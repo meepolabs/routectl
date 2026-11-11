@@ -490,6 +490,69 @@ fn anthropic_stream_with_usage_detail() -> ResponseTemplate {
     ))
 }
 
+/// An Anthropic stream carrying members the wire types do not model on its
+/// message events and a tool_use start, one unknown top-level event and one
+/// unknown delta on a known block, as Claude Code's upstream sends them.
+fn anthropic_stream_with_unmodeled_members() -> ResponseTemplate {
+    sse_response(sse(&anthropic_unmodeled_frames(), false))
+}
+
+fn anthropic_unmodeled_frames() -> Vec<(Option<&'static str>, Value)> {
+    vec![
+        (
+            Some("message_start"),
+            json!({"type": "message_start", "message": {
+                "id": "msg_1", "type": "message", "role": "assistant", "model": UPSTREAM,
+                "content": [], "stop_reason": null, "stop_sequence": null,
+                "usage": {"input_tokens": 3, "output_tokens": 0},
+                "container": {"id": "cntr_1", "expires_at": "2026-11-11T00:00:00Z"},
+                "context_management": {"applied_edits": []}}}),
+        ),
+        (
+            Some("content_block_start"),
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "tool_use", "id": "toolu_1", "name": "lookup",
+                                     "input": {}, "caller": {"type": "direct"}}}),
+        ),
+        (
+            Some("content_block_delta"),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "input_json_delta", "partial_json": "{\"q\":\"rust\"}"}}),
+        ),
+        (
+            Some("content_block_delta"),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "caller_delta", "caller": {"note": "caf\u{e9}"}}}),
+        ),
+        (
+            Some("content_block_stop"),
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            Some("diagnostics"),
+            json!({"type": "diagnostics", "diagnostics": {"cache": "miss"}}),
+        ),
+        (
+            Some("message_delta"),
+            json!({"type": "message_delta",
+                   "delta": {"stop_reason": "tool_use", "stop_sequence": null,
+                             "stop_details": {"type": "tool"},
+                             "container": {"id": "cntr_1", "expires_at": "2026-11-11T00:00:00Z"}},
+                   "usage": {"input_tokens": 3, "output_tokens": 1}}),
+        ),
+        (Some("message_stop"), json!({"type": "message_stop"})),
+    ]
+}
+
+/// The `event:` names of an SSE body, in order.
+fn event_names(body: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(body)
+        .lines()
+        .filter_map(|line| line.strip_prefix("event: "))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// A real upstream always stamps `created_at`; the complete path mints one
 /// for a zero, so a zero fixture would compare a minted value.
 const RESPONSES_CREATED_AT: i64 = 1_700_000_000;
@@ -1339,6 +1402,13 @@ fn anthropic_cases() -> Vec<Case> {
             Ingress::Anthropic,
             json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
             anthropic_stream(),
+            anthropic_provider,
+        ),
+        case(
+            "anthropic/stream-unmodeled-members",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+            anthropic_stream_with_unmodeled_members(),
             anthropic_provider,
         ),
         case(
@@ -2293,6 +2363,95 @@ async fn only_a_chat_client_receives_chat_message_part_and_usage_members() {
             &["sentinel_message", "sentinel_part"]
         };
         for member in members {
+            assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
+        }
+    }
+}
+
+/// The unmodeled stream row reaches an Anthropic client in upstream event
+/// order, with each member on the event that carried it.
+#[tokio::test]
+async fn an_anthropic_stream_keeps_upstream_event_order_and_members() {
+    // Arrange
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let probe = case(
+        "anthropic/stream-unmodeled-members-order",
+        Ingress::Anthropic,
+        json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+        anthropic_stream_with_unmodeled_members(),
+        anthropic_provider,
+    );
+
+    // Act
+    let (_swap, client) = serve(&probe).await;
+
+    // Assert
+    let upstream: Vec<String> = anthropic_unmodeled_frames()
+        .iter()
+        .filter_map(|(name, _)| name.map(str::to_owned))
+        .collect();
+    assert_eq!(event_names(&client), upstream);
+    let text = String::from_utf8_lossy(&client);
+    for member in [
+        "cntr_1",
+        "applied_edits",
+        "caller_delta",
+        "stop_details",
+        "caf\u{e9}",
+    ] {
+        assert!(text.contains(member), "{member}: {text}");
+    }
+}
+
+/// A client of another dialect served by an Anthropic upstream never sees
+/// the stream's unmodeled members or events. Positive control: the
+/// Anthropic client gets them.
+#[tokio::test]
+async fn only_an_anthropic_client_receives_unmodeled_stream_members_and_events() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, members expected)
+    let rows = [
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "stream": true, "messages": hi}),
+            false,
+        ),
+        (
+            "responses client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            false,
+        ),
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+            true,
+        ),
+    ];
+    for (row, ingress, body, expected) in rows {
+        // Arrange
+        let probe = case(
+            row,
+            ingress,
+            body,
+            anthropic_stream_with_unmodeled_members(),
+            anthropic_provider,
+        );
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let text = String::from_utf8_lossy(&client);
+        assert!(
+            text.contains("toolu_1"),
+            "{row}: tool call rendered: {text}"
+        );
+        for member in ["cntr_1", "stop_details", "caller_delta", "diagnostics"] {
             assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
         }
     }

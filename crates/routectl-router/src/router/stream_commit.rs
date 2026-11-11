@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    ChatChunk, ChatRequest, Error, Provider, Result,
+    ChatChunk, ChatRequest, Error, OpaqueSseEvent, Provider, Result,
     failure_class::{FailureClass, LastOutcome, classify},
 };
 
@@ -207,9 +207,16 @@ pub(super) const MAX_PRECONTENT_CHUNKS: usize = 8;
 ///
 /// Opaque carriers count as content: they are client-visible unknown block
 /// data that cannot be mixed with a different provider's output, so once one
-/// arrives the provider is committed exactly as a text chunk commits it.
+/// arrives the provider is committed exactly as a text chunk commits it. The
+/// unmodeled members of a known event are the exception: they describe the
+/// event (a `message_start` stamp), so like the role delta they leave the
+/// attempt open to fallback.
 pub(super) fn is_content_bearing(chunk: &ChatChunk) -> bool {
-    if !chunk.opaque_events.is_empty() {
+    if chunk
+        .opaque_events
+        .iter()
+        .any(|event| !matches!(event, OpaqueSseEvent::KnownEventExtras { .. }))
+    {
         return true;
     }
     chunk.choices.iter().any(|choice| {

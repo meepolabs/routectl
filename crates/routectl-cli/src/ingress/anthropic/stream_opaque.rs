@@ -7,6 +7,7 @@ use crate::ingress::SseEvent;
 
 use super::AnthropicStreamState;
 use super::stream::close_open_block;
+use super::stream_carriage::replay_carried;
 
 /// Replay opaque SSE events captured by the Anthropic-API egress.
 ///
@@ -121,6 +122,9 @@ pub(super) fn replay_opaque_events(
                     format!("{{\"type\":\"content_block_stop\",\"index\":{ingress_index}}}"),
                 ));
             }
+            OpaqueSseEvent::KnownEventExtras { .. }
+            | OpaqueSseEvent::UnknownEvent { .. }
+            | OpaqueSseEvent::UnknownBlockDelta { .. } => replay_carried(ev, state, events),
             // OpaqueSseEvent is `#[non_exhaustive]`. Future variants
             // ship without a code edit here; until this match learns
             // them, log + skip rather than panic. The canonical block

@@ -40,6 +40,7 @@ mod ratelimit_unified;
 pub mod request;
 pub mod response;
 pub mod sse;
+pub mod sse_carriage;
 pub mod sse_opaque;
 pub mod sse_unknown;
 
@@ -603,6 +604,13 @@ impl Provider for AnthropicApiProvider {
         let tool_reverse = cloak_result.map(|r| r.tool_reverse).unwrap_or_default();
 
         let base_state = stream_state_for(&provider_id, &self.cfg.base_url);
+        let base_state = if req.routectl_internal.provenance
+            == routectl_core::RequestProvenance::AnthropicIngress
+        {
+            base_state.with_unmodeled_carriage()
+        } else {
+            base_state
+        };
         let response_tap = crate::wire_declare::response_tap(&req);
         let observation = req.routectl_internal.observation.clone();
         let stream = async_stream::stream! {

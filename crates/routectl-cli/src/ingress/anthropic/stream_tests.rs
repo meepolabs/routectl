@@ -1576,6 +1576,7 @@ fn message_delta_renders_server_tool_use() {
             Some("stop"),
             None,
             Some(&usage),
+            None,
             &mut events,
             &mut ResponseEdits::default(),
         );

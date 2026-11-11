@@ -125,6 +125,9 @@ pub struct AnthropicStreamState {
     /// terminal `message_delta` carries the authoritative upstream count.
     /// Defaults to 0 on the `Default` path.
     pub(super) input_tokens_estimate: u64,
+    /// What an Anthropic upstream carried beyond the canonical chunk, and
+    /// how its blocks map onto the ones this render opened.
+    carried: stream_carriage::CarriedState,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -132,6 +135,8 @@ struct ToolBlockState {
     id: String,
     name: String,
     partial_json: String,
+    /// The carried upstream `tool_use` start this block stands for.
+    carried: Option<stream_carriage::CarriedBlock>,
 }
 
 impl IngressStreamState for AnthropicStreamState {
@@ -172,6 +177,7 @@ pub mod context_anchor;
 mod parse;
 mod render;
 mod stream;
+mod stream_carriage;
 mod stream_edits;
 mod stream_opaque;
 
@@ -362,7 +368,7 @@ impl IngressAdapter for AnthropicIngress {
         let s = anthropic_state_mut(state);
         let mut events = Vec::new();
         if !s.started {
-            emit_message_start(s, None, &mut events);
+            emit_message_start(s, None, None, &mut events);
             s.started = true;
         }
         events
@@ -407,19 +413,22 @@ impl IngressAdapter for AnthropicIngress {
             // SDK consumers don't see a bare `message_stop` (which the
             // spec forbids).
             if !s.started {
-                emit_message_start(s, None, &mut events);
+                emit_message_start(s, None, None, &mut events);
                 s.started = true;
             }
             flush_tool_blocks(s, &mut events);
             close_open_block(s, &mut events);
+            stream_carriage::flush_unbound(s, &mut events);
             close_lingering_opaque_blocks(s, &mut events);
             // Flush a deferred finish_reason (no usage chunk arrived).
             if let Some(fr) = s.pending_finish_reason.take() {
                 let matched = s.pending_matched_stop_sequence.take();
+                let carried = s.carried.take_delta_members();
                 emit_message_delta(
                     Some(&fr),
                     matched.as_deref(),
                     None,
+                    carried.as_ref(),
                     &mut events,
                     &mut ResponseEdits::default(),
                 );

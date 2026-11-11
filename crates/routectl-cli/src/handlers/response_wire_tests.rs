@@ -1078,8 +1078,9 @@ async fn a_complete_response_dropped_unread_records_incomplete_never_clean() {
 }
 
 /// An Anthropic stream whose one tool call carries `elements` array
-/// members in its input, and an extra block member the client render has
-/// no slot for, so the two documents differ inside the large block.
+/// members in its input, and a delta the upstream sends after closing that
+/// block, which the client render has no open block to carry, so the two
+/// documents differ inside the large block.
 fn anthropic_tool_stream(elements: usize) -> String {
     let items: Vec<String> = (0..elements).map(|n| n.to_string()).collect();
     let partial = format!("{{\"xs\":[{}]}}", items.join(","));
@@ -1105,6 +1106,11 @@ fn anthropic_tool_stream(elements: usize) -> String {
         (
             "content_block_stop",
             json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "late_delta", "late": true}}),
         ),
         (
             "message_delta",

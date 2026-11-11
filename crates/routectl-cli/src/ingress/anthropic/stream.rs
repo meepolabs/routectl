@@ -6,6 +6,9 @@ use crate::ingress::{
     IngressStreamState, ResponseEdits, SseEvent, StreamErrorClass, StreamRequestContext,
 };
 
+use super::stream_carriage::{
+    complete_block_start, flush_unbound, merge_carried, take_start_members, withhold_start_members,
+};
 use super::stream_edits::{
     declare_estimated_start_usage, declare_minted_start_id, declare_opening_carry,
     declare_stop_drop, declare_straggler_drop, declare_usage_fill,
@@ -70,7 +73,7 @@ pub(super) fn declare_sent_start_edits(state: &AnthropicStreamState, edits: &mut
 }
 
 fn render_chunk_events(
-    chunk: ChatChunk,
+    mut chunk: ChatChunk,
     state: &mut AnthropicStreamState,
     edits: &mut ResponseEdits,
 ) -> Result<Vec<SseEvent>> {
@@ -113,14 +116,17 @@ fn render_chunk_events(
     // Emit message_start once. When the chunk that opens the client stream
     // carries the upstream's own first-event usage, that count is the
     // opening; otherwise the request-seeded estimate is.
+    let start_members = take_start_members(&mut chunk.opaque_events);
     if !state.started {
         let opening = chunk
             .upstream_meta
             .as_ref()
             .and_then(|meta| meta.opening_usage.as_ref());
         declare_estimated_start_usage(opening.is_none(), edits);
-        emit_message_start(state, opening, &mut events);
+        emit_message_start(state, opening, start_members.as_ref(), &mut events);
         state.started = true;
+    } else if let Some(members) = start_members.as_ref() {
+        withhold_start_members(members, edits);
     }
 
     // Replay opaque SSE events FIRST. The egress attaches them at
@@ -141,13 +147,16 @@ fn render_chunk_events(
         if let Some(fr) = choice.finish_reason.as_deref() {
             flush_tool_blocks(state, &mut events);
             close_open_block(state, &mut events);
+            flush_unbound(state, &mut events);
             if chunk.usage.is_some() {
                 // Inline usage: emit combined delta + stop now.
                 close_lingering_opaque_blocks(state, &mut events);
+                let carried = state.carried.take_delta_members();
                 emit_message_delta(
                     Some(fr),
                     choice.matched_stop_sequence.as_deref(),
                     chunk.usage.as_ref(),
+                    carried.as_ref(),
                     &mut events,
                     edits,
                 );
@@ -183,10 +192,12 @@ fn render_chunk_events(
             // Finalize the buffered finish_reason now that we have usage.
             let matched = state.pending_matched_stop_sequence.take();
             close_lingering_opaque_blocks(state, &mut events);
+            let carried = state.carried.take_delta_members();
             emit_message_delta(
                 Some(&fr),
                 matched.as_deref(),
                 Some(usage),
+                carried.as_ref(),
                 &mut events,
                 edits,
             );
@@ -197,7 +208,7 @@ fn render_chunk_events(
             // terminating the stream. (The outer `state.finished`
             // guard above handles the post-stop case; this branch only
             // fires while the stream is still active.)
-            emit_message_delta(None, None, Some(usage), &mut events, edits);
+            emit_message_delta(None, None, Some(usage), None, &mut events, edits);
         }
     }
 
@@ -207,10 +218,12 @@ fn render_chunk_events(
 /// Emit the stream's `message_start`. With `opening`, its usage is the
 /// upstream's first-event input and cache breakdown field for field (the
 /// cache fields stay disjoint from `input_tokens`); without it, the
-/// request-seeded `input_tokens_estimate`.
+/// request-seeded `input_tokens_estimate`. `carried` adds the upstream
+/// message's other members, under the ones written here.
 pub(super) fn emit_message_start(
     state: &mut AnthropicStreamState,
     opening: Option<&OpeningUsage>,
+    carried: Option<&Map<String, Value>>,
     events: &mut Vec<SseEvent>,
 ) {
     state.minted_start_id = state.msg_id.is_none();
@@ -219,21 +232,22 @@ pub(super) fn emit_message_start(
         || json!({"input_tokens": state.input_tokens_estimate, "output_tokens": 0}),
         opening_usage_json,
     );
-    let msg = json!({
-        "type": "message_start",
-        "message": {
-            "id": state.msg_id.clone().unwrap_or_else(|| format!("msg_{}", random_msg_id())),
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": state.msg_model.clone()
-                .or_else(|| state.req_model.clone())
-                .unwrap_or_default(),
-            "stop_reason": Value::Null,
-            "stop_sequence": Value::Null,
-            "usage": usage,
-        }
+    let mut message = json!({
+        "id": state.msg_id.clone().unwrap_or_else(|| format!("msg_{}", random_msg_id())),
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "model": state.msg_model.clone()
+            .or_else(|| state.req_model.clone())
+            .unwrap_or_default(),
+        "stop_reason": Value::Null,
+        "stop_sequence": Value::Null,
+        "usage": usage,
     });
+    if let (Some(carried), Value::Object(fields)) = (carried, &mut message) {
+        merge_carried(fields, carried);
+    }
+    let msg = json!({"type": "message_start", "message": message});
     events.push(SseEvent::named(
         "message_start",
         serde_json::to_string(&msg).unwrap_or_default(),
@@ -315,12 +329,15 @@ fn emit_delta_events(
                 // the echo back is replayable; Anthropic-sourced bytes
                 // pass through verbatim. See `encrypted_detail_data`.
                 let data = super::encrypted_detail_data(d);
+                let mut content_block = json!({"type": "redacted_thinking", "data": data});
+                let carried = state.carried.bind("redacted_thinking", idx);
+                complete_block_start(&mut content_block, carried.as_ref());
                 events.push(SseEvent::named(
                     "content_block_start",
                     serde_json::to_string(&json!({
                         "type": "content_block_start",
                         "index": idx,
-                        "content_block": {"type": "redacted_thinking", "data": data},
+                        "content_block": content_block,
                     }))
                     .unwrap_or_default(),
                 ));
@@ -387,7 +404,11 @@ fn apply_tool_call_delta(
 
     // Allocate a new tool_use block on first sight of this call_index.
     while state.tool_blocks.len() <= call_index {
-        state.tool_blocks.push(ToolBlockState::default());
+        let carried = state.carried.take_tool_start();
+        state.tool_blocks.push(ToolBlockState {
+            carried,
+            ..ToolBlockState::default()
+        });
     }
     let block = &mut state.tool_blocks[call_index];
     if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
@@ -422,17 +443,19 @@ pub(super) fn flush_tool_blocks(state: &mut AnthropicStreamState, events: &mut V
         let idx = state.next_index;
         state.next_index += 1;
         state.open = Some((idx, OpenBlockKind::ToolUse));
+        let mut content_block = json!({
+            "type": "tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": {},
+        });
+        let carried_deltas = complete_block_start(&mut content_block, block.carried.as_ref());
         events.push(SseEvent::named(
             "content_block_start",
             serde_json::to_string(&json!({
                 "type": "content_block_start",
                 "index": idx,
-                "content_block": {
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": {},
-                },
+                "content_block": content_block,
             }))
             .unwrap_or_default(),
         ));
@@ -442,6 +465,9 @@ pub(super) fn flush_tool_blocks(state: &mut AnthropicStreamState, events: &mut V
                 idx,
                 json!({"type": "input_json_delta", "partial_json": block.partial_json}),
             );
+        }
+        for delta in carried_deltas {
+            push_block_delta(events, idx, delta);
         }
     }
 }
@@ -464,11 +490,16 @@ fn ensure_block(
     let idx = state.next_index;
     state.next_index += 1;
     state.open = Some((idx, kind));
-    let block = match kind {
-        OpenBlockKind::Text => json!({"type": "text", "text": ""}),
-        OpenBlockKind::Thinking { .. } => json!({"type": "thinking", "thinking": ""}),
-        OpenBlockKind::ToolUse => json!({"type": "tool_use", "id": "", "name": "", "input": {}}),
+    let (mut block, block_type) = match kind {
+        OpenBlockKind::Text => (json!({"type": "text", "text": ""}), "text"),
+        OpenBlockKind::Thinking { .. } => (json!({"type": "thinking", "thinking": ""}), "thinking"),
+        OpenBlockKind::ToolUse => (
+            json!({"type": "tool_use", "id": "", "name": "", "input": {}}),
+            "tool_use",
+        ),
     };
+    let carried = state.carried.bind(block_type, idx);
+    let carried_deltas = complete_block_start(&mut block, carried.as_ref());
     events.push(SseEvent::named(
         "content_block_start",
         serde_json::to_string(&json!({
@@ -478,7 +509,16 @@ fn ensure_block(
         }))
         .unwrap_or_default(),
     ));
+    for delta in carried_deltas {
+        push_block_delta(events, idx, delta);
+    }
     idx
+}
+
+/// Open a text block now, for a carried upstream text block whose members
+/// or deltas arrived before any text did.
+pub(super) fn ensure_text_block(state: &mut AnthropicStreamState, events: &mut Vec<SseEvent>) {
+    ensure_block(state, OpenBlockKind::Text, events);
 }
 
 pub(super) fn close_open_block(state: &mut AnthropicStreamState, events: &mut Vec<SseEvent>) {
@@ -519,7 +559,7 @@ pub(super) fn close_lingering_opaque_blocks(
     }
 }
 
-fn push_block_delta(events: &mut Vec<SseEvent>, idx: usize, delta: Value) {
+pub(super) fn push_block_delta(events: &mut Vec<SseEvent>, idx: usize, delta: Value) {
     events.push(SseEvent::named(
         "content_block_delta",
         serde_json::to_string(&json!({
@@ -535,6 +575,7 @@ pub(super) fn emit_message_delta(
     finish_reason: Option<&str>,
     matched_stop_sequence: Option<&str>,
     usage: Option<&UsageDelta>,
+    carried: Option<&Map<String, Value>>,
     events: &mut Vec<SseEvent>,
     edits: &mut ResponseEdits,
 ) {
@@ -558,6 +599,9 @@ pub(super) fn emit_message_delta(
     };
     delta.insert("stop_reason".into(), stop_reason_value);
     delta.insert("stop_sequence".into(), stop_sequence_value);
+    if let Some(carried) = carried {
+        merge_carried(&mut delta, carried);
+    }
 
     let mut payload = Map::new();
     payload.insert("type".into(), Value::String("message_delta".into()));

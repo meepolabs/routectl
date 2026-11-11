@@ -721,6 +721,16 @@ fn is_content_bearing_classifies_every_variant() {
     );
     assert!(is_content_bearing(&opaque_chunk("x")), "opaque_events");
     assert!(
+        is_content_bearing(&ChatChunk {
+            opaque_events: vec![OpaqueSseEvent::UnknownEvent {
+                event_type: "future_event".into(),
+                event: serde_json::json!({"type": "future_event"}),
+            }],
+            ..Default::default()
+        }),
+        "an unknown upstream event",
+    );
+    assert!(
         is_content_bearing(&delta_chunk(ChunkDelta {
             reasoning: Some("thinking".into()),
             ..Default::default()
@@ -731,6 +741,17 @@ fn is_content_bearing_classifies_every_variant() {
     // Content-free: metadata, terminal-only, and empty-value chunks.
     assert!(!is_content_bearing(&role_chunk("x")), "role-only");
     assert!(!is_content_bearing(&meta_chunk("x")), "id/model metadata");
+    assert!(
+        !is_content_bearing(&ChatChunk {
+            opaque_events: vec![OpaqueSseEvent::KnownEventExtras {
+                event_type: "message_start".into(),
+                upstream_index: None,
+                members: serde_json::Map::new(),
+            }],
+            ..Default::default()
+        }),
+        "unmodeled members of a known event",
+    );
     assert!(
         !is_content_bearing(&ChatChunk {
             usage: Some(UsageDelta {

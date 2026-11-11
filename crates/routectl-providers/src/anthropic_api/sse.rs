@@ -17,8 +17,10 @@ use routectl_core::{
 };
 
 use super::response::map_stop_reason;
+use super::sse_carriage::MESSAGE_START_KEYS;
 use super::sse_opaque::{MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK, OpaqueCapture};
 use super::types::SseEvent;
+use super::types_sse::is_known_event_type;
 
 /// Which kind of content block is currently open. Every variant
 /// carries the upstream `index` from its `content_block_start` so the
@@ -196,6 +198,16 @@ pub struct SseState {
     /// input count carried over from it is the vendor's measurement.
     /// `false` (the default) marks carried-over input as unverified.
     vendor_opening: bool,
+    /// Whether the client speaks this dialect, so the members and events
+    /// the canonical chunk has no slot for ride on the chunk of the event
+    /// that carried them.
+    pub(super) carries_unmodeled: bool,
+    /// What the event being dispatched carries beyond the canonical chunk.
+    pub(super) event_carriage: Vec<OpaqueSseEvent>,
+    /// Running totals of that carriage across the stream, held under the
+    /// same per-stream caps as unknown-block capture.
+    pub(super) carried_bytes_total: usize,
+    pub(super) carried_events_total: usize,
 }
 
 /// Input-side usage captured once from `message_start`, carried forward
@@ -256,6 +268,15 @@ impl SseState {
         self
     }
 
+    /// Carry the members and events the canonical chunk has no slot for,
+    /// each on the chunk of the event that carried it: the client speaks
+    /// this dialect and re-emits them.
+    #[must_use]
+    pub const fn with_unmodeled_carriage(mut self) -> Self {
+        self.carries_unmodeled = true;
+        self
+    }
+
     const fn opening_input_source(&self) -> UsageInputSource {
         if self.vendor_opening {
             UsageInputSource::VendorOpening
@@ -282,7 +303,13 @@ impl SseState {
         provider_id: &str,
         event: SseEvent,
     ) -> Result<Option<ChatChunk>> {
+        self.event_carriage.clear();
         let emitted = self.dispatch_event(provider_id, event)?;
+        let carried = std::mem::take(&mut self.event_carriage);
+        let emitted = match emitted {
+            None if !carried.is_empty() => Some(self.empty_carrier_chunk()),
+            emitted => emitted,
+        };
         if emitted.is_some() {
             self.canonical_chunk_emitted = true;
         }
@@ -290,6 +317,7 @@ impl SseState {
             if !self.pending_opaque.is_empty() {
                 chunk.opaque_events = std::mem::take(&mut self.pending_opaque);
             }
+            chunk.opaque_events.extend(carried);
             chunk
         }))
     }
@@ -297,6 +325,13 @@ impl SseState {
     fn dispatch_event(&mut self, provider_id: &str, event: SseEvent) -> Result<Option<ChatChunk>> {
         match event {
             SseEvent::MessageStart { message } => {
+                self.carry_event_members(
+                    provider_id,
+                    "message_start",
+                    None,
+                    message.members,
+                    MESSAGE_START_KEYS,
+                )?;
                 self.id = message.id;
                 self.model = message.model;
                 if let Some(u) = message.usage {
@@ -327,12 +362,14 @@ impl SseState {
             } => {
                 use super::types::SseContentBlockStart;
                 match content_block {
-                    SseContentBlockStart::Text { .. } => {
+                    SseContentBlockStart::Text { extras, .. } => {
+                        self.carry_block_start_members(provider_id, index, "text", extras)?;
                         self.open_block = Some(OpenBlockKind::Text {
                             upstream_index: index,
                         });
                     }
-                    SseContentBlockStart::Thinking { .. } => {
+                    SseContentBlockStart::Thinking { extras, .. } => {
+                        self.carry_block_start_members(provider_id, index, "thinking", extras)?;
                         let di = self.next_detail_index;
                         self.next_detail_index += 1;
                         self.open_block = Some(OpenBlockKind::Thinking {
@@ -343,7 +380,8 @@ impl SseState {
                             detail_index: di,
                         });
                     }
-                    SseContentBlockStart::ToolUse { id, name } => {
+                    SseContentBlockStart::ToolUse { id, name, extras } => {
+                        self.carry_block_start_members(provider_id, index, "tool_use", extras)?;
                         let ci = self.next_call_index;
                         self.next_call_index += 1;
                         // Reverse the tool name to the client's original
@@ -376,7 +414,13 @@ impl SseState {
                         // Empty, not "{}": later fragments append to it.
                         return Ok(Some(self.make_tool_delta_chunk(String::new())));
                     }
-                    SseContentBlockStart::RedactedThinking { data } => {
+                    SseContentBlockStart::RedactedThinking { data, extras } => {
+                        self.carry_block_start_members(
+                            provider_id,
+                            index,
+                            "redacted_thinking",
+                            extras,
+                        )?;
                         // No per-token deltas follow a redacted_thinking
                         // block. Emit it immediately as a synthesized
                         // reasoning_details entry; the open_block stays
@@ -460,17 +504,16 @@ impl SseState {
                     SseDelta::InputJsonDelta { partial_json } => {
                         Ok(Some(self.make_tool_delta_chunk(partial_json)))
                     }
-                    // Unknown delta inside a typed block is upstream-
-                    // malformed; drop without canonical emission. The
-                    // Unknown-block branch above is the only place
-                    // opaque deltas are captured.
-                    SseDelta::Other(_) => Ok(None),
+                    SseDelta::Other(delta) => self.carry_unknown_delta(provider_id, index, delta),
                 }
             }
 
             SseEvent::ContentBlockStop { index } => {
                 if !self.index_matches(index, "stop", provider_id) {
                     return Ok(None);
+                }
+                if !matches!(self.open_block, Some(OpenBlockKind::Unknown { .. })) {
+                    self.carry_block_stop(provider_id, index)?;
                 }
                 // Strategy A terminal: emit ONE aggregated structured
                 // detail per thinking block carrying both text and
@@ -536,7 +579,9 @@ impl SseState {
                 Ok(terminal_chunk)
             }
 
-            SseEvent::MessageDelta { delta, usage } => {
+            SseEvent::MessageDelta { mut delta, usage } => {
+                let members = std::mem::take(&mut delta.members);
+                self.carry_event_members(provider_id, "message_delta", None, members, &[])?;
                 let finish_reason = map_stop_reason(delta.stop_reason.as_deref());
                 // Lift the matched stop sequence so the Anthropic ingress
                 // can render `stop_reason:"stop_sequence"` +
@@ -787,15 +832,17 @@ impl SseState {
                     None,
                 ))
             }
-            // Forward-compat catchall for unknown top-level event tags.
-            // Top-level Other events are not captured into opaque_events
-            // (the carrier is keyed on content_block lifecycle only); a
-            // future event tag would need its own handling. For now,
-            // sink-drain so the stream does not crash; emit a DEBUG so
-            // a future Anthropic top-level event type is observable to
-            // operators.
+            // An event of a type this parser does not model rides whole
+            // on its own chunk for a client of this dialect. A modeled type
+            // that failed its typed parse is malformed, not new, and is
+            // sink-drained like any event no client could take.
             SseEvent::Other(v) => {
                 let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                if self.carries_unmodeled && !is_known_event_type(event_type) {
+                    let event_type = event_type.to_owned();
+                    self.carry_unknown_event(provider_id, event_type, v)?;
+                    return Ok(None);
+                }
                 tracing::debug!(
                     provider = %provider_id,
                     event_type = %sanitize_for_log(event_type),
@@ -919,7 +966,7 @@ impl SseState {
         name
     }
 
-    fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {
+    pub(super) fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {
         let (tool_id, tool_name, call_index) = match &self.open_block {
             Some(OpenBlockKind::ToolUse {
                 id,
@@ -963,7 +1010,7 @@ impl SseState {
     /// the matching ingress instead of being silently dropped.
     /// Choices are empty by design: there is no canonical content to
     /// translate; OpenAI-shape ingresses see a noop chunk.
-    fn empty_carrier_chunk(&self) -> ChatChunk {
+    pub(super) fn empty_carrier_chunk(&self) -> ChatChunk {
         ChatChunk {
             id: self.id.clone(),
             model: self.model.clone(),
@@ -1007,3 +1054,8 @@ mod sse_thinking_display_tests;
 #[cfg(test)]
 #[path = "sse_opening_usage_tests.rs"]
 mod sse_opening_usage_tests;
+
+// Carriage of unmodeled event members and unknown events, event by event.
+#[cfg(test)]
+#[path = "sse_carriage_tests.rs"]
+mod sse_carriage_tests;

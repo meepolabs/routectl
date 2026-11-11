@@ -28,7 +28,7 @@
 //! state machine needs.
 
 use serde::{Deserialize, Deserializer};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::types::{SseDeltaUsage, SseMessage, SseMessageDelta};
 
@@ -70,6 +70,24 @@ pub enum SseEvent {
     Other(Value),
 }
 
+/// The top-level event types the stream parser models.
+const KNOWN_EVENT_TYPES: &[&str] = &[
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "message_delta",
+    "message_stop",
+    "ping",
+    "error",
+];
+
+/// Whether `event_type` names a top-level event the parser models. An
+/// `Other` event of a modeled type is a malformed one, not a new one.
+pub fn is_known_event_type(event_type: &str) -> bool {
+    KNOWN_EVENT_TYPES.contains(&event_type)
+}
+
 impl<'de> Deserialize<'de> for SseEvent {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         // Private mirror that drives serde's built-in tagged-union
@@ -105,22 +123,11 @@ impl<'de> Deserialize<'de> for SseEvent {
             },
         }
 
-        const KNOWN_TAGS: &[&str] = &[
-            "message_start",
-            "content_block_start",
-            "content_block_delta",
-            "content_block_stop",
-            "message_delta",
-            "message_stop",
-            "ping",
-            "error",
-        ];
-
         let v: Value = Value::deserialize(de)?;
         let is_known = v
             .get("type")
             .and_then(Value::as_str)
-            .is_some_and(|t| KNOWN_TAGS.contains(&t));
+            .is_some_and(is_known_event_type);
         if !is_known {
             return Ok(Self::Other(v));
         }
@@ -175,6 +182,8 @@ pub enum SseContentBlockStart {
         // matches via `Text { .. }` and only reads the outer `index`.
         #[allow(dead_code)]
         text: String,
+        /// The block's members beyond its `type` and typed fields.
+        extras: Map<String, Value>,
     },
     Thinking {
         // Same reason as `Text::text`: matched via `..` because the
@@ -182,10 +191,14 @@ pub enum SseContentBlockStart {
         // block-start payload.
         #[allow(dead_code)]
         thinking: String,
+        /// The block's members beyond its `type` and typed fields.
+        extras: Map<String, Value>,
     },
     ToolUse {
         id: String,
         name: String,
+        /// The block's members beyond its `type` and typed fields.
+        extras: Map<String, Value>,
     },
     /// Encrypted thinking block (server emits the data verbatim; no
     /// per-token deltas follow). Required so a streamed response
@@ -194,6 +207,8 @@ pub enum SseContentBlockStart {
     /// rest of the stream in v0.4.0 pre-fix.
     RedactedThinking {
         data: String,
+        /// The block's members beyond its `type` and typed fields.
+        extras: Map<String, Value>,
     },
     /// Forward-compat. Unknown `content_block.type` tags land here
     /// verbatim (full block Value, including `type`).
@@ -235,12 +250,49 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
             }
         };
         Ok(match known {
-            Known::Text { text } => Self::Text { text },
-            Known::Thinking { thinking } => Self::Thinking { thinking },
-            Known::ToolUse { id, name } => Self::ToolUse { id, name },
-            Known::RedactedThinking { data } => Self::RedactedThinking { data },
+            Known::Text { text } => Self::Text {
+                text,
+                extras: unmodeled(&v, TEXT_START_KEYS),
+            },
+            Known::Thinking { thinking } => Self::Thinking {
+                thinking,
+                extras: unmodeled(&v, THINKING_START_KEYS),
+            },
+            Known::ToolUse { id, name } => Self::ToolUse {
+                id,
+                name,
+                extras: unmodeled(&v, TOOL_USE_START_KEYS),
+            },
+            Known::RedactedThinking { data } => Self::RedactedThinking {
+                data,
+                extras: unmodeled(&v, REDACTED_THINKING_START_KEYS),
+            },
         })
     }
+}
+
+/// The members of a `text` block start the Anthropic stream render writes
+/// itself.
+const TEXT_START_KEYS: &[&str] = &["type", "text"];
+/// The members of a `thinking` block start the render writes itself; the
+/// signature arrives as its own delta.
+const THINKING_START_KEYS: &[&str] = &["type", "thinking", "signature"];
+/// The members of a `tool_use` block start the render writes itself; the
+/// input arrives as `input_json_delta` fragments.
+const TOOL_USE_START_KEYS: &[&str] = &["type", "id", "name", "input"];
+/// The members of a `redacted_thinking` block start the render writes
+/// itself.
+const REDACTED_THINKING_START_KEYS: &[&str] = &["type", "data"];
+
+/// The members of `block` other than `typed`.
+fn unmodeled(block: &Value, typed: &[&str]) -> Map<String, Value> {
+    block.as_object().map_or_else(Map::new, |members| {
+        members
+            .iter()
+            .filter(|(key, _)| !typed.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -491,8 +543,9 @@ mod tests {
 
         // Assert
         match parsed {
-            SseContentBlockStart::RedactedThinking { data } => {
+            SseContentBlockStart::RedactedThinking { data, extras } => {
                 assert_eq!(data, "ENCRYPTED");
+                assert!(extras.is_empty(), "typed members are not extras");
             }
             other => panic!("expected RedactedThinking, got: {other:?}"),
         }

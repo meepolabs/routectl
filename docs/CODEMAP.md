@@ -980,6 +980,11 @@ license.
   it sums to that total, else none; a delta stating no total falls back per
   lifetime to the opener's. `is_terminal_event` (`message_stop` only) is
   the lane's `StreamCompletion` predicate
+- `src/anthropic_api/sse_carriage.rs` -- for an Anthropic client, carries
+  unmodeled `message_start` / `message_delta.delta` / known block-start
+  members, unknown top-level events and unknown deltas on known blocks on the
+  chunk of the event that carried them; an event over the opaque caps ends the
+  stream and counts (`oversize_event_total`)
 - `src/anthropic_api/sse_opaque.rs` -- bounded opaque-event capture per
   unknown content block (per-block caps: 256 KB / 10000 deltas; per-stream
   ceiling: 4 MB / 40000 events), each degrading to sink-drain on overflow with
@@ -7686,6 +7691,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   canonical `ChatRequest`
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic
   Messages response body shape
+- `src/ingress/anthropic/stream_carriage.rs` -- re-emits what an Anthropic
+  upstream carried beyond the canonical chunk: message_start / message_delta /
+  known block-start members merged with render members winning, unknown events
+  under their own name and unknown deltas on the render's own block index, in
+  upstream order; message_start members arriving after the early frame are
+  withheld, declared and counted (`unknown_member_withheld`, lane anthropic)
 - `src/ingress/anthropic/stream_edits.rs` -- response edits the Anthropic
   stream renderer declares to the wire check: straggler and repeated-stop
   drops, closing usage fill and opening-count restatement

@@ -737,6 +737,9 @@ pub struct SseMessage {
     pub(crate) id: String,
     pub(crate) model: String,
     pub(crate) usage: Option<AnthropicUsage>,
+    /// Every other member of `message_start.message`, typed or not.
+    #[serde(flatten)]
+    pub(crate) members: Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -750,6 +753,9 @@ pub struct SseMessageDelta {
     /// `stop_sequence` field on `message_delta`.
     #[serde(default)]
     pub(crate) stop_sequence: Option<String>,
+    /// Every other member of `message_delta.delta`.
+    #[serde(flatten)]
+    pub(crate) members: Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
