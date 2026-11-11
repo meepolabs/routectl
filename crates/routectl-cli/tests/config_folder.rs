@@ -1,8 +1,10 @@
 //! Real-binary checks of the config folder the CLI reads: a config left only
 //! in an old folder (`$HOME/Library/Application Support/routectl` or
-//! `$APPDATA/routectl`) stops every command before dispatch, naming both
-//! paths, and an explicit `--config` or `ROUTECTL_CONFIG` gets past the
-//! check. Also pins that the default lookup follows the shared core rule,
+//! `$APPDATA/routectl`) stops every command that reads the config before
+//! dispatch, naming both paths, while commands that never read it still run,
+//! and an explicit `--config` or `ROUTECTL_CONFIG` gets past the check. With
+//! no absolute config folder at all, a command that needs the default config
+//! is refused instead of reading one under the working directory. Also pins that the default lookup follows the shared core rule,
 //! where an empty `XDG_CONFIG_HOME` counts as unset, and that `doctor` lists
 //! files left in the old folders, and that a running `serve` lists them on
 //! its served doctor panel.
@@ -11,7 +13,10 @@
 //! it) and `ROUTECTL_CONFIG` (one row then sets it to a path inside the
 //! tempdir), points `HOME` and the working directory at a
 //! tempdir, and either removes `APPDATA` or points it inside that tempdir, so
-//! no real config folder is read or written.
+//! no real config folder is read or written. The no-folder rows remove
+//! `HOME` and `USERPROFILE` (the Windows home fallback) instead. Every child
+//! is killed after [`CHILD_DEADLINE`], so a command that should have refused
+//! fails its row instead of hanging the suite.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -26,6 +31,28 @@ const READY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Per-request socket timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Give-up bound for a one-shot command.
+const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Run `command` to completion with piped output, killing it (by its own
+/// handle) once [`CHILD_DEADLINE`] passes.
+fn output_bounded(command: &mut Command) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn routectl binary");
+    let until = Instant::now() + CHILD_DEADLINE;
+    while Instant::now() < until {
+        if child.try_wait().expect("poll child").is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    child.wait_with_output().expect("reap routectl binary")
+}
 
 struct Home {
     tmp: tempfile::TempDir,
@@ -95,17 +122,11 @@ impl Home {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.command(args)
-            .env_remove("APPDATA")
-            .output()
-            .expect("spawn routectl binary")
+        output_bounded(self.command(args).env_remove("APPDATA"))
     }
 
     fn run_with_appdata(&self, args: &[&str]) -> Output {
-        self.command(args)
-            .env("APPDATA", self.appdata())
-            .output()
-            .expect("spawn routectl binary")
+        output_bounded(self.command(args).env("APPDATA", self.appdata()))
     }
 }
 
@@ -114,11 +135,11 @@ fn stderr_of(out: &Output) -> String {
 }
 
 #[test]
-fn a_config_only_in_the_old_folder_stops_every_command() {
+fn a_config_only_in_the_old_folder_stops_every_config_reading_command() {
     let rows: &[(&str, &[&str])] = &[
         ("config check", &["config", "check"]),
+        ("config show", &["config", "show"]),
         ("serve", &["serve", "--port", "0"]),
-        ("doctor", &["doctor"]),
         ("init", &["init", "--scaffold", "--yes"]),
     ];
     let failures: Vec<String> = rows
@@ -148,6 +169,29 @@ fn stranded_row_failure(args: &[&str]) -> Option<String> {
         why.push(format!("created {}", new.display()));
     }
     (!why.is_empty()).then(|| why.join("; "))
+}
+
+/// Commands that never read the config run past a config left in the old
+/// folder; `doctor` reports the old folder itself. Mutation check: classify
+/// `whoami` as reading the config -> the whoami row goes red.
+#[test]
+fn a_config_only_in_the_old_folder_does_not_stop_commands_that_never_read_it() {
+    let rows: &[(&str, &[&str], &str)] = &[
+        ("whoami", &["whoami"], "No oauth providers logged in."),
+        ("doctor", &["doctor"], "WARN legacy folder"),
+    ];
+    let failures: Vec<String> = rows
+        .iter()
+        .filter_map(|(name, args, expected)| {
+            let home = Home::with_stranded_config();
+            let out = home.run(args);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = stderr_of(&out);
+            let ran = stdout.contains(expected) && !stderr.contains("moved nothing");
+            (!ran).then(|| format!("{name}: status {}: {stdout}\n{stderr}", out.status))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// How an explicit-config row names the stranded config.
@@ -185,10 +229,7 @@ fn explicit_row_failure(how: &ExplicitConfig) -> Option<String> {
         }
     };
 
-    let out = command
-        .env_remove("APPDATA")
-        .output()
-        .expect("spawn routectl binary");
+    let out = output_bounded(command.env_remove("APPDATA"));
 
     let stderr = stderr_of(&out);
     let passed =
@@ -212,22 +253,141 @@ fn an_empty_xdg_config_home_counts_as_unset() {
     )
     .unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_routectl"))
-        .args(["config", "check"])
-        .env("XDG_CONFIG_HOME", "")
-        .env_remove("ROUTECTL_CONFIG")
-        .env_remove("APPDATA")
-        .env("HOME", home.path())
-        .current_dir(elsewhere.path())
-        .stdin(Stdio::null())
-        .output()
-        .expect("spawn routectl binary");
+    let out = output_bounded(
+        Command::new(env!("CARGO_BIN_EXE_routectl"))
+            .args(["config", "check"])
+            .env("XDG_CONFIG_HOME", "")
+            .env_remove("ROUTECTL_CONFIG")
+            .env_remove("APPDATA")
+            .env("HOME", home.path())
+            .current_dir(elsewhere.path())
+            .stdin(Stdio::null()),
+    );
 
     let stderr = stderr_of(&out);
     assert!(
         stderr.contains("did you mean `port`?"),
         "the config under $HOME/.config must be the one read: {stderr}"
     );
+}
+
+const NO_FOLDER: &str = "could not resolve an absolute config folder; set HOME or pass --config";
+
+/// A port no other config in these tests uses, so its presence in output
+/// proves which file was read.
+const PLANTED_PORT: &str = "47391";
+
+/// A working directory holding a config where the old relative fallback
+/// would read it (`.config/routectl/config.toml`), and a second config
+/// outside it for the explicit-path rows.
+struct NoFolder {
+    cwd: tempfile::TempDir,
+    elsewhere: tempfile::TempDir,
+}
+
+impl NoFolder {
+    fn new() -> Self {
+        let fixture = Self {
+            cwd: tempfile::tempdir().unwrap(),
+            elsewhere: tempfile::tempdir().unwrap(),
+        };
+        let planted = fixture.cwd.path().join(".config").join("routectl");
+        std::fs::create_dir_all(&planted).unwrap();
+        std::fs::write(planted.join("config.toml"), Self::body(PLANTED_PORT)).unwrap();
+        std::fs::write(fixture.explicit_config(), Self::body("47392")).unwrap();
+        fixture
+    }
+
+    fn body(port: &str) -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nport = {port}\n")
+    }
+
+    fn explicit_config(&self) -> PathBuf {
+        self.elsewhere.path().join("config.toml")
+    }
+
+    /// `routectl <args>` with no absolute `HOME`, `USERPROFILE` or
+    /// `XDG_CONFIG_HOME`; `xdg` sets `XDG_CONFIG_HOME` to a relative value.
+    fn command(&self, xdg: Option<&str>, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_routectl"));
+        command
+            .args(args)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("ROUTECTL_CONFIG")
+            .env_remove("APPDATA")
+            .current_dir(self.cwd.path())
+            .stdin(Stdio::null());
+        if let Some(xdg) = xdg {
+            command.env("XDG_CONFIG_HOME", xdg);
+        }
+        command
+    }
+}
+
+/// Mutation check: restore the relative fallback in the CLI's default config
+/// path -> red (the planted config is read and shown).
+#[test]
+fn without_a_config_folder_the_default_config_is_refused_not_read_from_the_cwd() {
+    let rows: &[(&str, Option<&str>)] = &[
+        ("home and xdg unset", None),
+        ("relative xdg and home unset", Some(".config")),
+    ];
+    let failures: Vec<String> = rows
+        .iter()
+        .filter_map(|(name, xdg)| {
+            let fixture = NoFolder::new();
+            let out = output_bounded(&mut fixture.command(*xdg, &["config", "show"]));
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = stderr_of(&out);
+            let refused = !out.status.success()
+                && stderr.contains(NO_FOLDER)
+                && !stdout.contains(PLANTED_PORT);
+            (!refused).then(|| format!("{name}: status {}: {stdout}\n{stderr}", out.status))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Positive control for the refusal rows: naming the config explicitly reads
+/// that file in the same environment.
+#[test]
+fn without_a_config_folder_an_explicit_config_is_read() {
+    let rows = [
+        ("--config", ExplicitConfig::Flag),
+        ("ROUTECTL_CONFIG", ExplicitConfig::Env),
+    ];
+    let failures: Vec<String> = rows
+        .iter()
+        .filter_map(|(name, how)| {
+            let fixture = NoFolder::new();
+            let explicit = fixture.explicit_config();
+            let mut command = match how {
+                ExplicitConfig::Flag => fixture.command(
+                    None,
+                    &["--config", explicit.to_str().unwrap(), "config", "show"],
+                ),
+                ExplicitConfig::Env => {
+                    let mut command = fixture.command(None, &["config", "show"]);
+                    command.env("ROUTECTL_CONFIG", &explicit);
+                    command
+                }
+            };
+            let out = output_bounded(&mut command);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let read =
+                out.status.success() && stdout.contains("47392") && !stdout.contains(PLANTED_PORT);
+            (!read).then(|| {
+                format!(
+                    "{name}: status {}: {stdout}\n{}",
+                    out.status,
+                    stderr_of(&out)
+                )
+            })
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Each legacy-folder finding `doctor --config <new config>` renders, as its

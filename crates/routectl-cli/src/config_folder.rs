@@ -90,6 +90,9 @@ pub enum ConfigFolderError {
         /// The underlying failure.
         source: io::Error,
     },
+    /// Neither `XDG_CONFIG_HOME` nor the home folder is an absolute path,
+    /// so there is no default config to read.
+    NoFolder,
 }
 
 impl fmt::Display for ConfigFolderError {
@@ -115,6 +118,9 @@ impl fmt::Display for ConfigFolderError {
                  {source}. routectl moved nothing. Fix the path, or pass --config",
                 path = path.display(),
             ),
+            Self::NoFolder => f.write_str(
+                "could not resolve an absolute config folder; set HOME or pass --config",
+            ),
         }
     }
 }
@@ -122,7 +128,7 @@ impl fmt::Display for ConfigFolderError {
 impl std::error::Error for ConfigFolderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Stranded { .. } => None,
+            Self::Stranded { .. } | Self::NoFolder => None,
             Self::Inspect { source, .. } => Some(source),
         }
     }

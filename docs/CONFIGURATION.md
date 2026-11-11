@@ -128,15 +128,18 @@ when it is an absolute path, and the home folder is `HOME` when that is an
 absolute path; an empty or relative value counts as unset. On Windows without
 an absolute `HOME` that is `%USERPROFILE%\.config\routectl\config.toml`
 unless `XDG_CONFIG_HOME` is an absolute path. When neither variable (nor
-`USERPROFILE` on Windows) is an absolute path, the CLI reads
-`.config/routectl/config.toml` under the working directory. When neither
-`--config` nor `ROUTECTL_CONFIG` names the config and the new `config.toml`
-is missing, routectl checks the old folders on every OS, in order:
-`%APPDATA%\routectl` when `APPDATA` is an absolute path, then
+`USERPROFILE` on Windows) is an absolute path, there is no default config:
+a command that reads it stops with `could not resolve an absolute config
+folder; set HOME or pass --config`, and nothing under the working directory
+is read. When neither `--config` nor `ROUTECTL_CONFIG` names the config and
+the new `config.toml` is missing, routectl checks the old folders on every
+OS, in order: `%APPDATA%\routectl` when `APPDATA` is an absolute path, then
 `~/Library/Application Support/routectl` when `HOME` is an absolute path.
 The first that holds a `config.toml` or cannot be inspected stops every
-command until you move its files or pass `--config` (or set
-`ROUTECTL_CONFIG`). Credentials always arrive as references --
+command that reads or writes the config until you move its files or pass
+`--config` (or set `ROUTECTL_CONFIG`); `logout`, `refresh`, `whoami`,
+`config example`, `prices refresh` and `doctor` still run, and `doctor`
+lists the old folder. Credentials always arrive as references --
 `env://VAR`, `file:///abs/path` (owner-only, 0600), or
 `oauth://<provider>` (populated by `routectl login <provider>`);
 inline `literal:` values are rejected at parse and resolve. To add a

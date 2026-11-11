@@ -1258,6 +1258,7 @@ fn config_check_reports_unknown_seat_presence_when_the_store_cannot_open() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
         .args(["--config", path, "config", "check"])
         .env_remove("HOME")
+        .env_remove("USERPROFILE")
         .env_remove("XDG_CONFIG_HOME")
         .output()
         .expect("spawn routectl binary");
@@ -1783,6 +1784,7 @@ fn config_check_cannot_verify_an_oauth_ref_when_the_store_will_not_open() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
         .args(["--config", path, "config", "check"])
         .env_remove("HOME")
+        .env_remove("USERPROFILE")
         .env_remove("XDG_CONFIG_HOME")
         .output()
         .expect("spawn routectl binary");

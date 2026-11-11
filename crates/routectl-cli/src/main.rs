@@ -518,9 +518,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if matches!(cli.cmd, Cmd::Catalog { .. }) {
         exit_catalog_removed();
     }
-    if cli.config.is_none() {
+    if cli.config.is_none() && reads_config(&cli.cmd) {
         routectl_cli::config_folder::refuse_stranded_config(
-            &resolve_config_path(None),
+            &resolve_config_path(None)?,
             &routectl_cli::config_folder::legacy_config_dirs_from_env(),
         )?;
     }
@@ -532,7 +532,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             mitm_port,
             unsafe_public,
         } => {
-            let resolved_config_path = resolve_config_path(cli.config.as_deref());
+            let resolved_config_path = resolve_config_path(cli.config.as_deref())?;
             let mut config = load_config(cli.config.as_deref())?;
 
             if let Some(h) = host {
@@ -567,7 +567,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             label,
             yes,
         } => {
-            let config_path = resolve_config_path(cli.config.as_deref());
+            let config_path = resolve_config_path(cli.config.as_deref())?;
             if let Err(e) = commands::login::run(
                 &provider,
                 print_url,
@@ -604,7 +604,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Cmd::Doctor { json } => {
-            let path = resolve_config_path(cli.config.as_deref());
+            let path = resolve_config_path(cli.config.as_deref())?;
             let legacy_dirs = routectl_cli::config_folder::legacy_config_dirs_from_env();
             std::process::exit(commands::doctor::run(&path, &legacy_dirs, json).await);
         }
@@ -626,7 +626,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // Re-read the raw TOML so `check` can render semantic errors
                 // with the source line they came from. A read failure here is
                 // not fatal: `check` falls back to the plain message.
-                let raw = std::fs::read_to_string(resolve_config_path(cli.config.as_deref())).ok();
+                let raw = std::fs::read_to_string(resolve_config_path(cli.config.as_deref())?).ok();
                 if let Err(e) = commands::config::check(&config, raw.as_deref()).await {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -634,8 +634,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigCmd::Show { effective } => {
                 let result = if effective {
-                    let loaded =
-                        server::load_effective_config(&resolve_config_path(cli.config.as_deref()))?;
+                    let loaded = server::load_effective_config(&resolve_config_path(
+                        cli.config.as_deref(),
+                    )?)?;
                     let prices = commands::pricing::default_price_book();
                     commands::config_effective::show_effective(
                         &loaded,
@@ -651,7 +652,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ConfigCmd::Set { path, value, yes } => {
-                let config_path = resolve_config_path(cli.config.as_deref());
+                let config_path = resolve_config_path(cli.config.as_deref())?;
                 if let Err(e) = commands::config_edit::run(
                     &config_path,
                     &path,
@@ -663,7 +664,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ConfigCmd::Unset { path, yes } => {
-                let config_path = resolve_config_path(cli.config.as_deref());
+                let config_path = resolve_config_path(cli.config.as_deref())?;
                 if let Err(e) = commands::config_edit::run(
                     &config_path,
                     &path,
@@ -687,7 +688,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             default_model,
             forwarded,
         } => {
-            let config_path = resolve_config_path(cli.config.as_deref());
+            let config_path = resolve_config_path(cli.config.as_deref())?;
             let args = commands::init::InitArgs {
                 scaffold,
                 yes,
@@ -711,7 +712,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 overwrite,
                 yes,
             } => {
-                let config_path = resolve_config_path(cli.config.as_deref());
+                let config_path = resolve_config_path(cli.config.as_deref())?;
                 let args = commands::provider_add::ProviderAddArgs {
                     kind,
                     name,
@@ -729,7 +730,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ProviderCmd::Probe { name, json } => {
-                let config_path = resolve_config_path(cli.config.as_deref());
+                let config_path = resolve_config_path(cli.config.as_deref())?;
                 std::process::exit(commands::probe::run(&config_path, name, json).await);
             }
         },
@@ -885,7 +886,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn load_config(
     explicit: Option<&std::path::Path>,
 ) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {
-    let path = resolve_config_path(explicit);
+    let path = resolve_config_path(explicit)?;
     Ok(server::load_effective_config(&path)?.config)
 }
 
@@ -915,7 +916,7 @@ fn exit_catalog_removed() -> ! {
 fn load_config_unvalidated(
     explicit: Option<&std::path::Path>,
 ) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {
-    let path = resolve_config_path(explicit);
+    let path = resolve_config_path(explicit)?;
     Ok(server::load_effective_config_unvalidated(&path)?.config)
 }
 
@@ -949,12 +950,62 @@ fn apply_mitm_port_override(
 
 /// Resolve the config path the same way `load_config` does, but
 /// without reading or parsing. Used to register the file-watch
-/// target in `Cmd::Serve`.
-fn resolve_config_path(explicit: Option<&std::path::Path>) -> PathBuf {
+/// target in `Cmd::Serve`. With no explicit path and no absolute config
+/// folder there is no default to read, so the caller gets
+/// [`ConfigFolderError::NoFolder`] rather than a path under the working
+/// directory.
+///
+/// [`ConfigFolderError::NoFolder`]: routectl_cli::config_folder::ConfigFolderError::NoFolder
+fn resolve_config_path(
+    explicit: Option<&std::path::Path>,
+) -> Result<PathBuf, routectl_cli::config_folder::ConfigFolderError> {
     if let Some(p) = explicit {
-        return p.to_path_buf();
+        return Ok(p.to_path_buf());
     }
-    routectl_core::config_dir::config_dir_or_relative().join("config.toml")
+    routectl_core::config_dir::config_dir()
+        .map(|dir| dir.join("config.toml"))
+        .ok_or(routectl_cli::config_folder::ConfigFolderError::NoFolder)
+}
+
+/// Whether `cmd` reads or writes the config file, so a config left in an
+/// old folder must stop it before it runs. The match names every variant at
+/// every level, so a new subcommand does not compile until it is classified
+/// here. `doctor` is not one: it reports a stranded folder itself.
+const fn reads_config(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Serve { .. }
+        | Cmd::Login { .. }
+        | Cmd::Test { .. }
+        | Cmd::Init { .. }
+        | Cmd::PromptSize { .. } => true,
+        Cmd::Logout { .. }
+        | Cmd::Refresh { .. }
+        | Cmd::Whoami
+        | Cmd::Doctor { .. }
+        | Cmd::Catalog { .. } => false,
+        Cmd::Config { action } => match action {
+            ConfigCmd::Check
+            | ConfigCmd::Show { .. }
+            | ConfigCmd::Set { .. }
+            | ConfigCmd::Unset { .. } => true,
+            ConfigCmd::Example => false,
+        },
+        Cmd::Provider { action } => match action {
+            ProviderCmd::Add { .. } | ProviderCmd::Probe { .. } => true,
+        },
+        Cmd::Usage { action, .. } => match action {
+            None | Some(UsageCmd::Downgrade { .. }) => true,
+        },
+        Cmd::Prices { action } => match action {
+            PricesCmd::Refresh { .. } => false,
+        },
+        Cmd::Rc { action } => match action {
+            RcCmd::Env | RcCmd::RegenCa => true,
+        },
+        Cmd::Capability { action } => match action {
+            CapabilityCmd::Purge { .. } => true,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1607,6 +1658,107 @@ mod tests {
             argv.extend_from_slice(other);
             assert!(Cli::try_parse_from(argv).is_err(), "{other:?}");
         }
+    }
+
+    /// One row: the subcommand path, the rest of a parseable command line,
+    /// and whether the command reads the config.
+    type ReadsConfigRow = (&'static str, &'static [&'static str], bool);
+
+    const READS_CONFIG_ROWS: &[ReadsConfigRow] = &[
+        ("serve", &[], true),
+        ("login", &["anthropic"], true),
+        ("test", &["fast"], true),
+        ("config check", &[], true),
+        ("config show", &[], true),
+        ("config set", &["server.port", "1"], true),
+        ("config unset", &["server.port"], true),
+        ("init", &[], true),
+        (
+            "provider add",
+            &["--kind", "openai-compat", "--name", "p"],
+            true,
+        ),
+        ("provider probe", &[], true),
+        (
+            "prompt-size",
+            &["--alias", "a", "--request", "r.json"],
+            true,
+        ),
+        ("usage", &[], true),
+        ("usage downgrade", &["--to", "20"], true),
+        ("rc env", &[], true),
+        ("rc regen-ca", &[], true),
+        ("capability purge", &["p#m", "web_search"], true),
+        ("logout", &["anthropic"], false),
+        ("refresh", &["anthropic"], false),
+        ("whoami", &[], false),
+        ("config example", &[], false),
+        ("catalog", &[], false),
+        ("prices refresh", &[], false),
+        ("doctor", &[], false),
+    ];
+
+    /// Every runnable subcommand path clap knows, `help` excluded. A
+    /// command that also runs without a subcommand (`usage`) is listed
+    /// itself as well as its children.
+    fn leaf_subcommand_paths(command: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+        for sub in command.get_subcommands() {
+            let name = sub.get_name();
+            if name == "help" {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix} {name}")
+            };
+            if sub.has_subcommands() {
+                if !sub.is_subcommand_required_set() {
+                    out.push(path.clone());
+                }
+                leaf_subcommand_paths(sub, &path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn reads_config_classifies_every_leaf_subcommand() {
+        let mut failures = Vec::new();
+        for (path, rest, expected) in READS_CONFIG_ROWS {
+            let mut argv = vec!["routectl"];
+            argv.extend(path.split(' '));
+            argv.extend_from_slice(rest);
+            match Cli::try_parse_from(&argv) {
+                Ok(cli) if reads_config(&cli.cmd) == *expected => {}
+                Ok(_) => failures.push(format!("{path}: reads_config is {}", !expected)),
+                Err(e) => failures.push(format!("{path}: {argv:?} does not parse: {e}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The classification table above names every subcommand clap accepts,
+    /// so a new one cannot go untested.
+    #[test]
+    fn reads_config_table_covers_every_subcommand() {
+        use clap::CommandFactory;
+        let mut leaves = Vec::new();
+        leaf_subcommand_paths(&Cli::command(), "", &mut leaves);
+        assert!(
+            leaves.iter().any(|leaf| leaf == "usage")
+                && leaves.iter().any(|leaf| leaf == "usage downgrade")
+                && leaves.iter().any(|leaf| leaf == "config check"),
+            "positive control: the walk reaches nested and bare-runnable commands: {leaves:?}"
+        );
+
+        let missing: Vec<&String> = leaves
+            .iter()
+            .filter(|leaf| !READS_CONFIG_ROWS.iter().any(|(path, _, _)| path == leaf))
+            .collect();
+
+        assert!(missing.is_empty(), "unclassified subcommands: {missing:?}");
     }
 
     /// `usage downgrade` takes `--to 20`, `--to 19`, `--to 18`, `--to 17` or

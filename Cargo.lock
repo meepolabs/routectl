@@ -2800,6 +2800,7 @@ dependencies = [
  "routectl-testkit",
  "serde",
  "serde_json",
+ "serial_test",
  "syn 2.0.117",
  "tempfile",
  "thiserror",

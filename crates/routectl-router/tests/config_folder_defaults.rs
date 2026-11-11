@@ -1,9 +1,9 @@
 //! The path defaults that live in the config folder are empty when no folder
 //! resolves, never a path relative to the working directory.
 //!
-//! Its own test binary with one test: it rewrites `HOME` and
-//! `XDG_CONFIG_HOME` for the whole process, and no sibling test may read the
-//! environment while it does.
+//! Its own test binary with one test: it rewrites `HOME`, `USERPROFILE` (the
+//! Windows home fallback) and `XDG_CONFIG_HOME` for the whole process, and no
+//! sibling test may read the environment while it does.
 
 use std::path::PathBuf;
 
@@ -23,6 +23,7 @@ fn folder_defaults_are_empty_without_an_absolute_home_or_xdg() {
     for (name, xdg, home) in rows {
         let _xdg = scoped("XDG_CONFIG_HOME", *xdg);
         let _home = scoped("HOME", *home);
+        let _userprofile = scoped("USERPROFILE", None);
 
         let db_path = UsageConfig::default().db_path;
         let cert_dir = MitmConfig::default().cert_dir;
@@ -37,6 +38,7 @@ fn folder_defaults_are_empty_without_an_absolute_home_or_xdg() {
     // Positive control: an absolute XDG_CONFIG_HOME yields absolute defaults.
     let _xdg = scoped("XDG_CONFIG_HOME", Some("/abs/xdg"));
     let _home = scoped("HOME", None);
+    let _userprofile = scoped("USERPROFILE", None);
     assert_eq!(
         UsageConfig::default().db_path,
         PathBuf::from("/abs/xdg/routectl/usage.db")

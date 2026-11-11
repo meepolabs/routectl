@@ -1,8 +1,9 @@
 //! Real-binary checks that a path defaulting into the config folder is
 //! refused by key, where it is consumed, when no folder resolves.
 //!
-//! Every spawn removes `HOME`, `XDG_CONFIG_HOME` (the workspace cargo config
-//! forces it) and `ROUTECTL_CONFIG`, names its config with `--config`, and
+//! Every spawn removes `HOME`, `USERPROFILE` (the Windows home fallback),
+//! `XDG_CONFIG_HOME` (the workspace cargo config forces it) and
+//! `ROUTECTL_CONFIG`, names its config with `--config`, and
 //! runs in a fresh working directory that each test asserts stays empty, so
 //! a relative fallback would show up as a file there.
 
@@ -54,6 +55,7 @@ impl Fixture {
             .arg(self.config_path())
             .args(args)
             .env_remove("HOME")
+            .env_remove("USERPROFILE")
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("ROUTECTL_CONFIG")
             .env("RUST_LOG", "error")

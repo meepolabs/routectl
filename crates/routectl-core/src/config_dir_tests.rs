@@ -1,7 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use super::{config_dir_from, config_dir_or_relative_from, windows_home};
+use routectl_testkit::ScopedEnv;
+
+use super::{config_dir, config_dir_from, windows_home};
 
 /// The filesystem root, so every fixture below is absolute on the OS that
 /// runs it.
@@ -95,38 +97,30 @@ fn config_dir_from_honors_non_utf8_xdg() {
     assert_eq!(got, Some(PathBuf::from(xdg).join("routectl")));
 }
 
+/// `config_dir()` reads the process environment through the same rule.
+/// `USERPROFILE` is cleared too: on Windows it stands in for an unset `HOME`.
 #[test]
-fn config_dir_or_relative_from_falls_back_to_a_relative_folder() {
-    let rows: [Row; 3] = [
-        (
-            "both unset",
-            None,
-            None,
-            Some(PathBuf::from(".config/routectl")),
-        ),
-        (
-            "both relative",
-            s("rel/xdg"),
-            s("rel/home"),
-            Some(PathBuf::from(".config/routectl")),
-        ),
-        (
-            "home set",
-            None,
-            Some(abs("home/u")),
-            folder("home/u/.config"),
-        ),
+#[serial_test::serial]
+fn config_dir_reads_the_process_environment() {
+    let rows: [(&str, Option<String>, Option<PathBuf>); 2] = [
+        ("absolute xdg", Some(abs("xdg")), folder("xdg")),
+        ("xdg and home unset", None, None),
     ];
 
-    for (name, xdg, home, expected) in rows {
+    for (name, xdg, expected) in rows {
+        // Arrange
+        let _xdg = match &xdg {
+            Some(xdg) => ScopedEnv::set("XDG_CONFIG_HOME", xdg),
+            None => ScopedEnv::unset("XDG_CONFIG_HOME"),
+        };
+        let _home = ScopedEnv::unset("HOME");
+        let _userprofile = ScopedEnv::unset("USERPROFILE");
+
         // Act
-        let got = config_dir_or_relative_from(
-            xdg.as_deref().map(OsStr::new),
-            home.as_deref().map(OsStr::new),
-        );
+        let got = config_dir();
 
         // Assert
-        assert_eq!(Some(got), expected, "row: {name}");
+        assert_eq!(got, expected, "row: {name}");
     }
 }
 
