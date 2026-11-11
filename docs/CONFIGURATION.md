@@ -2919,7 +2919,7 @@ the per-window observation totals include them. A body that fails to
 parse writes no row.
 
 **Walk counts on the status surface.** The `observation` block on
-`/status/usage` (usage panel schema 5, for the requested window) and on
+`/status/usage` (usage panel schema 6, for the requested window) and on
 `/status/doctor` (doctor schema 30, for today) sums five walk counts over
 every `requests` row in the window, token-count rows included:
 `request_caused_failures` (failed attempts the request itself caused,
@@ -4569,8 +4569,16 @@ month / all time) as separate blocks. There are no rolling
 
 **Breakdown.** `--by model|provider|alias` rolls the rows up to that
 dimension; omit `--by` for a single total row. `--detail` adds extra
-columns: the 5m/1h cache-write split, p95 (nearest-rank) and max
-latency, total wall-time (summed `latency_ms`), and server-tool counts.
+columns: `cache_wr` (cache-write tokens of every lifetime), p95
+(nearest-rank) and max latency, total wall-time (summed `latency_ms`),
+and server-tool counts.
+
+**Cache writes.** The `input` column, the `cache_wr` column and the
+cache-hit rate count cache writes from every row: a row written before
+usage schema 21 contributes its 5-minute and 1-hour columns, a newer row
+its recorded write total, and no write is counted twice. `cache_wr`
+reads `-` when no row in the group reported a write and `0` when one
+reported an observed zero.
 
 **Cost.** Cost is derived at read time from the effective prices for
 each row, field by field, in the order [Model
@@ -4895,7 +4903,7 @@ loaded.
 
 The running server's `/status/query` endpoint answers a grouped, windowed
 aggregate over the local usage ledger. Like `--json` above, its payload
-carries a `schema_version` (currently `2`) and its shape is UNSTABLE before
+carries a `schema_version` (currently `3`) and its shape is UNSTABLE before
 1.0 -- metric names may be added and the envelope may be restructured. The
 `schema_version` bumps on any semantic change or removal; purely additive
 changes (a new metric, a new grouping or window token) do not bump it.
@@ -4922,6 +4930,16 @@ channels side by side: `cost_usd` is real spend under `cost_status`, and
 rows under the same complete-or-absent rule the CLI cell applies. Both are
 `null` rather than `0` when nothing contributed, both sum bucket-wise to
 `totals`, and neither is ever folded into the other.
+
+Every metric set also carries `cache_write_tokens`, the cache-write tokens
+of every lifetime summed over both ledger eras, and `cache_write_present`,
+the count of requests that reported a cache-write value (an observed zero
+counts, a request reporting nothing does not). `cache_write_5m` and
+`cache_write_1h` sum only rows written before usage schema 21; newer rows
+leave those columns empty, so read `cache_write_tokens` for the write
+volume. The `/status/usage` panel (schema 6) carries the same two fields,
+with the same meaning, on its `totals` and on every group, and the
+dashboard's cache-write figures read `cache_write_tokens`.
 
 ### `provider probe [<name>]` -- reachability, free-only
 

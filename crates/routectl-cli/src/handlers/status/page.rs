@@ -1434,6 +1434,29 @@ mod tests {
         }
     }
 
+    /// The written cache volume the Overview and Usage tabs show is the
+    /// both-era write total. The per-lifetime query fields cover only rows
+    /// written before the ledger recorded a total, so reading them would drop
+    /// every current write from the figure.
+    ///
+    /// Mutation check: make `cacheWritten` sum `m.cache_write_5m` and
+    /// `m.cache_write_1h` again -> red.
+    #[test]
+    fn cache_written_reads_the_write_total() {
+        let body = function_body("cacheWritten");
+        assert!(
+            body.contains("m.cache_write_tokens"),
+            "`cacheWritten` must read `cache_write_tokens`: {body}"
+        );
+        let code = strip_js_comments(&script());
+        for legacy in ["cache_write_5m", "cache_write_1h"] {
+            assert!(
+                !code.contains(legacy),
+                "the dashboard must not read the older-rows-only `{legacy}`"
+            );
+        }
+    }
+
     /// The eligibility reasons the shared target-phase rule treats as needing
     /// attention must be tokens the server emits; a renamed or misspelled
     /// token would file a dead login back under "not observed yet".

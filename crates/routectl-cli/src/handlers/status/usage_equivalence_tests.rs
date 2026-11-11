@@ -62,6 +62,9 @@ const TO_MS: i64 = FROM_MS + 86_400_000;
 // server_tool_calls       = summed json values: 2 + (1 + 4)               = 7
 // cache_write_5m          = 3 + 10                                        = 13
 // cache_write_1h          = 2 + 20                                        = 22
+// cache_write_tokens      = both eras; every row here is an older-era row,
+//                           so (3 + 2) + (10 + 20)                        = 35
+// cache_write_present     = rows reporting a write: B + I                 = 2
 // stream_count            = SUM(stream) = B + E + F + H + I               = 5
 
 const EXPECTED_REQUESTS: i64 = 8;
@@ -76,12 +79,14 @@ const EXPECTED_CACHE_READ_BILLED: i64 = 66;
 const EXPECTED_SERVER_TOOL_CALLS: i64 = 7;
 const EXPECTED_CACHE_WRITE_5M: i64 = 13;
 const EXPECTED_CACHE_WRITE_1H: i64 = 22;
+const EXPECTED_CACHE_WRITE_TOKENS: i64 = 35;
+const EXPECTED_CACHE_WRITE_PRESENT: i64 = 2;
 const EXPECTED_STREAM_COUNT: i64 = 5;
 
 /// The metric vocabulary BOTH surfaces carry -- the projection this guard
 /// asserts equal. Every token is a contracts sec-15 wire name and an `i64` on
 /// both sides.
-const SHARED: [&str; 13] = [
+const SHARED: [&str; 15] = [
     "requests",
     "ok",
     "errors",
@@ -94,15 +99,15 @@ const SHARED: [&str; 13] = [
     "cancelled_total",
     "cache_write_5m",
     "cache_write_1h",
+    "cache_write_tokens",
+    "cache_write_present",
     "stream_count",
 ];
 
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 14] = [
-    "cache_write_tokens",
-    "cache_write_present",
+const QUERY_ONLY: [&str; 12] = [
     "fallback_served",
     "ttft_p50_ms",
     "ttft_p95_ms",
@@ -434,7 +439,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
 }
 
 /// Sum one per-group panel field across every rollup group. Three of the
-/// thirteen shared tokens are panel-side per-group only, so their window-wide
+/// fifteen shared tokens are panel-side per-group only, so their window-wide
 /// value is the sum over the groups the panel reports.
 fn panel_group_sum(panel: &UsagePanel, field: impl Fn(&UsageGroup) -> i64) -> i64 {
     panel.groups.iter().map(field).sum()
@@ -459,7 +464,7 @@ fn shared_projection_agrees_between_query_and_usage_panel() {
     let p = &panel.totals;
     let q = &result.totals;
 
-    // Assert: the ten tokens both surfaces carry at window totals.
+    // Assert: the twelve tokens both surfaces carry at window totals.
     assert_eq!(p.requests, q.requests, "requests");
     assert_eq!(p.ok, q.ok, "ok");
     assert_eq!(p.errors, q.errors, "errors");
@@ -479,6 +484,14 @@ fn shared_projection_agrees_between_query_and_usage_panel() {
         "client_disconnect_total"
     );
     assert_eq!(p.cancelled_total, q.cancelled_total, "cancelled_total");
+    assert_eq!(
+        p.cache_write_tokens, q.cache_write_tokens,
+        "cache_write_tokens"
+    );
+    assert_eq!(
+        p.cache_write_present, q.cache_write_present,
+        "cache_write_present"
+    );
 
     // And the three the panel reports per group only.
     assert_eq!(
@@ -605,6 +618,28 @@ fn both_paths_match_the_hand_computed_window_oracle() {
         result.totals.stream_count, EXPECTED_STREAM_COUNT,
         "status query: stream_count"
     );
+
+    for (label, tokens, present) in [
+        (
+            "usage panel",
+            panel.totals.cache_write_tokens,
+            panel.totals.cache_write_present,
+        ),
+        (
+            "status query",
+            result.totals.cache_write_tokens,
+            result.totals.cache_write_present,
+        ),
+    ] {
+        assert_eq!(
+            tokens, EXPECTED_CACHE_WRITE_TOKENS,
+            "{label}: cache_write_tokens"
+        );
+        assert_eq!(
+            present, EXPECTED_CACHE_WRITE_PRESENT,
+            "{label}: cache_write_present"
+        );
+    }
 }
 
 #[test]

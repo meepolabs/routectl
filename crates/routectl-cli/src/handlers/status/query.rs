@@ -50,8 +50,11 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the query payload. Additive changes (a new metric, a
 /// new `group_by` or `window` token) do NOT bump it; a semantic change to an
-/// existing field, or a removal, does.
-pub const SCHEMA_VERSION: u32 = 2;
+/// existing field, or a removal, does. At 3 every metric set gained
+/// `cache_write_tokens` and `cache_write_present`, the cache writes of both
+/// ledger eras, and `cache_write_5m` / `cache_write_1h` narrowed to rows written
+/// before the ledger recorded a write total.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The one method this route answers. Not expressible as an axum
 /// `MethodFilter`, hence the manual guard.

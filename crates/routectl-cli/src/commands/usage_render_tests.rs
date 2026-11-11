@@ -202,8 +202,7 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
         "cost",
         "ctx_peak",
         "ctx_avg",
-        "cache_wr_5m",
-        "cache_wr_1h",
+        "cache_wr",
         "ttft_p50",
         "ttft_p95",
         "tok/s",
@@ -477,7 +476,7 @@ fn render_footer_cache_hit_rate_is_token_weighted_over_reporting_rows() {
     // Arrange: two model groups that both report cache reads. The footer is the
     // token-weighted fraction of prompt tokens served from cache:
     //   num = sum(cache_read_billed) over reporting rows
-    //   den = sum(input + cache_read_billed + cache_write_5m + cache_write_1h)
+    //   den = sum(input + cache_read_billed + cache_write_tokens)
     // Recomputed from the old "per-group mean of peak/(peak+input)" figure, which
     // was wrong (it mixed a per-turn SNAPSHOT with summed input and dropped
     // cache-write). Group A: cache_read 900, input 100. Group B: cache_read 0,
@@ -1246,6 +1245,40 @@ fn displayed_input_unchanged_for_write_less_provider() {
         Some("100"),
         "write-less provider input must equal fresh input: {row_line:?}"
     );
+}
+
+#[test]
+fn current_era_write_total_feeds_displayed_input_and_hit_rate() {
+    // Arrange: a row carrying the write total (no per-lifetime columns): fresh
+    // input 100, cache_read 300, writes 100. Displayed input = 100 + 100 = 200;
+    // hit% = 300 / (100 + 300 + 100) = 60.0%. A reader of only the older-era
+    // columns would show input 100 and 75.0%.
+    let (_dir, _path, db) = temp_db();
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             input_tokens, output_tokens, cache_read, cache_write_tokens) \
+             VALUES (1000, 1000, 'cur1', 'anthropic', 'req-model', 'al', 'm', 'paid', \
+             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, 100, 10, 300, 100)",
+            [],
+        )
+        .expect("insert current-era row");
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("m "))
+        .expect("model row present");
+
+    // Assert: key|reqs|err|input|output|cache_read|hit%.
+    let cells: Vec<&str> = row_line.split_whitespace().collect();
+    assert_eq!(cells.get(3).copied(), Some("200"), "input: {row_line:?}");
+    assert_eq!(cells.get(6).copied(), Some("60.0%"), "hit%: {row_line:?}");
+    assert!(out.contains("cache hit 60.0%"), "footer: {out}");
 }
 
 /// Insert a would-trim candidate row with the verdict-related advisory

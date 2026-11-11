@@ -257,8 +257,9 @@ enum Cmd {
         /// total row.
         #[arg(long, value_parser = ["model", "provider", "alias"])]
         by: Option<String>,
-        /// Show extra columns (cache-write 5m/1h, ttft p50/p95, tok/s,
-        /// server-tool counts) plus a per-window latency summary line.
+        /// Show extra columns (cache-write total of every lifetime, ttft
+        /// p50/p95, tok/s, server-tool counts) plus a per-window latency
+        /// summary line.
         #[arg(long)]
         detail: bool,
         /// Override the usage DB path. Defaults to `[usage] db_path`.

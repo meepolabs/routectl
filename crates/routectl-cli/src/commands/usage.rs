@@ -449,8 +449,8 @@ pub struct DisplayRow {
     /// The `total` row's value is overridden after the footer is computed so it
     /// mirrors the authoritative footer rate (see `build_window_report`).
     pub cache_hit_rate: Option<f64>,
-    pub cache_write_5m: i64,
-    pub cache_write_1h: i64,
+    /// Summed cache-write tokens across both ledger eras.
+    pub cache_write_tokens: i64,
     pub server_tool_calls: i64,
     pub priced_total_usd: Option<f64>,
     /// Summed API-equivalent value of this row's subscription usage, absent
@@ -467,8 +467,9 @@ pub struct DisplayRow {
     pub stream_count: i64,
     pub reasoning_present: i64,
     pub cache_read_present: i64,
-    pub cache_write_5m_present: i64,
-    pub cache_write_1h_present: i64,
+    /// Fine rows reporting a cache-write value in either era; an observed
+    /// zero counts.
+    pub cache_write_present: i64,
     pub server_tool_present: i64,
 }
 
@@ -834,16 +835,14 @@ struct Acc {
     /// (non-reporting rows contribute 0 there), so this pairs with it to give a
     /// per-group rate that matches the footer by construction.
     cache_hit_den: i64,
-    cache_write_5m: i64,
-    cache_write_1h: i64,
+    cache_write_tokens: i64,
     server_tool_calls: i64,
     gen_window_ms: i64,
     gen_output_tokens: i64,
     stream_count: i64,
     reasoning_present: i64,
     cache_read_present: i64,
-    cache_write_5m_present: i64,
-    cache_write_1h_present: i64,
+    cache_write_present: i64,
     server_tool_present: i64,
     priced_usd: f64,
     any_priced: bool,
@@ -871,16 +870,14 @@ impl Acc {
         if row.cache_read_present > 0 {
             self.cache_hit_den += cache_prompt_den(row);
         }
-        self.cache_write_5m += row.cache_write_5m;
-        self.cache_write_1h += row.cache_write_1h;
+        self.cache_write_tokens += row.cache_write_tokens;
         self.server_tool_calls += row.server_tool_calls;
         self.gen_window_ms += row.gen_window_ms;
         self.gen_output_tokens += row.gen_output_tokens;
         self.stream_count += row.stream_count;
         self.reasoning_present += row.reasoning_present;
         self.cache_read_present += row.cache_read_present;
-        self.cache_write_5m_present += row.cache_write_5m_present;
-        self.cache_write_1h_present += row.cache_write_1h_present;
+        self.cache_write_present += row.cache_write_present;
         self.server_tool_present += row.server_tool_present;
         match cost {
             RowCost::Subscription(equivalent) => {
@@ -1052,22 +1049,21 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
         cache_read_avg,
         cache_read_billed: acc.cache_read_billed,
         cache_hit_rate,
-        cache_write_5m: acc.cache_write_5m,
-        cache_write_1h: acc.cache_write_1h,
+        cache_write_tokens: acc.cache_write_tokens,
         server_tool_calls: acc.server_tool_calls,
         gen_window_ms: acc.gen_window_ms,
         gen_output_tokens: acc.gen_output_tokens,
         stream_count: acc.stream_count,
         reasoning_present: acc.reasoning_present,
         cache_read_present: acc.cache_read_present,
-        cache_write_5m_present: acc.cache_write_5m_present,
-        cache_write_1h_present: acc.cache_write_1h_present,
+        cache_write_present: acc.cache_write_present,
         server_tool_present: acc.server_tool_present,
     }
 }
 
 /// Cache-inclusive prompt-token denominator for one aggregate row:
-/// `input + cache_read_billed + cache_write_5m + cache_write_1h`. The DB stores
+/// `input + cache_read_billed + cache_write_tokens`, the write total spanning
+/// both ledger eras. The DB stores
 /// input / cache_read / cache_write as DISJOINT prompt dimensions, so their sum
 /// is the cache-INCLUSIVE prompt total against which billed cache reads are
 /// weighed. This is the ONE denominator rule -- consumed by both the per-group
@@ -1075,7 +1071,7 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
 /// show two contradictory hit%. A row with `cache_read_present > 0` but
 /// `input_tokens == 0` still contributes its reads/writes here.
 const fn cache_prompt_den(row: &AggRow) -> i64 {
-    row.input_tokens + row.cache_read_billed + row.cache_write_5m + row.cache_write_1h
+    row.input_tokens + row.cache_read_billed + row.cache_write_tokens
 }
 
 /// The token-weighted cache-hit ratio `num / den`, or `None` when the
@@ -1096,8 +1092,8 @@ fn cache_hit_ratio(num: i64, den: i64) -> Option<f64> {
 ///
 /// The rate is the token-weighted fraction of prompt tokens served from cache,
 /// computed over the rows that report cache reads (`cache_read_present > 0`):
-/// `sum(cache_read_billed) / sum(input + cache_read_billed + cache_write_5m +
-/// cache_write_1h)`. cache_read here is a billed FLOW, so summing it across rows
+/// `sum(cache_read_billed) / sum(input + cache_read_billed +
+/// cache_write_tokens)`. cache_read here is a billed FLOW, so summing it across rows
 /// is correct (the per-turn snapshot used for the display SIZE column is NOT --
 /// that one must never be summed). Rows whose provider does not report cache are
 /// excluded from both numerator and denominator. `None` when no qualifying row
@@ -1228,12 +1224,11 @@ fn normal_headers(key_header: &str) -> Vec<String> {
 }
 
 /// The `--detail` column headers, appended after the normal columns.
-const DETAIL_HEADERS: [&str; 9] = [
+const DETAIL_HEADERS: [&str; 8] = [
     "cost",
     "ctx_peak",
     "ctx_avg",
-    "cache_wr_5m",
-    "cache_wr_1h",
+    "cache_wr",
     "ttft_p50",
     "ttft_p95",
     "tok/s",
@@ -1250,12 +1245,12 @@ fn hit_pct_cell(row: &DisplayRow) -> String {
 }
 
 /// Displayed `input`: all prompt tokens NOT served from cache, i.e. fresh
-/// input plus both cache-write buckets. Applied uniformly to every provider
-/// (write buckets are 0 for OpenAI-style rows, so they render unchanged). With
+/// input plus the cache-write total of both ledger eras. Applied uniformly to
+/// every provider (a row reporting no write adds 0). With
 /// `cache_read_billed`, this reconciles with the `cache_hit_pct` denominator.
 /// NOT the cost basis -- cost prices the disjoint stored buckets separately.
 const fn display_input(row: &DisplayRow) -> i64 {
-    row.input_tokens + row.cache_write_5m + row.cache_write_1h
+    row.input_tokens + row.cache_write_tokens
 }
 
 /// The normal data cells for one row, in header order.
@@ -1277,8 +1272,7 @@ fn detail_cells(row: &DisplayRow) -> Vec<String> {
         cost_cell(row),
         metric_cell(row.cache_read_present, row.cache_read_peak),
         metric_cell(row.cache_read_present, row.cache_read_avg),
-        metric_cell(row.cache_write_5m_present, row.cache_write_5m),
-        metric_cell(row.cache_write_1h_present, row.cache_write_1h),
+        metric_cell(row.cache_write_present, row.cache_write_tokens),
         ttft_cell(row.ttft_p50_ms),
         ttft_cell(row.ttft_p95_ms),
         tok_per_s(row.gen_output_tokens, row.gen_window_ms)
@@ -1670,7 +1664,7 @@ const LEGEND: &str = concat!(
     "  \"~$\"        = notional API-equivalent value of subscription usage; never added to the dollar figure,\n",
     "                and absent when the subscription rows' rates are incomplete\n",
     "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
-    "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools,\n",
+    "                cache_wr (cache writes of every lifetime, already in input), ttft, tok/s, server-tools,\n",
     "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied),\n",
     "                a reduction line (lossless-minifier outcomes actually applied; counts, not rates),\n",
     "                and a cache-breakpoint line (per-region injection decisions + prefix-epoch events),\n",

@@ -58,7 +58,7 @@ fn wire_shape_pins_every_metric_token() {
     let panel = Panel::available(SCHEMA_VERSION, "2026-08-02T00:00:00Z".to_string(), result);
 
     let expected = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "as_of": "2026-08-02T00:00:00Z",
         "unavailable": null,
         "data": {
@@ -263,7 +263,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
     });
 
     let expected = serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "as_of": "2026-08-02T00:00:00Z",
         "unavailable": null,
         "data": {

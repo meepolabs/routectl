@@ -573,8 +573,8 @@
       sparklinePair(inSpark, outSpark, gap));
   }
 
-  // Cache volumes come from the ledger's own billed read and write counters
-  // (both write horizons summed), never from a ratio of the input tokens.
+  // Cache volumes come from the ledger's own billed read and write counters,
+  // never from a ratio of the input tokens.
   function cacheTrafficTile(t, series, gap) {
     var read = num0(t.cache_read_billed);
     var written = cacheWritten(t);
@@ -586,10 +586,10 @@
       sparklinePair(readSpark, writeSpark, gap));
   }
 
-  // Written cache volume is the sum of both write horizons: they are separate
-  // billing lines but one physical write stream.
+  // Written cache volume is the write total, which spans every cache lifetime
+  // and both ledger eras. The per-lifetime fields cover older rows only.
   function cacheWritten(m) {
-    return num0(m.cache_write_5m) + num0(m.cache_write_1h);
+    return num0(m.cache_write_tokens);
   }
 
   // How many times over the window read back what it wrote. Undefined without

@@ -38,8 +38,11 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 /// group gained `cancelled_total` (so `errors` no longer has to absorb it) and
 /// the panel gained the window's `observation` block. At 5 the `observation`
 /// block gained the five walk counts (`request_caused_failures` and the four
-/// `excluded_<scope>` counts).
-pub const SCHEMA_VERSION: u32 = 5;
+/// `excluded_<scope>` counts). At 6 the totals and every group gained
+/// `cache_write_tokens` and `cache_write_present`, the cache writes of both
+/// ledger eras; `cache_write_5m` / `cache_write_1h` now cover only rows written
+/// before the ledger recorded a write total, which leave them NULL.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The `window` query parameter for `GET /status/usage`.
 #[derive(Debug, Deserialize)]
@@ -99,6 +102,11 @@ struct UsageTotals {
     /// `requests`: dividing by requests dilutes the rate with rows that never
     /// reported a cache read.
     cache_read_present: i64,
+    /// Window-wide cache-write tokens across both ledger eras.
+    cache_write_tokens: i64,
+    /// Window-wide count of rows that reported a cache-write value in either
+    /// era; an observed zero counts, a row reporting nothing does not.
+    cache_write_present: i64,
 }
 
 /// One rollup group at `(alias, provider, model, upstream)` granularity.
@@ -134,6 +142,11 @@ struct UsageGroup {
     /// `requests`: dividing by requests dilutes the rate with rows that never
     /// reported a cache read.
     cache_read_present: i64,
+    /// Cache-write tokens across both ledger eras.
+    cache_write_tokens: i64,
+    /// Count of rows that reported a cache-write value in either era; an
+    /// observed zero counts, a row reporting nothing does not.
+    cache_write_present: i64,
 }
 
 impl UsageGroup {
@@ -157,6 +170,8 @@ impl UsageGroup {
         self.client_disconnect_total += other.client_disconnect_total;
         self.cancelled_total += other.cancelled_total;
         self.cache_read_present += other.cache_read_present;
+        self.cache_write_tokens += other.cache_write_tokens;
+        self.cache_write_present += other.cache_write_present;
         for (class, count) in other.errors_by_class {
             *self.errors_by_class.entry(class).or_default() += count;
         }
@@ -354,6 +369,8 @@ fn assemble(
         totals.client_disconnect_total += row.client_disconnect_total;
         totals.cancelled_total += row.cancelled_total;
         totals.cache_read_present += row.cache_read_present;
+        totals.cache_write_tokens += row.cache_write_tokens;
+        totals.cache_write_present += row.cache_write_present;
         // The breakdown is grouped at the SAME kind-bearing grain as the
         // aggregate, so this stays an exact-match lookup; the class maps are
         // merged together when the era partitions coalesce below.
@@ -406,6 +423,8 @@ fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup 
         cancelled_total: row.cancelled_total,
         errors_by_class,
         cache_read_present: row.cache_read_present,
+        cache_write_tokens: row.cache_write_tokens,
+        cache_write_present: row.cache_write_present,
     }
 }
 
@@ -488,6 +507,10 @@ pub(super) const fn busy_or_unavailable(code: Option<ErrorCode>) -> &'static str
 #[cfg(test)]
 #[path = "usage_equivalence_tests.rs"]
 mod equivalence_tests;
+
+#[cfg(test)]
+#[path = "usage_cache_write_surfaces_tests.rs"]
+mod cache_write_surfaces_tests;
 
 #[cfg(test)]
 #[path = "read_budget_bench_tests.rs"]
@@ -1383,7 +1406,7 @@ mod tests {
             json["unavailable"].is_null(),
             "a migrated v12 DB must read as available: {json}"
         );
-        assert_eq!(json["schema_version"], 5);
+        assert_eq!(json["schema_version"], 6);
         assert_eq!(json["data"]["totals"]["requests"], 2);
     }
 
@@ -1425,13 +1448,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_panel_reports_schema_version_five() {
+    async fn usage_panel_reports_schema_version_six() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_ledger(&path, &[Local::now().timestamp_millis()]);
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["schema_version"], 5);
+        assert_eq!(json["schema_version"], 6);
     }
 
     /// Build a `StatusState` over the caller's usage handle, whose counters

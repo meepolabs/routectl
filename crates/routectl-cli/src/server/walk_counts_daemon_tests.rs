@@ -680,8 +680,8 @@ async fn walk_counts_match_across_usage_cli_status_usage_and_status_doctor() {
         "one walk line per window block: {cli}"
     );
     for (surface, panel, schema) in [
-        ("/status/usage?window=today", &usage_today, 5),
-        ("/status/usage?window=all", &usage_all, 5),
+        ("/status/usage?window=today", &usage_today, 6),
+        ("/status/usage?window=all", &usage_all, 6),
         ("/status/doctor", &doctor, 30),
     ] {
         assert_eq!(panel["schema_version"], schema, "{surface}: {panel}");
