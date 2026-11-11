@@ -30,8 +30,8 @@ use uuid::Uuid;
 use routectl_core::{
     CacheCreation, ChatRequest, ChatResponse, Choice, ContentPart, Error, KnownContentPart,
     Message, MessageContent, ReasoningDetail, ReasoningDetailKind, RequestObservation,
-    ResponsesEnvelope, Result, Role, UpstreamMeta, Usage, parse_cache_lifetime_member,
-    sanitize_for_log,
+    ResponsesEnvelope, ResponsesItemMembers, Result, Role, UpstreamMeta, Usage,
+    parse_cache_lifetime_member, sanitize_for_log,
     wire_check::{IngressDialect, WireTap},
 };
 
@@ -198,6 +198,7 @@ fn translate_filtered(
     let upstream_meta = Some(complete_meta(
         first_message_item_id(&body.output),
         body.extras,
+        output_item_members(&body.output),
     ));
 
     Ok(ChatResponse {
@@ -219,21 +220,47 @@ fn translate_filtered(
 }
 
 /// The carrier of a complete response: tagged as parsed from a Responses
-/// body, with an envelope only when there is an item id or an unmodeled
-/// top-level member to carry.
+/// body, with an envelope only when there is an item id, an unmodeled
+/// top-level member or an unmodeled output item member to carry.
 fn complete_meta(
     message_item_id: Option<String>,
     extras: serde_json::Map<String, Value>,
+    item_members: ResponsesItemMembers,
 ) -> UpstreamMeta {
-    let meta = if message_item_id.is_none() && extras.is_empty() {
+    let meta = if message_item_id.is_none() && extras.is_empty() && item_members.is_empty() {
         UpstreamMeta::default()
     } else {
         let mut envelope = ResponsesEnvelope::default();
         envelope.message_item_id = message_item_id;
         envelope.extras = extras;
+        envelope.item_members = item_members;
         UpstreamMeta::from_responses_envelope(envelope)
     };
     meta.with_wire_dialect(IngressDialect::Responses)
+}
+
+/// The unmodeled members of every `message` and `function_call` output
+/// item that has any, keyed by the identity the render emits the item
+/// under: a message by its `id`, a call by its `call_id`.
+fn output_item_members(output: &[ResponseOutputItem]) -> ResponsesItemMembers {
+    let mut item_members = ResponsesItemMembers::default();
+    for item in output {
+        let (by_identity, identity, members) = match item {
+            ResponseOutputItem::Message { id, members, .. } => {
+                (&mut item_members.message, id, members)
+            }
+            ResponseOutputItem::FunctionCall {
+                call_id, members, ..
+            } => (&mut item_members.function_call, call_id, members),
+            _ => continue,
+        };
+        if !members.is_empty() {
+            by_identity
+                .entry(identity.clone())
+                .or_insert_with(|| members.clone());
+        }
+    }
+    item_members
 }
 
 /// The id of the first `message` output item, when the upstream sent a

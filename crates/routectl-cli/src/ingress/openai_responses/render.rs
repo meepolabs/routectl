@@ -47,10 +47,11 @@
 //! ```
 //!
 //! A response parsed from a Responses upstream also carries the members
-//! canonical does not model: top-level members on the envelope and usage
-//! members (each details object whole) on the usage. Only this render
-//! emits them, after every typed key, and a typed key always wins, even
-//! when the render omits its value.
+//! canonical does not model: top-level members and `message` /
+//! `function_call` output item members on the envelope, and usage members
+//! (each details object whole) on the usage. Only this render emits them,
+//! after every typed key, and a typed key always wins, even when the render
+//! omits its value.
 //!
 //! Reasoning reconstruction mirrors the egress request-side replay
 //! (`messages.rs::lift_reasoning_details`) so a round-trip is stable:
@@ -65,7 +66,7 @@ use serde_json::{Map, Value, json};
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect, WirePath};
 use routectl_core::{
     ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result, is_responses_family, renders_unknowns,
+    ReasoningDetailKind, ResponsesItemMembers, Result, is_responses_family, renders_unknowns,
 };
 
 use crate::ingress::ResponseEdits;
@@ -91,6 +92,13 @@ pub(super) fn render_responses_response_declared(
         .and_then(|meta| meta.responses_message_item_id())
         .map(str::to_string);
     let carries_unknowns = renders_unknowns(IngressDialect::Responses, resp.upstream_meta.as_ref());
+    let envelope = resp
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.openai_responses.as_ref())
+        .filter(|_| carries_unknowns);
+    let no_item_members = ResponsesItemMembers::default();
+    let item_members = envelope.map_or(&no_item_members, |envelope| &envelope.item_members);
     let mut body = Map::new();
     body.insert("object".into(), Value::String("response".into()));
     body.insert("id".into(), Value::String(resp.id));
@@ -112,6 +120,7 @@ pub(super) fn render_responses_response_declared(
             build_output(
                 &c.message,
                 message_item_id.as_deref(),
+                item_members,
                 tool_namespaces,
                 edits,
             )
@@ -128,12 +137,7 @@ pub(super) fn render_responses_response_declared(
         body.insert("usage".into(), render_usage(u, carried));
     }
 
-    if carries_unknowns
-        && let Some(envelope) = resp
-            .upstream_meta
-            .as_ref()
-            .and_then(|meta| meta.openai_responses.as_ref())
-    {
+    if let Some(envelope) = envelope {
         merge_unreserved(&mut body, &envelope.extras, RESERVED_TOP_LEVEL);
     }
 
@@ -162,6 +166,14 @@ const RESERVED_USAGE: &[&str] = &[
     INPUT_TOKENS_DETAILS,
     OUTPUT_TOKENS_DETAILS,
 ];
+
+/// `message` item names this render owns, whether or not it emits them.
+const RESERVED_MESSAGE_ITEM: &[&str] = &["type", "id", "role", "status", "content"];
+
+/// `function_call` item names this render owns, whether or not it emits
+/// them. The upstream item's `id` and `status` are not among them: the
+/// render writes neither, so they come back as carried members.
+const RESERVED_FUNCTION_CALL_ITEM: &[&str] = &["type", "call_id", "name", "arguments", "namespace"];
 
 const INPUT_TOKENS_DETAILS: &str = "input_tokens_details";
 const OUTPUT_TOKENS_DETAILS: &str = "output_tokens_details";
@@ -250,6 +262,7 @@ pub(super) fn declare_status_rebuild(finish_reason: Option<&str>, edits: &mut Re
 fn build_output(
     msg: &Message,
     message_item_id: Option<&str>,
+    item_members: &ResponsesItemMembers,
     tool_namespaces: &BTreeMap<String, String>,
     edits: &mut ResponseEdits,
 ) -> Vec<Value> {
@@ -261,12 +274,13 @@ fn build_output(
         build_message_item(&msg.content, msg.refusal.as_deref(), message_item_id)
     {
         declare_message_item_status(output.len(), edits);
-        output.push(message_item);
+        output.push(with_message_members(message_item, item_members));
     }
 
     output.extend(build_unmodeled_items(&msg.content));
     for item in build_function_call_items(msg) {
         let item = stamp_namespace(item, tool_namespaces);
+        let item = with_function_call_members(item, item_members);
         if item.get("namespace").is_some() {
             declare_namespace_stamp(output.len(), edits);
         }
@@ -274,6 +288,35 @@ fn build_output(
     }
 
     output
+}
+
+/// `item`, a `message` output item, with the members `item_members` carries
+/// for its `id` (an absent id is the empty key) added after its own.
+pub(super) fn with_message_members(item: Value, item_members: &ResponsesItemMembers) -> Value {
+    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+    let members = item_members.message.get(id);
+    with_members(item, members, RESERVED_MESSAGE_ITEM)
+}
+
+/// `item`, a `function_call` output item, with the members `item_members`
+/// carries for its `call_id` added after its own.
+pub(super) fn with_function_call_members(
+    item: Value,
+    item_members: &ResponsesItemMembers,
+) -> Value {
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let members = item_members.function_call.get(call_id);
+    with_members(item, members, RESERVED_FUNCTION_CALL_ITEM)
+}
+
+fn with_members(mut item: Value, members: Option<&Map<String, Value>>, reserved: &[&str]) -> Value {
+    if let (Some(members), Some(obj)) = (members, item.as_object_mut()) {
+        merge_unreserved(obj, members, reserved);
+    }
+    item
 }
 
 /// A `message` output item's `status` comes from the render's own item

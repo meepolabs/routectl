@@ -1,7 +1,9 @@
 //! Output items the Responses stream parser does not model (for example
 //! `custom_tool_call`): a Responses client receives each one whole, once, on
 //! an `OpaqueSseEvent::OutputItem`; every other client loses it, counted once
-//! per request on the census and on the request's observation slot.
+//! per request on the census and on the request's observation slot. The
+//! unmodeled members of a `message` or `function_call` item likewise ride
+//! to a Responses client only, on a carrier chunk at that item's event.
 //!
 //! The unit-test registry is per thread and every stream here is polled on
 //! the test's own current-thread runtime, so each delta is exactly what that
@@ -10,9 +12,10 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     ChatChunk, ChatRequest, Message, MessageContent, OpaqueSseEvent, Provider, RequestObservation,
-    RequestProvenance, Role, StaticToken, TokenSource,
+    RequestProvenance, ResponsesItemMembers, Role, StaticToken, TokenSource,
 };
 use serde_json::{Value, json};
 use tracing_test::traced_test;
@@ -394,4 +397,135 @@ fn an_item_past_the_block_cap_is_counted_and_warned() {
         }
     });
     assert!(!logs_contain(FULL_INPUT));
+}
+
+/// A message and a function_call streamed with the members the upstream
+/// stamps on them, the done events carrying more than the added ones.
+fn item_member_events() -> Vec<Value> {
+    vec![
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"type": "message", "id": "m1", "role": "assistant",
+                        "status": "in_progress", "phase": "commentary", "content": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 0, "delta": "ok"}),
+        json!({"type": "response.output_item.done", "output_index": 0,
+               "item": {"type": "message", "id": "m1", "role": "assistant",
+                        "status": "completed", "phase": "commentary",
+                        "metadata": {"turn_id": "t1"},
+                        "content": [{"type": "output_text", "text": "ok"}]}}),
+        json!({"type": "response.output_item.added", "output_index": 1,
+               "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                        "name": "f", "arguments": "", "status": "in_progress"}}),
+        json!({"type": "response.function_call_arguments.delta", "output_index": 1,
+               "delta": "{}"}),
+        json!({"type": "response.output_item.done", "output_index": 1,
+               "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                        "name": "f", "arguments": "{}", "status": "completed"}}),
+    ]
+}
+
+/// The (added, done) item members each chunk carries, in chunk order, with
+/// the position of the chunk in the stream.
+fn item_member_carriers(
+    chunks: &[ChatChunk],
+) -> Vec<(usize, ResponsesItemMembers, ResponsesItemMembers)> {
+    chunks
+        .iter()
+        .enumerate()
+        .filter_map(|(at, chunk)| {
+            let meta = chunk.upstream_meta.as_ref()?;
+            let envelope = meta.openai_responses.as_ref()?;
+            if envelope.added_item_members.is_empty() && envelope.item_members.is_empty() {
+                return None;
+            }
+            assert_eq!(meta.wire_dialect, Some(IngressDialect::Responses));
+            Some((
+                at,
+                envelope.added_item_members.clone(),
+                envelope.item_members.clone(),
+            ))
+        })
+        .collect()
+}
+
+fn members(value: Value) -> serde_json::Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        other => panic!("expected an object, got {other}"),
+    }
+}
+
+#[test]
+fn each_item_event_carries_its_own_item_members_on_its_own_chunk() {
+    // Arrange
+    let mut state = responses_state();
+
+    // Act
+    let chunks = drive_all(&mut state, item_member_events());
+
+    // Assert: one carrier per item event, each at the position of the
+    // event that sent it (before the item's text / argument chunk for an
+    // added, after it for a done).
+    let carriers = item_member_carriers(&chunks);
+    let text_at = chunks
+        .iter()
+        .position(|c| c.choices[0].delta.content.is_some())
+        .expect("text chunk");
+    let args_at = chunks
+        .iter()
+        .position(|c| c.choices[0].delta.tool_calls.is_some())
+        .expect("argument chunk");
+    let at: Vec<usize> = carriers.iter().map(|(at, _, _)| *at).collect();
+    assert_eq!(at.len(), 4, "{carriers:?}");
+    assert!(at[0] < text_at && text_at < at[1], "{at:?} text {text_at}");
+    assert!(
+        at[1] < at[2] && at[2] < args_at && args_at < at[3],
+        "{at:?} args {args_at}"
+    );
+    let (_, added, done) = &carriers[0];
+    assert_eq!(added.message["m1"], members(json!({"phase": "commentary"})));
+    assert!(done.is_empty());
+    let (_, added, done) = &carriers[1];
+    assert!(added.is_empty());
+    assert_eq!(
+        done.message["m1"],
+        members(json!({"phase": "commentary", "metadata": {"turn_id": "t1"}}))
+    );
+    let (_, added, _) = &carriers[2];
+    assert_eq!(
+        added.function_call["call_1"],
+        members(json!({"id": "fc_1", "status": "in_progress"}))
+    );
+    let (_, _, done) = &carriers[3];
+    assert_eq!(
+        done.function_call["call_1"],
+        members(json!({"id": "fc_1", "status": "completed"}))
+    );
+}
+
+#[test]
+fn item_members_ride_to_a_responses_client_only() {
+    // (row, provenance, carriers expected)
+    let rows = [
+        ("responses", RequestProvenance::ResponsesIngress, 4),
+        ("anthropic", RequestProvenance::AnthropicIngress, 0),
+        ("chat", RequestProvenance::OpenaiIngress, 0),
+        ("library", RequestProvenance::Library, 0),
+    ];
+    for (row, provenance, expected) in rows {
+        // Arrange
+        let mut state = ResponsesStreamState::new(AuthKind::ApiKey, provenance, None, &[], None);
+
+        // Act
+        let chunks = drive_all(&mut state, item_member_events());
+
+        // Assert
+        assert_eq!(item_member_carriers(&chunks).len(), expected, "{row}");
+        let item_chunks = chunks
+            .iter()
+            .filter(|c| {
+                c.choices[0].delta.content.is_some() || c.choices[0].delta.tool_calls.is_some()
+            })
+            .count();
+        assert_eq!(item_chunks, 2, "{row}: the items still stream");
+    }
 }

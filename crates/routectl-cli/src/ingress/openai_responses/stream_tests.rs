@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatChunk, ChunkChoice, ChunkDelta, OPENAI_APIKEY,
-    OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, UpstreamMeta,
+    OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope,
+    ResponsesItemMembers, UpstreamMeta,
 };
 
 use super::*;
@@ -1766,5 +1767,175 @@ fn usage_members_on_an_unstamped_or_foreign_chunk_are_not_rendered() {
                 "{row} usage_only={usage_only}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output item members carried from the upstream item events
+// ---------------------------------------------------------------------------
+
+fn members_of(value: Value) -> serde_json::Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        other => panic!("expected an object, got {other}"),
+    }
+}
+
+/// A content-free chunk carrying `members` for one item: on the item's
+/// added event when `added`, else on its done event.
+fn item_members_chunk(
+    dialect: Option<routectl_core::wire_check::IngressDialect>,
+    added: bool,
+    fill: impl FnOnce(&mut ResponsesItemMembers),
+) -> ChatChunk {
+    let mut members = ResponsesItemMembers::default();
+    fill(&mut members);
+    let mut envelope = ResponsesEnvelope::default();
+    if added {
+        envelope.added_item_members = members;
+    } else {
+        envelope.item_members = members;
+    }
+    let meta = UpstreamMeta::from_responses_envelope(envelope);
+    let mut chunk = finish_chunk("stop", None);
+    chunk.choices[0].finish_reason = None;
+    chunk.upstream_meta = Some(match dialect {
+        Some(dialect) => meta.with_wire_dialect(dialect),
+        None => meta,
+    });
+    chunk
+}
+
+/// A message item `m1` with text, then a call `call_1`, the way the egress
+/// streams them: each item's added carrier before its content, its done
+/// carrier after.
+fn stream_with_item_members(
+    dialect: Option<routectl_core::wire_check::IngressDialect>,
+) -> Vec<SseEvent> {
+    let mut state = fresh();
+    let mut first_text = text_chunk("ok");
+    first_text.upstream_meta = Some(UpstreamMeta::from_responses_envelope(
+        ResponsesEnvelope::of_message_item_id("m1".into()),
+    ));
+    let chunks = vec![
+        item_members_chunk(dialect, true, |m| {
+            m.message
+                .insert("m1".into(), members_of(json!({"phase": "commentary"})));
+        }),
+        first_text,
+        item_members_chunk(dialect, false, |m| {
+            m.message.insert(
+                "m1".into(),
+                members_of(json!({"phase": "commentary", "metadata": {"turn_id": "t1"}})),
+            );
+        }),
+        item_members_chunk(dialect, true, |m| {
+            m.function_call.insert(
+                "call_1".into(),
+                members_of(json!({"id": "fc_1", "status": "in_progress"})),
+            );
+        }),
+        tool_chunk(0, "call_1", "f", "{}"),
+        item_members_chunk(dialect, false, |m| {
+            m.function_call.insert(
+                "call_1".into(),
+                members_of(json!({"id": "fc_1", "status": "completed"})),
+            );
+        }),
+        finish_chunk("tool_calls", None),
+    ];
+    let mut events = Vec::new();
+    for chunk in chunks {
+        events.extend(render(&mut state, chunk));
+    }
+    events.extend(render_eos_internal(&mut state));
+    events
+}
+
+/// Every `output_item.added` / `.done` item of `item_type`, in order, with
+/// its event name.
+fn item_events(events: &[SseEvent], item_type: &str) -> Vec<(String, Value)> {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.event.as_deref(),
+                Some("response.output_item.added" | "response.output_item.done")
+            )
+        })
+        .map(|e| {
+            let data: Value = serde_json::from_str(&e.data).expect("json");
+            (e.event.clone().unwrap_or_default(), data["item"].clone())
+        })
+        .filter(|(_, item)| item["type"] == item_type)
+        .collect()
+}
+
+#[test]
+fn each_item_event_renders_the_members_its_upstream_event_carried() {
+    // Act
+    let events =
+        stream_with_item_members(Some(routectl_core::wire_check::IngressDialect::Responses));
+
+    // Assert
+    let message = item_events(&events, "message");
+    assert_eq!(message.len(), 2, "{message:?}");
+    assert_eq!(message[0].0, "response.output_item.added");
+    assert_eq!(message[0].1["phase"], "commentary");
+    assert!(message[0].1.get("metadata").is_none(), "{message:?}");
+    assert_eq!(message[1].0, "response.output_item.done");
+    assert_eq!(message[1].1["phase"], "commentary");
+    assert_eq!(message[1].1["metadata"], json!({"turn_id": "t1"}));
+    assert_eq!(message[1].1["status"], "completed", "typed status wins");
+
+    let call = item_events(&events, "function_call");
+    assert_eq!(call.len(), 2, "{call:?}");
+    assert_eq!(call[0].0, "response.output_item.added");
+    assert_eq!(call[0].1["id"], "fc_1");
+    assert_eq!(call[0].1["status"], "in_progress");
+    assert_eq!(call[1].0, "response.output_item.done");
+    assert_eq!(call[1].1["id"], "fc_1");
+    assert_eq!(call[1].1["status"], "completed");
+
+    let completed = data_of(&events, "response.completed");
+    let output = completed["response"]["output"].as_array().expect("output");
+    assert_eq!(output[0]["phase"], "commentary");
+    assert_eq!(output[0]["metadata"], json!({"turn_id": "t1"}));
+    assert_eq!(output[1]["id"], "fc_1");
+    assert_eq!(output[1]["status"], "completed");
+}
+
+#[test]
+fn item_members_on_an_unstamped_or_foreign_chunk_are_not_rendered() {
+    let rows = [
+        ("unstamped", None),
+        (
+            "anthropic",
+            Some(routectl_core::wire_check::IngressDialect::Anthropic),
+        ),
+        (
+            "chat",
+            Some(routectl_core::wire_check::IngressDialect::Chat),
+        ),
+    ];
+    for (row, dialect) in rows {
+        // Act
+        let events = stream_with_item_members(dialect);
+
+        // Assert
+        let rendered: Vec<Value> = item_events(&events, "message")
+            .into_iter()
+            .chain(item_events(&events, "function_call"))
+            .map(|(_, item)| item)
+            .collect();
+        assert_eq!(rendered.len(), 4, "{row}");
+        for item in &rendered {
+            assert!(item.get("phase").is_none(), "{row}: {item}");
+            assert!(item.get("metadata").is_none(), "{row}: {item}");
+        }
+        let completed = data_of(&events, "response.completed");
+        let text = completed.to_string();
+        assert!(!text.contains("fc_1"), "{row}: {text}");
+        assert!(!text.contains("commentary"), "{row}: {text}");
     }
 }

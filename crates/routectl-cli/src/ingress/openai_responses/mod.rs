@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use routectl_core::wire_check::IngressDialect;
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
+use routectl_core::{ChatChunk, ChatRequest, ChatResponse, ResponsesItemMembers, Result};
 use serde_json::Value;
 
 use super::{
@@ -137,6 +137,13 @@ pub struct ResponsesStreamState {
     /// the `output_index` it streamed at, in arrival order. The completed
     /// body holds each at that same index.
     carried_items: Vec<(u64, Value)>,
+    /// Upstream output item members carried from each item's
+    /// `output_item.added`, emitted on the item's own `output_item.added`.
+    added_item_members: ResponsesItemMembers,
+    /// Upstream output item members carried from each item's
+    /// `output_item.done`, emitted on the item's own `output_item.done` and
+    /// in the completed body.
+    done_item_members: ResponsesItemMembers,
     /// Bare tool name -> the namespace the client declared it in, stamped
     /// onto each returned `function_call` item.
     tool_namespaces: BTreeMap<String, String>,

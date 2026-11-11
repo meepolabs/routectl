@@ -51,8 +51,8 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, OpaqueSseEvent, ReasoningDetail,
-    ReasoningDetailKind, ResponsesEnvelope, Result, Role, UpstreamMeta, Usage, UsageDelta,
-    is_responses_family, renders_unknowns, schema::Choice,
+    ReasoningDetailKind, ResponsesEnvelope, ResponsesItemMembers, Result, Role, UpstreamMeta,
+    Usage, UsageDelta, is_responses_family, renders_unknowns, schema::Choice,
 };
 
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
@@ -62,7 +62,7 @@ use crate::ingress::{IngressStreamState, ResponseEdits, SseEvent, StreamErrorCla
 use super::render::{
     declare_message_item_status, declare_status_rebuild, function_call_item, message_item,
     output_text_block, render_responses_response_declared, stamp_namespace,
-    status_from_finish_reason,
+    status_from_finish_reason, with_function_call_members, with_message_members,
 };
 use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
@@ -124,6 +124,7 @@ pub(super) fn render_chunk_declared(
     }
 
     capture_identity(&chunk, state);
+    capture_item_members(&chunk, state);
     ensure_created(state, &mut events);
 
     for opaque in &chunk.opaque_events {
@@ -181,6 +182,40 @@ fn capture_identity(chunk: &ChatChunk, state: &mut ResponsesStreamState) {
     if let Some(id) = meta.responses_message_item_id() {
         state.message_item_id = Some(id.to_string());
     }
+}
+
+/// Hold the output item members a Responses-parsed chunk carries until the
+/// item they belong to is emitted: an item opens and closes on this
+/// render's own lifecycle, never before its upstream counterpart did.
+fn capture_item_members(chunk: &ChatChunk, state: &mut ResponsesStreamState) {
+    if !renders_unknowns(IngressDialect::Responses, chunk.upstream_meta.as_ref()) {
+        return;
+    }
+    let Some(envelope) = chunk
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.openai_responses.as_ref())
+    else {
+        return;
+    };
+    state.added_item_members = envelope
+        .added_item_members
+        .clone()
+        .merge(std::mem::take(&mut state.added_item_members));
+    state.done_item_members = envelope
+        .item_members
+        .clone()
+        .merge(std::mem::take(&mut state.done_item_members));
+}
+
+/// The members of each finished item: those its `output_item.done`
+/// carried, else, for an item whose done event never came, those its
+/// `output_item.added` carried.
+fn finished_item_members(state: &ResponsesStreamState) -> ResponsesItemMembers {
+    state
+        .done_item_members
+        .clone()
+        .merge(state.added_item_members.clone())
 }
 
 /// Emit `response.created` (+ `response.in_progress`) exactly once.
@@ -299,7 +334,10 @@ fn ensure_text_item(
         declare_message_item_status(index, edits);
     }
     let item_id = state.message_item_id.clone();
-    let added = message_item(item_id.as_deref(), "in_progress", Vec::new());
+    let added = with_message_members(
+        message_item(item_id.as_deref(), "in_progress", Vec::new()),
+        &state.added_item_members,
+    );
     state.open = Some(OpenOutputItem::Text {
         output_index,
         item_id,
@@ -499,9 +537,12 @@ fn flush_tool_calls(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
     {
         close_open_item(state, events);
         let output_index = alloc_output_index(state);
-        let item = stamp_namespace(
-            function_call_item(&tool_call_value(&buf)),
-            &state.tool_namespaces,
+        let item = with_function_call_members(
+            stamp_namespace(
+                function_call_item(&tool_call_value(&buf)),
+                &state.tool_namespaces,
+            ),
+            &state.added_item_members,
         );
         push_event(
             state,
@@ -523,9 +564,12 @@ fn flush_tool_calls(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
             "response.function_call_arguments.done",
             json!({"output_index": output_index, "arguments": buf.arguments}),
         );
-        let done_item = stamp_namespace(
-            function_call_item(&tool_call_value(&buf)),
-            &state.tool_namespaces,
+        let done_item = with_function_call_members(
+            stamp_namespace(
+                function_call_item(&tool_call_value(&buf)),
+                &state.tool_namespaces,
+            ),
+            &finished_item_members(state),
         );
         push_event(
             state,
@@ -594,6 +638,14 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
             item_id,
         }) => {
             let text = std::mem::take(&mut state.current_text);
+            let done_item = with_message_members(
+                message_item(
+                    item_id.as_deref(),
+                    "completed",
+                    vec![output_text_block(&text)],
+                ),
+                &finished_item_members(state),
+            );
             push_event(
                 state,
                 events,
@@ -620,11 +672,7 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
                 "response.output_item.done",
                 json!({
                     "output_index": output_index,
-                    "item": message_item(
-                        item_id.as_deref(),
-                        "completed",
-                        vec![output_text_block(&text)],
-                    ),
+                    "item": done_item,
                 }),
             );
         }
@@ -775,10 +823,13 @@ fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let later_items =
-        state.message_texts.iter().skip(1).map(|(id, text)| {
-            message_item(id.as_deref(), "completed", vec![output_text_block(text)])
-        });
+    let item_members = finished_item_members(state);
+    let later_items = state.message_texts.iter().skip(1).map(|(id, text)| {
+        with_message_members(
+            message_item(id.as_deref(), "completed", vec![output_text_block(text)]),
+            &item_members,
+        )
+    });
     let after_first_message = output
         .iter()
         .position(|item| item.get("type").and_then(Value::as_str) == Some("message"))
@@ -840,10 +891,32 @@ fn accumulated_response(state: &ResponsesStreamState) -> ChatResponse {
         usage: None,
         routectl_provider: None,
         extras: Default::default(),
-        upstream_meta: first_message.and_then(|(id, _)| id.clone()).map(|id| {
-            UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(id))
-        }),
+        upstream_meta: accumulated_meta(
+            first_message.and_then(|(id, _)| id.clone()),
+            finished_item_members(state),
+        ),
     }
+}
+
+/// The carrier of the accumulated response: the first message item's id,
+/// and the item members this stream carried from a Responses upstream,
+/// stamped so the render emits them.
+fn accumulated_meta(
+    message_item_id: Option<String>,
+    item_members: ResponsesItemMembers,
+) -> Option<UpstreamMeta> {
+    if item_members.is_empty() {
+        return message_item_id.map(|id| {
+            UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(id))
+        });
+    }
+    let mut envelope = ResponsesEnvelope::default();
+    envelope.message_item_id = message_item_id;
+    envelope.item_members = item_members;
+    Some(
+        UpstreamMeta::from_responses_envelope(envelope)
+            .with_wire_dialect(IngressDialect::Responses),
+    )
 }
 
 // ---------------------------------------------------------------------------

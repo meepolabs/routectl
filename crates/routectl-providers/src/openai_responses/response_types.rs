@@ -114,6 +114,8 @@ pub enum ResponseOutputItem {
         #[allow(dead_code)]
         status: Option<String>,
         content: Vec<ResponsesOutputContent>,
+        /// The item's members outside [`MESSAGE_ITEM_KEYS`].
+        members: Map<String, Value>,
     },
     Reasoning {
         id: String,
@@ -139,6 +141,8 @@ pub enum ResponseOutputItem {
         /// `function_call` item.
         #[allow(dead_code)]
         status: Option<String>,
+        /// The item's members outside [`FUNCTION_CALL_ITEM_KEYS`].
+        members: Map<String, Value>,
     },
     /// Forward-compat catchall. Preserves the original `{type, ...}`
     /// JSON verbatim so the response translator emits a
@@ -171,6 +175,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 // type is still an error (the translator depends on
                 // typed fields), but UNKNOWN types fall to Other and
                 // preserve their JSON.
+                let members = item_members(&value, MESSAGE_ITEM_KEYS);
                 let m: MessageItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(Self::Message {
@@ -178,6 +183,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                     role: m.role,
                     status: m.status,
                     content: m.content,
+                    members,
                 })
             }
             "reasoning" => {
@@ -192,6 +198,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 })
             }
             "function_call" => {
+                let members = item_members(&value, FUNCTION_CALL_ITEM_KEYS);
                 let f: FunctionCallItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(Self::FunctionCall {
@@ -200,11 +207,36 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                     name: f.name,
                     arguments: f.arguments,
                     status: f.status,
+                    members,
                 })
             }
             _ => Ok(Self::Other(value)),
         }
     }
+}
+
+/// The `message` item members the Responses render writes itself: its
+/// `status` is the render's own item lifecycle.
+pub(super) const MESSAGE_ITEM_KEYS: &[&str] = &["type", "id", "role", "status", "content"];
+
+/// The `function_call` item members the Responses render writes itself:
+/// `namespace` is stamped from the client's own tool declarations. The
+/// item's `id` and `status` are not among them, so they are carried.
+pub(super) const FUNCTION_CALL_ITEM_KEYS: &[&str] =
+    &["type", "call_id", "name", "arguments", "namespace"];
+
+/// The members of the output item `item` that `owned` does not name, for a
+/// Responses client to get back on that item.
+pub(super) fn item_members(item: &Value, owned: &[&str]) -> Map<String, Value> {
+    item.as_object()
+        .map(|members| {
+            members
+                .iter()
+                .filter(|(key, _)| !owned.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize)]

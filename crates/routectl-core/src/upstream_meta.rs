@@ -41,6 +41,8 @@
 //! into neutral names would silently conflate semantics across vendors
 //! whose quota models do not actually match.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value};
 
 use crate::wire_check::IngressDialect;
@@ -503,6 +505,12 @@ pub struct ResponsesEnvelope {
     /// Top-level response members canonical does not model, for the
     /// Responses render alone to re-emit.
     pub extras: Map<String, Value>,
+    /// Output item members canonical does not model, as an item's
+    /// `output_item.added` event carried them. Stream only.
+    pub added_item_members: ResponsesItemMembers,
+    /// Output item members canonical does not model, as the finished item
+    /// carries them: on a stream, its `output_item.done` event.
+    pub item_members: ResponsesItemMembers,
 }
 
 impl ResponsesEnvelope {
@@ -510,23 +518,21 @@ impl ResponsesEnvelope {
     pub fn of_message_item_id(id: String) -> Self {
         Self {
             message_item_id: Some(id),
-            created_at: None,
-            extras: Map::new(),
+            ..Self::default()
         }
     }
 
     /// An envelope carrying only the response `created_at`.
     pub fn of_created_at(created_at: i64) -> Self {
         Self {
-            message_item_id: None,
             created_at: Some(created_at),
-            extras: Map::new(),
+            ..Self::default()
         }
     }
 
     /// Combine two envelopes that describe the same response. Each field is
     /// taken from `self` when present there, otherwise from `other`; the
-    /// extras are united, `self` winning a key both carry.
+    /// extras and item members are united, `self` winning a key both carry.
     #[must_use]
     pub fn merge(self, other: Self) -> Self {
         let mut extras = other.extras;
@@ -535,6 +541,40 @@ impl ResponsesEnvelope {
             message_item_id: self.message_item_id.or(other.message_item_id),
             created_at: self.created_at.or(other.created_at),
             extras,
+            added_item_members: self.added_item_members.merge(other.added_item_members),
+            item_members: self.item_members.merge(other.item_members),
+        }
+    }
+}
+
+/// The members of Responses output items canonical does not model, each
+/// item's members keyed by the wire identity the render emits it under.
+/// Read only by the Responses render.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct ResponsesItemMembers {
+    /// `message` item members, keyed by the item `id`.
+    pub message: BTreeMap<String, Map<String, Value>>,
+    /// `function_call` item members, keyed by the item `call_id`.
+    pub function_call: BTreeMap<String, Map<String, Value>>,
+}
+
+impl ResponsesItemMembers {
+    /// True when no item carries a member.
+    pub fn is_empty(&self) -> bool {
+        self.message.is_empty() && self.function_call.is_empty()
+    }
+
+    /// Unite two sets of item members, `self` winning an item both carry.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        let mut message = other.message;
+        message.extend(self.message);
+        let mut function_call = other.function_call;
+        function_call.extend(self.function_call);
+        Self {
+            message,
+            function_call,
         }
     }
 }
@@ -729,7 +769,7 @@ mod tests {
         ResponsesEnvelope {
             message_item_id: id.map(str::to_string),
             created_at,
-            extras: Map::new(),
+            ..ResponsesEnvelope::default()
         }
     }
 

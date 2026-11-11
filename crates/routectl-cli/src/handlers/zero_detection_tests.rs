@@ -893,6 +893,20 @@ fn responses_cases() -> Vec<Case> {
             responses_provider,
         ),
         case(
+            "responses/item-members",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            responses_stream_with_item_members(),
+            responses_provider,
+        ),
+        case(
+            "responses/item-members-stream",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            responses_stream_with_item_members(),
+            responses_provider,
+        ),
+        case(
             "responses/sampling",
             Ingress::Responses,
             json!({"model": ALIAS, "temperature": 0.3, "top_p": 0.9,
@@ -1012,6 +1026,73 @@ fn responses_document_with_unmodeled_usage() -> Value {
         "output_tokens_details": {"reasoning_tokens": 0, "x": 1}
     });
     done
+}
+
+/// A Responses answer whose `message` and `function_call` output items carry
+/// members no typed field models, each item event carrying the members the
+/// upstream stamps on it at that point.
+fn responses_stream_with_item_members() -> ResponseTemplate {
+    let message = |status: &str, content: Value, done: bool| {
+        let mut item = json!({"type": "message", "id": "m1", "role": "assistant",
+                              "status": status, "phase": "final_answer", "content": content});
+        if done {
+            item["metadata"] = json!({"turn_id": "turn-sentinel"});
+        }
+        item
+    };
+    let call = |status: &str, arguments: &str| {
+        json!({"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "search",
+               "arguments": arguments, "status": status})
+    };
+    let text = json!([{"type": "output_text", "text": "ok", "annotations": []}]);
+    let mut done = responses_document();
+    done["output"] = json!([
+        message("completed", text.clone(), true),
+        call("completed", "{}")
+    ]);
+    let mut created = done.clone();
+    created["status"] = json!("in_progress");
+    created["output"] = json!([]);
+    let event = |kind: &'static str, mut body: Value| {
+        body["type"] = json!(kind);
+        (Some(kind), body)
+    };
+    sse_response(sse(
+        &[
+            event("response.created", json!({"response": created})),
+            event(
+                "response.output_item.added",
+                json!({"output_index": 0, "item": message("in_progress", json!([]), false)}),
+            ),
+            event(
+                "response.content_part.added",
+                json!({"output_index": 0, "content_index": 0,
+                       "part": {"type": "output_text", "text": "", "annotations": []}}),
+            ),
+            event(
+                "response.output_text.delta",
+                json!({"output_index": 0, "content_index": 0, "delta": "ok"}),
+            ),
+            event(
+                "response.output_item.done",
+                json!({"output_index": 0, "item": message("completed", text, true)}),
+            ),
+            event(
+                "response.output_item.added",
+                json!({"output_index": 1, "item": call("in_progress", "")}),
+            ),
+            event(
+                "response.function_call_arguments.delta",
+                json!({"output_index": 1, "delta": "{}"}),
+            ),
+            event(
+                "response.output_item.done",
+                json!({"output_index": 1, "item": call("completed", "{}")}),
+            ),
+            event("response.completed", json!({"response": done})),
+        ],
+        false,
+    ))
 }
 
 /// Responses traffic through the Bedrock Mantle surface, walked by a real
@@ -1815,5 +1896,75 @@ async fn only_a_responses_client_receives_responses_top_level_and_usage_members(
             expected,
             "{row}: usage member: {text}"
         );
+    }
+}
+
+/// A client of another dialect served by openai-responses never receives
+/// the output item members only a Responses client can carry. Positive
+/// control: the same upstream answer gives a Responses client every member,
+/// complete and streamed.
+#[tokio::test]
+async fn only_a_responses_client_receives_responses_output_item_members() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, members expected)
+    let rows = [
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            false,
+        ),
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            false,
+        ),
+        (
+            "anthropic stream client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+            false,
+        ),
+        (
+            "chat stream client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "stream": true, "messages": hi}),
+            false,
+        ),
+        (
+            "responses client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            true,
+        ),
+        (
+            "responses stream client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            true,
+        ),
+    ];
+    for (row, ingress, body, expected) in rows {
+        // Arrange
+        let probe = case(
+            row,
+            ingress,
+            body,
+            responses_stream_with_item_members(),
+            responses_provider,
+        );
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let text = String::from_utf8_lossy(&client);
+        assert!(text.contains("call_1"), "{row}: call rendered: {text}");
+        for member in ["final_answer", "turn-sentinel", "fc_1"] {
+            assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
+        }
     }
 }

@@ -12,7 +12,7 @@ use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatResponse, ContentPart, KnownContentPart, Message,
     MessageContent, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind,
-    ResponsesEnvelope, Role, UpstreamMeta, Usage, schema::Choice,
+    ResponsesEnvelope, ResponsesItemMembers, Role, UpstreamMeta, Usage, schema::Choice,
 };
 
 use super::render_responses_response;
@@ -1172,5 +1172,122 @@ fn members_carried_from_another_dialect_or_unstamped_are_not_rendered() {
                    "output_tokens_details": {"reasoning_tokens": 2}}),
             "{row}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output item members the canonical response does not model
+// ---------------------------------------------------------------------------
+
+/// A text answer from message item `msg_1` plus one call `call_1`, its
+/// carrier stamped with `dialect` and holding `message` / `call` as the
+/// two items' members.
+fn response_with_item_members(
+    dialect: Option<IngressDialect>,
+    message: Value,
+    call: Value,
+) -> ChatResponse {
+    let mut msg = assistant_message(MessageContent::Text("x".into()));
+    msg.tool_calls = Some(vec![json!({
+        "id": "call_1", "type": "function",
+        "function": {"name": "f", "arguments": "{}"}
+    })]);
+    let mut resp = response_with(msg, Some("tool_calls"));
+    let mut item_members = ResponsesItemMembers::default();
+    item_members.message.insert("msg_1".into(), object(message));
+    item_members
+        .function_call
+        .insert("call_1".into(), object(call));
+    let mut envelope = ResponsesEnvelope::default();
+    envelope.message_item_id = Some("msg_1".into());
+    envelope.item_members = item_members;
+    let meta = UpstreamMeta::from_responses_envelope(envelope);
+    resp.upstream_meta = Some(match dialect {
+        Some(dialect) => meta.with_wire_dialect(dialect),
+        None => meta,
+    });
+    resp
+}
+
+#[test]
+fn a_responses_upstream_gets_its_message_and_function_call_item_members_back() {
+    // Arrange
+    let resp = response_with_item_members(
+        Some(IngressDialect::Responses),
+        json!({"phase": "final_answer", "metadata": {"turn_id": "caf\u{e9}"}}),
+        json!({"id": "fc_1", "status": "completed"}),
+    );
+
+    // Act
+    let v = render_responses_response(resp).unwrap();
+
+    // Assert
+    let items = output(&v);
+    assert_eq!(
+        items[0],
+        json!({"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+               "content": [{"type": "output_text", "text": "x", "annotations": []}],
+               "phase": "final_answer", "metadata": {"turn_id": "caf\u{e9}"}})
+    );
+    assert_eq!(
+        items[1],
+        json!({"type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}",
+               "id": "fc_1", "status": "completed"})
+    );
+}
+
+#[test]
+fn a_typed_item_member_wins_over_a_carried_one_of_the_same_name() {
+    // Arrange: every name each item owns, carried with a foreign value.
+    let resp = response_with_item_members(
+        Some(IngressDialect::Responses),
+        json!({"type": "x", "id": "x", "role": "x", "status": "x", "content": "x",
+               "phase": "kept"}),
+        json!({"type": "x", "call_id": "x", "name": "x", "arguments": "x",
+               "namespace": "x", "status": "kept"}),
+    );
+
+    // Act
+    let v = render_responses_response(resp).unwrap();
+
+    // Assert
+    let items = output(&v);
+    assert_eq!(items[0]["type"], "message");
+    assert_eq!(items[0]["id"], "msg_1");
+    assert_eq!(items[0]["role"], "assistant");
+    assert_eq!(items[0]["status"], "completed");
+    assert_eq!(items[0]["content"][0]["text"], "x");
+    assert_eq!(items[0]["phase"], "kept");
+    assert_eq!(items[1]["type"], "function_call");
+    assert_eq!(items[1]["call_id"], "call_1");
+    assert_eq!(items[1]["name"], "f");
+    assert_eq!(items[1]["arguments"], "{}");
+    assert!(items[1].get("namespace").is_none(), "{v}");
+    assert_eq!(items[1]["status"], "kept");
+}
+
+#[test]
+fn item_members_carried_from_another_dialect_or_unstamped_are_not_rendered() {
+    let rows = [
+        ("unstamped", None),
+        ("anthropic", Some(IngressDialect::Anthropic)),
+        ("chat", Some(IngressDialect::Chat)),
+    ];
+    for (row, dialect) in rows {
+        // Arrange
+        let resp = response_with_item_members(
+            dialect,
+            json!({"phase": "final_answer"}),
+            json!({"id": "fc_1", "status": "completed"}),
+        );
+
+        // Act
+        let v = render_responses_response(resp).unwrap();
+
+        // Assert
+        let items = output(&v);
+        assert!(items[0].get("phase").is_none(), "{row}: {v}");
+        assert!(items[1].get("id").is_none(), "{row}: {v}");
+        assert!(items[1].get("status").is_none(), "{row}: {v}");
     }
 }

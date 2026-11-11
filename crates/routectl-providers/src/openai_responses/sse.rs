@@ -40,8 +40,8 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, ReasoningDetailKind, RequestObservation,
-    RequestProvenance, ResponsesEnvelope, Result, Role, ToolDef, UpstreamMeta, UsageInputSource,
-    sanitize_for_log,
+    RequestProvenance, ResponsesEnvelope, ResponsesItemMembers, Result, Role, ToolDef,
+    UpstreamMeta, UsageInputSource, sanitize_for_log,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
     wire_check::{IngressDialect, WireTap},
 };
@@ -62,8 +62,18 @@ pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 
 use super::empty_optional::EmptyOptionalFilter;
 use super::response::{cache_details, map_finish_reason, upstream_error_from_failed};
-use super::response_types::{ResponsesResponse, ResponsesStreamEvent};
+use super::response_types::{
+    FUNCTION_CALL_ITEM_KEYS, MESSAGE_ITEM_KEYS, ResponsesResponse, ResponsesStreamEvent,
+    item_members,
+};
 use super::{AuthKind, lane_format_tag};
+
+/// The item event an output item's members were read from.
+#[derive(Debug, Clone, Copy)]
+enum ItemEvent {
+    Added,
+    Done,
+}
 
 /// Per-output-item streaming state.
 #[derive(Debug, Clone)]
@@ -379,6 +389,7 @@ impl ResponsesStreamState {
             return Vec::new();
         }
 
+        let carrier = self.item_members_chunk(item, ItemEvent::Added);
         match item_type {
             "message" => {
                 self.blocks.insert(idx, BlockState::Text { item_id });
@@ -440,7 +451,7 @@ impl ResponsesStreamState {
                     .insert(idx, BlockState::Passthrough { item: item.clone() });
             }
         }
-        Vec::new()
+        carrier.into_iter().collect()
     }
 
     fn handle_text_delta(
@@ -741,8 +752,61 @@ impl ResponsesStreamState {
                 chunks.push(self.reasoning_signature_chunk(&detail_id, detail_index, sig));
             }
         }
+        if matches!(
+            self.blocks.get(&idx),
+            Some(BlockState::Text { .. } | BlockState::ToolUse { .. })
+        ) && let Some(item) = event.item.as_ref()
+        {
+            chunks.extend(self.item_members_chunk(item, ItemEvent::Done));
+        }
         self.blocks.remove(&idx);
         chunks
+    }
+
+    /// The chunk carrying the unmodeled members a `message` or
+    /// `function_call` item has on this item event, keyed by the identity
+    /// the Responses render emits the item under. `None` for any other
+    /// item, an item with no such member, or a client of another dialect,
+    /// which has nowhere to put them.
+    fn item_members_chunk(&self, item: &Value, event: ItemEvent) -> Option<ChatChunk> {
+        if !super::client_carries_unmodeled_items(self.provenance) {
+            return None;
+        }
+        let identity = |key: &str| {
+            item.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let mut by_item = ResponsesItemMembers::default();
+        let (by_identity, identity, members) = match item_type_of(item) {
+            "message" => (
+                &mut by_item.message,
+                identity("id"),
+                item_members(item, MESSAGE_ITEM_KEYS),
+            ),
+            "function_call" => (
+                &mut by_item.function_call,
+                identity("call_id"),
+                item_members(item, FUNCTION_CALL_ITEM_KEYS),
+            ),
+            _ => return None,
+        };
+        if members.is_empty() {
+            return None;
+        }
+        by_identity.insert(identity, members);
+        let mut envelope = ResponsesEnvelope::default();
+        match event {
+            ItemEvent::Added => envelope.added_item_members = by_item,
+            ItemEvent::Done => envelope.item_members = by_item,
+        }
+        Some(
+            self.carrier_chunk(
+                UpstreamMeta::from_responses_envelope(envelope)
+                    .with_wire_dialect(IngressDialect::Responses),
+            ),
+        )
     }
 
     fn handle_completed(
@@ -1145,6 +1209,23 @@ impl ResponsesStreamState {
             usage: None,
             opaque_events: Vec::new(),
             upstream_meta: None,
+        }
+    }
+
+    /// A chunk with an empty delta whose only payload is `meta`.
+    fn carrier_chunk(&self, meta: UpstreamMeta) -> ChatChunk {
+        ChatChunk {
+            id: self.response_id.clone(),
+            model: self.model.clone(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta::default(),
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: Some(meta),
         }
     }
 

@@ -1971,19 +1971,16 @@ mod codex_lane_mixed_output {
     }
 
     fn assert_responses_client(row: &str, stream: bool, served: &Served) {
-        if stream {
-            responses_stream_output(row, &served.client);
+        let output = if stream {
+            responses_stream_output(row, &served.client)
         } else {
-            responses_complete_output(row, &served.client);
-        }
-        // The function call render does not yet carry the upstream item's id and status.
-        let known_render_gap = [
-            ("/output/2/id".to_string(), "missing"),
-            ("/output/2/status".to_string(), "missing"),
-        ];
+            responses_complete_output(row, &served.client)
+        };
+        assert_eq!(output[2]["id"], "fc_1", "{row}: call item id");
+        assert_eq!(output[2]["status"], "completed", "{row}: call item status");
         assert_eq!(
             response_findings(&served.snapshot),
-            known_render_gap,
+            [],
             "{row}: {}",
             String::from_utf8_lossy(&served.client)
         );

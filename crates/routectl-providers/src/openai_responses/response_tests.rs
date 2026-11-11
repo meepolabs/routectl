@@ -598,8 +598,8 @@ fn translate_carries_no_envelope_without_a_message_item_id_or_member() {
                     "content": [{"type": "output_text", "text": "a"}]}]),
         ),
         (
-            "function call only",
-            json!([{"type": "function_call", "id": "fc_1", "call_id": "call_1",
+            "function call with only typed members",
+            json!([{"type": "function_call", "call_id": "call_1",
                     "name": "f", "arguments": "{}"}]),
         ),
     ];
@@ -801,4 +801,42 @@ fn translate_usage_without_members_carries_nothing() {
 
     // Assert
     assert!(usage.extras.is_empty());
+}
+
+#[test]
+fn translate_carries_message_and_function_call_item_members_by_identity() {
+    // Arrange: the item shapes a Responses upstream sends, one value
+    // non-ASCII; a reasoning item's members are not this carrier's.
+    let body = json!({
+        "id": "resp_01", "status": "completed", "model": "m",
+        "output": [
+            {"type": "reasoning", "id": "rs_1", "summary": [], "metadata": {"turn_id": "t"}},
+            {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+             "phase": "final_answer", "metadata": {"turn_id": "caf\u{e9}"},
+             "content": [{"type": "output_text", "text": "a"}]},
+            {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "f",
+             "arguments": "{}", "status": "completed", "namespace": "ns"}
+        ]
+    });
+
+    // Act
+    let resp = parse(body);
+
+    // Assert
+    let envelope = resp
+        .upstream_meta
+        .and_then(|meta| meta.openai_responses)
+        .expect("envelope");
+    let members = envelope.item_members;
+    assert_eq!(
+        Value::Object(members.message["msg_1"].clone()),
+        json!({"phase": "final_answer", "metadata": {"turn_id": "caf\u{e9}"}})
+    );
+    assert_eq!(
+        Value::Object(members.function_call["call_1"].clone()),
+        json!({"id": "fc_1", "status": "completed"})
+    );
+    assert_eq!(members.message.len(), 1);
+    assert_eq!(members.function_call.len(), 1);
+    assert!(envelope.added_item_members.is_empty());
 }
