@@ -380,14 +380,15 @@ CREATE TABLE IF NOT EXISTS requests (
 pub const CREATE_TS_START_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_requests_ts_start ON requests (ts_start)";
 
-/// Partial index over `ts_start` holding only the rows that carry a cache-write
-/// total (v21), so the per-lifetime write read visits neither the rows that
-/// wrote nothing nor the legacy rows, whose writes the aggregate already sums.
+/// Partial index over `ts_start` holding only the rows that carry a positive
+/// cache-write total (v21), so the per-lifetime write read visits neither the
+/// rows that wrote nothing (a reported zero included) nor the legacy rows,
+/// whose writes the aggregate already sums.
 /// SQLite uses a partial index only when the query's WHERE implies the
 /// index's, so the read filters on this same predicate.
 pub const CREATE_CACHE_WRITE_TS_START_INDEX: &str = concat!(
     "CREATE INDEX IF NOT EXISTS idx_requests_cache_write_ts_start ON requests (ts_start) ",
-    "WHERE cache_write_tokens IS NOT NULL"
+    "WHERE cache_write_tokens > 0"
 );
 
 /// DDL for the `capability_learn_events` table (v9).

@@ -2,19 +2,24 @@
 //!
 //! Pricing a cache write needs to know how long each written token was cached
 //! for, and that lives in the `cache_write_lifetimes` JSON split. Reading it
-//! takes a `json_each` pass, so it runs as its own statement that only the
+//! means parsing every split, so it runs as its own statement that only the
 //! priced readers issue: [`super::query`] and
 //! [`aggregate_with_cache_lifetimes`]. The unpriced [`super::aggregate`] read
 //! never parses JSON.
 //!
-//! The statement reads only rows that carry a write total. Legacy rows
+//! The statement reads only rows that carry a positive write total, one
+//! result row per ledger row, and each split is parsed and folded into its
+//! fine group here rather than grouped in SQL. Legacy rows
 //! (written before the total and split columns existed) carry their writes in
 //! the 5-minute and 1-hour columns, which the aggregate already sums per fine
 //! row; [`attach`] merges those sums as the 300 s and 3600 s lifetimes.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 
+use rusqlite::types::ValueRef;
 use rusqlite::{Row, Transaction};
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::cache_writes::{LEGACY_1H_SECONDS, LEGACY_5M_SECONDS};
 use crate::db::UsageDb;
@@ -31,7 +36,8 @@ use super::{AggRow, GroupKey, QueryError};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CacheWriteLifetimes {
     /// Summed tokens per lifetime in seconds. Holds an entry for every
-    /// lifetime some row reported, a reported zero included.
+    /// lifetime a row with a positive write total reported, a reported zero
+    /// included; a row whose total is zero adds nothing.
     pub tokens_by_lifetime: BTreeMap<u32, i64>,
     /// Summed write tokens with no reported lifetime.
     pub unknown_tokens: i64,
@@ -41,64 +47,33 @@ pub struct CacheWriteLifetimes {
 
 impl CacheWriteLifetimes {
     fn add_lifetime(&mut self, seconds: u32, tokens: i64) {
-        *self.tokens_by_lifetime.entry(seconds).or_insert(0) += tokens;
+        let sum = self.tokens_by_lifetime.entry(seconds).or_insert(0);
+        *sum = sum.saturating_add(tokens);
     }
 }
 
-/// A split entry that counts: a JSON integer token value (a boolean, a float
-/// or an integer too large for `i64` does not count) that is not negative,
-/// under a key that is a positive decimal lifetime fitting `u32` seconds. Any
-/// other entry counts toward neither a lifetime nor the split sum, so its
-/// tokens stay unknown.
-macro_rules! split_entry_counts {
-    () => {
-        "je.type = 'integer' AND typeof(je.value) = 'integer' AND je.value >= 0
-            AND je.key GLOB '[1-9]*' AND je.key NOT GLOB '*[^0-9]*'
-            AND length(je.key) <= 10 AND CAST(je.key AS INTEGER) <= 4294967295"
-    };
-}
-
-/// The rows the per-lifetime read visits: those carrying a write total.
-/// Word for word the WHERE of
+/// The rows the per-lifetime read visits: those carrying a positive write
+/// total. A zero total contributes no tokens to any lifetime, so skipping it
+/// changes no price. Word for word the WHERE of
 /// [`crate::schema::CREATE_CACHE_WRITE_TS_START_INDEX`]: SQLite uses a
 /// partial index only when the query's WHERE implies the index's.
 macro_rules! write_total_rows {
     () => {
-        "cache_write_tokens IS NOT NULL"
+        "cache_write_tokens > 0"
     };
 }
 
-/// The fine-group columns every relation below carries.
-macro_rules! fine_key {
-    () => {
-        "k_model, k_provider, k_upstream, k_alias, k_kind, bucket"
-    };
-}
-
-/// The statement body, with the bucket expression as its one parameter.
-///
-/// `writes` is the window's rows carrying a write total, at the aggregate's
-/// fine grain, read once. A split is kept only when it is a JSON object (a
-/// split beside no total is not a shape the ledger writer produces).
-/// `entries` expands each kept split once into its counting entries, keyed by
-/// the ledger row, and both consumers read that one expansion. The first
-/// emits one summary row per fine group: the unknown remainder and the
-/// invalid flag, each derived per ledger row from that row's own entry sum
-/// (`lifetime` NULL). The second emits one row per (fine group, lifetime).
+/// The statement, with the bucket expression as its one parameter: one
+/// result row per ledger row carrying a positive write total, with its fine
+/// group key, bucket, total and raw split. No grouping in SQL: each split is
+/// parsed and folded per row in Rust (see [`fold_row`]).
 macro_rules! cache_lifetimes_sql {
     ($bucket:literal) => {
         concat!(
-            "WITH writes AS MATERIALIZED (
-    SELECT rowid AS rid,
-        COALESCE(model, requested_model) AS k_model, provider AS k_provider,
-        upstream AS k_upstream, alias AS k_alias, provider_kind AS k_kind,
-        ",
+            "SELECT COALESCE(model, requested_model), provider, upstream, alias,
+        provider_kind, ",
             $bucket,
-            " AS bucket,
-        cache_write_tokens AS total,
-        CASE WHEN json_valid(cache_write_lifetimes)
-            THEN CASE WHEN json_type(cache_write_lifetimes) = 'object'
-                THEN cache_write_lifetimes END END AS split
+            ", cache_write_tokens, cache_write_lifetimes
     FROM requests
     WHERE ts_start >= ?1 AND ts_start < ?2
       AND ",
@@ -107,42 +82,7 @@ macro_rules! cache_lifetimes_sql {
       AND (?3 IS NULL OR alias = ?3)
       AND (?4 IS NULL OR provider = ?4)
       AND ",
-            write_total_rows!(),
-            "
-),
-entries AS MATERIALIZED (
-    SELECT writes.rid, ",
-            fine_key!(),
-            ",
-        CAST(je.key AS INTEGER) AS lifetime, je.value AS tokens
-    FROM writes, json_each(writes.split) AS je
-    WHERE ",
-            split_entry_counts!(),
-            "
-),
-split_sums AS MATERIALIZED (
-    SELECT rid, SUM(tokens) AS split_sum FROM entries GROUP BY rid
-)
-SELECT ",
-            fine_key!(),
-            ",
-    NULL AS lifetime, 0 AS tokens,
-    COALESCE(SUM(CASE WHEN COALESCE(split_sum, 0) <= total
-        THEN total - COALESCE(split_sum, 0) ELSE 0 END), 0) AS unknown,
-    MAX(CASE WHEN split_sum > total THEN 1 ELSE 0 END) AS invalid
-FROM writes LEFT JOIN split_sums USING (rid)
-GROUP BY ",
-            fine_key!(),
-            "
-UNION ALL
-SELECT ",
-            fine_key!(),
-            ",
-    lifetime, SUM(tokens) AS tokens, 0, 0
-FROM entries
-GROUP BY ",
-            fine_key!(),
-            ", lifetime"
+            write_total_rows!()
         )
     };
 }
@@ -166,20 +106,16 @@ pub(super) struct LifetimeWindow<'a> {
     pub provider_filter: Option<&'a str>,
 }
 
-/// Read the per-lifetime writes of the rows carrying a write total, for every
-/// fine group in the window. With `bucket_width_ms`, each group is further
-/// split by bucket index. Legacy writes are not read here; see [`attach`].
+/// Read the per-lifetime writes of the rows carrying a positive write total,
+/// for every fine group in the window. With `bucket_width_ms`, each group is
+/// further split by bucket index. Legacy writes are not read here; see
+/// [`attach`].
 pub(super) fn read_lifetimes(
     tx: &Transaction<'_>,
     window: &LifetimeWindow<'_>,
     bucket_width_ms: Option<i64>,
 ) -> Result<LifetimesByRow, QueryError> {
     let mut out = LifetimesByRow::new();
-    let mut fold = |row: &Row<'_>| -> rusqlite::Result<()> {
-        let (key, bucket, part) = map_part(row)?;
-        merge_part(out.entry((key, bucket)).or_default(), part);
-        Ok(())
-    };
     match bucket_width_ms {
         None => {
             let mut stmt = tx.prepare(CACHE_LIFETIMES_SQL)?;
@@ -190,7 +126,7 @@ pub(super) fn read_lifetimes(
                 window.provider_filter,
             ])?;
             while let Some(row) = rows.next()? {
-                fold(row)?;
+                fold_row(row, &mut out)?;
             }
         }
         Some(width_ms) => {
@@ -203,21 +139,14 @@ pub(super) fn read_lifetimes(
                 width_ms,
             ])?;
             while let Some(row) = rows.next()? {
-                fold(row)?;
+                fold_row(row, &mut out)?;
             }
         }
     }
     Ok(out)
 }
 
-/// One result row: either a fine group's summary (`lifetime` NULL) or one
-/// lifetime's split sum.
-enum Part {
-    Summary { unknown: i64, invalid: bool },
-    Lifetime { seconds: u32, tokens: i64 },
-}
-
-fn map_part(row: &Row<'_>) -> rusqlite::Result<(GroupKey, i64, Part)> {
+fn fold_row(row: &Row<'_>, out: &mut LifetimesByRow) -> rusqlite::Result<()> {
     let key = GroupKey {
         model: row.get(0)?,
         provider: row.get(1)?,
@@ -225,27 +154,165 @@ fn map_part(row: &Row<'_>) -> rusqlite::Result<(GroupKey, i64, Part)> {
         alias: row.get(3)?,
         provider_kind: row.get(4)?,
     };
-    let bucket = row.get(5)?;
-    let part = match row.get::<_, Option<u32>>(6)? {
-        Some(seconds) => Part::Lifetime {
-            seconds,
-            tokens: row.get(7)?,
-        },
-        None => Part::Summary {
-            unknown: row.get(8)?,
-            invalid: row.get::<_, i64>(9)? != 0,
-        },
+    let bucket: i64 = row.get(5)?;
+    let total: i64 = row.get(6)?;
+    let split = match row.get_ref(7)? {
+        ValueRef::Text(text) => parse_split(text),
+        _ => Vec::new(),
     };
-    Ok((key, bucket, part))
+    add_row(out.entry((key, bucket)).or_default(), total, &split);
+    Ok(())
 }
 
-fn merge_part(acc: &mut CacheWriteLifetimes, part: Part) {
-    match part {
-        Part::Lifetime { seconds, tokens } => acc.add_lifetime(seconds, tokens),
-        Part::Summary { unknown, invalid } => {
-            acc.unknown_tokens += unknown;
-            acc.invalid_split |= invalid;
+/// Fold one ledger row into its fine group: every counting entry adds to its
+/// lifetime; the row's total beyond its own split sum is unknown, and a split
+/// summing above the total flags the group invalid instead.
+fn add_row(acc: &mut CacheWriteLifetimes, total: i64, split: &[(u32, i64)]) {
+    let mut split_sum: i64 = 0;
+    for &(seconds, tokens) in split {
+        acc.add_lifetime(seconds, tokens);
+        split_sum = split_sum.saturating_add(tokens);
+    }
+    if split_sum > total {
+        acc.invalid_split = true;
+    } else {
+        acc.unknown_tokens = acc.unknown_tokens.saturating_add(total - split_sum);
+    }
+}
+
+/// The counting entries of a stored split, in document order (a repeated key
+/// counts each time). Text that is not a JSON object yields none.
+///
+/// An entry counts when its value is a JSON integer (a boolean, a float or an
+/// integer outside `i64` does not) that is not negative, under a key that is a
+/// positive decimal lifetime fitting `u32` seconds with no leading zero. Any
+/// other entry counts toward neither a lifetime nor the split sum, so its
+/// tokens stay unknown.
+fn parse_split(text: &[u8]) -> Vec<(u32, i64)> {
+    serde_json::from_slice::<SplitEntries>(text)
+        .map(|entries| entries.0)
+        .unwrap_or_default()
+}
+
+fn lifetime_seconds(key: &str) -> Option<u32> {
+    let bytes = key.as_bytes();
+    let leading_digit = matches!(bytes.first(), Some(b'1'..=b'9'));
+    if !leading_digit || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    key.parse().ok()
+}
+
+/// A split document's counting entries; deserializes only from an object.
+struct SplitEntries(Vec<(u32, i64)>);
+
+impl<'de> Deserialize<'de> for SplitEntries {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(SplitVisitor)
+    }
+}
+
+struct SplitVisitor;
+
+impl<'de> Visitor<'de> for SplitVisitor {
+    type Value = SplitEntries;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON object of lifetime seconds to tokens")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<SplitEntries, A::Error> {
+        let mut entries = Vec::new();
+        while let Some((LifetimeKey(key), value)) = map.next_entry::<LifetimeKey, SplitTokens>()? {
+            if let (Some(seconds), SplitTokens::Counted(tokens)) = (key, value) {
+                entries.push((seconds, tokens));
+            }
         }
+        Ok(SplitEntries(entries))
+    }
+}
+
+/// One split entry's key as lifetime seconds, `None` when it is not one.
+struct LifetimeKey(Option<u32>);
+
+impl<'de> Deserialize<'de> for LifetimeKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
+struct KeyVisitor;
+
+impl Visitor<'_> for KeyVisitor {
+    type Value = LifetimeKey;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object key")
+    }
+
+    fn visit_str<E>(self, key: &str) -> Result<LifetimeKey, E> {
+        Ok(LifetimeKey(lifetime_seconds(key)))
+    }
+}
+
+/// One split entry's value: a non-negative `i64` integer counts; any other
+/// JSON value is consumed and ignored.
+enum SplitTokens {
+    Counted(i64),
+    Ignored,
+}
+
+impl<'de> Deserialize<'de> for SplitTokens {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(TokensVisitor)
+    }
+}
+
+struct TokensVisitor;
+
+impl<'de> Visitor<'de> for TokensVisitor {
+    type Value = SplitTokens;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<SplitTokens, E> {
+        Ok(if v >= 0 {
+            SplitTokens::Counted(v)
+        } else {
+            SplitTokens::Ignored
+        })
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<SplitTokens, E> {
+        Ok(i64::try_from(v).map_or(SplitTokens::Ignored, SplitTokens::Counted))
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<SplitTokens, E> {
+        Ok(SplitTokens::Ignored)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<SplitTokens, E> {
+        Ok(SplitTokens::Ignored)
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<SplitTokens, E> {
+        Ok(SplitTokens::Ignored)
+    }
+
+    fn visit_unit<E>(self) -> Result<SplitTokens, E> {
+        Ok(SplitTokens::Ignored)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<SplitTokens, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(SplitTokens::Ignored)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<SplitTokens, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(SplitTokens::Ignored)
     }
 }
 
