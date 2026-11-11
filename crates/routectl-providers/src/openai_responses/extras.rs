@@ -191,6 +191,7 @@ pub(super) fn merge_provider_extras(
     auth_kind: AuthKind,
     tap: Option<&WireTap>,
     withheld: &mut PromptCacheWithheldTally,
+    member_withheld: &mut UnknownMemberWithheldTally,
 ) {
     let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
         return;
@@ -239,7 +240,7 @@ pub(super) fn merge_provider_extras(
             key => carry.apply(request, key, v, &mut unforwarded),
         }
     }
-    unforwarded.flush(tap);
+    unforwarded.flush(tap, member_withheld);
 }
 
 /// Extras keys another step of this egress reads into a typed field.
@@ -308,15 +309,14 @@ impl UnforwardedMembers {
         self.keys.push((key.to_owned(), site));
     }
 
-    /// Declare each withheld key as a top-level Remove and count the
-    /// request once. A key that is not token-shaped is left undeclared, so
-    /// it still surfaces as a finding.
-    /// TRANSLATION-DROP: lane=openai-responses class=unknown_member_withheld test=top_level_members_outside_the_forwarded_set_are_withheld_declared_and_counted_once
-    fn flush(&self, tap: Option<&WireTap>) {
+    /// Declare each withheld key as a top-level Remove and record the
+    /// request on `member_withheld`. A key that is not token-shaped is left
+    /// undeclared, so it still surfaces as a finding.
+    fn flush(&self, tap: Option<&WireTap>, member_withheld: &mut UnknownMemberWithheldTally) {
         if self.keys.is_empty() {
             return;
         }
-        record_translation_drop(super::LANE, "unknown_member_withheld");
+        member_withheld.record();
         tracing::debug!(
             withheld = self.keys.len(),
             "openai-responses egress: top-level extras outside this surface's forwarded set withheld"
@@ -328,6 +328,33 @@ impl UnforwardedMembers {
             if let Some(path) = crate::wire_declare::member_pointer("", key) {
                 declare(tap, *site, path, EditKind::Remove);
             }
+        }
+    }
+}
+
+/// Per-request record that this egress withheld at least one client member
+/// it does not model: a top-level extras key outside the surface's
+/// forwarded set, or on Bedrock Mantle an unreviewed input item, tool,
+/// namespace container or carried member. One tally per request shared by
+/// every such site, flushed once outside every fallible step, so a request
+/// withholding several counts once.
+#[derive(Debug, Default)]
+#[must_use = "a tally records nothing until flush() runs"]
+pub(super) struct UnknownMemberWithheldTally {
+    withheld: bool,
+}
+
+impl UnknownMemberWithheldTally {
+    /// Note one more withheld member. Idempotent.
+    pub(super) const fn record(&mut self) {
+        self.withheld = true;
+    }
+
+    /// Count the request's withhold, if any, once.
+    /// TRANSLATION-DROP: lane=openai-responses class=unknown_member_withheld test=top_level_members_outside_the_forwarded_set_are_withheld_declared_and_counted_once
+    pub(super) fn flush(&self) {
+        if self.withheld {
+            record_translation_drop(super::LANE, "unknown_member_withheld");
         }
     }
 }

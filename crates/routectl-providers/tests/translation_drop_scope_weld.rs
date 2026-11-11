@@ -81,6 +81,7 @@ const INSCOPE_FILES: &[&str] = &[
     "openai_compat/wire_lift/tools.rs",
     "openai_responses/empty_optional.rs",
     "openai_responses/extras.rs",
+    "openai_responses/mantle_guard.rs",
     "openai_responses/messages.rs",
     "openai_responses/mod.rs",
     "openai_responses/request.rs",

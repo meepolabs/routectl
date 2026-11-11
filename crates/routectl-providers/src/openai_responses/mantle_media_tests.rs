@@ -247,6 +247,8 @@ fn assert_media_refusal(result: Result<(), Error>, row: &str) {
     }
 }
 
+/// Media URLs the request translation builds itself, which only the
+/// serialized-body walk refuses on Mantle.
 #[tokio::test]
 async fn mantle_refuses_non_forwardable_media_urls_without_an_upstream_call() {
     let s3 = planted_s3();
@@ -254,87 +256,6 @@ async fn mantle_refuses_non_forwardable_media_urls_without_an_upstream_call() {
         ("user input_image s3", user_image_request(&s3)),
         ("tool-result input_image s3", tool_result_image_request(&s3)),
         ("user input_image empty", user_image_request("")),
-        (
-            "passthrough input_image s3",
-            passthrough_request(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_image", "image_url": s3}]
-            })),
-        ),
-        (
-            "passthrough input_file file_url s3",
-            passthrough_request(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_file", "file_url": s3}]
-            })),
-        ),
-        (
-            "passthrough function_call_output image s3",
-            passthrough_request(json!({
-                "type": "function_call_output",
-                "call_id": "call_p",
-                "output": [{"type": "input_image", "image_url": s3}]
-            })),
-        ),
-        (
-            "passthrough input_image object url s3",
-            passthrough_request(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_image", "image_url": {"url": s3}}]
-            })),
-        ),
-        (
-            "passthrough computer_call_output object output s3",
-            passthrough_request(json!({
-                "type": "computer_call_output",
-                "call_id": "call_c",
-                "output": {"type": "computer_screenshot", "image_url": s3}
-            })),
-        ),
-        (
-            "passthrough image_url object two levels deep",
-            passthrough_request(json!({
-                "type": "custom_tool_call_output",
-                "call_id": "call_d",
-                "output": {"parts": [{"image": {"image_url": {"url": s3}}}]}
-            })),
-        ),
-        (
-            "passthrough file bare url s3",
-            passthrough_request(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "file", "url": s3}]
-            })),
-        ),
-        (
-            "passthrough source url gs",
-            passthrough_request(json!({
-                "type": "agent_message",
-                "content": [{
-                    "type": "image",
-                    "source": {"type": "url", "url": planted_gs()}
-                }]
-            })),
-        ),
-        (
-            "passthrough url-shaped key above image_url",
-            passthrough_request(json!({
-                "type": "agent_message",
-                "meta": {s3.clone(): {"image_url": s3}}
-            })),
-        ),
-        (
-            "passthrough part parameters carrying a url source",
-            passthrough_request(part_parameters_item(&s3)),
-        ),
-        (
-            "tool_search_output nested in a message content part",
-            passthrough_request(nested_tool_search_output_item(&s3)),
-        ),
     ];
 
     for (row, req) in rows {
@@ -345,6 +266,89 @@ async fn mantle_refuses_non_forwardable_media_urls_without_an_upstream_call() {
 
         assert_media_refusal(result, row);
         assert_eq!(hit_count(&server).await, 0, "{row}: no upstream call");
+    }
+}
+
+/// Preserved input items carrying a media URL, a file reference or a
+/// shape the walk does not read: none is a reviewed kind, so each is
+/// withheld before the walk and the request still reaches the upstream
+/// without it.
+#[tokio::test]
+async fn mantle_withholds_unreviewed_passthrough_items_before_the_media_walk() {
+    let s3 = planted_s3();
+    let rows: Vec<(&str, Value)> = vec![
+        (
+            "input_image s3",
+            json!({"type": "message", "role": "user",
+                   "content": [{"type": "input_image", "image_url": s3}]}),
+        ),
+        (
+            "input_file file_url s3",
+            json!({"type": "message", "role": "user",
+                   "content": [{"type": "input_file", "file_url": s3}]}),
+        ),
+        (
+            "function_call_output image s3",
+            json!({"type": "function_call_output", "call_id": "call_p",
+                   "output": [{"type": "input_image", "image_url": s3}]}),
+        ),
+        (
+            "function_call_output file_id",
+            json!({"type": "function_call_output", "call_id": "call_f",
+                   "output": [{"type": "input_image", "file_id": "file-planted"}]}),
+        ),
+        (
+            "computer_call_output upper-case IMAGE_URL",
+            json!({"type": "computer_call_output", "call_id": "call_c",
+                   "output": {"type": "computer_screenshot", "IMAGE_URL": s3}}),
+        ),
+        (
+            "custom_tool_call_output image_url two levels deep",
+            json!({"type": "custom_tool_call_output", "call_id": "call_d",
+                   "output": {"parts": [{"image": {"image_url": {"url": s3}}}]}}),
+        ),
+        (
+            "agent_message s3 source",
+            json!({"type": "agent_message", "author": "a", "recipient": "b", "content": [],
+                   "source": {"type": "s3", "uri": s3}}),
+        ),
+        (
+            "agent_message url source gs",
+            json!({"type": "agent_message",
+                   "content": [{"type": "image", "source": {"type": "url", "url": planted_gs()}}]}),
+        ),
+        (
+            "web_search_call open_page",
+            json!({"type": "web_search_call", "status": "completed",
+                   "action": {"type": "open_page", "url": planted_http()}}),
+        ),
+        (
+            "tool_search_output nested in a message content part",
+            nested_tool_search_output_item(&s3),
+        ),
+        (
+            "part parameters carrying a url source",
+            part_parameters_item(&s3),
+        ),
+    ];
+
+    for (row, item) in rows {
+        let server = mock_upstream().await;
+        let provider = mantle_provider(&server.uri()).await;
+
+        provider
+            .complete(passthrough_request(item.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("{row}: the item is withheld, not refused: {e:?}"));
+
+        let body = wire_body(&server).await;
+        assert_eq!(
+            body["input"].as_array().map(Vec::len),
+            Some(1),
+            "{row}: {body}"
+        );
+        assert_no_planted_url(&body, row);
+        assert!(!body.to_string().contains("file-planted"), "{row}: {body}");
     }
 }
 
@@ -376,22 +380,6 @@ async fn mantle_forwards_https_and_data_media_urls() {
         (
             "tool-result https",
             tool_result_image_request("https://example.com/b.png?sig=1"),
-        ),
-        (
-            "passthrough file https",
-            passthrough_request(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_file", "file_url": "https://example.com/c.pdf"}]
-            })),
-        ),
-        (
-            "passthrough part parameters carrying an https source",
-            passthrough_request(part_parameters_item("https://example.com/d.png")),
-        ),
-        (
-            "tool_search_output nested in a message content part with https",
-            passthrough_request(nested_tool_search_output_item("https://example.com/e.png")),
         ),
     ];
 
@@ -515,8 +503,10 @@ async fn mantle_does_not_inspect_tool_schemas() {
     );
 }
 
+/// A tool-declaring input item may name a remote server, so Mantle never
+/// receives one; the first-party lane forwards it as written.
 #[tokio::test]
-async fn mantle_does_not_inspect_tool_definitions_in_tool_declaring_input_items() {
+async fn tool_declaring_input_items_reach_the_first_party_lane_only() {
     let tool = json!({
         "type": "function",
         "name": "fetch",
@@ -533,19 +523,28 @@ async fn mantle_does_not_inspect_tool_definitions_in_tool_declaring_input_items(
     ];
     for item in items {
         let kind = item["type"].clone();
-        let server = mock_upstream().await;
-        let provider = mantle_provider(&server.uri()).await;
+        let mantle_server = mock_upstream().await;
+        let first_party_server = mock_upstream().await;
+        let mantle = mantle_provider(&mantle_server.uri()).await;
+        let first_party = first_party_provider(&first_party_server.uri());
 
-        provider
+        mantle
             .complete(passthrough_request(item.clone()))
             .await
-            .unwrap_or_else(|e| panic!("{kind}: a tool definition is not media, got {e:?}"));
+            .unwrap_or_else(|e| panic!("{kind}: withheld, not refused: {e:?}"));
+        first_party
+            .complete(passthrough_request(item.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("{kind}: forwarded: {e:?}"));
 
-        let body = wire_body(&server).await;
-        let input = body["input"].as_array().expect("input array");
+        let mantle_body = wire_body(&mantle_server).await;
+        let first_party_body = wire_body(&first_party_server).await;
+        let mantle_input = mantle_body["input"].as_array().expect("input array");
+        let first_party_input = first_party_body["input"].as_array().expect("input array");
+        assert!(!mantle_input.contains(&item), "{kind}: {mantle_body}");
         assert!(
-            input.contains(&item),
-            "{kind}: item forwarded as written: {body}"
+            first_party_input.contains(&item),
+            "{kind}: {first_party_body}"
         );
     }
 }
@@ -948,5 +947,54 @@ async fn first_party_lane_forwards_an_unmodeled_part_verbatim() {
             "stream={stream}"
         );
         assert_eq!(content_part_drops() - before, 0, "stream={stream}");
+    }
+}
+
+/// One lane source: a provider built with a `mantle` block is the Mantle
+/// lane whatever `auth_kind` its config names, so the request translation
+/// withholds what Mantle must not receive on the same request the transport
+/// signs for Mantle.
+#[tokio::test]
+async fn a_mantle_block_decides_the_lane_whatever_the_auth_kind() {
+    let creds = BedrockCreds::BearerKey {
+        key: "mantle-media-bearer".into(),
+    };
+    for auth_kind in [AuthKind::ChatgptOauth, AuthKind::ApiKey] {
+        let server = mock_upstream().await;
+        let mantle = MantleAuth {
+            region: "us-west-2".into(),
+            creds: resolve(&creds, "us-west-2").await.unwrap(),
+        };
+        let provider = OpenAiResponsesProvider::new(config(&server.uri(), auth_kind, Some(mantle)));
+        let mut text_part = text("hi");
+        if let ContentPart::Known(KnownContentPart::Text { extras, .. }) = &mut text_part {
+            extras.insert("annotations".into(), json!([{"url": planted_http()}]));
+        }
+        let mut user = message(Role::User, MessageContent::Parts(vec![text_part]));
+        user.extras.insert("id".into(), json!("msg_1"));
+        let mut req = request(vec![user]);
+        req.routectl_internal.provenance = RequestProvenance::ResponsesIngress;
+        req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+            modeled_prefix: 1,
+            item: json!({"type": "custom_tool_call_output", "call_id": "c", "output": "ok"}),
+        }];
+
+        provider
+            .complete(req)
+            .await
+            .unwrap_or_else(|e| panic!("{auth_kind:?}: {e:?}"));
+
+        let body = wire_body(&server).await;
+        let item = &body["input"][0];
+        assert!(item.get("id").is_none(), "{auth_kind:?}: {body}");
+        assert!(
+            item["content"][0].get("annotations").is_none(),
+            "{auth_kind:?}: {body}"
+        );
+        assert_eq!(
+            body["input"].as_array().map(Vec::len),
+            Some(1),
+            "{auth_kind:?}: {body}"
+        );
     }
 }

@@ -1302,17 +1302,54 @@ fn codex_shaped_body() -> Value {
 /// Responses traffic through the Bedrock Mantle surface, walked by a real
 /// Mantle egress.
 fn responses_mantle_cases() -> Vec<Case> {
-    vec![Case {
+    let mantle = |name: &str, body: Value| Case {
         egress: Egress::ResponsesMantle,
         ..case(
-            "responses-mantle/plain",
+            name,
             Ingress::Responses,
-            json!({"model": ALIAS, "input": [{"type": "message", "role": "user",
-                   "content": [{"type": "input_text", "text": "hi"}]}]}),
+            body,
             responses_stream(),
             responses_provider,
         )
-    }]
+    };
+    vec![
+        mantle(
+            "responses-mantle/plain",
+            json!({"model": ALIAS, "input": [{"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": "hi"}]}]}),
+        ),
+        mantle(
+            "responses-mantle/unmodeled-members",
+            mantle_unmodeled_members_body(),
+        ),
+    ]
+}
+
+/// A codex-shaped request carrying every kind of member the Mantle surface
+/// withholds: item and part members, unreviewed preserved items beside a
+/// reviewed one, an unmodeled tool, a namespace container, and a call
+/// naming its namespace. Each withhold must be declared where the check
+/// reports it.
+fn mantle_unmodeled_members_body() -> Value {
+    let function =
+        |name: &str| json!({"type": "function", "name": name, "parameters": {"type": "object"}});
+    json!({"model": ALIAS,
+           "tools": [function("calc"),
+                     {"type": "namespace", "name": "ns", "tools": [function("alpha")]},
+                     {"type": "web_search"}],
+           "input": [
+                {"type": "message", "id": "msg_u1", "role": "user", "content": [
+                    {"type": "input_text", "text": "hi",
+                     "annotations": [{"url": "http://planted.invalid/a"}]}]},
+                {"type": "agent_message", "author": "a", "recipient": "b", "content": [],
+                 "source": {"type": "s3", "uri": "s3://planted/key"}},
+                {"type": "agent_message", "id": "am_1", "author": "a", "recipient": "b",
+                 "content": [{"type": "input_text", "text": "hand-off"}]},
+                {"type": "function_call", "call_id": "c1", "name": "alpha",
+                 "namespace": "ns", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "42"},
+                {"type": "computer_call_output", "call_id": "c2",
+                 "output": {"type": "computer_screenshot", "IMAGE_URL": "s3://planted/k"}}]})
 }
 
 /// A Responses answer carrying an output item no other client dialect can

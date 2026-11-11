@@ -235,6 +235,11 @@ impl CarriedMembers {
                 .collect(),
         )
     }
+
+    /// The names of the carried members.
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
 }
 
 /// Member names a `message` input item writes.

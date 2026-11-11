@@ -17,10 +17,11 @@ use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
     ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, RequestProvenance,
-    ResponsesCacheBreakpoint, ResponsesPassthroughItem, Result, Role,
+    ResponsesCacheBreakpoint, Result, Role,
 };
 use serde_json::Value;
 
+use super::mantle_guard::{self, ForwardedItem};
 use super::messages::{
     UnknownParts, build_request_input, restamp_namespaces, withholds_forwarded_file_url,
     withholds_user_file_url,
@@ -58,24 +59,31 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     let tap = crate::wire_declare::tap(req);
     let mut fingerprint = ClientFingerprintStripTally::default();
     let mut cache_withheld = extras::PromptCacheWithheldTally::default();
+    let mut member_withheld = extras::UnknownMemberWithheldTally::default();
     let instructions = translate_system(req, &mut fingerprint);
     declare_instructions(tap, instructions.is_some(), &fingerprint);
     record_developer_turn_withhold(&req.messages, &mut fingerprint);
     let instructions = instructions.unwrap_or_default();
-    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req, tap, &mut cache_withheld);
+    let mut tallies = InputTallies {
+        cache: &mut cache_withheld,
+        member: &mut member_withheld,
+    };
+    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req, tap, &mut tallies);
     // Flushed before the input build's `?`, so a request that withheld the
     // fingerprint and then failed translation still counts.
     flush_fingerprint_tally(&fingerprint);
-    // The prompt-cache tally is shared with the top-level fields merged
-    // below, so it flushes once: here only when the input build failed.
+    // The prompt-cache and withheld-member tallies are shared with the
+    // fields built below, so each flushes once: here only when the input
+    // build failed.
     let input = match input {
         Ok(input) => input,
         Err(e) => {
             cache_withheld.flush();
+            member_withheld.flush();
             return Err(e);
         }
     };
-    let tools = translate_tools(req);
+    let tools = translate_tools(req, cfg.auth_kind, tap, &mut member_withheld);
     let tool_choice = translate_tool_choice(req.tool_choice.as_ref());
 
     let mut request = ResponsesRequest {
@@ -118,8 +126,16 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         declare_lane_gates(tap, cfg.auth_kind, req);
     }
     extras::apply_reasoning(&mut request, req, tap);
-    extras::merge_provider_extras(&mut request, req, cfg.auth_kind, tap, &mut cache_withheld);
+    extras::merge_provider_extras(
+        &mut request,
+        req,
+        cfg.auth_kind,
+        tap,
+        &mut cache_withheld,
+        &mut member_withheld,
+    );
     cache_withheld.flush();
+    member_withheld.flush();
     // Runs after merge_provider_extras so a client or operator key wins.
     extras::apply_session_cache_key(&mut request, req, cfg.auth_kind, tap);
     // Runs after merge_provider_extras so the stamp lands on the merged
@@ -142,10 +158,20 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     Ok(request)
 }
 
+/// The per-request tallies the input build records withholds on.
+struct InputTallies<'t> {
+    cache: &'t mut extras::PromptCacheWithheldTally,
+    member: &'t mut extras::UnknownMemberWithheldTally,
+}
+
 /// Build the `input[]` array: the modeled items translated from the
 /// canonical `messages[]`, with any Responses item kinds this hub does
 /// not model spliced back into their original inbound positions from
 /// `req.routectl_internal.responses_input_passthrough`.
+///
+/// On Bedrock Mantle only the items [`mantle_guard`] reviewed are spliced,
+/// and no `function_call` gets back a namespace (Mantle receives no
+/// container); see that module.
 ///
 /// The passthrough items are the Responses ingress's capture of
 /// codex-only kinds (`local_shell_call`, `custom_tool_call(_output)`,
@@ -163,13 +189,23 @@ fn build_input_with_passthrough(
     auth_kind: AuthKind,
     req: &ChatRequest,
     tap: Option<&WireTap>,
-    cache_withheld: &mut extras::PromptCacheWithheldTally,
+    tallies: &mut InputTallies<'_>,
 ) -> Result<Vec<ResponseInput>> {
     let provenance = req.routectl_internal.provenance;
-    let mut items = build_request_input(id, auth_kind, req, tap, cache_withheld);
+    let mut items = build_request_input(id, auth_kind, req, tap, tallies.cache, tallies.member);
     if provenance == RequestProvenance::ResponsesIngress {
         if let Ok(items) = items.as_mut() {
-            restamp_namespaces(items, &req.routectl_internal.responses_namespaces.members);
+            let members = &req.routectl_internal.responses_namespaces.members;
+            if mantle_guard::takes_namespace_stamps(
+                id,
+                auth_kind,
+                items,
+                members,
+                tap,
+                tallies.member,
+            ) {
+                restamp_namespaces(items, members);
+            }
         }
         place_cache_breakpoints(
             id,
@@ -178,15 +214,21 @@ fn build_input_with_passthrough(
             &req.messages,
             items.as_deref_mut().ok(),
             tap,
-            cache_withheld,
+            tallies.cache,
         );
     }
+    let passthrough = mantle_guard::forwarded_passthrough(
+        id,
+        auth_kind,
+        &req.routectl_internal.responses_input_passthrough,
+        tap,
+        tallies.member,
+    );
     let items = items?;
     let modeled: Vec<ResponseInput> = items.into_iter().map(ResponseInput::Item).collect();
-    let passthrough = &req.routectl_internal.responses_input_passthrough;
-    let merged = merge_passthrough(modeled, passthrough);
+    let merged = merge_passthrough(modeled, &passthrough);
     if let Some(tap) = tap {
-        declare_passthrough_relocations(tap, &merged, passthrough);
+        declare_passthrough_relocations(tap, &merged, &passthrough);
     }
     Ok(merged)
 }
@@ -310,21 +352,26 @@ fn attach_matching_breakpoints(
 
 /// Declare a Relocate for each spliced passthrough item that left at a
 /// different `input[]` index than it arrived at. Its inbound index is its
-/// modeled prefix plus the passthroughs before it; a modeled item that
-/// expands to a different egress-item count shifts it.
+/// modeled prefix plus the passthroughs before it, withheld ones included;
+/// a modeled item that expands to a different egress-item count shifts it.
+/// A shift by the withheld items before it alone is no move: each of those
+/// is declared a Remove.
 fn declare_passthrough_relocations(
     tap: &WireTap,
     merged: &[ResponseInput],
-    passthrough: &[ResponsesPassthroughItem],
+    passthrough: &[ForwardedItem<'_>],
 ) {
     let egress_positions = merged
         .iter()
         .enumerate()
         .filter(|(_, item)| matches!(item, ResponseInput::Passthrough(_)))
         .map(|(position, _)| position);
-    for (ordinal, (item, egress)) in passthrough.iter().zip(egress_positions).enumerate() {
-        let inbound = item.modeled_prefix.saturating_add(ordinal);
-        if inbound == egress {
+    for (rank, (forwarded, egress)) in passthrough.iter().zip(egress_positions).enumerate() {
+        let inbound = forwarded
+            .item
+            .modeled_prefix
+            .saturating_add(forwarded.ordinal);
+        if forwarded.item.modeled_prefix.saturating_add(rank) == egress {
             continue;
         }
         for position in [inbound, egress] {
@@ -477,13 +524,13 @@ fn carries_user_file_url(req: &ChatRequest) -> bool {
 /// dropped.
 fn merge_passthrough(
     modeled: Vec<ResponseInput>,
-    passthrough: &[ResponsesPassthroughItem],
+    passthrough: &[ForwardedItem<'_>],
 ) -> Vec<ResponseInput> {
     if passthrough.is_empty() {
         return modeled;
     }
     let mut out: Vec<ResponseInput> = Vec::with_capacity(modeled.len() + passthrough.len());
-    let mut next = passthrough.iter().peekable();
+    let mut next = passthrough.iter().map(|f| f.item).peekable();
     for (i, item) in modeled.into_iter().enumerate() {
         while let Some(p) = next.peek() {
             if p.modeled_prefix > i {

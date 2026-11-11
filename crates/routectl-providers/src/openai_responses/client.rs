@@ -156,7 +156,17 @@ pub struct OpenAiResponsesProvider {
 
 impl OpenAiResponsesProvider {
     /// Build a provider from its configuration.
-    pub fn new(cfg: OpenAiResponsesConfig) -> Self {
+    ///
+    /// A config carrying a `mantle` block is a Bedrock Mantle provider
+    /// whatever its `auth_kind` says: `auth_kind` is set to `BedrockMantle`
+    /// here, so the request translation's Mantle withholds and the signing
+    /// transport can never disagree about the lane.
+    #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+    pub fn new(mut cfg: OpenAiResponsesConfig) -> Self {
+        #[cfg(feature = "bedrock")]
+        if cfg.mantle.is_some() {
+            cfg.auth_kind = AuthKind::BedrockMantle;
+        }
         // Always pass an explicit UA string so the client-level default
         // header carries the codex-derived value. Operator-supplied
         // `cfg.user_agent` wins; otherwise fall back to the codex CLI
@@ -245,7 +255,8 @@ impl OpenAiResponsesProvider {
     }
 
     /// True when this provider egresses on the Bedrock mantle lane. Always
-    /// `false` in a build without the `bedrock` feature.
+    /// `false` in a build without the `bedrock` feature. When true,
+    /// `cfg.auth_kind` is `BedrockMantle` (see [`Self::new`]).
     pub(super) const fn is_mantle(&self) -> bool {
         #[cfg(feature = "bedrock")]
         {

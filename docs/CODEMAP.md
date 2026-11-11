@@ -1183,6 +1183,12 @@ license.
   `gate_unmodeled_output_items` drops unmodeled output items from a complete
   response unless the client speaks Responses
   (`client_carries_unmodeled_items`)
+- `src/openai_responses/mantle_guard.rs` -- what the Bedrock Mantle lane
+  lets through of unmodeled request members: `MANTLE_PASSTHROUGH_KINDS` (the
+  reviewed passthrough item kinds and their member shapes),
+  `forwarded_passthrough`, `takes_namespace_stamps` and `WithheldCarriers`;
+  each withhold declared as a Remove, counted once per request as
+  `unknown_member_withheld`
 - `src/openai_responses/mantle_media.rs` -- (cfg `bedrock`)
   `check_forwarded_media_urls`: on the Mantle lane `normalize_request` passes
   the serialized body's `input` to `mantle::refuse_unforwardable_media_urls`

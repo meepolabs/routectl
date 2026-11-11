@@ -99,7 +99,8 @@ use serde_json::Map;
 use crate::bounded_diagnostics::BoundedLogSample;
 use crate::skipped_format::render_skipped_format;
 
-use super::extras::{PromptCacheField, PromptCacheWithheldTally};
+use super::extras::{PromptCacheField, PromptCacheWithheldTally, UnknownMemberWithheldTally};
+use super::mantle_guard::{ITEM_MEMBER, PART_MEMBER, WithheldCarriers};
 use super::types::{
     CarriedMembers, FUNCTION_CALL_OUTPUT_ITEM_KEYS, FunctionCallOutputBody,
     FunctionCallOutputContentItem, INPUT_IMAGE_KEYS, INPUT_TEXT_KEYS, MESSAGE_ITEM_KEYS,
@@ -274,56 +275,94 @@ impl UnknownParts {
 struct InputPolicy<'a> {
     auth_kind: AuthKind,
     unknown: UnknownParts,
-    /// Whether the members a message or modeled part carries (see
-    /// `Message::forwardable_extras`) are emitted. Only on a
-    /// lane whose wire the request's members were written for, and not on
-    /// Bedrock Mantle, which fetches what it reads under the operator's
-    /// identity and documents no list of the members it reads.
-    emits_carriers: bool,
+    carriers: Carriers<'a>,
     /// Indices of the system turns that were `developer` items inbound.
     developer_turns: &'a [usize],
 }
 
-impl InputPolicy<'_> {
-    fn message_carried(&self, msg: &Message, wire_keys: &[&str]) -> CarriedMembers {
-        if !self.emits_carriers {
-            return CarriedMembers::default();
+/// What becomes of the members a message or modeled part carries (see
+/// `Message::forwardable_extras`).
+#[derive(Debug, Clone, Copy)]
+enum Carriers<'a> {
+    /// Emitted beside the node's typed members: the request's members were
+    /// written for this wire.
+    Emit,
+    /// Bedrock Mantle, which fetches what it reads under the operator's
+    /// identity and documents no list of the members it reads: each member
+    /// the other surfaces would emit is withheld and noted.
+    Withhold(&'a WithheldCarriers),
+    /// The members were spelled for another dialect's wire.
+    Foreign,
+}
+
+impl<'a> Carriers<'a> {
+    fn of(
+        provenance: RequestProvenance,
+        auth_kind: AuthKind,
+        withheld: &'a WithheldCarriers,
+    ) -> Self {
+        if !forwards_unknowns(provenance, auth_kind.egress_kind()) {
+            return Self::Foreign;
         }
-        CarriedMembers::new(msg.forwardable_extras(), wire_keys)
+        match auth_kind {
+            AuthKind::BedrockMantle => Self::Withhold(withheld),
+            AuthKind::ChatgptOauth | AuthKind::ApiKey => Self::Emit,
+        }
     }
 
-    fn part_carried(&self, part: &KnownContentPart, wire_keys: &[&str]) -> CarriedMembers {
-        if !self.emits_carriers {
-            return CarriedMembers::default();
+    fn carried<'m>(
+        self,
+        members: impl Iterator<Item = (&'m String, &'m Value)>,
+        wire_keys: &[&str],
+        parent: &str,
+    ) -> CarriedMembers {
+        let carried = CarriedMembers::new(members, wire_keys);
+        match self {
+            Self::Emit => carried,
+            Self::Withhold(withheld) => {
+                withheld.note(parent, carried.keys());
+                CarriedMembers::default()
+            }
+            Self::Foreign => CarriedMembers::default(),
         }
-        CarriedMembers::new(part.forwardable_extras(), wire_keys)
     }
 }
 
-/// Whether a request of `provenance` bound for `auth_kind` emits the members
-/// its messages and modeled parts carry.
-fn emits_carriers(provenance: RequestProvenance, auth_kind: AuthKind) -> bool {
-    auth_kind != AuthKind::BedrockMantle && forwards_unknowns(provenance, auth_kind.egress_kind())
+impl InputPolicy<'_> {
+    fn message_carried(&self, msg: &Message, wire_keys: &[&str]) -> CarriedMembers {
+        self.carriers
+            .carried(msg.forwardable_extras(), wire_keys, ITEM_MEMBER)
+    }
+
+    fn part_carried(&self, part: &KnownContentPart, wire_keys: &[&str]) -> CarriedMembers {
+        self.carriers
+            .carried(part.forwardable_extras(), wire_keys, PART_MEMBER)
+    }
 }
 
 /// [`build_input`] for a whole request: its provenance, messages and the
 /// Responses ingress's record of which kept system turns were `developer`
-/// items.
+/// items. A carried member Bedrock Mantle withholds is declared and recorded
+/// on `member_withheld`, on the Ok and the Err arm alike.
 pub(super) fn build_request_input(
     id: &str,
     auth_kind: AuthKind,
     req: &ChatRequest,
     tap: Option<&WireTap>,
     cache_withheld: &mut PromptCacheWithheldTally,
+    member_withheld: &mut UnknownMemberWithheldTally,
 ) -> Result<Vec<ResponseInputItem>> {
     let provenance = req.routectl_internal.provenance;
+    let withheld = WithheldCarriers::default();
     let policy = InputPolicy {
         auth_kind,
         unknown: UnknownParts::for_request(provenance, auth_kind),
-        emits_carriers: emits_carriers(provenance, auth_kind),
+        carriers: Carriers::of(provenance, auth_kind, &withheld),
         developer_turns: &req.routectl_internal.responses_developer_turns,
     };
-    build_input_with(id, policy, &req.messages, tap, cache_withheld)
+    let out = build_input_with(id, policy, &req.messages, tap, cache_withheld);
+    withheld.flush(id, tap, member_withheld);
+    out
 }
 
 /// Walk the canonical `messages[]` and produce a flat `input[]` array
@@ -350,13 +389,18 @@ pub(super) fn build_input(
     tap: Option<&WireTap>,
     cache_withheld: &mut PromptCacheWithheldTally,
 ) -> Result<Vec<ResponseInputItem>> {
+    let withheld = WithheldCarriers::default();
     let policy = InputPolicy {
         auth_kind,
         unknown: UnknownParts::for_request(provenance, auth_kind),
-        emits_carriers: emits_carriers(provenance, auth_kind),
+        carriers: Carriers::of(provenance, auth_kind, &withheld),
         developer_turns: &[],
     };
-    build_input_with(id, policy, messages, tap, cache_withheld)
+    let out = build_input_with(id, policy, messages, tap, cache_withheld);
+    let mut member_withheld = UnknownMemberWithheldTally::default();
+    withheld.flush(id, tap, &mut member_withheld);
+    member_withheld.flush();
+    out
 }
 
 fn build_input_with(

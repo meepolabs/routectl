@@ -5,6 +5,12 @@
 //! parameters, strict?}`. `ToolDef::Other` passes through verbatim so
 //! Anthropic builtins / future shapes ride the egress without code edits.
 //!
+//! Bedrock Mantle receives the function tools alone: a `ToolDef::Other` or a
+//! namespace container may name a server or file it would reach under the
+//! operator's identity, and neither the replayed `additional_tools` item nor
+//! a container reaches that lane, so every function they declared is sent
+//! flat instead.
+//!
 //! tool_choice mapping:
 //!   - `"auto"` / `"required"` / `"none"` -> bare-string passthrough
 //!   - named function (OpenAI object shape, Anthropic-shape, or any
@@ -13,13 +19,19 @@
 //!     nested chat-completions shape is rejected with
 //!     "Unknown parameter: 'tool_choice.function'").
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 
 use routectl_core::schema::ResponsesNamespaces;
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{ChatRequest, CustomTool, ToolDef, sanitize_for_log};
 
+use super::AuthKind;
+use super::extras::UnknownMemberWithheldTally;
 use super::types::{ResponsesFunctionTag, ResponsesTool};
 use crate::translation_drop_metrics::record_translation_drop;
+use crate::wire_declare::declare;
 
 /// Responses `input[]` item kind that declares tools inline. The ingress
 /// merges its function declarations into `req.tools` AND preserves the item
@@ -126,14 +138,41 @@ fn splice_containers(out: &mut Vec<ResponsesTool>, namespaces: &ResponsesNamespa
     }
 }
 
-/// Translate `req.tools` into the Responses `tools` array. Returns an
-/// empty Vec when no tools are configured -- the parent
-/// `ResponsesRequest` skips serializing the field when empty. Tools an
-/// `additional_tools` input item already declares are omitted: that item
-/// is replayed verbatim in `input[]`, and declaring a tool twice is
-/// rejected upstream. For the same reason a member flattened out of a
+/// The flat Responses shape of a canonical function tool.
+fn function_tool(c: &CustomTool) -> ResponsesTool {
+    // Flat Responses shape: {type, name, description?, parameters, strict?}
+    // The chat-completions nested shape ({type, function:{name,...}}) is
+    // rejected by the chatgpt-oauth backend with
+    // "Missing required parameter: 'tools[0].name'" (smoke 2026-05-12).
+    ResponsesTool::Function {
+        kind: ResponsesFunctionTag::Function,
+        name: c.name.clone(),
+        description: c.description.clone(),
+        parameters: c.input_schema.clone(),
+        strict: c.strict,
+    }
+}
+
+/// Translate `req.tools` into the Responses `tools` array for the lane
+/// `auth_kind`. Returns an empty Vec when no tools are configured -- the
+/// parent `ResponsesRequest` skips serializing the field when empty.
+pub(super) fn translate_tools(
+    req: &ChatRequest,
+    auth_kind: AuthKind,
+    tap: Option<&WireTap>,
+    withheld: &mut UnknownMemberWithheldTally,
+) -> Vec<ResponsesTool> {
+    if auth_kind == AuthKind::BedrockMantle {
+        return translate_mantle_tools(req, tap, withheld);
+    }
+    translate_first_party_tools(req)
+}
+
+/// Tools an `additional_tools` input item already declares are omitted:
+/// that item is replayed verbatim in `input[]`, and declaring a tool twice
+/// is rejected upstream. For the same reason a member flattened out of a
 /// namespace container is omitted and its container sent as written.
-pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
+fn translate_first_party_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
     let namespaces = &req.routectl_internal.responses_namespaces;
     let tools = req.tools.as_deref().unwrap_or_default();
     let inline = InlineDeclarations::collect(req);
@@ -146,19 +185,7 @@ pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
         .map(|(td, _)| td);
     for td in declared {
         match td {
-            ToolDef::Custom(c) => {
-                // Flat Responses shape: {type, name, description?, parameters, strict?}
-                // The chat-completions nested shape ({type, function:{name,...}}) is
-                // rejected by the chatgpt-oauth backend with
-                // "Missing required parameter: 'tools[0].name'" (smoke 2026-05-12).
-                out.push(ResponsesTool::Function {
-                    kind: ResponsesFunctionTag::Function,
-                    name: c.name.clone(),
-                    description: c.description.clone(),
-                    parameters: c.input_schema.clone(),
-                    strict: c.strict,
-                });
-            }
+            ToolDef::Custom(c) => out.push(function_tool(c)),
             ToolDef::Other(v) => {
                 // Forward-compat passthrough. Anthropic builtins and
                 // future shapes ride here unchanged so the Responses
@@ -183,6 +210,83 @@ pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
     }
     splice_containers(&mut out, namespaces);
     out
+}
+
+/// The Bedrock Mantle `tools` array: every canonical function tool, flat,
+/// in canonical order, including those a namespace container or an
+/// `additional_tools` item declared. Every `ToolDef::Other` and every
+/// top-level namespace container is withheld and the request recorded on
+/// `withheld`.
+/// TRANSLATION-DROP: lane=openai-responses class=unknown_member_withheld test=mantle_withholds_unmodeled_tools_and_namespace_containers_and_counts_once
+fn translate_mantle_tools(
+    req: &ChatRequest,
+    tap: Option<&WireTap>,
+    withheld: &mut UnknownMemberWithheldTally,
+) -> Vec<ResponsesTool> {
+    let tools = req.tools.as_deref().unwrap_or_default();
+    let unmodeled = tools
+        .iter()
+        .filter(|td| matches!(td, ToolDef::Other(_)))
+        .count();
+    let containers = req.routectl_internal.responses_namespaces.containers.len();
+    if unmodeled + containers > 0 {
+        withheld.record();
+        tracing::debug!(
+            unmodeled,
+            containers,
+            "openai-responses egress: omitting unmodeled tools and namespace containers on \
+             bedrock-mantle"
+        );
+    }
+    if let Some(tap) = tap {
+        declare_mantle_tool_edits(tap, req, tools);
+    }
+    tools
+        .iter()
+        .filter_map(|td| match td {
+            ToolDef::Custom(c) => Some(function_tool(c)),
+            ToolDef::Other(_) => None,
+        })
+        .collect()
+}
+
+/// Declare how the Mantle `tools` array differs from the client's: a Remove
+/// at the client index of each withheld container and `ToolDef::Other`, and
+/// an Add at the wire index of each function the client declared inside a
+/// container or an `additional_tools` item. A tool from the client's own
+/// `tools` array takes the next client index no container holds, the rule
+/// [`splice_containers`] rebuilds that array by.
+fn declare_mantle_tool_edits(tap: &WireTap, req: &ChatRequest, tools: &[ToolDef]) {
+    let namespaces = &req.routectl_internal.responses_namespaces;
+    let inline = InlineDeclarations::collect(req);
+    let container_at: BTreeSet<usize> = namespaces.containers.iter().map(|c| c.index).collect();
+    for index in &container_at {
+        declare_tool(tap, *index, EditKind::Remove);
+    }
+    let mut client_slots = (0..).filter(|index| !container_at.contains(index));
+    let mut wire_index = 0;
+    for (td, is_member) in tools.iter().zip(flattened_members(namespaces, tools)) {
+        let client_index = (!is_member && !inline.declares(td))
+            .then(|| client_slots.next())
+            .flatten();
+        match (td, client_index) {
+            (ToolDef::Custom(_), None) => declare_tool(tap, wire_index, EditKind::Add),
+            (ToolDef::Other(_), Some(index)) => declare_tool(tap, index, EditKind::Remove),
+            (ToolDef::Custom(_) | ToolDef::Other(_), _) => {}
+        }
+        if matches!(td, ToolDef::Custom(_)) {
+            wire_index += 1;
+        }
+    }
+}
+
+fn declare_tool(tap: &WireTap, index: usize, kind: EditKind) {
+    declare(
+        tap,
+        EditSite::AuthSurfaceGate,
+        format!("/tools/{index}"),
+        kind,
+    );
 }
 
 /// Per-REQUEST tally for the tool_choice family's drops on this lane.

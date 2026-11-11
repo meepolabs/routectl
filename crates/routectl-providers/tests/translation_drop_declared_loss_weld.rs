@@ -468,6 +468,17 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         4,
     ),
     ("openai_responses/extras.rs", "responses_text_format", 4),
+    ("openai_responses/mantle_guard.rs", "flush", 1),
+    (
+        "openai_responses/mantle_guard.rs",
+        "forwarded_passthrough",
+        1,
+    ),
+    (
+        "openai_responses/mantle_guard.rs",
+        "takes_namespace_stamps",
+        1,
+    ),
     ("openai_responses/messages.rs", "lift_reasoning_details", 2),
     ("openai_responses/messages.rs", "translate_image_source", 1),
     ("openai_responses/messages.rs", "translate_other_message", 1),
@@ -509,6 +520,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "warn_on_cache_control_loss",
         1,
     ),
+    ("openai_responses/tools.rs", "translate_mantle_tools", 1),
     (
         "openai_responses/tools.rs",
         "translate_tool_choice_object",
