@@ -194,6 +194,20 @@ fn function_argument_request() -> ChatRequest {
     ])
 }
 
+fn url_image_block(url: &str) -> Value {
+    json!({"type": "image", "source": {"type": "url", "url": url}})
+}
+
+/// A passthrough message whose content part carries a url-type image source
+/// under a member named `parameters`.
+fn part_parameters_item(url: &str) -> Value {
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "t", "parameters": url_image_block(url)}]
+    })
+}
+
 async fn hit_count(server: &MockServer) -> usize {
     server.received_requests().await.unwrap().len()
 }
@@ -300,6 +314,10 @@ async fn mantle_refuses_non_forwardable_media_urls_without_an_upstream_call() {
                 "meta": {s3.clone(): {"image_url": s3}}
             })),
         ),
+        (
+            "passthrough part parameters carrying a url source",
+            passthrough_request(part_parameters_item(&s3)),
+        ),
     ];
 
     for (row, req) in rows {
@@ -349,6 +367,10 @@ async fn mantle_forwards_https_and_data_media_urls() {
                 "role": "user",
                 "content": [{"type": "input_file", "file_url": "https://example.com/c.pdf"}]
             })),
+        ),
+        (
+            "passthrough part parameters carrying an https source",
+            passthrough_request(part_parameters_item("https://example.com/d.png")),
         ),
     ];
 
@@ -469,6 +491,32 @@ async fn mantle_does_not_inspect_tool_schemas() {
         Some(&Value::String(planted_s3())),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn mantle_does_not_inspect_tool_definitions_in_tool_declaring_input_items() {
+    let tool = json!({
+        "type": "function",
+        "name": "fetch",
+        "parameters": {"type": "object", "properties": {"image": url_image_block(&planted_s3())}}
+    });
+    for kind in ["additional_tools", "tool_search_output"] {
+        let server = mock_upstream().await;
+        let provider = mantle_provider(&server.uri()).await;
+        let item = json!({"type": kind, "tools": [tool.clone()]});
+
+        provider
+            .complete(passthrough_request(item.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("{kind}: a tool definition is not media, got {e:?}"));
+
+        let body = wire_body(&server).await;
+        let input = body["input"].as_array().expect("input array");
+        assert!(
+            input.contains(&item),
+            "{kind}: item forwarded as written: {body}"
+        );
+    }
 }
 
 fn planted_http() -> String {

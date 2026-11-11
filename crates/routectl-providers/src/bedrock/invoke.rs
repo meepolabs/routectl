@@ -49,6 +49,13 @@ pub(crate) const LANE: &str = PROVIDER_KIND;
 /// patched with Bedrock-specific fields. For non-Anthropic Bedrock-hosted
 /// vendors, prefer Converse (vendor-neutral) -- the InvokeModel adapter
 /// here does not currently shape Mistral/Llama/Cohere bodies.
+///
+/// No media-URL check runs here, unlike the Bedrock Mantle lanes. The AWS
+/// InvokeModel Claude Messages request reference
+/// (<https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages-request-response.html>)
+/// documents `base64` as the only image `source.type`, so Invoke has no
+/// documented member it fetches; a url or S3 source is forwarded and the
+/// upstream judges it.
 pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value> {
     let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The one point every Invoke request passes exactly once, on both the Ok
@@ -841,6 +848,34 @@ mod tests {
         assert!(
             body.get("model").is_none(),
             "model must be stripped: Bedrock takes it in the URL, not the body"
+        );
+    }
+
+    /// Invoke runs no media-URL check: a url-type image source normalizes
+    /// and reaches the body as written, for the upstream to judge.
+    #[test]
+    fn url_image_source_normalizes_unchecked() {
+        // Arrange
+        let source = json!({"type": "url", "url": "s3://example-bucket/a.png"});
+        let mut req = user_req();
+        req.messages = vec![Message {
+            content: MessageContent::Parts(vec![routectl_core::ContentPart::Known(
+                routectl_core::KnownContentPart::Image {
+                    source: source.clone(),
+                    cache_control: None,
+                },
+            )]),
+            ..req.messages[0].clone()
+        }]
+        .into();
+
+        // Act
+        let body = normalize_request(&fake_cfg(), &req).expect("no local refusal");
+
+        // Assert
+        assert_eq!(
+            body["messages"][0]["content"][0]["source"], source,
+            "{body}"
         );
     }
 

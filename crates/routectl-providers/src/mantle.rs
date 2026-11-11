@@ -113,12 +113,13 @@ pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == scheme)
 }
 
-/// Object members the media-URL walker never descends into: tool
-/// definitions and their JSON schemas. Mantle does not fetch from tool
-/// definitions today; if it enables image generation, the image generation
-/// tool's `input_image_mask.image_url` is the member to revisit.
+/// Responses `input` item kinds whose `tools` member holds tool
+/// definitions, which the media-URL walker does not descend into. Mantle
+/// does not fetch from tool definitions today; if it enables image
+/// generation, the image generation tool's `input_image_mask.image_url` is
+/// the member to revisit.
 #[cfg(feature = "bedrock")]
-const MEDIA_WALK_SKIPPED_MEMBERS: [&str; 3] = ["tools", "input_schema", "parameters"];
+const TOOL_DECLARING_ITEM_KINDS: [&str; 2] = ["additional_tools", "tool_search_output"];
 
 /// `source.type` values whose payload is not a URL, so the `source` rule
 /// skips a `url` member beside them. A `file`-typed object's own bare `url`
@@ -157,10 +158,15 @@ const MAX_RENDERED_KEY_LEN: usize = 64;
 /// one the upstream does not fetch.
 ///
 /// It never descends into string values (function-call `arguments` are
-/// JSON-encoded strings), any member named `tools`, `input_schema` or
-/// `parameters`, or the `input` member of an object whose `type` is
-/// `tool_use` (client-authored tool arguments on Anthropic shapes). Server
-/// tool inputs (`server_tool_use`, `mcp_tool_use`) are walked.
+/// JSON-encoded strings), the `tools` member of an object whose `type` is
+/// `additional_tools` or `tool_search_output` (tool definitions, schemas
+/// included), or the `input` member of an object whose `type` is
+/// `tool_use` (client-authored tool arguments on Anthropic shapes). The
+/// skips are positional: a member named `tools`, `input_schema` or
+/// `parameters` on any other object is walked like any member. Server tool
+/// inputs (`server_tool_use`, `mcp_tool_use`) are walked. Callers pass only
+/// the request members that carry content, so a body's top-level `tools`
+/// never reaches the walker.
 ///
 /// `path` names `root` in the refusal message. The message names the
 /// field, its position and the accepted scheme class, never the URL; an
@@ -203,16 +209,26 @@ fn find_unforwardable_media_url<'v>(
             if let Some(field) = refused_media_member(members) {
                 return Some((field, path.to_owned()));
             }
-            let is_tool_use = members.get("type").and_then(Value::as_str) == Some("tool_use");
+            let kind = members.get("type").and_then(Value::as_str);
             members
                 .iter()
-                .filter(|(key, _)| !MEDIA_WALK_SKIPPED_MEMBERS.contains(&key.as_str()))
-                .filter(|(key, _)| !(is_tool_use && key.as_str() == "input"))
+                .filter(|(key, _)| !is_unwalked_member(kind, key))
                 .find_map(|(key, child)| {
                     find_unforwardable_media_url(child, &format!("{path}.{}", render_key(key)))
                 })
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+/// Whether the member `key` of an object whose `type` is `kind` holds tool
+/// definitions or client tool arguments rather than content.
+#[cfg(feature = "bedrock")]
+fn is_unwalked_member(kind: Option<&str>, key: &str) -> bool {
+    match kind {
+        Some("tool_use") => key == "input",
+        Some(kind) if TOOL_DECLARING_ITEM_KINDS.contains(&kind) => key == "tools",
+        _ => false,
     }
 }
 
@@ -628,6 +644,77 @@ mod tests {
             }
         }
 
+        fn url_image(url: &str) -> Value {
+            json!({"type": "image", "source": {"type": "url", "url": url}})
+        }
+
+        fn tool_definition(url: &str) -> Value {
+            json!({
+                "type": "function",
+                "name": "fetch",
+                "parameters": {"properties": {"image": url_image(url)}},
+                "input_schema": {"properties": {"image": url_image(url)}},
+                "image_url": url
+            })
+        }
+
+        /// Content-shaped positions holding a member named like a tool
+        /// subtree, each with a url-type image source at `url`.
+        fn tool_named_member_rows(url: &str) -> Vec<(&'static str, Value, &'static str)> {
+            vec![
+                (
+                    "parameters in a content part",
+                    json!([{"type": "text", "text": "t", "parameters": url_image(url)}]),
+                    "`source` at root[0].parameters ",
+                ),
+                (
+                    "tools in a content part",
+                    json!([{"type": "text", "text": "t", "tools": [url_image(url)]}]),
+                    "`source` at root[0].tools[0] ",
+                ),
+                (
+                    "input_schema in a content part",
+                    json!([{"type": "text", "text": "t", "input_schema": url_image(url)}]),
+                    "`source` at root[0].input_schema ",
+                ),
+                (
+                    "tools on an untyped object",
+                    json!({"tools": [url_image(url)]}),
+                    "`source` at root.tools[0] ",
+                ),
+                (
+                    "parameters on a tool_use part",
+                    json!({"type": "tool_use", "input": {}, "parameters": url_image(url)}),
+                    "`source` at root.parameters ",
+                ),
+                (
+                    "input_schema beside an additional_tools item's tools",
+                    json!({"type": "additional_tools", "tools": [], "input_schema": url_image(url)}),
+                    "`source` at root.input_schema ",
+                ),
+                (
+                    "tools on an unrelated input item",
+                    json!({"type": "agent_message", "tools": [url_image(url)]}),
+                    "`source` at root.tools[0] ",
+                ),
+            ]
+        }
+
+        #[test]
+        fn walks_tool_named_members_outside_tool_positions() {
+            for (row, root, expected) in tool_named_member_rows(S3) {
+                let msg = refusal_message(&root).unwrap_or_else(|| panic!("{row}: must refuse"));
+                assert!(msg.contains(expected), "{row}: {msg}");
+            }
+        }
+
+        #[test]
+        fn forwards_https_sources_in_tool_named_members() {
+            for (row, root, _) in tool_named_member_rows(HTTPS) {
+                assert_eq!(refusal_message(&root), None, "{row}: must pass");
+            }
+        }
+
         #[test]
         fn never_descends_into_strings_tool_definitions_or_tool_use_input() {
             let rows: Vec<(&str, Value)> = vec![
@@ -636,20 +723,16 @@ mod tests {
                     json!({"type": "function_call", "arguments": json!({"image_url": S3}).to_string()}),
                 ),
                 (
-                    "tools",
-                    json!({"tools": [{"type": "function", "image_url": S3}]}),
+                    "additional_tools item tools",
+                    json!({"type": "additional_tools", "role": "developer", "tools": [tool_definition(S3), url_image(S3)]}),
                 ),
                 (
-                    "input_schema",
-                    json!({"input_schema": {"properties": {"image_url": {"default": S3}}, "image_url": S3}}),
-                ),
-                (
-                    "parameters",
-                    json!({"parameters": {"image_url": S3, "source": {"type": "url", "url": S3}}}),
+                    "tool_search_output item tools",
+                    json!({"type": "tool_search_output", "tools": [tool_definition(S3), url_image(S3)]}),
                 ),
                 (
                     "tool_use input",
-                    json!({"type": "tool_use", "id": "t1", "input": {"image_url": S3, "file_url": S3}}),
+                    json!({"type": "tool_use", "id": "t1", "input": {"image_url": S3, "file_url": S3, "image": url_image(S3)}}),
                 ),
             ];
 
