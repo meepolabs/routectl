@@ -88,7 +88,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use routectl_core::wire_check::{EditKind, EditSite, WireTap};
+use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap, forwards_unknowns};
 use routectl_core::{
     ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability,
     RequestProvenance, Result, Role, is_replayable, is_responses_family, reasoning_envelope,
@@ -252,13 +252,21 @@ pub(super) enum UnknownParts {
 }
 
 impl UnknownParts {
-    pub(super) const fn for_request(provenance: RequestProvenance, auth_kind: AuthKind) -> Self {
-        match (provenance, auth_kind) {
-            (RequestProvenance::ResponsesIngress, AuthKind::BedrockMantle) => {
-                Self::RebuildFilesOnly
-            }
-            (RequestProvenance::ResponsesIngress, _) => Self::Forward,
-            _ => Self::Drop,
+    pub(super) fn for_request(provenance: RequestProvenance, auth_kind: AuthKind) -> Self {
+        let egress = match auth_kind {
+            AuthKind::BedrockMantle => EgressKind::OpenaiResponsesMantle,
+            AuthKind::ChatgptOauth | AuthKind::ApiKey => EgressKind::OpenaiResponses,
+        };
+        // A library caller builds canonical parts itself, so an unmodeled
+        // block it holds was never written for this wire.
+        if matches!(provenance, RequestProvenance::Library)
+            || !forwards_unknowns(provenance, egress)
+        {
+            return Self::Drop;
+        }
+        match auth_kind {
+            AuthKind::BedrockMantle => Self::RebuildFilesOnly,
+            AuthKind::ChatgptOauth | AuthKind::ApiKey => Self::Forward,
         }
     }
 }

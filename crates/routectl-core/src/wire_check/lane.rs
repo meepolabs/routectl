@@ -188,7 +188,7 @@ impl Lane {
     /// The lane for `ingress` feeding `egress`: FIDELITY exactly when the
     /// egress sends the ingress's own dialect.
     pub fn of(ingress: IngressDialect, egress: EgressKind) -> Self {
-        let class = if egress.wire_dialect() == Some(ingress) {
+        let class = if egress_speaks(ingress, egress) {
             LaneClass::Fidelity
         } else {
             LaneClass::Translation
@@ -225,11 +225,25 @@ impl Lane {
     }
 }
 
+/// Whether `egress` sends the wire dialect `ingress` parsed.
+fn egress_speaks(ingress: IngressDialect, egress: EgressKind) -> bool {
+    egress.wire_dialect() == Some(ingress)
+}
+
+/// Whether members routectl does not model may forward unchanged from a
+/// request of `provenance` to `egress`: the request was built by a library
+/// caller, or its ingress dialect is the dialect `egress` sends. For an
+/// ingress request this is exactly the FIDELITY class of its [`Lane`].
+pub fn forwards_unknowns(provenance: RequestProvenance, egress: EgressKind) -> bool {
+    IngressDialect::of_provenance(provenance).is_none_or(|ingress| egress_speaks(ingress, egress))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use super::{EgressKind, IngressDialect, Lane, LaneClass};
+    use super::{EgressKind, IngressDialect, Lane, LaneClass, forwards_unknowns};
+    use crate::RequestProvenance;
     use crate::safe_token::is_safe_token;
 
     const FIDELITY_PAIRS: [(IngressDialect, EgressKind); 7] = [
@@ -254,6 +268,28 @@ mod tests {
                 };
 
                 assert_eq!(lane.class(), expected, "lane {}", lane.label());
+            }
+        }
+    }
+
+    const PROVENANCES: [RequestProvenance; 4] = [
+        RequestProvenance::Library,
+        RequestProvenance::AnthropicIngress,
+        RequestProvenance::OpenaiIngress,
+        RequestProvenance::ResponsesIngress,
+    ];
+
+    #[test]
+    fn forwards_unknowns_agrees_with_the_lane_class_and_always_for_a_library_caller() {
+        for provenance in PROVENANCES {
+            for egress in EgressKind::ALL {
+                // Act
+                let forwards = forwards_unknowns(provenance, egress);
+
+                // Assert
+                let expected = IngressDialect::of_provenance(provenance)
+                    .is_none_or(|ingress| Lane::of(ingress, egress).class() == LaneClass::Fidelity);
+                assert_eq!(forwards, expected, "{provenance:?} -> {}", egress.label());
             }
         }
     }

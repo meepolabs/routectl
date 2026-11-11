@@ -866,3 +866,69 @@ fn a_library_caller_forwards_its_extras_whole_under_either_matching_input() {
         }
     }
 }
+
+/// The HTTP provenance whose ingress parses `dialect`.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+const fn provenance_of(
+    dialect: routectl_core::wire_check::IngressDialect,
+) -> routectl_core::RequestProvenance {
+    use routectl_core::RequestProvenance as P;
+    use routectl_core::wire_check::IngressDialect as D;
+    match dialect {
+        D::Anthropic => P::AnthropicIngress,
+        D::Chat => P::OpenaiIngress,
+        D::Responses => P::ResponsesIngress,
+    }
+}
+
+#[test]
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+fn a_same_dialect_egress_splits_exactly_as_its_own_ingress_matching() {
+    use routectl_core::RequestProvenance as P;
+    use routectl_core::wire_check::EgressKind;
+    let provenances = [
+        P::Library,
+        P::AnthropicIngress,
+        P::OpenaiIngress,
+        P::ResponsesIngress,
+    ];
+    for row in split_rows() {
+        for egress in EgressKind::ALL {
+            let Some(wire) = egress.wire_dialect() else {
+                continue;
+            };
+            for provenance in provenances {
+                // Arrange
+                let label = format!("{} as {} from {provenance:?}", row.egress, egress.label());
+                let req = split_request(&row, provenance);
+                let by_ingress = super::client_extras_for(
+                    &req,
+                    row.dialect,
+                    super::MatchingIngress::Http(provenance_of(wire)),
+                    row.handled_by_egress,
+                );
+
+                // Act
+                let by_egress = super::client_extras_for(
+                    &req,
+                    row.dialect,
+                    super::MatchingIngress::SameDialect(egress),
+                    row.handled_by_egress,
+                );
+
+                // Assert
+                assert_eq!(
+                    by_egress.forwardable.as_deref(),
+                    by_ingress.forwardable.as_deref(),
+                    "{label}"
+                );
+                assert_eq!(by_egress.foreign_keys, by_ingress.foreign_keys, "{label}");
+                assert_eq!(
+                    by_egress.foreign_keys.is_empty(),
+                    routectl_core::wire_check::forwards_unknowns(provenance, egress),
+                    "{label}: the unrelated client key forwards exactly on same dialect"
+                );
+            }
+        }
+    }
+}

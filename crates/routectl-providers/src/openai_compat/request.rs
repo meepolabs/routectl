@@ -20,10 +20,9 @@
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use routectl_core::wire_check::{EditKind, EditSite, WireTap};
+use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap};
 use routectl_core::{
-    ChatRequest, Error, Message, RefusalReason, RequestProvenance, Result, ToolDef,
-    sanitize_for_log,
+    ChatRequest, Error, Message, RefusalReason, Result, ToolDef, sanitize_for_log,
 };
 
 use super::HistoryReasoning;
@@ -518,7 +517,9 @@ fn select_client_extras<'a>(
     let client_extras = client_extras_for(
         req,
         Dialect::OpenAiCompat,
-        MatchingIngress::Http(RequestProvenance::OpenaiIngress),
+        // The Mantle lane shares this assembly and sends the same wire
+        // dialect, so the direct kind decides for both.
+        MatchingIngress::SameDialect(EgressKind::OpenaiCompat),
         &TRANSLATED_EXTRAS_KEYS,
     );
     let (metadata, foreign): (Vec<&str>, Vec<&str>) = client_extras
@@ -844,7 +845,8 @@ fn request_carries_reasoning(req: &ChatRequest) -> bool {
 mod tests {
     use super::*;
     use routectl_core::{
-        ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, ReasoningConfig, Role,
+        ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, ReasoningConfig,
+        RequestProvenance, Role,
     };
     use serde_json::json;
 

@@ -41,9 +41,9 @@
 use serde_json::Value;
 
 use routectl_core::cache_control::{self, BreakpointPosition};
+use routectl_core::wire_check::EgressKind;
 use routectl_core::{
-    ChatRequest, CoreHistoryReasoning, Error, RequestProvenance, Result, TranslationKey,
-    TranslationReason,
+    ChatRequest, CoreHistoryReasoning, Error, Result, TranslationKey, TranslationReason,
 };
 
 use crate::managed_keys::{Dialect, MatchingIngress, client_extras_for};
@@ -1041,7 +1041,9 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let client_extras = client_extras_for(
         req,
         Dialect::AnthropicApi,
-        MatchingIngress::Http(RequestProvenance::AnthropicIngress),
+        // Mantle and Bedrock Invoke share this assembly and send the same
+        // wire dialect, so the direct kind decides for all three.
+        MatchingIngress::SameDialect(EgressKind::AnthropicApi),
         &[],
     );
     foreign.record(&client_extras.foreign_keys);

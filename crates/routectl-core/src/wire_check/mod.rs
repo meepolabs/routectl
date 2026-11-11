@@ -26,5 +26,5 @@ pub use diff::{DiffOutcome, Finding, MAX_DIFF_DEPTH, MAX_DIFF_NODES, diff};
 pub use edits::{
     DeclaredEdit, EditKind, EditPatternError, EditSite, PathClass, RejectionProvenance,
 };
-pub use lane::{EgressKind, IngressDialect, Lane, LaneClass, Leg};
+pub use lane::{EgressKind, IngressDialect, Lane, LaneClass, Leg, forwards_unknowns};
 pub use path::{MAX_WIRE_PATH_DEPTH, MAX_WIRE_PATH_LEN, WILDCARD_SEGMENT, WirePath};

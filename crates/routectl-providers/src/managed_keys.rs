@@ -36,7 +36,7 @@ use serde_json::{Map, Value};
 use crate::anthropic_api::PARALLEL_TOOL_CALLS_KEY;
 use routectl_core::is_canonical_request_key;
 #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
-use routectl_core::wire_check::{EditKind, EditSite, WireTap};
+use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap, forwards_unknowns};
 #[cfg(any(
     feature = "anthropic-api",
     feature = "openai-compat",
@@ -144,9 +144,18 @@ pub struct ClientExtras<'a> {
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchingIngress {
-    /// Requests of this provenance speak the egress's dialect. A managed-key
-    /// spelling from a client of another dialect is kept for the egress's
-    /// merge to refuse, exactly as it refuses one from this ingress.
+    /// The egress sends an ingress dialect's own wire shape, so requests of
+    /// that dialect speak its vocabulary ([`forwards_unknowns`]). A
+    /// managed-key spelling from a client of another dialect is kept for the
+    /// egress's merge to refuse, exactly as it refuses one from that ingress.
+    #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+    SameDialect(EgressKind),
+    /// Requests of this provenance speak the egress's vocabulary although no
+    /// ingress sends the egress's wire shape (the Bedrock Converse bag takes
+    /// Anthropic-spelled fields). A managed-key spelling from a client of
+    /// another dialect is kept for the egress's merge to refuse, exactly as
+    /// it refuses one from this ingress.
+    #[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
     Http(RequestProvenance),
     /// No HTTP ingress speaks the egress's dialect; only a library caller
     /// does. An HTTP client's key that shares a managed key's spelling was
@@ -201,6 +210,8 @@ pub fn client_extras_for<'a>(
     let mut foreign_keys = Vec::new();
     for (key, value) in dispatched {
         let refused_as_managed = match matching {
+            #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+            MatchingIngress::SameDialect(_) => is_managed_key(egress, key),
             MatchingIngress::Http(_) => is_managed_key(egress, key),
             #[cfg(feature = "gemini")]
             MatchingIngress::LibraryOnly => false,
@@ -296,7 +307,15 @@ pub fn declare_foreign_keys(tap: Option<&WireTap>, foreign_keys: &[&str]) {
     feature = "gemini"
 ))]
 fn speaks_egress_dialect(provenance: RequestProvenance, matching: MatchingIngress) -> bool {
-    provenance == RequestProvenance::Library || matching == MatchingIngress::Http(provenance)
+    match matching {
+        #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+        MatchingIngress::SameDialect(egress) => forwards_unknowns(provenance, egress),
+        MatchingIngress::Http(matching) => {
+            provenance == RequestProvenance::Library || provenance == matching
+        }
+        #[cfg(feature = "gemini")]
+        MatchingIngress::LibraryOnly => provenance == RequestProvenance::Library,
+    }
 }
 
 /// The operator's `payload_extras` object, if any. Callers consult it only
