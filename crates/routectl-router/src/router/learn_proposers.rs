@@ -3,15 +3,18 @@
 //! draws budget, or touches a registry. The order they are consulted in lives
 //! in [`super::learn_engine::ARBITRATION_ORDER`], not here.
 
+use routectl_core::capability::SignalTier;
 use routectl_core::sanitize_for_log;
+use routectl_core::wire_check::RejectionProvenance;
 
 use crate::capability_matcher::resolve_requested_capability;
+use crate::capability_strip::strippable_keys;
 
 use super::Router;
 use super::class_observe::upstream_facts;
-use super::field_repair::rejected_field;
+use super::field_repair::{class_can_name_a_field, rejected_field};
 use super::learn_engine::{Proposal, Proposer, RejectionInput, RejectionSite};
-use super::rejection_parser::rejected_beta_flags;
+use super::rejection_parser::{refused_member, rejected_beta_flags};
 use super::replay_repair::replay_rejection_body_free;
 
 /// Proposes the reasoning-replay strip when the attempt carried replay
@@ -47,6 +50,47 @@ impl Proposer for FieldRowProposer {
             kind: named.kind,
             tier: named.tier,
             value: named.value,
+        })
+    }
+}
+
+/// Proposes removing a client member no closed-table row names, when the
+/// rejection refuses that member by a grounded template, self-identifyingly,
+/// and the attempt's settlement attributes it to the client: the member sits
+/// at the named path in the body that went out, unchanged from what the
+/// client sent, on a fidelity lane. A member the capability strip owns stays
+/// the strip's.
+///
+/// Every refusal here leaves the rejection to the slots after it, so a
+/// rejection this arm cannot attribute reaches the client as the upstream
+/// sent it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CarriedMemberProposer;
+
+impl Proposer for CarriedMemberProposer {
+    fn propose(&self, input: &RejectionInput<'_>) -> Option<Proposal> {
+        let site = input.site.as_ref()?;
+        let attributed =
+            site.provenance == RejectionProvenance::ClientUnchanged && site.in_egress == Some(true);
+        if !attributed || FieldRowProposer.propose(input).is_some() {
+            return None;
+        }
+        let provider_kind = input.target.provider_kind?;
+        if !class_can_name_a_field(input.native_class, provider_kind) {
+            return None;
+        }
+        let path = refused_member(
+            provider_kind,
+            upstream_facts(input.err).status?,
+            input.err.parsed_body(),
+        )?;
+        let leaf = path.segments().last()?;
+        if strippable_keys().any(|owned| owned == leaf) {
+            return None;
+        }
+        Some(Proposal::CarriedMember {
+            path,
+            tier: SignalTier::SelfIdentifying,
         })
     }
 }

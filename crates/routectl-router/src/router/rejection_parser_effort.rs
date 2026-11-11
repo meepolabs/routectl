@@ -252,6 +252,7 @@ pub(super) fn unsupported_effort_level(message: &str) -> Option<Attribution<'_>>
         replacements: levels,
         ceiling: None,
         echoed: Some(echoed),
+        extra_member: false,
     })
 }
 
@@ -276,6 +277,7 @@ pub(super) fn unknown_effort_variant(message: &str) -> Option<Attribution<'_>> {
         replacements: variants,
         ceiling: None,
         echoed: Some(echoed),
+        extra_member: false,
     })
 }
 

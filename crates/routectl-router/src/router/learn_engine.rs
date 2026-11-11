@@ -40,7 +40,9 @@ use super::field_repair::{
     FIELD_ACTION_LOSSY_DROP_REPAIR, FieldRepairHandle, FieldRepairPlan, FieldRepairRow,
     FieldRepairTable, FieldSettlementMode,
 };
-use super::learn_proposers::{BetaProposer, CapabilityProposer, FieldRowProposer, ReplayProposer};
+use super::learn_proposers::{
+    BetaProposer, CapabilityProposer, CarriedMemberProposer, FieldRowProposer, ReplayProposer,
+};
 use super::learn_revert::{MatchedEdit, SentSlot, TargetRevert};
 use super::rejection_parser::{NamedRejection, RawPath, RejectionKind, RejectionValue};
 use super::repair_budget::RepairBudget;
@@ -216,6 +218,10 @@ pub(super) enum Proposal {
         tier: SignalTier,
         value: Option<RejectionValue>,
     },
+    /// Remove the client member the rejection named, at exactly that path,
+    /// from every node carrier (or the client's top-level extras) holding it.
+    /// Only for a member no closed-table row names.
+    CarriedMember { path: RawPath, tier: SignalTier },
     /// Re-send the attempt withholding the named client `anthropic-beta`
     /// flags; a success then learns a `beta:<flag>` negative for each.
     Beta { flags: Vec<String> },
@@ -234,6 +240,7 @@ pub(super) trait Proposer {
 pub(super) enum ProposerSlot {
     Replay(ReplayProposer),
     FieldRow(FieldRowProposer),
+    CarriedMember(CarriedMemberProposer),
     Beta(BetaProposer),
     Capability(CapabilityProposer),
 }
@@ -243,7 +250,7 @@ impl ProposerSlot {
     /// names. The canary answers the field-row proposal, so it is keyed on
     /// the same path.
     const fn is_path_keyed(self) -> bool {
-        matches!(self, Self::FieldRow(_))
+        matches!(self, Self::FieldRow(_) | Self::CarriedMember(_))
     }
 }
 
@@ -252,6 +259,7 @@ impl Proposer for ProposerSlot {
         match self {
             Self::Replay(proposer) => proposer.propose(input),
             Self::FieldRow(proposer) => proposer.propose(input),
+            Self::CarriedMember(proposer) => proposer.propose(input),
             Self::Beta(proposer) => proposer.propose(input),
             Self::Capability(proposer) => proposer.propose(input),
         }
@@ -260,9 +268,10 @@ impl Proposer for ProposerSlot {
 
 /// THE precedence among the learners: the first slot whose proposal takes
 /// decides the rejection.
-pub(super) const ARBITRATION_ORDER: [ProposerSlot; 4] = [
+pub(super) const ARBITRATION_ORDER: [ProposerSlot; 5] = [
     ProposerSlot::Replay(ReplayProposer),
     ProposerSlot::FieldRow(FieldRowProposer),
+    ProposerSlot::CarriedMember(CarriedMemberProposer),
     ProposerSlot::Beta(BetaProposer),
     ProposerSlot::Capability(CapabilityProposer),
 ];
@@ -273,6 +282,7 @@ pub(super) trait RepairSink {
     fn strip_replay(&mut self) -> bool;
     fn repair_field(&mut self, named: NamedRejection) -> bool;
     fn canary_retry(&mut self, named: NamedRejection) -> bool;
+    fn remove_member(&mut self, path: &RawPath, tier: SignalTier) -> bool;
     fn withhold_betas(&mut self, flags: Vec<String>) -> bool;
 }
 
@@ -335,6 +345,9 @@ fn take_proposal(proposal: Proposal, sink: &mut impl RepairSink) -> Option<Arbit
                 sink.canary_retry(named).then_some(Arbitration::CanaryRetry)
             }
         }
+        Proposal::CarriedMember { path, tier } => sink
+            .remove_member(&path, tier)
+            .then_some(Arbitration::FieldRepair),
         Proposal::Beta { flags } => sink
             .withhold_betas(flags)
             .then_some(Arbitration::BetaRepair),
@@ -578,6 +591,37 @@ impl<'a> AttemptLearning<'a> {
         }
         self.router
             .note_field_repair(meta, target.repair_target(), plan);
+        self.skip_replay_backoff = true;
+        true
+    }
+
+    /// The generic carried-member repair: remove the client member `path`
+    /// names from every carrier at exactly that position on `attempt_req`.
+    /// Charges and settles like a closed-table step; `false` means nothing
+    /// was mutated or charged.
+    #[expect(clippy::too_many_arguments)]
+    fn try_member_repair(
+        &mut self,
+        path: &RawPath,
+        tier: SignalTier,
+        err: &Error,
+        target: &DispatchTarget,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+        budget: &mut RepairBudget,
+    ) -> bool {
+        let Some(plan) = self.field_plan.as_mut() else {
+            return false;
+        };
+        let status = upstream_facts(err).status.unwrap_or(0);
+        if plan
+            .apply_member(path, tier, attempt_req, meta, budget, status)
+            .is_none()
+        {
+            return false;
+        }
+        self.router
+            .note_member_repair(meta, target.repair_target(), plan);
         self.skip_replay_backoff = true;
         true
     }

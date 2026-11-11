@@ -652,6 +652,7 @@ fn repair_of(field_path: &'static str, succeeded: bool) -> FieldRepair {
         refused_level: None,
         chosen_level: None,
         direction: None,
+        member_path: None,
     }
 }
 

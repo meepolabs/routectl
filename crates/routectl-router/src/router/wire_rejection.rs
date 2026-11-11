@@ -545,8 +545,9 @@ fn field_repair_outcome(
         .unwrap_or_default()
         .iter()
         .find(|repair| {
+            let repaired = repair.member_path.as_deref().unwrap_or(repair.field_path);
             repair.state_key == pending.state_key
-                && FieldIdentity::folded(repair.field_path.split('.')) == identity
+                && FieldIdentity::folded(repaired.split('.')) == identity
         });
     match repair {
         Some(repair) if repair.repair_succeeded => {

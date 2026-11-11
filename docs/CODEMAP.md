@@ -3021,6 +3021,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   WARN action token), `repair_teaches`, `commit`
 - `src/router/field_repair_step_apply.rs` -- `FieldRepairPlan::claim` (guard
   choice before a repair's mutation) and `install_step` (step installation after it)
+- `src/router/field_repair_step_member.rs` -- the generic carried-member arm:
+  `FieldRepairPlan::apply_member` removes a refused client member from every
+  node carrier (or client top-level extras) at exactly the named index-free
+  path, declares the Remove, and holds a `MemberStep` that commits
+  `field:<path>` only on a repaired success; `carries_unmodeled_members`
 - `src/router/field_repair_effort.rs` -- child module of `field_repair`: the
   `FieldSurface::Effort(level)` carrier reads (`emitted_effort`,
   `effort_present`) and the

@@ -1773,6 +1773,10 @@ pub struct FieldRepair {
     /// Which way a ranked rewrite moved the level (`lower` or `higher`);
     /// `None` for every other repair.
     pub direction: Option<&'static str>,
+    /// The sanitized index-free path of the client member the generic arm
+    /// removed, when `field_path` is the carried-member token; `None` for a
+    /// closed-table repair.
+    pub member_path: Option<String>,
 }
 
 /// Closed-set facts about one reasoning-replay strip-repair that fired

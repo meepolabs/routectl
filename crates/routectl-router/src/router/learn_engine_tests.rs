@@ -53,6 +53,9 @@ impl RepairSink for ScriptedSink {
     fn canary_retry(&mut self, _: NamedRejection) -> bool {
         self.0.canary
     }
+    fn remove_member(&mut self, _: &super::RawPath, _: SignalTier) -> bool {
+        self.0.field
+    }
     fn withhold_betas(&mut self, _: Vec<String>) -> bool {
         self.0.beta
     }

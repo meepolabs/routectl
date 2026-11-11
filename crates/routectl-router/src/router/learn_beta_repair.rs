@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use routectl_core::{ChatRequest, Error, sanitize_for_log};
 
-use super::super::rejection_parser::NamedRejection;
+use routectl_core::capability::SignalTier;
+
+use super::super::rejection_parser::{NamedRejection, RawPath};
 use super::super::repair_budget::RepairBudget;
 use super::super::{DispatchMeta, DispatchTarget};
 use super::{AttemptLearning, RepairSink, ThinkingShape};
@@ -57,6 +59,18 @@ impl RepairSink for EngineSink<'_, '_> {
     fn canary_retry(&mut self, named: NamedRejection) -> bool {
         self.learning.try_canary_repair(
             named,
+            self.err,
+            self.target,
+            self.attempt_req,
+            self.meta,
+            self.budget,
+        )
+    }
+
+    fn remove_member(&mut self, path: &RawPath, tier: SignalTier) -> bool {
+        self.learning.try_member_repair(
+            path,
+            tier,
             self.err,
             self.target,
             self.attempt_req,

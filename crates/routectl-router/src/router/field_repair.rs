@@ -100,6 +100,11 @@ pub(super) fn repair_action_is_lossy(action: &str) -> bool {
     )
 }
 
+/// The `field_path` of a repair record for a carried client member the
+/// generic arm removed: no closed-table row names it, so the record's
+/// member path carries the path. Closed set.
+pub(super) const FIELD_PATH_CARRIED_MEMBER: &str = "carried_member";
+
 /// Reason token: the attempt drew an upstream rejection naming this field
 /// path. Closed set.
 pub(super) const FIELD_REASON_UPSTREAM_REJECTION: &str = "upstream_field_rejection";
@@ -1734,7 +1739,7 @@ pub(super) fn direct_egress(provider_kind: &str) -> Option<routectl_core::wire_c
 /// ([`super::capability_learn::f2_class_is_deterministic`]); the field arm runs
 /// first and the two learners never claim the same path (pinned by the
 /// disjointness test over the closed table).
-fn class_can_name_a_field(class: &FailureClass, provider_kind: &str) -> bool {
+pub(super) fn class_can_name_a_field(class: &FailureClass, provider_kind: &str) -> bool {
     match class {
         FailureClass::BadRequest => true,
         FailureClass::FeatureUnsupported { capability } => {
@@ -1924,7 +1929,10 @@ impl Router {
                 }
             })
             .collect();
-        if candidates.is_empty() {
+        // A request carrying no closed-table field may still carry a client
+        // member the generic arm can remove, so it keeps a plan with no row
+        // candidate; one carrying neither has nothing to repair.
+        if candidates.is_empty() && !field_repair_step::carries_unmodeled_members(attempt_req) {
             return None;
         }
         let reclaim = match (mode, target.learned_lane.as_ref()) {
@@ -2068,6 +2076,37 @@ impl Router {
         plan.stamp_latest(handle);
     }
 
+    /// Record the generic arm's removal of a carried client member, the
+    /// latest member step of `plan`, and stamp its handle on that step.
+    ///
+    /// The record's `field_path` is the closed token
+    /// [`FIELD_PATH_CARRIED_MEMBER`]; the member's index-free path rides in
+    /// `member_path`, sanitized, since its segments are names the client
+    /// chose.
+    pub(super) fn note_member_repair(
+        &self,
+        meta: &mut DispatchMeta,
+        target: RepairTarget<'_>,
+        plan: &mut FieldRepairPlan<'_>,
+    ) {
+        let member = plan
+            .latest_member_path()
+            .expect("a reported member repair names the member it removed");
+        let handle = self.record_field_repair(
+            meta,
+            target,
+            RepairRecord {
+                field_path: FIELD_PATH_CARRIED_MEMBER,
+                action: FIELD_ACTION_DROP_REPAIR,
+                pick: None,
+            },
+        );
+        if let Some(record) = meta.field_repairs.get_mut(handle.0) {
+            record.member_path = Some(sanitize_for_log(&member));
+        }
+        plan.stamp_latest_member(handle);
+    }
+
     /// Record a field repair by the path it repaired and its action token:
     /// the shared recorder behind [`Self::note_field_repair`] and the canary's
     /// refused-value repair, so both report through one summary and one set
@@ -2114,6 +2153,7 @@ impl Router {
             refused_level: pick.map(|pick| pick.refused),
             chosen_level: pick.map(|pick| pick.chosen),
             direction: pick.map(|pick| pick.direction.token()),
+            member_path: None,
         });
         self.metrics.incr_field_repair_attempted();
         if repair_action_is_lossy(action) {
@@ -2187,6 +2227,7 @@ pub(super) fn emit_field_repair(meta: &DispatchMeta) {
             refused_level = record.refused_level,
             chosen_level = record.chosen_level,
             direction = record.direction,
+            member_path = record.member_path.as_deref(),
             "{FIELD_REPAIR_EVENT}",
         );
     }
@@ -2310,6 +2351,10 @@ mod sibling_tests;
 #[cfg(test)]
 #[path = "field_attribution_tests.rs"]
 mod field_attribution_tests;
+
+#[cfg(test)]
+#[path = "field_repair_generic_tests.rs"]
+pub(in crate::router) mod generic_tests;
 
 #[cfg(test)]
 #[path = "field_learner_disjointness_tests.rs"]

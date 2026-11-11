@@ -94,6 +94,9 @@ pub(in crate::router) struct FieldRepairPlan<'a> {
     candidates: Vec<FieldRepairCandidate<'a>>,
     /// The repairs applied and not yet settled, in the order they were made.
     pending: Vec<RepairStep<'a>>,
+    /// The carried-member removals applied and not yet settled, in the order
+    /// they were made; see [`member`].
+    members: Vec<member::MemberStep<'a>>,
     /// The fields whose steps already committed on this target. A committed
     /// field is never repaired again in the request, so this outlives the
     /// pending list it drains from.
@@ -232,6 +235,7 @@ impl<'a> FieldRepairPlan<'a> {
         Self {
             candidates,
             pending: Vec::new(),
+            members: Vec::new(),
             committed: Vec::new(),
             applied: false,
             wire,
@@ -288,7 +292,8 @@ impl<'a> FieldRepairPlan<'a> {
         rejection: &Error,
         provider_kind: &str,
     ) -> bool {
-        if self.pending.is_empty() || !super::class_can_name_a_field(native_class, provider_kind) {
+        let nothing_pending = self.pending.is_empty() && self.members.is_empty();
+        if nothing_pending || !super::class_can_name_a_field(native_class, provider_kind) {
             return false;
         }
         let Some(status) = super::super::class_observe::upstream_facts(rejection).status else {
@@ -300,6 +305,10 @@ impl<'a> FieldRepairPlan<'a> {
                     .pending
                     .iter()
                     .all(|step| FieldIdentity::of_row(&step.row) != field.identity)
+                && self
+                    .members
+                    .iter()
+                    .all(|step| step.identity() != field.identity)
         })
     }
 
@@ -536,19 +545,26 @@ impl<'a> FieldRepairPlan<'a> {
                 .iter()
                 .map(|step| FieldIdentity::of_row(&step.row)),
         );
+        self.committed
+            .extend(self.members.iter().map(member::MemberStep::identity));
         if let Some(exits) = self.exits {
-            exits.add_committed(self.pending.len());
+            exits.add_committed(self.pending.len() + self.members.len());
         }
         let values: Vec<Option<VerdictValue>> = self
             .pending
             .iter()
             .map(|step| self.proven_value(step))
             .collect();
-        self.pending
+        let rows = self
+            .pending
             .drain(..)
             .zip(values)
-            .map(|(step, value)| step.commit(value, request_features, now))
-            .collect()
+            .map(|(step, value)| step.commit(value, request_features, now));
+        let members = self
+            .members
+            .drain(..)
+            .map(|step| step.commit(request_features, now));
+        rows.chain(members).collect()
     }
 
     /// The value `step` commits once proven: the one the latest pending step
@@ -606,7 +622,7 @@ pub(in crate::router) struct SuccessClears {
 impl Drop for FieldRepairPlan<'_> {
     fn drop(&mut self) {
         if let Some(exits) = self.exits {
-            exits.add_dropped(self.pending.len());
+            exits.add_dropped(self.pending.len() + self.members.len());
         }
     }
 }
@@ -618,6 +634,10 @@ pub(super) use edit::FieldEdit;
 #[path = "field_repair_step_apply.rs"]
 mod apply;
 use apply::MutatedCandidate;
+
+#[path = "field_repair_step_member.rs"]
+mod member;
+pub(super) use member::carries_unmodeled_members;
 
 #[cfg(test)]
 #[path = "field_repair_step_tests.rs"]

@@ -264,6 +264,12 @@ impl RawPath {
         Self(segments.into_iter().map(str::to_owned).collect())
     }
 
+    /// A path of `segments`, for tests that drive a resolved path directly.
+    #[cfg(test)]
+    pub(super) fn for_tests(segments: &[&str]) -> Self {
+        Self::new(segments.iter().copied())
+    }
+
     pub(super) fn as_slice(&self) -> &[String] {
         &self.0
     }
@@ -351,6 +357,28 @@ pub(super) fn localized_field(
     })
 }
 
+/// The canonical path of a member a rejection refuses outright, whatever the
+/// member, or `None` unless every condition holds: a grounded template that
+/// refuses the member itself (the location-prefix `Extra inputs are not
+/// permitted`, the openai unsupported-parameter code or template), a
+/// self-identifying attribution, and a path naming a member rather than an
+/// array element. Inferred prose and a refused value name nothing here.
+///
+/// The returned path holds only canonical name segments, so a caller can key
+/// on it without reading upstream text again.
+pub(super) fn refused_member(
+    provider_kind: &str,
+    status: u16,
+    parsed: Option<&ParsedErrorBody>,
+) -> Option<RawPath> {
+    let localized = localize(provider_kind, status, parsed?)?;
+    let grounded = localized.extra_member
+        && localized.tier == SignalTier::SelfIdentifying
+        && localized.kind == RejectionKind::UnsupportedField
+        && !localized.ends_in_index;
+    grounded.then(|| RawPath::new(localized.segments.iter().copied()))
+}
+
 /// One raw dotted segment split into its name and trailing bracket indices
 /// (`tools[0]` -> `tools`, `0`), empty names dropped. Only called on a path
 /// [`canonical_segments`] accepted, so every bracket holds an index.
@@ -430,6 +458,7 @@ struct LocalizedPath<'a> {
     /// The effort levels among `replacements`, as a [`effort::levels_mask`]; `0`
     /// unless the path is the effort field.
     levels: u8,
+    extra_member: bool,
 }
 
 /// One arm's reading of an envelope: the raw path and what it says about it.
@@ -444,6 +473,10 @@ struct Attribution<'a> {
     replacements: Vec<&'a str>,
     ceiling: Option<u32>,
     echoed: Option<&'a str>,
+    /// The reason is a grounded template refusing the member at `path`
+    /// itself, whatever the member is: `Extra inputs are not permitted`, or
+    /// the openai unsupported-parameter code or template.
+    extra_member: bool,
 }
 
 fn localize<'a>(
@@ -476,6 +509,7 @@ fn localize<'a>(
         ceiling: attribution.ceiling,
         echoed: attribution.echoed,
         levels,
+        extra_member: attribution.extra_member,
     })
 }
 
@@ -510,6 +544,7 @@ fn unsupported_temperature(message: &str) -> Option<Attribution<'static>> {
         replacements: Vec::new(),
         ceiling: None,
         echoed: None,
+        extra_member: false,
     })
 }
 
@@ -530,6 +565,7 @@ fn output_ceiling(message: &str) -> Option<Attribution<'static>> {
         replacements: Vec::new(),
         ceiling: Some(ceiling),
         echoed: None,
+        extra_member: false,
     })
 }
 
@@ -551,6 +587,7 @@ fn messages_output_ceiling(message: &str) -> Option<Attribution<'static>> {
         replacements: Vec::new(),
         ceiling: Some(ceiling),
         echoed: None,
+        extra_member: false,
     })
 }
 
@@ -582,6 +619,7 @@ fn quoted_not_supported(message: &str) -> Option<Attribution<'_>> {
         replacements: replacement.flatten().into_iter().collect(),
         ceiling: None,
         echoed: None,
+        extra_member: false,
     })
 }
 
@@ -602,6 +640,7 @@ fn thinking_off_switch(message: &str) -> Option<Attribution<'static>> {
         replacements: vec![thinking_type(accepted)?.path],
         ceiling: None,
         echoed: None,
+        extra_member: false,
     })
 }
 
@@ -631,6 +670,7 @@ fn unknown_thinking_variant(message: &str) -> Option<Attribution<'static>> {
         replacements,
         ceiling: None,
         echoed: None,
+        extra_member: false,
     })
 }
 
@@ -661,6 +701,7 @@ fn location_prefix(message: &str) -> Option<Attribution<'_>> {
         replacements: listed.map(quoted_list).unwrap_or_default(),
         ceiling: None,
         echoed: None,
+        extra_member: reason == LOCATION_UNSUPPORTED_FIELD_REASON,
     })
 }
 
@@ -692,6 +733,7 @@ fn localize_openai(parsed: &ParsedErrorBody) -> Option<Attribution<'_>> {
         replacements: Vec::new(),
         ceiling: None,
         echoed: None,
+        extra_member: unsupported,
     })
 }
 
