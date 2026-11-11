@@ -571,19 +571,26 @@ impl Router {
     /// The view comes from the same `for_lane` accessor, with the same entry
     /// kind and egress, that the planner reads for an attributable target, so
     /// a row the planner never considers on this lane is never reported as
-    /// waiting on evidence there.
+    /// waiting on evidence there. A carried-member key has no row and no view:
+    /// the planner considers it on the lane that learned it.
     fn lane_view_carries(
         &self,
         key: &FieldVerdictKey,
         lane: &crate::router::field_repair::AttributableLane<'_>,
     ) -> bool {
-        self.field_repair_table()
-            .for_lane(lane.provider_kind, Some(lane.egress))
-            .lane_rows()
-            .any(|row| {
-                crate::field_capability::field_capability_key(row.path).as_deref()
-                    == Some(key.capability_key())
-            })
+        let table = self.field_repair_table();
+        crate::router::field_repair::carried_member_path_of_capability_key(
+            table,
+            key.capability_key(),
+        )
+        .is_some()
+            || table
+                .for_lane(lane.provider_kind, Some(lane.egress))
+                .lane_rows()
+                .any(|row| {
+                    crate::field_capability::field_capability_key(row.path).as_deref()
+                        == Some(key.capability_key())
+                })
     }
 
     /// Whether an operator `[capability.overrides]` cell forces this capability

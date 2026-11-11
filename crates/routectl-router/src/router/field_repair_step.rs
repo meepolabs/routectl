@@ -637,7 +637,9 @@ use apply::MutatedCandidate;
 
 #[path = "field_repair_step_member.rs"]
 mod member;
-pub(super) use member::carries_unmodeled_members;
+pub(in crate::router) use member::{
+    carried_member_paths, carries_unmodeled_members, is_carried_member_path, without_carried_member,
+};
 
 #[cfg(test)]
 #[path = "field_repair_step_tests.rs"]

@@ -3970,6 +3970,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_preflight_action_tests.rs` -- `include!`d fragment of
   `field_preflight_tests.rs`: the pre-flight adopted-row action counter and
   the one-WARN-per-request contract
+- `src/router/field_preflight_member.rs` -- `include!`d fragment of
+  `field_preflight.rs`: learned drops of carried client members. A `field:` key
+  no closed row names resolves to a carried-member Envelope drop; on a fidelity
+  lane whose verdict acts, `plan_one_member` clears the envelope gates and removes
+  the member at that exact position through the repair arm's own removal,
+  declares the Remove, and records `member_path`. Never canaried.
 - `src/router/field_preflight_provenance_tests.rs` -- `include!`d fragment of
   `field_preflight_tests.rs`: the authorization-provenance record. Plants a
   verdict whose provenance is DISTINGUISHABLE on every axis the record reports

@@ -234,6 +234,67 @@ fn remove_member(req: &mut ChatRequest, kind: Carrier, path: &[&str]) -> usize {
     removed
 }
 
+/// The carrier kind whose members sit at exactly `segments`: a carrier
+/// position plus one client member key that the capability strip does not
+/// own. A structural answer, so it holds for a persisted path whatever a
+/// request carries.
+fn member_carrier(segments: &[&str]) -> Option<Carrier> {
+    let (key, position) = segments.split_last()?;
+    if crate::capability_strip::strippable_keys().any(|owned| owned == *key) {
+        return None;
+    }
+    Carrier::ALL
+        .into_iter()
+        .find(|&kind| kind.position() == position && is_client_member(kind, key))
+}
+
+/// Whether the index-free dotted `path` names a carried client member the
+/// generic arm can remove: the paths its verdicts are keyed on.
+pub(in crate::router) fn is_carried_member_path(path: &str) -> bool {
+    let segments: Vec<&str> = path.split('.').collect();
+    member_carrier(&segments).is_some()
+}
+
+/// The index-free dotted paths of every client member `req` carries in a
+/// carrier, each once, in sorted order.
+pub(in crate::router) fn carried_member_paths(req: &ChatRequest) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    for kind in Carrier::ALL {
+        for map in carriers(req, kind) {
+            for key in map.keys().filter(|key| is_client_member(kind, key)) {
+                let segments: Vec<&str> = kind
+                    .position()
+                    .iter()
+                    .copied()
+                    .chain([key.as_str()])
+                    .collect();
+                if member_carrier(&segments).is_some() {
+                    paths.insert(segments.join("."));
+                }
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
+/// A clone of `req` without the member `path` names in any carrier at that
+/// exact position, with the wire pointer pattern the removal is declared
+/// under. `None` when no carrier held it, or it is still carried after.
+pub(in crate::router) fn without_carried_member(
+    req: &ChatRequest,
+    path: &str,
+) -> Option<(ChatRequest, String)> {
+    let segments: Vec<&str> = path.split('.').collect();
+    let kind = member_carrier(&segments)?;
+    let mut scratch = req.clone();
+    if remove_member(&mut scratch, kind, &segments) == 0
+        || carried_member(&scratch, &segments).is_some()
+    {
+        return None;
+    }
+    Some((scratch, kind.pointer(segments.last()?)))
+}
+
 /// Whether `req` carries any member the generic arm could be asked to
 /// remove: a client top-level extras key or a non-empty node carrier.
 pub(in crate::router) fn carries_unmodeled_members(req: &ChatRequest) -> bool {

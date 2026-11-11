@@ -1693,6 +1693,10 @@ pub struct FieldPreflight {
     /// read would attribute permission to a decision that had none. Populated
     /// from the EXACT snapshot the gates were decided against, never re-read.
     pub authorization: Option<FieldPreflightAuthorizationRecord>,
+    /// The sanitized index-free path of the carried client member a learned
+    /// drop considered, when `field_path` is the carried-member token; `None`
+    /// for a closed-table decision.
+    pub member_path: Option<String>,
 }
 
 /// The closed-set authorization provenance one pre-flight action rested on.

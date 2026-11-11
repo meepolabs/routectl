@@ -4333,6 +4333,7 @@ fn the_warn_headline_takes_the_worst_and_breaks_ties_on_planning_order() {
             // so this fixture carries no authorization: threading one in would
             // suggest the tie rule consults it.
             authorization: None,
+            member_path: None,
         }
     }
 

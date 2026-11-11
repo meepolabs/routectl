@@ -137,6 +137,7 @@ struct MemberSeat {
     message: &'static str,
     pointer: &'static str,
     bodies: Mutex<Vec<Value>>,
+    edits: Mutex<Vec<Vec<routectl_core::wire_check::DeclaredEdit>>>,
 }
 
 impl MemberSeat {
@@ -149,11 +150,17 @@ impl MemberSeat {
             message,
             pointer,
             bodies: Mutex::new(Vec::new()),
+            edits: Mutex::new(Vec::new()),
         })
     }
 
     fn bodies(&self) -> Vec<Value> {
         self.bodies.lock().clone()
+    }
+
+    /// The edits each attempt declared, in attempt order.
+    fn edits(&self) -> Vec<Vec<routectl_core::wire_check::DeclaredEdit>> {
+        self.edits.lock().clone()
     }
 
     fn answer(&self, req: &ChatRequest) -> Result<()> {
@@ -169,6 +176,9 @@ impl MemberSeat {
         }
         let refused = body.pointer(self.pointer).is_some();
         self.bodies.lock().push(body);
+        self.edits
+            .lock()
+            .push(req.routectl_internal.declared_edits.clone());
         if refused {
             return Err(rejection(self.message));
         }
@@ -791,3 +801,6 @@ impl Provider for NoopSeat {
         Err(Error::normalize_response("noop-seat", "unused"))
     }
 }
+
+#[path = "field_preflight_member_tests.rs"]
+mod preflight;

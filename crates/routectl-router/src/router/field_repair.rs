@@ -1530,12 +1530,31 @@ pub(super) fn attributable_field_lane<'a>(
 }
 
 /// The transform class of the closed-table row a `field:`-namespaced capability
-/// key names, or `None` for a key this build's table carries no row for.
+/// key names, [`TransformClass::Envelope`] for a key naming a carried client
+/// member no row names, or `None` for a key this build resolves neither way.
 pub(super) fn transform_class_of_capability_key(
     table: FieldRepairTable,
     key: &str,
 ) -> Option<TransformClass> {
-    table.row_for_capability_key(key).map(|row| row.class)
+    table.row_for_capability_key(key).map_or_else(
+        || carried_member_path_of_capability_key(table, key).map(|_| TransformClass::Envelope),
+        |row| Some(row.class),
+    )
+}
+
+/// The index-free carried-member path a `field:`-namespaced capability key
+/// names, when no closed-table row names the key: the drop the generic arm
+/// learned, which carries no value and which no free count re-checks. A key
+/// a closed row names resolves to that row, never here.
+pub(super) fn carried_member_path_of_capability_key(
+    table: FieldRepairTable,
+    key: &str,
+) -> Option<&str> {
+    if table.row_for_capability_key(key).is_some() {
+        return None;
+    }
+    let path = crate::field_capability::field_capability_path(key)?;
+    field_repair_step::is_carried_member_path(path).then_some(path)
 }
 
 /// Whether a negative on `feature_key` for the lane `state_key` of
@@ -1793,6 +1812,7 @@ pub(super) use effort::ranked_pick;
 use field_repair_step::FieldEdit;
 pub(super) use field_repair_step::FieldRepairPlan;
 use field_repair_step::{FieldRepairCandidate, GuardAdmission};
+pub(super) use field_repair_step::{carried_member_paths, without_carried_member};
 
 impl Router {
     /// Claim the envelope-field repair slot for EVERY closed-table field the

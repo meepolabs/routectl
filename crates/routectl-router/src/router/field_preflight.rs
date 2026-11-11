@@ -500,7 +500,8 @@ impl Router {
         }
         let table = self.preflight_view(target, lane.as_ref());
         let mut rows = present_rows(table, original_req).peekable();
-        if rows.peek().is_none() {
+        let members = self.acting_member_verdicts(original_req, target, lane.as_ref());
+        if rows.peek().is_none() && members.is_empty() {
             return (
                 original_req.clone(),
                 vec![unchanged_record(
@@ -552,6 +553,10 @@ impl Router {
                     plan.absorb(&mut records, hop);
                 }
             }
+        }
+        for member in members {
+            let decided = self.plan_one_member(&mut planned, target, member);
+            plan.absorb(&mut records, decided);
         }
         (planned, records, plan)
     }
@@ -775,6 +780,7 @@ impl Router {
                 // provenance or a canary posture this rewrite was never
                 // authorized under.
                 authorization: Some(authorization_record(authorization)),
+                member_path: None,
             },
             canary: None,
             accounting: Some(accounting),
@@ -1204,6 +1210,7 @@ fn unchanged_record(
         chosen_level: None,
         direction: None,
         authorization: None,
+        member_path: None,
     }
 }
 
@@ -1212,6 +1219,7 @@ fn unchanged_record(
 // compiles into THIS module via `include!`, so no call site's path changes.
 include!("field_preflight_provenance.rs");
 include!("field_preflight_effort_chain.rs");
+include!("field_preflight_member.rs");
 
 /// Apply `surface` to a SCRATCH clone of `original_req` and adopt it only on a
 /// reported success whose post-condition holds.
@@ -1291,6 +1299,7 @@ pub(super) fn plan_transform_for_tests(
                 // authorization to report -- it exercises the transform, not the
                 // gates that authorize one.
                 authorization: None,
+                member_path: None,
             },
         ),
         None => (
@@ -1304,6 +1313,7 @@ pub(super) fn plan_transform_for_tests(
                 chosen_level: None,
                 direction: None,
                 authorization: None,
+                member_path: None,
             },
         ),
     }
@@ -1387,6 +1397,7 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 confirmations = provenance.confirmations,
                 canary = provenance.canary,
                 canary_last_outcome = provenance.canary_last_outcome,
+                member_path = record.member_path.as_deref().unwrap_or(FIELD_PATH_NONE),
                 "envelope-field pre-flight decision",
             );
         } else {
@@ -1405,6 +1416,7 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 confirmations = provenance.confirmations,
                 canary = provenance.canary,
                 canary_last_outcome = provenance.canary_last_outcome,
+                member_path = record.member_path.as_deref().unwrap_or(FIELD_PATH_NONE),
                 "envelope-field pre-flight decision",
             );
         }
@@ -1445,6 +1457,7 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
         confirmations = provenance.confirmations,
         canary = provenance.canary,
         canary_last_outcome = provenance.canary_last_outcome,
+        member_path = headline.member_path.as_deref().unwrap_or(FIELD_PATH_NONE),
         decisions_acted = acted.len(),
         // Every recorded decision, so an effort chain's terminating hop (the
         // refusal that ended it) counts here although it acted on nothing.

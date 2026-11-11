@@ -93,10 +93,10 @@ fn is_qualified_field_path(path: &str) -> bool {
 /// outside the namespace. The exact inverse of [`field_capability_key`]'s
 /// append: it returns the stored bytes, so a round trip is lossless.
 ///
-/// Private: no caller outside this module needs the path, and every one
-/// that has the prefix could hand-assemble a key. The two callers here are
-/// the grammar's already-a-key rule and the field-verdict predicate.
-fn field_capability_path(key: &str) -> Option<&str> {
+/// Reads only: the prefix itself stays private, so a caller holding a path
+/// still mints a key through [`field_capability_key`] alone. Outside this
+/// module it is read to resolve a persisted key no closed-table row names.
+pub fn field_capability_path(key: &str) -> Option<&str> {
     key.strip_prefix(FIELD_CAPABILITY_PREFIX)
 }
 
