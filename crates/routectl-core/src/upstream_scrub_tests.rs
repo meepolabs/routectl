@@ -816,6 +816,9 @@ fn planted_fixture() -> Vec<String> {
         "grant_type=refresh_token&refresh_token=OPAQUE1",
         "Authorization: Bearer OPAQUE1 was rejected",
         r#"{"password":"x\\","model":"m"}"#,
+        "redirect_token=a://user:p&ssw0rd@host/x",
+        "api_key=OPAQUE1,model=gpt-4o,max_tokens=5",
+        "Config(api_key=OPAQUE1)",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -823,6 +826,11 @@ fn planted_fixture() -> Vec<String> {
     let session = key("Tok", "Ab+/9=", 6);
     rows.push(format!("x-amz-security-token:{session}\nhost"));
     rows.push(format!(r#"{{\"x-amz-security-token\":\"{session}\"}}"#));
+    rows.push(format!(
+        "api_key=.{}&{}",
+        key("bedrock-api-key-", "h", 24),
+        "k".repeat(24)
+    ));
     rows.extend(
         [
             key("sk-ant-api03-", "a", 16),
@@ -1258,4 +1266,152 @@ fn an_even_backslash_run_closes_a_quoted_value() {
     for (name, input, expected) in rows {
         assert_eq!(scrub_upstream_text(input), expected, "{name}");
     }
+}
+
+/// A bedrock API key holding an unencoded `&`, which ends a form value but
+/// not the key; assembled at runtime.
+fn bedrock_key_with_ampersand() -> (String, String) {
+    let tail = "k".repeat(24);
+    (format!("{}&{tail}", key("bedrock-api-key-", "h", 24)), tail)
+}
+
+/// Each row's credential starts inside another rule's span and runs past
+/// that span's end; one row per such rule.
+#[test]
+fn a_credential_starting_inside_a_span_is_redacted_to_its_own_end() {
+    let (bedrock, tail) = bedrock_key_with_ampersand();
+    let session = "A".repeat(20);
+    let rows = [
+        (
+            "form value",
+            format!("api_key=.{bedrock}"),
+            "api_key=[redacted]".to_owned(),
+            tail.clone(),
+        ),
+        (
+            "arn",
+            "arn:aws:s3:::b/https://u:p,w0rdtail@host/x".to_owned(),
+            "[redacted]@host/x".to_owned(),
+            "w0rdtail".to_owned(),
+        ),
+        (
+            "session token value",
+            format!("x-amz-security-token={session}/{bedrock}"),
+            "x-amz-security-token=[redacted]".to_owned(),
+            tail.clone(),
+        ),
+        (
+            "bearer token",
+            format!("Bearer abc123/{bedrock}"),
+            "Bearer [redacted]".to_owned(),
+            tail.clone(),
+        ),
+    ];
+    for (name, input, expected, planted) in &rows {
+        assert_redacts(name, input, planted);
+        assert_eq!(scrub_upstream_text(input), *expected, "{name}");
+    }
+}
+
+/// The `auth-host` row is the single source for crossing the authority:
+/// no other rule matches inside it.
+#[test]
+fn a_form_value_holding_a_url_crosses_delimiters_inside_its_authority() {
+    let rows = [
+        (
+            "userinfo holding an ampersand",
+            "redirect_token=a://user:p&ssw0rd@host/x",
+            "redirect_token=[redacted]",
+            "ssw0rd",
+        ),
+        (
+            "auth-host holding a comma",
+            "callback_token=https://cb,s3cr3tpart.example/x rejected",
+            "callback_token=[redacted] rejected",
+            "s3cr3tpart",
+        ),
+    ];
+    for (name, input, expected, planted) in rows {
+        assert_redacts(name, input, planted);
+        assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
+}
+
+#[test]
+fn a_form_value_ends_at_a_list_or_bracket_delimiter() {
+    let rows = [
+        (
+            "comma list",
+            "api_key=OPAQUE1,model=gpt-4o,max_tokens=5",
+            "api_key=[redacted],model=gpt-4o,max_tokens=5",
+        ),
+        (
+            "python repr",
+            "Config(api_key=OPAQUE1)",
+            "Config(api_key=[redacted])",
+        ),
+        (
+            "java toString",
+            "{api_key=OPAQUE1, model=x}",
+            "{api_key=[redacted], model=x}",
+        ),
+        (
+            "semicolon list",
+            "password=OPAQUE1;timeout=30",
+            "password=[redacted];timeout=30",
+        ),
+    ];
+    for (name, input, expected) in rows {
+        assert_redacts(name, input, "OPAQUE1");
+        assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
+}
+
+/// A run longer than any judged key before `=` is base64 padding, not a
+/// form pair.
+#[test]
+fn a_long_bare_run_before_equals_is_not_a_key() {
+    let blob = format!("gAAAAAB{}", "x_Y-z9".repeat(30));
+    let data = "iVBORw0KGgo".repeat(15);
+    let rows = [
+        (
+            "padding before a parenthesis",
+            format!("invalid encrypted_content: {blob}== (expired)"),
+        ),
+        (
+            "padding before a comma",
+            format!("invalid encrypted_content: {blob}==, retry"),
+        ),
+        (
+            "data url",
+            format!(r#"{{"url":"data:image/png;base64,{data}=="}}"#),
+        ),
+    ];
+    for (name, input) in &rows {
+        assert_clean(name, input);
+    }
+    let longest = format!("{}_token", "a".repeat(122));
+    assert_redacts(
+        "128-char bare key is still judged",
+        &format!("{longest}=OPAQUE1"),
+        "OPAQUE1",
+    );
+}
+
+#[test]
+fn value_scrub_keeps_colliding_scrubbed_keys_distinct() {
+    let mut value = serde_json::json!({
+        "arn:aws:iam::111111111111:role/a": "first",
+        "arn:aws:iam::222222222222:role/b": "second",
+        "[redacted]": "literal",
+        "model": "m"
+    });
+    scrub_upstream_value(&mut value);
+    let expected = serde_json::json!({
+        "[redacted]": "literal",
+        "[redacted]#2": "first",
+        "[redacted]#3": "second",
+        "model": "m"
+    });
+    assert_eq!(value, expected);
 }

@@ -17,7 +17,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
 
 use crate::log_safe::{body_key_looks_credential, sanitize_for_log};
@@ -74,9 +74,12 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 ///   then `:` or `=` and a quoted value, with optional spaces or tabs around
 ///   the separator; or bare (starting a token, so after `?`, `&`, a space
 ///   and so on) then `=`. A bare key directly followed by `=` takes a quoted
-///   value or, unquoted, the run up to `&`, whitespace, a control character
-///   or a quote (a query or form pair); a bare key with spaces before `=`
-///   takes a quoted value only. Prose such as `unexpected token: '}'` and an
+///   value or, unquoted, the run up to `&`, `,`, `;`, `)`, `}`, whitespace,
+///   a control character or a quote (a query or form pair, or a `k=v` list
+///   such as a Python repr or a Java `toString`), crossing whole any URL
+///   authority after a `://` inside it; a bare key with spaces before `=`
+///   takes a quoted value only, and a bare key of 129+ characters is not
+///   judged (a base64 run before its `=` padding is no key). Prose such as `unexpected token: '}'` and an
 ///   unquoted `max_tokens: 5` stay. A value already `[redacted]` is left
 ///   alone. A quoted value runs to the matching closing quote (one carrying
 ///   no more backslashes than the opening one; after an unescaped opening
@@ -84,7 +87,11 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 ///   next control character or the end of the text.
 ///
 /// Every rule sees every byte not already inside a redacted span, so a
-/// credential-shaped key before its value is redacted too.
+/// credential-shaped key before its value is redacted too. A span that ends
+/// at a delimiter in free text (an ARN, an echoed session-token value, the
+/// token after `bearer`, an unquoted key value) is seen inside as well, so a
+/// credential starting in it and running past that delimiter is redacted to
+/// its own end.
 #[must_use = "the returned text carries required redactions"]
 pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
     let spans = redaction_spans(s.as_bytes());
@@ -108,32 +115,100 @@ pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
 /// after `account`) waits in `ahead` while the bytes before it are probed,
 /// so a credential-shaped key is still matched, and its first byte is
 /// probed too, so a credential filling a value is matched to its own end.
-/// The rest of a span is not probed again.
+/// The rest of a span is probed only when the span is [`Span::probed`].
 fn redaction_spans(bytes: &[u8]) -> Vec<Range<usize>> {
     let mut found = Vec::new();
-    let mut ahead: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    let mut ahead: BinaryHeap<Reverse<Span>> = BinaryHeap::new();
+    let mut runs = RunCaches::default();
     let mut at = 0;
     while at < bytes.len() {
         let mut next = at + 1;
-        while let Some(&Reverse((start, end))) = ahead.peek()
-            && start <= at
+        while let Some(&Reverse(span)) = ahead.peek()
+            && span.start <= at
         {
             ahead.pop();
-            next = next.max(end);
-            found.push(start..end);
+            next = next.max(span.resume_at());
+            found.push(span.range());
         }
-        for span in match_at(bytes, at).into_iter().flatten() {
+        for span in match_at(bytes, at, &mut runs).into_iter().flatten() {
             if span.start > at {
-                ahead.push(Reverse((span.start, span.end)));
+                ahead.push(Reverse(span));
             } else {
-                next = next.max(span.end);
-                found.push(span);
+                next = next.max(span.resume_at());
+                found.push(span.range());
             }
         }
         at = next;
     }
-    found.extend(ahead.into_iter().map(|Reverse((start, end))| start..end));
+    found.extend(ahead.into_iter().map(|Reverse(span)| span.range()));
     merge_overlapping(found)
+}
+
+/// A span to redact and whether its inside is probed. A span is probed when
+/// its end is a delimiter in free text that another credential may run
+/// across. A span ending at a quote, at the `@` closing userinfo, at the end
+/// of a vendor credential's own alphabet, or after a fixed digit count is
+/// skipped: no other rule's alphabet runs across those ends, and skipping
+/// keeps a long or repeated match linear.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Span {
+    start: usize,
+    end: usize,
+    is_probed: bool,
+}
+
+impl Span {
+    const fn skipped(range: Range<usize>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+            is_probed: false,
+        }
+    }
+
+    const fn probed(range: Range<usize>) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+            is_probed: true,
+        }
+    }
+
+    const fn range(self) -> Range<usize> {
+        self.start..self.end
+    }
+
+    /// The first byte probed after this span starts.
+    const fn resume_at(self) -> usize {
+        if self.is_probed { self.start } else { self.end }
+    }
+}
+
+/// The end of the last run each probed-span rule measured. A rule matching
+/// again inside its own run reuses that end instead of rescanning, which
+/// keeps probing inside a long chain (`arn:aws:...arn:aws:...`,
+/// `a_token=a_token=...`) linear.
+#[derive(Default)]
+struct RunCaches {
+    arn: RunCache,
+    session_token: RunCache,
+    form_value: RunCache,
+}
+
+#[derive(Default)]
+struct RunCache {
+    run: Range<usize>,
+}
+
+impl RunCache {
+    /// End of the run starting at `from`: the cached end when `from` lies
+    /// inside the cached run, else `measure(from)`, cached.
+    fn end_from(&mut self, from: usize, measure: impl FnOnce(usize) -> usize) -> usize {
+        if !self.run.contains(&from) {
+            self.run = from..measure(from);
+        }
+        self.run.end
+    }
 }
 
 fn merge_overlapping(mut spans: Vec<Range<usize>>) -> Vec<Range<usize>> {
@@ -161,8 +236,8 @@ pub fn upstream_text_for_log(s: &str) -> String {
 /// Applies [`scrub_upstream_text`] to a decoded JSON value in place,
 /// redacting what the text scrub redacts in the same value serialized:
 /// every string leaf and every object key is scrubbed (a key the scrub
-/// rewrites is replaced; of keys that scrub to the same text, the last
-/// entry is kept),
+/// rewrites is replaced; a rewritten key that would collide with another
+/// key takes the first free `#2`, `#3`, ... suffix, so no entry is lost),
 /// and a leaf is judged with its key as context. A non-empty string directly
 /// under a credential-named key (the key rule of [`scrub_upstream_text`])
 /// becomes `[redacted]`, and a 12-digit account id leading a string or
@@ -187,20 +262,46 @@ fn scrub_object(map: &mut serde_json::Map<String, serde_json::Value>) {
         scrub_upstream_value(child);
         scrub_keyed_leaf(key, child);
     }
-    if map
+    if !map
         .keys()
         .any(|key| matches!(scrub_upstream_text(key), Cow::Owned(_)))
     {
-        *map = std::mem::take(map)
-            .into_iter()
-            .map(|(key, child)| {
-                let scrubbed = match scrub_upstream_text(&key) {
-                    Cow::Owned(scrubbed) => Some(scrubbed),
-                    Cow::Borrowed(_) => None,
-                };
-                (scrubbed.unwrap_or(key), child)
-            })
-            .collect();
+        return;
+    }
+    let mut rewritten = Vec::new();
+    for (key, child) in std::mem::take(map) {
+        match scrub_upstream_text(&key) {
+            Cow::Owned(scrubbed) => rewritten.push((scrubbed, child)),
+            Cow::Borrowed(_) => {
+                map.insert(key, child);
+            }
+        }
+    }
+    let mut next_suffix = HashMap::new();
+    for (scrubbed, child) in rewritten {
+        let key = unused_key(map, &mut next_suffix, scrubbed);
+        map.insert(key, child);
+    }
+}
+
+/// `key`, else the first of `key#2`, `key#3`, ... that `map` does not hold.
+/// `next_suffix` remembers where each key's search stopped, so a run of
+/// colliding keys stays linear.
+fn unused_key(
+    map: &serde_json::Map<String, serde_json::Value>,
+    next_suffix: &mut HashMap<String, usize>,
+    key: String,
+) -> String {
+    if !map.contains_key(&key) {
+        return key;
+    }
+    let suffix = next_suffix.entry(key.clone()).or_insert(2);
+    loop {
+        let candidate = format!("{key}#{suffix}");
+        *suffix += 1;
+        if !map.contains_key(&candidate) {
+            return candidate;
+        }
     }
 }
 
@@ -275,15 +376,15 @@ pub fn names_aws_principal(text: &str) -> bool {
 /// The span each rule redacts for a match probed at `at`. Every rule is
 /// evaluated, so one rule matching never hides another's match at the same
 /// position. A span may start past `at` (a value after its key).
-fn match_at(bytes: &[u8], at: usize) -> [Option<Range<usize>>; 7] {
+fn match_at(bytes: &[u8], at: usize, runs: &mut RunCaches) -> [Option<Span>; 7] {
     [
-        arn_at(bytes, at),
-        account_id_at(bytes, at),
-        token_at(bytes, at),
-        session_token_at(bytes, at),
-        userinfo_at(bytes, at),
-        bearer_token_at(bytes, at),
-        credential_key_value_at(bytes, at),
+        arn_span_at(bytes, at, &mut runs.arn).map(Span::probed),
+        account_id_at(bytes, at).map(Span::skipped),
+        token_at(bytes, at).map(Span::skipped),
+        session_token_span_at(bytes, at, &mut runs.session_token).map(Span::probed),
+        userinfo_at(bytes, at).map(Span::skipped),
+        bearer_token_at(bytes, at).map(Span::probed),
+        credential_key_value_at(bytes, at, &mut runs.form_value),
     ]
 }
 
@@ -338,11 +439,18 @@ fn run_len(bytes: &[u8], at: usize, class: impl Fn(u8) -> bool) -> usize {
 /// An AWS ARN, plain or percent-encoded, starting a token at `at`; the span
 /// runs to the end of the token.
 fn arn_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+    arn_span_at(bytes, at, &mut RunCache::default())
+}
+
+fn arn_span_at(bytes: &[u8], at: usize, run: &mut RunCache) -> Option<Range<usize>> {
     if !starts_token(bytes, at) {
         return None;
     }
     let after_head = plain_arn_head(bytes, at).or_else(|| encoded_arn_head(bytes, at))?;
-    Some(at..after_head + run_len(bytes, after_head, |b| !ends_arn(b)))
+    let end = run.end_from(after_head, |from| {
+        from + run_len(bytes, from, |b| !ends_arn(b))
+    });
+    Some(at..end)
 }
 
 /// End of `arn:aws` / `arn:aws-<partition>` and its separator at `at`.
@@ -599,7 +707,7 @@ const SESSION_TOKEN_MIN: usize = 20;
 
 /// The value of an echoed `x-amz-security-token` header or query parameter
 /// whose name starts at `at`; the span is the value alone.
-fn session_token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+fn session_token_span_at(bytes: &[u8], at: usize, run: &mut RunCache) -> Option<Range<usize>> {
     const NAME: &[u8] = b"x-amz-security-token";
     if !has_prefix_ci(bytes, at, NAME) || !starts_token(bytes, at) {
         return None;
@@ -610,10 +718,12 @@ fn session_token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     }
     let value_at = sep + 1 + run_len(bytes, sep + 1, |b| b == b' ' || b == b'\t');
     let start = after_optional_quote(bytes, value_at);
-    let len = run_len(bytes, start, |b| {
-        b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'%' | b'-')
+    let end = run.end_from(start, |from| {
+        from + run_len(bytes, from, |b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'%' | b'-')
+        })
     });
-    (len >= SESSION_TOKEN_MIN).then_some(start..start + len)
+    (end - start >= SESSION_TOKEN_MIN).then_some(start..end)
 }
 
 /// Past an optional `"`, `'` or `\"` at `at`.
@@ -629,19 +739,24 @@ fn after_optional_quote(bytes: &[u8], at: usize) -> usize {
 /// everything after the slashes up to the LAST `@` before the authority
 /// ends. The span is the userinfo alone.
 fn userinfo_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
-    let slashes = [b"://".as_slice(), b":\\/\\/"]
-        .into_iter()
-        .find(|slashes| {
-            bytes
-                .get(at..)
-                .is_some_and(|rest| rest.starts_with(slashes))
-        })?;
-    let start = at + slashes.len();
+    let start = after_url_slashes(bytes, at)?;
     let authority = run_len(bytes, start, |b| !ends_authority(b));
     let last_at = bytes[start..start + authority]
         .iter()
         .rposition(|&b| b == b'@')?;
     (last_at > 0).then_some(start..start + last_at)
+}
+
+/// Past a `://` (or JSON-escaped `:\/\/`) at `at`.
+fn after_url_slashes(bytes: &[u8], at: usize) -> Option<usize> {
+    [b"://".as_slice(), b":\\/\\/"]
+        .into_iter()
+        .find(|slashes| {
+            bytes
+                .get(at..)
+                .is_some_and(|rest| rest.starts_with(slashes))
+        })
+        .map(|slashes| at + slashes.len())
 }
 
 /// A bare backslash is not here: it stays inside the authority, and an
@@ -652,8 +767,10 @@ const fn ends_authority(b: u8) -> bool {
         || matches!(b, b'/' | b'?' | b'#' | b'"' | b'<' | b'>')
 }
 
-/// Longest key judged by name; a longer key before a quoted value is
-/// treated as credential-named, which keeps the judgment off the heap.
+/// Longest key judged by name. A longer quoted key is treated as
+/// credential-named, which keeps the judgment off the heap; a longer bare
+/// key is no key at all (no query or form key runs that long, while a
+/// base64 run before its `=` padding does).
 const MAX_JUDGED_KEY_LEN: usize = 128;
 
 /// Model-vocabulary keys whose names end in `token` but whose values are
@@ -674,7 +791,7 @@ const VOCABULARY_TOKEN_KEYS: [&[u8]; 8] = [
 /// alone. A start just after a backslash, or a bare key just after a `.`,
 /// is skipped: the run's own start already judged the same key, and
 /// skipping keeps a long run of backslashes or dotted segments linear.
-fn credential_key_value_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+fn credential_key_value_at(bytes: &[u8], at: usize, form_run: &mut RunCache) -> Option<Span> {
     let prev = at.checked_sub(1).map(|i| bytes[i]);
     if prev == Some(b'\\') {
         return None;
@@ -685,7 +802,7 @@ fn credential_key_value_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
         return None;
     }
     let key_len = run_len(bytes, key_at, is_key_char);
-    if key_len == 0 {
+    if key_len == 0 || (opening.is_none() && key_len > MAX_JUDGED_KEY_LEN) {
         return None;
     }
     let key = &bytes[key_at..key_at + key_len];
@@ -698,11 +815,12 @@ fn credential_key_value_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
         return None;
     }
     let value = if opening.is_none() && bytes.get(pos) == Some(&b'=') {
-        form_value(bytes, pos + 1)
+        form_value(bytes, pos + 1, form_run)
     } else {
-        quoted_value_after_separator(bytes, pos, opening.is_some())?
+        Span::skipped(quoted_value_after_separator(bytes, pos, opening.is_some())?)
     };
-    (!value.is_empty() && &bytes[value.clone()] != PLACEHOLDER.as_bytes()).then_some(value)
+    let text = &bytes[value.range()];
+    (!text.is_empty() && text != PLACEHOLDER.as_bytes()).then_some(value)
 }
 
 /// The quoted value after blanks, a `:` (quoted keys only) or `=`, and
@@ -722,15 +840,25 @@ fn quoted_value_after_separator(
     Some(quoted_value(bytes, &value_quote))
 }
 
-/// A query or form value at `at`: a quoted value, else the run up to `&`,
-/// whitespace, a control character, or a quote (bare or backslash-escaped).
-fn form_value(bytes: &[u8], at: usize) -> Range<usize> {
+/// A query or form value at `at`: a quoted value, else the unquoted run
+/// [`form_run_end`] measures, which ends at a delimiter another credential
+/// may run across, so its inside is probed.
+fn form_value(bytes: &[u8], at: usize, run: &mut RunCache) -> Span {
     if let Some(open) = quote_at(bytes, at) {
-        return quoted_value(bytes, &open);
+        return Span::skipped(quoted_value(bytes, &open));
     }
+    Span::probed(at..run.end_from(at, |from| form_run_end(bytes, from)))
+}
+
+/// End of the unquoted form value at `at`: the run up to `&`, `,`, `;`,
+/// `)`, `}`, whitespace, a control character or a quote (bare or
+/// backslash-escaped). A URL authority after a `://` (or `:\/\/`) in the
+/// run is crossed whole, so userinfo holding one of those delimiters stays
+/// inside the value.
+fn form_run_end(bytes: &[u8], at: usize) -> usize {
     let mut pos = at;
     while let Some(&b) = bytes.get(pos) {
-        if b == b'&' || b.is_ascii_whitespace() || b.is_ascii_control() || b == b'"' || b == b'\'' {
+        if ends_form_value(b) {
             break;
         }
         if b == b'\\' {
@@ -741,9 +869,19 @@ fn form_value(bytes: &[u8], at: usize) -> Range<usize> {
             pos += run;
             continue;
         }
+        if let Some(authority_at) = after_url_slashes(bytes, pos) {
+            pos = authority_at + run_len(bytes, authority_at, |b| !ends_authority(b));
+            continue;
+        }
         pos += 1;
     }
-    at..pos
+    pos
+}
+
+const fn ends_form_value(b: u8) -> bool {
+    b.is_ascii_whitespace()
+        || b.is_ascii_control()
+        || matches!(b, b'&' | b',' | b';' | b')' | b'}' | b'"' | b'\'')
 }
 
 /// The opaque token after `Bearer` (any case, starting a token) and one or
