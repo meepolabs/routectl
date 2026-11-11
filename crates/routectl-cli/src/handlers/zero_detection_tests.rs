@@ -450,7 +450,11 @@ fn responses_document() -> Value {
 
 /// The Responses egress reads every answer as a stream.
 fn responses_stream() -> ResponseTemplate {
-    let done = responses_document();
+    responses_stream_of(responses_document())
+}
+
+/// A text answer streamed event by event, ending in `done`.
+fn responses_stream_of(done: Value) -> ResponseTemplate {
     let mut created = done.clone();
     created["status"] = json!("in_progress");
     created["output"] = json!([]);
@@ -850,10 +854,24 @@ fn responses_cases() -> Vec<Case> {
             responses_provider,
         ),
         case(
+            "responses/unmodeled-members",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            responses_stream_with_unmodeled_members(),
+            responses_provider,
+        ),
+        case(
             "responses/stream",
             Ingress::Responses,
             json!({"model": ALIAS, "stream": true, "input": input}),
             responses_stream(),
+            responses_provider,
+        ),
+        case(
+            "responses/unmodeled-usage-stream",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            responses_stream_with_unmodeled_usage(),
             responses_provider,
         ),
         case(
@@ -951,6 +969,31 @@ fn responses_cases() -> Vec<Case> {
             responses_provider,
         ),
     ]
+}
+
+/// A Responses answer carrying a top-level member and usage members no
+/// typed field models, beside the typed counts read out of the same
+/// details objects.
+fn responses_stream_with_unmodeled_members() -> ResponseTemplate {
+    let mut done = responses_document_with_unmodeled_usage();
+    done["service_tier"] = json!("default");
+    responses_stream_of(done)
+}
+
+/// The same answer for a streaming client, whose terminal event does not
+/// carry top-level members yet: usage members only.
+fn responses_stream_with_unmodeled_usage() -> ResponseTemplate {
+    responses_stream_of(responses_document_with_unmodeled_usage())
+}
+
+fn responses_document_with_unmodeled_usage() -> Value {
+    let mut done = responses_document();
+    done["usage"] = json!({
+        "input_tokens": 3, "output_tokens": 1, "total_tokens": 4,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0, "x": 1}
+    });
+    done
 }
 
 /// Responses traffic through the Bedrock Mantle surface, walked by a real
@@ -1396,12 +1439,20 @@ fn compared_checks(snapshot: &WireCheckSnapshot) -> u64 {
 /// Send `case` through the ingress against its own mock upstream and return
 /// what the check recorded, once the response is over.
 async fn walk(case: Case) -> (Case, WireCheckSnapshot) {
+    let (swap, _body) = serve(&case).await;
+    let snapshot = settled_snapshot(&swap, case.legs().len()).await;
+    (case, snapshot)
+}
+
+/// Send `case` through the ingress against its own mock upstream; return
+/// the router it ran on and the body its client received.
+async fn serve(case: &Case) -> (Arc<arc_swap::ArcSwap<Router>>, Bytes) {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(case.upstream.clone())
         .mount(&server)
         .await;
-    let router = router_for(&case, &server.uri()).await;
+    let router = router_for(case, &server.uri()).await;
     let router = match case.tap_drop {
         Some(pointer) => router.with_wire_tap_drop_for_tests(pointer),
         None => router,
@@ -1429,8 +1480,7 @@ async fn walk(case: Case) -> (Case, WireCheckSnapshot) {
         case.name,
         String::from_utf8_lossy(&bytes)
     );
-    let snapshot = settled_snapshot(&swap, case.legs().len()).await;
-    (case, snapshot)
+    (swap, bytes)
 }
 
 /// The wire-check state once `legs` checks have recorded: a stream's
@@ -1654,4 +1704,75 @@ async fn the_walk_surfaces_an_undeclared_difference_on_each_bedrock_lane() {
             ),
         ]
     );
+}
+
+/// A client of another dialect served by openai-responses never receives
+/// the members only a Responses client can carry. Positive control: the
+/// same upstream answer gives a Responses client both members.
+#[tokio::test]
+async fn only_a_responses_client_receives_responses_top_level_and_usage_members() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, members expected)
+    let rows = [
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            false,
+        ),
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            false,
+        ),
+        (
+            "anthropic stream client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+            false,
+        ),
+        (
+            "chat stream client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "stream": true,
+                   "stream_options": {"include_usage": true}, "messages": hi}),
+            false,
+        ),
+        (
+            "responses client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            true,
+        ),
+    ];
+    for (row, ingress, body, expected) in rows {
+        // Arrange
+        let probe = case(
+            row,
+            ingress,
+            body,
+            responses_stream_with_unmodeled_members(),
+            responses_provider,
+        );
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let text = String::from_utf8_lossy(&client);
+        assert!(text.contains("\"usage\""), "{row}: usage rendered: {text}");
+        assert_eq!(
+            text.contains("service_tier"),
+            expected,
+            "{row}: top-level member: {text}"
+        );
+        assert_eq!(
+            text.contains("\"x\""),
+            expected,
+            "{row}: usage member: {text}"
+        );
+    }
 }

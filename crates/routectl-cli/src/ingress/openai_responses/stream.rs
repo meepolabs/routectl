@@ -52,10 +52,10 @@ use uuid::Uuid;
 use routectl_core::{
     ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, OpaqueSseEvent, ReasoningDetail,
     ReasoningDetailKind, ResponsesEnvelope, Result, Role, UpstreamMeta, Usage, UsageDelta,
-    is_responses_family, schema::Choice,
+    is_responses_family, renders_unknowns, schema::Choice,
 };
 
-use routectl_core::wire_check::{EditKind, EditSite};
+use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 
 use crate::ingress::{IngressStreamState, ResponseEdits, SseEvent, StreamErrorClass};
 
@@ -129,25 +129,33 @@ pub(super) fn render_chunk_declared(
     for opaque in &chunk.opaque_events {
         emit_opaque_event(opaque, state, &mut events);
     }
+    let usage = renderable_usage(&chunk);
     if let Some(choice) = chunk.choices.first() {
         emit_delta_events(&choice.delta, state, &mut events, edits);
         if let Some(fr) = choice.finish_reason.as_deref() {
             if state.pending_finish_reason.is_none() {
                 declare_status_rebuild(Some(fr), edits);
             }
-            stash_finish(fr, chunk.usage.as_ref(), state);
+            stash_finish(fr, usage, state);
         }
-    }
-    if chunk.choices.is_empty()
-        && let Some(usage) = chunk.usage.as_ref()
-    {
+    } else if let Some(usage) = usage {
         // Trailing usage-only chunk (OpenAI-compat upstreams emit
         // usage in a separate final chunk). Stash it for the
         // completed body; render_eos flushes the terminal event.
-        state.pending_usage = Some(usage.clone());
+        state.pending_usage = Some(usage);
     }
 
     Ok(events)
+}
+
+/// The chunk's usage as this render may emit it: the upstream usage
+/// members ride along only on a chunk parsed from a Responses body.
+fn renderable_usage(chunk: &ChatChunk) -> Option<UsageDelta> {
+    let mut usage = chunk.usage.clone()?;
+    if !renders_unknowns(IngressDialect::Responses, chunk.upstream_meta.as_ref()) {
+        usage.extras.clear();
+    }
+    Some(usage)
 }
 
 /// Cache the response id / model / created_at from the first chunk that
@@ -696,7 +704,7 @@ fn reasoning_done_item(detail_id: Option<String>, details: &[ReasoningDetail]) -
 /// Buffer the terminal `finish_reason` (and any inline usage) for the
 /// `response.completed` body emitted at EOS. First-wins on a duplicate
 /// finish_reason, matching the anthropic ingress.
-fn stash_finish(fr: &str, usage: Option<&UsageDelta>, state: &mut ResponsesStreamState) {
+fn stash_finish(fr: &str, usage: Option<UsageDelta>, state: &mut ResponsesStreamState) {
     if state.pending_finish_reason.is_none() {
         state.pending_finish_reason = Some(fr.to_string());
     } else {
@@ -707,7 +715,7 @@ fn stash_finish(fr: &str, usage: Option<&UsageDelta>, state: &mut ResponsesStrea
         );
     }
     if let Some(u) = usage {
-        state.pending_usage = Some(u.clone());
+        state.pending_usage = Some(u);
     }
 }
 
@@ -923,7 +931,7 @@ fn response_skeleton(
     if let Some(u) = usage {
         obj.insert(
             "usage".into(),
-            super::render::render_usage(&usage_from_delta(&u)),
+            super::render::render_usage(&usage_from_delta(&u), &u.extras),
         );
     }
     Value::Object(obj)

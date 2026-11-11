@@ -1669,3 +1669,102 @@ fn a_carried_item_before_any_text_sits_ahead_of_the_message() {
         .expect("message added");
     assert_eq!(message_added["output_index"], 1);
 }
+
+// ---------------------------------------------------------------------------
+// Upstream usage members the canonical delta does not model
+// ---------------------------------------------------------------------------
+
+/// The completed body's usage after a finish chunk whose usage carries
+/// `members`, its carrier stamped with `dialect`; `usage_only` sends the
+/// usage on a trailing chunk with no choice.
+fn completed_usage_with_members(
+    dialect: Option<routectl_core::wire_check::IngressDialect>,
+    members: Value,
+    usage_only: bool,
+) -> Value {
+    let mut state = fresh();
+    let _ = render(&mut state, text_chunk("hi"));
+    let Value::Object(extras) = members else {
+        panic!("members must be an object");
+    };
+    let usage = UsageDelta {
+        prompt_tokens: Some(12),
+        completion_tokens: Some(7),
+        total_tokens: Some(19),
+        reasoning_tokens: Some(3),
+        cache_read_input_tokens: Some(4),
+        extras,
+        ..Default::default()
+    };
+    let mut chunk = if usage_only {
+        let _ = render(&mut state, finish_chunk("stop", None));
+        ChatChunk {
+            choices: Vec::new(),
+            ..finish_chunk("stop", Some(usage))
+        }
+    } else {
+        finish_chunk("stop", Some(usage))
+    };
+    chunk.upstream_meta = dialect.map(|d| UpstreamMeta::default().with_wire_dialect(d));
+    let _ = render(&mut state, chunk);
+    let events = render_eos_internal(&mut state);
+    data_of(&events, "response.completed")["response"]["usage"].clone()
+}
+
+#[test]
+fn a_responses_stamped_usage_renders_its_members_with_typed_counts_winning() {
+    for usage_only in [false, true] {
+        // Act
+        let u = completed_usage_with_members(
+            Some(routectl_core::wire_check::IngressDialect::Responses),
+            json!({"input_tokens_details": {"cached_tokens": 999, "audio_tokens": 1},
+                   "output_tokens_details": {"reasoning_tokens": 999, "x": 2},
+                   "input_tokens": 999, "cost": 5}),
+            usage_only,
+        );
+
+        // Assert
+        assert_eq!(
+            u,
+            json!({"input_tokens": 12, "output_tokens": 7, "total_tokens": 19,
+                   "input_tokens_details": {"cached_tokens": 4, "audio_tokens": 1},
+                   "output_tokens_details": {"reasoning_tokens": 3, "x": 2},
+                   "cost": 5}),
+            "usage_only={usage_only}"
+        );
+    }
+}
+
+#[test]
+fn usage_members_on_an_unstamped_or_foreign_chunk_are_not_rendered() {
+    let rows = [
+        ("unstamped", None),
+        (
+            "anthropic",
+            Some(routectl_core::wire_check::IngressDialect::Anthropic),
+        ),
+        (
+            "chat",
+            Some(routectl_core::wire_check::IngressDialect::Chat),
+        ),
+    ];
+    for (row, dialect) in rows {
+        for usage_only in [false, true] {
+            // Act
+            let u = completed_usage_with_members(
+                dialect,
+                json!({"output_tokens_details": {"x": 2}, "cost": 5}),
+                usage_only,
+            );
+
+            // Assert
+            assert_eq!(
+                u,
+                json!({"input_tokens": 12, "output_tokens": 7, "total_tokens": 19,
+                       "input_tokens_details": {"cached_tokens": 4},
+                       "output_tokens_details": {"reasoning_tokens": 3}}),
+                "{row} usage_only={usage_only}"
+            );
+        }
+    }
+}

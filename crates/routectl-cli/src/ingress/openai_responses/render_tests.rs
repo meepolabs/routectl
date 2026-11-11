@@ -8,6 +8,7 @@
 
 use serde_json::{Value, json};
 
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatResponse, ContentPart, KnownContentPart, Message,
     MessageContent, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind,
@@ -1008,4 +1009,168 @@ fn a_call_to_a_flat_tool_carries_no_namespace() {
     let items = output(&v);
     assert_eq!(items[1]["name"], "flat_one");
     assert!(items[1].get("namespace").is_none(), "got: {v}");
+}
+
+// ---------------------------------------------------------------------------
+// Upstream members the canonical response does not model
+// ---------------------------------------------------------------------------
+
+fn object(v: Value) -> serde_json::Map<String, Value> {
+    match v {
+        Value::Object(map) => map,
+        other => panic!("expected an object, got {other}"),
+    }
+}
+
+/// A response carrying `top_level` on its envelope and `usage_members` on
+/// its usage, its carrier stamped with `dialect`.
+fn response_with_members(
+    dialect: Option<IngressDialect>,
+    top_level: Value,
+    usage_members: Value,
+) -> ChatResponse {
+    let mut resp = response_with(
+        assistant_message(MessageContent::Text("x".into())),
+        Some("stop"),
+    );
+    let mut envelope = ResponsesEnvelope::default();
+    envelope.extras = object(top_level);
+    let meta = UpstreamMeta::from_responses_envelope(envelope);
+    resp.upstream_meta = Some(match dialect {
+        Some(dialect) => meta.with_wire_dialect(dialect),
+        None => meta,
+    });
+    resp.usage = Some(Usage {
+        prompt_tokens: 10,
+        completion_tokens: 4,
+        total_tokens: 14,
+        reasoning_tokens: Some(2),
+        cache_read_input_tokens: Some(6),
+        extras: object(usage_members),
+        ..Default::default()
+    });
+    resp
+}
+
+#[test]
+fn a_responses_upstream_gets_its_top_level_and_usage_members_back() {
+    // Arrange
+    let resp = response_with_members(
+        Some(IngressDialect::Responses),
+        json!({"service_tier": "default", "metadata": {"note": "caf\u{e9}"}}),
+        json!({"input_tokens_details": {"cached_tokens": 6, "audio_tokens": 1},
+               "output_tokens_details": {"reasoning_tokens": 2, "x": 3},
+               "cost": {"usd": 0.01}}),
+    );
+
+    // Act
+    let v = render_responses_response(resp).unwrap();
+
+    // Assert
+    assert_eq!(v["service_tier"], "default");
+    assert_eq!(v["metadata"], json!({"note": "caf\u{e9}"}));
+    assert_eq!(
+        v["usage"],
+        json!({"input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
+               "input_tokens_details": {"cached_tokens": 6, "audio_tokens": 1},
+               "output_tokens_details": {"reasoning_tokens": 2, "x": 3},
+               "cost": {"usd": 0.01}})
+    );
+}
+
+#[test]
+fn a_typed_key_wins_over_a_carried_member_of_the_same_name() {
+    // (row, carried top-level members, carried usage members)
+    let rows = [
+        (
+            "top-level envelope keys",
+            json!({"id": "upstream", "model": "upstream", "status": "failed",
+                   "output": [], "usage": {}, "object": "x", "created_at": 1}),
+            json!({}),
+        ),
+        (
+            "usage counts",
+            json!({}),
+            json!({"input_tokens": 999, "output_tokens": 999, "total_tokens": 999}),
+        ),
+        (
+            "typed detail counts",
+            json!({}),
+            json!({"input_tokens_details": {"cached_tokens": 999},
+                   "output_tokens_details": {"reasoning_tokens": 999}}),
+        ),
+    ];
+    for (row, top_level, usage_members) in rows {
+        // Arrange
+        let resp = response_with_members(Some(IngressDialect::Responses), top_level, usage_members);
+
+        // Act
+        let v = render_responses_response(resp).unwrap();
+
+        // Assert
+        assert_eq!(v["id"], "resp_01", "{row}");
+        assert_eq!(v["model"], "gpt-5-codex", "{row}");
+        assert_eq!(v["status"], "completed", "{row}");
+        assert_eq!(v["object"], "response", "{row}");
+        assert_eq!(v["created_at"], 1_700_000_000, "{row}");
+        assert_eq!(v["output"][0]["type"], "message", "{row}");
+        assert_eq!(
+            v["usage"],
+            json!({"input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
+                   "input_tokens_details": {"cached_tokens": 6},
+                   "output_tokens_details": {"reasoning_tokens": 2}}),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn a_reserved_name_stays_absent_when_the_render_omits_it() {
+    // Arrange: no typed cache or reasoning count, no incomplete status.
+    let mut resp = response_with_members(
+        Some(IngressDialect::Responses),
+        json!({"incomplete_details": {"reason": "upstream"}, "error": {"code": "x"}}),
+        json!({"input_tokens_details": {"cached_tokens": 5}}),
+    );
+    let usage = resp.usage.as_mut().expect("usage");
+    usage.cache_read_input_tokens = None;
+
+    // Act
+    let v = render_responses_response(resp).unwrap();
+
+    // Assert: the carried details object is kept, its typed key is not
+    // recreated from it, and the render's own top-level names stay unset.
+    assert_eq!(v["usage"]["input_tokens_details"], json!({}));
+    assert!(v.get("incomplete_details").is_none());
+    assert!(v.get("error").is_none());
+}
+
+#[test]
+fn members_carried_from_another_dialect_or_unstamped_are_not_rendered() {
+    let rows = [
+        ("unstamped", None),
+        ("anthropic", Some(IngressDialect::Anthropic)),
+        ("chat", Some(IngressDialect::Chat)),
+    ];
+    for (row, dialect) in rows {
+        // Arrange
+        let resp = response_with_members(
+            dialect,
+            json!({"service_tier": "default"}),
+            json!({"output_tokens_details": {"x": 3}, "cost": 1}),
+        );
+
+        // Act
+        let v = render_responses_response(resp).unwrap();
+
+        // Assert
+        assert!(v.get("service_tier").is_none(), "{row}");
+        assert_eq!(
+            v["usage"],
+            json!({"input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
+                   "input_tokens_details": {"cached_tokens": 6},
+                   "output_tokens_details": {"reasoning_tokens": 2}}),
+            "{row}"
+        );
+    }
 }

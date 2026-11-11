@@ -585,7 +585,7 @@ fn translate_carries_the_first_message_item_id() {
 }
 
 #[test]
-fn translate_carries_no_envelope_without_a_message_item_id() {
+fn translate_carries_no_envelope_without_a_message_item_id_or_member() {
     let rows = [
         (
             "message without id",
@@ -610,8 +610,12 @@ fn translate_carries_no_envelope_without_a_message_item_id() {
         // Act
         let resp = parse(body);
 
-        // Assert
-        assert!(resp.upstream_meta.is_none(), "{name}");
+        // Assert: only the dialect tag is carried.
+        assert_eq!(
+            resp.upstream_meta,
+            Some(UpstreamMeta::default().with_wire_dialect(IngressDialect::Responses)),
+            "{name}"
+        );
     }
 }
 
@@ -731,4 +735,70 @@ fn cache_usage_is_equal_on_complete_and_stream_paths() {
         assert_eq!(complete, stream, "{name}: complete and stream differ");
         assert_eq!(complete, (1941, want), "{name}");
     }
+}
+
+#[test]
+fn translate_carries_unmodeled_top_level_members_on_the_envelope() {
+    // Arrange: a modeled `error: null` and two members the parser does not
+    // model, one of them non-ASCII.
+    let body = json!({
+        "id": "resp_01", "object": "response", "status": "completed", "model": "m",
+        "error": null, "service_tier": "default", "metadata": {"note": "caf\u{e9}"},
+        "output": []
+    });
+
+    // Act
+    let resp = parse(body);
+
+    // Assert
+    let meta = resp.upstream_meta.expect("carrier");
+    assert_eq!(meta.wire_dialect, Some(IngressDialect::Responses));
+    let extras = &meta.openai_responses.expect("envelope").extras;
+    let keys: Vec<&str> = extras.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["metadata", "service_tier"]);
+    assert_eq!(extras["metadata"], json!({"note": "caf\u{e9}"}));
+}
+
+#[test]
+fn translate_usage_carries_unmodeled_members_and_details_objects_whole() {
+    // Arrange
+    let body = json!({
+        "id": "resp_01", "status": "completed", "model": "m", "output": [],
+        "usage": {
+            "input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
+            "input_tokens_details": {"cached_tokens": 6, "audio_tokens": 1},
+            "output_tokens_details": {"reasoning_tokens": 2, "x": 3},
+            "cost": {"usd": 0.01}
+        }
+    });
+
+    // Act
+    let usage = parse(body).usage.expect("usage");
+
+    // Assert: typed reads unchanged, every member carried.
+    assert_eq!(usage.cache_read_input_tokens, Some(6));
+    assert_eq!(usage.reasoning_tokens, Some(2));
+    assert_eq!(
+        Value::Object(usage.extras),
+        json!({
+            "input_tokens_details": {"cached_tokens": 6, "audio_tokens": 1},
+            "output_tokens_details": {"reasoning_tokens": 2, "x": 3},
+            "cost": {"usd": 0.01}
+        })
+    );
+}
+
+#[test]
+fn translate_usage_without_members_carries_nothing() {
+    // Arrange
+    let body = json!({
+        "id": "resp_01", "status": "completed", "model": "m", "output": [],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    });
+
+    // Act
+    let usage = parse(body).usage.expect("usage");
+
+    // Assert
+    assert!(usage.extras.is_empty());
 }

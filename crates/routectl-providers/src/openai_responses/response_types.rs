@@ -25,7 +25,7 @@
 //! shape doesn't break the decoder.
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 // ---------------------------------------------------------------------------
 // Non-streaming response body (POST /responses with stream:false)
@@ -62,6 +62,10 @@ pub struct ResponsesResponse {
     pub(crate) output: Vec<ResponseOutputItem>,
     #[serde(default)]
     pub(crate) usage: Option<ResponsesUsage>,
+    /// Top-level members this struct does not model, for a Responses
+    /// client to receive back.
+    #[serde(flatten)]
+    pub(crate) extras: Map<String, Value>,
 }
 
 /// `incomplete_details: { reason: "..." }`. Reason values seen in the
@@ -338,6 +342,29 @@ pub struct ResponsesUsage {
     pub(crate) output_tokens_details: Option<Value>,
     #[serde(default)]
     pub(crate) total_tokens: u32,
+    /// Usage members this struct does not model.
+    #[serde(flatten)]
+    pub(crate) extras: Map<String, Value>,
+}
+
+impl ResponsesUsage {
+    /// The usage members a Responses client gets back beside the typed
+    /// counts: every unmodeled member, plus each details object whole. A
+    /// render owns precedence, so a typed count read out of a details
+    /// object still wins over its carried copy.
+    pub(crate) fn carried_members(&self) -> Map<String, Value> {
+        let mut members = self.extras.clone();
+        let details = [
+            ("input_tokens_details", &self.input_tokens_details),
+            ("output_tokens_details", &self.output_tokens_details),
+        ];
+        for (key, value) in details {
+            if let Some(value) = value {
+                members.insert(key.to_string(), value.clone());
+            }
+        }
+        members
+    }
 }
 
 // ---------------------------------------------------------------------------

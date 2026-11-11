@@ -31,7 +31,8 @@ use routectl_core::{
     CacheCreation, ChatRequest, ChatResponse, Choice, ContentPart, Error, KnownContentPart,
     Message, MessageContent, ReasoningDetail, ReasoningDetailKind, RequestObservation,
     ResponsesEnvelope, Result, Role, UpstreamMeta, Usage, parse_cache_lifetime_member,
-    sanitize_for_log, wire_check::WireTap,
+    sanitize_for_log,
+    wire_check::{IngressDialect, WireTap},
 };
 
 use super::empty_optional::EmptyOptionalFilter;
@@ -39,7 +40,7 @@ use super::response_types::{
     IncompleteDetails, ReasoningContent, ReasoningSummary, ResponseOutputItem,
     ResponsesOutputContent, ResponsesResponse, ResponsesUsage,
 };
-use super::{AuthKind, lane_format_tag};
+use super::{AuthKind, client_carries_unmodeled_items, lane_format_tag};
 
 /// Translate a deserialized Responses body into canonical `ChatResponse`.
 ///
@@ -58,7 +59,8 @@ pub fn translate(
 /// [`translate`] for the response to `req`. On the codex lane, a function
 /// call's empty optional arguments (see the `empty_optional` module) are
 /// removed against the tools `req` declared, and the removal is counted once
-/// per client request and declared on the response leg. Synchronous: the
+/// per client request and declared on the response leg. The unmodeled usage
+/// members stay only for a client that speaks Responses. Synchronous: the
 /// observation scope it opens must never span an `.await`.
 pub fn translate_for_request(
     provider_id: &str,
@@ -66,9 +68,23 @@ pub fn translate_for_request(
     body: ResponsesResponse,
     req: &ChatRequest,
 ) -> Result<ChatResponse> {
-    if !auth_kind.is_codex_lane() {
-        return translate(provider_id, auth_kind, body);
+    let mut resp = if auth_kind.is_codex_lane() {
+        translate_codex(provider_id, auth_kind, body, req)?
+    } else {
+        translate(provider_id, auth_kind, body)?
+    };
+    if !client_carries_unmodeled_items(req.routectl_internal.provenance) {
+        withhold_usage_members(&mut resp);
     }
+    Ok(resp)
+}
+
+fn translate_codex(
+    provider_id: &str,
+    auth_kind: AuthKind,
+    body: ResponsesResponse,
+    req: &ChatRequest,
+) -> Result<ChatResponse> {
     let tools = req.tools.as_deref().unwrap_or_default();
     let mut filter = EmptyOptionalFilter::from_tools(tools);
     let resp = translate_filtered(provider_id, auth_kind, body, Some(&mut filter))?;
@@ -79,6 +95,15 @@ pub fn translate_for_request(
         filter.removed(),
     );
     Ok(resp)
+}
+
+/// `Usage.extras` is serialized by canonical serde and re-emitted by every
+/// render that spreads it, so Responses usage members must not reach a
+/// client of another dialect through it.
+fn withhold_usage_members(resp: &mut ChatResponse) {
+    if let Some(usage) = resp.usage.as_mut() {
+        usage.extras.clear();
+    }
 }
 
 /// Log, count and declare the empty optional arguments one response had
@@ -170,9 +195,10 @@ fn translate_filtered(
         body.created_at
     };
 
-    let upstream_meta = first_message_item_id(&body.output).map(|item_id| {
-        UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(item_id))
-    });
+    let upstream_meta = Some(complete_meta(
+        first_message_item_id(&body.output),
+        body.extras,
+    ));
 
     Ok(ChatResponse {
         id,
@@ -190,6 +216,24 @@ fn translate_filtered(
         extras: Default::default(),
         upstream_meta,
     })
+}
+
+/// The carrier of a complete response: tagged as parsed from a Responses
+/// body, with an envelope only when there is an item id or an unmodeled
+/// top-level member to carry.
+fn complete_meta(
+    message_item_id: Option<String>,
+    extras: serde_json::Map<String, Value>,
+) -> UpstreamMeta {
+    let meta = if message_item_id.is_none() && extras.is_empty() {
+        UpstreamMeta::default()
+    } else {
+        let mut envelope = ResponsesEnvelope::default();
+        envelope.message_item_id = message_item_id;
+        envelope.extras = extras;
+        UpstreamMeta::from_responses_envelope(envelope)
+    };
+    meta.with_wire_dialect(IngressDialect::Responses)
 }
 
 /// The id of the first `message` output item, when the upstream sent a
@@ -484,7 +528,7 @@ fn translate_usage(u: &ResponsesUsage) -> Usage {
         cache_read_input_tokens: cache.read,
         cache_creation: cache.write_split,
         server_tool_use: None,
-        extras: Default::default(),
+        extras: u.carried_members(),
     };
     usage.derive_total_if_absent();
     usage

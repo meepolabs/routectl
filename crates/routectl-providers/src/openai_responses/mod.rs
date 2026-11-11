@@ -292,8 +292,7 @@ impl Provider for OpenAiResponsesProvider {
         // Parse the x-codex-* quota family off the response head BEFORE
         // `resp` is consumed by the SSE byte stream. None on the api-key
         // and mantle lanes (family absent), so no auth-kind gate.
-        let upstream_meta = quota_headers::parse_codex_quota(resp.headers())
-            .map(routectl_core::UpstreamMeta::from_codex);
+        let upstream_meta = quota_headers::parse_codex_quota(resp.headers()).map(codex_meta);
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
         futures::pin_mut!(event_stream);
@@ -495,8 +494,7 @@ impl Provider for OpenAiResponsesProvider {
         // attached to the FIRST canonical chunk yielded by the stream;
         // consumers must not assume it on later chunks. None on the
         // api-key and mantle lanes (family absent).
-        let upstream_meta = quota_headers::parse_codex_quota(resp.headers())
-            .map(routectl_core::UpstreamMeta::from_codex);
+        let upstream_meta = quota_headers::parse_codex_quota(resp.headers()).map(codex_meta);
 
         let provider_id = self.cfg.id.clone();
         let auth_kind = self.cfg.auth_kind;
@@ -646,6 +644,12 @@ impl Provider for OpenAiResponsesProvider {
         )
         .await
     }
+}
+
+/// The carrier of the codex quota read off a Responses response head.
+const fn codex_meta(quota: routectl_core::CodexQuota) -> routectl_core::UpstreamMeta {
+    routectl_core::UpstreamMeta::from_codex(quota)
+        .with_wire_dialect(routectl_core::wire_check::IngressDialect::Responses)
 }
 
 impl OpenAiResponsesProvider {

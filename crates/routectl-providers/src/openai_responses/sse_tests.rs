@@ -1189,3 +1189,71 @@ fn a_message_item_without_an_id_carries_no_envelope() {
     // Assert
     assert!(chunks[0].upstream_meta.is_none());
 }
+
+#[test]
+fn a_completed_response_carries_its_usage_members_on_a_responses_stamped_chunk() {
+    // Arrange
+    let mut state = ResponsesStreamState::default();
+
+    // Act
+    let chunks = drive(
+        &mut state,
+        json!({
+            "type": "response.completed",
+            "response": {"id": "r", "status": "completed", "model": "m", "output": [],
+                         "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19,
+                                   "output_tokens_details": {"reasoning_tokens": 2, "x": 1},
+                                   "cost": 3}}
+        }),
+    );
+
+    // Assert
+    let terminal = chunks.last().expect("terminal");
+    let usage = terminal.usage.as_ref().expect("usage");
+    assert_eq!(usage.reasoning_tokens, Some(2));
+    assert_eq!(
+        serde_json::Value::Object(usage.extras.clone()),
+        json!({"output_tokens_details": {"reasoning_tokens": 2, "x": 1}, "cost": 3})
+    );
+    assert_eq!(
+        terminal.upstream_meta.as_ref().and_then(|m| m.wire_dialect),
+        Some(IngressDialect::Responses)
+    );
+}
+
+#[test]
+fn every_responses_stream_carrier_is_stamped_with_the_responses_dialect() {
+    // Arrange: one carrier per construction site (created_at, message item
+    // id, terminal usage).
+    let mut state = ResponsesStreamState::default();
+    let events = [
+        json!({"type": "response.created",
+               "response": {"id": "r", "model": "m", "created_at": 1_700_000_000_i64}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 0, "delta": "hi"}),
+        json!({"type": "response.completed",
+               "response": {"id": "r", "status": "completed", "model": "m", "output": [],
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ];
+
+    // Act
+    let chunks: Vec<ChatChunk> = events
+        .into_iter()
+        .flat_map(|ev| drive(&mut state, ev))
+        .collect();
+
+    // Assert
+    let carriers: Vec<_> = chunks
+        .iter()
+        .filter_map(|c| c.upstream_meta.as_ref())
+        .collect();
+    assert_eq!(carriers.len(), 3, "created, item id, usage");
+    for meta in carriers {
+        assert_eq!(
+            meta.wire_dialect,
+            Some(IngressDialect::Responses),
+            "{meta:?}"
+        );
+    }
+}

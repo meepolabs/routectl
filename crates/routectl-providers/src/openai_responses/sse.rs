@@ -43,7 +43,7 @@ use routectl_core::{
     RequestProvenance, ResponsesEnvelope, Result, Role, ToolDef, UpstreamMeta, UsageInputSource,
     sanitize_for_log,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
-    wire_check::WireTap,
+    wire_check::{IngressDialect, WireTap},
 };
 
 /// Discriminant returned by `BlockState::tag` for log-context strings.
@@ -329,6 +329,7 @@ impl ResponsesStreamState {
             opaque_events: Vec::new(),
             upstream_meta: created_at.map(|created_at| {
                 UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_created_at(created_at))
+                    .with_wire_dialect(IngressDialect::Responses)
             }),
         }]
     }
@@ -490,6 +491,7 @@ impl ResponsesStreamState {
         let mut chunk = self.text_chunk(delta.to_string());
         chunk.upstream_meta = opening_item_id.map(|id| {
             UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(id))
+                .with_wire_dialect(IngressDialect::Responses)
         });
         vec![chunk]
     }
@@ -812,6 +814,7 @@ impl ResponsesStreamState {
                 cache_creation_input_tokens: cache.write_total,
                 cache_read_input_tokens: cache.read,
                 cache_creation: cache.write_split,
+                extras: u.carried_members(),
                 ..Default::default()
             }
         });
@@ -834,9 +837,10 @@ impl ResponsesStreamState {
                 finish_reason,
                 matched_stop_sequence: None,
             }],
-            upstream_meta: usage_delta
-                .as_ref()
-                .map(|_| UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)),
+            upstream_meta: usage_delta.as_ref().map(|_| {
+                UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)
+                    .with_wire_dialect(IngressDialect::Responses)
+            }),
             usage: usage_delta,
             opaque_events: Vec::new(),
         });
@@ -1287,6 +1291,7 @@ impl UnwrapOrDefaultResp for serde_json::Result<ResponsesResponse> {
             model: String::new(),
             output: Vec::new(),
             usage: None,
+            extras: serde_json::Map::new(),
         })
     }
 }

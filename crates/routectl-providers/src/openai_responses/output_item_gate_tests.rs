@@ -254,3 +254,42 @@ async fn the_drop_log_names_the_item_type_and_never_its_body() {
     assert!(logs_contain(UNMODELED));
     assert!(!logs_contain(ITEM_BODY_SENTINEL));
 }
+
+#[tokio::test]
+async fn usage_members_stay_only_for_a_responses_client() {
+    // (row, provenance, members kept)
+    let rows = [
+        (
+            "anthropic client",
+            RequestProvenance::AnthropicIngress,
+            false,
+        ),
+        ("chat client", RequestProvenance::OpenaiIngress, false),
+        ("library caller", RequestProvenance::Library, false),
+        (
+            "responses client",
+            RequestProvenance::ResponsesIngress,
+            true,
+        ),
+    ];
+    for (row, provenance, kept) in rows {
+        // Arrange
+        let slot = RequestObservation::new();
+        let body = json!({"id": "resp_1", "object": "response", "created_at": 1_700_000_000_i64,
+                          "status": "completed", "model": "gpt-test", "output": [],
+                          "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4,
+                                    "output_tokens_details": {"reasoning_tokens": 1, "x": 2}}});
+        let event = json!({"type": "response.completed", "response": body});
+        let template = ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(format!("data: {event}\n\n"));
+
+        // Act
+        let resp = complete_against(template, request(provenance, &slot)).await;
+
+        // Assert
+        let usage = resp.usage.expect("usage");
+        assert_eq!(usage.reasoning_tokens, Some(1), "{row}: typed read kept");
+        assert_eq!(!usage.extras.is_empty(), kept, "{row}: {:?}", usage.extras);
+    }
+}

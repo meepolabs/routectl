@@ -46,6 +46,12 @@
 //! reasoning_tokens        -> output_tokens_details.reasoning_tokens
 //! ```
 //!
+//! A response parsed from a Responses upstream also carries the members
+//! canonical does not model: top-level members on the envelope and usage
+//! members (each details object whole) on the usage. Only this render
+//! emits them, after every typed key, and a typed key always wins, even
+//! when the render omits its value.
+//!
 //! Reasoning reconstruction mirrors the egress request-side replay
 //! (`messages.rs::lift_reasoning_details`) so a round-trip is stable:
 //! details are grouped by `id`; the FIRST Encrypted detail per id is the
@@ -56,10 +62,10 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 
-use routectl_core::wire_check::{EditKind, EditSite, WirePath};
+use routectl_core::wire_check::{EditKind, EditSite, IngressDialect, WirePath};
 use routectl_core::{
     ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result, is_responses_family,
+    ReasoningDetailKind, Result, is_responses_family, renders_unknowns,
 };
 
 use crate::ingress::ResponseEdits;
@@ -84,6 +90,7 @@ pub(super) fn render_responses_response_declared(
         .as_ref()
         .and_then(|meta| meta.responses_message_item_id())
         .map(str::to_string);
+    let carries_unknowns = renders_unknowns(IngressDialect::Responses, resp.upstream_meta.as_ref());
     let mut body = Map::new();
     body.insert("object".into(), Value::String("response".into()));
     body.insert("id".into(), Value::String(resp.id));
@@ -112,11 +119,67 @@ pub(super) fn render_responses_response_declared(
         .unwrap_or_default();
     body.insert("output".into(), Value::Array(output));
 
-    if let Some(usage) = resp.usage.as_ref().map(render_usage) {
-        body.insert("usage".into(), usage);
+    if let Some(u) = resp.usage.as_ref() {
+        let carried = if carries_unknowns {
+            &u.extras
+        } else {
+            &Map::new()
+        };
+        body.insert("usage".into(), render_usage(u, carried));
+    }
+
+    if carries_unknowns
+        && let Some(envelope) = resp
+            .upstream_meta
+            .as_ref()
+            .and_then(|meta| meta.openai_responses.as_ref())
+    {
+        merge_unreserved(&mut body, &envelope.extras, RESERVED_TOP_LEVEL);
     }
 
     Ok(Value::Object(body))
+}
+
+/// Top-level names this render owns, whether or not it emits them.
+const RESERVED_TOP_LEVEL: &[&str] = &[
+    "object",
+    "id",
+    "created_at",
+    "model",
+    "status",
+    "incomplete_details",
+    "error",
+    "output",
+    "usage",
+];
+
+/// `usage` names this render owns, whether or not it emits them. The two
+/// details objects are merged member by member instead.
+const RESERVED_USAGE: &[&str] = &[
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    INPUT_TOKENS_DETAILS,
+    OUTPUT_TOKENS_DETAILS,
+];
+
+const INPUT_TOKENS_DETAILS: &str = "input_tokens_details";
+const OUTPUT_TOKENS_DETAILS: &str = "output_tokens_details";
+const CACHED_TOKENS: &str = "cached_tokens";
+const REASONING_TOKENS: &str = "reasoning_tokens";
+
+/// Add each `carried` member to `target` unless `target` already has it or
+/// `reserved` names it.
+fn merge_unreserved(
+    target: &mut Map<String, Value>,
+    carried: &Map<String, Value>,
+    reserved: &[&str],
+) {
+    for (key, value) in carried {
+        if !reserved.contains(&key.as_str()) {
+            target.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -504,28 +567,55 @@ fn reasoning_item(id: Option<String>, group: ReasoningItemBuilder) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Render canonical `Usage` into the Responses `usage` object. Inverse of
-/// the egress `translate_usage`: the `input_tokens_details` /
-/// `output_tokens_details` sub-objects are omitted entirely when their
-/// source field is None (matching the wire shape a client expects --
-/// no empty detail objects).
-pub(super) fn render_usage(u: &routectl_core::Usage) -> Value {
+/// the egress `translate_usage`: a details sub-object is emitted only when
+/// its typed source field is present or `carried` holds that object, so
+/// no empty details object is invented. `carried` holds the upstream usage
+/// members to emit beside the typed counts; the caller passes an empty map
+/// for a response this render may not carry members for.
+pub(super) fn render_usage(u: &routectl_core::Usage, carried: &Map<String, Value>) -> Value {
     let mut obj = Map::new();
     obj.insert("input_tokens".into(), json!(u.prompt_tokens));
-    if let Some(cached) = u.cache_read_input_tokens {
-        obj.insert(
-            "input_tokens_details".into(),
-            json!({"cached_tokens": cached}),
-        );
-    }
+    insert_details(
+        &mut obj,
+        INPUT_TOKENS_DETAILS,
+        (CACHED_TOKENS, u.cache_read_input_tokens),
+        carried,
+    );
     obj.insert("output_tokens".into(), json!(u.completion_tokens));
-    if let Some(reasoning) = u.reasoning_tokens {
-        obj.insert(
-            "output_tokens_details".into(),
-            json!({"reasoning_tokens": reasoning}),
-        );
-    }
+    insert_details(
+        &mut obj,
+        OUTPUT_TOKENS_DETAILS,
+        (REASONING_TOKENS, u.reasoning_tokens),
+        carried,
+    );
     obj.insert("total_tokens".into(), json!(u.total_tokens));
+    merge_unreserved(&mut obj, carried, RESERVED_USAGE);
     Value::Object(obj)
+}
+
+/// Insert the `name` details object: its typed count when present, then
+/// the carried object's other members.
+fn insert_details(
+    usage: &mut Map<String, Value>,
+    name: &str,
+    (typed_key, typed): (&str, Option<u32>),
+    carried: &Map<String, Value>,
+) {
+    let carried_details = match carried.get(name) {
+        Some(Value::Object(members)) => Some(members),
+        _ => None,
+    };
+    if typed.is_none() && carried_details.is_none() {
+        return;
+    }
+    let mut details = Map::new();
+    if let Some(count) = typed {
+        details.insert(typed_key.into(), json!(count));
+    }
+    if let Some(members) = carried_details {
+        merge_unreserved(&mut details, members, &[typed_key]);
+    }
+    usage.insert(name.into(), Value::Object(details));
 }
 
 #[cfg(test)]

@@ -839,6 +839,7 @@ async fn complete_carries_no_codex_quota_without_codex_headers() {
         routectl_core::UpstreamMeta::from_responses_envelope(
             routectl_core::ResponsesEnvelope::of_message_item_id("msg_1".into())
         )
+        .with_wire_dialect(routectl_core::wire_check::IngressDialect::Responses)
     );
 }
 
