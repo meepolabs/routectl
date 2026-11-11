@@ -210,6 +210,7 @@ fn sweep_leaves_non_reasoning_items_alone() {
         ResponseInputItem::Message {
             role: "assistant".into(),
             content: Vec::new(),
+            carried: Default::default(),
         },
         ResponseInputItem::Reasoning {
             id: None,

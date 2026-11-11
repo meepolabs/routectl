@@ -428,7 +428,8 @@ type LiftEditRow = (
 /// The lift declares the edits it makes to a Responses body, at `input[]`
 /// indices: each lifted item is removed and its text lands in
 /// `instructions`, added when the client sent none and rewritten when it
-/// did. A kept developer item declares the role rewrite instead.
+/// did. A kept developer item leaves with the role it came in with, so it
+/// declares nothing.
 #[test]
 fn the_responses_lift_declares_its_edits_at_input_indices() {
     use EditKind::{Add, Remove, Rewrite};
@@ -459,7 +460,7 @@ fn the_responses_lift_declares_its_edits_at_input_indices() {
         (
             "kept developer item",
             json!({"model": "m", "input": [msg("user", "hi"), image_dev]}),
-            vec![("/input/1/role", Rewrite)],
+            vec![],
         ),
         (
             "no system",

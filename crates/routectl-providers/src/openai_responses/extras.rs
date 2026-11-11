@@ -16,8 +16,15 @@
 //! provider_extras allowlist (8 keys): `prompt_cache_key`,
 //! `prompt_cache_options`, `prompt_cache_retention`, `service_tier`,
 //! `text`, `include`, `store`, `client_metadata`.
-//! Anything else stays unforwarded -- matches the discipline in
-//! `routectl-core::is_canonical_request_key`.
+//!
+//! Any other key, on a request whose extras are spelled for this wire
+//! (`forwards_unknowns`: the Responses ingress or a library caller): the
+//! api-key surface forwards it at the top level unless routectl writes that
+//! name itself (a `ResponsesRequest` member or a canonical request key); the
+//! ChatGPT-OAuth and Bedrock Mantle surfaces keep the allowlist. Every key a
+//! surface does not forward is withheld, declared as a Remove, and the
+//! request counts once as `unknown_member_withheld`. A key from another
+//! ingress dialect was spelled for another wire and stays unforwarded.
 //!
 //! Prompt caching: `prompt_cache_options` and `prompt_cache_retention`
 //! forward only for a request the Responses ingress produced, and only on
@@ -46,11 +53,11 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use routectl_core::wire_check::{EditKind, EditSite, WireTap};
-use routectl_core::{ChatRequest, ReasoningConfig, RequestProvenance};
+use routectl_core::wire_check::{EditKind, EditSite, WireTap, forwards_unknowns};
+use routectl_core::{ChatRequest, ReasoningConfig, RequestProvenance, is_canonical_request_key};
 
 use super::AuthKind;
-use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
+use super::types::{RESPONSES_REQUEST_MEMBERS, ResponsesReasoning, ResponsesRequest, TextControls};
 use crate::effort::{level_from_budget, wire_effort};
 use crate::translation_drop_metrics::record_translation_drop;
 use crate::wire_declare::declare;
@@ -172,13 +179,12 @@ fn responses_reasoning_overlay(req: &ChatRequest) -> Option<Map<String, Value>> 
 }
 
 /// Layer canonical `req.provider_extras` into the Responses request.
-/// Only the 8 allowed keys are honored; everything else is left
-/// unforwarded so an operator-supplied long-tail field doesn't slip
-/// through unaudited. The `store` flag is special-cased: for
-/// `ChatgptOauth`, it stays hardcoded to `false` regardless of any
-/// `provider_extras["store"]` value. The two prompt-cache fields pass the
-/// gate in [`apply_prompt_cache_field`], which records each one it
-/// withholds in `withheld`.
+/// The 8 allowed keys are honored on every surface; any other key goes
+/// through [`TopLevelCarry`] (see the module doc). The `store` flag is
+/// special-cased: for `ChatgptOauth`, it stays hardcoded to `false`
+/// regardless of any `provider_extras["store"]` value. The two prompt-cache
+/// fields pass the gate in [`apply_prompt_cache_field`], which records each
+/// one it withholds in `withheld`.
 pub(super) fn merge_provider_extras(
     request: &mut ResponsesRequest,
     req: &ChatRequest,
@@ -189,6 +195,8 @@ pub(super) fn merge_provider_extras(
     let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
         return;
     };
+    let carry = TopLevelCarry::of(req.routectl_internal.provenance, auth_kind);
+    let mut unforwarded = UnforwardedMembers::default();
 
     for (k, v) in extras {
         match k.as_str() {
@@ -225,23 +233,101 @@ pub(super) fn merge_provider_extras(
             "client_metadata" => {
                 request.client_metadata = Some(v.clone());
             }
-            // Any other key stays unforwarded. The discipline matches
-            // routectl-core::is_canonical_request_key -- if the
-            // Responses API grows a new top-level field, we add it
-            // here explicitly rather than silently passing through.
-            //
-            // No caller content is lost on this arm for the same-dialect
-            // pairing. The Responses ingress sweeps every unhandled
-            // top-level body field into `provider_extras`, so an inbound
-            // key outside this allowlist was outside the Responses API's
-            // own field set too -- forwarding it would put an unaudited
-            // operator- or client-supplied key on the wire, which is the
-            // failure this allowlist exists to prevent, not a fidelity
-            // loss it causes. A recognized field the API grows later is a
-            // code edit here, and the pinned allowlist is what makes that
-            // edit a review moment rather than a silent passthrough.
-            // TRANSLATION-DROP: structural -- the allowlist is the audited forwarding surface; an unlisted key was never a Responses API field
-            _ => {}
+            // Read by `apply_reasoning` and `resolve_parallel_tool_calls`,
+            // which build the typed fields from them.
+            key if CONSUMED_ELSEWHERE.contains(&key) => {}
+            key => carry.apply(request, key, v, &mut unforwarded),
+        }
+    }
+    unforwarded.flush(tap);
+}
+
+/// Extras keys another step of this egress reads into a typed field.
+const CONSUMED_ELSEWHERE: &[&str] = &["reasoning", "parallel_tool_calls"];
+
+/// What the egress does with a top-level extras key outside the allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopLevelCarry {
+    /// The api-key surface: forward it unless routectl writes the name.
+    Open,
+    /// The ChatGPT-OAuth and Bedrock Mantle surfaces: the allowlist is the
+    /// whole forwarded set (the OAuth backend refuses fields its codex
+    /// client never sends; nothing records what Mantle accepts).
+    Allowlist,
+    /// Extras spelled for another wire: never forwarded.
+    Foreign,
+}
+
+impl TopLevelCarry {
+    fn of(provenance: RequestProvenance, auth_kind: AuthKind) -> Self {
+        if !forwards_unknowns(provenance, auth_kind.egress_kind()) {
+            return Self::Foreign;
+        }
+        match auth_kind {
+            AuthKind::ApiKey => Self::Open,
+            AuthKind::ChatgptOauth | AuthKind::BedrockMantle => Self::Allowlist,
+        }
+    }
+
+    fn apply(
+        self,
+        request: &mut ResponsesRequest,
+        key: &str,
+        value: &Value,
+        unforwarded: &mut UnforwardedMembers,
+    ) {
+        match self {
+            Self::Open if !is_written_by_egress(key) => {
+                request.carried.insert(key.to_owned(), value.clone());
+            }
+            Self::Open => unforwarded.record(key, EditSite::ManagedExtrasStrip),
+            Self::Allowlist => unforwarded.record(key, EditSite::AuthSurfaceGate),
+            // A key a client of another dialect sent names a member of that
+            // dialect's wire, which no Responses surface defines.
+            // TRANSLATION-DROP: structural -- a key from another ingress dialect was spelled for another wire, not for this one
+            Self::Foreign => {}
+        }
+    }
+}
+
+/// Whether routectl writes the top-level member `key` itself, so an extras
+/// value under that name must never reach the wire beside or over it.
+fn is_written_by_egress(key: &str) -> bool {
+    RESPONSES_REQUEST_MEMBERS.contains(&key) || is_canonical_request_key(key)
+}
+
+/// The top-level extras keys one request's surface did not forward, each
+/// with the edit site that withheld it.
+#[derive(Debug, Default)]
+struct UnforwardedMembers {
+    keys: Vec<(String, EditSite)>,
+}
+
+impl UnforwardedMembers {
+    fn record(&mut self, key: &str, site: EditSite) {
+        self.keys.push((key.to_owned(), site));
+    }
+
+    /// Declare each withheld key as a top-level Remove and count the
+    /// request once. A key that is not token-shaped is left undeclared, so
+    /// it still surfaces as a finding.
+    /// TRANSLATION-DROP: lane=openai-responses class=unknown_member_withheld test=top_level_members_outside_the_forwarded_set_are_withheld_declared_and_counted_once
+    fn flush(&self, tap: Option<&WireTap>) {
+        if self.keys.is_empty() {
+            return;
+        }
+        record_translation_drop(super::LANE, "unknown_member_withheld");
+        tracing::debug!(
+            withheld = self.keys.len(),
+            "openai-responses egress: top-level extras outside this surface's forwarded set withheld"
+        );
+        let Some(tap) = tap else {
+            return;
+        };
+        for (key, site) in &self.keys {
+            if let Some(path) = crate::wire_declare::member_pointer("", key) {
+                declare(tap, *site, path, EditKind::Remove);
+            }
         }
     }
 }

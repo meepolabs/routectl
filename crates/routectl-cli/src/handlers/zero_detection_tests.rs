@@ -1095,6 +1095,60 @@ fn responses_stream_with_item_members() -> ResponseTemplate {
     ))
 }
 
+/// Responses requests whose items and blocks carry members the canonical
+/// model does not type: each must reach the wire where the client put it.
+fn responses_carrier_cases() -> Vec<Case> {
+    vec![
+        case(
+            "responses/message-and-part-members",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "id": "msg_u1", "role": "user", "content": [
+                    {"type": "input_text", "text": "hi", "annotations": ["caf\u{e9}"]}]},
+                {"type": "message", "id": "msg_a1", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "ok", "annotations": []}]},
+                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "id": "fco_1", "call_id": "c1",
+                 "output": "42"},
+                {"type": "message", "id": "msg_u2", "role": "user", "content": [
+                    {"type": "input_text", "text": "again"}]}]}),
+            responses_stream(),
+            responses_provider,
+        ),
+        case(
+            "responses/codex-shaped-developer-items",
+            Ingress::Responses,
+            codex_shaped_body(),
+            responses_stream(),
+            responses_provider,
+        ),
+    ]
+}
+
+/// A synthetic request in the shape a codex client sends: four developer
+/// items and the user and assistant turns each carrying an item `id`, no
+/// `instructions`.
+fn codex_shaped_body() -> Value {
+    let item = |id: &str, role: &str, kind: &str, texts: &[&str]| {
+        let content: Vec<Value> = texts
+            .iter()
+            .map(|text| json!({"type": kind, "text": text}))
+            .collect();
+        json!({"type": "message", "id": id, "role": role, "content": content})
+    };
+    json!({"model": ALIAS, "stream": true, "store": false,
+           "include": ["reasoning.encrypted_content"],
+           "prompt_cache_key": "session-1",
+           "input": [
+                item("msg_d1", "developer", "input_text", &["permissions"]),
+                item("msg_d2", "developer", "input_text", &["collaboration", "skills"]),
+                item("msg_d3", "developer", "input_text", &["environment"]),
+                item("msg_d4", "developer", "input_text", &["apps"]),
+                item("msg_u1", "user", "input_text", &["context"]),
+                item("msg_u2", "user", "input_text", &["fix the test"]),
+                item("msg_a1", "assistant", "output_text", &["on it"])]})
+}
+
 /// Responses traffic through the Bedrock Mantle surface, walked by a real
 /// Mantle egress.
 fn responses_mantle_cases() -> Vec<Case> {
@@ -1690,6 +1744,7 @@ async fn every_walked_request_is_clean_or_a_listed_known_loss_on_both_legs() {
         .chain(anthropic_cases())
         .chain(chat_cases())
         .chain(responses_cases())
+        .chain(responses_carrier_cases())
         .chain(responses_mantle_cases())
         .chain(cross_dialect_responses_cases())
         .chain(bedrock_invoke_cases())
@@ -1777,6 +1832,29 @@ async fn the_walk_surfaces_an_undeclared_difference() {
         walked.unexplained(),
         [format!(
             "{CHAT} response /unmodelled_member missing (control/unmodelled-upstream-member)"
+        )]
+    );
+}
+
+/// Positive control on the Responses lane: a carried member the deposited
+/// egress body lost comes back as a request-leg finding at its own path, or
+/// a clean walk of the carrier cases proves nothing.
+#[tokio::test]
+async fn the_walk_surfaces_a_lost_carried_member_on_the_responses_lane() {
+    let probe = Case {
+        tap_drop: Some("/input/0/content/0/annotations"),
+        ..responses_carrier_cases().remove(0)
+    };
+
+    let walked = Box::pin(walk_all(vec![probe])).await;
+
+    assert_eq!(walked.total(), 2, "one request, both legs");
+    assert_eq!(
+        walked.unexplained(),
+        [format!(
+            "{} request /input/0/content/0/annotations missing \
+             (responses/message-and-part-members)",
+            Ingress::Responses.lane()
         )]
     );
 }

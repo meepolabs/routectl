@@ -686,6 +686,39 @@ fn a_kept_text_only_system_turn_reaches_the_lifted_system_and_counts_no_drop() {
     assert!(!body.to_string().contains("msg_kept"), "{body}");
 }
 
+/// The same lane with NO canonical system: the Lift policy still moves the
+/// kept turn's text into the wire `system`, and no system-role message is
+/// left in `messages`.
+#[test]
+fn a_kept_text_only_system_turn_without_a_canonical_system_reaches_the_lifted_system() {
+    let req = ChatRequest {
+        system: None,
+        messages: vec![
+            user_turn("hi"),
+            system_turn_with_members("kept rule"),
+            user_turn("again"),
+        ]
+        .into(),
+        ..base_req()
+    };
+
+    let before = system_part_drop_count();
+    let body =
+        normalize("test", &req, false, None, false, false, false).expect("normalize must succeed");
+    let after = system_part_drop_count();
+
+    assert_eq!(after - before, 0, "{body}");
+    assert_eq!(body["system"], serde_json::json!("kept rule"), "{body}");
+    let messages = body["messages"].as_array().expect("messages");
+    assert!(
+        messages
+            .iter()
+            .all(|m| m["role"] != serde_json::json!("system")),
+        "{body}"
+    );
+    assert!(!body.to_string().contains("msg_kept"), "{body}");
+}
+
 /// Positive control for the row above: the same lane and shape with an
 /// image on the kept turn does count the part the `system` field cannot carry.
 #[test]

@@ -102,7 +102,35 @@ pub struct ResponsesRequest {
     /// gate lives in `request.rs::translate`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_tokens: Option<u32>,
+
+    /// Top-level members forwarded as the request carried them, on the
+    /// surfaces that take members outside the allowlist; the gate lives in
+    /// `extras.rs`. Never holds a name a field above serializes.
+    #[serde(flatten)]
+    pub(crate) carried: Map<String, Value>,
 }
+
+/// Every top-level member name [`ResponsesRequest`] serializes from a typed
+/// field. A carried top-level member never takes one of these names.
+pub const RESPONSES_REQUEST_MEMBERS: &[&str] = &[
+    "model",
+    "instructions",
+    "input",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
+    "store",
+    "stream",
+    "include",
+    "service_tier",
+    "prompt_cache_key",
+    "prompt_cache_options",
+    "prompt_cache_retention",
+    "text",
+    "client_metadata",
+    "max_output_tokens",
+];
 
 // ---------------------------------------------------------------------------
 // Input items
@@ -139,6 +167,10 @@ pub enum ResponseInputItem {
     Message {
         role: String,
         content: Vec<ResponsesContentItem>,
+        /// Members the client sent on the item that this hub does not
+        /// model; see [`CarriedMembers`].
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     Reasoning {
         /// Upstream-stable item id (e.g. "rs_1"). Skipped when None so
@@ -174,8 +206,47 @@ pub enum ResponseInputItem {
     FunctionCallOutput {
         call_id: String,
         output: FunctionCallOutputBody,
+        /// Members the client sent on the item that this hub does not
+        /// model; see [`CarriedMembers`].
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
 }
+
+/// Members of a client item or content block that this hub does not model,
+/// emitted beside the typed members of the wire node built from it. Built
+/// only through [`CarriedMembers::new`], which leaves out every name the
+/// wire node itself writes, present or not, so a carried member never
+/// replaces or recreates a typed one.
+#[derive(Debug, Default, Serialize)]
+#[serde(transparent)]
+pub struct CarriedMembers(Map<String, Value>);
+
+impl CarriedMembers {
+    /// The members of `carried` whose names are not in `wire_keys`.
+    pub fn new<'a>(
+        carried: impl Iterator<Item = (&'a String, &'a Value)>,
+        wire_keys: &[&str],
+    ) -> Self {
+        Self(
+            carried
+                .filter(|(key, _)| !wire_keys.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    }
+}
+
+/// Member names a `message` input item writes.
+pub const MESSAGE_ITEM_KEYS: &[&str] = &["type", "role", "content"];
+/// Member names a `function_call_output` input item writes.
+pub const FUNCTION_CALL_OUTPUT_ITEM_KEYS: &[&str] = &["type", "call_id", "output"];
+/// Member names an `input_text` block writes.
+pub const INPUT_TEXT_KEYS: &[&str] = &["type", "text", "prompt_cache_breakpoint"];
+/// Member names an `output_text` block writes.
+pub const OUTPUT_TEXT_KEYS: &[&str] = &["type", "text"];
+/// Member names an `input_image` block writes.
+pub const INPUT_IMAGE_KEYS: &[&str] = &["type", "image_url", "detail"];
 
 /// The `output` field of a `function_call_output` item. When all tool
 /// result parts are plain text the body collapses to a flat string
@@ -235,9 +306,13 @@ pub enum ResponsesContentItem {
         /// breakpoint placement; absent on every other block.
         #[serde(skip_serializing_if = "Option::is_none")]
         prompt_cache_breakpoint: Option<Value>,
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     OutputText {
         text: String,
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     /// Image block on a user message. `image_url` is either a
     /// `data:<media_type>;base64,<data>` URI (for base64 sources) or an
@@ -248,6 +323,8 @@ pub enum ResponsesContentItem {
         image_url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     /// File block on a user message. Carries inline base64 (`file_data`
     /// as a `data:<mime>;base64,<...>` URI), a reference to a
@@ -386,7 +463,9 @@ mod tests {
             content: vec![ResponsesContentItem::InputText {
                 text: "hi".to_string(),
                 prompt_cache_breakpoint: None,
+                carried: CarriedMembers::default(),
             }],
+            carried: CarriedMembers::default(),
         };
 
         // Act
@@ -490,6 +569,7 @@ mod tests {
         let item = ResponseInputItem::FunctionCallOutput {
             call_id: "call_1".into(),
             output: FunctionCallOutputBody::Text("42".into()),
+            carried: CarriedMembers::default(),
         };
 
         // Act
@@ -520,6 +600,7 @@ mod tests {
                     detail: None,
                 },
             ]),
+            carried: CarriedMembers::default(),
         };
 
         // Act
@@ -612,6 +693,120 @@ mod tests {
                 "mode": "pro"
             })
         );
+    }
+
+    /// The reserved top-level list names exactly the members a fully
+    /// populated request serializes, so a field added later is reserved too.
+    #[test]
+    fn reserved_request_members_match_every_serialized_field() {
+        // Arrange
+        let request = ResponsesRequest {
+            model: "m".into(),
+            instructions: String::new(),
+            input: Vec::new(),
+            tools: vec![ResponsesTool::Other(json!({}))],
+            tool_choice: Some(json!("auto")),
+            parallel_tool_calls: true,
+            reasoning: Some(ResponsesReasoning {
+                effort: None,
+                summary: None,
+                extra: Map::new(),
+            }),
+            store: false,
+            stream: false,
+            include: vec!["x".into()],
+            service_tier: Some("flex".into()),
+            prompt_cache_key: Some("k".into()),
+            prompt_cache_options: Some(json!({})),
+            prompt_cache_retention: Some(json!("24h")),
+            text: Some(TextControls { inner: json!({}) }),
+            client_metadata: Some(json!({})),
+            max_output_tokens: Some(1),
+            carried: Map::new(),
+        };
+
+        // Act
+        let v = serde_json::to_value(&request).unwrap();
+
+        // Assert
+        let mut serialized: Vec<&str> = v
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut reserved = RESPONSES_REQUEST_MEMBERS.to_vec();
+        serialized.sort_unstable();
+        reserved.sort_unstable();
+        assert_eq!(serialized, reserved);
+    }
+
+    /// Each wire node's reserved list names exactly the members it writes.
+    #[test]
+    fn reserved_node_members_match_what_each_node_writes() {
+        let rows: [(&str, Value, &[&str]); 5] = [
+            (
+                "message",
+                serde_json::to_value(ResponseInputItem::Message {
+                    role: "user".into(),
+                    content: Vec::new(),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                MESSAGE_ITEM_KEYS,
+            ),
+            (
+                "function_call_output",
+                serde_json::to_value(ResponseInputItem::FunctionCallOutput {
+                    call_id: "c".into(),
+                    output: FunctionCallOutputBody::Text(String::new()),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                FUNCTION_CALL_OUTPUT_ITEM_KEYS,
+            ),
+            (
+                "input_text",
+                serde_json::to_value(ResponsesContentItem::InputText {
+                    text: String::new(),
+                    prompt_cache_breakpoint: Some(json!({})),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                INPUT_TEXT_KEYS,
+            ),
+            (
+                "output_text",
+                serde_json::to_value(ResponsesContentItem::OutputText {
+                    text: String::new(),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                OUTPUT_TEXT_KEYS,
+            ),
+            (
+                "input_image",
+                serde_json::to_value(ResponsesContentItem::InputImage {
+                    image_url: String::new(),
+                    detail: Some("low".into()),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                INPUT_IMAGE_KEYS,
+            ),
+        ];
+        for (row, value, reserved) in rows {
+            let mut written: Vec<&str> = value
+                .as_object()
+                .expect("object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let mut reserved = reserved.to_vec();
+            written.sort_unstable();
+            reserved.sort_unstable();
+            assert_eq!(written, reserved, "{row}");
+        }
     }
 
     #[test]

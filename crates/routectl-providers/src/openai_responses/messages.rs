@@ -88,9 +88,9 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap, forwards_unknowns};
+use routectl_core::wire_check::{EditKind, EditSite, WireTap, forwards_unknowns};
 use routectl_core::{
-    ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability,
+    ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability,
     RequestProvenance, Result, Role, is_replayable, is_responses_family, reasoning_envelope,
     sanitize_for_log, scheme_of,
 };
@@ -101,8 +101,10 @@ use crate::skipped_format::render_skipped_format;
 
 use super::extras::{PromptCacheField, PromptCacheWithheldTally};
 use super::types::{
-    FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
-    ReasoningSummaryItem, ResponseInputItem, ResponsesContentItem,
+    CarriedMembers, FUNCTION_CALL_OUTPUT_ITEM_KEYS, FunctionCallOutputBody,
+    FunctionCallOutputContentItem, INPUT_IMAGE_KEYS, INPUT_TEXT_KEYS, MESSAGE_ITEM_KEYS,
+    OUTPUT_TEXT_KEYS, ReasoningContentItem, ReasoningSummaryItem, ResponseInputItem,
+    ResponsesContentItem,
 };
 use super::{AuthKind, lane_scheme};
 use crate::translation_drop_metrics::record_translation_drop;
@@ -253,14 +255,10 @@ pub(super) enum UnknownParts {
 
 impl UnknownParts {
     pub(super) fn for_request(provenance: RequestProvenance, auth_kind: AuthKind) -> Self {
-        let egress = match auth_kind {
-            AuthKind::BedrockMantle => EgressKind::OpenaiResponsesMantle,
-            AuthKind::ChatgptOauth | AuthKind::ApiKey => EgressKind::OpenaiResponses,
-        };
         // A library caller builds canonical parts itself, so an unmodeled
         // block it holds was never written for this wire.
         if matches!(provenance, RequestProvenance::Library)
-            || !forwards_unknowns(provenance, egress)
+            || !forwards_unknowns(provenance, auth_kind.egress_kind())
         {
             return Self::Drop;
         }
@@ -269,6 +267,63 @@ impl UnknownParts {
             AuthKind::ChatgptOauth | AuthKind::ApiKey => Self::Forward,
         }
     }
+}
+
+/// What one request's input build emits besides the modeled members.
+#[derive(Debug, Clone, Copy)]
+struct InputPolicy<'a> {
+    auth_kind: AuthKind,
+    unknown: UnknownParts,
+    /// Whether the members a message or modeled part carries (see
+    /// `Message::forwardable_extras`) are emitted. Only on a
+    /// lane whose wire the request's members were written for, and not on
+    /// Bedrock Mantle, which fetches what it reads under the operator's
+    /// identity and documents no list of the members it reads.
+    emits_carriers: bool,
+    /// Indices of the system turns that were `developer` items inbound.
+    developer_turns: &'a [usize],
+}
+
+impl InputPolicy<'_> {
+    fn message_carried(&self, msg: &Message, wire_keys: &[&str]) -> CarriedMembers {
+        if !self.emits_carriers {
+            return CarriedMembers::default();
+        }
+        CarriedMembers::new(msg.forwardable_extras(), wire_keys)
+    }
+
+    fn part_carried(&self, part: &KnownContentPart, wire_keys: &[&str]) -> CarriedMembers {
+        if !self.emits_carriers {
+            return CarriedMembers::default();
+        }
+        CarriedMembers::new(part.forwardable_extras(), wire_keys)
+    }
+}
+
+/// Whether a request of `provenance` bound for `auth_kind` emits the members
+/// its messages and modeled parts carry.
+fn emits_carriers(provenance: RequestProvenance, auth_kind: AuthKind) -> bool {
+    auth_kind != AuthKind::BedrockMantle && forwards_unknowns(provenance, auth_kind.egress_kind())
+}
+
+/// [`build_input`] for a whole request: its provenance, messages and the
+/// Responses ingress's record of which kept system turns were `developer`
+/// items.
+pub(super) fn build_request_input(
+    id: &str,
+    auth_kind: AuthKind,
+    req: &ChatRequest,
+    tap: Option<&WireTap>,
+    cache_withheld: &mut PromptCacheWithheldTally,
+) -> Result<Vec<ResponseInputItem>> {
+    let provenance = req.routectl_internal.provenance;
+    let policy = InputPolicy {
+        auth_kind,
+        unknown: UnknownParts::for_request(provenance, auth_kind),
+        emits_carriers: emits_carriers(provenance, auth_kind),
+        developer_turns: &req.routectl_internal.responses_developer_turns,
+    };
+    build_input_with(id, policy, &req.messages, tap, cache_withheld)
 }
 
 /// Walk the canonical `messages[]` and produce a flat `input[]` array
@@ -286,6 +341,7 @@ impl UnknownParts {
 ///
 /// A breakpoint this lane withholds from a forwarded unmodeled part is
 /// recorded on `cache_withheld`, which the caller flushes.
+#[cfg(test)]
 pub(super) fn build_input(
     id: &str,
     auth_kind: AuthKind,
@@ -294,9 +350,24 @@ pub(super) fn build_input(
     tap: Option<&WireTap>,
     cache_withheld: &mut PromptCacheWithheldTally,
 ) -> Result<Vec<ResponseInputItem>> {
+    let policy = InputPolicy {
+        auth_kind,
+        unknown: UnknownParts::for_request(provenance, auth_kind),
+        emits_carriers: emits_carriers(provenance, auth_kind),
+        developer_turns: &[],
+    };
+    build_input_with(id, policy, messages, tap, cache_withheld)
+}
+
+fn build_input_with(
+    id: &str,
+    policy: InputPolicy<'_>,
+    messages: &[Message],
+    tap: Option<&WireTap>,
+    cache_withheld: &mut PromptCacheWithheldTally,
+) -> Result<Vec<ResponseInputItem>> {
     let mut tally = ResponsesDropTally::default();
-    let unknown = UnknownParts::for_request(provenance, auth_kind);
-    let out = build_input_tallied(id, auth_kind, unknown, messages, &mut tally);
+    let out = build_input_tallied(id, policy, messages, &mut tally);
     // Flushed before the `?`-free return so a request that FAILS after
     // dropping something still reports the drop it already made.
     tally.flush(tap, cache_withheld);
@@ -305,31 +376,35 @@ pub(super) fn build_input(
 
 fn build_input_tallied(
     id: &str,
-    auth_kind: AuthKind,
-    unknown: UnknownParts,
+    policy: InputPolicy<'_>,
     messages: &[Message],
     tally: &mut ResponsesDropTally,
 ) -> Result<Vec<ResponseInputItem>> {
     let mut out: Vec<ResponseInputItem> = Vec::with_capacity(messages.len());
-    for msg in messages {
+    for (index, msg) in messages.iter().enumerate() {
         match &msg.role {
             // A liftable system turn is not lost here: `system.rs` lifts its
             // text into `instructions` after the top-level `req.system`, with
             // the billing/attribution block withheld, so emitting it again as
             // an input item would duplicate it. A turn that stays in place (a
             // non-text part, or unmodeled members) rides in place as a
-            // `system` message item instead; `system.rs` skips it.
+            // message item instead; `system.rs` skips it.
             // TRANSLATION-DROP: structural -- a liftable system turn is lifted into `instructions` by the system translation, and any other system turn is emitted in place below
             Role::System => {
                 if msg.stays_in_place() {
-                    translate_system_message(id, auth_kind, unknown, msg, &mut out, tally)?;
+                    let role = if policy.developer_turns.contains(&index) {
+                        "developer"
+                    } else {
+                        "system"
+                    };
+                    translate_system_message(id, policy, role, msg, &mut out, tally)?;
                 }
             }
-            Role::User => translate_user_message(id, auth_kind, unknown, msg, &mut out, tally)?,
+            Role::User => translate_user_message(id, policy, msg, &mut out, tally)?,
             Role::Assistant => {
-                translate_assistant_message(id, auth_kind, unknown, msg, &mut out, tally)?;
+                translate_assistant_message(id, policy, msg, &mut out, tally)?;
             }
-            Role::Tool => translate_tool_message(id, auth_kind, msg, &mut out, tally)?,
+            Role::Tool => translate_tool_message(id, policy, msg, &mut out, tally)?,
             // This function serves callers whose ingress dialect is
             // openai_responses itself as well as callers translating in
             // from other dialects. Unlike Anthropic/Gemini/Converse, the
@@ -344,7 +419,7 @@ fn build_input_tallied(
             // goes through the same tool-result lift and content build a
             // `Role::User` turn does.
             Role::Other(tag) => {
-                translate_other_message(id, auth_kind, unknown, tag, msg, &mut out, tally)?;
+                translate_other_message(id, policy, tag, msg, &mut out, tally)?;
             }
         }
     }
@@ -357,8 +432,7 @@ fn build_input_tallied(
 
 fn translate_user_message(
     id: &str,
-    auth_kind: AuthKind,
-    unknown: UnknownParts,
+    policy: InputPolicy<'_>,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -372,7 +446,7 @@ fn translate_user_message(
     // function call <id>".
     extract_tool_results(id, &msg.content, out);
 
-    let content = build_user_content(id, auth_kind, unknown, &msg.content, tally)?;
+    let content = build_user_content(id, policy, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -384,6 +458,7 @@ fn translate_user_message(
     out.push(ResponseInputItem::Message {
         role: "user".into(),
         content,
+        carried: policy.message_carried(msg, MESSAGE_ITEM_KEYS),
     });
     Ok(())
 }
@@ -394,8 +469,7 @@ fn translate_user_message(
 /// since Responses input items share one shape regardless of role tag.
 fn translate_other_message(
     id: &str,
-    auth_kind: AuthKind,
-    unknown: UnknownParts,
+    policy: InputPolicy<'_>,
     tag: &str,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
@@ -415,7 +489,7 @@ fn translate_other_message(
     let msg = &msg;
     extract_tool_results(id, &msg.content, out);
 
-    let content = build_user_content(id, auth_kind, unknown, &msg.content, tally)?;
+    let content = build_user_content(id, policy, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -427,18 +501,20 @@ fn translate_other_message(
     out.push(ResponseInputItem::Message {
         role: tag.to_string(),
         content,
+        carried: policy.message_carried(msg, MESSAGE_ITEM_KEYS),
     });
     Ok(())
 }
 
-/// A system turn carrying a non-text part, emitted in place as a `system`
-/// message item through the same content build a user turn takes. The
-/// billing/attribution part is withheld first; `system.rs` sees the
-/// same part and records the withhold, so it is counted once per request.
+/// A system turn that stays in place (a non-text part, or carried members),
+/// emitted where it sits as a message item under `role` through the same
+/// content build a user turn takes. The billing/attribution part is
+/// withheld first; `system.rs` sees the same part and records the withhold,
+/// so it is counted once per request.
 fn translate_system_message(
     id: &str,
-    auth_kind: AuthKind,
-    unknown: UnknownParts,
+    policy: InputPolicy<'_>,
+    role: &str,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -446,11 +522,12 @@ fn translate_system_message(
     let Some(msg) = crate::system_filter::without_billing_attribution(msg) else {
         return Ok(());
     };
-    let content = build_user_content(id, auth_kind, unknown, &msg.content, tally)?;
+    let content = build_user_content(id, policy, &msg.content, tally)?;
     if !content.is_empty() {
         out.push(ResponseInputItem::Message {
-            role: "system".into(),
+            role: role.to_owned(),
             content,
+            carried: policy.message_carried(&msg, MESSAGE_ITEM_KEYS),
         });
     }
     Ok(())
@@ -489,6 +566,7 @@ fn extract_tool_results(id: &str, content: &MessageContent, out: &mut Vec<Respon
         out.push(ResponseInputItem::FunctionCallOutput {
             call_id: crate::tool_id::sanitize_tool_id(tool_use_id).into_owned(),
             output,
+            carried: CarriedMembers::default(),
         });
     }
 }
@@ -561,12 +639,12 @@ fn tool_result_to_output_body(id: &str, content: &Value) -> FunctionCallOutputBo
 /// duplicate is visible during triage.
 fn translate_assistant_message(
     id: &str,
-    auth_kind: AuthKind,
-    unknown: UnknownParts,
+    policy: InputPolicy<'_>,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
 ) -> Result<()> {
+    let auth_kind = policy.auth_kind;
     let mut reasoning_items: Vec<ResponseInputItem> = Vec::new();
     let mut message_content: Vec<ResponsesContentItem> = Vec::new();
     let mut tool_calls: Vec<ResponseInputItem> = Vec::new();
@@ -586,7 +664,10 @@ fn translate_assistant_message(
     let mut content_has_tool_use = false;
     match &msg.content {
         MessageContent::Text(t) if !t.is_empty() => {
-            message_content.push(ResponsesContentItem::OutputText { text: t.clone() });
+            message_content.push(ResponsesContentItem::OutputText {
+                text: t.clone(),
+                carried: CarriedMembers::default(),
+            });
         }
         // An empty-string or Null assistant content carries no text to
         // emit, and a Responses `message` item with an empty `content`
@@ -603,7 +684,7 @@ fn translate_assistant_message(
                 match p {
                     ContentPart::Known(known) => walk_assistant_part(
                         id,
-                        auth_kind,
+                        policy,
                         known,
                         suppress_thinking_parts,
                         &mut reasoning_items,
@@ -618,8 +699,13 @@ fn translate_assistant_message(
                             type_tag,
                             extras,
                         };
-                        message_content
-                            .extend(unknown_content_part(id, auth_kind, unknown, &part, tally)?);
+                        message_content.extend(unknown_content_part(
+                            id,
+                            auth_kind,
+                            policy.unknown,
+                            &part,
+                            tally,
+                        )?);
                     }
                 }
             }
@@ -645,6 +731,7 @@ fn translate_assistant_message(
         out.push(ResponseInputItem::Message {
             role: "assistant".into(),
             content: message_content,
+            carried: policy.message_carried(msg, MESSAGE_ITEM_KEYS),
         });
     }
     out.extend(tool_calls);
@@ -959,7 +1046,7 @@ struct ReasoningGroup {
 /// `extract_tool_results` for the same rule on the Anthropic-shape lane.
 fn translate_tool_message(
     id: &str,
-    auth_kind: AuthKind,
+    policy: InputPolicy<'_>,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -969,9 +1056,13 @@ fn translate_tool_message(
     let output = match &msg.content {
         MessageContent::Text(t) => FunctionCallOutputBody::Text(t.clone()),
         MessageContent::Null => FunctionCallOutputBody::Text(String::new()),
-        MessageContent::Parts(parts) => build_tool_output_body(id, auth_kind, parts, tally)?,
+        MessageContent::Parts(parts) => build_tool_output_body(id, policy.auth_kind, parts, tally)?,
     };
-    out.push(ResponseInputItem::FunctionCallOutput { call_id, output });
+    out.push(ResponseInputItem::FunctionCallOutput {
+        call_id,
+        output,
+        carried: policy.message_carried(msg, FUNCTION_CALL_OUTPUT_ITEM_KEYS),
+    });
     Ok(())
 }
 
@@ -981,27 +1072,29 @@ fn translate_tool_message(
 
 fn build_user_content(
     id: &str,
-    auth_kind: AuthKind,
-    unknown: UnknownParts,
+    policy: InputPolicy<'_>,
     content: &MessageContent,
     tally: &mut ResponsesDropTally,
 ) -> Result<Vec<ResponsesContentItem>> {
+    let auth_kind = policy.auth_kind;
     match content {
         MessageContent::Text(t) if t.is_empty() => Ok(Vec::new()),
         MessageContent::Text(t) => Ok(vec![ResponsesContentItem::InputText {
             text: t.clone(),
             prompt_cache_breakpoint: None,
+            carried: CarriedMembers::default(),
         }]),
         MessageContent::Null => Ok(Vec::new()),
         MessageContent::Parts(parts) => {
             let mut out: Vec<ResponsesContentItem> = Vec::with_capacity(parts.len());
             for p in parts {
                 match p {
-                    ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+                    ContentPart::Known(known @ KnownContentPart::Text { text, .. }) => {
                         if !text.is_empty() {
                             out.push(ResponsesContentItem::InputText {
                                 text: text.clone(),
                                 prompt_cache_breakpoint: None,
+                                carried: policy.part_carried(known, INPUT_TEXT_KEYS),
                             });
                         }
                     }
@@ -1010,10 +1103,14 @@ fn build_user_content(
                             out.push(item);
                         }
                     }
-                    ContentPart::Known(KnownContentPart::ImageUrl { image_url, .. }) => {
+                    ContentPart::Known(known @ KnownContentPart::ImageUrl { image_url, .. }) => {
                         let (image_url, detail) =
                             read_image_url(id, image_url, ImageLocation::UserMessage)?;
-                        out.push(ResponsesContentItem::InputImage { image_url, detail });
+                        out.push(ResponsesContentItem::InputImage {
+                            image_url,
+                            detail,
+                            carried: policy.part_carried(known, INPUT_IMAGE_KEYS),
+                        });
                     }
                     ContentPart::Known(KnownContentPart::ToolResult { .. }) => {
                         // Lifted to FunctionCallOutput in
@@ -1038,7 +1135,13 @@ fn build_user_content(
                             type_tag,
                             extras,
                         };
-                        out.extend(unknown_content_part(id, auth_kind, unknown, &part, tally)?);
+                        out.extend(unknown_content_part(
+                            id,
+                            auth_kind,
+                            policy.unknown,
+                            &part,
+                            tally,
+                        )?);
                     }
                 }
             }
@@ -1065,17 +1168,21 @@ fn build_user_content(
 /// signature in a slot that ContentPart::Thinking lacks.
 fn walk_assistant_part(
     id: &str,
-    auth_kind: AuthKind,
+    policy: InputPolicy<'_>,
     p: &KnownContentPart,
     suppress_thinking_parts: bool,
     reasoning: &mut Vec<ResponseInputItem>,
     message_content: &mut Vec<ResponsesContentItem>,
     tool_calls: &mut Vec<ResponseInputItem>,
 ) -> Result<()> {
+    let auth_kind = policy.auth_kind;
     match p {
         KnownContentPart::Text { text, .. } => {
             if !text.is_empty() {
-                message_content.push(ResponsesContentItem::OutputText { text: text.clone() });
+                message_content.push(ResponsesContentItem::OutputText {
+                    text: text.clone(),
+                    carried: policy.part_carried(p, OUTPUT_TEXT_KEYS),
+                });
             }
         }
         KnownContentPart::Thinking {
@@ -1533,6 +1640,7 @@ fn translate_image_source(
             Ok(Some(ResponsesContentItem::InputImage {
                 image_url: format!("data:{media_type};base64,{data}"),
                 detail: None,
+                carried: CarriedMembers::default(),
             }))
         }
         "url" => {
@@ -1540,6 +1648,7 @@ fn translate_image_source(
             Ok(Some(ResponsesContentItem::InputImage {
                 image_url: url,
                 detail: None,
+                carried: CarriedMembers::default(),
             }))
         }
         // TRANSLATION-DROP: lane=openai-responses class=image_source_kind_unrepresentable test=unknown_user_image_source_kind_drops_from_the_wire_and_counts

@@ -40,6 +40,9 @@ use super::{
 mod breakpoints;
 mod parse;
 #[cfg(test)]
+#[path = "parse_carrier_tests.rs"]
+mod parse_carrier_tests;
+#[cfg(test)]
 #[path = "parse_tests.rs"]
 mod parse_tests;
 mod render;

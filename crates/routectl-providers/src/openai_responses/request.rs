@@ -22,7 +22,7 @@ use routectl_core::{
 use serde_json::Value;
 
 use super::messages::{
-    UnknownParts, build_input, restamp_namespaces, withholds_forwarded_file_url,
+    UnknownParts, build_request_input, restamp_namespaces, withholds_forwarded_file_url,
     withholds_user_file_url,
 };
 use super::system::{flush_fingerprint_tally, record_developer_turn_withhold, translate_system};
@@ -111,6 +111,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         } else {
             req.max_tokens
         },
+        carried: serde_json::Map::new(),
     };
 
     if let Some(tap) = tap {
@@ -165,14 +166,7 @@ fn build_input_with_passthrough(
     cache_withheld: &mut extras::PromptCacheWithheldTally,
 ) -> Result<Vec<ResponseInput>> {
     let provenance = req.routectl_internal.provenance;
-    let mut items = build_input(
-        id,
-        auth_kind,
-        provenance,
-        &req.messages,
-        tap,
-        cache_withheld,
-    );
+    let mut items = build_request_input(id, auth_kind, req, tap, cache_withheld);
     if provenance == RequestProvenance::ResponsesIngress {
         if let Ok(items) = items.as_mut() {
             restamp_namespaces(items, &req.routectl_internal.responses_namespaces.members);
@@ -287,6 +281,7 @@ fn attach_matching_breakpoints(
             ResponsesContentItem::InputText {
                 text,
                 prompt_cache_breakpoint,
+                ..
             } => Some((&*text, prompt_cache_breakpoint)),
             _ => None,
         })

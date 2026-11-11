@@ -64,6 +64,23 @@ use routectl_core::OPENAI_RESPONSES_V1;
 /// entirely and send every declaration this way).
 const ADDITIONAL_TOOLS_ITEM: &str = "additional_tools";
 
+/// Members of a `message` input item the canonical message models; every
+/// other member rides the message's carrier.
+const MESSAGE_ITEM_MEMBERS: &[&str] = &["type", "role", "content"];
+
+/// Members of a `function_call_output` input item the canonical tool message
+/// models; every other member rides the message's carrier.
+const FUNCTION_CALL_OUTPUT_MEMBERS: &[&str] = &["type", "call_id", "output"];
+
+/// Members of an `input_text` / `output_text` block the canonical text part
+/// models, plus the per-block cache breakpoint, which the breakpoint record
+/// owns.
+const TEXT_BLOCK_MEMBERS: &[&str] = &["type", "text", "prompt_cache_breakpoint"];
+
+/// Members of an `input_image` block the canonical image part models, plus
+/// the per-block cache breakpoint.
+const IMAGE_BLOCK_MEMBERS: &[&str] = &["type", "image_url", "detail", "prompt_cache_breakpoint"];
+
 /// Top-level Responses request fields handled explicitly below. Anything
 /// NOT in this set is swept into `provider_extras` so a future Responses
 /// field reaches the egress without a code edit (forward-compat seam,
@@ -150,6 +167,7 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     let lifted = crate::ingress::lift_system_messages(&mut req);
     let lift_edits = system_lift_edits(sent_instructions, &lifted, &origins);
     req.routectl_internal.declared_edits.extend(lift_edits);
+    req.routectl_internal.responses_developer_turns = kept_developer_turns(&origins, &lifted);
     req.routectl_internal.responses_cache_breakpoints = super::breakpoints::resolve(
         breakpoint_sites,
         &req.messages,
@@ -361,8 +379,8 @@ struct InputOrigins {
 /// The edits the system-message lift makes to a Responses body: every
 /// lifted item leaves `input[]` and its text lands in `instructions`, which
 /// is rewritten when the client sent the field and added when it did not. A
-/// `developer` item the lift kept in place reaches the egress as a `system`
-/// item, so its role is rewritten.
+/// `developer` item the lift kept in place keeps its role (see
+/// [`kept_developer_turns`]), so it is no edit.
 fn system_lift_edits(
     sent_instructions: bool,
     lifted: &crate::ingress::LiftedSystem,
@@ -390,12 +408,26 @@ fn system_lift_edits(
     for item in &lifted_items {
         declare(format!("/input/{item}"), EditKind::Remove);
     }
-    for item in &origins.developer {
-        if !lifted_items.contains(item) {
-            declare(format!("/input/{item}/role"), EditKind::Rewrite);
-        }
-    }
     edits
+}
+
+/// The post-lift `messages` index of every `developer` item the lift kept in
+/// place, ascending. Canonical has no developer role, so the item became a
+/// system turn; this record lets the Responses egress send it back as the
+/// client wrote it.
+fn kept_developer_turns(
+    origins: &InputOrigins,
+    lifted: &crate::ingress::LiftedSystem,
+) -> Vec<usize> {
+    origins
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(message, _)| !lifted.indices.contains(message))
+        .enumerate()
+        .filter(|(_, (_, item))| origins.developer.contains(item))
+        .map(|(kept, _)| kept)
+        .collect()
 }
 
 /// Turn the Responses `input` field into canonical `messages[]`. `input`
@@ -513,7 +545,8 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
 
 /// Build a `message` input item into a canonical `Message`. Maps
 /// `input_text` / `output_text` parts to text; preserves images and any
-/// other part shape so nothing is silently dropped.
+/// other part shape so nothing is silently dropped. Every item member the
+/// message does not model (codex sends an `id` on each) rides its carrier.
 fn push_message_item(messages: &mut Vec<Message>, item: &Value) {
     let role = parse_role(item.get("role").and_then(Value::as_str));
     let content = parse_message_content(item.get("content"));
@@ -526,8 +559,22 @@ fn push_message_item(messages: &mut Vec<Message>, item: &Value) {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
-        extras: Map::new(),
+        extras: members_outside(item, MESSAGE_ITEM_MEMBERS),
     });
+}
+
+/// Every member of `node` whose name is not in `modeled`, cloned. Empty for
+/// a non-object node.
+fn members_outside(node: &Value, modeled: &[&str]) -> Map<String, Value> {
+    node.as_object()
+        .map(|members| {
+            members
+                .iter()
+                .filter(|(key, _)| !modeled.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(super) fn parse_role(role: Option<&str>) -> Role {
@@ -572,6 +619,8 @@ fn parse_content_blocks(blocks: &[Value]) -> MessageContent {
 /// `input_text` / `output_text` -> canonical text; `input_image` ->
 /// canonical OpenAI-shape `ImageUrl`; everything else is sworn to the
 /// forward-compat `Other` so an unknown block type survives the ingress.
+/// A modeled block's other members ride the part's carrier, except a
+/// `prompt_cache_breakpoint`, which the breakpoint record owns.
 fn parse_content_block(block: &Value) -> Option<ContentPart> {
     let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
@@ -581,7 +630,7 @@ fn parse_content_block(block: &Value) -> Option<ContentPart> {
                 text: text.to_string(),
                 citations: None,
                 cache_control: None,
-                extras: Map::new(),
+                extras: members_outside(block, TEXT_BLOCK_MEMBERS),
             }))
         }
         "input_image" => {
@@ -607,7 +656,7 @@ fn parse_content_block(block: &Value) -> Option<ContentPart> {
             Some(ContentPart::Known(KnownContentPart::ImageUrl {
                 image_url: Value::Object(image_url),
                 cache_control: None,
-                extras: Map::new(),
+                extras: members_outside(block, IMAGE_BLOCK_MEMBERS),
             }))
         }
         // Unknown / future block type: preserve verbatim as Other so the
@@ -635,15 +684,17 @@ fn other_part_from_block(kind: &str, block: &Value) -> ContentPart {
     }
 }
 
-/// Collapse a parts vector: empty -> Null, a single text part -> Text,
-/// anything else -> Parts. Matches the canonical convention that a
-/// pure-text turn carries a flat `content` string.
+/// Collapse a parts vector: empty -> Null, a single text part with no
+/// carried members -> Text, anything else -> Parts. Matches the canonical
+/// convention that a pure-text turn carries a flat `content` string; a flat
+/// string has nowhere to keep a part's members.
 fn collapse_parts(parts: Vec<ContentPart>) -> MessageContent {
     if parts.is_empty() {
         return MessageContent::Null;
     }
     if parts.len() == 1
-        && let ContentPart::Known(KnownContentPart::Text { text, .. }) = &parts[0]
+        && let ContentPart::Known(KnownContentPart::Text { text, extras, .. }) = &parts[0]
+        && extras.is_empty()
     {
         return MessageContent::Text(text.clone());
     }
@@ -726,7 +777,8 @@ fn attach_function_call(messages: &mut Vec<Message>, item: &Value) {
 /// `function_call_output` item. The `output` field is either a flat
 /// string or an array of typed content items; both collapse to canonical
 /// text content (the canonical tool message carries `tool_call_id` +
-/// content, matching the openai chat shape).
+/// content, matching the openai chat shape). Every other item member rides
+/// the message's carrier.
 fn function_call_output_message(item: &Value) -> Message {
     let call_id = item
         .get("call_id")
@@ -752,7 +804,7 @@ fn function_call_output_message(item: &Value) -> Message {
         },
         tool_calls: None,
         refusal: None,
-        extras: Map::new(),
+        extras: members_outside(item, FUNCTION_CALL_OUTPUT_MEMBERS),
     }
 }
 

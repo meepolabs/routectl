@@ -350,7 +350,7 @@ pub struct ResponsesCacheBreakpoint {
 /// holds for the resolved-knob fields and equally for the inbound capture
 /// fields (`claude_code_headers`, `stainless_headers`,
 /// `responses_input_passthrough`, `responses_cache_breakpoints`,
-/// `responses_namespaces`,
+/// `responses_namespaces`, `responses_developer_turns`,
 /// `inbound_session_key`,
 /// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`,
 /// `anthropic_thinking`), which
@@ -547,6 +547,14 @@ pub struct RoutectlInternal {
     /// renders a response for this request must carry it. Empty for library
     /// consumers and for every non-Responses ingress.
     pub responses_namespaces: ResponsesNamespaces,
+
+    /// Indices into `ChatRequest.messages` of the system turns the OpenAI
+    /// Responses ingress built from a `developer` item and kept in place,
+    /// ascending. Canonical has no developer role, so only this record lets
+    /// the Responses egress send such a turn back with the role the client
+    /// wrote. Every other egress ignores it. Empty for library consumers
+    /// and for every non-Responses ingress.
+    pub responses_developer_turns: Vec<usize>,
 
     /// INBOUND per-conversation key captured by EVERY ingress dialect from
     /// a HEADER candidate first, a BODY candidate second. The Anthropic

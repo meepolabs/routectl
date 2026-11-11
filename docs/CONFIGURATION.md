@@ -726,12 +726,12 @@ vocabulary:
 |---|---|
 | `anthropic-api` (Mantle's Anthropic lane included), Bedrock Invoke, the Bedrock Converse bag | the Anthropic Messages ingress |
 | `openai-compat` (Mantle's OpenAI-compatible lane included) | the OpenAI Chat Completions ingress |
-| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress |
+| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress. From the Responses ingress, `auth_kind = "api-key"` also forwards any other key except one routectl writes itself; `chatgpt-oauth` and `bedrock-mantle` withhold every other key and count the request once as `unknown_member_withheld` |
 | `gemini` | no ingress: only the operator layer |
 
 A library caller that builds its own `ChatRequest` keeps forwarding its
-`provider_extras` to every egress but Responses, which applies its
-allowlist to it too. For any other request, an egress keeps only the
+`provider_extras` to every egress; Responses treats it as it treats the
+Responses ingress. For any other request, an egress keeps only the
 keys it handles itself (a key it manages, which its merge drops as
 before, or one it translates, such as `output_config` on openai-compat)
 and the operator's `payload_extras` with the operator's value. Every

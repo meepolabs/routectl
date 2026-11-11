@@ -130,6 +130,16 @@ impl AuthKind {
     pub(crate) const fn is_codex_lane(self) -> bool {
         matches!(self, Self::ChatgptOauth)
     }
+
+    /// The egress this surface is, for the same-dialect decision.
+    #[must_use]
+    pub(crate) const fn egress_kind(self) -> routectl_core::wire_check::EgressKind {
+        use routectl_core::wire_check::EgressKind;
+        match self {
+            Self::BedrockMantle => EgressKind::OpenaiResponsesMantle,
+            Self::ChatgptOauth | Self::ApiKey => EgressKind::OpenaiResponses,
+        }
+    }
 }
 
 /// The format tag this lane stamps on the reasoning artifacts it
