@@ -124,7 +124,11 @@ fn reserved_names_never_enter_the_projection() {
     });
     let msg = message(
         MessageContent::Parts(vec![text_part(part_extras), thinking]),
-        carried(&[("name", json!("forged")), ("reasoning", json!("x"))]),
+        carried(&[
+            ("name", json!("forged")),
+            ("reasoning", json!("x")),
+            ("cache_control", json!({"type": "ephemeral"})),
+        ]),
     );
     let custom = tool(carried(&[
         ("type", json!("custom")),

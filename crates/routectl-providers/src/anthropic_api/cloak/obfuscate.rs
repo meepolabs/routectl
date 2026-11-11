@@ -143,6 +143,10 @@ pub fn validate_sensitive_words(words: &[String]) -> Result<(), SensitiveWordsBo
 /// zero-width space is invisible to the model, so no reverse mapping is
 /// needed on the response. An empty word list is a byte-identical no-op.
 ///
+/// Members a same-dialect client sent on a message, a block, a system block
+/// or a custom tool that the wire types do not model are forwarded as sent
+/// and are not scanned: a configured word inside one travels unmarked.
+///
 /// A list outside the bounds is refused before the body is touched; the
 /// caller must then not send the body, since the terms would travel
 /// unmarked. On success, reports which surfaces it rewrote.
@@ -535,7 +539,8 @@ fn obfuscate_text_block(block: &mut Value, matcher: &SensitiveWordMatcher) -> bo
 ///
 /// A base64, URL, or file source is opaque here -- its bytes are encoded or
 /// fetched upstream -- so a sensitive word inside one travels unmarked. The
-/// block's `title` and `context` are not scanned.
+/// block's `title` and `context` are not scanned, nor is any unmodeled
+/// member the client sent on it.
 fn obfuscate_document_block(block: &mut Value, matcher: &SensitiveWordMatcher) -> bool {
     let Some(source) = block.get_mut("source") else {
         return false;

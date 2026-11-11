@@ -1278,12 +1278,13 @@ fn withhold_mantle_client_metadata(body: &mut Value, req: &ChatRequest) {
     }
 }
 
-/// Refuse a Bedrock Mantle body whose `system` or `messages` carries a media
-/// URL the upstream would fetch under the operator's AWS identity, unless it
-/// is `https` or `data`. Walks the final body, so a block copied verbatim
-/// and a nested `tool_result` are checked like a translated one; top-level
-/// `tools` are never walked, and in `messages` only a `tool_use` part's
-/// `input` is skipped.
+/// Refuse a Bedrock Mantle body whose `system`, `messages` or custom tools
+/// carry a media URL the upstream would fetch under the operator's AWS
+/// identity, unless it is `https` or `data`. Walks the final body, so a
+/// block copied verbatim and a nested `tool_result` are checked like a
+/// translated one. The only skipped subtrees are a `tool_use` part's
+/// `input` in `messages` and a custom tool's `input_schema`; a tool of any
+/// other `type` is a server tool definition and is not walked.
 #[cfg(feature = "bedrock")]
 fn refuse_unforwardable_mantle_media(id: &str, body: &Value) -> Result<()> {
     use crate::mantle::MediaWalkRoot;
@@ -1296,7 +1297,37 @@ fn refuse_unforwardable_mantle_media(id: &str, body: &Value) -> Result<()> {
             crate::mantle::refuse_unforwardable_media_urls(id, walk_root, value, member)?;
         }
     }
+    let tools = body.get("tools").and_then(Value::as_array);
+    for (index, tool) in tools.into_iter().flatten().enumerate() {
+        if let Some(members) = custom_tool_members_outside_schema(tool) {
+            crate::mantle::refuse_unforwardable_media_urls(
+                id,
+                MediaWalkRoot::Content,
+                &members,
+                &format!("tools[{index}]"),
+            )?;
+        }
+    }
     Ok(())
+}
+
+/// A wire custom tool (no `type`, or `type: "custom"`) without its
+/// `input_schema`, the one member that holds a schema rather than content.
+/// `None` for any other tool.
+#[cfg(feature = "bedrock")]
+fn custom_tool_members_outside_schema(tool: &Value) -> Option<Value> {
+    let members = tool.as_object()?;
+    match members.get("type") {
+        None => {}
+        Some(kind) if kind.as_str() == Some("custom") => {}
+        Some(_) => return None,
+    }
+    let walked = members
+        .iter()
+        .filter(|(key, _)| key.as_str() != "input_schema")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Some(Value::Object(walked))
 }
 
 /// Remove `mcp_servers` from a Bedrock Mantle body, client and operator

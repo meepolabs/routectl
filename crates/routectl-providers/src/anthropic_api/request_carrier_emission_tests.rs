@@ -199,23 +199,97 @@ fn reserved_names_never_reach_the_wire_even_when_the_typed_value_is_absent() {
     }
 }
 
+/// Every carrier node of a carrier-free same-dialect request holds its typed
+/// members and nothing else. Full-body bytes for carrier-free traffic are
+/// pinned by the `contract_egress` and `contract_egress_bedrock_invoke`
+/// snapshot suites.
 #[test]
-fn a_carrier_free_request_serializes_byte_identically_from_either_dialect() {
-    let mut anthropic = carrying_request(RequestProvenance::AnthropicIngress);
-    anthropic.messages = Arc::from(vec![message(
+fn a_carrier_free_request_emits_only_typed_members_on_every_carrier_node() {
+    let mut req = carrying_request(RequestProvenance::AnthropicIngress);
+    req.messages = Arc::from(vec![message(
         Role::User,
         MessageContent::Parts(vec![text_part("hi", Map::new())]),
         Map::new(),
     )]);
-    anthropic.tools = Some(vec![custom_tool(Map::new())]);
-    anthropic.system = Some(system_block(Map::new()));
-    let mut chat = anthropic.clone();
-    chat.routectl_internal.provenance = RequestProvenance::OpenaiIngress;
+    req.tools = Some(vec![custom_tool(Map::new())]);
+    req.system = Some(system_block(Map::new()));
 
-    let emitted = serde_json::to_vec(&anthropic_body(&anthropic)).unwrap();
-    let withheld = serde_json::to_vec(&anthropic_body(&chat)).unwrap();
+    for (lane, body) in bodies(&req) {
+        assert_eq!(
+            body["messages"],
+            json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}]),
+            "{lane}"
+        );
+        assert_eq!(
+            body["tools"],
+            json!([{"name": "lookup", "input_schema": {"type": "object"}}]),
+            "{lane}"
+        );
+        assert_eq!(
+            body["system"],
+            json!([{"type": "text", "text": "be brief"}]),
+            "{lane}"
+        );
+    }
+}
 
-    assert_eq!(emitted, withheld);
+#[test]
+fn a_message_level_cache_control_member_never_reaches_the_wire() {
+    let mut req = carrying_request(RequestProvenance::AnthropicIngress);
+    req.messages = Arc::from(vec![message(
+        Role::User,
+        MessageContent::Text("hi".into()),
+        carried(&[
+            ("cache_control", json!({"type": "ephemeral"})),
+            ("note", json!(1)),
+        ]),
+    )]);
+
+    for (lane, body) in bodies(&req) {
+        let turn = &body["messages"][0];
+        assert_eq!(turn["note"], json!(1), "{lane}: premise: merged: {turn}");
+        assert!(turn.get("cache_control").is_none(), "{lane}: {turn}");
+    }
+}
+
+/// A user turn whose only part is `part`.
+fn single_part_request(part: KnownContentPart) -> ChatRequest {
+    let mut req = carrying_request(RequestProvenance::AnthropicIngress);
+    req.messages = Arc::from(vec![message(
+        Role::User,
+        MessageContent::Parts(vec![ContentPart::Known(part)]),
+        Map::new(),
+    )]);
+    req
+}
+
+/// An OpenAI `file` part sent as a wire `document` never has a carried
+/// member fill one of the document's own typed members, even one the
+/// translation left absent (no `filename` means no `title`).
+#[test]
+fn a_file_part_sent_as_a_document_never_fills_a_document_member_from_its_carriers() {
+    let req = single_part_request(KnownContentPart::File {
+        file: json!({"file_data": "data:application/pdf;base64,JVBERg=="}),
+        cache_control: None,
+        extras: carried(&[
+            ("title", json!("forged")),
+            ("citations", json!({"enabled": true})),
+            (
+                "source",
+                json!({"type": "url", "url": "https://example.com/forged"}),
+            ),
+            ("note", json!(1)),
+        ]),
+    });
+
+    for (lane, body) in bodies(&req) {
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["type"], "document", "{lane}: {block}");
+        assert_eq!(block["note"], json!(1), "{lane}: premise: merged: {block}");
+        assert_eq!(block["source"]["type"], "base64", "{lane}: {block}");
+        assert!(block.get("title").is_none(), "{lane}: {block}");
+        assert!(block.get("citations").is_none(), "{lane}: {block}");
+    }
 }
 
 fn tool_turn(id: &str, extras: Map<String, Value>) -> Message {
@@ -284,7 +358,7 @@ fn a_joined_tool_run_emits_the_earlier_value_and_declares_one_rewrite() {
     assert_eq!(joined["only_second"], json!(2));
     let rewrites: Vec<_> = edits
         .iter()
-        .filter(|(_, path, kind)| path.starts_with("/messages/2/") && *kind == EditKind::Rewrite)
+        .filter(|(_, path, kind)| path.ends_with("/tag") && *kind == EditKind::Rewrite)
         .collect();
     assert_eq!(
         rewrites,

@@ -877,3 +877,121 @@ async fn first_party_lane_forwards_a_media_url_in_part_extras() {
     let body: Value = serde_json::from_slice(&received[0].body).unwrap();
     assert_eq!(body["messages"][0]["content"][0]["meta"], meta, "{body}");
 }
+
+/// A same-dialect request whose one custom tool carries `tool_extras` and
+/// declares `input_schema`.
+fn custom_tool_req(
+    tool_extras: serde_json::Map<String, Value>,
+    input_schema: Value,
+) -> ChatRequest {
+    let mut req = base_req(
+        "claude-3-opus",
+        vec![parts_msg(Role::User, vec![text_part("hi")])],
+    );
+    req.tools = Some(vec![ToolDef::Custom(CustomTool {
+        name: "lookup".into(),
+        description: None,
+        input_schema,
+        cache_control: None,
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+        extras: tool_extras,
+    })]);
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
+    req
+}
+
+/// A custom tool's carried member reaches Mantle, so the walker checks it:
+/// a non-https media URL in one is refused on both the messages and the
+/// count_tokens path, and the upstream is never called.
+#[tokio::test]
+async fn mantle_lane_refuses_unforwardable_media_urls_in_custom_tool_members() {
+    let req = custom_tool_req(
+        member("meta", url_image_value(&planted("s3"))),
+        json!({"type": "object"}),
+    );
+    let mock_server = media_upstream().await;
+    let provider = mantle_provider_bearer(&mock_server.uri()).await;
+
+    let complete = provider.complete(req.clone()).await.map(|_| ());
+    let count = provider.count_tokens(req).await.map(|_| ());
+
+    let field_at = "`source` at tools[0].meta ";
+    assert_media_refusal(complete, "custom tool member (messages)", field_at);
+    assert_media_refusal(count, "custom tool member (count_tokens)", field_at);
+    let received = mock_server.received_requests().await.unwrap();
+    assert!(received.is_empty(), "no upstream call");
+}
+
+/// A request whose one tool is the server tool definition `tool`, which
+/// reaches the wire verbatim.
+fn server_tool_req(tool: Value) -> ChatRequest {
+    let mut req = custom_tool_req(serde_json::Map::new(), json!({"type": "object"}));
+    req.tools = Some(vec![ToolDef::Other(tool)]);
+    req
+}
+
+/// Controls for the custom-tool walk on Mantle: an https URL in a carried
+/// member passes, a schema naming an s3 image is a schema, not media, and a
+/// server tool definition is not a custom tool and is not walked.
+#[tokio::test]
+async fn mantle_lane_forwards_https_tool_members_and_unwalked_input_schema() {
+    let rows = [
+        (
+            "server tool definition",
+            server_tool_req(json!({"type": "web_fetch_20250910", "name": "web_fetch",
+                                   "meta": url_image_value(&planted("s3"))})),
+        ),
+        (
+            "https custom tool member",
+            custom_tool_req(
+                member("meta", url_image_value("https://example.com/t.png")),
+                json!({"type": "object"}),
+            ),
+        ),
+        (
+            "s3 image shape inside input_schema",
+            custom_tool_req(
+                serde_json::Map::new(),
+                json!({"type": "object", "properties": {"image": url_image_value(&planted("s3"))}}),
+            ),
+        ),
+    ];
+
+    for (row, req) in rows {
+        let mock_server = media_upstream().await;
+        let provider = mantle_provider_bearer(&mock_server.uri()).await;
+
+        provider
+            .complete(req.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{row}: messages must reach the upstream, got {e:?}"));
+        provider
+            .count_tokens(req)
+            .await
+            .unwrap_or_else(|e| panic!("{row}: count_tokens must reach the upstream, got {e:?}"));
+
+        let received = mock_server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 2, "{row}");
+    }
+}
+
+/// Off Mantle a custom tool's carried member is the client's own request
+/// and reaches the first-party upstream as sent.
+#[tokio::test]
+async fn first_party_lane_forwards_a_media_url_in_a_custom_tool_member() {
+    let meta = url_image_value(&planted("s3"));
+    let req = custom_tool_req(member("meta", meta.clone()), json!({"type": "object"}));
+    let mock_server = media_upstream().await;
+    let provider = make_provider(&mock_server.uri());
+
+    provider
+        .complete(req)
+        .await
+        .expect("first-party lane must forward");
+
+    let received = mock_server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(body["tools"][0]["meta"], meta, "{body}");
+}

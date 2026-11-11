@@ -258,6 +258,30 @@ impl ContentBlock {
             Self::Other { .. } => None,
         }
     }
+
+    /// Every member name this block's wire form can carry, absent optional
+    /// ones included. A carried member never takes one of these names: a
+    /// part translated to a block of another shape (an OpenAI `file` part
+    /// sent as a `document`) is reserved against the canonical shape's
+    /// names, which do not cover the block's own.
+    const fn wire_keys(&self) -> &'static [&'static str] {
+        match self {
+            Self::Text { .. } => &["type", "text", "citations", "cache_control"],
+            Self::Image { .. } => &["type", "source", "cache_control"],
+            Self::Document { .. } => &["type", "source", "title", "citations", "cache_control"],
+            Self::Thinking { .. } => &["type", "thinking", "signature", "cache_control"],
+            Self::RedactedThinking { .. } => &["type", "data", "cache_control"],
+            Self::ToolUse { .. } => &["type", "id", "name", "input", "cache_control"],
+            Self::ToolResult { .. } => &[
+                "type",
+                "tool_use_id",
+                "content",
+                "is_error",
+                "cache_control",
+            ],
+            Self::Other { .. } => &["type", "cache_control"],
+        }
+    }
 }
 
 impl Serialize for ContentBlock {
@@ -356,8 +380,16 @@ impl Serialize for ContentBlock {
                 merge_cc(Value::Object(obj), cache_control)
             }
         };
-        match self.carried() {
-            Some(carried) => with_carried(v, carried).serialize(ser),
+        match self.carried().filter(|carried| !carried.is_empty()) {
+            Some(carried) => {
+                let wire_keys = self.wire_keys();
+                let forwardable: Map<String, Value> = carried
+                    .iter()
+                    .filter(|(key, _)| !wire_keys.contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                with_carried(v, &forwardable).serialize(ser)
+            }
             None => v.serialize(ser),
         }
     }

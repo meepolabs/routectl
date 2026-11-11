@@ -37,6 +37,10 @@ use crate::{
 /// Every member name `Message` serializes.
 const MESSAGE_KEYS: &[&str] = &MESSAGE_MEMBERS;
 
+/// Names reserved on every message beside its typed members: the cache
+/// marker routectl places and strips itself.
+const MESSAGE_MANAGED_KEYS: &[&str] = &["cache_control"];
+
 /// Every member name `SystemBlock` serializes.
 const SYSTEM_BLOCK_KEYS: &[&str] = &SYSTEM_BLOCK_MEMBERS;
 
@@ -73,12 +77,13 @@ fn is_part_reserved(part: &KnownContentPart, key: &str) -> bool {
 
 impl Message {
     /// The carried members a same-dialect egress may emit on this message:
-    /// every `extras` member except one named like a member `Message`
-    /// serializes, whether or not that typed value is present.
+    /// every `extras` member except `cache_control` and one named like a
+    /// member `Message` serializes, whether or not that typed value is
+    /// present.
     pub fn forwardable_extras(&self) -> impl Iterator<Item = (&String, &Value)> {
-        self.extras
-            .iter()
-            .filter(|(key, _)| !MESSAGE_KEYS.contains(&key.as_str()))
+        self.extras.iter().filter(|(key, _)| {
+            !MESSAGE_KEYS.contains(&key.as_str()) && !MESSAGE_MANAGED_KEYS.contains(&key.as_str())
+        })
     }
 }
 

@@ -136,6 +136,7 @@ fn reserved_names_in_carriers_never_override_or_appear() {
             ("content", json!("carried content")),
             ("name", json!("forged")),
             ("reasoning_content", json!("forged")),
+            ("cache_control", json!({"type": "ephemeral"})),
             ("message_note", json!(1)),
         ]),
     );
@@ -150,6 +151,7 @@ fn reserved_names_in_carriers_never_override_or_appear() {
     assert_eq!(turn["role"], json!("user"), "{body}");
     assert!(turn.get("name").is_none(), "{body}");
     assert!(turn.get("reasoning_content").is_none(), "{body}");
+    assert!(turn.get("cache_control").is_none(), "{body}");
     let part = &turn["content"][0];
     assert_eq!(part["part_note"], json!(2), "premise: merged: {body}");
     assert_eq!(part["type"], json!("text"), "{body}");
