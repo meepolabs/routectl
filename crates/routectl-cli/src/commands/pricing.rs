@@ -9,6 +9,7 @@
 //! precedence (`routectl_router::prices::effective_pricing`), and this module
 //! carries the last step onto the leaf's own struct.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_router::prices::{PriceBook, PriceSource, PriceSources, PriceTable, shipped_table};
@@ -113,6 +114,10 @@ pub(super) fn rate_covers(rate: Option<f64>) -> bool {
 /// except one a `[registry]` row prices, which counts an absent rate as `0`
 /// as the operator wrote it. A table gap or a partial `[models.X.pricing]`
 /// block is not a statement that the dimension is free.
+///
+/// Each priced cache-write lifetime is its own source. Cache writes with no
+/// reported lifetime have no rate to cover them, so this rule never exempts
+/// them: a row carrying any stays unpriced whatever priced it.
 pub(super) fn is_complete_or_absent(sources: &PriceSources) -> bool {
     !sources.iter().any(|source| source == PriceSource::Registry)
 }
@@ -122,39 +127,61 @@ pub(super) fn is_complete_or_absent(sources: &PriceSources) -> bool {
 ///
 /// The usage report's complete-or-absent equivalent applies the same rule,
 /// minus the token counts. A diagnostic has no usage to weigh, so it asks which
-/// dimensions RESOLVE at all rather than which of the used ones did.
+/// dimensions RESOLVE at all rather than which of the used ones did. The 5m and
+/// 1h cache writes are always named, since nearly all cache-write traffic uses
+/// them; any other lifetime a source prices is checked too, as
+/// `cache write <duration>`.
 ///
 /// Reasoning is not its own dimension: a disjoint-reasoning row bills thinking
 /// tokens at the OUTPUT rate, so the output entry already covers it.
-pub(super) fn missing_equivalence_dimensions(pricing: &PricingConfig) -> Vec<&'static str> {
-    [
-        ("input", pricing.input_per_mtok),
-        ("output", pricing.output_per_mtok),
-        ("cache read", pricing.cache_read_per_mtok),
-        ("cache write 5m", pricing.cache_write_5m_per_mtok),
-        ("cache write 1h", pricing.cache_write_1h_per_mtok),
+pub(super) fn missing_equivalence_dimensions(pricing: &PricingConfig) -> Vec<String> {
+    let mut write_rates: BTreeMap<u32, Option<f64>> = [
+        PricingConfig::CACHE_WRITE_5M_SECONDS,
+        PricingConfig::CACHE_WRITE_1H_SECONDS,
     ]
     .into_iter()
-    .filter(|(_, rate)| !rate_covers(*rate))
-    .map(|(label, _)| label)
-    .collect()
+    .map(|seconds| (seconds, None))
+    .collect();
+    for (seconds, rate) in pricing.cache_write_rates() {
+        write_rates.insert(seconds, Some(rate));
+    }
+    let fixed = [
+        ("input".to_string(), pricing.input_per_mtok),
+        ("output".to_string(), pricing.output_per_mtok),
+        ("cache read".to_string(), pricing.cache_read_per_mtok),
+    ];
+    let writes = write_rates.into_iter().map(|(seconds, rate)| {
+        (
+            format!(
+                "cache write {}",
+                routectl_core::format_cache_lifetime(seconds)
+            ),
+            rate,
+        )
+    });
+    fixed
+        .into_iter()
+        .chain(writes)
+        .filter(|(_, rate)| !rate_covers(*rate))
+        .map(|(label, _)| label)
+        .collect()
 }
 
 /// Convert the router's per-million-token pricing into the usage crate's
 /// leaf-safe `Rates`. Both units are USD per million tokens, so this is a
-/// field-for-field carry, not a conversion.
+/// field-for-field carry, not a conversion; each priced cache-write lifetime
+/// carries as its own rate (see [`PricingConfig::cache_write_rates`]).
 ///
 /// `reasoning_per_mtok` starts unset: whether reasoning tokens bill as their
 /// own dimension is a property of the row being priced, not of the rate
 /// table, so only a caller that knows a row's reasoning structure promotes it.
-pub(super) const fn rates_from_pricing(pricing: &PricingConfig) -> Rates {
+pub(super) fn rates_from_pricing(pricing: &PricingConfig) -> Rates {
     Rates {
         input_per_mtok: pricing.input_per_mtok,
         output_per_mtok: pricing.output_per_mtok,
         reasoning_per_mtok: None,
         cache_read_per_mtok: pricing.cache_read_per_mtok,
-        cache_write_5m_per_mtok: pricing.cache_write_5m_per_mtok,
-        cache_write_1h_per_mtok: pricing.cache_write_1h_per_mtok,
+        cache_write_per_mtok: pricing.cache_write_rates(),
     }
 }
 
@@ -212,3 +239,7 @@ pub(super) fn cache_write_spelling_conflicts(
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "pricing_tests.rs"]
+mod tests;

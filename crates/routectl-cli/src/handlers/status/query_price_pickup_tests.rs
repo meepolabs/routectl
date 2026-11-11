@@ -109,3 +109,88 @@ async fn a_renamed_in_price_table_reprices_the_next_query_without_a_router_rebui
     // The router the state serves is the one it started with.
     assert!(Arc::ptr_eq(&router_before, &swap.load_full()));
 }
+
+/// Insert one 100-input / 20-output row under model `m` and alias `alias`,
+/// with the given cache-write total and lifetime split.
+fn seed_write_row(path: &Path, alias: &str, total: Option<i64>, split: Option<&str>) {
+    let db = open(path).expect("open ledger");
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             input_tokens, output_tokens, cache_write_tokens, cache_write_lifetimes) \
+             VALUES (?1, ?1, ?2, 'anthropic', 'm', ?3, 'm', 'p', 'u', 0, 'ok', \
+             50, 0, 0, 1, 0, 100, 20, ?4, ?5)",
+            rusqlite::params![
+                Local::now().timestamp_millis(),
+                format!("r-{alias}"),
+                alias,
+                total,
+                split
+            ],
+        )
+        .expect("seed write row");
+}
+
+/// A table pricing `u` at 1000 $/Mtok for input, output and the 5-minute write.
+fn table_with_5m_write() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "generated_at": "2026-11-01",
+        "providers": [{
+            "id": "anthropic",
+            "models": [{ "id": "u", "input": 1000.0, "output": 1000.0, "cache_write_5m": 1000.0 }],
+        }],
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_group_with_an_unknown_lifetime_write_row_reports_partial_cost() {
+    // (name, second row's split, expected status, expected cost)
+    // Each row prices its tokens at $0.12. The second also writes 10 tokens:
+    // fully split at 5m they add 10*1000/1e6 = $0.01 (group $0.25); with 4 of
+    // the 10 unsplit that row is unpriced and the group reports the first
+    // row's $0.12 alone.
+    let cases = [
+        (
+            "every write has a lifetime",
+            r#"{"300":10}"#,
+            "priced",
+            0.25,
+        ),
+        (
+            "part of the write has no lifetime",
+            r#"{"300":6}"#,
+            "partial",
+            TABLE_A_USD,
+        ),
+    ];
+    for (name, split, status, cost) in cases {
+        // Arrange: two aliases, so one model group holds two fine rows.
+        let dir = TempDir::new().unwrap();
+        let ledger = dir.path().join("usage.db");
+        seed_write_row(&ledger, "plain", None, None);
+        seed_write_row(&ledger, "writes", Some(10), Some(split));
+        rename_in(
+            &dir.path().join("prices.json"),
+            &table_with_5m_write(),
+            1_000,
+        );
+        let (state, _swap) = priced_state(dir.path(), ledger);
+
+        // Act
+        let (_, json) = send(state, QUERY_METHOD, VALID_BODY).await;
+
+        // Assert
+        let groups = json["data"]["groups"].as_array().expect("groups");
+        assert_eq!(groups.len(), 1, "{name}: one model group: {json}");
+        assert_eq!(
+            groups[0]["metrics"]["cost_status"], status,
+            "{name}: {json}"
+        );
+        assert_eq!(json["data"]["totals"]["cost_status"], status, "{name}");
+        assert_cost(&json, cost, name);
+    }
+}

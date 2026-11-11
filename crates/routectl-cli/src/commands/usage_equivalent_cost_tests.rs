@@ -136,7 +136,7 @@ fn seed_equiv_ledger(db: &UsageDb) {
 /// The single aggregate row the seeded ledger folds to.
 fn equiv_agg_row(db: &UsageDb) -> AggRow {
     let bounds = window_bounds(WindowFlag::All, fixed_now());
-    let rows = aggregate(db, bounds.from_ms, bounds.to_ms).expect("aggregate");
+    let rows = aggregate_with_cache_lifetimes(db, bounds.from_ms, bounds.to_ms).expect("aggregate");
     assert_eq!(rows.len(), 1, "the fixture folds to one fine row");
     rows.into_iter().next().unwrap()
 }
@@ -357,7 +357,7 @@ fn a_kindless_subscription_row_on_a_removed_provider_resolves_no_equivalent() {
     );
 
     // Act
-    let verdicts: Vec<RowCost> = aggregate(&db, 0, i64::MAX)
+    let verdicts: Vec<RowCost> = aggregate_with_cache_lifetimes(&db, 0, i64::MAX)
         .expect("aggregate")
         .iter()
         .map(|row| cost_for_row(&config, &both_tables(), row))

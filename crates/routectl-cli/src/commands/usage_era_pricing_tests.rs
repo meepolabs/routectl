@@ -169,7 +169,7 @@ fn aggregate_partitions_one_provider_name_by_persisted_kind() {
     seed_two_eras(&db);
 
     // Act
-    let rows = aggregate(&db, 0, i64::MAX).expect("aggregate");
+    let rows = aggregate_with_cache_lifetimes(&db, 0, i64::MAX).expect("aggregate");
 
     // Assert: the read grain separates the eras, which is what lets each be
     // priced by what it was. Without the split there is no era to price.

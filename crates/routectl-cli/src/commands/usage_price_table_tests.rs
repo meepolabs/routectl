@@ -115,7 +115,7 @@ fn insert_table_row(
 
 /// The verdict for the single aggregate row of `db`.
 fn table_verdict(db: &UsageDb, config: &Config, prices: &PriceSnapshot) -> RowCost {
-    let rows = aggregate(db, 0, i64::MAX).expect("aggregate");
+    let rows = aggregate_with_cache_lifetimes(db, 0, i64::MAX).expect("aggregate");
     assert_eq!(rows.len(), 1, "the fixture folds to one fine row");
     cost_for_row(config, prices, &rows[0])
 }

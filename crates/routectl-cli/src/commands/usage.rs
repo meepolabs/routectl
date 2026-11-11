@@ -25,10 +25,10 @@ use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
     NearLosslessAttributionSummary, ObservationTotals, OpenError, QueryError, QuotaSnapshot, Rates,
     ReductionSummary, RowCost, SUPPRESSED_SESSION_CAP, ShadowMisfireSummary, SuppressedSessions,
-    UsageDb, WouldTrimSummary, aggregate, cache_decision_summary, estimate_cost_tokens,
-    k_calibration_summary, latest_quota_by_seat, near_lossless_attribution_summary,
-    observation_totals, open_readonly, reduction_summary, shadow_misfire_summary,
-    suppressed_sessions, ttfbs, would_trim_summary,
+    UsageDb, WouldTrimSummary, aggregate_with_cache_lifetimes, cache_decision_summary,
+    estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
+    near_lossless_attribution_summary, observation_totals, open_readonly, reduction_summary,
+    shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
 
 use crate::commands::pricing::{
@@ -597,6 +597,11 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// when that entry no longer exists. No price for any field leaves the row
 /// `Unpriced` (or, on the subscription arm, with no equivalent), never `$0`.
 ///
+/// Cache writes price per lifetime. Written tokens with no reported lifetime,
+/// or a lifetime split summing above its total, leave the row `Unpriced` (or
+/// with no equivalent) whatever priced it, a `[registry]` row included: no
+/// rate can be matched to them.
+///
 /// Reasoning is priced from the row's PERSISTED `provider_kind`, so a provider
 /// whose kind an operator later changed keeps each era priced by what it was.
 /// A row with NO persisted kind and NONZERO reasoning tokens fails CLOSED as
@@ -637,7 +642,7 @@ fn priced_usd(
     if resolved.complete_or_absent && !rates_cover_used_dimensions(&resolved, row) {
         return None;
     }
-    price_row(&resolved.rates, row)
+    price_row(&resolved, row)
 }
 
 /// The API-equivalent dollar value of one SUBSCRIPTION row: the same rate
@@ -661,13 +666,15 @@ fn equivalent_usd(
     }
     // A non-finite product reads as absent rather than propagating into the
     // equivalent channel's sum, where it would poison every other row's value.
-    price_row(&resolved.rates, row).filter(|usd| usd.is_finite())
+    price_row(&resolved, row).filter(|usd| usd.is_finite())
 }
 
 /// A row's resolved rate table plus whether its reasoning tokens bill as their
 /// own dimension.
 struct RowRates {
     rates: Rates,
+    /// The row's cache-write tokens per lifetime in seconds.
+    cache_writes: BTreeMap<u32, i64>,
     /// True when the row's reasoning tokens are DISJOINT from its output count
     /// and therefore a separately billed dimension. False when they are already
     /// inside output, where a reasoning rate would double-charge.
@@ -678,14 +685,15 @@ struct RowRates {
 
 /// Resolve the rate table for one row and settle its reasoning structure.
 /// `None` means no price can be justified for the row at all: no upstream, no
-/// effective pricing, or an unknown persisted kind on a row that reported
-/// reasoning tokens.
+/// effective pricing, an unknown persisted kind on a row that reported
+/// reasoning tokens, or cache writes that cannot be priced by lifetime.
 fn resolve_row_rates(
     config: &Config,
     prices: &PriceSnapshot,
     row: &AggRow,
     provider: &str,
 ) -> Option<RowRates> {
+    let cache_writes = lifetime_priceable_writes(row)?;
     let subject = PriceSubject {
         model: row.key.model.as_deref(),
         provider,
@@ -710,26 +718,40 @@ fn resolve_row_rates(
     }
     Some(RowRates {
         rates,
+        cache_writes,
         reasoning_billed,
         complete_or_absent: is_complete_or_absent(&sources),
     })
+}
+
+/// A row's cache-write tokens per lifetime, or `None` when some of them
+/// cannot be priced by lifetime: tokens with no reported lifetime, or a split
+/// summing above its total. A row read without its lifetimes has every
+/// written token unknown.
+fn lifetime_priceable_writes(row: &AggRow) -> Option<BTreeMap<u32, i64>> {
+    let Some(lifetimes) = &row.cache_write_lifetimes else {
+        return (row.cache_write_tokens == 0).then(BTreeMap::new);
+    };
+    if lifetimes.invalid_split || lifetimes.unknown_tokens > 0 {
+        return None;
+    }
+    Some(lifetimes.tokens_by_lifetime.clone())
 }
 
 /// The token math shared by the real price and the API-equivalent value.
 ///
 /// cache_read is billed PER TURN, so the cost basis is the summed cache-read
 /// volume (`cache_read_billed`), not the peak. The peak / avg are display-only
-/// context SIZE and must NOT drive cost; input / output / cache_write_* are real
+/// context SIZE and must NOT drive cost; input / output / cache writes are real
 /// summed flows.
-fn price_row(rates: &Rates, row: &AggRow) -> Option<f64> {
+fn price_row(resolved: &RowRates, row: &AggRow) -> Option<f64> {
     estimate_cost_tokens(
         row.input_tokens,
         row.output_tokens,
         row.reasoning_tokens,
         row.cache_read_billed,
-        row.cache_write_5m,
-        row.cache_write_1h,
-        rates,
+        &resolved.cache_writes,
+        &resolved.rates,
     )
     .map(|b| b.total_usd)
 }
@@ -742,7 +764,8 @@ fn price_row(rates: &Rates, row: &AggRow) -> Option<f64> {
 /// partial one, and a partial equivalent misstates value rather than
 /// approximating it. Presence decides, per [`rate_covers`]: a known `0` rate
 /// prices its dimension at nothing and keeps the figure complete. Reasoning counts as a dimension only when it bills
-/// separately; cache reads are weighed as the BILLED volume, never the peak.
+/// separately; cache reads are weighed as the BILLED volume, never the peak;
+/// each cache-write lifetime is its own dimension.
 fn rates_cover_used_dimensions(resolved: &RowRates, row: &AggRow) -> bool {
     let rates = &resolved.rates;
     // A subsumed-reasoning row's thinking tokens are inside its output count, so
@@ -753,15 +776,18 @@ fn rates_cover_used_dimensions(resolved: &RowRates, row: &AggRow) -> bool {
     } else {
         0
     };
+    let writes = resolved
+        .cache_writes
+        .iter()
+        .map(|(seconds, tokens)| (*tokens, rates.cache_write_per_mtok.get(seconds).copied()));
     [
         (row.input_tokens, rates.input_per_mtok),
         (row.output_tokens, rates.output_per_mtok),
         (reasoning_tokens, rates.reasoning_per_mtok),
         (row.cache_read_billed, rates.cache_read_per_mtok),
-        (row.cache_write_5m, rates.cache_write_5m_per_mtok),
-        (row.cache_write_1h, rates.cache_write_1h_per_mtok),
     ]
     .into_iter()
+    .chain(writes)
     .all(|(tokens, rate)| tokens == 0 || rate_covers(rate))
 }
 
@@ -886,7 +912,7 @@ pub fn build_window_report(
     detail: bool,
 ) -> Result<WindowReport, UsageError> {
     let dim = by.unwrap_or(GroupDim::Model);
-    let rows = aggregate(db, bounds.from_ms, bounds.to_ms)?;
+    let rows = aggregate_with_cache_lifetimes(db, bounds.from_ms, bounds.to_ms)?;
 
     let mut groups: BTreeMap<String, Acc> = BTreeMap::new();
     let mut total = Acc::default();

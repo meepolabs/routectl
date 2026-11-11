@@ -11,11 +11,18 @@
 //! drift at the sub-cent level is acceptable here, so binary
 //! floating-point is fine.
 
+use std::collections::BTreeMap;
+
 use crate::record::UsageRecord;
 
 const TOKENS_PER_MTOK: f64 = 1_000_000.0;
 
-/// Per-million-token rates (USD), one optional field per billable
+/// The lifetime seconds a record's legacy 5-minute cache-write field stands for.
+const LEGACY_5M_SECONDS: u32 = 300;
+/// The lifetime seconds a record's legacy 1-hour cache-write field stands for.
+const LEGACY_1H_SECONDS: u32 = 3600;
+
+/// Per-million-token rates (USD), one optional rate per billable
 /// dimension. A `None` field means "no price known for this dimension";
 /// the dimension then contributes nothing to the estimate. This is a
 /// usage-owned mirror of the router's pricing config -- deliberately NOT
@@ -43,17 +50,16 @@ pub struct Rates {
     pub reasoning_per_mtok: Option<f64>,
     /// USD per million cache-read tokens. `None` leaves cache reads unpriced.
     pub cache_read_per_mtok: Option<f64>,
-    /// USD per million 5-minute cache-write tokens. `None` leaves them unpriced.
-    pub cache_write_5m_per_mtok: Option<f64>,
-    /// USD per million 1-hour cache-write tokens. `None` leaves them unpriced.
-    pub cache_write_1h_per_mtok: Option<f64>,
+    /// USD per million cache-write tokens, keyed by cache lifetime in
+    /// seconds. A lifetime with no entry is unpriced.
+    pub cache_write_per_mtok: BTreeMap<u32, f64>,
 }
 
-/// Per-dimension cost breakdown plus the total, all in USD. The six
+/// Per-dimension cost breakdown plus the total, all in USD. The five
 /// component fields always sum to `total_usd`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CostBreakdown {
-    /// Sum of the six component costs, USD.
+    /// Sum of the five component costs, USD.
     pub total_usd: f64,
     /// Input-token cost, USD.
     pub input_usd: f64,
@@ -64,26 +70,29 @@ pub struct CostBreakdown {
     pub reasoning_usd: f64,
     /// Cache-read cost, USD.
     pub cache_read_usd: f64,
-    /// 5-minute cache-write cost, USD.
-    pub cache_write_5m_usd: f64,
-    /// 1-hour cache-write cost, USD.
-    pub cache_write_1h_usd: f64,
+    /// Cache-write cost over every lifetime, USD.
+    pub cache_write_usd: f64,
 }
 
 /// Estimate the cost of one usage row against a rate table.
 ///
 /// Returns `None` when the rate table is entirely unpriced (every rate
-/// field `None`) -- the caller decides how to display an unpriced row.
-/// Otherwise returns a breakdown where each dimension contributes
-/// `tokens * rate / 1_000_000` only when BOTH the row's token count and
-/// the matching rate are present; any missing half makes that dimension
-/// contribute `0.0`.
+/// `None` and no cache-write lifetime priced) -- the caller decides how to
+/// display an unpriced row. Otherwise returns a breakdown where each
+/// dimension contributes `tokens * rate / 1_000_000` only when BOTH the
+/// row's token count and the matching rate are present; any missing half
+/// makes that dimension contribute `0.0`.
+///
+/// Cache writes are priced per lifetime: the record's lifetime split, plus
+/// its legacy 5-minute and 1-hour fields as the 300 s and 3600 s lifetimes.
+/// Written tokens the split does not cover have no lifetime and contribute
+/// nothing; a caller that must not under-price checks for them itself.
 ///
 /// Return contract (the display layer depends on this): `None` means no
-/// price is configured (all rates `None`); `Some(total_usd == 0.0)`
-/// means the record IS priced but carries no billable tokens. Callers
-/// distinguish "n/a (subscription)" from "$0.00" using the provider /
-/// auth context, NOT this return value alone.
+/// price is configured; `Some(total_usd == 0.0)` means the record IS
+/// priced but carries no billable tokens. Callers distinguish "n/a
+/// (subscription)" from "$0.00" using the provider / auth context, NOT this
+/// return value alone.
 ///
 /// Reasoning tokens are priced only when `rates.reasoning_per_mtok` is set
 /// (a disjoint-reasoning provider like Gemini); otherwise they contribute
@@ -96,8 +105,7 @@ pub fn estimate_cost(record: &UsageRecord, rates: &Rates) -> Option<CostBreakdow
         opt_u64_to_i64(record.output_tokens),
         opt_u64_to_i64(record.reasoning_tokens),
         opt_u64_to_i64(record.cache_read),
-        opt_u64_to_i64(record.cache_write_5m),
-        opt_u64_to_i64(record.cache_write_1h),
+        &record_cache_writes(record),
         rates,
     )
 }
@@ -107,10 +115,13 @@ pub fn estimate_cost(record: &UsageRecord, rates: &Rates) -> Option<CostBreakdow
 /// point the `routectl usage` CLI uses after rolling fine-grained
 /// `AggRow`s into a display group.
 ///
+/// `cache_writes` is the summed cache-write tokens per lifetime in seconds;
+/// each lifetime is priced at its own rate in `rates.cache_write_per_mtok`.
+///
 /// Same return contract as [`estimate_cost`]: `None` when the rate table
-/// is entirely unpriced (every rate field `None`); otherwise a breakdown
-/// where each dimension contributes `tokens * rate / 1_000_000` only when
-/// both the token count and the matching rate are present.
+/// is entirely unpriced; otherwise a breakdown where each dimension
+/// contributes `tokens * rate / 1_000_000` only when both the token count
+/// and the matching rate are present.
 ///
 /// `reasoning` is priced only when `rates.reasoning_per_mtok` is set (a
 /// disjoint-reasoning provider like Gemini, whose thinking tokens are NOT
@@ -122,16 +133,14 @@ pub fn estimate_cost_tokens(
     output: i64,
     reasoning: i64,
     cache_read: i64,
-    cache_write_5m: i64,
-    cache_write_1h: i64,
+    cache_writes: &BTreeMap<u32, i64>,
     rates: &Rates,
 ) -> Option<CostBreakdown> {
     let all_unpriced = rates.input_per_mtok.is_none()
         && rates.output_per_mtok.is_none()
         && rates.reasoning_per_mtok.is_none()
         && rates.cache_read_per_mtok.is_none()
-        && rates.cache_write_5m_per_mtok.is_none()
-        && rates.cache_write_1h_per_mtok.is_none();
+        && rates.cache_write_per_mtok.is_empty();
     if all_unpriced {
         return None;
     }
@@ -140,15 +149,18 @@ pub fn estimate_cost_tokens(
     let output_usd = component(output, rates.output_per_mtok);
     let reasoning_usd = component(reasoning, rates.reasoning_per_mtok);
     let cache_read_usd = component(cache_read, rates.cache_read_per_mtok);
-    let cache_write_5m_usd = component(cache_write_5m, rates.cache_write_5m_per_mtok);
-    let cache_write_1h_usd = component(cache_write_1h, rates.cache_write_1h_per_mtok);
+    let cache_write_parts: Vec<f64> = cache_writes
+        .iter()
+        .map(|(seconds, tokens)| {
+            component(*tokens, rates.cache_write_per_mtok.get(seconds).copied())
+        })
+        .collect();
 
-    let total_usd = input_usd
-        + output_usd
-        + reasoning_usd
-        + cache_read_usd
-        + cache_write_5m_usd
-        + cache_write_1h_usd;
+    let total_usd = [input_usd, output_usd, reasoning_usd, cache_read_usd]
+        .into_iter()
+        .chain(cache_write_parts.iter().copied())
+        .fold(0.0, |sum, part| sum + part);
+    let cache_write_usd = cache_write_parts.iter().fold(0.0, |sum, part| sum + part);
 
     Some(CostBreakdown {
         total_usd,
@@ -156,9 +168,30 @@ pub fn estimate_cost_tokens(
         output_usd,
         reasoning_usd,
         cache_read_usd,
-        cache_write_5m_usd,
-        cache_write_1h_usd,
+        cache_write_usd,
     })
+}
+
+/// A record's cache writes per lifetime: its split, with the legacy 5-minute
+/// and 1-hour fields added as the 300 s and 3600 s lifetimes.
+fn record_cache_writes(record: &UsageRecord) -> BTreeMap<u32, i64> {
+    let mut writes: BTreeMap<u32, i64> = record
+        .cache_write_lifetimes
+        .iter()
+        .flatten()
+        .map(|(seconds, tokens)| (*seconds, opt_u64_to_i64(Some(*tokens))))
+        .collect();
+    let legacy = [
+        (LEGACY_5M_SECONDS, record.cache_write_5m),
+        (LEGACY_1H_SECONDS, record.cache_write_1h),
+    ];
+    for (seconds, tokens) in legacy {
+        if let Some(tokens) = tokens {
+            let sum = writes.entry(seconds).or_insert(0);
+            *sum = sum.saturating_add(opt_u64_to_i64(Some(tokens)));
+        }
+    }
+    writes
 }
 
 /// Convert a record's `Option<u64>` token field to the `i64` the
@@ -287,9 +320,18 @@ mod tests {
             output_per_mtok: Some(15.0),
             reasoning_per_mtok: None,
             cache_read_per_mtok: Some(0.3),
-            cache_write_5m_per_mtok: Some(3.75),
-            cache_write_1h_per_mtok: Some(6.0),
+            cache_write_per_mtok: BTreeMap::from([(300, 3.75), (3600, 6.0)]),
         }
+    }
+
+    /// Summed cache writes per lifetime, as the aggregate entry point takes them.
+    fn writes(pairs: &[(u32, i64)]) -> BTreeMap<u32, i64> {
+        pairs.iter().copied().collect()
+    }
+
+    /// No cache writes at all.
+    fn no_writes() -> BTreeMap<u32, i64> {
+        BTreeMap::new()
     }
 
     /// A Gemini-shape rate table: reasoning priced at the output rate,
@@ -321,15 +363,13 @@ mod tests {
         assert_eq!(breakdown.input_usd, 3.0);
         assert_eq!(breakdown.output_usd, 15.0);
         assert_eq!(breakdown.cache_read_usd, 0.3);
-        assert_eq!(breakdown.cache_write_5m_usd, 3.75);
-        assert_eq!(breakdown.cache_write_1h_usd, 6.0);
+        assert_eq!(breakdown.cache_write_usd, 3.75 + 6.0);
         let expected = 3.0 + 15.0 + 0.3 + 3.75 + 6.0;
         assert_eq!(breakdown.total_usd, expected);
         let component_sum = breakdown.input_usd
             + breakdown.output_usd
             + breakdown.cache_read_usd
-            + breakdown.cache_write_5m_usd
-            + breakdown.cache_write_1h_usd;
+            + breakdown.cache_write_usd;
         assert_eq!(breakdown.total_usd, component_sum);
     }
 
@@ -382,8 +422,7 @@ mod tests {
         assert_eq!(breakdown.input_usd, 0.0);
         assert_eq!(breakdown.output_usd, 0.0);
         assert_eq!(breakdown.cache_read_usd, 0.0);
-        assert_eq!(breakdown.cache_write_5m_usd, 0.0);
-        assert_eq!(breakdown.cache_write_1h_usd, 0.0);
+        assert_eq!(breakdown.cache_write_usd, 0.0);
     }
 
     #[test]
@@ -420,10 +459,9 @@ mod tests {
         assert_eq!(breakdown.input_usd, 100_000.0 * 3.0 / 1_000_000.0);
         assert_eq!(breakdown.output_usd, 200_000.0 * 15.0 / 1_000_000.0);
         assert_eq!(breakdown.cache_read_usd, 400_000.0 * 0.3 / 1_000_000.0);
-        assert_eq!(breakdown.cache_write_5m_usd, 800_000.0 * 3.75 / 1_000_000.0);
         assert_eq!(
-            breakdown.cache_write_1h_usd,
-            1_600_000.0 * 6.0 / 1_000_000.0
+            breakdown.cache_write_usd,
+            800_000.0 * 3.75 / 1_000_000.0 + 1_600_000.0 * 6.0 / 1_000_000.0
         );
     }
 
@@ -448,9 +486,15 @@ mod tests {
         let rates = all_rates();
 
         // Act
-        let breakdown =
-            estimate_cost_tokens(100_000, 200_000, 9_999, 400_000, 800_000, 1_600_000, &rates)
-                .expect("priced");
+        let breakdown = estimate_cost_tokens(
+            100_000,
+            200_000,
+            9_999,
+            400_000,
+            &writes(&[(300, 800_000), (3600, 1_600_000)]),
+            &rates,
+        )
+        .expect("priced");
 
         // Assert: hand-computed per-dimension terms; reasoning (9_999) ignored.
         let input = 100_000.0 * 3.0 / 1_000_000.0;
@@ -461,15 +505,14 @@ mod tests {
         assert_eq!(breakdown.input_usd, input);
         assert_eq!(breakdown.output_usd, output);
         assert_eq!(breakdown.cache_read_usd, cache_read);
-        assert_eq!(breakdown.cache_write_5m_usd, cw5);
-        assert_eq!(breakdown.cache_write_1h_usd, cw1);
+        assert_eq!(breakdown.cache_write_usd, cw5 + cw1);
         assert_eq!(breakdown.total_usd, input + output + cache_read + cw5 + cw1);
     }
 
     #[test]
     fn token_entry_point_all_none_rates_returns_none() {
         // Arrange + Act
-        let result = estimate_cost_tokens(1_000, 1_000, 0, 0, 0, 0, &Rates::default());
+        let result = estimate_cost_tokens(1_000, 1_000, 0, 0, &no_writes(), &Rates::default());
 
         // Assert
         assert!(result.is_none(), "fully-unpriced table => None");
@@ -481,7 +524,8 @@ mod tests {
         let rates = all_rates();
 
         // Act
-        let breakdown = estimate_cost_tokens(0, 0, 0, 0, 0, 0, &rates).expect("priced => Some");
+        let breakdown =
+            estimate_cost_tokens(0, 0, 0, 0, &no_writes(), &rates).expect("priced => Some");
 
         // Assert
         assert_eq!(breakdown.total_usd, 0.0);
@@ -493,7 +537,8 @@ mod tests {
         let rates = all_rates();
 
         // Act
-        let breakdown = estimate_cost_tokens(2_000_000, 0, 0, 0, 0, 0, &rates).expect("priced");
+        let breakdown =
+            estimate_cost_tokens(2_000_000, 0, 0, 0, &no_writes(), &rates).expect("priced");
 
         // Assert
         assert_eq!(breakdown.input_usd, 6.0);
@@ -545,8 +590,8 @@ mod tests {
     #[test]
     fn gemini_reasoning_priced_at_output_rate() {
         // Arrange: output and (disjoint) reasoning tokens, Gemini-shape rates.
-        let breakdown =
-            estimate_cost_tokens(0, 200_000, 500_000, 0, 0, 0, &gemini_rates()).expect("priced");
+        let breakdown = estimate_cost_tokens(0, 200_000, 500_000, 0, &no_writes(), &gemini_rates())
+            .expect("priced");
 
         // Assert: reasoning priced at the output rate and included in total.
         let expected_reasoning = 500_000.0 * 15.0 / 1_000_000.0;
@@ -590,5 +635,69 @@ mod tests {
         let output_only = 200_000.0 * 15.0 / 1_000_000.0;
         assert_eq!(breakdown.reasoning_usd, 0.0);
         assert_eq!(breakdown.total_usd, output_only);
+    }
+
+    #[test]
+    fn cache_writes_price_each_lifetime_at_its_own_rate() {
+        // Arrange: 1M tokens at each of three lifetimes, each priced apart.
+        let rates = Rates {
+            cache_write_per_mtok: BTreeMap::from([(300, 3.75), (1800, 5.0), (3600, 6.0)]),
+            ..Rates::default()
+        };
+        let cache_writes = writes(&[(300, 1_000_000), (1800, 1_000_000), (3600, 1_000_000)]);
+
+        // Act
+        let breakdown = estimate_cost_tokens(0, 0, 0, 0, &cache_writes, &rates).expect("priced");
+
+        // Assert
+        assert_eq!(breakdown.cache_write_usd, 3.75 + 5.0 + 6.0);
+        assert_eq!(breakdown.total_usd, 3.75 + 5.0 + 6.0);
+    }
+
+    #[test]
+    fn a_lifetime_with_no_rate_contributes_zero() {
+        // Arrange: the 1800 s lifetime carries tokens but has no price.
+        let rates = all_rates();
+        let cache_writes = writes(&[(300, 1_000_000), (1800, 1_000_000)]);
+
+        // Act
+        let breakdown = estimate_cost_tokens(0, 0, 0, 0, &cache_writes, &rates).expect("priced");
+
+        // Assert
+        assert_eq!(breakdown.cache_write_usd, 3.75);
+    }
+
+    #[test]
+    fn a_table_pricing_only_a_write_lifetime_is_priced() {
+        // Arrange
+        let rates = Rates {
+            cache_write_per_mtok: BTreeMap::from([(1800, 5.0)]),
+            ..Rates::default()
+        };
+
+        // Act
+        let result = estimate_cost_tokens(0, 0, 0, 0, &no_writes(), &rates);
+
+        // Assert
+        assert_eq!(result.map(|b| b.total_usd), Some(0.0));
+    }
+
+    #[test]
+    fn record_split_and_legacy_fields_price_as_lifetimes() {
+        // Arrange: a split with 1M at 1800 s and 1M at 300 s, plus a legacy
+        // 5-minute field of 1M that adds to the 300 s lifetime: 2M at $3.75
+        // is $7.50, 1M at $5.00 is $5.00.
+        let mut record = record_with_tokens(None, None, None, Some(1_000_000), None);
+        record.cache_write_lifetimes = Some(BTreeMap::from([(300, 1_000_000), (1800, 1_000_000)]));
+        let rates = Rates {
+            cache_write_per_mtok: BTreeMap::from([(300, 3.75), (1800, 5.0)]),
+            ..Rates::default()
+        };
+
+        // Act
+        let breakdown = estimate_cost(&record, &rates).expect("priced");
+
+        // Assert
+        assert_eq!(breakdown.cache_write_usd, 7.5 + 5.0);
     }
 }
