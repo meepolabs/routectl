@@ -258,3 +258,7 @@ mod failure_scope_daemon_tests;
 #[cfg(test)]
 #[path = "walk_counts_daemon_tests.rs"]
 mod walk_counts_daemon_tests;
+
+#[cfg(test)]
+#[path = "cache_writes_daemon_tests.rs"]
+mod cache_writes_daemon_tests;
