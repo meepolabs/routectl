@@ -1417,6 +1417,67 @@ fn a_name_closing_a_span_takes_no_value_past_it() {
     }
 }
 
+/// A key closing a bearer token as its `=` padding still owns the unquoted
+/// value starting right after that `=`. One row per key spelling.
+#[test]
+fn a_value_starting_at_a_bearer_tokens_padding_is_redacted() {
+    let hex = "0123456789abcdef";
+    let rows = [
+        (
+            "uppercase env name",
+            format!("Authorization: Bearer AZURE_OPENAI_API_KEY={hex}{hex}"),
+            "Authorization: Bearer [redacted][redacted]".to_owned(),
+        ),
+        (
+            "name ending in token, text after the value",
+            format!("Authorization: Bearer personal_access_token={hex} rejected"),
+            "Authorization: Bearer [redacted][redacted] rejected".to_owned(),
+        ),
+        (
+            "name carrying a digit",
+            "Bearer oauth2_access_token=OPAQUESECRET1".to_owned(),
+            "Bearer [redacted][redacted]".to_owned(),
+        ),
+        (
+            "session-token header name",
+            format!(
+                "Authorization: Bearer x-amz-security-token={}",
+                "F".repeat(40)
+            ),
+            "Authorization: Bearer [redacted][redacted]".to_owned(),
+        ),
+    ];
+    for (name, input, expected) in &rows {
+        assert_eq!(scrub_upstream_text(input), *expected, "{name}");
+    }
+}
+
+/// A literal `[redacted]@` leading a value is not taken as an earlier pass's
+/// output unless the value is unquoted and the host after `@` ends inside it.
+#[test]
+fn a_literal_placeholder_before_at_does_not_shield_the_value() {
+    let rows = [
+        (
+            "quoted json value",
+            r#"{"password":"[redacted]@hunter2xyz"}"#,
+            r#"{"password":"[redacted]"}"#,
+        ),
+        (
+            "quoted value holding blanks",
+            r#"{"secret": "[redacted]@ my whole secret phrase here"}"#,
+            r#"{"secret": "[redacted]"}"#,
+        ),
+        (
+            "form value whose host runs past it",
+            "token=[redacted]@OPAQUESECRET1&x=1",
+            "token=[redacted]&x=1",
+        ),
+    ];
+    for (name, input, expected) in rows {
+        assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
+}
+
 #[test]
 fn a_form_value_ends_at_a_list_or_bracket_delimiter() {
     let rows = [

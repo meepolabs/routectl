@@ -160,8 +160,10 @@ fn redaction_spans(bytes: &[u8]) -> Vec<Range<usize>> {
 /// A probed span whose own shape ends it (an ARN, a session-token value, a
 /// bearer token) also fences what is found inside it: a rule that takes a
 /// value after a name (a credential-named key, `bearer`, the session-token
-/// header) is cut at the fence and dropped when its value would start at or
-/// past it, so a name closing that span never takes the text after it. Only
+/// header) is cut at the fence and dropped when its value would start past
+/// it, so a name closing that span never takes the text after it. A value
+/// starting exactly at the fence (an unquoted value right after the `=`
+/// closing the span) is kept whole: the name is that value's own key. Only
 /// a credential carrying its own shape (URL userinfo, a prefix-keyed token,
 /// an account id, an ARN) runs past the fence.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -236,10 +238,10 @@ impl Fence {
         }
     }
 
-    /// `span` cut at the fence when it is fenced; `None` when nothing of it
-    /// lies inside the fence.
+    /// `span` cut at the fence when it is fenced and does not start at the
+    /// fence end; `None` when nothing of it lies inside the fence.
     fn bound(&self, span: Span) -> Option<Span> {
-        let Some(end) = self.end.filter(|_| span.is_fenced) else {
+        let Some(end) = self.end.filter(|&end| span.is_fenced && span.start != end) else {
             return Some(span);
         };
         (span.start < end).then_some(Span {
@@ -258,6 +260,7 @@ struct RunCaches {
     arn: RunCache,
     session_token: RunCache,
     form_value: RunCache,
+    authority: RunCache,
 }
 
 #[derive(Default)]
@@ -450,7 +453,8 @@ fn match_at(bytes: &[u8], at: usize, runs: &mut RunCaches) -> [Option<Span>; 7] 
             .map(|range| Span::probed(range).fencing().fenced()),
         userinfo_at(bytes, at).map(Span::skipped),
         bearer_token_at(bytes, at).map(|range| Span::probed(range).fencing().fenced()),
-        credential_key_value_at(bytes, at, &mut runs.form_value).map(Span::fenced),
+        credential_key_value_at(bytes, at, &mut runs.form_value, &mut runs.authority)
+            .map(Span::fenced),
     ]
 }
 
@@ -858,7 +862,12 @@ const VOCABULARY_TOKEN_KEYS: [&[u8]; 8] = [
 /// alone. A start just after a backslash, or a bare key just after a `.`,
 /// is skipped: the run's own start already judged the same key, and
 /// skipping keeps a long run of backslashes or dotted segments linear.
-fn credential_key_value_at(bytes: &[u8], at: usize, form_run: &mut RunCache) -> Option<Span> {
+fn credential_key_value_at(
+    bytes: &[u8],
+    at: usize,
+    form_run: &mut RunCache,
+    authority_run: &mut RunCache,
+) -> Option<Span> {
     let prev = at.checked_sub(1).map(|i| bytes[i]);
     if prev == Some(b'\\') {
         return None;
@@ -891,17 +900,30 @@ fn credential_key_value_at(bytes: &[u8], at: usize, form_run: &mut RunCache) -> 
     } else {
         Span::skipped(quoted_value_after_separator(bytes, pos, opening.is_some())?)
     };
-    (!is_already_redacted(&bytes[value.range()])).then_some(value)
+    (!is_already_redacted(bytes, value, authority_run)).then_some(value)
 }
 
-/// True for an empty value, `[redacted]`, or `[redacted]@` and a host: the
-/// shape a value takes once the userinfo inside it was redacted.
-fn is_already_redacted(value: &[u8]) -> bool {
-    value
-        .strip_prefix(PLACEHOLDER.as_bytes())
-        .map_or(value.is_empty(), |rest| {
-            rest.is_empty() || rest.starts_with(b"@")
-        })
+/// True for an empty value or `[redacted]`, and for an unquoted form value
+/// reading `[redacted]@` and a host whose authority ends inside the value:
+/// the shape a form value takes once the userinfo inside it was redacted.
+/// A quoted value is always redacted whole, so it never takes that shape.
+fn is_already_redacted(bytes: &[u8], value: Span, authority_run: &mut RunCache) -> bool {
+    let text = &bytes[value.range()];
+    let Some(rest) = text.strip_prefix(PLACEHOLDER.as_bytes()) else {
+        return text.is_empty();
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let is_unquoted_form_value = value.is_probed;
+    if !is_unquoted_form_value || !rest.starts_with(b"@") {
+        return false;
+    }
+    let host_at = value.end - rest.len() + 1;
+    let authority_end = authority_run.end_from(host_at, |from| {
+        from + run_len(bytes, from, |b| !ends_authority(b))
+    });
+    authority_end <= value.end
 }
 
 /// The quoted value after blanks, a `:` (quoted keys only) or `=`, and
