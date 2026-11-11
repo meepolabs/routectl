@@ -1,6 +1,6 @@
 //! The `routectl_edit_rejected` warning and what outlives a revert: one
-//! warning per lane, path and attribution, rendered only as the masked,
-//! sanitized pointer, and nothing remembered by the next request.
+//! warning per lane, path pattern and attribution, rendered only as the
+//! masked, sanitized pointer, and nothing remembered by the next request.
 
 use std::sync::Arc;
 
@@ -59,6 +59,37 @@ async fn a_revert_is_not_remembered_by_the_next_request() {
         );
         assert_nothing_learned(&router, &second, &format!("{surface:?}"));
     }
+}
+
+/// Rejected paths that differ only in an array index share one warning,
+/// which prints the first concrete path; a different pattern warns again.
+#[test]
+fn the_warning_fires_once_per_path_pattern() {
+    let lane = Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi);
+    let router = router(ANTHROPIC, false, &[]);
+    let at = |segments: &[&str]| -> WirePath {
+        segments.iter().fold(WirePath::root(), |path, segment| {
+            segment
+                .parse::<usize>()
+                .map_or_else(|_| path.child(segment), |index| path.index(index))
+        })
+    };
+
+    let events = routectl_testkit::capture_events(|| {
+        for segments in [
+            &["messages", "0", "x"][..],
+            &["messages", "7", "x"],
+            &["tools", "0", "x"],
+        ] {
+            router.warn_edit_rejected(lane, &at(segments), EditAttribution::Undeclared);
+        }
+    });
+
+    let paths: Vec<String> = warned(&events)
+        .into_iter()
+        .map(|(_, path, _)| path)
+        .collect();
+    assert_eq!(paths, ["/messages/0/x", "/tools/0/x"]);
 }
 
 /// The warning renders the path a rejection names only as its masked,

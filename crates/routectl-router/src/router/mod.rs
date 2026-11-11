@@ -472,8 +472,8 @@ pub struct Router {
     /// sampler's per-(lane, version) counts must not restart their first-N
     /// window on every config swap.
     wire_check: Arc<crate::wire_check_state::WireCheckState>,
-    /// Warn-once dedup for `routectl_edit_rejected`, keyed by lane, masked
-    /// path and attribution. Reset on a Router rebuild, which re-warns once.
+    /// Warn-once dedup for `routectl_edit_rejected`, keyed by lane, path
+    /// pattern and attribution. Reset on a Router rebuild, which re-warns once.
     edit_rejected_warned: learn_revert::EditRejectedWarned,
     /// Test-only: an RFC 6901 pointer every installed wire tap removes from
     /// the request body the egress deposits, simulating an egress that lost

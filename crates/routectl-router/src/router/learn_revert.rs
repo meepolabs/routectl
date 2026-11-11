@@ -126,8 +126,9 @@ impl EditAttribution {
 const EDIT_REJECTED_WARN_CAP: usize = 1024;
 
 /// The dedup set of `routectl_edit_rejected` warnings, one per lane, path
-/// and attribution.
-pub(super) type EditRejectedWarned = CappedWarnSet<(Lane, WirePath, EditAttribution)>;
+/// pattern ([`WirePath::pattern`]) and attribution. Keying on the pattern
+/// keeps array indices, which the client chooses, from filling the set.
+pub(super) type EditRejectedWarned = CappedWarnSet<(Lane, String, EditAttribution)>;
 
 /// An empty [`EditRejectedWarned`] at its cap.
 pub(super) fn edit_rejected_warned() -> EditRejectedWarned {
@@ -135,9 +136,10 @@ pub(super) fn edit_rejected_warned() -> EditRejectedWarned {
 }
 
 impl Router {
-    /// Warn, once per lane, path and attribution, that the upstream rejected
-    /// a path routectl put on the wire. The path renders masked and
-    /// sanitized; every other field is a closed label.
+    /// Warn, once per lane, path pattern and attribution, that the upstream
+    /// rejected a path routectl put on the wire. The warning prints the
+    /// first concrete path seen for the pattern, masked and sanitized; every
+    /// other field is a closed label.
     pub(super) fn warn_edit_rejected(
         &self,
         lane: Lane,
@@ -146,7 +148,7 @@ impl Router {
     ) {
         match self
             .edit_rejected_warned
-            .admit((lane, path.clone(), attribution))
+            .admit((lane, path.pattern(), attribution))
         {
             WarnDecision::Emit => tracing::warn!(
                 lane = lane.label(),

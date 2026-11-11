@@ -372,6 +372,22 @@ impl WirePath {
     pub fn as_str(&self) -> &str {
         &self.pointer
     }
+
+    /// The pointer as an edit pattern: every array index and masked key
+    /// renders as [`WILDCARD_SEGMENT`], so pointers that differ only in
+    /// their indices share one pattern.
+    pub fn pattern(&self) -> String {
+        let mut pattern = String::with_capacity(self.pointer.len());
+        for (position, segment) in self.segments().enumerate() {
+            pattern.push('/');
+            pattern.push_str(if self.is_wildcard_segment(position) {
+                WILDCARD_SEGMENT
+            } else {
+                segment
+            });
+        }
+        pattern
+    }
 }
 
 impl PartialEq for WirePath {
@@ -683,6 +699,36 @@ mod tests {
         );
         assert_eq!(path.depth(), MAX_WIRE_PATH_DEPTH - 1);
         assert!(path.is_coarsened());
+    }
+
+    #[test]
+    fn pattern_renders_indices_and_masked_keys_as_wildcards() {
+        let rows: [(&str, WirePath, &str); 5] = [
+            ("root", WirePath::root(), ""),
+            (
+                "an index",
+                WirePath::root().child("messages").index(7).child("x"),
+                "/messages/*/x",
+            ),
+            (
+                "nested indices",
+                WirePath::root().child("a").index(0).child("b").index(12),
+                "/a/*/b/*",
+            ),
+            (
+                "a masked key",
+                WirePath::root().child("metadata").child("owner"),
+                "/metadata/*",
+            ),
+            (
+                "an all-digit object key",
+                WirePath::root().child("x").child("0"),
+                "/x/*",
+            ),
+        ];
+        for (name, path, expected) in rows {
+            assert_eq!(path.pattern(), expected, "row {name}");
+        }
     }
 
     #[test]

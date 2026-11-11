@@ -616,7 +616,7 @@ matches a declared edit.
 
 | Message | Meaning | Fields |
 |---|---|---|
-| `routectl_edit_rejected` | An upstream rejection named a path a routectl edit put on the wire. Fires once per (lane, path, attribution) | `lane`, `path`, `edit_site` |
+| `routectl_edit_rejected` | An upstream rejection named a path a routectl edit put on the wire. Fires once per (lane, path pattern, attribution), naming the first concrete path seen | `lane`, `path`, `edit_site` |
 | `routectl_edit_rejected dedup is full; new paths are no longer warned` | The dedup set reached its cap. Emitted once; later new paths stay silent | `cap` |
 
 `lane` is the same `<ingress>-><egress>` label as above. `path` is the
@@ -625,8 +625,11 @@ same rules as the wire-check `path`). `edit_site` is the declared edit's
 site label (for example `operator_payload_extras`, `cache_placement`,
 `model_rename`), `conflict` when several different declared edits match the
 path, or `undeclared` for a `routectl_added` path no declaration explains
-(that rejection then goes to the learners as usual). The dedup set holds at
-most 1024 (lane, path, attribution) entries per Router and starts empty
+(that rejection then goes to the learners as usual). The dedup key is the
+path pattern: every array index renders as `*`, so `/messages/0/x` and
+`/messages/7/x` share one warning (the line prints `/messages/0/x`, the
+first one seen) while `/tools/0/x` warns again. The dedup set holds at most
+1024 (lane, path pattern, attribution) entries per Router and starts empty
 again when a config reload rebuilds the Router.
 
 ### Envelope-field pre-flight decision DEBUG + WARN
@@ -1745,7 +1748,6 @@ Summary (grep the `event` field to isolate a kind):
 | `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; catalog-scoped learned capabilities are evicted at the replay boundary` (no longer emitted) |
 | `strip` | WARN | `routectl_router::router::feature_filter` | `capability_strip_decision` |
 | `suppression` | WARN | `routectl_router::router::capability_learn` | `force_supported override contradicted: masked capability still rejected upstream` / `f2 feature-naming negative suppressed: same-chain f1 already observed for this capability` |
-| `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key normalizes to a form that is not normalization-stable; ...` |
 
 ## Bounded probe-scheduler diagnostics
 
@@ -2362,33 +2364,6 @@ WARN routectl_router::router::capability_learn event=suppression state_key=m1
   "force_supported override contradicted: masked capability still rejected upstream"
 ```
 
-### `dead_override_key` (WARN)
-
-A config-layer event, emitted once per operator override key whose
-normalized form is not itself normalization-stable: the cell would be stored
-under a key no normalized capability lookup can produce, so the override is
-unreachable. Normalization is idempotent for every key it accepts today, so
-this guard is a bug signal rather than a routine config lint -- a line here
-means the normalizer changed shape; rewrite the key in its `lookup_key` form
-and file a bug.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `event` | string | Always `dead_override_key`. |
-| `target_spec` | string | The override target (`provider` or `provider:nickname`). |
-| `raw_key` | string | The operator's key as written in config. |
-| `stored_key` | string | The normalized key the override cell is stored under. |
-| `lookup_key` | string | What a normalized lookup of that stored key produces (use this form instead). |
-
-```
-WARN routectl_router::override_registry event=dead_override_key
-  target_spec=br raw_key=<as written> stored_key=<normalized>
-  lookup_key=<normalized again>
-  "capability override key normalizes to a form that is not
-  normalization-stable; the cell is stored under a key no normalized
-  capability lookup can produce, so the override is unreachable"
-```
-
 ## WARN and ERROR catalog
 
 Every class of line that still logs at WARN or ERROR, grouped by crate, with
@@ -2517,7 +2492,6 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::catalog_import_state` | `catalog_import_state.json is corrupt, unreadable, or from a newer routectl build` | No longer emitted: routectl no longer imports a catalog or reads `catalog_import_state.json`. A line in an older log meant an import's shrink guard fell back to the baked baseline. |
 | WARN | `routectl_router::catalog_import_state` | `failed to persist catalog_import_state.json ...` | No longer emitted: routectl no longer writes `catalog_import_state.json`. |
 | WARN | `routectl_router::catalog_overlay` | `catalog overlay cell has a below-sentinel write multiplier` | No longer emitted: the daemon no longer reads `catalog_overlay.json`, at boot or on reload. A line in an older log named an overlay cell on `selector` with a low write multiplier. |
-| WARN | `routectl_router::override_registry` | `dead_override_key` event | Rewrite the override key in its `lookup_key` form and file a bug (see the event section). |
 | WARN | `routectl_router::learned_capability` | `capability purge lease abandoned without settlement ...` | The purge did not happen and the entry is still acting: re-issue the purge. |
 | ERROR | `routectl_router::learned_capability` | `incarnation_exhausted` | Learned-capability mutations are refused: restart, and file a bug. |
 | ERROR | `routectl_router::learned_capability` | `purge_incarnation_mismatch` | A purge found the entry changed under its lease and removed nothing: file a bug. |

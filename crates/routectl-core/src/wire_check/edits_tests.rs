@@ -221,6 +221,26 @@ fn tools_child_pattern_never_matches_a_grandchild() {
 }
 
 #[test]
+fn a_path_matches_its_own_pattern() {
+    let rows: [(&str, &[&str]); 4] = [
+        ("indices", &["messages", "7", "content", "0", "text"]),
+        ("a masked key", &["metadata", "owner"]),
+        ("verbatim keys only", &["tools", "x"]),
+        ("an index then a masked key", &["tools", "2", "a b"]),
+    ];
+
+    for (name, segments) in rows {
+        let path = path_of(segments);
+
+        assert!(
+            super::pattern_matches(&path.pattern(), &path),
+            "row {name}: {}",
+            path.pattern()
+        );
+    }
+}
+
+#[test]
 fn coarsened_path_matches_no_pattern() {
     let deep = path_of(&["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
     let rows = [
