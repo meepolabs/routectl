@@ -133,7 +133,9 @@ pub use upstream_meta::{
     ResponsesEnvelope, ResponsesItemMembers, UpstreamMeta, UsageInputSource, renders_unknowns,
 };
 pub use upstream_reason::UpstreamReason;
-pub use upstream_scrub::{names_aws_principal, scrub_upstream_text};
+pub use upstream_scrub::{
+    names_aws_principal, scrub_upstream_text, scrub_upstream_value, upstream_text_for_log,
+};
 pub use volatile::{
     CallerPrefixAdvisory, CallerPrefixFinding, PrefixComponent, VolatileConfidence, VolatileKind,
     VolatileReport, scan_caller_prefix_advisory, scan_volatile,

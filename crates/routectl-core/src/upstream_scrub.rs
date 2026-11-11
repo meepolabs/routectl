@@ -9,9 +9,16 @@
 //! `%25XX` escape counts as a delimiter, and the encoded spellings of the
 //! ARN markers match. Matching is hand-rolled over bytes: every marker is
 //! ASCII, so a byte offset at a marker is always a char boundary.
+//!
+//! Log sinks render upstream text through [`upstream_text_for_log`] (or
+//! [`scrub_upstream_value`] for a decoded body), so the scrub sees the
+//! complete text before any control filter or length cap can cut a
+//! credential short of its rule.
 
 use std::borrow::Cow;
 use std::ops::Range;
+
+use crate::log_safe::{body_key_looks_credential, sanitize_for_log};
 
 /// The one replacement every match gets.
 const PLACEHOLDER: &str = "[redacted]";
@@ -49,7 +56,19 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 ///   precedes it and the `@`. No scheme is required: the text is displayed,
 ///   not parsed, so `://user:pass@` is redacted whatever stands before it.
 ///   The authority runs to `/` (so to an escaped `\/`), never to a bare `\`, so
-///   a domain user such as `CORP\alice:pw@` is userinfo.
+///   a domain user such as `CORP\alice:pw@` is userinfo;
+/// - the value of a credential-named key (as judged for request bodies:
+///   `api_key`, `secret`, `password`, `authorization`, a name ending in
+///   `token` but not `tokens`, and so on; a name of 129+ characters counts
+///   as one), keeping the key: the key, of `[A-Za-z0-9_.-]`, quoted with
+///   `"` or `'` (each optionally backslash-escaped, any depth) then `:` or
+///   `=`, or bare (starting a token) then `=` only, so prose such as
+///   `unexpected token: '}'` stays; optional spaces or tabs around the
+///   separator; then a quoted value. A value already
+///   `[redacted]` is left alone. The value runs to the matching closing quote
+///   (one carrying no more backslashes than the opening one), or else to the
+///   next control character or the end of the text. An unquoted value such
+///   as `max_tokens: 5` is not one.
 #[must_use = "the returned text carries required redactions"]
 pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
     let bytes = s.as_bytes();
@@ -73,6 +92,34 @@ pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
             buf.push_str(&s[copied..]);
             Cow::Owned(buf)
         }
+    }
+}
+
+/// Log-line rendering of upstream-authored text: the complete text is
+/// scrubbed with [`scrub_upstream_text`] first, then control-filtered and
+/// capped by [`sanitize_for_log`]. Pass the raw text, never an excerpt
+/// already capped or filtered, or a credential cut at the cap escapes its
+/// rule.
+#[must_use = "the returned text is the log-safe rendering"]
+pub fn upstream_text_for_log(s: &str) -> String {
+    sanitize_for_log(&scrub_upstream_text(s))
+}
+
+/// Applies [`scrub_upstream_text`] to every string leaf of a decoded JSON
+/// value, in place. Object keys, numbers, booleans and nulls are left as
+/// they are, and a leaf the scrub leaves unchanged is not rewritten. A
+/// credential held as the whole value of a credential-named key is not a
+/// shape this finds; key-based redaction is a separate pass.
+pub fn scrub_upstream_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Cow::Owned(scrubbed) = scrub_upstream_text(text) {
+                *text = scrubbed;
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_upstream_value),
+        serde_json::Value::Object(map) => map.values_mut().for_each(scrub_upstream_value),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
@@ -101,6 +148,7 @@ fn match_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
         .or_else(|| token_at(bytes, at))
         .or_else(|| session_token_at(bytes, at))
         .or_else(|| userinfo_at(bytes, at))
+        .or_else(|| credential_key_value_at(bytes, at))
 }
 
 const fn is_token_char(b: u8) -> bool {
@@ -459,6 +507,105 @@ const fn ends_authority(b: u8) -> bool {
     b.is_ascii_whitespace()
         || b.is_ascii_control()
         || matches!(b, b'/' | b'?' | b'#' | b'"' | b'<' | b'>')
+}
+
+/// Longest key judged by name; a longer key before a quoted value is
+/// treated as credential-named, which keeps the judgment off the heap.
+const MAX_JUDGED_KEY_LEN: usize = 128;
+
+/// The quoted value of a credential-named key starting at `at` (at its
+/// opening quote, or at its first character when bare); the span is the
+/// value alone. A start just after a backslash, or a bare key just after a
+/// `.`, is skipped: the run's own start already judged the same key, and
+/// skipping keeps a long run of backslashes or dotted segments linear.
+fn credential_key_value_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+    let prev = at.checked_sub(1).map(|i| bytes[i]);
+    if prev == Some(b'\\') {
+        return None;
+    }
+    let opening = quote_at(bytes, at);
+    let key_at = opening.map_or(at, |quote| quote.end);
+    if opening.is_none() && (prev == Some(b'.') || !starts_token(bytes, at)) {
+        return None;
+    }
+    let key_len = run_len(bytes, key_at, is_key_char);
+    if key_len == 0 {
+        return None;
+    }
+    let mut pos = key_at + key_len;
+    if let Some(open) = opening {
+        let close = quote_at(bytes, pos).filter(|close| close.mark == open.mark)?;
+        pos = close.end;
+    }
+    let sep = pos + run_len(bytes, pos, is_blank);
+    match bytes.get(sep) {
+        Some(b'=') => {}
+        Some(b':') if opening.is_some() => {}
+        _ => return None,
+    }
+    let value_quote = quote_at(bytes, sep + 1 + run_len(bytes, sep + 1, is_blank))?;
+    if !key_names_credential(&bytes[key_at..key_at + key_len]) {
+        return None;
+    }
+    let value = quoted_value(bytes, &value_quote);
+    (!value.is_empty() && &bytes[value.clone()] != PLACEHOLDER.as_bytes()).then_some(value)
+}
+
+const fn is_key_char(b: u8) -> bool {
+    is_token_char(b) || b == b'.'
+}
+
+const fn is_blank(b: u8) -> bool {
+    b == b' ' || b == b'\t'
+}
+
+/// A quote mark preceded by `backslashes` backslashes, ending at `end`.
+#[derive(Clone, Copy)]
+struct Quote {
+    mark: u8,
+    backslashes: usize,
+    end: usize,
+}
+
+/// Zero or more backslashes then `"` or `'` at `at`.
+fn quote_at(bytes: &[u8], at: usize) -> Option<Quote> {
+    let backslashes = run_len(bytes, at, |b| b == b'\\');
+    let mark = *bytes.get(at + backslashes)?;
+    matches!(mark, b'"' | b'\'').then_some(Quote {
+        mark,
+        backslashes,
+        end: at + backslashes + 1,
+    })
+}
+
+/// The value after `open`: up to the first `open.mark` preceded by no more
+/// backslashes than `open` carries (a quote escaped one level deeper stays
+/// inside), else to the next control character or the end.
+fn quoted_value(bytes: &[u8], open: &Quote) -> Range<usize> {
+    let start = open.end;
+    let mut backslashes = 0;
+    for (pos, &b) in bytes.iter().enumerate().skip(start) {
+        if b == open.mark && backslashes <= open.backslashes {
+            return start..pos - backslashes;
+        }
+        if b.is_ascii_control() {
+            return start..pos;
+        }
+        backslashes = if b == b'\\' { backslashes + 1 } else { 0 };
+    }
+    start..bytes.len()
+}
+
+/// Judges an ASCII key by the request-body credential-key rule, which takes
+/// it lowercased.
+fn key_names_credential(key: &[u8]) -> bool {
+    let mut lowered = [0_u8; MAX_JUDGED_KEY_LEN];
+    let Some(buf) = lowered.get_mut(..key.len()) else {
+        return true;
+    };
+    buf.copy_from_slice(key);
+    buf.make_ascii_lowercase();
+    std::str::from_utf8(buf).is_ok_and(body_key_looks_credential)
 }
 
 #[cfg(test)]

@@ -746,7 +746,7 @@ fn redact_reasoning_artifacts(v: &mut serde_json::Value) {
 /// `max_output_tokens`, usage counts like `input_tokens`, and Gemini's
 /// `promptTokenCount`, which are the structural fields a body trace exists
 /// to show.
-fn body_key_looks_credential(lc: &str) -> bool {
+pub(crate) fn body_key_looks_credential(lc: &str) -> bool {
     lc.contains("authorization")
         || lc.contains("authentication")
         || lc.contains("api_key")
