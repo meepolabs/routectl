@@ -441,6 +441,72 @@ fn series_bucket_lifetime_sums_reconcile_to_the_group_sums() {
     assert_eq!(per_provider(&bucketed), per_provider(&unbucketed));
 }
 
+/// One legacy-only group: its name, the seeded rows, and the expected
+/// lifetime sums.
+type LegacyOnlyCase = (&'static str, Vec<Writes>, Vec<(u32, i64)>);
+
+/// The legacy-only groups below, read through every priced path: the
+/// unbucketed and bucketed query, and the priced aggregate.
+fn legacy_only_reads(db: &UsageDb) -> [(&'static str, Vec<AggRow>); 3] {
+    let one_bucket = BucketSpec {
+        width_ms: 10_000,
+        count: 1,
+    };
+    [
+        ("query", priced_rows(db, None)),
+        ("series", priced_rows(db, Some(one_bucket))),
+        (
+            "aggregate",
+            aggregate_with_cache_lifetimes(db, 0, 10_000).expect("aggregate"),
+        ),
+    ]
+}
+
+#[test]
+fn legacy_only_group_gets_its_lifetimes_on_every_priced_read() {
+    // (name, rows with no write total, expected lifetimes)
+    let cases: [LegacyOnlyCase; 4] = [
+        (
+            "both legacy columns",
+            vec![legacy(Some(10), Some(20)), legacy(Some(5), None)],
+            vec![(300, 15), (3600, 20)],
+        ),
+        (
+            "5-minute column only",
+            vec![legacy(Some(7), None)],
+            vec![(300, 7)],
+        ),
+        (
+            "1-hour column only",
+            vec![legacy(None, Some(9))],
+            vec![(3600, 9)],
+        ),
+        (
+            "a reported legacy zero is kept",
+            vec![legacy(Some(0), None), Writes::default()],
+            vec![(300, 0)],
+        ),
+    ];
+    for (name, rows, expected) in cases {
+        // Arrange
+        let (_dir, db) = open_db();
+        seed(&db, &rows);
+        let expected = CacheWriteLifetimes {
+            tokens_by_lifetime: expected.into_iter().collect(),
+            unknown_tokens: 0,
+            invalid_split: false,
+        };
+
+        // Act
+        let reads = legacy_only_reads(&db);
+
+        // Assert
+        for (path, read) in reads {
+            assert_eq!(lifetimes_of(only_row(&read)), &expected, "{name}: {path}");
+        }
+    }
+}
+
 #[test]
 fn aggregate_reads_no_lifetime_split() {
     // Arrange: a row whose split the priced read would report.
@@ -454,4 +520,128 @@ fn aggregate_reads_no_lifetime_split() {
     // column in its statement.
     assert_eq!(only_row(&rows).cache_write_lifetimes, None);
     assert!(!super::super::aggregate::AGG_SQL.contains("cache_write_lifetimes"));
+}
+
+/// One malformed-split row: its name, the split beside a total of 100, and
+/// the lifetimes that still count.
+type MalformedSplitCase = (&'static str, &'static str, Vec<(u32, i64)>);
+
+#[test]
+fn malformed_split_entries_leave_their_tokens_unknown() {
+    // (name, split beside a total of 100, expected lifetimes)
+    let cases: [MalformedSplitCase; 8] = [
+        (
+            "boolean value",
+            r#"{"300":true,"3600":10}"#,
+            vec![(3600, 10)],
+        ),
+        (
+            "float value",
+            r#"{"300":1.5e1,"3600":10}"#,
+            vec![(3600, 10)],
+        ),
+        ("array split", "[4,7]", vec![]),
+        ("scalar split", "7", vec![]),
+        ("malformed text", r#"{"300":"#, vec![]),
+        (
+            "negative value",
+            r#"{"300":-5,"3600":10}"#,
+            vec![(3600, 10)],
+        ),
+        (
+            "non-decimal key",
+            r#"{"5m":20,"3600":10}"#,
+            vec![(3600, 10)],
+        ),
+        (
+            "integer above i64",
+            r#"{"300":99999999999999999999}"#,
+            vec![],
+        ),
+    ];
+    for (name, split, expected) in cases {
+        // Arrange
+        let (_dir, db) = open_db();
+        seed(&db, &[new_era(100, Some(split))]);
+
+        // Act
+        let read = aggregate_with_cache_lifetimes(&db, 0, 10_000).expect("aggregate");
+
+        // Assert: only the well-formed entries count; the rest of the total
+        // is unknown and the row stays priceable.
+        let got = lifetimes_of(only_row(&read));
+        let counted: i64 = expected.iter().map(|(_, tokens)| tokens).sum();
+        let expected: BTreeMap<u32, i64> = expected.into_iter().collect();
+        assert_eq!(got.tokens_by_lifetime, expected, "{name}: lifetimes");
+        assert_eq!(got.unknown_tokens, 100 - counted, "{name}: unknown");
+        assert!(!got.invalid_split, "{name}: invalid");
+    }
+}
+
+fn query_plan(db: &UsageDb, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Vec<String> {
+    db.conn()
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("prepare explain")
+        .query_map(params, |row| row.get::<_, String>(3))
+        .expect("query explain")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect explain")
+}
+
+/// Both lifetime statements must read `requests` only through the partial
+/// write-total index, and expand the split JSON in exactly one place.
+#[test]
+fn lifetime_statements_read_through_the_write_total_index() {
+    // Arrange: a migrated database with rows of every era.
+    let (_dir, db) = open_db();
+    seed(&db, &spread_fixture());
+    let index_sql: String = db
+        .conn()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_requests_cache_write_ts_start'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("index present");
+    // A wider index predicate would still be implied by the read's WHERE,
+    // so the plan alone cannot show the index holds no legacy rows.
+    assert!(
+        index_sql.ends_with(concat!("WHERE ", write_total_rows!())),
+        "the index holds exactly the rows the read visits: {index_sql}"
+    );
+    let none = None::<&str>;
+    let cases: [(&str, &str, Vec<&dyn rusqlite::ToSql>); 2] = [
+        (
+            "unbucketed",
+            CACHE_LIFETIMES_SQL,
+            vec![&0_i64, &10_000_i64, &none, &none],
+        ),
+        (
+            "bucketed",
+            CACHE_LIFETIMES_BUCKETED_SQL,
+            vec![&0_i64, &10_000_i64, &none, &none, &1_000_i64],
+        ),
+    ];
+    for (name, sql, params) in cases {
+        // Act
+        let plan = query_plan(&db, sql, &params);
+
+        // Assert
+        let requests_reads: Vec<&String> =
+            plan.iter().filter(|d| d.contains(" requests")).collect();
+        assert_eq!(
+            requests_reads.len(),
+            1,
+            "{name}: one read of requests; plan was {plan:?}"
+        );
+        assert!(
+            requests_reads[0].contains("USING INDEX idx_requests_cache_write_ts_start"),
+            "{name}: requests must be read through the write-total index; plan was {plan:?}"
+        );
+        let json_expansions = plan.iter().filter(|d| d.contains("VIRTUAL TABLE")).count();
+        assert_eq!(
+            json_expansions, 1,
+            "{name}: the split is expanded once; plan was {plan:?}"
+        );
+    }
 }

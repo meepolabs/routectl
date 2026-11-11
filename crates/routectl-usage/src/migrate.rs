@@ -10,10 +10,11 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::capability_event::TOMBSTONE_VERDICT;
 use crate::schema::{
-    CREATE_CAPABILITY_EVENTS_TABLE, CREATE_CAPABILITY_EVENTS_TS_INDEX,
-    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_LEDGER_GAPS_TABLE, CREATE_LEDGER_GAPS_TS_INDEX,
-    CREATE_META_TABLE, CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS,
-    META_LEGACY_CAPABILITY_PURGE, META_SCHEMA_VERSION, SCHEMA_VERSION,
+    CREATE_CACHE_WRITE_TS_START_INDEX, CREATE_CAPABILITY_EVENTS_TABLE,
+    CREATE_CAPABILITY_EVENTS_TS_INDEX, CREATE_CAPABILITY_LEARN_EVENTS_TABLE,
+    CREATE_LEDGER_GAPS_TABLE, CREATE_LEDGER_GAPS_TS_INDEX, CREATE_META_TABLE,
+    CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS, META_LEGACY_CAPABILITY_PURGE,
+    META_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 
 /// Errors raised while migrating the usage DB. The caller can degrade
@@ -690,18 +691,20 @@ pub const V21_REQUESTS_COLUMNS: &[(&str, &str)] = &[
 ];
 
 /// Apply the v20 -> v21 step atomically: append the two nullable cache-write
-/// columns to `requests` (no default, no CHECK), bump `PRAGMA user_version`
-/// to 21, and update the human-readable `meta.schema_version` row, all in one
-/// transaction. Existing rows survive with both new columns NULL -- no
-/// backfill, no rewrite.
+/// columns to `requests` (no default, no CHECK), create the partial
+/// `ts_start` index over the rows that carry a cache-write total, bump `PRAGMA
+/// user_version` to 21, and update the human-readable `meta.schema_version`
+/// row, all in one transaction. Existing rows survive with both new columns
+/// NULL -- no backfill, no rewrite.
 ///
 /// The step is strictly additive, so a v20 binary can be handed the file back
 /// after the version stamps are lowered: a v20 writer names its `requests`
-/// columns explicitly, so the two trailing columns are invisible to it.
+/// columns explicitly, so the two trailing columns are invisible to it, and
+/// SQLite maintains the index on its inserts.
 ///
 /// A FRESH DB reaches this arm too, its `requests` already created from the
 /// current DDL; so does a downgraded-then-reopened file. Each `ADD COLUMN` is
-/// therefore guarded by `column_exists`.
+/// therefore guarded by `column_exists`, and the index is `IF NOT EXISTS`.
 fn migrate_v20_to_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
     for (column, declared_type) in V21_REQUESTS_COLUMNS {
@@ -711,6 +714,7 @@ fn migrate_v20_to_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
             ))?;
         }
     }
+    tx.execute_batch(CREATE_CACHE_WRITE_TS_START_INDEX)?;
     tx.execute_batch("PRAGMA user_version = 21")?;
     tx.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2) \

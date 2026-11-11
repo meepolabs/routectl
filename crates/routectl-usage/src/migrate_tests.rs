@@ -537,6 +537,46 @@ fn a_seeded_v20_ledger_migrates_to_v21_with_null_cache_write_columns_on_old_rows
     assert_eq!(rows, 3);
 }
 
+/// `(sql, partial)` of the write-total index, or `None` when absent.
+fn write_total_index(conn: &Connection) -> Option<(String, bool)> {
+    conn.query_row(
+        "SELECT m.sql, l.partial FROM sqlite_master AS m \
+         JOIN pragma_index_list('requests') AS l ON l.name = m.name \
+         WHERE m.type = 'index' AND m.name = 'idx_requests_cache_write_ts_start'",
+        [],
+        |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
+    )
+    .optional()
+    .expect("index lookup")
+}
+
+#[test]
+fn the_v21_step_creates_the_write_total_index_on_a_migrated_file_as_on_a_fresh_one() {
+    // Arrange: a v20 file with a legacy write, which has no such index.
+    let (_dir, path) = temp_db_path();
+    {
+        let conn = v20_file(&path);
+        insert_as_v20_writer(&conn, "v20-row", 11);
+        assert_eq!(write_total_index(&conn), None);
+    }
+    let (_fresh_dir, fresh_path) = temp_db_path();
+    let fresh = write_total_index(open(&fresh_path).expect("fresh").conn());
+
+    // Act
+    let migrated = open(&path).expect("migrate to v21");
+
+    // Assert: the migrated file carries the same partial index as a fresh
+    // one, and reopening leaves it in place.
+    let index = write_total_index(migrated.conn());
+    assert!(fresh.is_some(), "a fresh file has the index");
+    assert_eq!(index, fresh);
+    assert!(index.expect("present").1, "the index is partial");
+    drop(migrated);
+    let again = open(&path).expect("reopen at v21");
+    assert_eq!(migrate_to_current(again.conn(), 0).expect("re-run"), 21);
+    assert_eq!(write_total_index(again.conn()), fresh);
+}
+
 #[test]
 fn an_injected_failure_after_the_first_v21_alter_rolls_back_the_columns_and_both_stamps() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -582,6 +622,7 @@ fn an_injected_failure_after_the_first_v21_alter_rolls_back_the_columns_and_both
     assert_eq!(user_version(&path), 20);
     assert_eq!(meta_version(&conn), "20");
     assert_eq!(requests_columns(&conn), columns_before);
+    assert_eq!(write_total_index(&conn), None);
 
     // Assert: once the fault is gone the same file migrates normally.
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)

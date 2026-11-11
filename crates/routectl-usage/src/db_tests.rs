@@ -395,7 +395,9 @@ fn old_v1_db_migrates_to_current_preserving_rows() {
             tool_count INTEGER NOT NULL,
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
-            fallback_count INTEGER NOT NULL
+            fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER
         );
         CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
         INSERT INTO meta (key, value) VALUES ('schema_version', '1');
@@ -487,6 +489,8 @@ fn old_v2_db_migrates_to_v3_preserving_rows() {
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
             fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER,
             strategy TEXT
         );
         CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
@@ -563,6 +567,8 @@ fn old_v3_db_migrates_to_v4_preserving_rows() {
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
             fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER,
             strategy TEXT,
             reduction_strategy TEXT
         );
@@ -652,6 +658,8 @@ fn old_v4_db_migrates_to_v5_preserving_rows() {
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
             fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER,
             strategy TEXT,
             reduction_strategy TEXT,
             selection_decision TEXT
@@ -755,6 +763,8 @@ fn old_v5_db_migrates_to_v6_preserving_rows() {
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
             fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER,
             strategy TEXT,
             reduction_strategy TEXT,
             selection_decision TEXT,
@@ -851,6 +861,8 @@ fn old_v7_db_migrates_to_v8_preserving_rows() {
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
             fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER,
             strategy TEXT,
             reduction_strategy TEXT,
             selection_decision TEXT,
@@ -1015,7 +1027,9 @@ fn old_v8_db_migrates_to_v9_creating_learn_events_table() {
             tool_count INTEGER NOT NULL,
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
-            fallback_count INTEGER NOT NULL
+            fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER
         );
         CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
         INSERT INTO meta (key, value) VALUES ('schema_version', '8');
@@ -1084,7 +1098,9 @@ fn v9_to_v10_truncates_stale_pre_change_learn_rows() {
              tool_count      INTEGER NOT NULL,
              msg_count       INTEGER NOT NULL,
              attempt_count   INTEGER NOT NULL,
-             fallback_count  INTEGER NOT NULL
+             fallback_count  INTEGER NOT NULL,
+             cache_write_5m  INTEGER,
+             cache_write_1h  INTEGER
          )",
     )
     .expect("create v9 requests table");
@@ -1167,7 +1183,9 @@ fn v10_to_v11_renames_feature_key_to_capability_key() {
              tool_count      INTEGER NOT NULL,
              msg_count       INTEGER NOT NULL,
              attempt_count   INTEGER NOT NULL,
-             fallback_count  INTEGER NOT NULL
+             fallback_count  INTEGER NOT NULL,
+             cache_write_5m  INTEGER,
+             cache_write_1h  INTEGER
          )",
     )
     .expect("create v10 requests table");
@@ -1238,7 +1256,9 @@ fn v11_to_v12_adds_resolved_class_idempotently_preserving_rows() {
             tool_count INTEGER NOT NULL,
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
-            fallback_count INTEGER NOT NULL
+            fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER
         );
         CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
         INSERT INTO meta (key, value) VALUES ('schema_version', '11');
@@ -1367,6 +1387,8 @@ fn old_v12_db_migrates_to_v13_creating_capability_events_table() {
             msg_count INTEGER NOT NULL,
             attempt_count INTEGER NOT NULL,
             fallback_count INTEGER NOT NULL,
+            cache_write_5m INTEGER,
+            cache_write_1h INTEGER,
             resolved_class TEXT
         );
         {create_ts_index};
