@@ -390,3 +390,47 @@ fn a_context_cache_miss_is_the_one_case_the_read_over_reports() {
     assert_eq!(read.as_deref(), Some("adaptive"));
     assert!(wire.get("thinking").is_none(), "{wire}");
 }
+
+/// The public read runs the same thinking composition as body assembly but
+/// emits nothing: the router reads it per request, so a line there would
+/// repeat the body's. Body assembly still emits each composition line
+/// exactly once. One row per line the composition can emit.
+#[test]
+fn the_public_read_is_silent_and_the_body_logs_each_thinking_line_once() {
+    let rows: [(&str, ChatRequest, &str); 2] = [
+        (
+            "probe-sized drop",
+            {
+                let mut r = translated(effort("high"));
+                r.max_tokens = Some(64);
+                r
+            },
+            "anthropic legacy thinking shape requires max_tokens > 1024",
+        ),
+        (
+            "explicit budget clamp",
+            translated(Some(ReasoningConfig {
+                max_tokens: Some(500),
+                ..Default::default()
+            })),
+            "reasoning.max_tokens below Anthropic legacy minimum",
+        ),
+    ];
+    for (row, req, line) in rows {
+        // Act
+        let read_events = routectl_testkit::capture_events(|| {
+            let _ = emitted_thinking_type(&req);
+        });
+        let body_events = routectl_testkit::capture_events(|| {
+            let _ = body(&req);
+        });
+
+        // Assert
+        assert!(read_events.is_empty(), "{row}: {read_events:?}");
+        let emitted = body_events
+            .iter()
+            .filter(|e| e.level == tracing::Level::DEBUG && e.message.contains(line))
+            .count();
+        assert_eq!(emitted, 1, "{row}: {body_events:?}");
+    }
+}

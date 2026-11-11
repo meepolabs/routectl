@@ -310,9 +310,13 @@ is over 64 KiB or does not parse renders on all three paths as
 other body is logged as sanitized text.
 
 Not covered: a credential inside a URL query string (e.g. in
-`server_url`), a credential inside the value of a non-credential key
-(e.g. a `"Bearer ..."` string under an arbitrary name), and non-JSON
-upstream error bodies.
+`server_url`), and a credential inside the value of a non-credential key
+(e.g. a `"Bearer ..."` string under an arbitrary name). Prompt redaction
+does not reach a non-JSON upstream error body, which has no structure to
+walk. Every upstream error body and excerpt, JSON or not, still passes
+the upstream-text scrub (below) before any cap; the one exception is the
+WARN `body_excerpt` on the OpenAI-compatible and OpenAI Responses lanes,
+which is capped at 256 characters before it is scrubbed.
 
 Two known residual leaks even with the knob ON:
 - `<redacted len=N>` reveals the char count of the original content.
@@ -320,14 +324,18 @@ Two known residual leaks even with the knob ON:
   are disambiguable by length alone. Treat redacted traces as a
   length-leaking side channel.
 - Non-JSON 4xx/5xx upstream error bodies (`debug_upstream_error_body` at
-  DEBUG level) are NOT redacted -- a non-JSON error body has no
-  structure for `redact_prompts_in` to walk, so it goes through the
-  HTML-collapse + control-char-strip path only and may echo back
-  portions of the request as raw text. A PARSEABLE JSON error body IS
-  routed through `redact_prompts_in` (the same entry point the trace
-  helpers use), so it collapses under the knob the same way a success
-  body does. Operators flipping DEBUG (not TRACE) for triage on a
-  sensitive environment should be aware of the non-JSON gap.
+  DEBUG level, the WARN `body_excerpt`, and the excerpt in a rendered
+  upstream error) are not prompt-redacted: a non-JSON error body has no
+  structure for `redact_prompts_in` to walk, so prompt text it echoes
+  back stays readable. Like every upstream error body and excerpt, it
+  passes the upstream-text scrub (credentials, ARNs, account ids) over
+  the complete text before any HTML collapse, control-char strip or cap
+  (except the capped-first WARN excerpts noted above).
+  A PARSEABLE JSON error body IS routed through `redact_prompts_in` (the
+  same entry point the trace helpers use), so it collapses under the
+  knob the same way a success body does. Operators flipping DEBUG (not
+  TRACE) for triage on a sensitive environment should be aware of the
+  non-JSON prompt gap.
 
 ```bash
 # Redacted triage. All four trace directions still fire; user content
@@ -2484,7 +2492,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_providers::anthropic_api::messages` | `cannot translate OpenAI file part ...`, `skipping Thinking blocks on replay: signature missing`, `skipping reasoning blocks on replay: format is not anthropic-claude-v1`, `assistant content assembled empty ...` | File part: expect a 400, the client must send a base64 PDF. Replay skips: reasoning was lost on replay; pin the session to one provider family if it matters. Empty assistant content: a predicate drifted, file a bug. |
 | WARN | `routectl_providers::anthropic_api::request` | `response_format ... dropping structured-output directive` (five shapes) | Structured output was silently lost: fix the client's `response_format`. |
 | WARN | `routectl_providers::bedrock` | `bedrock upstream auth rejected`, `bedrock IAM access denied`, `bedrock validation error`, `bedrock upstream 5xx`, `bedrock upstream error`, `failed to read upstream error body`, `bedrock upstream error-type header unusable` | Auth: rotate the AWS credential or bearer key. IAM: grant the logged `action`. Validation: fix the model id or region, or report the field. 5xx / other (often 429): check AWS health or raise quota. Header unusable: a proxy is garbling `x-amzn-errortype`, so capability learning cannot attribute 400s. |
-| WARN | `routectl_providers::bedrock::{frame,eventstream}` | `bedrock in-stream auth/permission exception`, `... frame decode failed`, `bedrock chunk payload ...; skipping`, `bedrock invoke stream: upstream closed before message_stop` (with `had_output`; the stream then ends with an error) | Credentials or IAM were revoked mid-stream, the stream framing is corrupt (check proxies; file a bug with the prelude hex if it recurs), or the upstream truncated the stream (check upstream health and proxy timeouts). |
+| WARN | `routectl_providers::bedrock::{frame,eventstream}` | `bedrock in-stream auth/permission exception`, `... frame decode failed`, `bedrock chunk payload ...; skipping`, `bedrock invoke stream: upstream closed before message_stop` (with `had_output`; the stream then ends with an error) | Credentials or IAM were revoked mid-stream, the stream framing is corrupt (check proxies; file a bug with the WARN's `prelude_hex` and `frame_len` if it recurs; a frame split after its prelude carries `prelude_staged=true` instead, and its bytes only at TRACE), or the upstream truncated the stream (check upstream health and proxy timeouts). |
 | WARN | `routectl_providers::bedrock::auth` | `bedrock credential resolution failed` | Fix the named AWS profile or provide credentials to the default chain (env, SSO login, instance role). |
 | ERROR | `routectl_providers::bedrock::signing` | `bedrock auth failed` (by `failure_kind`) | The request could not be signed. Invalid bearer or non-ASCII header: re-enter the key or fix the header. Credentials unavailable: refresh them. The remaining kinds are internal invariants: file a bug. |
 | WARN | `routectl_providers::bedrock::{invoke,converse::extras}` | `additional_model_request_fields attempted to override routectl-managed key ...` | Remove the named `key` from the provider's `additional_model_request_fields`. |

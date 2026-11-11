@@ -136,6 +136,20 @@ fn adaptive_effort(req: &ChatRequest) -> Option<String> {
 /// `req.routectl_internal.anthropic_thinking_display` when the ingress
 /// captured one, and from `reasoning.exclude` otherwise.
 pub fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
+    translate_thinking(req, ThinkingLog::Emit)
+}
+
+/// Whether composing thinking emits its DEBUG lines (the probe-sized drop
+/// and the explicit-budget clamp). Body assembly emits them; a read-only
+/// probe of the same computation stays silent, since the router reads it
+/// per request and the body would otherwise log each line twice.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ThinkingLog {
+    Emit,
+    Silent,
+}
+
+fn translate_thinking(req: &ChatRequest, log: ThinkingLog) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
     if r.is_off() {
@@ -175,16 +189,18 @@ pub fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
     // those would 400 upstream. Drop thinking for this one request
     // rather than reshape the caller's `max_tokens`.
     if !legacy_thinking_fits(req) {
-        tracing::debug!(
-            request_max_tokens = req.max_tokens,
-            min_required = ANTHROPIC_MIN_THINKING_BUDGET + 1,
-            reasoning_effort = ?r.effort,
-            reasoning_max_tokens = ?r.max_tokens,
-            "anthropic legacy thinking shape requires max_tokens > 1024; \
-             dropping thinking for this probe-sized request. Send adaptive \
-             thinking to avoid the budget-vs-max_tokens coupling, or send \
-             max_tokens > 1024."
-        );
+        if log == ThinkingLog::Emit {
+            tracing::debug!(
+                request_max_tokens = req.max_tokens,
+                min_required = ANTHROPIC_MIN_THINKING_BUDGET + 1,
+                reasoning_effort = ?r.effort,
+                reasoning_max_tokens = ?r.max_tokens,
+                "anthropic legacy thinking shape requires max_tokens > 1024; \
+                 dropping thinking for this probe-sized request. Send adaptive \
+                 thinking to avoid the budget-vs-max_tokens coupling, or send \
+                 max_tokens > 1024."
+            );
+        }
         return None;
     }
 
@@ -207,7 +223,7 @@ pub fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
 
     if let Some(budget) = r.max_tokens {
         return Some(ThinkingConfig::Enabled {
-            budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Explicit),
+            budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Explicit, log),
             display,
         });
     }
@@ -222,14 +238,14 @@ pub fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
         let budget = budget_from_level(level)
             .unwrap_or_else(|| ((max as f64) * effort_ratio(level)).max(1.0) as u32);
         return Some(ThinkingConfig::Enabled {
-            budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
+            budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived, log),
             display,
         });
     }
     // r.enabled == Some(true) without budget or effort.
     let budget = max / 2;
     Some(ThinkingConfig::Enabled {
-        budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
+        budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived, log),
         display,
     })
 }
@@ -254,10 +270,18 @@ enum BudgetSource {
 /// gets clamped UP from below the floor, log at DEBUG so the operator
 /// can correlate "I asked for 500 tokens of thinking, why is the
 /// model using 1024" with a single grep.
-fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) -> u32 {
+fn clamp_budget_to_legacy_window(
+    budget: u32,
+    max: u32,
+    source: BudgetSource,
+    log: ThinkingLog,
+) -> u32 {
     let ceiling = max.saturating_sub(1);
     let clamped = budget.max(ANTHROPIC_MIN_THINKING_BUDGET).min(ceiling);
-    if matches!(source, BudgetSource::Explicit) && budget < ANTHROPIC_MIN_THINKING_BUDGET {
+    if log == ThinkingLog::Emit
+        && matches!(source, BudgetSource::Explicit)
+        && budget < ANTHROPIC_MIN_THINKING_BUDGET
+    {
         tracing::debug!(
             requested_budget = budget,
             clamped_to = clamped,
@@ -288,11 +312,18 @@ pub fn legacy_thinking_budget(req: &ChatRequest) -> Option<u32> {
 /// - `SentNone`: no thinking; an effort alone never adds any.
 /// - `NotCaptured`: translated from canonical reasoning by
 ///   `build_thinking`.
+#[cfg(feature = "bedrock")]
 pub fn compose_thinking(req: &ChatRequest) -> Option<WireThinking> {
+    compose_thinking_with(req, ThinkingLog::Emit)
+}
+
+fn compose_thinking_with(req: &ChatRequest, log: ThinkingLog) -> Option<WireThinking> {
     match &req.routectl_internal.anthropic_thinking {
         AnthropicThinking::Sent(object) => Some(forward_client_thinking(req, object)),
         AnthropicThinking::SentNone => None,
-        AnthropicThinking::NotCaptured => build_thinking(req).map(WireThinking::Translated),
+        AnthropicThinking::NotCaptured => {
+            translate_thinking(req, log).map(WireThinking::Translated)
+        }
     }
 }
 
@@ -326,7 +357,15 @@ pub(super) fn shipped_thinking(
     req: &ChatRequest,
     context_cache_missed: bool,
 ) -> (Option<WireThinking>, Option<ThinkingStrip>) {
-    let Some(composed) = compose_thinking(req) else {
+    shipped_thinking_with(req, context_cache_missed, ThinkingLog::Emit)
+}
+
+fn shipped_thinking_with(
+    req: &ChatRequest,
+    context_cache_missed: bool,
+    log: ThinkingLog,
+) -> (Option<WireThinking>, Option<ThinkingStrip>) {
+    let Some(composed) = compose_thinking_with(req, log) else {
         return (None, None);
     };
     if context_cache_missed {
@@ -352,9 +391,11 @@ pub(super) fn shipped_thinking(
 /// only ever removes `thinking`, never changes its type, so the read can
 /// over-report a type the body then omits, and cannot report one the body
 /// ships differently.
+///
+/// The read emits no log lines; body assembly emits them once.
 #[must_use]
 pub fn emitted_thinking_type(req: &ChatRequest) -> Option<String> {
-    shipped_thinking(req, false)
+    shipped_thinking_with(req, false, ThinkingLog::Silent)
         .0
         .as_ref()
         .and_then(WireThinking::thinking_type)

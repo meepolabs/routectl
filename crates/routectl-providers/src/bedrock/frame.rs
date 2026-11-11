@@ -360,7 +360,14 @@ impl FrameBuffer {
             }
             Err(e) => {
                 let advertised = self.advertised_len().unwrap_or(0);
-                log_decode_error(provider_id, label, &self.buffer, advertised, &e);
+                log_decode_error(
+                    provider_id,
+                    label,
+                    &self.buffer,
+                    advertised,
+                    self.smithy_has_prelude_buffered,
+                    &e,
+                );
                 DecodeStep::Fatal(Error::Streaming(label.decode_failed(&e)))
             }
         }
@@ -394,22 +401,39 @@ impl FrameBuffer {
 /// diagnosability. The variable-length payload may carry model output and
 /// must NOT go to a third-party log SaaS at WARN; it is gated at TRACE
 /// instead.
+///
+/// `buffer` opens with the prelude only when the decoder has not staged it.
+/// Once staged (a frame split after its prelude), the prelude bytes live
+/// inside the decoder and `buffer` opens with headers or payload, so the
+/// WARN carries `prelude_staged = true` and no bytes, and no frame length
+/// is known.
 fn log_decode_error(
     provider_id: &str,
     label: FrameLabel,
     buffer: &[u8],
     advertised: usize,
+    prelude_staged: bool,
     err: &impl std::fmt::Display,
 ) {
-    let prelude_len = 12_usize.min(buffer.len());
-    tracing::warn!(
-        provider = %provider_id,
-        err = %err,
-        frame_len = advertised,
-        prelude_hex = %hex_bytes(&buffer[..prelude_len]),
-        "{}",
-        label.warn_decode_failed()
-    );
+    if prelude_staged {
+        tracing::warn!(
+            provider = %provider_id,
+            err = %err,
+            prelude_staged = true,
+            "{}",
+            label.warn_decode_failed()
+        );
+    } else {
+        let prelude_len = 12_usize.min(buffer.len());
+        tracing::warn!(
+            provider = %provider_id,
+            err = %err,
+            frame_len = advertised,
+            prelude_hex = %hex_bytes(&buffer[..prelude_len]),
+            "{}",
+            label.warn_decode_failed()
+        );
+    }
     if tracing::enabled!(tracing::Level::TRACE) {
         let dump_len = advertised.min(256).min(buffer.len());
         tracing::trace!(
@@ -947,6 +971,69 @@ mod tests {
 
         assert_single_decode_error(&items, "eventstream frame");
         assert!(seen.is_empty(), "no frame may reach the handler: {seen:?}");
+    }
+
+    /// `(row, chunks, prelude_hex, frame_len, prelude_staged)`: the expected
+    /// WARN fields for one read path.
+    type DecodeWarnRow<'a> = (
+        &'static str,
+        Vec<Vec<u8>>,
+        Option<&'a str>,
+        Option<&'a str>,
+        Option<&'static str>,
+    );
+
+    /// The decode-failure WARN names what its bytes are on both read paths.
+    /// A frame read whole opens the buffer with its prelude, which the WARN
+    /// carries as `prelude_hex` beside the advertised `frame_len`. A frame
+    /// split after its prelude has the prelude staged inside the decoder, so
+    /// the buffer opens with frame body bytes: the WARN carries
+    /// `prelude_staged = true` and neither field.
+    #[tokio::test]
+    async fn decode_failure_warn_labels_its_bytes_on_both_read_paths() {
+        let whole = encode_with_bad_crc("messageStart", r#"{"role":"assistant"}"#);
+        let good = encode("messageStart", r#"{"role":"assistant"}"#);
+        let corrupt_tail: Vec<u8> = good[12..].iter().map(|b| b ^ 0xFF).collect();
+        let whole_len = whole.len().to_string();
+        let whole_prelude = hex_bytes(&whole[..12]);
+        let cases: [DecodeWarnRow<'_>; 2] = [
+            (
+                "prelude in buffer",
+                vec![whole.clone()],
+                Some(whole_prelude.as_str()),
+                Some(whole_len.as_str()),
+                None,
+            ),
+            (
+                "prelude staged",
+                vec![good[..12].to_vec(), corrupt_tail],
+                None,
+                None,
+                Some("true"),
+            ),
+        ];
+        for (row, chunks, prelude_hex, frame_len, prelude_staged) in cases {
+            let (_, events) =
+                routectl_testkit::with_capture(run_driver(chunks, FrameLabel::Invoke)).await;
+
+            let warns: Vec<_> = events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN)
+                .collect();
+            assert_eq!(warns.len(), 1, "{row}: {events:?}");
+            let warn = warns[0];
+            assert!(
+                warn.message.contains("frame decode failed"),
+                "{row}: {warn:?}"
+            );
+            assert_eq!(warn.field("prelude_hex"), prelude_hex, "{row}: {warn:?}");
+            assert_eq!(warn.field("frame_len"), frame_len, "{row}: {warn:?}");
+            assert_eq!(
+                warn.field("prelude_staged"),
+                prelude_staged,
+                "{row}: {warn:?}"
+            );
+        }
     }
 
     /// A bad-CRC frame followed by a valid frame split mid-body across two
