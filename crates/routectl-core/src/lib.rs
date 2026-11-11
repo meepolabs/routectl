@@ -11,6 +11,7 @@ pub mod cache_control;
 pub mod cache_decision;
 pub mod cache_lifetime;
 pub mod capability;
+pub mod carrier_projection;
 pub(crate) mod cloud_project;
 pub mod config_dir;
 pub mod content_part;
@@ -69,6 +70,7 @@ pub use capability::{
     SEARCH_BLOCKS, STRUCTURED_OUTPUT, SignalTier, THINKING, THINKING_BLOCKS, Verdict, WEB_SEARCH,
     WELL_KNOWN_CAPABILITY_KEYS, is_known_evidence_class, normalize_capability_key,
 };
+pub use carrier_projection::{Projectable, RequestPrefix, projection_bytes, write_projection};
 pub use cloud_project::{CloudProjectCache, InMemoryProjectCache};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use context_reduction::{

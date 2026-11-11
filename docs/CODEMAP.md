@@ -198,6 +198,10 @@ license.
 - `src/content_part.rs` -- typed `ContentPart` enum
   (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking
   (plus the `Other` catchall)) for `MessageContent::Parts`
+- `src/carrier_projection.rs` -- extras-inclusive identity of canonical nodes
+  (`projection_bytes`, `write_projection`, `RequestPrefix`): canonical JSON
+  with each node's carried members merged, typed and managed names reserved;
+  for fingerprints and comparisons only, never a wire form
 - `src/system_content.rs` -- typed top-level `system` field (flat string OR
   array of `SystemBlock` with per-block cache_control); `is_blank` is the
   shared egress screen that keeps a meaningless `system: ""` off every wire

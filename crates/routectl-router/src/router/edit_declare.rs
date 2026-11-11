@@ -15,7 +15,7 @@ use routectl_core::wire_check::{
 };
 use routectl_core::{
     ChatRequest, ContentPart, FrontSlot, KnownContentPart, Message, MessageContent,
-    is_canonical_request_key,
+    is_canonical_request_key, projection_bytes,
 };
 use serde_json::{Map, Value};
 
@@ -419,9 +419,9 @@ pub(super) fn declare_replay_strip(req: &mut ChatRequest, removed_ids: &[String]
 }
 
 /// What a learned capability strip may remove, captured before it runs: the
-/// serialized tools and the top-level extras keys.
+/// projected tools and the top-level extras keys.
 pub(super) struct StripBefore {
-    tools: Vec<Value>,
+    tools: Vec<Vec<u8>>,
     extras_keys: Vec<String>,
 }
 
@@ -443,11 +443,13 @@ pub(super) fn strip_before(target: &DispatchTarget, req: &ChatRequest) -> Option
     })
 }
 
-fn tool_values(req: &ChatRequest) -> Vec<Value> {
+/// Each tool's carrier projection, so two tools that differ only in carried
+/// members never compare equal.
+fn tool_values(req: &ChatRequest) -> Vec<Vec<u8>> {
     req.tools
         .iter()
         .flatten()
-        .map(|tool| serde_json::to_value(tool).unwrap_or(Value::Null))
+        .map(|tool| projection_bytes(tool).unwrap_or_default())
         .collect()
 }
 

@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use routectl_core::content_part::{ContentPart, KnownContentPart};
+use routectl_core::projection_bytes;
 use routectl_core::schema::{ChatRequest, MessageContent};
 use serde::Serialize;
 use serde_json::Value;
@@ -306,16 +307,15 @@ pub fn apply_trim_plan(req: &ChatRequest, plan: &SteadyStateTrimPlan) -> ChatReq
 /// fixed anchor. Hashing the tail would produce a different value on every
 /// turn by construction, yielding a spurious Misfire on every turn.
 ///
-/// The hash is computed over the JSON serialization of the trimmed-front
-/// messages and is deterministic across calls for identical content. FNV-1a
+/// The hash is computed over the carrier projection of the trimmed-front
+/// messages (canonical JSON plus each node's carried members) and is deterministic across calls for identical content. FNV-1a
 /// 64-bit provides stable output across Rust versions (unlike
 /// `DefaultHasher`). Pure: no clock, no I/O, no randomness.
 #[must_use]
 pub fn trimmed_prefix_fingerprint(req: &ChatRequest, plan: &SteadyStateTrimPlan) -> u64 {
     let trimmed = apply_trim_plan(req, plan);
     let front = trimmed.messages.get(..plan.span.end).unwrap_or(&[]);
-    let serialized = serde_json::to_string(front).unwrap_or_default();
-    fnv1a_hash(serialized.as_bytes())
+    fnv1a_hash(&projection_bytes(front).unwrap_or_default())
 }
 
 /// Replace a tool payload with a placeholder string in place. Emits
@@ -1200,6 +1200,36 @@ mod tests {
             fp_base, fp_perturbed,
             "fingerprint did not change when front content was perturbed",
         );
+    }
+
+    fn with_front_carrier(mut req: ChatRequest, note: &str) -> ChatRequest {
+        let mut extras = serde_json::Map::new();
+        extras.insert("output_config".into(), serde_json::json!({"note": note}));
+        std::sync::Arc::make_mut(&mut req.messages)[0].extras = extras;
+        req
+    }
+
+    #[test]
+    fn fingerprint_tracks_a_front_message_carrier() {
+        // Arrange: equal canonical conversations whose first front message
+        // carries "x", "x" again, or "y".
+        let params = SteadyStateTrimParams::default();
+        let fingerprint = |req: &ChatRequest| {
+            let plan = propose_steady_state_trim(req, &params).expect("plan");
+            trimmed_prefix_fingerprint(req, &plan)
+        };
+        let marked = with_front_carrier(long_conversation(6, 12_000), "x");
+        let marked_again = with_front_carrier(long_conversation(6, 12_000), "x");
+        let remarked = with_front_carrier(long_conversation(6, 12_000), "y");
+
+        // Act
+        let fp_marked = fingerprint(&marked);
+        let fp_marked_again = fingerprint(&marked_again);
+        let fp_remarked = fingerprint(&remarked);
+
+        // Assert
+        assert_ne!(fp_marked, fp_remarked);
+        assert_eq!(fp_marked, fp_marked_again);
     }
 
     #[test]

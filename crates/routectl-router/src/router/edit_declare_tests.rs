@@ -656,6 +656,43 @@ fn a_replay_strip_with_nothing_removable_declares_nothing() {
     assert!(declared(&req, EditSite::ReplayStrip).is_empty());
 }
 
+fn carried_tool(note: &str) -> routectl_core::ToolDef {
+    let mut extras = serde_json::Map::new();
+    extras.insert("eager_input_streaming".into(), json!(note));
+    routectl_core::ToolDef::Custom(routectl_core::CustomTool {
+        name: "lookup".into(),
+        description: None,
+        input_schema: json!({"type": "object"}),
+        cache_control: None,
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+        extras,
+    })
+}
+
+#[test]
+fn a_learned_strip_of_tools_differing_only_in_carriers_names_the_removed_index() {
+    // Arrange: two tools whose canonical forms are equal; the strip drops
+    // the first one.
+    let mut req = anthropic_request();
+    req.tools = Some(vec![carried_tool("first"), carried_tool("second")]);
+    let before = super::StripBefore {
+        tools: super::tool_values(&req),
+        extras_keys: Vec::new(),
+    };
+    req.tools = Some(vec![carried_tool("second")]);
+
+    // Act
+    super::declare_learned_strip(&mut req, &before);
+
+    // Assert
+    assert_eq!(
+        declared(&req, EditSite::LearnedRepair),
+        [edit("/tools/0", EditKind::Remove)]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The patterns these sites emit
 // ---------------------------------------------------------------------------

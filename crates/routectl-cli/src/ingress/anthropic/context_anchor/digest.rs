@@ -248,7 +248,7 @@ fn without_markers(message: &Message) -> Message {
         tool_call_id: message.tool_call_id.clone(),
         tool_calls: message.tool_calls.clone(),
         refusal: message.refusal.clone(),
-        extras: serde_json::Map::new(),
+        extras: message.extras.clone(),
     }
 }
 
@@ -333,5 +333,43 @@ impl Write for HashSink {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod without_markers_tests {
+    use routectl_core::{CacheControl, Role};
+    use serde_json::{Map, json};
+
+    use super::*;
+
+    #[test]
+    fn removing_markers_keeps_the_message_carrier() {
+        // Arrange
+        let mut extras = Map::new();
+        extras.insert("output_config".into(), json!({"effort": "low"}));
+        let message = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "q".into(),
+                citations: None,
+                cache_control: Some(CacheControl::ephemeral_5m()),
+                extras: Map::new(),
+            })]),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            refusal: None,
+            extras: extras.clone(),
+        };
+
+        // Act
+        let stripped = without_markers(&message);
+
+        // Assert
+        assert!(!carries_cache_marker(&stripped), "premise: marker removed");
+        assert_eq!(stripped.extras, extras);
     }
 }

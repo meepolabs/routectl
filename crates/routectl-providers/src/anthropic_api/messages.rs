@@ -245,7 +245,7 @@ pub(super) fn normalize_replay_invariants<'a>(
             name: msg.name.clone(),
             tool_call_id: msg.tool_call_id.clone(),
             tool_calls: msg.tool_calls.clone(),
-            extras: serde_json::Map::new(),
+            extras: msg.extras.clone(),
         });
     }
 
@@ -2306,6 +2306,54 @@ mod thinking_signature_tests {
         assert!(thinking_sigs.contains(&r_signature().as_str()));
         // Text part survives.
         assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn stripping_unsigned_thinking_keeps_every_rebuilt_message_carrier() {
+        // Arrange: the stripped message and a later Parts message both carry
+        // a member; only the first holds an unsigned thinking block.
+        let text = || {
+            ContentPart::Known(KnownContentPart::Text {
+                text: "answer".to_string(),
+                citations: None,
+                cache_control: None,
+                extras: serde_json::Map::new(),
+            })
+        };
+        let carried = |value: &str| {
+            let mut extras = serde_json::Map::new();
+            extras.insert("output_config".into(), serde_json::json!({"note": value}));
+            extras
+        };
+        let mut stripped = assistant_with_parts(vec![thinking_part(None), text()]);
+        stripped.extras = carried("stripped");
+        let mut untouched = assistant_with_parts(vec![text()]);
+        untouched.extras = carried("untouched");
+        let req = ChatRequest {
+            messages: vec![stripped, untouched].into(),
+            ..Default::default()
+        };
+
+        // Act
+        let out = normalize_replay_invariants(
+            "anthropic",
+            &req,
+            CoreHistoryReasoning::Auto,
+            SystemTurnPolicy::Lift,
+        )
+        .expect("strip should not error");
+
+        // Assert
+        assert!(
+            matches!(out, std::borrow::Cow::Owned(_)),
+            "premise: the strip ran"
+        );
+        let MessageContent::Parts(parts) = &out[0].content else {
+            panic!("expected Parts content");
+        };
+        assert_eq!(parts.len(), 1, "premise: the unsigned block was removed");
+        assert_eq!(out[0].extras, carried("stripped"));
+        assert_eq!(out[1].extras, carried("untouched"));
     }
 
     #[test]

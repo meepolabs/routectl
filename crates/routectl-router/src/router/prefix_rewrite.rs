@@ -41,7 +41,7 @@ use std::sync::atomic::Ordering;
 
 use lru::LruCache;
 use parking_lot::Mutex;
-use routectl_core::ChatRequest;
+use routectl_core::{ChatRequest, RequestPrefix, projection_bytes};
 
 use super::{DispatchMeta, Router};
 use crate::context_trim::fnv1a_hash;
@@ -324,13 +324,16 @@ pub(super) fn fingerprint_prefix(req: &ChatRequest) -> (usize, u64) {
 }
 
 /// Fingerprint the canonical prefix of `req` truncated to `prefix_len`
-/// messages. A `prefix_len` past the end covers all messages rather than
+/// messages, carried members included. A `prefix_len` past the end covers all messages rather than
 /// panicking (defensive against a baseline recorded before a shortening).
 pub(super) fn fingerprint_prefix_at(req: &ChatRequest, prefix_len: usize) -> u64 {
     let front = req.messages.get(..prefix_len).unwrap_or(&req.messages);
-    let serialized = serde_json::to_string(&(req.system.as_ref(), req.tools.as_ref(), front))
-        .unwrap_or_default();
-    fnv1a_hash(serialized.as_bytes())
+    let prefix = RequestPrefix {
+        system: req.system.as_ref(),
+        tools: req.tools.as_deref(),
+        messages: front,
+    };
+    fnv1a_hash(&projection_bytes(&prefix).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -561,6 +564,52 @@ mod tests {
         // Assert
         assert_ne!(fp_base, fp_system);
         assert_ne!(fp_base, fp_tools);
+    }
+
+    fn with_carrier(mut req: ChatRequest, index: usize, note: &str) -> ChatRequest {
+        let mut extras = serde_json::Map::new();
+        extras.insert("output_config".into(), json!({"note": note}));
+        Arc::make_mut(&mut req.messages)[index].extras = extras;
+        req
+    }
+
+    #[test]
+    fn fingerprint_tracks_a_prefix_message_carrier() {
+        // Arrange: requests equal in canonical form whose first prefix
+        // message carries "x", "x" again, or "y".
+        let marked = with_carrier(req_with(&["a", "b", "c"]), 0, "x");
+        let marked_again = with_carrier(req_with(&["a", "b", "c"]), 0, "x");
+        let remarked = with_carrier(req_with(&["a", "b", "c"]), 0, "y");
+
+        // Act
+        let (_, fp_marked) = fingerprint_prefix(&marked);
+        let (_, fp_marked_again) = fingerprint_prefix(&marked_again);
+        let (_, fp_remarked) = fingerprint_prefix(&remarked);
+
+        // Assert
+        assert_ne!(fp_marked, fp_remarked);
+        assert_eq!(fp_marked, fp_marked_again);
+    }
+
+    #[test]
+    fn a_carrier_only_history_change_is_classified_as_a_rewrite() {
+        // Arrange
+        let store = PrefixRewriteStore::new();
+        store.observe("sess-c", &with_carrier(req_with(&["a", "b", "c"]), 0, "x"));
+
+        // Act
+        let same = store.observe(
+            "sess-c",
+            &with_carrier(req_with(&["a", "b", "c", "d"]), 0, "x"),
+        );
+        let changed = store.observe(
+            "sess-c",
+            &with_carrier(req_with(&["a", "b", "c", "d", "e"]), 0, "y"),
+        );
+
+        // Assert
+        assert_eq!(same.event, Some(EpochEvent::Stable));
+        assert_eq!(changed.event, Some(EpochEvent::Rewritten));
     }
 
     #[test]
