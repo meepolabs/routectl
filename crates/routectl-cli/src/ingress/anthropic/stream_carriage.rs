@@ -20,7 +20,7 @@
 use serde_json::{Map, Value};
 
 use routectl_core::wire_check::{EditKind, EditSite, WirePath};
-use routectl_core::{OpaqueSseEvent, is_safe_token, sanitize_for_log};
+use routectl_core::{OpaqueSseEvent, is_safe_token, parse_cache_lifetime_member, sanitize_for_log};
 use routectl_providers::translation_drop_metrics::record_translation_drop;
 
 use crate::ingress::{ResponseEdits, SseEvent};
@@ -164,6 +164,30 @@ pub(super) const MESSAGE_DELTA_KEYS: &[&str] = &["type", "delta", "usage"];
 
 /// The members of the render's `message_delta.delta`.
 pub(super) const MESSAGE_DELTA_DELTA_KEYS: &[&str] = &["stop_reason", "stop_sequence"];
+
+/// The members of the render's `message_delta.usage`.
+pub(super) const MESSAGE_DELTA_USAGE_KEYS: &[&str] = &[
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation",
+    "server_tool_use",
+];
+
+/// Add each carried `usage` member to the render's `message_delta.usage`
+/// that is not one of the render's own keys, whether or not this event
+/// wrote that key. A cache-lifetime member name is the render's too: its
+/// count is already in `cache_creation`.
+pub(super) fn merge_usage_members(usage: &mut Map<String, Value>, carried: &Map<String, Value>) {
+    for (key, value) in carried {
+        if !MESSAGE_DELTA_USAGE_KEYS.contains(&key.as_str())
+            && parse_cache_lifetime_member(key).is_none()
+        {
+            usage.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+}
 
 /// Add each carried top-level member to the render's `message_delta`
 /// `payload` that is not one of the render's own keys, whether or not this

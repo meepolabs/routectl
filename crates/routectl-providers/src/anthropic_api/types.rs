@@ -705,20 +705,18 @@ impl AnthropicUsage {
     /// `output_tokens`, already counted there. `None` when the wire omits
     /// it, which is what a non-thinking response does.
     pub(crate) fn thinking_tokens(&self) -> Option<u32> {
-        self.extras
-            .get("output_tokens_details")?
-            .get("thinking_tokens")?
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
+        thinking_tokens_of(&self.extras)
     }
 }
 
-/// `usage.output_tokens_details` on a streamed `message_delta`.
-#[derive(Debug, Deserialize)]
-pub struct AnthropicOutputTokensDetails {
-    /// The thinking share of `output_tokens`, already counted there.
-    #[serde(default)]
-    pub(crate) thinking_tokens: Option<u32>,
+/// `output_tokens_details.thinking_tokens` among a usage object's
+/// unmodeled members.
+fn thinking_tokens_of(extras: &Map<String, Value>) -> Option<u32> {
+    extras
+        .get("output_tokens_details")?
+        .get("thinking_tokens")?
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -780,10 +778,21 @@ pub struct SseDeltaUsage {
     /// chunk usage's `server_tool_use` field.
     #[serde(default)]
     pub(crate) server_tool_use: Option<Value>,
-    /// Thinking-token breakdown. Reported on `message_delta` only; the
+    /// Every other member of `message_delta.usage`, for an Anthropic
+    /// render to re-emit. `output_tokens_details` stays here whole, as on
+    /// [`AnthropicUsage`]: the thinking share is read from it, and the
+    /// object goes back to the client as the upstream sent it.
+    #[serde(flatten)]
+    pub(crate) extras: Map<String, Value>,
+}
+
+impl SseDeltaUsage {
+    /// `output_tokens_details.thinking_tokens`: the thinking share of
+    /// `output_tokens`. Reported on `message_delta` only; the
     /// `message_start` usage never carries it.
-    #[serde(default)]
-    pub(crate) output_tokens_details: Option<AnthropicOutputTokensDetails>,
+    pub(crate) fn thinking_tokens(&self) -> Option<u32> {
+        thinking_tokens_of(&self.extras)
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,8 @@
 //! builds them.
 
 use routectl_core::wire_check::EditKind;
-use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, OpaqueSseEvent, UsageDelta};
+use routectl_core::wire_check::IngressDialect;
+use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, OpaqueSseEvent, UpstreamMeta, UsageDelta};
 use routectl_providers::anthropic_api::sse::SseState;
 use serde_json::{Map, Value, json};
 use serial_test::serial;
@@ -13,7 +14,7 @@ use crate::ingress::{IngressAdapter, ResponseEdits, SseEvent};
 
 use super::super::AnthropicStreamState;
 use super::super::stream::render_chunk_declared;
-use super::{MESSAGE_DELTA_DELTA_KEYS, MESSAGE_DELTA_KEYS};
+use super::{MESSAGE_DELTA_DELTA_KEYS, MESSAGE_DELTA_KEYS, MESSAGE_DELTA_USAGE_KEYS};
 
 fn members(value: Value) -> Map<String, Value> {
     match value {
@@ -575,6 +576,10 @@ fn the_message_delta_reserved_keys_are_what_the_render_writes() {
     let usage = UsageDelta {
         prompt_tokens: Some(3),
         completion_tokens: Some(1),
+        cache_creation_input_tokens: Some(1),
+        cache_read_input_tokens: Some(1),
+        cache_creation: Some(routectl_core::CacheCreation::from_lifetimes([(300, 1)])),
+        server_tool_use: Some(json!({"web_search_requests": 1})),
         ..Default::default()
     };
     let mut events = Vec::new();
@@ -599,6 +604,118 @@ fn the_message_delta_reserved_keys_are_what_the_render_writes() {
     };
     assert_eq!(keys(&delta), reserved(MESSAGE_DELTA_KEYS));
     assert_eq!(keys(&delta["delta"]), reserved(MESSAGE_DELTA_DELTA_KEYS));
+    assert_eq!(keys(&delta["usage"]), reserved(MESSAGE_DELTA_USAGE_KEYS));
+}
+
+/// A closing chunk whose usage carries `members`, stamped as parsed from
+/// `dialect`, the way the Anthropic-API egress builds it.
+fn closing_with_usage_members(carried: Value, dialect: Option<IngressDialect>) -> ChatChunk {
+    let mut chunk = closing(Vec::new());
+    let usage = chunk.usage.as_mut().expect("closing usage");
+    usage.cache_creation_input_tokens = Some(2);
+    usage.cache_creation = Some(routectl_core::CacheCreation::from_lifetimes([(300, 2)]));
+    usage.extras = members(carried);
+    chunk.upstream_meta = dialect.map(|d| UpstreamMeta::default().with_wire_dialect(d));
+    chunk
+}
+
+/// The closing usage of an Anthropic-parsed stream takes its carried
+/// members after the typed ones, on the inline and the deferred close
+/// alike: a carried `cache_creation`, cache-lifetime member or token
+/// count never replaces or adds to what the render writes.
+#[test]
+fn message_delta_usage_takes_carried_members_under_the_typed_ones() {
+    // Arrange
+    let carried = json!({
+        "output_tokens_details": {"thinking_tokens": 0},
+        "speed": "standard",
+        "cache_creation": {"ephemeral_1h_input_tokens": 99},
+        "ephemeral_5m_input_tokens": 99,
+        "output_tokens": 99,
+    });
+    let deferred = || {
+        let mut finish = closing(Vec::new());
+        finish.usage = None;
+        let mut usage_only =
+            closing_with_usage_members(carried.clone(), Some(IngressDialect::Anthropic));
+        usage_only.choices.clear();
+        vec![role(Vec::new()), finish, usage_only]
+    };
+    let untyped_cache = || {
+        let mut chunk =
+            closing_with_usage_members(carried.clone(), Some(IngressDialect::Anthropic));
+        let usage = chunk.usage.as_mut().expect("closing usage");
+        usage.cache_creation_input_tokens = None;
+        usage.cache_creation = None;
+        vec![role(Vec::new()), chunk]
+    };
+    let typed_split = json!({"ephemeral_5m_input_tokens": 2});
+    let rows: [(&str, Vec<ChatChunk>, Option<&Value>); 3] = [
+        (
+            "inline",
+            vec![
+                role(Vec::new()),
+                closing_with_usage_members(carried.clone(), Some(IngressDialect::Anthropic)),
+            ],
+            Some(&typed_split),
+        ),
+        ("deferred", deferred(), Some(&typed_split)),
+        ("typed cache absent", untyped_cache(), None),
+    ];
+
+    for (name, chunks, expected_split) in rows {
+        // Act
+        let (events, _) = render(chunks);
+
+        // Assert
+        let deltas = named(&events, "message_delta");
+        assert_eq!(deltas.len(), 1, "{name}");
+        let usage = &payload(deltas[0])["usage"];
+        assert_eq!(
+            usage["output_tokens_details"],
+            json!({"thinking_tokens": 0}),
+            "{name}: {usage}"
+        );
+        assert_eq!(usage["speed"], "standard", "{name}");
+        assert_eq!(
+            usage.get("cache_creation"),
+            expected_split,
+            "{name}: the typed cache_creation, or none, never the carried one"
+        );
+        assert!(
+            usage.get("ephemeral_5m_input_tokens").is_none(),
+            "{name}: a lifetime member stays inside cache_creation: {usage}"
+        );
+        assert_eq!(usage["output_tokens"], 1, "{name}: typed count wins");
+    }
+}
+
+/// Usage members carried on a chunk not parsed from an Anthropic body never
+/// reach the closing `message_delta`. Positive control: the stamped chunk's
+/// do.
+#[test]
+fn message_delta_usage_carries_members_only_from_an_anthropic_body() {
+    let rows = [
+        ("unstamped", None, false),
+        ("chat body", Some(IngressDialect::Chat), false),
+        ("responses body", Some(IngressDialect::Responses), false),
+        ("anthropic body", Some(IngressDialect::Anthropic), true),
+    ];
+    for (name, dialect, expected) in rows {
+        // Arrange
+        let chunk = closing_with_usage_members(json!({"sentinel_usage": 1}), dialect);
+
+        // Act
+        let (events, _) = render(vec![role(Vec::new()), chunk]);
+
+        // Assert
+        let usage = &payload(named(&events, "message_delta")[0])["usage"];
+        assert_eq!(
+            usage.get("sentinel_usage").is_some(),
+            expected,
+            "{name}: {usage}"
+        );
+    }
 }
 
 #[test]

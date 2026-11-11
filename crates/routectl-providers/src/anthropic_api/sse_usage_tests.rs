@@ -608,3 +608,57 @@ fn message_delta_carries_a_thirty_minute_lifetime() {
         );
     }
 }
+
+/// Parse a thinking `message_start` and a closing `message_delta` whose
+/// usage carries `output_tokens_details` and an unmodeled member, on `state`.
+fn closing_chunk_of(mut state: SseState) -> ChatChunk {
+    let _ = state
+        .parse_event(
+            "test",
+            r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-opus-4-8","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":1}}}"#,
+        )
+        .unwrap();
+    state
+        .parse_event(
+            "test",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":3,"output_tokens":57,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0},"server_tool_use":{"web_search_requests":1},"output_tokens_details":{"thinking_tokens":51,"other_tokens":2},"speed":"standard"}}"#,
+        )
+        .unwrap()
+        .expect("closing chunk")
+}
+
+/// For an Anthropic client, the closing usage keeps every member the
+/// canonical delta does not model, `output_tokens_details` whole, and is
+/// stamped as an Anthropic body; the thinking share is still read from it.
+#[test]
+fn message_delta_carries_unmodeled_usage_members_for_an_anthropic_client() {
+    // Act
+    let chunk = closing_chunk_of(SseState::default().with_unmodeled_carriage());
+
+    // Assert
+    let usage = chunk.usage.expect("usage");
+    assert_eq!(usage.reasoning_tokens, Some(51));
+    assert_eq!(
+        Value::Object(usage.extras),
+        json!({"output_tokens_details": {"thinking_tokens": 51, "other_tokens": 2},
+               "speed": "standard"})
+    );
+    assert_eq!(
+        chunk.upstream_meta.and_then(|m| m.wire_dialect),
+        Some(routectl_core::wire_check::IngressDialect::Anthropic)
+    );
+}
+
+/// For a client of another dialect the closing usage carries no member
+/// and no dialect stamp; the thinking share is read all the same.
+#[test]
+fn message_delta_carries_no_usage_members_for_another_client() {
+    // Act
+    let chunk = closing_chunk_of(SseState::default());
+
+    // Assert
+    let usage = chunk.usage.expect("usage");
+    assert_eq!(usage.reasoning_tokens, Some(51));
+    assert!(usage.extras.is_empty(), "{:?}", usage.extras);
+    assert_eq!(chunk.upstream_meta.and_then(|m| m.wire_dialect), None);
+}

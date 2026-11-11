@@ -1,6 +1,9 @@
 use serde_json::{Map, Value, json};
 
-use routectl_core::{ChatChunk, Error, OpeningUsage, ReasoningDetail, Result, UsageDelta};
+use routectl_core::wire_check::IngressDialect;
+use routectl_core::{
+    ChatChunk, Error, OpeningUsage, ReasoningDetail, Result, UsageDelta, renders_unknowns,
+};
 
 use crate::ingress::{
     IngressStreamState, ResponseEdits, SseEvent, StreamErrorClass, StreamRequestContext,
@@ -8,7 +11,7 @@ use crate::ingress::{
 
 use super::stream_carriage::{
     MessageDeltaCarriage, complete_block_start, flush_unbound, merge_carried, merge_top_level,
-    take_start_members,
+    merge_usage_members, take_start_members,
 };
 use super::stream_edits::{
     declare_estimated_start_usage, declare_minted_start_id, declare_opening_carry,
@@ -104,6 +107,11 @@ fn render_chunk_events(
         return Ok(events);
     }
     declare_opening_carry(&chunk, edits);
+    if !renders_unknowns(IngressDialect::Anthropic, chunk.upstream_meta.as_ref())
+        && let Some(usage) = chunk.usage.as_mut()
+    {
+        usage.extras.clear();
+    }
 
     // Cache id/model from the first chunk that carries them; both
     // are tolerated as missing on the wire.
@@ -643,6 +651,7 @@ pub(super) fn emit_message_delta(
         if let Some(server_tool_use) = &u.server_tool_use {
             wire_usage.insert("server_tool_use".into(), server_tool_use.clone());
         }
+        merge_usage_members(&mut wire_usage, &u.extras);
         // Guard: only attach `usage` to the payload when the map carries
         // at least one key. Both `input_tokens` and `output_tokens` are
         // always present above, so this is defensive -- it prevents a

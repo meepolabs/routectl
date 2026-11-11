@@ -17,9 +17,9 @@ use routectl_core::{
 };
 
 use super::response::map_stop_reason;
-use super::sse_carriage::{MESSAGE_START_KEYS, message_delta_members};
+use super::sse_carriage::{MESSAGE_START_KEYS, closing_meta, message_delta_members};
 use super::sse_opaque::{MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK, OpaqueCapture};
-use super::types::SseEvent;
+use super::types::{SseDeltaUsage, SseEvent};
 use super::types_sse::is_known_event_type;
 
 /// Which kind of content block is currently open. Every variant
@@ -758,11 +758,11 @@ impl SseState {
                         // captured to merge -- lift the delta value
                         // straight through.
                         server_tool_use: usage.as_ref().and_then(|u| u.server_tool_use.clone()),
-                        reasoning_tokens: usage
-                            .as_ref()
-                            .and_then(|u| u.output_tokens_details.as_ref())
-                            .and_then(|d| d.thinking_tokens),
-                        extras: serde_json::Map::new(),
+                        reasoning_tokens: usage.as_ref().and_then(SseDeltaUsage::thinking_tokens),
+                        extras: match usage {
+                            Some(u) if self.carries_unmodeled => u.extras,
+                            _ => serde_json::Map::new(),
+                        },
                     })
                 } else {
                     None
@@ -782,12 +782,15 @@ impl SseState {
                         finish_reason,
                         matched_stop_sequence,
                     }],
+                    upstream_meta: closing_meta(
+                        usage_input_source.map(|source| {
+                            UpstreamMeta::from_usage_input_source(source)
+                                .with_usage_from_vendor_endpoint(self.vendor_opening)
+                        }),
+                        usage_delta.as_ref(),
+                    ),
                     usage: usage_delta,
                     opaque_events: Vec::new(),
-                    upstream_meta: usage_input_source.map(|source| {
-                        UpstreamMeta::from_usage_input_source(source)
-                            .with_usage_from_vendor_endpoint(self.vendor_opening)
-                    }),
                 }))
             }
 

@@ -15,7 +15,10 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{ChatChunk, Error, OpaqueSseEvent, Result, sanitize_for_log};
+use routectl_core::wire_check::IngressDialect;
+use routectl_core::{
+    ChatChunk, Error, OpaqueSseEvent, Result, UpstreamMeta, UsageDelta, sanitize_for_log,
+};
 
 use super::sse::SseState;
 use super::sse_opaque::{
@@ -46,6 +49,22 @@ pub(super) fn message_delta_members(
         top_level.insert("delta".to_owned(), Value::Object(delta));
     }
     top_level
+}
+
+/// The closing chunk's `meta`, stamped as parsed from an Anthropic body
+/// when its `usage` carries members, so only an Anthropic render emits them.
+pub(super) fn closing_meta(
+    meta: Option<UpstreamMeta>,
+    usage: Option<&UsageDelta>,
+) -> Option<UpstreamMeta> {
+    if usage.is_none_or(|u| u.extras.is_empty()) {
+        return meta;
+    }
+    let stamp = UpstreamMeta::default().with_wire_dialect(IngressDialect::Anthropic);
+    Some(match meta {
+        Some(meta) => meta.merge(stamp),
+        None => stamp,
+    })
 }
 
 impl SseState {

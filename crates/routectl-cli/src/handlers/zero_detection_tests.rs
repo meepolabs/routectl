@@ -56,7 +56,6 @@ struct KnownUndeclared {
     reason: &'static str,
 }
 
-const ANTHROPIC: &str = "anthropic->anthropic-api";
 const CHAT: &str = "chat->openai-compat";
 const BEDROCK_INVOKE: &str = "anthropic->bedrock-invoke";
 const BEDROCK_CONVERSE: &str = "anthropic->bedrock-converse";
@@ -65,12 +64,7 @@ const ANTHROPIC_TO_RESPONSES: &str = "anthropic->openai-responses";
 const CHAT_TO_RESPONSES: &str = "chat->openai-responses";
 
 /// Findings the check correctly reports that no declaration explains.
-const KNOWN_UNDECLARED: &[KnownUndeclared] = &[KnownUndeclared {
-    lane: ANTHROPIC,
-    leg: Leg::Response,
-    path: "/usage/output_tokens_details",
-    reason: "real loss: the closing message_delta render drops output_tokens_details",
-}];
+const KNOWN_UNDECLARED: &[KnownUndeclared] = &[];
 
 /// The client dialect a case speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,7 +535,8 @@ fn anthropic_unmodeled_frames() -> Vec<(Option<&'static str>, Value)> {
                    "context_management": {"applied_edits": [
                        {"type": "clear_tool_uses_20250919", "cleared_tool_uses": 1}]},
                    "server_note": {"n": 1},
-                   "usage": {"input_tokens": 3, "output_tokens": 1}}),
+                   "usage": {"input_tokens": 3, "output_tokens": 1,
+                             "usage_note": {"tier": "standard"}}}),
         ),
         (Some("message_stop"), json!({"type": "message_stop"})),
     ]
@@ -2454,7 +2449,13 @@ async fn only_an_anthropic_client_receives_unmodeled_stream_members_and_events()
             text.contains("toolu_1"),
             "{row}: tool call rendered: {text}"
         );
-        for member in ["cntr_1", "stop_details", "caller_delta", "diagnostics"] {
+        for member in [
+            "cntr_1",
+            "stop_details",
+            "caller_delta",
+            "diagnostics",
+            "usage_note",
+        ] {
             assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
         }
     }
