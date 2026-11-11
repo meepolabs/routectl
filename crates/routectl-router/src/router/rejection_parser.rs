@@ -371,7 +371,12 @@ pub(super) fn refused_member(
     status: u16,
     parsed: Option<&ParsedErrorBody>,
 ) -> Option<RawPath> {
-    let localized = localize(provider_kind, status, parsed?)?;
+    member_refused_by(&localize(provider_kind, status, parsed?)?)
+}
+
+/// The path of the member `localized` refuses outright, under the conditions
+/// [`refused_member`] states.
+fn member_refused_by(localized: &LocalizedPath<'_>) -> Option<RawPath> {
     let grounded = localized.extra_member
         && localized.tier == SignalTier::SelfIdentifying
         && localized.kind == RejectionKind::UnsupportedField
@@ -827,3 +832,7 @@ mod beta_tests;
 #[cfg(test)]
 #[path = "rejection_parser_identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "rejection_parser_member_tests.rs"]
+mod member_tests;

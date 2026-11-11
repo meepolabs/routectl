@@ -1,20 +1,23 @@
 //! The generic carried-member arm of the reactive field repair, end to end
-//! through the complete walk on an anthropic-api seat, plus the exact-path
-//! rule at the carrier surface.
+//! through the complete, pre-content stream and token-count walks on an
+//! anthropic-api seat, for every carrier kind, plus the gates at the plan's
+//! own entry point.
 //!
-//! The seat assembles each attempt with the real Anthropic egress, then
-//! merges the canonical part carriers into the body the way a same-dialect
-//! egress emits them, so the settlement reads a body that carries the client
-//! member at the path the rejection names.
+//! The seat assembles each attempt with the real Anthropic egress, which
+//! emits the client's carried members on a same-dialect request, so the
+//! settlement reads a body that carries the client member at the path the
+//! rejection names.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, Message,
-    MessageContent, Provider, Result, Role,
+    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, ContentPart, CustomTool, Error,
+    KnownContentPart, Message, MessageContent, Provider, Result, Role, SystemBlock, SystemContent,
+    TokenCount, ToolDef,
 };
 use serde_json::{Map, Value, json};
 
@@ -123,17 +126,28 @@ fn rejection(message: &str) -> Error {
     )
 }
 
-/// A seat refusing every body whose assistant part carries `caller` with
-/// `message`, and serving every other.
+/// The wire pointer of the client's `caller` member on the assistant part.
+const CALLER_POINTER: &str = "/messages/1/content/0/caller";
+
+/// A seat refusing with `message` every body that carries a member at
+/// `pointer`, and serving every other. Every walk's body is the real
+/// Anthropic egress's; a count body is the messages body, which carries
+/// every node a count body does.
 struct MemberSeat {
     message: &'static str,
+    pointer: &'static str,
     bodies: Mutex<Vec<Value>>,
 }
 
 impl MemberSeat {
     fn new(message: &'static str) -> Arc<Self> {
+        Self::refusing_at(message, CALLER_POINTER)
+    }
+
+    fn refusing_at(message: &'static str, pointer: &'static str) -> Arc<Self> {
         Arc::new(Self {
             message,
+            pointer,
             bodies: Mutex::new(Vec::new()),
         })
     }
@@ -150,36 +164,15 @@ impl MemberSeat {
         if let Some(object) = body.as_object_mut() {
             object.remove("stream");
         }
-        merge_part_carriers(req, &mut body);
         if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
             tap.deposit(serde_json::to_vec(&body).expect("serialize").into());
         }
-        let refused = body["messages"][1]["content"][0].get("caller").is_some();
+        let refused = body.pointer(self.pointer).is_some();
         self.bodies.lock().push(body);
         if refused {
             return Err(rejection(self.message));
         }
         Ok(())
-    }
-}
-
-/// Each typed part's carried members, added where the part sits in `body`,
-/// typed members winning.
-fn merge_part_carriers(req: &ChatRequest, body: &mut Value) {
-    for (m, message) in req.messages.iter().enumerate() {
-        let MessageContent::Parts(parts) = &message.content else {
-            continue;
-        };
-        for (p, part) in parts.iter().enumerate() {
-            let ContentPart::Known(KnownContentPart::Text { extras, .. }) = part else {
-                continue;
-            };
-            if let Some(slot) = body["messages"][m]["content"][p].as_object_mut() {
-                for (key, value) in extras {
-                    slot.entry(key.clone()).or_insert_with(|| value.clone());
-                }
-            }
-        }
     }
 }
 
@@ -197,8 +190,33 @@ impl Provider for MemberSeat {
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         self.answer(&req).map(|()| success_response())
     }
-    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        Err(Error::normalize_response("member-seat", "unused"))
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.answer(&req).map(|()| {
+            futures::stream::iter(vec![Ok(content_chunk())]).boxed()
+                as BoxStream<'static, Result<ChatChunk>>
+        })
+    }
+    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        self.answer(&req).map(|()| TokenCount {
+            input_tokens: 7,
+            ..Default::default()
+        })
+    }
+}
+
+/// A content-bearing chunk: the stream walk commits on first content.
+fn content_chunk() -> ChatChunk {
+    ChatChunk {
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some("ok".into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        ..Default::default()
     }
 }
 
@@ -286,6 +304,297 @@ async fn a_sibling_member_on_the_same_part_stays_on_the_retried_wire() {
         "{retried}"
     );
     assert_eq!(sent_part(retried)["text"], json!("earlier"));
+}
+
+/// One carrier kind's row: the canonical request the ingress parses a client
+/// body carrying a member at `pointer` into, and the grounded refusal of that
+/// member.
+struct CarrierCase {
+    name: &'static str,
+    req: ChatRequest,
+    refusal: &'static str,
+    pointer: &'static str,
+    member_path: &'static str,
+}
+
+fn one_member(key: &str, value: Value) -> Map<String, Value> {
+    Map::from_iter([(key.to_string(), value)])
+}
+
+/// The canonical request the Anthropic ingress parses `client` into: three
+/// plain turns, then `shape` applies the carrier under test.
+fn carried_req(client: &Value, shape: impl FnOnce(&mut ChatRequest)) -> ChatRequest {
+    let mut req = member_req(Map::new(), client);
+    shape(&mut req);
+    req
+}
+
+/// The client body with three plain turns, then `shape` applies the member
+/// under test.
+fn plain_client(shape: impl FnOnce(&mut Value)) -> Value {
+    let mut client = json!({
+        "model": ALIAS,
+        "max_tokens": 1024,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "earlier"}]},
+            {"role": "user", "content": [{"type": "text", "text": "again"}]},
+        ],
+    });
+    shape(&mut client);
+    client
+}
+
+fn top_level_case() -> CarrierCase {
+    let client = plain_client(|c| c["zz_knob"] = json!({"level": 2}));
+    let req = carried_req(&client, |r| {
+        r.provider_extras = Some(json!({"zz_knob": {"level": 2}}));
+    });
+    CarrierCase {
+        name: "top-level provider_extras",
+        req,
+        refusal: "zz_knob: Extra inputs are not permitted",
+        pointer: "/zz_knob",
+        member_path: "zz_knob",
+    }
+}
+
+fn message_case() -> CarrierCase {
+    let client = plain_client(|c| c["messages"][1]["zz_note"] = json!("m"));
+    let req = carried_req(&client, |r| {
+        Arc::make_mut(&mut r.messages)[1].extras = one_member("zz_note", json!("m"));
+    });
+    CarrierCase {
+        name: "message",
+        req,
+        refusal: "messages.1.zz_note: Extra inputs are not permitted",
+        pointer: "/messages/1/zz_note",
+        member_path: "messages.zz_note",
+    }
+}
+
+fn part_case() -> CarrierCase {
+    let client = client_body(Some(caller()));
+    CarrierCase {
+        name: "content part",
+        req: member_req(carried(true), &client),
+        refusal: REFUSED_CALLER,
+        pointer: CALLER_POINTER,
+        member_path: CALLER_PATH,
+    }
+}
+
+fn custom_tool_case() -> CarrierCase {
+    let schema = json!({"type": "object", "properties": {}});
+    let client = plain_client(|c| {
+        c["tools"] = json!([{"name": "t", "input_schema": schema, "zz_tool_note": 1}]);
+    });
+    let req = carried_req(&client, |r| {
+        r.tools = Some(vec![ToolDef::Custom(CustomTool {
+            name: "t".into(),
+            description: None,
+            input_schema: schema.clone(),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+            extras: one_member("zz_tool_note", json!(1)),
+        })]);
+    });
+    CarrierCase {
+        name: "custom tool",
+        req,
+        refusal: "tools.0.zz_tool_note: Extra inputs are not permitted",
+        pointer: "/tools/0/zz_tool_note",
+        member_path: "tools.zz_tool_note",
+    }
+}
+
+fn system_block_case() -> CarrierCase {
+    let client = plain_client(|c| {
+        c["system"] = json!([{"type": "text", "text": "be brief", "zz_block_note": 1}]);
+    });
+    let req = carried_req(&client, |r| {
+        r.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "be brief".into(),
+            cache_control: None,
+            citations: None,
+            extras: one_member("zz_block_note", json!(1)),
+        }]));
+    });
+    CarrierCase {
+        name: "system block",
+        req,
+        refusal: "system.0.zz_block_note: Extra inputs are not permitted",
+        pointer: "/system/0/zz_block_note",
+        member_path: "system.zz_block_note",
+    }
+}
+
+/// Every carrier kind the arm reaches, through the complete walk: the
+/// refused member is gone from the retried wire and only its verdict is
+/// learned.
+///
+/// Mutation check: drop one kind from `Carrier::ALL` -> red on that row.
+#[tokio::test]
+async fn a_refused_member_is_removed_from_each_carrier_kind() {
+    for case in [
+        top_level_case(),
+        message_case(),
+        part_case(),
+        custom_tool_case(),
+        system_block_case(),
+    ] {
+        let name = case.name;
+        let seat = MemberSeat::refusing_at(case.refusal, case.pointer);
+        let router = member_router(&seat);
+
+        let dispatched =
+            Box::pin(router.complete_with_options(case.req, crate::router::RouterOptions::new()))
+                .await;
+
+        assert!(
+            dispatched.result.is_ok(),
+            "{name}: {:?}",
+            dispatched.result.err()
+        );
+        let bodies = seat.bodies();
+        assert_eq!(bodies.len(), 2, "{name}: one refused attempt, one retry");
+        assert!(
+            bodies[0].pointer(case.pointer).is_some(),
+            "{name}: premise: sent"
+        );
+        assert!(
+            bodies[1].pointer(case.pointer).is_none(),
+            "{name}: {}",
+            bodies[1]
+        );
+        let key = crate::field_capability::field_capability_key(case.member_path).expect(name);
+        assert_eq!(learned_keys(&dispatched.meta), vec![key], "{name}");
+        assert_eq!(
+            dispatched.meta.field_repairs[0].member_path.as_deref(),
+            Some(case.member_path),
+            "{name}",
+        );
+    }
+}
+
+/// A canonical field is removed from every carrier at its position: both
+/// parts carrying `caller` lose it on the retry, though the rejection named
+/// one, and the sibling member on the first part stays.
+///
+/// Mutation check: stop the removal after the first matching carrier in
+/// `remove_member` -> red (the second instance survives).
+#[tokio::test]
+async fn every_matching_instance_goes_and_a_sibling_stays() {
+    let part = |text: &str, extra: Option<(&str, Value)>| {
+        let mut wire = json!({"type": "text", "text": text, "caller": caller()});
+        let mut extras = one_member("caller", caller());
+        if let Some((key, value)) = extra {
+            wire[key] = value.clone();
+            extras.insert(key.to_string(), value);
+        }
+        (wire, text_part(text, extras))
+    };
+    let (first_wire, first) = part("earlier", Some(("estimated_tokens", json!(12))));
+    let (second_wire, second) = part("later", None);
+    let client = plain_client(|c| c["messages"][1]["content"] = json!([first_wire, second_wire]));
+    let req = carried_req(&client, |r| {
+        Arc::make_mut(&mut r.messages)[1].content = MessageContent::Parts(vec![first, second]);
+    });
+    let seat = MemberSeat::new(REFUSED_CALLER);
+    let router = member_router(&seat);
+
+    let dispatched =
+        Box::pin(router.complete_with_options(req, crate::router::RouterOptions::new())).await;
+
+    assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+    let bodies = seat.bodies();
+    assert_eq!(bodies.len(), 2);
+    let sent = &bodies[0]["messages"][1]["content"];
+    assert!(
+        sent[0].get("caller").is_some() && sent[1].get("caller").is_some(),
+        "premise"
+    );
+    let retried = &bodies[1]["messages"][1]["content"];
+    assert!(retried[0].get("caller").is_none(), "{retried}");
+    assert!(retried[1].get("caller").is_none(), "{retried}");
+    assert_eq!(retried[0]["estimated_tokens"], json!(12), "{retried}");
+    assert_eq!(learned_keys(&dispatched.meta), vec![caller_key()]);
+}
+
+/// The same refusal on a stream answered before any content repairs and
+/// settles exactly as the complete walk does.
+///
+/// Mutation check: return `None` from `CarriedMemberProposer::propose` ->
+/// red.
+#[tokio::test]
+async fn a_pre_content_stream_rejection_removes_the_member_and_settles_it() {
+    let seat = MemberSeat::new(REFUSED_CALLER);
+    let router = member_router(&seat);
+
+    let dispatched =
+        Box::pin(router.stream_with_options(caller_req(), crate::router::RouterOptions::new()))
+            .await;
+
+    assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+    let bodies = seat.bodies();
+    assert_eq!(bodies.len(), 2, "one refused attempt, one retry");
+    assert!(
+        sent_part(&bodies[1]).get("caller").is_none(),
+        "{}",
+        bodies[1]
+    );
+    assert_eq!(sent_part(&bodies[1])["estimated_tokens"], json!(12));
+    assert_eq!(learned_keys(&dispatched.meta), vec![caller_key()]);
+}
+
+/// A token count the upstream refuses for the member is re-counted without
+/// it. Field verdicts carry no surface, and a settling count commits a
+/// repaired step the way the messages walks do (as it does for a closed-table
+/// row); `count_tokens_validates` decides only which verdicts a free count
+/// may re-check, so it plays no part here. A non-settling count repairs for
+/// its answer and learns nothing.
+///
+/// Mutation check: return `None` from `CarriedMemberProposer::propose` ->
+/// red on both rows.
+#[tokio::test]
+async fn a_refused_member_is_removed_from_the_token_count() {
+    let settling_seat = MemberSeat::new(REFUSED_CALLER);
+    let settling_router = member_router(&settling_seat);
+
+    let counted = settling_router.count_tokens_with_meta(caller_req()).await;
+
+    assert!(counted.result.is_ok(), "{:?}", counted.result.err());
+    let bodies = settling_seat.bodies();
+    assert_eq!(bodies.len(), 2, "settling: one refused count, one re-count");
+    assert!(
+        sent_part(&bodies[1]).get("caller").is_none(),
+        "{}",
+        bodies[1]
+    );
+    assert_eq!(learned_keys(&counted.meta), vec![caller_key()]);
+
+    let seat = MemberSeat::new(REFUSED_CALLER);
+    let router = member_router(&seat);
+
+    let answered = router.count_tokens(caller_req()).await;
+
+    assert!(answered.is_ok(), "{:?}", answered.err());
+    let bodies = seat.bodies();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "non-settling: one refused count, one re-count"
+    );
+    assert!(
+        sent_part(&bodies[1]).get("caller").is_none(),
+        "{}",
+        bodies[1]
+    );
+    assert!(router.learned_capability_snapshot().is_empty());
+    assert_eq!(router.field_verdicts().snapshot_len(), 0);
 }
 
 /// Each refusal the arm must not answer: the client gets the upstream 400 and
@@ -418,6 +727,47 @@ fn a_translation_lane_plan_removes_no_member() {
         budget.remaining(),
         super::super::repair_budget::REPAIRS_PER_REQUEST
     );
+}
+
+/// A request whose shared repair allowance is spent removes no member and
+/// charges nothing, though the path names exactly a carried member.
+///
+/// Mutation check: drop the `check_or_mark_refusal` check in
+/// `apply_member` -> red (the member is removed).
+#[test]
+fn a_spent_repair_allowance_removes_no_member_and_charges_nothing() {
+    use super::super::rejection_parser::RawPath;
+    use super::super::repair_budget::{REPAIRS_PER_REQUEST, RepairBudget};
+    use super::FieldRepairPlan;
+    use routectl_core::capability::SignalTier;
+    use routectl_core::wire_check::IngressDialect;
+
+    let mut req = caller_req();
+    let mut plan = FieldRepairPlan::admitted(Vec::new(), Some(IngressDialect::Anthropic), None);
+    let mut meta = crate::router::DispatchMeta::for_alias(ALIAS);
+    let mut budget = RepairBudget::per_request();
+    while budget.draw() {}
+    assert_eq!(budget.spent(), REPAIRS_PER_REQUEST, "premise: spent");
+
+    let applied = plan.apply_member(
+        &RawPath::for_tests(&["messages", "content", "caller"]),
+        SignalTier::SelfIdentifying,
+        &mut req,
+        &mut meta,
+        &mut budget,
+        400,
+    );
+
+    assert!(applied.is_none());
+    let MessageContent::Parts(parts) = &req.messages[1].content else {
+        panic!("parts");
+    };
+    let ContentPart::Known(KnownContentPart::Text { extras, .. }) = &parts[0] else {
+        panic!("text part");
+    };
+    assert!(extras.contains_key("caller"), "nothing removed");
+    assert_eq!(budget.spent(), REPAIRS_PER_REQUEST, "nothing charged");
+    assert!(!plan.has_applied());
 }
 
 /// A seat that is never called, for tests that only need a target.

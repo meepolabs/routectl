@@ -144,20 +144,21 @@ fn no_closed_table_row_resolves_a_generic_capability_in_any_repair_kind() {
     }
 }
 
-/// A refused client member the capability strip owns is left to the strip:
-/// the generic carried-member arm proposes nothing for it, while the same
-/// refusal of a member the strip does not own is proposed. Both requests
-/// carry their member at the top level, unchanged from the client's body.
-///
-/// Mutation check: drop the `strippable_keys` check in
-/// `CarriedMemberProposer::propose` -> red on `context_management`.
-#[test]
-fn a_member_the_capability_strip_owns_is_never_taken_by_the_generic_arm() {
+/// What the field-row and carried-member proposers each make of `err` on an
+/// anthropic-api target, given the attempt's settlement.
+struct Proposed {
+    field_row: bool,
+    carried_member: bool,
+}
+
+fn propose_on_anthropic(
+    err: &Error,
+    provenance: routectl_core::wire_check::RejectionProvenance,
+    in_egress: Option<bool>,
+) -> Proposed {
     use crate::router::learn_engine::ThinkingShape;
     use crate::router::learn_engine::{Proposal, Proposer, RejectionInput, RejectionSite};
-    use crate::router::learn_proposers::CarriedMemberProposer;
-    use routectl_core::failure_class::ClassifiedFailure;
-    use routectl_core::wire_check::RejectionProvenance;
+    use crate::router::learn_proposers::{CarriedMemberProposer, FieldRowProposer};
 
     let config: crate::config::Config =
         toml::from_str("[providers.p1]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n")
@@ -171,8 +172,8 @@ fn a_member_the_capability_strip_owns_is_never_taken_by_the_generic_arm() {
         .pop()
         .expect("one target");
     let site = RejectionSite {
-        provenance: RejectionProvenance::ClientUnchanged,
-        in_egress: Some(true),
+        provenance,
+        in_egress,
         matched_edit: crate::router::learn_revert::MatchedEdit::None,
         locator: None,
         sent: crate::router::learn_revert::SentSlot::default(),
@@ -180,35 +181,102 @@ fn a_member_the_capability_strip_owns_is_never_taken_by_the_generic_arm() {
         sent_effort: SentEffort::Unknown,
         thinking: ThinkingShape::Unknown,
     };
+    let classified = classify(err, Some(ANTHROPIC_API_KIND));
+    let input = RejectionInput {
+        err,
+        class: &classified,
+        native_class: &classified.class,
+        target: &target,
+        replay_carried: false,
+        table: crate::router::FieldRepairTable::default(),
+        site: Some(site),
+        client_betas: &[],
+        withheld_betas: &[],
+        beta_assembly: None,
+    };
+    Proposed {
+        field_row: matches!(
+            FieldRowProposer.propose(&input),
+            Some(Proposal::FieldRow { .. })
+        ),
+        carried_member: matches!(
+            CarriedMemberProposer.propose(&input),
+            Some(Proposal::CarriedMember { .. })
+        ),
+    }
+}
+
+/// A member no closed row names and the capability strip does not own: the
+/// generic arm proposes it when the settlement attributes it to the client.
+const UNOWNED_MEMBER: &str = "service_tier_hint";
+
+/// A refused client member the capability strip owns is left to the strip:
+/// the generic carried-member arm proposes nothing for it, while the same
+/// refusal of a member the strip does not own is proposed. Both requests
+/// carry their member at the top level, unchanged from the client's body.
+///
+/// Mutation check: drop the `strippable_keys` check in
+/// `CarriedMemberProposer::propose` -> red on `context_management`.
+#[test]
+fn a_member_the_capability_strip_owns_is_never_taken_by_the_generic_arm() {
+    use routectl_core::wire_check::RejectionProvenance;
+
     for (member, proposed) in [
         (crate::capability_strip::CONTEXT_MANAGEMENT, false),
-        ("service_tier_hint", true),
+        (UNOWNED_MEMBER, true),
     ] {
         assert!(
             crate::capability_strip::strippable_keys().any(|key| key == member) != proposed,
             "premise: {member}",
         );
         let err = anthropic_rejection(member);
-        let classified: ClassifiedFailure = classify(&err, Some(ANTHROPIC_API_KIND));
-        let input = RejectionInput {
-            err: &err,
-            class: &classified,
-            native_class: &classified.class,
-            target: &target,
-            replay_carried: false,
-            table: crate::router::FieldRepairTable::default(),
-            site: Some(site.clone()),
-            client_betas: &[],
-            withheld_betas: &[],
-            beta_assembly: None,
-        };
 
-        let proposal = CarriedMemberProposer.propose(&input);
+        let outcome = propose_on_anthropic(&err, RejectionProvenance::ClientUnchanged, Some(true));
 
-        assert_eq!(
-            matches!(proposal, Some(Proposal::CarriedMember { .. })),
-            proposed,
-            "{member}",
-        );
+        assert_eq!(outcome.carried_member, proposed, "{member}");
+    }
+}
+
+/// A rejection a closed-table row claims is the row's, never the generic
+/// arm's, even though it refuses a member by the same grounded template.
+///
+/// Mutation check: drop the `FieldRowProposer.propose(input).is_some()`
+/// check in `CarriedMemberProposer::propose` -> red.
+#[test]
+fn a_rejection_a_closed_row_claims_is_never_taken_by_the_generic_arm() {
+    use routectl_core::wire_check::RejectionProvenance;
+    let row_path = "temperature";
+    let err = anthropic_rejection(row_path);
+
+    let outcome = propose_on_anthropic(&err, RejectionProvenance::ClientUnchanged, Some(true));
+
+    assert!(
+        outcome.field_row,
+        "premise: the closed row claims `{row_path}`"
+    );
+    assert!(!outcome.carried_member);
+}
+
+/// A member the client sent unchanged is attributed to it only when the body
+/// that went out is proven to carry it; a proven absence and an unproven
+/// presence each leave the rejection unattributed. The `Some(true)` row is the
+/// positive control on the same rejection.
+///
+/// Mutation check: drop `site.in_egress == Some(true)` from the attribution
+/// in `CarriedMemberProposer::propose` -> red on both refusing rows.
+#[test]
+fn egress_presence_must_be_proven_for_the_generic_arm() {
+    use routectl_core::wire_check::RejectionProvenance;
+    let err = anthropic_rejection(UNOWNED_MEMBER);
+
+    for (name, in_egress, proposed) in [
+        ("present on the wire", Some(true), true),
+        ("absent from the wire", Some(false), false),
+        ("presence unproven", None, false),
+    ] {
+        let outcome = propose_on_anthropic(&err, RejectionProvenance::ClientUnchanged, in_egress);
+
+        assert!(!outcome.field_row, "premise: {name}: no closed row");
+        assert_eq!(outcome.carried_member, proposed, "{name}");
     }
 }

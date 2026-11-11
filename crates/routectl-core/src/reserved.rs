@@ -41,102 +41,160 @@
 /// Extend when a new field is added to `ChatRequest` in
 /// `routectl-core/src/schema.rs`, or when a new egress alias is introduced.
 pub fn is_canonical_request_key(key: &str) -> bool {
-    matches!(
-        key,
-        // Identifiers and routing.
-        "model"
-            // Message arrays.
-            | "messages"
-            // System prompt (Anthropic-shape top-level).
-            | "system"
-            // Sampling parameters.
-            | "temperature"
-            | "top_p"
-            | "max_tokens"
-            // OpenAI alias for max_tokens on newer models.
-            | "max_completion_tokens"
-            // Stop sequences -- OpenAI wire name.
-            | "stop"
-            // Stop sequences -- Anthropic wire name.
-            | "stop_sequences"
-            | "stream"
-            | "n"
-            | "seed"
-            | "logprobs"
-            | "top_logprobs"
-            | "logit_bias"
-            | "presence_penalty"
-            | "frequency_penalty"
-            | "user"
-            // Tool definitions and selection.
-            | "tools"
-            | "tool_choice"
-            // OpenAI structured output (JSON mode / json_schema).
-            | "response_format"
-            // Anthropic prompt-cache breakpoint at the top-level body.
-            | "cache_control"
-            // Anthropic beta feature flags.
-            | "anthropic_beta"
-            // Reasoning / thinking config.
-            | "reasoning"
-            // Typed reasoning-details echoed on multi-turn (Anthropic shape).
-            | "reasoning_details"
-            // Escape hatch for long-tail provider knobs; must not be
-            // clobbered by a second layer of extras.
-            | "provider_extras"
-            // Chat-template kwargs (vLLM / DashScope).
-            | "chat_template_kwargs"
-    )
+    CANONICAL_REQUEST_KEYS.contains(&key)
 }
+
+/// The names [`is_canonical_request_key`] recognizes.
+const CANONICAL_REQUEST_KEYS: &[&str] = &[
+    // Identifiers and routing.
+    "model",
+    // Message arrays.
+    "messages",
+    // System prompt (Anthropic-shape top-level).
+    "system",
+    // Sampling parameters.
+    "temperature",
+    "top_p",
+    "max_tokens",
+    // OpenAI alias for max_tokens on newer models.
+    "max_completion_tokens",
+    // Stop sequences -- OpenAI wire name.
+    "stop",
+    // Stop sequences -- Anthropic wire name.
+    "stop_sequences",
+    "stream",
+    "n",
+    "seed",
+    "logprobs",
+    "top_logprobs",
+    "logit_bias",
+    "presence_penalty",
+    "frequency_penalty",
+    "user",
+    // Tool definitions and selection.
+    "tools",
+    "tool_choice",
+    // OpenAI structured output (JSON mode / json_schema).
+    "response_format",
+    // Anthropic prompt-cache breakpoint at the top-level body.
+    "cache_control",
+    // Anthropic beta feature flags.
+    "anthropic_beta",
+    // Reasoning / thinking config.
+    "reasoning",
+    // Typed reasoning-details echoed on multi-turn (Anthropic shape).
+    "reasoning_details",
+    // Escape hatch for long-tail provider knobs; must not be
+    // clobbered by a second layer of extras.
+    "provider_extras",
+    // Chat-template kwargs (vLLM / DashScope).
+    "chat_template_kwargs",
+];
 
 #[cfg(test)]
 mod tests {
-    use super::is_canonical_request_key;
+    use std::collections::BTreeSet;
 
-    /// Every serde wire-name on `ChatRequest` must be recognized.
-    /// Update this list whenever `schema.rs::ChatRequest` gains or
-    /// renames a field.
+    use serde_json::json;
+
+    use super::{CANONICAL_REQUEST_KEYS, is_canonical_request_key};
+    use crate::{
+        CacheControl, ChatRequest, CustomTool, Message, MessageContent, ReasoningConfig, Role,
+        RoutectlInternal, SystemContent, ToolDef,
+    };
+
+    /// Wire names routectl writes or echoes that are not a `ChatRequest`
+    /// member's serialized key.
+    const WIRE_ALIASES: [&str; 3] = [
+        // OpenAI's alias for `max_tokens` on newer models.
+        "max_completion_tokens",
+        // The Anthropic spelling of `stop`.
+        "stop_sequences",
+        // Echoed on multi-turn assistant messages.
+        "reasoning_details",
+    ];
+
+    /// A `ChatRequest` with every member populated, so each serializes. A
+    /// struct literal without `..Default::default()`: a member added to
+    /// `ChatRequest` fails to compile here until it is populated.
+    fn populated_request() -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                refusal: None,
+                extras: serde_json::Map::new(),
+            }]
+            .into(),
+            system: Some(SystemContent::Text("s".into())),
+            temperature: Some(0.5),
+            top_p: Some(0.5),
+            max_tokens: Some(1),
+            stop: Some(vec!["x".into()]),
+            stream: Some(true),
+            n: Some(1),
+            seed: Some(1),
+            logprobs: Some(true),
+            top_logprobs: Some(1),
+            logit_bias: Some(json!({})),
+            presence_penalty: Some(0.5),
+            frequency_penalty: Some(0.5),
+            user: Some("u".into()),
+            tools: Some(vec![ToolDef::Custom(CustomTool {
+                name: "t".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+                extras: serde_json::Map::new(),
+            })]),
+            tool_choice: Some(json!("auto")),
+            response_format: Some(json!({"type": "text"})),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            anthropic_beta: vec!["b".into()],
+            reasoning: Some(ReasoningConfig {
+                effort: Some("low".into()),
+                ..Default::default()
+            }),
+            chat_template_kwargs: Some(json!({})),
+            provider_extras: Some(json!({})),
+            routectl_internal: RoutectlInternal::default(),
+        }
+    }
+
+    /// The predicate covers exactly the keys a populated `ChatRequest`
+    /// serializes, plus the wire aliases: no member is missing, and nothing
+    /// outside that set is claimed.
+    ///
+    /// Mutation check: drop one name from `CANONICAL_REQUEST_KEYS` -> red.
     #[test]
-    fn all_chat_request_wire_fields_are_recognized() {
-        // Arrange: exhaustive list of ChatRequest wire-field names
-        // (the key each field serializes to on the JSON wire).
-        let canonical_fields = [
-            "model",
-            "messages",
-            "system",
-            "temperature",
-            "top_p",
-            "max_tokens",
-            "stop",
-            "stream",
-            "n",
-            "seed",
-            "logprobs",
-            "top_logprobs",
-            "logit_bias",
-            "presence_penalty",
-            "frequency_penalty",
-            "user",
-            "tools",
-            "tool_choice",
-            "response_format",
-            "cache_control",
-            "anthropic_beta",
-            "reasoning",
-            "chat_template_kwargs",
-            "provider_extras",
-            // Additional aliases routectl uses across egresses:
-            "max_completion_tokens",
-            "stop_sequences",
-            "reasoning_details",
-        ];
+    fn the_canonical_keys_are_the_serialized_request_members_plus_wire_aliases() {
+        // Arrange
+        let wire = serde_json::to_value(populated_request()).expect("serialize");
+        let expected: BTreeSet<&str> = wire
+            .as_object()
+            .expect("a request serializes to an object")
+            .keys()
+            .map(String::as_str)
+            .chain(WIRE_ALIASES)
+            .collect();
 
-        // Act + Assert: each field name must return true.
-        for field in &canonical_fields {
-            assert!(
-                is_canonical_request_key(field),
-                "expected is_canonical_request_key({field:?}) == true but got false"
-            );
+        // Act
+        let claimed: BTreeSet<&str> = CANONICAL_REQUEST_KEYS.iter().copied().collect();
+
+        // Assert
+        assert_eq!(claimed, expected);
+        assert_eq!(claimed.len(), CANONICAL_REQUEST_KEYS.len(), "no duplicates");
+        for key in &expected {
+            assert!(is_canonical_request_key(key), "{key}");
         }
     }
 
