@@ -5,13 +5,18 @@
 //! `XDG_CONFIG_HOME` (the workspace cargo config forces it) and
 //! `ROUTECTL_CONFIG`, names its config with `--config`, and
 //! runs in a fresh working directory that each test asserts stays empty, so
-//! a relative fallback would show up as a file there.
+//! a relative fallback would show up as a file there. A one-shot command
+//! that does not exit on its own fails its test.
+
+#[path = "common/bounded_child.rs"]
+mod bounded_child;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use bounded_child::{POLL_INTERVAL, run_to_exit};
 use routectl_router::CURRENT_CONFIG_VERSION;
 
 const BIN: &str = env!("CARGO_BIN_EXE_routectl");
@@ -65,28 +70,7 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.command(args).output().expect("spawn routectl binary")
-    }
-
-    /// [`Self::run`] for a command that may start serving: killed after
-    /// [`READY_DEADLINE`], so a daemon that should have refused fails the
-    /// row instead of hanging the suite.
-    fn run_bounded(&self, args: &[&str]) -> Output {
-        let mut child = self
-            .command(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn routectl binary");
-        let until = Instant::now() + READY_DEADLINE;
-        while Instant::now() < until {
-            if child.try_wait().expect("poll child").is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = child.kill();
-        child.wait_with_output().expect("reap routectl binary")
+        run_to_exit(&mut self.command(args))
     }
 
     fn cwd_entries(&self) -> Vec<PathBuf> {
@@ -125,7 +109,6 @@ fn server_block(port: u16) -> String {
     format!("[server]\nhost = \"127.0.0.1\"\nport = {port}\n")
 }
 
-/// Mutation check: drop the start-up path check in the serve body -> red.
 #[test]
 fn serve_without_a_config_folder_refuses_the_empty_default_by_key() {
     let rows: &[(&str, &str, &str)] = &[
@@ -147,7 +130,7 @@ fn serve_without_a_config_folder_refuses_the_empty_default_by_key() {
                 String::new()
             };
             let fixture = Fixture::new(&format!("{}{extra}", server_block(port)));
-            let out = fixture.run_bounded(&["serve"]);
+            let out = fixture.run(&["serve"]);
             refusal_failure(&fixture, &out, key).map(|why| format!("{name}: {why}"))
         })
         .collect();
@@ -192,7 +175,7 @@ fn await_serving(daemon: &mut Daemon, port: u16) {
         if health_answers(port) {
             return;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(POLL_INTERVAL);
     }
     panic!("the daemon never began serving on port {port}");
 }
@@ -227,8 +210,6 @@ fn serve_without_a_config_folder_starts_when_the_keys_are_set() {
     );
 }
 
-/// Mutation check: return `config.usage.db_path` unchecked from the usage
-/// db-path helper -> red.
 #[test]
 fn usage_commands_without_a_config_folder_refuse_the_empty_db_path() {
     let rows: &[(&str, &[&str])] = &[
@@ -276,8 +257,6 @@ fn rc_env_without_a_config_folder_refuses_the_empty_cert_dir() {
     assert_eq!(refusal_failure(&fixture, &out, "mitm.cert_dir"), None);
 }
 
-/// Mutation check: restore the relative fallback in the refresh entry point
-/// -> red (the table lands under the cwd).
 #[test]
 fn prices_refresh_without_a_config_folder_errors_and_writes_nothing() {
     let fixture = Fixture::new("");
@@ -307,8 +286,6 @@ fn plant_under_cwd(fixture: &Fixture, name: &str, body: &[u8]) {
     std::fs::write(dir.join(name), body).unwrap();
 }
 
-/// Mutation check: read the relative fallback in the default price book ->
-/// red (the planted table is picked up).
 #[test]
 fn config_show_effective_without_a_config_folder_reads_no_refreshed_table() {
     let fixture = Fixture::new("");
@@ -329,8 +306,6 @@ fn config_show_effective_without_a_config_folder_reads_no_refreshed_table() {
     assert!(stdout.contains("refreshed table none"), "{stdout}");
 }
 
-/// Mutation check: scan the relative fallback for leftover catalog files in
-/// the doctor gather -> red (the planted file is listed).
 #[test]
 fn doctor_without_a_config_folder_lists_no_leftover_catalog_files() {
     let fixture = Fixture::new("");

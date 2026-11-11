@@ -14,15 +14,18 @@
 //! tempdir), points `HOME` and the working directory at a
 //! tempdir, and either removes `APPDATA` or points it inside that tempdir, so
 //! no real config folder is read or written. The no-folder rows remove
-//! `HOME` and `USERPROFILE` (the Windows home fallback) instead. Every child
-//! is killed after [`CHILD_DEADLINE`], so a command that should have refused
-//! fails its row instead of hanging the suite.
+//! `HOME` and `USERPROFILE` (the Windows home fallback) instead. A one-shot
+//! command that does not exit on its own fails its test.
+
+#[path = "common/bounded_child.rs"]
+mod bounded_child;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use bounded_child::{POLL_INTERVAL, run_to_exit};
 use routectl_router::CURRENT_CONFIG_VERSION;
 use serde_json::Value;
 
@@ -31,28 +34,6 @@ const READY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Per-request socket timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Give-up bound for a one-shot command.
-const CHILD_DEADLINE: Duration = Duration::from_secs(30);
-
-/// Run `command` to completion with piped output, killing it (by its own
-/// handle) once [`CHILD_DEADLINE`] passes.
-fn output_bounded(command: &mut Command) -> Output {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn routectl binary");
-    let until = Instant::now() + CHILD_DEADLINE;
-    while Instant::now() < until {
-        if child.try_wait().expect("poll child").is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = child.kill();
-    child.wait_with_output().expect("reap routectl binary")
-}
 
 struct Home {
     tmp: tempfile::TempDir,
@@ -122,11 +103,11 @@ impl Home {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        output_bounded(self.command(args).env_remove("APPDATA"))
+        run_to_exit(self.command(args).env_remove("APPDATA"))
     }
 
     fn run_with_appdata(&self, args: &[&str]) -> Output {
-        output_bounded(self.command(args).env("APPDATA", self.appdata()))
+        run_to_exit(self.command(args).env("APPDATA", self.appdata()))
     }
 }
 
@@ -172,8 +153,7 @@ fn stranded_row_failure(args: &[&str]) -> Option<String> {
 }
 
 /// Commands that never read the config run past a config left in the old
-/// folder; `doctor` reports the old folder itself. Mutation check: classify
-/// `whoami` as reading the config -> the whoami row goes red.
+/// folder; `doctor` reports the old folder itself.
 #[test]
 fn a_config_only_in_the_old_folder_does_not_stop_commands_that_never_read_it() {
     let rows: &[(&str, &[&str], &str)] = &[
@@ -229,7 +209,7 @@ fn explicit_row_failure(how: &ExplicitConfig) -> Option<String> {
         }
     };
 
-    let out = output_bounded(command.env_remove("APPDATA"));
+    let out = run_to_exit(command.env_remove("APPDATA"));
 
     let stderr = stderr_of(&out);
     let passed =
@@ -253,7 +233,7 @@ fn an_empty_xdg_config_home_counts_as_unset() {
     )
     .unwrap();
 
-    let out = output_bounded(
+    let out = run_to_exit(
         Command::new(env!("CARGO_BIN_EXE_routectl"))
             .args(["config", "check"])
             .env("XDG_CONFIG_HOME", "")
@@ -326,8 +306,6 @@ impl NoFolder {
     }
 }
 
-/// Mutation check: restore the relative fallback in the CLI's default config
-/// path -> red (the planted config is read and shown).
 #[test]
 fn without_a_config_folder_the_default_config_is_refused_not_read_from_the_cwd() {
     let rows: &[(&str, Option<&str>)] = &[
@@ -338,7 +316,7 @@ fn without_a_config_folder_the_default_config_is_refused_not_read_from_the_cwd()
         .iter()
         .filter_map(|(name, xdg)| {
             let fixture = NoFolder::new();
-            let out = output_bounded(&mut fixture.command(*xdg, &["config", "show"]));
+            let out = run_to_exit(&mut fixture.command(*xdg, &["config", "show"]));
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = stderr_of(&out);
             let refused = !out.status.success()
@@ -374,7 +352,7 @@ fn without_a_config_folder_an_explicit_config_is_read() {
                     command
                 }
             };
-            let out = output_bounded(&mut command);
+            let out = run_to_exit(&mut command);
             let stdout = String::from_utf8_lossy(&out.stdout);
             let read =
                 out.status.success() && stdout.contains("47392") && !stdout.contains(PLANTED_PORT);
@@ -416,8 +394,6 @@ fn legacy_lines_of(out: &Output) -> Vec<String> {
         .collect()
 }
 
-/// Mutation check: replace the legacy gather in the doctor context gather
-/// with `LegacyFolder::Absent` -> red here.
 #[test]
 fn doctor_lists_a_file_left_in_the_old_folder_by_its_home_free_name() {
     let home = Home::with_new_config_and_old_files(&["usage.db"]);
@@ -452,8 +428,7 @@ fn doctor_with_an_empty_old_folder_shows_no_legacy_finding() {
 }
 
 /// The refusal reads `APPDATA` itself: a config only in `$APPDATA/routectl`
-/// stops the command, naming that file. Mutation check: change the
-/// `"APPDATA"` literal in `legacy_config_dirs_from_env` -> red here.
+/// stops the command, naming that file.
 #[test]
 fn a_config_only_in_the_appdata_folder_stops_the_command() {
     let home = Home {
@@ -476,8 +451,6 @@ fn a_config_only_in_the_appdata_folder_stops_the_command() {
 }
 
 /// `doctor` names a file left under `$APPDATA/routectl` by its variable.
-/// Mutation check: change the `"APPDATA"` literal in
-/// `legacy_config_dirs_from_env` -> red here.
 #[test]
 fn doctor_names_a_file_left_in_the_appdata_folder_by_its_variable() {
     let home = Home::with_new_config_and_old_files(&[]);
@@ -530,7 +503,7 @@ impl Daemon {
             if matches!(try_get(self.port, "/health"), Some((200, _))) {
                 return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(POLL_INTERVAL);
         }
         panic!("the daemon never began serving on port {}", self.port);
     }
@@ -592,8 +565,6 @@ fn free_port() -> u16 {
 }
 
 /// The served doctor panel lists the old folders `serve` read at start.
-/// Mutation check: drop the `.with_legacy_config_dirs(...)` call where the
-/// serve path builds its status state -> red here.
 #[test]
 fn served_doctor_names_a_file_left_in_the_appdata_folder() {
     let home = Home::with_new_config_and_old_files(&[]);

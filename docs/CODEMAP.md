@@ -8780,6 +8780,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   testkit `file_ref` secret helper, plus the cli-only `replay` harness and
   `readiness` submodules; the builders are enabled via the `test-utils`
   dev-dependency feature on core
+- `tests/common/bounded_child.rs` -- one-shot child runner
+  (`run_to_exit`, deadline + poll-interval consts) for binaries that spawn
+  the real CLI; included by `#[path]`, it fails the test when the child is
+  still running at the deadline
 - `tests/common/readiness.rs` -- shared `/health` readiness poll
   (`await_health`, deadline + cadence consts) used by every integration
   binary that boots `serve_on_listener`; readiness is a served response,
