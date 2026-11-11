@@ -7,7 +7,8 @@
 #[cfg(any(
     feature = "openai-compat",
     feature = "openai-responses",
-    feature = "anthropic-api"
+    feature = "anthropic-api",
+    feature = "gemini"
 ))]
 use std::borrow::Cow;
 
@@ -17,7 +18,8 @@ use routectl_core::wire_check::WireTap;
 #[cfg(any(
     feature = "openai-compat",
     feature = "openai-responses",
-    feature = "anthropic-api"
+    feature = "anthropic-api",
+    feature = "gemini"
 ))]
 use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
 
@@ -92,7 +94,8 @@ pub fn push_frame(tap: Option<&WireTap>, event: &str, data: &str) {
 #[cfg(any(
     feature = "openai-compat",
     feature = "openai-responses",
-    feature = "anthropic-api"
+    feature = "anthropic-api",
+    feature = "gemini"
 ))]
 pub fn declare(tap: &WireTap, site: EditSite, path: impl Into<Cow<'static, str>>, kind: EditKind) {
     match DeclaredEdit::new(site, path, kind) {
@@ -129,7 +132,8 @@ pub fn declare_response(tap: Option<&WireTap>, site: EditSite, path: &'static st
 #[cfg(any(
     feature = "openai-compat",
     feature = "openai-responses",
-    feature = "anthropic-api"
+    feature = "anthropic-api",
+    feature = "gemini"
 ))]
 pub fn member_pointer(parent: &str, key: &str) -> Option<String> {
     routectl_core::is_safe_token(key)

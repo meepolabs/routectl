@@ -658,6 +658,7 @@ fn tool_choice_named_function_uses_flat_shape() {
 
 include!("request_extras_tests.rs");
 include!("request_carrier_tests.rs");
+include!("request_foreign_carrier_tests.rs");
 include!("request_mantle_guard_tests.rs");
 include!("request_content_tests.rs");
 include!("request_lane_observability_tests.rs");

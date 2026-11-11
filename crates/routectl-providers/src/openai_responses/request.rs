@@ -30,6 +30,7 @@ use super::system::{flush_fingerprint_tally, record_developer_turn_withhold, tra
 use super::tools::{translate_tool_choice, translate_tools};
 use super::types::{ResponseInput, ResponseInputItem, ResponsesContentItem, ResponsesRequest};
 use super::{AuthKind, OpenAiResponsesConfig, extras};
+use crate::managed_keys::{ForeignDialectExtraTally, withhold_carried_members};
 use crate::translation_drop_metrics::{
     ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
 };
@@ -49,6 +50,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // worst.
     record_translation_lane_seen(super::LANE);
     count_unmodeled_thinking_type(req);
+    withhold_foreign_carried_members(&cfg.id, cfg.auth_kind, req);
     log_dropped_cache_control(req);
     count_withheld_sampling_params(req);
     // The canonical sampling knobs have no Responses-API home and are gated
@@ -598,6 +600,25 @@ const fn sampling_params(req: &ChatRequest) -> [(&'static str, bool); 2] {
         ("/temperature", req.temperature.is_some()),
         ("/top_p", req.top_p.is_some()),
     ]
+}
+
+/// Withhold the members a client of another dialect carried on its messages,
+/// parts, tools and system blocks: they were spelled for that dialect's wire,
+/// so no input item or tool here emits them. Each is declared removed and
+/// the request counts once. A Responses client's members are this wire's own,
+/// and the input build decides them per surface. Names keys, never values.
+/// TRANSLATION-DROP: lane=openai-responses class=foreign_dialect_extra test=a_foreign_client_carried_member_is_absent_declared_and_counted_once_on_every_responses_surface
+fn withhold_foreign_carried_members(id: &str, auth_kind: AuthKind, req: &ChatRequest) {
+    let mut withheld = ForeignDialectExtraTally::default();
+    withhold_carried_members(req, auth_kind.egress_kind(), &mut withheld);
+    if withheld.dropped() {
+        record_translation_drop(super::LANE, "foreign_dialect_extra");
+        tracing::debug!(
+            provider = id,
+            keys = %withheld.keys_for_log(),
+            "openai-responses egress: carried members from another ingress dialect dropped",
+        );
+    }
 }
 
 /// Count, once per request, the client `temperature` / `top_p` this egress

@@ -30,7 +30,8 @@ use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
 use crate::managed_keys::{
-    ClientExtras, Dialect, MatchingIngress, client_extras_for, declare_foreign_keys, is_managed_key,
+    ClientExtras, Dialect, ForeignDialectExtraTally, MatchingIngress, client_extras_for,
+    declare_foreign_keys, is_managed_key, withhold_carried_members,
 };
 use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
@@ -552,18 +553,22 @@ fn select_client_extras<'a>(
             "openai-compat egress: client metadata from another ingress dialect dropped",
         );
     }
-    // A key another dialect's client sent is spelled for that dialect's
-    // upstream; strict hosts answer `Unsupported parameter`, and routectl
-    // does not guess a Chat equivalent.
+    // A key or carried member another dialect's client sent is spelled for
+    // that dialect's upstream; strict hosts answer `Unsupported parameter`,
+    // and routectl does not guess a Chat equivalent. One count per request,
+    // whichever of the two it withheld.
+    let mut withheld = ForeignDialectExtraTally::default();
+    withheld.record(&foreign);
+    withhold_carried_members(req, EgressKind::OpenaiCompat, &mut withheld);
     // TRANSLATION-DROP: lane=openai-compat class=foreign_dialect_extra test=foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_once
-    if !foreign.is_empty() {
+    if withheld.dropped() {
         crate::translation_drop_metrics::record_translation_drop(
             super::LANE,
             "foreign_dialect_extra",
         );
         debug!(
             provider = id,
-            keys = %sanitize_for_log(&foreign.join(",")),
+            keys = %withheld.keys_for_log(),
             "openai-compat egress: client extras from another ingress dialect dropped",
         );
     }

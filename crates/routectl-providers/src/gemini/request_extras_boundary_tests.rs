@@ -480,3 +480,125 @@ fn library_metadata_is_still_withheld_and_counted() {
     assert_eq!(fingerprint, 1);
     assert_eq!(withheld, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Carried members: a translation drop, disjoint from the extras withhold
+// ---------------------------------------------------------------------------
+
+/// A dispatched request whose user turn carries a message member and a part
+/// member, and whose custom tool carries a member.
+fn carrying(provenance: RequestProvenance, union: Value) -> ChatRequest {
+    let member = |key: &str, value: Value| {
+        let mut map = serde_json::Map::new();
+        map.insert(key.to_owned(), value);
+        map
+    };
+    let mut req = dispatched(provenance, union, None);
+    let mut turn = user_with_parts(vec![ContentPart::Known(KnownContentPart::Text {
+        text: "hi".into(),
+        citations: None,
+        cache_control: None,
+        extras: member("zz_part_member", json!("caf\u{e9}")),
+    })]);
+    turn.extras = member("zz_message_member", json!("zz-message-tell"));
+    req.messages = vec![turn].into();
+    req.tools = Some(vec![routectl_core::ToolDef::Custom(
+        routectl_core::CustomTool {
+            name: "calc".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+            extras: member("zz_tool_member", json!(1)),
+        },
+    )]);
+    req
+}
+
+/// The provider body and every request-leg Remove its assembly declared.
+fn body_declaring(req: &ChatRequest) -> (Value, Vec<String>) {
+    use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
+    let mut req = req.clone();
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    let body = provider_body("gemini:test", &req).expect("provider body builds");
+    let removes = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|e| e.site() == EditSite::ManagedExtrasStrip && e.kind() == EditKind::Remove)
+        .map(|e| e.path().to_string())
+        .collect();
+    (body, removes)
+}
+
+#[test]
+fn an_anthropic_client_carried_member_is_absent_from_the_gemini_body_declared_and_counted_once() {
+    // Arrange -- carried members only: the extras withhold has nothing to act on.
+    let req = carrying(RequestProvenance::AnthropicIngress, json!({}));
+    let foreign = || gemini_drop_count("foreign_dialect_extra");
+    let seen = || crate::translation_drop_metrics::translation_lane_seen("gemini");
+    let (foreign_before, seen_before) = (foreign(), seen());
+
+    // Act
+    let (body, _, withheld, _) = body_events_and_deltas(&req);
+    let (foreign_delta, seen_delta) = (foreign() - foreign_before, seen() - seen_before);
+    let (_, removes) = body_declaring(&req);
+
+    // Assert
+    let wire = rendered(&body);
+    for member in ["zz_message_member", "zz_part_member", "zz_tool_member"] {
+        assert!(!wire.contains(member), "{member}: {wire}");
+    }
+    assert!(wire.contains("calc"), "the tool itself ships: {wire}");
+    for path in [
+        "/messages/*/zz_message_member",
+        "/messages/*/content/*/zz_part_member",
+        "/tools/*/zz_tool_member",
+    ] {
+        assert!(removes.iter().any(|r| r == path), "{path}: {removes:?}");
+    }
+    assert_eq!(foreign_delta, 1);
+    assert_eq!(seen_delta, 1);
+    assert_eq!(withheld, 0, "not the ingress-extras policy action");
+}
+
+#[test]
+fn a_withheld_ingress_extra_beside_a_carried_member_counts_each_class_once() {
+    // Arrange -- one top-level key (the policy action) and carried members
+    // (the translation drop) on one request.
+    let req = carrying(
+        RequestProvenance::OpenaiIngress,
+        json!({"some_future_knob": FUTURE_TELL}),
+    );
+    let foreign = || gemini_drop_count("foreign_dialect_extra");
+    let before = foreign();
+
+    // Act
+    let (body, _, withheld, _) = body_events_and_deltas(&req);
+
+    // Assert
+    let wire = rendered(&body);
+    assert!(!wire.contains(FUTURE_TELL), "{wire}");
+    assert!(!wire.contains("zz-message-tell"), "{wire}");
+    assert_eq!(withheld, 1);
+    assert_eq!(foreign() - before, 1);
+}
+
+#[test]
+fn a_library_caller_carried_member_counts_no_gemini_drop() {
+    // Arrange -- the control: a library caller's request speaks every wire.
+    let req = carrying(RequestProvenance::Library, json!({}));
+
+    // Act
+    let (_, removes) = crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        "gemini",
+        "foreign_dialect_extra",
+        || body_declaring(&req),
+    );
+
+    // Assert
+    assert!(removes.is_empty(), "{removes:?}");
+}

@@ -383,6 +383,124 @@ fn foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_onc
     assert!(control_wire.contains("zz-container-tell"), "{control_wire}");
 }
 
+/// A user turn carrying a message member and a part member, and a custom
+/// tool carrying a member, from `provenance` with `extras` at the top level.
+fn carrying_request(provenance: RequestProvenance, extras: serde_json::Value) -> ChatRequest {
+    let member = |key: &str, value: serde_json::Value| {
+        let mut map = serde_json::Map::new();
+        map.insert(key.to_owned(), value);
+        map
+    };
+    let mut req = simple_req("m");
+    let mut turn = user_parts_message(vec![ContentPart::Known(KnownContentPart::Text {
+        text: "hi".into(),
+        citations: None,
+        cache_control: None,
+        extras: member("zz_part_member", json!("caf\u{e9}")),
+    })]);
+    turn.extras = member("zz_message_member", json!("zz-message-tell"));
+    req.messages = vec![turn].into();
+    req.tools = Some(vec![routectl_core::ToolDef::Custom(
+        routectl_core::CustomTool {
+            name: "calc".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+            extras: member("zz_tool_member", json!(1)),
+        },
+    )]);
+    req.provider_extras = Some(extras);
+    with_provenance(req, provenance)
+}
+
+/// The request-leg Removes a lenient normalize declared at `ManagedExtrasStrip`.
+fn declared_strips(req: &ChatRequest) -> Vec<String> {
+    use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
+    let mut req = req.clone();
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    wire_and_delta(&req, None, || 0);
+    tap.take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|e| e.site() == EditSite::ManagedExtrasStrip && e.kind() == EditKind::Remove)
+        .map(|e| e.path().to_string())
+        .collect()
+}
+
+#[test]
+fn a_foreign_client_carried_member_is_absent_from_the_openai_compat_wire_declared_and_counted_once()
+{
+    let rows = [
+        (RequestProvenance::AnthropicIngress, "/messages/*"),
+        (RequestProvenance::ResponsesIngress, "/input/*"),
+    ];
+    for (provenance, messages) in rows {
+        // Arrange -- carried members only, no top-level extras at all.
+        let req = carrying_request(provenance, json!({}));
+        let seen = || crate::translation_drop_metrics::translation_lane_seen(super::super::LANE);
+        let seen_before = seen();
+
+        // Act
+        let (rendered, delta) =
+            wire_and_delta(&req, None, || compat_drop_count("foreign_dialect_extra"));
+        let seen_delta = seen() - seen_before;
+        let strips = declared_strips(&req);
+
+        // Assert
+        for member in ["zz_message_member", "zz_part_member", "zz_tool_member"] {
+            assert!(
+                !rendered.contains(member),
+                "{provenance:?} {member}: {rendered}"
+            );
+        }
+        for path in [
+            format!("{messages}/zz_message_member"),
+            format!("{messages}/content/*/zz_part_member"),
+            "/tools/*/zz_tool_member".to_owned(),
+        ] {
+            assert!(strips.contains(&path), "{provenance:?} {path}: {strips:?}");
+        }
+        assert_eq!(delta, 1, "{provenance:?}");
+        assert_eq!(seen_delta, 1, "{provenance:?}");
+    }
+}
+
+#[test]
+fn a_foreign_top_level_key_beside_a_carried_member_counts_the_openai_compat_request_once() {
+    // Arrange
+    let req = carrying_request(
+        RequestProvenance::AnthropicIngress,
+        json!({"container": "zz-container-tell"}),
+    );
+
+    // Act
+    let (rendered, delta) =
+        wire_and_delta(&req, None, || compat_drop_count("foreign_dialect_extra"));
+
+    // Assert
+    assert!(!rendered.contains("zz-container-tell"), "{rendered}");
+    assert!(!rendered.contains("zz-message-tell"), "{rendered}");
+    assert_eq!(delta, 1);
+}
+
+#[test]
+fn a_chat_client_carried_member_rides_the_openai_compat_wire_uncounted() {
+    // Arrange -- the positive control: the same carriers from the dialect
+    // this wire speaks.
+    let req = carrying_request(RequestProvenance::OpenaiIngress, json!({}));
+
+    // Act
+    let rendered = wire_uncounted(&req, None, "foreign_dialect_extra");
+
+    // Assert
+    assert!(rendered.contains("zz-message-tell"), "{rendered}");
+    assert!(declared_strips(&req).is_empty());
+}
+
 fn credential_withhold_count() -> u64 {
     compat_policy_count("credential_bearing_field_withheld")
 }

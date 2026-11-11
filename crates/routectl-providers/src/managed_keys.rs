@@ -24,7 +24,6 @@
     feature = "gemini"
 ))]
 use std::borrow::Cow;
-#[cfg(feature = "anthropic-api")]
 use std::collections::BTreeSet;
 
 #[cfg(any(
@@ -32,25 +31,30 @@ use std::collections::BTreeSet;
     feature = "openai-compat",
     feature = "gemini"
 ))]
-use serde_json::{Map, Value};
+use serde_json::Map;
+use serde_json::Value;
 
 #[cfg(feature = "anthropic-api")]
 use crate::anthropic_api::PARALLEL_TOOL_CALLS_KEY;
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
-use routectl_core::Message;
-use routectl_core::is_canonical_request_key;
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
-use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap, forwards_unknowns};
 #[cfg(any(
     feature = "anthropic-api",
     feature = "openai-compat",
     feature = "gemini"
 ))]
-use routectl_core::{ChatRequest, RequestProvenance};
-#[cfg(feature = "anthropic-api")]
-use routectl_core::{ContentPart, MessageContent, SystemContent, ToolDef};
+use routectl_core::is_canonical_request_key;
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+use routectl_core::wire_check::WireTap;
+use routectl_core::wire_check::{EditKind, EditSite, EgressKind, forwards_unknowns};
+use routectl_core::{
+    ChatRequest, ContentPart, Message, MessageContent, RequestProvenance, SystemContent, ToolDef,
+};
 
 /// The extras merge whose managed set a key is checked against.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     /// The Anthropic Messages body, built by the anthropic-api egress and
@@ -75,6 +79,11 @@ pub enum Dialect {
 
 /// True when `key` is a top-level field routectl writes for `dialect`, so an
 /// extras value under that key must not reach the wire.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 pub fn is_managed_key(dialect: Dialect, key: &str) -> bool {
     match dialect {
         #[cfg(feature = "anthropic-api")]
@@ -307,13 +316,11 @@ pub fn declare_foreign_keys(tap: Option<&WireTap>, foreign_keys: &[&str]) {
 
 /// Name of the cache marker routectl places and strips itself; a client's
 /// message-level value is reserved, never carried.
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
 pub const MESSAGE_CACHE_MARKER: &str = "cache_control";
 
 /// One member a client sent on a carrier node (a message, a typed content
 /// part, a custom tool, a system block): the client-coordinate pattern of the
 /// node, every index a wildcard, and the member's name.
-#[cfg(feature = "anthropic-api")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CarriedMember<'a> {
     /// Pattern of the node the member sat on, as the client wrote it.
@@ -326,7 +333,6 @@ pub struct CarriedMember<'a> {
 /// cannot carry, one entry per (node pattern, name): the members a
 /// same-dialect egress would emit, plus a message's own `cache_control`,
 /// which no egress forwards. Empty for a carrier-free request.
-#[cfg(feature = "anthropic-api")]
 pub fn carried_members(req: &ChatRequest) -> BTreeSet<CarriedMember<'_>> {
     let (message, part) = message_patterns(req.routectl_internal.provenance);
     let mut members = BTreeSet::new();
@@ -355,7 +361,6 @@ pub fn carried_members(req: &ChatRequest) -> BTreeSet<CarriedMember<'_>> {
     members
 }
 
-#[cfg(feature = "anthropic-api")]
 fn insert_members<'a>(
     members: &mut BTreeSet<CarriedMember<'a>>,
     parent: &'static str,
@@ -365,7 +370,6 @@ fn insert_members<'a>(
 }
 
 /// A message's carried members plus its reserved cache marker.
-#[cfg(feature = "anthropic-api")]
 fn message_members(msg: &Message) -> impl Iterator<Item = (&String, &Value)> {
     msg.forwardable_extras().chain(
         msg.extras
@@ -376,7 +380,6 @@ fn message_members(msg: &Message) -> impl Iterator<Item = (&String, &Value)> {
 
 /// Client-coordinate patterns of a message and of one of its content parts:
 /// a Responses client writes its turns as `input` items.
-#[cfg(feature = "anthropic-api")]
 const fn message_patterns(provenance: RequestProvenance) -> (&'static str, &'static str) {
     match provenance {
         RequestProvenance::ResponsesIngress => ("/input/*", "/input/*/content/*"),
@@ -391,7 +394,6 @@ const fn message_patterns(provenance: RequestProvenance) -> (&'static str, &'sta
 /// request whose members `egress` forwards is left alone. A name that is not
 /// token-shaped is counted but left undeclared, so it still surfaces as a
 /// finding.
-#[cfg(feature = "anthropic-api")]
 pub fn withhold_carried_members(
     req: &ChatRequest,
     egress: EgressKind,
@@ -478,16 +480,15 @@ fn operator_payload_extras(req: &ChatRequest) -> Option<&Map<String, Value>> {
 /// Per-request record that client extras from another ingress dialect were
 /// withheld. A flag, not a count: the `(lane, class)` counters are per
 /// request, and the egress that owns the request's lane flushes it once.
-#[cfg(feature = "anthropic-api")]
 #[must_use = "a foreign-dialect withhold counts nothing until its lane flushes it"]
 #[derive(Debug, Default)]
 pub struct ForeignDialectExtraTally {
     keys: Vec<String>,
 }
 
-#[cfg(feature = "anthropic-api")]
 impl ForeignDialectExtraTally {
     /// Note the request's withheld keys, if any.
+    #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
     pub fn record(&mut self, foreign_keys: &[&str]) {
         self.keys
             .extend(foreign_keys.iter().map(|k| (*k).to_string()));
@@ -517,6 +518,13 @@ impl ForeignDialectExtraTally {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "anthropic-api",
+        feature = "openai-compat",
+        feature = "gemini"
+    )
+))]
 #[path = "managed_keys_tests.rs"]
 mod tests;

@@ -15,10 +15,14 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
+use routectl_core::wire_check::EgressKind;
 use routectl_core::{ChatRequest, ReasoningDetail, RefusalReason, Result, sanitize_for_log};
 use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role, ToolDef};
 
-use crate::managed_keys::{Dialect, MatchingIngress, client_extras_for, is_managed_key};
+use crate::managed_keys::{
+    Dialect, ForeignDialectExtraTally, MatchingIngress, client_extras_for, is_managed_key,
+    withhold_carried_members,
+};
 use crate::translation_drop_metrics::{
     ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
     record_translation_policy_action,
@@ -184,7 +188,28 @@ pub(super) fn provider_body(provider_id: &str, req: &ChatRequest) -> Result<Valu
     );
     flush_fingerprint_tally(&fingerprint);
     report_withheld_ingress_extras(provider_id, &client_extras.foreign_keys);
+    withhold_foreign_carried_members(provider_id, req);
     body
+}
+
+/// Withhold the members an HTTP client carried on its messages, parts, tools
+/// and system blocks: they were spelled for that client's dialect, and no
+/// Gemini node emits them. Each is declared removed and the request counts
+/// once. Separate from the top-level ingress-extras withhold: that one is a
+/// routectl policy over keys Gemini would accept, this one a member the
+/// translation has no slot for. Names keys, never values.
+/// TRANSLATION-DROP: lane=gemini class=foreign_dialect_extra test=an_anthropic_client_carried_member_is_absent_from_the_gemini_body_declared_and_counted_once
+fn withhold_foreign_carried_members(provider_id: &str, req: &ChatRequest) {
+    let mut withheld = ForeignDialectExtraTally::default();
+    withhold_carried_members(req, EgressKind::Gemini, &mut withheld);
+    if withheld.dropped() {
+        record_translation_drop(LANE, "foreign_dialect_extra");
+        tracing::debug!(
+            provider = %provider_id,
+            keys = %withheld.keys_for_log(),
+            "gemini egress: carried members from another ingress dialect dropped",
+        );
+    }
 }
 
 /// `extras` is the layer [`client_extras_for`] chose for this request: a

@@ -439,6 +439,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("gemini/request.rs", "strip_client_metadata", 1),
     ("gemini/request.rs", "tool_call_to_function_call_part", 1),
     ("gemini/request.rs", "withhold_developer_billing_block", 1),
+    ("gemini/request.rs", "withhold_foreign_carried_members", 1),
     (
         "openai_compat/request.rs",
         "check_dropped_anthropic_fields",
@@ -504,6 +505,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         1,
     ),
     ("openai_responses/request.rs", "place_cache_breakpoints", 1),
+    (
+        "openai_responses/request.rs",
+        "withhold_foreign_carried_members",
+        1,
+    ),
     (
         "openai_responses/response.rs",
         "report_empty_optionals_removed",
