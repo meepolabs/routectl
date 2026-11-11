@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use crate::anthropic_family::{AnthropicFamily, anthropic_family};
 use routectl_core::{AnthropicThinking, ChatRequest, RequestProvenance, sanitize_for_log};
 
-use routectl_core::wire_check::{EditKind, EditSite};
+use routectl_core::wire_check::{EditKind, EditSite, EgressKind};
 
 use crate::anthropic_api::request::{
     AnthropicFormat, DroppedFormatKeys, build_output_config, client_sent_output_config_effort,
@@ -77,6 +77,9 @@ pub(super) fn build_additional_fields(
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
     let provider_actions = insert_provider_extras(cfg, req, &mut bag, fingerprint, &mut foreign);
+    // Converse sends no ingress's wire shape, so carried members never ride
+    // it; they count with the request's foreign top-level keys.
+    crate::managed_keys::withhold_carried_members(req, EgressKind::BedrockConverse, &mut foreign);
     let operator_actions = insert_operator_extras(cfg, &mut bag);
     // Once per REQUEST per class, never once per withheld key: a bag whose
     // extras collide on three managed keys is one policy-action event against

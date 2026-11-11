@@ -743,6 +743,14 @@ fn chat_cases() -> Vec<Case> {
             chat_provider,
         ),
         case(
+            "chat/message-cache-marker",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "user", "content": "hi", "cache_control": {"type": "ephemeral"}}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
             "chat/system-first",
             Ingress::Chat,
             json!({"model": ALIAS, "messages": [
@@ -1445,6 +1453,27 @@ fn anthropic_cases() -> Vec<Case> {
             json!({"model": ALIAS, "max_tokens": 16, "messages": hi,
                    "output_config": {"format": {"type": "json_schema", "schema": {
                        "type": "object", "properties": {"x": {"type": "integer"}}}}}}),
+            anthropic_complete(),
+            anthropic_provider,
+        ),
+        case(
+            "anthropic/message-cache-marker",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": [
+                {"role": "user", "content": "hi", "cache_control": {"type": "ephemeral"}}]}),
+            anthropic_complete(),
+            anthropic_provider,
+        ),
+        case(
+            "anthropic/members-joined-across-a-dropped-system-turn",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16,
+                   "system": [{"type": "text", "text": "you are helpful"}],
+                   "messages": [
+                       {"role": "user", "content": "earlier", "tag": "first"},
+                       {"role": "system", "content": ""},
+                       {"role": "user", "content": "later", "tag": "second",
+                        "only_later": 1}]}),
             anthropic_complete(),
             anthropic_provider,
         ),

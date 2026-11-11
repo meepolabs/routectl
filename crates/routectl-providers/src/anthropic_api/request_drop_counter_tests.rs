@@ -651,11 +651,12 @@ fn system_turn_with_members(text: &str) -> Message {
 
 /// On a lane that lifts system turns (no Messages-API system role), with a
 /// canonical system present, a kept text-only turn's text is appended to the
-/// wire `system` rather than consumed, and nothing is counted lost: its text
-/// is representable there. The plain text-only turn beside it was hoisted by
-/// the ingress already, so it is consumed and its text must not appear twice.
+/// wire `system` rather than consumed. Its carried members have no home
+/// there, so the request counts one system-part drop. The plain text-only
+/// turn beside it was hoisted by the ingress already, so it is consumed and
+/// its text must not appear twice.
 #[test]
-fn a_kept_text_only_system_turn_reaches_the_lifted_system_and_counts_no_drop() {
+fn a_kept_text_only_system_turn_reaches_the_lifted_system_and_counts_its_members_once() {
     let req = ChatRequest {
         system: Some(SystemContent::Text("be brief".into())),
         messages: vec![
@@ -673,7 +674,7 @@ fn a_kept_text_only_system_turn_reaches_the_lifted_system_and_counts_no_drop() {
         normalize("test", &req, false, None, false, false, false).expect("normalize must succeed");
     let after = system_part_drop_count();
 
-    assert_eq!(after - before, 0, "{body}");
+    assert_eq!(after - before, 1, "{body}");
     assert_eq!(
         body["system"],
         serde_json::json!([
@@ -687,8 +688,8 @@ fn a_kept_text_only_system_turn_reaches_the_lifted_system_and_counts_no_drop() {
 }
 
 /// The same lane with NO canonical system: the Lift policy still moves the
-/// kept turn's text into the wire `system`, and no system-role message is
-/// left in `messages`.
+/// kept turn's text into the wire `system`, no system-role message is left in
+/// `messages`, and the turn's carried members count one system-part drop.
 #[test]
 fn a_kept_text_only_system_turn_without_a_canonical_system_reaches_the_lifted_system() {
     let req = ChatRequest {
@@ -707,7 +708,7 @@ fn a_kept_text_only_system_turn_without_a_canonical_system_reaches_the_lifted_sy
         normalize("test", &req, false, None, false, false, false).expect("normalize must succeed");
     let after = system_part_drop_count();
 
-    assert_eq!(after - before, 0, "{body}");
+    assert_eq!(after - before, 1, "{body}");
     assert_eq!(body["system"], serde_json::json!("kept rule"), "{body}");
     let messages = body["messages"].as_array().expect("messages");
     assert!(

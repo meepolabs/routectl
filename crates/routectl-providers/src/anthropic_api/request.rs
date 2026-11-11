@@ -41,19 +41,20 @@
 use serde_json::Value;
 
 use routectl_core::cache_control::{self, BreakpointPosition};
-use routectl_core::wire_check::EgressKind;
+use routectl_core::wire_check::{EgressKind, WireTap};
 use routectl_core::{
-    ChatRequest, CoreHistoryReasoning, Error, Result, TranslationKey, TranslationReason,
+    ChatRequest, ContentPart, CoreHistoryReasoning, Error, Message, MessageContent, Result, Role,
+    TranslationKey, TranslationReason,
 };
 
 use crate::managed_keys::{Dialect, MatchingIngress, client_extras_for};
 
-// `MessageContent`, `ReasoningDetail`, and `ReasoningDetailKind` are
-// referenced by the inline test modules below via `use super::*;`; the
-// orchestrator code does not use them directly, so the import is
-// test-gated to avoid unused-import warnings in release builds.
+// `ReasoningDetail` and `ReasoningDetailKind` are referenced by the inline
+// test modules below via `use super::*;`; the orchestrator code does not use
+// them directly, so the import is test-gated to avoid unused-import warnings
+// in release builds.
 #[cfg(test)]
-use routectl_core::{MessageContent, ReasoningDetail, ReasoningDetailKind};
+use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 
 use super::types::{
     AnthropicContent, AnthropicRequest, AnthropicSystem, AnthropicTool, ContentBlock,
@@ -189,8 +190,8 @@ fn flush_system_part_tally(tally: &SystemPartDropTally, id: &str, req: &ChatRequ
         );
         tracing::debug!(
             provider = id,
-            "anthropic-api egress: non-text parts of a system-role turn dropped; the system \
-             field carries text only",
+            "anthropic-api egress: non-text parts or carried members of a system-role turn \
+             dropped; the system field carries text only",
         );
     }
 }
@@ -265,6 +266,65 @@ fn flush_foreign_dialect_tally(tally: &ForeignDialectExtraTally, id: &str, req: 
             provider = id,
             keys = %tally.keys_for_log(),
             "anthropic-api egress: client extras from another ingress dialect dropped",
+        );
+    }
+}
+
+/// Account for the members `req`'s carrier nodes hold. A request of another
+/// dialect emits none of them: each is declared removed and the request is
+/// noted in `foreign`. A same-dialect request emits them, all but a
+/// message's own cache marker, which is declared removed.
+fn account_carried_members(req: &ChatRequest, foreign: &mut ForeignDialectExtraTally) {
+    if Carriers::for_request(req) == Carriers::Emit {
+        crate::managed_keys::declare_message_cache_marker(
+            super::wire_edits::tap_of(req),
+            &req.messages,
+            "/messages/*",
+        );
+    } else {
+        crate::managed_keys::withhold_carried_members(req, EgressKind::AnthropicApi, foreign);
+    }
+}
+
+/// Declare removed each carried member of every `Role::System` turn the
+/// legacy lift consumes: the lifted text keeps no message or block of its
+/// own to carry them. Returns whether any turn carried one. A name that is
+/// not token-shaped is left undeclared, so it still surfaces as a finding.
+fn declare_lifted_turn_members(tap: Option<&WireTap>, messages: &[Message]) -> bool {
+    let mut carried = false;
+    for (index, msg) in messages.iter().enumerate() {
+        if !matches!(msg.role, Role::System) {
+            continue;
+        }
+        let parent = format!("/messages/{index}");
+        for (key, _) in msg.forwardable_extras() {
+            carried = true;
+            declare_member_removed(tap, &parent, key);
+        }
+        let MessageContent::Parts(parts) = &msg.content else {
+            continue;
+        };
+        for (block, part) in parts.iter().enumerate() {
+            let ContentPart::Known(known) = part else {
+                continue;
+            };
+            let parent = format!("{parent}/content/{block}");
+            for (key, _) in known.forwardable_extras() {
+                carried = true;
+                declare_member_removed(tap, &parent, key);
+            }
+        }
+    }
+    carried
+}
+
+fn declare_member_removed(tap: Option<&WireTap>, parent: &str, key: &str) {
+    if let Some(path) = crate::wire_declare::member_pointer(parent, key) {
+        super::wire_edits::declare(
+            tap,
+            routectl_core::wire_check::EditSite::DialectFieldStrip,
+            path,
+            routectl_core::wire_check::EditKind::Remove,
         );
     }
 }
@@ -793,6 +853,9 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // DEBUG (an expected transform). Bedrock-Invoke delegates body construction here,
     // so this single call also covers that lane (with its own provider id).
     crate::sampling_drop_guard::log_dropped_sampling_fields(id, req, &[]);
+    // Mantle and Bedrock Invoke share this assembly and send the same wire
+    // dialect, so the direct kind decides for all three.
+    account_carried_members(req, foreign);
 
     // Prefer canonical req.system; fall back to lifting Role::System
     // messages for direct callers that bypass an ingress.
@@ -894,6 +957,15 @@ pub(crate) fn normalize_deferring_format_key_warn(
         system_parts.record();
     }
     let carriers = Carriers::for_request(req);
+    // The same class: a lifted turn's carried members have no home in the
+    // `system` field either. A request whose members never ride this wire
+    // was already counted with its foreign-dialect extras.
+    if system_turns == SystemTurnPolicy::Lift
+        && carriers == Carriers::Emit
+        && declare_lifted_turn_members(tap, &req.messages)
+    {
+        system_parts.record();
+    }
     let primary = filtered_system
         .as_ref()
         .map(|system| translate_system_carrying(system, carriers));

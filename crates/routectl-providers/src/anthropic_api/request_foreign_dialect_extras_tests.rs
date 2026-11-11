@@ -388,3 +388,156 @@ fn every_foreign_dialect_key_is_declared_removed_on_every_anthropic_shape_egress
         );
     }
 }
+
+/// A request from `provenance` whose user turn carries a message member and
+/// a part member, and whose custom tool carries a member.
+fn carrying(provenance: RequestProvenance, extras: Value) -> ChatRequest {
+    let carried = |key: &str, value: Value| {
+        let mut map = serde_json::Map::new();
+        map.insert(key.to_owned(), value);
+        map
+    };
+    let mut req = request(provenance, extras);
+    req.messages = vec![Message {
+        content: MessageContent::Parts(vec![routectl_core::ContentPart::Known(
+            routectl_core::KnownContentPart::Text {
+                text: "hi".into(),
+                citations: None,
+                cache_control: None,
+                extras: carried("annotations", json!(["caf\u{e9}"])),
+            },
+        )]),
+        extras: carried("id", json!("msg_u1")),
+        ..req.messages[0].clone()
+    }]
+    .into();
+    req.tools = Some(vec![routectl_core::ToolDef::Custom(
+        routectl_core::CustomTool {
+            name: "calc".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+            extras: carried("zz_tool_member", json!(1)),
+        },
+    )]);
+    req
+}
+
+/// The wire value, the lane's `foreign_dialect_extra` delta and its
+/// lane-seen delta across one build.
+fn wire_and_deltas(egress: &Egress, req: &ChatRequest) -> (Value, u64, u64) {
+    let seen = || crate::translation_drop_metrics::translation_lane_seen(egress.lane);
+    let seen_before = seen();
+    let (wire, delta) = wire_and_delta(egress, req);
+    (wire, delta, seen() - seen_before)
+}
+
+#[test]
+fn a_responses_client_carried_member_is_absent_declared_and_counted_once_on_every_anthropic_shape_egress()
+ {
+    // Arrange -- a Responses client's message item `id`, a part member and a
+    // custom-tool member; no top-level extras at all.
+    let req = carrying(RequestProvenance::ResponsesIngress, json!({}));
+    let removed = |path: &str| {
+        (
+            EditSite::ManagedExtrasStrip,
+            path.to_owned(),
+            EditKind::Remove,
+        )
+    };
+
+    for egress in egresses() {
+        // Act
+        let (wire, delta, seen) = wire_and_deltas(&egress, &req);
+        let edits = declared_edits(&egress, req.clone());
+
+        // Assert
+        let text = wire.to_string();
+        for member in ["msg_u1", "caf\u{e9}", "zz_tool_member"] {
+            assert!(!text.contains(member), "{} {member}: {text}", egress.lane);
+        }
+        for path in [
+            "/input/*/id",
+            "/input/*/content/*/annotations",
+            "/tools/*/zz_tool_member",
+        ] {
+            assert!(
+                edits.contains(&removed(path)),
+                "{} {path}: {edits:?}",
+                egress.lane
+            );
+        }
+        assert_eq!(delta, 1, "{}", egress.lane);
+        assert_eq!(seen, 1, "{}", egress.lane);
+    }
+}
+
+#[test]
+fn a_chat_client_carried_member_is_declared_at_its_messages_path() {
+    // Arrange
+    let req = carrying(RequestProvenance::OpenaiIngress, json!({}));
+
+    for egress in egresses() {
+        // Act
+        let edits = declared_edits(&egress, req.clone());
+
+        // Assert
+        assert!(
+            edits.contains(&(
+                EditSite::ManagedExtrasStrip,
+                "/messages/*/content/*/annotations".to_owned(),
+                EditKind::Remove,
+            )),
+            "{}: {edits:?}",
+            egress.lane
+        );
+    }
+}
+
+#[test]
+fn a_foreign_top_level_key_beside_a_carried_member_counts_the_request_once() {
+    // Arrange
+    let req = carrying(
+        RequestProvenance::ResponsesIngress,
+        json!({"store": true, "prompt_cache_key": "zz"}),
+    );
+
+    for egress in egresses() {
+        // Act
+        let (wire, delta) = wire_and_delta(&egress, &req);
+
+        // Assert
+        assert!(wire.get("store").is_none(), "{}: {wire}", egress.lane);
+        assert!(!wire.to_string().contains("msg_u1"), "{}", egress.lane);
+        assert_eq!(delta, 1, "{}", egress.lane);
+    }
+}
+
+#[test]
+fn an_anthropic_client_carried_member_rides_the_anthropic_wire_uncounted_and_drops_counted_on_converse()
+ {
+    // Arrange -- the same carriers from the dialect they were written for.
+    // Converse sends no ingress's wire shape, so it carries them nowhere.
+    let req = carrying(RequestProvenance::AnthropicIngress, json!({}));
+    let [anthropic, invoke, converse] = egresses();
+
+    for egress in [anthropic, invoke] {
+        // Act
+        let wire = wire_uncounted(&egress, &req);
+
+        // Assert
+        assert_eq!(
+            wire["messages"][0]["id"], "msg_u1",
+            "{}: {wire}",
+            egress.lane
+        );
+    }
+    // Act
+    let (body, delta) = wire_and_delta(&converse, &req);
+    // Assert
+    assert!(!body.to_string().contains("msg_u1"), "{body}");
+    assert_eq!(delta, 1);
+}

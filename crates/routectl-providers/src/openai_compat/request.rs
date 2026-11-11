@@ -122,6 +122,9 @@ pub fn normalize(
     }
 
     let tap = crate::wire_declare::tap(req);
+    if emit_carriers {
+        crate::managed_keys::declare_message_cache_marker(tap, &req.messages, "/messages/*");
+    }
     declare_fingerprint_strip(tap, &system);
     apply_system_projection(id, obj, system, emit_carriers)?;
 

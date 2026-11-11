@@ -329,8 +329,14 @@ fn tool_run_request(first: Map<String, Value>, second: Map<String, Value>) -> Ch
 }
 
 fn body_and_edits(req: &ChatRequest) -> (Value, Vec<(EditSite, String, EditKind)>) {
+    body_and_edits_on(req, WireTap::default())
+}
+
+fn body_and_edits_on(
+    req: &ChatRequest,
+    tap: WireTap,
+) -> (Value, Vec<(EditSite, String, EditKind)>) {
     let mut req = req.clone();
-    let tap = WireTap::default();
     req.routectl_internal.wire_tap = Some(tap.clone());
     let body = anthropic_body(&req);
     let edits = tap
@@ -380,6 +386,158 @@ fn a_joined_tool_run_with_agreeing_members_declares_nothing() {
     assert_eq!(body["messages"][1]["tag"], json!("same"));
     assert!(
         !edits.iter().any(|(_, path, _)| path.ends_with("/tag")),
+        "{edits:?}"
+    );
+}
+
+#[test]
+fn a_message_level_cache_control_member_is_declared_removed() {
+    // Arrange
+    let mut req = carrying_request(RequestProvenance::AnthropicIngress);
+    req.messages = Arc::from(vec![message(
+        Role::User,
+        MessageContent::Text("hi".into()),
+        carried(&[("cache_control", json!({"type": "ephemeral"}))]),
+    )]);
+    let declared = (
+        EditSite::CacheMarkerStrip,
+        "/messages/*/cache_control".to_owned(),
+        EditKind::Remove,
+    );
+
+    // Act
+    let (with_marker, edits) = body_and_edits(&req);
+    let (_, control) = body_and_edits(&carrying_request(RequestProvenance::AnthropicIngress));
+
+    // Assert
+    assert!(with_marker["messages"][0].get("cache_control").is_none());
+    assert!(edits.contains(&declared), "{edits:?}");
+    assert!(!control.contains(&declared), "{control:?}");
+}
+
+fn lift_drop_count() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == super::super::LANE && e.drop_class == "system_part_unrepresentable")
+        .map_or(0, |e| e.drop_count)
+}
+
+/// A system turn carrying a message member and a text-part member, then a
+/// user turn; no canonical system, so the anthropic-api egress lifts it.
+fn lifted_carrier_request() -> ChatRequest {
+    let mut req = carrying_request(RequestProvenance::AnthropicIngress);
+    req.system = None;
+    req.tools = None;
+    req.messages = Arc::from(vec![
+        message(
+            Role::System,
+            MessageContent::Parts(vec![text_part(
+                "be brief",
+                carried(&[("origin", json!(1))]),
+            )]),
+            carried(&[("note", json!("caf\u{e9}"))]),
+        ),
+        message(Role::User, MessageContent::Text("hi".into()), Map::new()),
+    ]);
+    req
+}
+
+#[test]
+fn a_lifted_system_turn_loses_its_carried_members_declared_and_counted_once() {
+    // Arrange
+    let req = lifted_carrier_request();
+
+    // Act
+    let before = lift_drop_count();
+    let (body, edits) = body_and_edits(&req);
+    let delta = lift_drop_count() - before;
+
+    // Assert -- the text is lifted, its members have nowhere to go.
+    assert_eq!(body["system"], json!("be brief"), "{body}");
+    assert!(!body.to_string().contains("caf\u{e9}"), "{body}");
+    for path in ["/messages/0/note", "/messages/0/content/0/origin"] {
+        assert!(
+            edits.contains(&(
+                EditSite::DialectFieldStrip,
+                path.to_owned(),
+                EditKind::Remove
+            )),
+            "{path}: {edits:?}"
+        );
+    }
+    assert_eq!(delta, 1);
+}
+
+#[test]
+fn a_lifted_carrier_free_system_turn_counts_nothing() {
+    // Arrange -- the control: the same turn without members.
+    let mut req = lifted_carrier_request();
+    let mut messages = req.messages.to_vec();
+    messages[0] = message(
+        Role::System,
+        MessageContent::Parts(vec![text_part("be brief", Map::new())]),
+        Map::new(),
+    );
+    req.messages = Arc::from(messages);
+
+    // Act
+    let before = lift_drop_count();
+    let (body, _) = body_and_edits(&req);
+
+    // Assert
+    assert_eq!(body["system"], json!("be brief"), "{body}");
+    assert_eq!(lift_drop_count() - before, 0);
+}
+
+/// user, an empty system turn the forwarding screen drops, then user: the two
+/// user turns join across the seam.
+fn seam_join_request(first: Map<String, Value>, second: Map<String, Value>) -> ChatRequest {
+    let mut req = carrying_request(RequestProvenance::AnthropicIngress);
+    req.tools = None;
+    req.messages = Arc::from(vec![
+        message(Role::User, MessageContent::Text("earlier".into()), first),
+        message(
+            Role::System,
+            MessageContent::Text(String::new()),
+            Map::new(),
+        ),
+        message(Role::User, MessageContent::Text("later".into()), second),
+    ]);
+    req
+}
+
+#[test]
+fn a_same_role_join_across_a_dropped_system_turn_keeps_both_turns_members() {
+    // Arrange
+    let req = seam_join_request(
+        carried(&[("tag", json!("first")), ("only_first", json!(1))]),
+        carried(&[("tag", json!("second")), ("only_second", json!(2))]),
+    );
+
+    // Act -- an admitted tap: only it tracks which turns a join names.
+    let (body, edits) = body_and_edits_on(&req, WireTap::admitted());
+
+    // Assert -- earlier wins a shared name; the later turn's own member
+    // survives the join and is declared added to the earlier turn.
+    let joined = &body["messages"][0];
+    assert_eq!(body["messages"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(joined["tag"], json!("first"));
+    assert_eq!(joined["only_first"], json!(1));
+    assert_eq!(joined["only_second"], json!(2));
+    assert!(
+        edits.contains(&(
+            EditSite::DialectFieldStrip,
+            "/messages/2/tag".to_owned(),
+            EditKind::Rewrite
+        )),
+        "{edits:?}"
+    );
+    assert!(
+        edits.contains(&(
+            EditSite::DialectFieldStrip,
+            "/messages/0/only_second".to_owned(),
+            EditKind::Add
+        )),
         "{edits:?}"
     );
 }

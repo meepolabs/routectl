@@ -35,7 +35,7 @@ use std::collections::HashSet;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use routectl_core::{
     CacheControl, ChatRequest, ContentPart, CoreHistoryReasoning, Error, KnownContentPart, Message,
@@ -1253,6 +1253,7 @@ pub(super) fn translate_messages(
     ledger.verify(id, wire.messages.len())?;
     declare_dropped_system_turns(tap, &system_turns);
     declare_joined_member_rewrites(tap, &wire.joined_member_rewrites);
+    declare_seam_member_adds(tap, &wire.seam_member_adds);
     Ok(wire.messages)
 }
 
@@ -1270,6 +1271,25 @@ fn declare_joined_member_rewrites(
                 routectl_core::wire_check::EditSite::DialectFieldStrip,
                 path,
                 routectl_core::wire_check::EditKind::Rewrite,
+            );
+        }
+    }
+}
+
+/// Declare each carried member a same-role join across a dropped system turn
+/// added to the earlier turn.
+fn declare_seam_member_adds(
+    tap: Option<&routectl_core::wire_check::WireTap>,
+    adds: &[(usize, String)],
+) {
+    for (index, key) in adds {
+        if let Some(path) = crate::wire_declare::member_pointer(&format!("/messages/{index}"), key)
+        {
+            super::wire_edits::declare(
+                tap,
+                routectl_core::wire_check::EditSite::DialectFieldStrip,
+                path,
+                routectl_core::wire_check::EditKind::Add,
             );
         }
     }
@@ -1620,8 +1640,40 @@ struct WireMessages {
     /// Whether the request's carried members ride the wire.
     carriers: Carriers,
     /// `(canonical index, name)` of each carried member of a later turn in
-    /// a folded tool run that the earlier turn's same-named member replaced.
+    /// a folded tool run, or in a same-role pair joined across a dropped
+    /// system turn, that the earlier turn's same-named member replaced.
     joined_member_rewrites: Vec<(usize, String)>,
+    /// `(canonical index, name)` of each carried member a same-role join
+    /// across a dropped system turn added to the earlier turn from the later.
+    seam_member_adds: Vec<(usize, String)>,
+}
+
+/// What joining a later message's carried members into an earlier one did.
+struct JoinedMembers {
+    /// Names the earlier message did not carry, now carried from the later.
+    added: Vec<String>,
+    /// Names both carried with different values; the earlier value is kept.
+    replaced: Vec<String>,
+}
+
+/// Union `later` into `earlier`, the earlier message winning a name both
+/// carry: the same rule as a folded tool run.
+fn join_members(earlier: &mut Map<String, Value>, later: Map<String, Value>) -> JoinedMembers {
+    let mut joined = JoinedMembers {
+        added: Vec::new(),
+        replaced: Vec::new(),
+    };
+    for (key, value) in later {
+        match earlier.get(&key) {
+            None => {
+                joined.added.push(key.clone());
+                earlier.insert(key, value);
+            }
+            Some(kept) if *kept != value => joined.replaced.push(key),
+            Some(_) => {}
+        }
+    }
+    joined
 }
 
 /// Where a cache breakpoint carried by a dropped system turn ended up.
@@ -1651,6 +1703,7 @@ impl WireMessages {
             merged: Vec::new(),
             carriers,
             joined_member_rewrites: Vec::new(),
+            seam_member_adds: Vec::new(),
         }
     }
 
@@ -1678,9 +1731,14 @@ impl WireMessages {
             ));
             blocks.extend(content_into_blocks(msg.content));
             last.content = AnthropicContent::Blocks(blocks);
+            let joined = join_members(&mut last.extras, msg.extras);
             ledger.merged_across_dropped_system_turn += 1;
             if let Some(&into) = self.origins.as_ref().and_then(|o| o.last()) {
                 self.merged.push((into, origin));
+                self.seam_member_adds
+                    .extend(joined.added.into_iter().map(|key| (into, key)));
+                self.joined_member_rewrites
+                    .extend(joined.replaced.into_iter().map(|key| (origin, key)));
             }
             return;
         }

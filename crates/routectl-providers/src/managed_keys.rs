@@ -24,6 +24,8 @@
     feature = "gemini"
 ))]
 use std::borrow::Cow;
+#[cfg(feature = "anthropic-api")]
+use std::collections::BTreeSet;
 
 #[cfg(any(
     feature = "anthropic-api",
@@ -34,6 +36,8 @@ use serde_json::{Map, Value};
 
 #[cfg(feature = "anthropic-api")]
 use crate::anthropic_api::PARALLEL_TOOL_CALLS_KEY;
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+use routectl_core::Message;
 use routectl_core::is_canonical_request_key;
 #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
 use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap, forwards_unknowns};
@@ -43,6 +47,8 @@ use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap, forward
     feature = "gemini"
 ))]
 use routectl_core::{ChatRequest, RequestProvenance};
+#[cfg(feature = "anthropic-api")]
+use routectl_core::{ContentPart, MessageContent, SystemContent, ToolDef};
 
 /// The extras merge whose managed set a key is checked against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +305,142 @@ pub fn declare_foreign_keys(tap: Option<&WireTap>, foreign_keys: &[&str]) {
     }
 }
 
+/// Name of the cache marker routectl places and strips itself; a client's
+/// message-level value is reserved, never carried.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+pub const MESSAGE_CACHE_MARKER: &str = "cache_control";
+
+/// One member a client sent on a carrier node (a message, a typed content
+/// part, a custom tool, a system block): the client-coordinate pattern of the
+/// node, every index a wildcard, and the member's name.
+#[cfg(feature = "anthropic-api")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CarriedMember<'a> {
+    /// Pattern of the node the member sat on, as the client wrote it.
+    pub parent: &'static str,
+    /// The member's name.
+    pub key: &'a str,
+}
+
+/// Every member `req`'s carrier nodes hold that a wire of another dialect
+/// cannot carry, one entry per (node pattern, name): the members a
+/// same-dialect egress would emit, plus a message's own `cache_control`,
+/// which no egress forwards. Empty for a carrier-free request.
+#[cfg(feature = "anthropic-api")]
+pub fn carried_members(req: &ChatRequest) -> BTreeSet<CarriedMember<'_>> {
+    let (message, part) = message_patterns(req.routectl_internal.provenance);
+    let mut members = BTreeSet::new();
+    for msg in req.messages.iter() {
+        insert_members(&mut members, message, message_members(msg));
+        let MessageContent::Parts(parts) = &msg.content else {
+            continue;
+        };
+        for known in parts.iter().filter_map(|p| match p {
+            ContentPart::Known(known) => Some(known),
+            ContentPart::Other { .. } => None,
+        }) {
+            insert_members(&mut members, part, known.forwardable_extras());
+        }
+    }
+    for tool in req.tools.iter().flatten() {
+        if let ToolDef::Custom(custom) = tool {
+            insert_members(&mut members, "/tools/*", custom.forwardable_extras());
+        }
+    }
+    if let Some(SystemContent::Blocks(blocks)) = &req.system {
+        for block in blocks {
+            insert_members(&mut members, "/system/*", block.forwardable_extras());
+        }
+    }
+    members
+}
+
+#[cfg(feature = "anthropic-api")]
+fn insert_members<'a>(
+    members: &mut BTreeSet<CarriedMember<'a>>,
+    parent: &'static str,
+    carried: impl Iterator<Item = (&'a String, &'a Value)>,
+) {
+    members.extend(carried.map(|(key, _)| CarriedMember { parent, key }));
+}
+
+/// A message's carried members plus its reserved cache marker.
+#[cfg(feature = "anthropic-api")]
+fn message_members(msg: &Message) -> impl Iterator<Item = (&String, &Value)> {
+    msg.forwardable_extras().chain(
+        msg.extras
+            .iter()
+            .filter(|(key, _)| key.as_str() == MESSAGE_CACHE_MARKER),
+    )
+}
+
+/// Client-coordinate patterns of a message and of one of its content parts:
+/// a Responses client writes its turns as `input` items.
+#[cfg(feature = "anthropic-api")]
+const fn message_patterns(provenance: RequestProvenance) -> (&'static str, &'static str) {
+    match provenance {
+        RequestProvenance::ResponsesIngress => ("/input/*", "/input/*/content/*"),
+        _ => ("/messages/*", "/messages/*/content/*"),
+    }
+}
+
+/// Withhold `req`'s carried members from an `egress` whose wire does not
+/// speak the request's dialect: nothing is emitted from a carrier there, so
+/// each member is declared removed at its client pattern and the request is
+/// noted in `tally`, which counts it once with any foreign top-level key. A
+/// request whose members `egress` forwards is left alone. A name that is not
+/// token-shaped is counted but left undeclared, so it still surfaces as a
+/// finding.
+#[cfg(feature = "anthropic-api")]
+pub fn withhold_carried_members(
+    req: &ChatRequest,
+    egress: EgressKind,
+    tally: &mut ForeignDialectExtraTally,
+) {
+    if forwards_unknowns(req.routectl_internal.provenance, egress) {
+        return;
+    }
+    let members = carried_members(req);
+    if members.is_empty() {
+        return;
+    }
+    tally.record_carried(&members);
+    let Some(tap) = crate::wire_declare::tap(req) else {
+        return;
+    };
+    for member in &members {
+        if let Some(path) = crate::wire_declare::member_pointer(member.parent, member.key) {
+            crate::wire_declare::declare(tap, EditSite::ManagedExtrasStrip, path, EditKind::Remove);
+        }
+    }
+}
+
+/// Declare the client's message-level cache marker removed under
+/// `messages_pattern` (the client's messages array, every index a wildcard)
+/// when any of `messages` carried one: the marker is reserved, so a
+/// same-dialect emission never forwards it.
+#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+pub fn declare_message_cache_marker(
+    tap: Option<&WireTap>,
+    messages: &[Message],
+    messages_pattern: &str,
+) {
+    let Some(tap) = tap else {
+        return;
+    };
+    if messages
+        .iter()
+        .any(|msg| msg.extras.contains_key(MESSAGE_CACHE_MARKER))
+    {
+        crate::wire_declare::declare(
+            tap,
+            EditSite::CacheMarkerStrip,
+            format!("{messages_pattern}/{MESSAGE_CACHE_MARKER}"),
+            EditKind::Remove,
+        );
+    }
+}
+
 /// Whether a request of `provenance` carries extras spelled for an egress
 /// whose vocabulary the `matching` ingress speaks.
 #[cfg(any(
@@ -349,6 +491,12 @@ impl ForeignDialectExtraTally {
     pub fn record(&mut self, foreign_keys: &[&str]) {
         self.keys
             .extend(foreign_keys.iter().map(|k| (*k).to_string()));
+    }
+
+    /// Note the request's withheld carried members, by pattern and name.
+    pub fn record_carried(&mut self, members: &BTreeSet<CarriedMember<'_>>) {
+        self.keys
+            .extend(members.iter().map(|m| format!("{}/{}", m.parent, m.key)));
     }
 
     /// Whether `key` was noted as withheld for this request.

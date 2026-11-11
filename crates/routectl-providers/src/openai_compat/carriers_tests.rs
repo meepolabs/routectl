@@ -242,3 +242,45 @@ fn a_carrier_free_chat_request_serializes_exactly_as_before() {
 
     assert_eq!(serde_json::to_vec(&slots).unwrap(), before);
 }
+
+#[test]
+fn a_chat_message_level_cache_control_member_is_withheld_and_declared_removed() {
+    use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
+
+    // Arrange
+    let marked = message(
+        Role::User,
+        MessageContent::Text("hi".into()),
+        members(&[("cache_control", json!({"type": "ephemeral"}))]),
+    );
+    let declared = |req: &ChatRequest| {
+        let mut req = req.clone();
+        let tap = WireTap::default();
+        req.routectl_internal.wire_tap = Some(tap.clone());
+        let body = wire(&req);
+        let edits: Vec<_> = tap
+            .take_request()
+            .edits(Leg::Request)
+            .iter()
+            .map(|e| (e.site(), e.path().to_owned(), e.kind()))
+            .collect();
+        (body, edits)
+    };
+    let marker = (
+        EditSite::CacheMarkerStrip,
+        "/messages/*/cache_control".to_owned(),
+        EditKind::Remove,
+    );
+
+    // Act
+    let (body, edits) = declared(&request(RequestProvenance::OpenaiIngress, vec![marked]));
+    let (_, control) = declared(&request(
+        RequestProvenance::OpenaiIngress,
+        vec![carried_user_turn()],
+    ));
+
+    // Assert
+    assert!(body["messages"][0].get("cache_control").is_none(), "{body}");
+    assert!(edits.contains(&marker), "{edits:?}");
+    assert!(!control.contains(&marker), "{control:?}");
+}
