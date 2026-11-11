@@ -152,6 +152,12 @@ impl IngressAdapter for OpenAiIngress {
         // sweep so both dialects forward unknown body fields verbatim
         // to the egress (which merges via `merge_provider_extras`).
         let extras = sweep_unknown_top_level_fields(&mut body);
+        // Members a message does not model ride its carrier for a
+        // same-dialect egress. Runs after every rewrite above that folds a
+        // spelling into a modeled member (`reasoning_content` into
+        // `reasoning`, `developer` into `system`), so a folded member is
+        // never taken as an extra.
+        let message_extras = split_raw_message_extras(&mut body);
 
         let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
             Error::Validation(
@@ -159,6 +165,7 @@ impl IngressAdapter for OpenAiIngress {
                 RefusalReason::Unparseable,
             )
         })?;
+        attach_message_extras(&mut req, message_extras);
         declare_max_completion_tokens_fold(&mut req, token_cap_fold);
         // An assistant turn echoed back by a client may carry its
         // reasoning_details in Anthropic block vocabulary -- notably a
@@ -594,6 +601,29 @@ fn sweep_unknown_top_level_fields(body: &mut Value) -> Map<String, Value> {
         }
     }
     extras
+}
+
+/// Split the members a canonical message does not model out of each raw
+/// message in `body`, one map per message. Empty when `messages` is not an
+/// array.
+fn split_raw_message_extras(body: &mut Value) -> Vec<Map<String, Value>> {
+    body.get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .map_or_else(Vec::new, |messages| {
+            routectl_core::split_message_extras(messages)
+        })
+}
+
+/// Store each split map on the message it came from. Leaves the message
+/// buffer untouched when no message carried a member.
+fn attach_message_extras(req: &mut ChatRequest, extras: Vec<Map<String, Value>>) {
+    if extras.iter().all(Map::is_empty) {
+        return;
+    }
+    let messages = std::sync::Arc::make_mut(&mut req.messages);
+    for (message, members) in messages.iter_mut().zip(extras) {
+        message.extras = members;
+    }
 }
 
 /// Merge swept extras into `req.provider_extras`. Preserves any

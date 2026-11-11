@@ -8,9 +8,11 @@
 //! when the typed value is absent.
 //!
 //! The output is an identity, never a wire form: a translation lane must not
-//! see carried members, so nothing here hands out a serializable value. The
-//! only outputs are bytes ([`projection_bytes`]) or a write into a sink
-//! ([`write_projection`]).
+//! see carried members, so the projection is handed out only as bytes
+//! ([`projection_bytes`]) or a write into a sink ([`write_projection`]). A
+//! same-dialect egress that builds its wire form itself reads the members
+//! the same rule lets through from [`Message::forwardable_extras`] and
+//! [`KnownContentPart::forwardable_extras`].
 //!
 //! A node with no mergeable carrier projects to exactly its canonical
 //! serialization, so the identity of carrier-free traffic does not change.
@@ -68,21 +70,52 @@ fn is_part_reserved(part: &KnownContentPart, key: &str) -> bool {
     PART_MANAGED_KEYS.contains(&key) || part_typed_keys(part).any(|typed| typed == key)
 }
 
+impl Message {
+    /// The carried members a same-dialect egress may emit on this message:
+    /// every `extras` member except one named like a member `Message`
+    /// serializes, whether or not that typed value is present.
+    pub fn forwardable_extras(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.extras
+            .iter()
+            .filter(|(key, _)| !MESSAGE_KEYS.contains(&key.as_str()))
+    }
+}
+
+impl KnownContentPart {
+    /// The carried members a same-dialect egress may emit on this part:
+    /// every `extras` member except the `type` tag, `cache_control`, and a
+    /// name this variant types, whether or not that typed value is present.
+    pub fn forwardable_extras(&self) -> impl Iterator<Item = (&String, &Value)> {
+        part_extras(self)
+            .iter()
+            .filter(|(key, _)| !is_part_reserved(self, key))
+    }
+}
+
 fn has_mergeable(extras: &Map<String, Value>, reserved: &[&str]) -> bool {
     extras.keys().any(|key| !reserved.contains(&key.as_str()))
 }
 
 fn part_has_mergeable(part: &KnownContentPart) -> bool {
-    part_extras(part)
-        .keys()
-        .any(|key| !is_part_reserved(part, key))
+    part.forwardable_extras().next().is_some()
 }
 
 fn message_has_mergeable(message: &Message) -> bool {
-    has_mergeable(&message.extras, MESSAGE_KEYS)
+    message.forwardable_extras().next().is_some()
         || matches!(&message.content, MessageContent::Parts(parts) if parts.iter().any(
             |part| matches!(part, ContentPart::Known(known) if part_has_mergeable(known))
         ))
+}
+
+/// Add each of `members` to `target`, never replacing a member `target`
+/// already has.
+fn merge_members<'a>(target: &mut Value, members: impl Iterator<Item = (&'a String, &'a Value)>) {
+    let Value::Object(target) = target else {
+        return;
+    };
+    for (key, value) in members {
+        target.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 /// Add each carried member of `extras` that `is_reserved` does not claim to
@@ -92,19 +125,12 @@ fn merge_carried(
     extras: &Map<String, Value>,
     is_reserved: impl Fn(&str) -> bool,
 ) {
-    let Value::Object(members) = target else {
-        return;
-    };
-    for (key, value) in extras {
-        if !is_reserved(key) {
-            members.entry(key.clone()).or_insert_with(|| value.clone());
-        }
-    }
+    merge_members(target, extras.iter().filter(|(key, _)| !is_reserved(key)));
 }
 
 fn merge_part(slot: &mut Value, part: &ContentPart) {
     if let ContentPart::Known(known) = part {
-        merge_carried(slot, part_extras(known), |key| is_part_reserved(known, key));
+        merge_members(slot, known.forwardable_extras());
     }
 }
 
@@ -169,7 +195,7 @@ impl sealed::Sealed for Message {
             return self.serialize(serializer);
         }
         project_through_value(self, serializer, |value| {
-            merge_carried(value, &self.extras, |key| MESSAGE_KEYS.contains(&key));
+            merge_members(value, self.forwardable_extras());
             if let (MessageContent::Parts(parts), Some(Value::Array(slots))) =
                 (&self.content, value.get_mut("content"))
             {
@@ -195,7 +221,7 @@ impl sealed::Sealed for KnownContentPart {
             return self.serialize(serializer);
         }
         project_through_value(self, serializer, |value| {
-            merge_carried(value, part_extras(self), |key| is_part_reserved(self, key));
+            merge_members(value, self.forwardable_extras());
         })
     }
 }

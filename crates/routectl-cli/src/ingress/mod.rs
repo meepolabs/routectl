@@ -1128,6 +1128,10 @@ mod system_lift_fingerprint_tests;
 mod system_lift_carrier_tests;
 
 #[cfg(test)]
+#[path = "openai_message_extras_tests.rs"]
+mod openai_message_extras_tests;
+
+#[cfg(test)]
 #[path = "thinking_carrier_ingress_tests.rs"]
 mod thinking_carrier_ingress_tests;
 

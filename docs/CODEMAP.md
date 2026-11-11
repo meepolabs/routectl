@@ -1062,6 +1062,10 @@ license.
   first-party Bearer, no-redirect client, `mantle::probe` credential check;
   cfg `bedrock` `refuse_unforwardable_mantle_media` walks the finished
   `messages`)
+- `src/openai_compat/carriers.rs` -- merges message and content-part
+  carriers back onto the serialized `messages` when the request speaks the
+  Chat dialect (`forwards_unknowns`); typed, managed and dialect-written
+  names reserved
 - `src/openai_compat/dialect.rs` -- public `ReasoningDialect` enum +
   format-tag accessors
 - `src/openai_compat/request.rs` -- `normalize`, `select_client_extras`,

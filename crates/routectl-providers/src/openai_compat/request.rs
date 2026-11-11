@@ -1,7 +1,8 @@
 //! Top-level request normalization. Walks a routectl `ChatRequest` into
 //! the JSON body sent upstream:
 //!
-//!   1. Direct serde serialization of `ChatRequest`.
+//!   1. Direct serde serialization of `ChatRequest`, with message and part
+//!      carriers merged back on when the request speaks this dialect.
 //!   2. Drop routectl-internal fields the upstream never wants.
 //!   3. Apply outgoing-history reasoning policy (strip vs preserve).
 //!   4. Hand off dialect-specific shaping to `Dialect::apply_request`.
@@ -115,9 +116,14 @@ pub fn normalize(
         ))
     })?;
 
+    let emit_carriers = super::carriers::emits_carriers(req);
+    if emit_carriers && let Some(slots) = obj.get_mut("messages") {
+        super::carriers::emit(slots, &req.messages);
+    }
+
     let tap = crate::wire_declare::tap(req);
     declare_fingerprint_strip(tap, &system);
-    apply_system_projection(id, obj, system)?;
+    apply_system_projection(id, obj, system, emit_carriers)?;
 
     // Dialects that need `chat_template_kwargs` re-inject it themselves.
     obj.remove("system");
@@ -330,16 +336,21 @@ fn declare_fingerprint_strip(tap: Option<&WireTap>, system: &SystemProjection) {
 /// OpenAI-compat hosts (NIM) reject the top-level field with
 /// `400 Validation: Unsupported parameter(s): system`. Every `Role::System`
 /// turn the caller sent keeps its position after it: equal content is not
-/// provenance, so nothing is deduplicated.
+/// provenance, so nothing is deduplicated. A re-serialized `messages` array
+/// gets its carried members back when `emit_carriers` holds.
 fn apply_system_projection(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
     system: SystemProjection,
+    emit_carriers: bool,
 ) -> Result<()> {
     if let Some(messages) = system.messages {
-        let messages = serde_json::to_value(messages)
+        let mut slots = serde_json::to_value(&messages)
             .map_err(|e| Error::Internal(format!("provider `{id}`: serialize messages: {e}")))?;
-        obj.insert("messages".into(), messages);
+        if emit_carriers {
+            super::carriers::emit(&mut slots, &messages);
+        }
+        obj.insert("messages".into(), slots);
     }
     if let Some(text) = system.lowered {
         obj.entry("messages")

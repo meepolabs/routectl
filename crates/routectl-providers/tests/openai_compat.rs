@@ -2055,6 +2055,95 @@ mod mantle {
         }
     }
 
+    /// A Chat text part whose carried `preview_url` names `url`.
+    fn part_extra_url_req(url: &str) -> ChatRequest {
+        let mut extras = serde_json::Map::new();
+        extras.insert("preview_url".into(), json!(url));
+        let part = ContentPart::Known(KnownContentPart::Text {
+            text: "see".into(),
+            citations: None,
+            cache_control: None,
+            extras,
+        });
+        user_parts_req(part)
+    }
+
+    /// A Chat user turn whose carried `attachment` is an image object with a
+    /// bare `url`.
+    fn message_extra_url_req(url: &str) -> ChatRequest {
+        let mut turn = message(Role::User, MessageContent::Text("see".into()));
+        turn.extras
+            .insert("attachment".into(), json!({"type": "image", "url": url}));
+        chat(vec![turn])
+    }
+
+    /// Carried members reach the final body, so the Mantle media walk sees
+    /// them: a non-https URL in a part or message carrier is refused locally,
+    /// an https one reaches the upstream, and a first-party lane forwards the
+    /// refused shapes unchanged.
+    #[tokio::test]
+    async fn mantle_lane_walks_carried_members_for_media_urls() {
+        let refused = [
+            (
+                "part extra preview_url s3",
+                part_extra_url_req(&planted("s3")),
+                "`preview_url` at messages[0].content[1] ",
+            ),
+            (
+                "message extra image url gs",
+                message_extra_url_req(&planted("gs")),
+                "`url` at messages[0].attachment ",
+            ),
+        ];
+        for (row, req, field_at) in refused {
+            let server = completion_upstream().await;
+            let mantle = mantle_provider(&server.uri(), bearer_creds()).await;
+
+            assert_media_refusal(mantle.complete(req.clone()).await, row, field_at);
+            assert!(
+                server.received_requests().await.unwrap().is_empty(),
+                "{row}"
+            );
+
+            let first_party = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+            first_party
+                .complete(req)
+                .await
+                .unwrap_or_else(|e| panic!("{row}: first-party lane must forward, got {e:?}"));
+            let received = server.received_requests().await.unwrap();
+            assert_eq!(received.len(), 1, "{row}");
+            let body = String::from_utf8_lossy(&received[0].body);
+            assert!(body.contains(PLANTED_HOST), "{row}: {body}");
+        }
+
+        let https_rows = [
+            (
+                "part extra preview_url https",
+                part_extra_url_req("https://example.com/e.png"),
+            ),
+            (
+                "message extra image url https",
+                message_extra_url_req("https://example.com/f.png"),
+            ),
+        ];
+        for (row, req) in https_rows {
+            let server = completion_upstream().await;
+            let mantle = mantle_provider(&server.uri(), bearer_creds()).await;
+
+            mantle
+                .complete(req)
+                .await
+                .unwrap_or_else(|e| panic!("{row}: must reach the upstream, got {e:?}"));
+
+            let received = server.received_requests().await.unwrap();
+            assert_eq!(received.len(), 1, "{row}");
+            assert!(
+                String::from_utf8_lossy(&received[0].body).contains("example.com"),
+                "{row}: the carried member rides the Mantle wire"
+            );
+        }
+    }
+
     /// Tool-call arguments are not media: an OpenAI `tool_calls` entry and an
     /// Anthropic `tool_use` input naming an s3 URL in a media-shaped member
     /// reach the Mantle upstream verbatim.

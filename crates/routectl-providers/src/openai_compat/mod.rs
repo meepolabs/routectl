@@ -19,6 +19,7 @@
 //!   stateful `ThinkTagAccumulator` lives inside `stream()` as a local
 //!   variable captured by the stream future for RawThinkTag.
 
+mod carriers;
 pub mod dialect;
 pub mod dialects;
 pub mod request;

@@ -765,6 +765,24 @@ fn chat_cases() -> Vec<Case> {
             chat_provider,
         ),
         case(
+            "chat/message-and-part-extras",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "user", "sentinel_message": {"k": "caf\u{e9}"}, "content": [
+                    {"type": "text", "text": "hi", "sentinel_part": 1}]}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/developer-with-message-extra",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "developer", "sentinel_developer": true, "content": "be brief"},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
             "chat/stream-usage-cached",
             Ingress::Chat,
             json!({"model": ALIAS, "stream": true, "messages": hi}),
