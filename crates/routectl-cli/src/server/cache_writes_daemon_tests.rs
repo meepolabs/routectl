@@ -402,8 +402,9 @@ async fn boot(config: &Config) -> Daemon {
     Daemon::spawn(config.clone(), router).await
 }
 
-/// Send `case` to `daemon` on its lane's ingress and return the status.
-async fn send(daemon: &Daemon, case: &Case) -> u16 {
+/// Send `case` to `daemon` on its lane's ingress and return the status
+/// and the body the client read.
+async fn send(daemon: &Daemon, case: &Case) -> (u16, String) {
     let request = match case.lane {
         Lane::AnthropicApi => daemon.messages(
             case.id,
@@ -423,16 +424,17 @@ async fn send(daemon: &Daemon, case: &Case) -> u16 {
     };
     let response = request.send().await.expect("the daemon answers");
     let status = response.status().as_u16();
-    // Drain the body so a streamed answer runs to its end before the row
-    // is awaited.
-    let _ = response.bytes().await;
-    status
+    // Read the whole body so a streamed answer runs to its end before the
+    // row is awaited.
+    let body = response.text().await.expect("the client body");
+    (status, body)
 }
 
 /// The scenario's ledger after the restart.
 struct CacheLedger {
     restarted: Daemon,
     statuses: BTreeMap<&'static str, u16>,
+    client_bodies: BTreeMap<&'static str, String>,
     before_restart: BTreeMap<&'static str, CacheRow>,
     expected: BTreeMap<&'static str, CacheRow>,
     seeded_version: i64,
@@ -480,8 +482,11 @@ async fn cache_ledger() -> CacheLedger {
     let first = boot(&config).await;
     let migrated_version = user_version(&usage_db);
     let mut statuses = BTreeMap::new();
+    let mut client_bodies = BTreeMap::new();
     for case in &cases {
-        statuses.insert(case.id, send(&first, case).await);
+        let (status, body) = send(&first, case).await;
+        statuses.insert(case.id, status);
+        client_bodies.insert(case.id, body);
     }
     let mut before_restart = BTreeMap::new();
     for case in &cases {
@@ -494,6 +499,7 @@ async fn cache_ledger() -> CacheLedger {
     CacheLedger {
         restarted,
         statuses,
+        client_bodies,
         before_restart,
         expected: cases.into_iter().map(|c| (c.id, c.expected)).collect(),
         seeded_version,
@@ -593,6 +599,64 @@ async fn every_cache_write_row_reads_the_same_after_a_restart_on_the_migrated_fi
     for (id, before) in &ledger.before_restart {
         assert_eq!(&ledger.row(id), before, "{id}");
         assert_eq!(before, &ledger.expected[id], "{id}: served values");
+    }
+    ledger.restarted.shutdown().await;
+}
+
+/// The usage object a Responses client read: the top-level `usage` of a
+/// complete body, or `response.usage` of the stream's `response.completed`
+/// frame. Also returns the raw JSON text it was parsed from.
+fn client_usage(body: &str, stream: bool) -> (Value, String) {
+    let raw = if stream {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .find(|data| data.contains(r#""type":"response.completed""#))
+            .expect("a response.completed frame")
+            .to_string()
+    } else {
+        body.to_string()
+    };
+    let parsed: Value = serde_json::from_str(&raw).expect("client JSON");
+    let usage = if stream {
+        parsed["response"]["usage"].clone()
+    } else {
+        parsed["usage"].clone()
+    };
+    (usage, raw)
+}
+
+/// A Responses client gets `input_tokens_details` back as the upstream sent
+/// it, complete and streamed: the typed `cached_tokens` and the carried
+/// `cache_write_tokens` each appear once, and the ledger still records the
+/// write. Mutation check: dropping the carried usage members on either
+/// path turns its row red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn a_responses_client_reads_cache_write_tokens_once_beside_cached_tokens() {
+    // Arrange + Act
+    let ledger = cache_ledger().await;
+
+    // Assert
+    let rows = [
+        ("responses-complete-write-total", false),
+        ("responses-stream-write-total", true),
+    ];
+    for (id, stream) in rows {
+        assert_eq!(ledger.statuses[id], 200, "{id}: status");
+        let (usage, raw) = client_usage(&ledger.client_bodies[id], stream);
+        assert_eq!(
+            usage["input_tokens_details"],
+            json!({"cache_write_tokens": 1938, "cached_tokens": 0}),
+            "{id}: client usage {usage}"
+        );
+        for member in [r#""cache_write_tokens""#, r#""cached_tokens""#] {
+            assert_eq!(raw.matches(member).count(), 1, "{id}: {member} in {raw}");
+        }
+        assert_eq!(
+            ledger.row(id).cache_write_tokens,
+            Some(1938),
+            "{id}: ledger"
+        );
     }
     ledger.restarted.shutdown().await;
 }
