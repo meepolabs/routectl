@@ -189,18 +189,22 @@ pub(crate) fn walk_content_blocks(
 
 /// Choose between `MessageContent::Text(joined)` and
 /// `MessageContent::Parts(parts)`. When the response only contained Text
-/// blocks (i.e. parts.len() == count of Text-flavored entries), collapse
-/// to flat Text for OpenAI-ingress wire stability. Otherwise emit Parts
-/// so multimodal/forward-compat blocks ride through to ingresses that
-/// preserve them. Thinking/RedactedThinking aren't in `parts` -- they
-/// surface via reasoning_details -- so a response with only text +
+/// blocks and none of them carries an unmodeled member, collapse to flat
+/// Text for OpenAI-ingress wire stability. Otherwise emit Parts so
+/// multimodal/forward-compat blocks, and the members a text block carries,
+/// ride through to ingresses that preserve them: a flat string has nowhere
+/// to keep a block's members. Thinking/RedactedThinking aren't in `parts`
+/// -- they surface via reasoning_details -- so a response with only text +
 /// thinking still collapses cleanly to Text here, while text + image
 /// emits Parts.
 fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
-    let only_text = parts
-        .iter()
-        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
-    if only_text {
+    let only_plain_text = parts.iter().all(|p| {
+        matches!(
+            p,
+            ContentPart::Known(KnownContentPart::Text { extras, .. }) if extras.is_empty()
+        )
+    });
+    if only_plain_text {
         MessageContent::Text(text)
     } else {
         MessageContent::Parts(parts)

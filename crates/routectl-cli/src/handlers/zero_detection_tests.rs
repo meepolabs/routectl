@@ -276,6 +276,18 @@ fn anthropic_complete_with_part_members() -> ResponseTemplate {
     }))
 }
 
+/// A complete Anthropic answer made only of text blocks, the first carrying
+/// a member the wire types do not model.
+fn anthropic_complete_text_with_block_member() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": UPSTREAM,
+        "content": [{"type": "text", "text": "o", "zz_block_future": {"k": "caf\u{e9}"}},
+                    {"type": "text", "text": "k"}],
+        "stop_reason": "end_turn", "stop_sequence": null,
+        "usage": {"input_tokens": 3, "output_tokens": 1}
+    }))
+}
+
 /// A complete Anthropic answer whose top level and usage each carry a member
 /// no canonical field models.
 fn anthropic_complete_with_top_level_and_usage_members() -> ResponseTemplate {
@@ -1444,6 +1456,23 @@ fn responses_carrier_cases() -> Vec<Case> {
             responses_stream(),
             responses_provider,
         ),
+        case(
+            "responses/tool-output-text-member",
+            Ingress::Responses,
+            tool_output_text_member_body(),
+            responses_stream(),
+            responses_provider,
+        ),
+        Case {
+            egress: Egress::ResponsesChatgptOauth,
+            ..case(
+                "responses-chatgpt-oauth/tool-output-text-member",
+                Ingress::Responses,
+                tool_output_text_member_body(),
+                responses_stream(),
+                responses_provider,
+            )
+        },
         Case {
             egress: Egress::ResponsesChatgptOauth,
             ..case(
@@ -1455,6 +1484,19 @@ fn responses_carrier_cases() -> Vec<Case> {
             )
         },
     ]
+}
+
+/// A Responses request whose `function_call_output` returns two text items,
+/// the first carrying a member the item shape does not type: it must reach
+/// the wire on that item.
+fn tool_output_text_member_body() -> Value {
+    json!({"model": ALIAS, "input": [
+        {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1",
+         "output": [{"type": "input_text", "text": "4", "zz_item_future": {"k": "caf\u{e9}"}},
+                    {"type": "input_text", "text": "2"}]}]})
 }
 
 /// A Responses request declaring a function tool with a member the
@@ -1532,6 +1574,10 @@ fn responses_mantle_cases() -> Vec<Case> {
         mantle(
             "responses-mantle/function-tool-member",
             function_tool_member_body(),
+        ),
+        mantle(
+            "responses-mantle/tool-output-text-member",
+            tool_output_text_member_body(),
         ),
     ]
 }
@@ -1650,6 +1696,13 @@ fn anthropic_cases() -> Vec<Case> {
             Ingress::Anthropic,
             json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
             anthropic_complete_with_part_members(),
+            anthropic_provider,
+        ),
+        case(
+            "anthropic/text-only-block-member",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            anthropic_complete_text_with_block_member(),
             anthropic_provider,
         ),
         case(
@@ -1787,6 +1840,13 @@ fn bedrock_invoke_cases() -> Vec<Case> {
             upstream: anthropic_complete_with_part_members(),
             ..invoke(
                 "bedrock-invoke/response-part-members",
+                json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            )
+        },
+        Case {
+            upstream: anthropic_complete_text_with_block_member(),
+            ..invoke(
+                "bedrock-invoke/text-only-block-member",
                 json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
             )
         },
@@ -2378,6 +2438,35 @@ async fn the_walk_surfaces_a_lost_function_call_or_reasoning_item_member() {
     }
 }
 
+/// Positive control for a tool output text item member: the member the
+/// deposited egress body lost comes back as a request-leg finding at its own
+/// path.
+#[tokio::test]
+async fn the_walk_surfaces_a_lost_tool_output_text_member() {
+    let probe = Case {
+        tap_drop: Some("/input/2/output/0/zz_item_future"),
+        ..case(
+            "responses/tool-output-text-member",
+            Ingress::Responses,
+            tool_output_text_member_body(),
+            responses_stream(),
+            responses_provider,
+        )
+    };
+
+    let walked = Box::pin(walk_all(vec![probe])).await;
+
+    assert_eq!(walked.total(), 2, "one request, both legs");
+    assert_eq!(
+        walked.unexplained(),
+        [format!(
+            "{} request /input/2/output/0/zz_item_future missing \
+             (responses/tool-output-text-member)",
+            Ingress::Responses.lane()
+        )]
+    );
+}
+
 /// Positive control for a function tool member: the member the deposited
 /// egress body lost comes back as a request-leg finding at its own path, or
 /// a clean walk of the tool-member cases proves nothing.
@@ -2647,6 +2736,67 @@ async fn only_an_anthropic_client_receives_response_content_block_members() {
             text.contains("estimated_tokens"),
             expected,
             "{row}: estimated_tokens: {text}"
+        );
+    }
+}
+
+/// A text-only Anthropic answer whose block carries a member: an Anthropic
+/// client gets the member on its block, and a client of another dialect
+/// gets its usual single text and no member.
+#[tokio::test]
+async fn only_an_anthropic_client_receives_a_text_only_answer_block_member() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, pointer to the client's text content, text)
+    let rows = [
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            "/content",
+            json!([{"type": "text", "text": "o", "zz_block_future": {"k": "caf\u{e9}"}},
+                   {"type": "text", "text": "k"}]),
+        ),
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            "/choices/0/message/content",
+            json!("ok"),
+        ),
+        (
+            "responses client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            "/output/0/content",
+            json!([{"type": "output_text", "text": "ok", "annotations": []}]),
+        ),
+    ];
+    for (row, ingress, body, pointer, expected) in rows {
+        // Arrange
+        let probe = case(
+            row,
+            ingress,
+            body,
+            anthropic_complete_text_with_block_member(),
+            anthropic_provider,
+        );
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let rendered: Value = serde_json::from_slice(&client).expect("json body");
+        assert_eq!(
+            rendered.pointer(pointer),
+            Some(&expected),
+            "{row}: {rendered}"
+        );
+        assert_eq!(
+            rendered.to_string().contains("zz_block_future"),
+            ingress == Ingress::Anthropic,
+            "{row}: {rendered}"
         );
     }
 }

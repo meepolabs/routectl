@@ -25,6 +25,7 @@ use routectl_core::{
 use serde_json::{Map, Value};
 
 use super::normalize_client_betas;
+use super::text_kept_apart_for_members;
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, RenderContext, ResponseEdits, SseEvent,
     StreamErrorClass, StreamRequestContext, read_alias_header,
@@ -426,11 +427,17 @@ fn render_openai_response_value(resp: ChatResponse, edits: &mut ResponseEdits) -
 
 /// `resp` without its unknown top-level and usage members, which canonical
 /// serde would otherwise flatten onto the Chat body whatever dialect they
-/// were parsed from.
+/// were parsed from. Text parts kept apart only for their members become
+/// the plain `content` string a Chat client gets for a text answer.
 fn withhold_unknown_members(mut resp: ChatResponse) -> ChatResponse {
     resp.extras.clear();
     if let Some(usage) = resp.usage.as_mut() {
         usage.extras.clear();
+    }
+    for choice in &mut resp.choices {
+        if let Some(text) = text_kept_apart_for_members(&choice.message.content) {
+            choice.message.content = MessageContent::Text(text);
+        }
     }
     resp
 }
@@ -1093,7 +1100,7 @@ fn surface_cached_tokens_in_usage(value: &mut Value, edits: &mut ResponseEdits) 
 ///
 /// After the strip, the surviving content collapses the same way
 /// `select_message_content` (openai_responses/response.rs) builds it:
-/// all-text -> a `content` string; nothing left -> `content: null`
+/// text with no carried member -> a `content` string; nothing left -> `content: null`
 /// (OpenAI's shape for an assistant turn that is purely tool calls); any
 /// non-text part remaining -> keep the parts array verbatim.
 fn strip_tool_use_parts_when_tool_calls_present(mut resp: ChatResponse) -> ChatResponse {
@@ -1137,17 +1144,21 @@ fn is_tool_use_part(part: &ContentPart) -> bool {
 
 /// Collapse the content parts left after stripping tool_use blocks into
 /// the shape an OpenAI client expects: `null` when nothing meaningful
-/// remains, a plain text string when only text parts survive, otherwise
-/// the parts array verbatim. Matches `select_message_content`'s
-/// all-text-collapses-to-Text convention.
+/// remains, a plain text string when only text parts without carried
+/// members survive, otherwise the parts array verbatim. Matches
+/// `select_message_content`'s convention: a flat string has nowhere to keep
+/// a part's members.
 fn collapse_after_tool_use_strip(parts: Vec<ContentPart>) -> MessageContent {
     if parts.is_empty() {
         return MessageContent::Null;
     }
-    let only_text = parts
-        .iter()
-        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
-    if !only_text {
+    let only_plain_text = parts.iter().all(|p| {
+        matches!(
+            p,
+            ContentPart::Known(KnownContentPart::Text { extras, .. }) if extras.is_empty()
+        )
+    });
+    if !only_plain_text {
         return MessageContent::Parts(parts);
     }
     let text = parts

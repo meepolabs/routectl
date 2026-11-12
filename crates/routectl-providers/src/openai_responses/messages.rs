@@ -100,12 +100,12 @@ use crate::bounded_diagnostics::BoundedLogSample;
 use crate::skipped_format::render_skipped_format;
 
 use super::extras::{PromptCacheField, PromptCacheWithheldTally, UnknownMemberWithheldTally};
-use super::mantle_guard::{ITEM_MEMBER, PART_MEMBER, WithheldCarriers};
+use super::mantle_guard::{ITEM_MEMBER, PART_MEMBER, TOOL_OUTPUT_PART_MEMBER, WithheldCarriers};
 use super::types::{
     CarriedMembers, FUNCTION_CALL_OUTPUT_ITEM_KEYS, FunctionCallOutputBody,
     FunctionCallOutputContentItem, INPUT_IMAGE_KEYS, INPUT_TEXT_KEYS, MESSAGE_ITEM_KEYS,
     OUTPUT_TEXT_KEYS, ReasoningContentItem, ReasoningSummaryItem, ResponseInputItem,
-    ResponsesContentItem,
+    ResponsesContentItem, TOOL_OUTPUT_TEXT_KEYS,
 };
 use super::{AuthKind, lane_scheme};
 use crate::translation_drop_metrics::record_translation_drop;
@@ -337,6 +337,23 @@ impl InputPolicy<'_> {
     fn part_carried(&self, part: &KnownContentPart, wire_keys: &[&str]) -> CarriedMembers {
         self.carriers
             .carried(part.forwardable_extras(), wire_keys, PART_MEMBER)
+    }
+
+    /// Whether a tool output text `part` has a member this lane emits or
+    /// withholds item by item, which only a typed item can hold.
+    fn emits_tool_output_text_members(&self, part: &KnownContentPart) -> bool {
+        !matches!(self.carriers, Carriers::Foreign)
+            && part
+                .forwardable_extras()
+                .any(|(key, _)| !TOOL_OUTPUT_TEXT_KEYS.contains(&key.as_str()))
+    }
+
+    fn tool_output_text_carried(&self, part: &KnownContentPart) -> CarriedMembers {
+        self.carriers.carried(
+            part.forwardable_extras(),
+            TOOL_OUTPUT_TEXT_KEYS,
+            TOOL_OUTPUT_PART_MEMBER,
+        )
     }
 }
 
@@ -1103,7 +1120,7 @@ fn translate_tool_message(
     let output = match &msg.content {
         MessageContent::Text(t) => FunctionCallOutputBody::Text(t.clone()),
         MessageContent::Null => FunctionCallOutputBody::Text(String::new()),
-        MessageContent::Parts(parts) => build_tool_output_body(id, policy.auth_kind, parts, tally)?,
+        MessageContent::Parts(parts) => build_tool_output_body(id, policy, parts, tally)?,
     };
     out.push(ResponseInputItem::FunctionCallOutput {
         call_id,
@@ -1716,20 +1733,24 @@ fn translate_image_source(
 }
 
 /// Build a `FunctionCallOutputBody` from a parts slice. When every part is
-/// plain text the result collapses to a flat string (codex parity,
-/// most-common path). Otherwise each part becomes a typed item; a body left
+/// plain text with no member this lane emits, the result collapses to a flat
+/// string (codex parity, most-common path): a flat string has nowhere to keep
+/// a part's members. Otherwise each part becomes a typed item; a body left
 /// with no item after drops collapses to an empty string, as a null content
 /// does. An image or file part no slot can hold fails the request.
 fn build_tool_output_body(
     id: &str,
-    auth_kind: AuthKind,
+    policy: InputPolicy<'_>,
     parts: &[ContentPart],
     tally: &mut ResponsesDropTally,
 ) -> Result<FunctionCallOutputBody> {
-    let all_text = parts
-        .iter()
-        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
-    if all_text {
+    let all_plain_text = parts.iter().all(|p| match p {
+        ContentPart::Known(known @ KnownContentPart::Text { .. }) => {
+            !policy.emits_tool_output_text_members(known)
+        }
+        _ => false,
+    });
+    if all_plain_text {
         let mut buf = String::new();
         for p in parts {
             if let ContentPart::Known(KnownContentPart::Text { text, .. }) = p {
@@ -1744,7 +1765,7 @@ fn build_tool_output_body(
 
     let mut items: Vec<FunctionCallOutputContentItem> = Vec::with_capacity(parts.len());
     for p in parts {
-        if let Some(item) = translate_tool_output_part(id, auth_kind, p, tally)? {
+        if let Some(item) = translate_tool_output_part(id, policy, p, tally)? {
             items.push(item);
         }
     }
@@ -1764,14 +1785,16 @@ const fn forwards_tool_output_files(auth_kind: AuthKind) -> bool {
 /// when the part has no tool-output slot on this lane.
 fn translate_tool_output_part(
     id: &str,
-    auth_kind: AuthKind,
+    policy: InputPolicy<'_>,
     part: &ContentPart,
     tally: &mut ResponsesDropTally,
 ) -> Result<Option<FunctionCallOutputContentItem>> {
+    let auth_kind = policy.auth_kind;
     match part {
-        ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+        ContentPart::Known(known @ KnownContentPart::Text { text, .. }) => {
             Ok(Some(FunctionCallOutputContentItem::InputText {
                 text: text.clone(),
+                carried: policy.tool_output_text_carried(known),
             }))
         }
         ContentPart::Known(KnownContentPart::Image { source, .. }) => {

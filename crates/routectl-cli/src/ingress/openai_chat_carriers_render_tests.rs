@@ -148,3 +148,84 @@ fn usage_members_on_an_unstamped_or_foreign_chunk_are_not_rendered() {
         assert_eq!(usage["prompt_tokens"], json!(10), "{row}");
     }
 }
+
+fn text_parts_response(dialect: Option<IngressDialect>) -> ChatResponse {
+    let text = |text: &str, extras: Map<String, Value>| {
+        ContentPart::Known(KnownContentPart::Text {
+            text: text.into(),
+            cache_control: None,
+            citations: None,
+            extras,
+        })
+    };
+    let mut resp = carrying_response(dialect);
+    resp.choices[0].message.extras = Map::new();
+    resp.choices[0].message.content = MessageContent::Parts(vec![
+        text("o", object(json!({"part_note": 1}))),
+        text("k", Map::new()),
+    ]);
+    resp
+}
+
+#[test]
+fn text_parts_kept_for_members_render_as_one_string_unless_chat_stamped() {
+    // (row, stamp, expected content)
+    let rows = [
+        ("unstamped", None, json!("ok")),
+        ("anthropic", Some(IngressDialect::Anthropic), json!("ok")),
+        ("responses", Some(IngressDialect::Responses), json!("ok")),
+        (
+            "chat",
+            Some(IngressDialect::Chat),
+            json!([{"type": "text", "text": "o", "part_note": 1},
+                   {"type": "text", "text": "k"}]),
+        ),
+    ];
+    for (row, dialect, expected) in rows {
+        let body = render(text_parts_response(dialect));
+
+        assert_eq!(body["choices"][0]["message"]["content"], expected, "{row}");
+    }
+}
+
+/// After the duplicate tool_use block is stripped, a surviving text part
+/// that carries a member stays a part on a Chat-stamped answer, so the
+/// member reaches the client; a foreign answer still renders one string.
+#[test]
+fn a_text_part_member_beside_a_stripped_tool_use_renders_only_when_chat_stamped() {
+    // (row, stamp, expected content)
+    let rows = [
+        (
+            "chat",
+            Some(IngressDialect::Chat),
+            json!([{"type": "text", "text": "o", "part_note": 1}]),
+        ),
+        ("anthropic", Some(IngressDialect::Anthropic), json!("o")),
+    ];
+    for (row, dialect, expected) in rows {
+        // Arrange
+        let mut resp = text_parts_response(dialect);
+        let message = &mut resp.choices[0].message;
+        let MessageContent::Parts(parts) = &mut message.content else {
+            panic!("parts");
+        };
+        parts[1] = ContentPart::Known(KnownContentPart::ToolUse {
+            id: "toolu_1".into(),
+            name: "lookup".into(),
+            input: json!({}),
+            cache_control: None,
+            extras: Map::new(),
+        });
+        message.tool_calls = Some(vec![json!({"id": "toolu_1", "type": "function",
+                                              "function": {"name": "lookup", "arguments": "{}"}})]);
+
+        // Act
+        let body = render(resp);
+
+        // Assert
+        assert_eq!(
+            body["choices"][0]["message"]["content"], expected,
+            "{row}: {body}"
+        );
+    }
+}

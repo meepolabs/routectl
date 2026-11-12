@@ -356,6 +356,32 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
     lifted
 }
 
+/// The joined text of a response `content` made only of text parts, at
+/// least one of which carries members: a parser keeps such parts apart only
+/// so a same-dialect render can return those members. A render that does
+/// not return them gives the client the single text it gets for any text
+/// answer.
+pub(crate) fn text_kept_apart_for_members(content: &MessageContent) -> Option<String> {
+    let MessageContent::Parts(parts) = content else {
+        return None;
+    };
+    let mut carries_members = false;
+    let mut text = String::new();
+    for part in parts {
+        let ContentPart::Known(KnownContentPart::Text {
+            text: piece,
+            extras,
+            ..
+        }) = part
+        else {
+            return None;
+        };
+        carries_members |= !extras.is_empty();
+        text.push_str(piece);
+    }
+    carries_members.then_some(text)
+}
+
 /// Whether [`lift_system_messages`] moves `m` into `req.system`: a system
 /// turn that need not stay in place.
 fn is_liftable(m: &Message) -> bool {

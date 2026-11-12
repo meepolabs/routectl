@@ -274,6 +274,8 @@ pub(super) fn takes_namespace_stamps(
 pub(super) const ITEM_MEMBER: &str = "/input/*";
 /// Pointer pattern of a member carried on a content part of an `input` item.
 pub(super) const PART_MEMBER: &str = "/input/*/content/*";
+/// Pointer pattern of a member carried on an item of a tool output.
+pub(super) const TOOL_OUTPUT_PART_MEMBER: &str = "/input/*/output/*";
 
 /// The members carried on modeled input nodes that one request's input
 /// build left off the Bedrock Mantle wire. Shared by the build's per-node

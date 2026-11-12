@@ -465,3 +465,89 @@ fn an_isolated_top_level_key_from_another_dialect_is_declared_and_counted_once()
         }
     }
 }
+
+/// A tool turn whose two text parts each carry `extras`, as the Responses
+/// ingress builds it from a `function_call_output` with two text items.
+fn tool_output_turn(first: serde_json::Map<String, Value>) -> Message {
+    tool_message_parts(
+        "c1",
+        vec![
+            carried_text_part("4", first),
+            carried_text_part("2", serde_json::Map::new()),
+        ],
+    )
+}
+
+/// A tool output whose text parts carry a member keeps its items on the
+/// first-party surfaces, the member on its item; the same output with no
+/// member, a member from another dialect, or the Mantle surface, which
+/// withholds and declares it, keeps the flat string or loses the member.
+#[test]
+fn a_tool_output_text_member_rides_its_item_on_the_first_party_surfaces_only() {
+    use routectl_core::wire_check::{EditKind, EditSite};
+    let member = || members(&[("zz_item_future", json!({"k": "caf\u{e9}"}))]);
+    let carried_items = json!([
+        {"type": "input_text", "text": "4", "zz_item_future": {"k": "caf\u{e9}"}},
+        {"type": "input_text", "text": "2"}]);
+    let withheld_items = json!([
+        {"type": "input_text", "text": "4"},
+        {"type": "input_text", "text": "2"}]);
+    // (row, surface, request, expected output, withhold declared)
+    let rows = [
+        (
+            "api-key",
+            cfg_api_key(),
+            responses_request(vec![user_text("hi"), tool_output_turn(member())]),
+            carried_items.clone(),
+            false,
+        ),
+        (
+            "chatgpt-oauth",
+            cfg(),
+            responses_request(vec![user_text("hi"), tool_output_turn(member())]),
+            carried_items,
+            false,
+        ),
+        (
+            "bedrock-mantle",
+            cfg_bedrock_mantle(),
+            responses_request(vec![user_text("hi"), tool_output_turn(member())]),
+            withheld_items,
+            true,
+        ),
+        (
+            "no member",
+            cfg_api_key(),
+            responses_request(vec![
+                user_text("hi"),
+                tool_output_turn(serde_json::Map::new()),
+            ]),
+            json!("4\n2"),
+            false,
+        ),
+        (
+            "another dialect",
+            cfg_api_key(),
+            {
+                let mut req = responses_request(vec![user_text("hi"), tool_output_turn(member())]);
+                req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+                req
+            },
+            json!("4\n2"),
+            false,
+        ),
+    ];
+    for (row, cfg, req, expected, declared) in rows {
+        // Act
+        let (wire, edits) = translate_declaring(&cfg, &req);
+
+        // Assert
+        assert_eq!(wire["input"][1]["output"], expected, "{row}: {wire}");
+        let withhold = (
+            EditSite::AuthSurfaceGate,
+            "/input/*/output/*/zz_item_future".to_owned(),
+            EditKind::Remove,
+        );
+        assert_eq!(edits.contains(&withhold), declared, "{row}: {edits:?}");
+    }
+}

@@ -73,7 +73,7 @@ use routectl_providers::openai_responses::{
     OUTPUT_FUNCTION_CALL_ITEM_KEYS, OUTPUT_MESSAGE_ITEM_KEYS, OUTPUT_REASONING_ITEM_KEYS,
 };
 
-use crate::ingress::ResponseEdits;
+use crate::ingress::{ResponseEdits, text_kept_apart_for_members};
 
 /// Render a canonical `ChatResponse` into a Responses `response` object.
 #[cfg(test)]
@@ -413,10 +413,21 @@ pub(super) fn message_item(id: Option<&str>, status: &str, content: Vec<Value>) 
 }
 
 fn build_content_blocks(content: &MessageContent) -> Vec<Value> {
+    if let Some(text) = text_kept_apart_for_members(content) {
+        return text_blocks(&text);
+    }
     match content {
-        MessageContent::Text(t) if !t.is_empty() => vec![output_text_block(t)],
-        MessageContent::Text(_) | MessageContent::Null => Vec::new(),
+        MessageContent::Text(t) => text_blocks(t),
+        MessageContent::Null => Vec::new(),
         MessageContent::Parts(parts) => parts.iter().filter_map(content_block_from_part).collect(),
+    }
+}
+
+fn text_blocks(text: &str) -> Vec<Value> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![output_text_block(text)]
     }
 }
 

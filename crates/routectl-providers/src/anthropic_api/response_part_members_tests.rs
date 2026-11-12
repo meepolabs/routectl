@@ -128,3 +128,43 @@ fn a_bedrock_invoke_response_is_stamped_with_the_anthropic_dialect() {
     // Assert
     assert_eq!(stamped_dialect(resp), Some(IngressDialect::Anthropic));
 }
+
+#[test]
+fn a_text_only_answer_is_flat_text_unless_a_block_carries_a_member() {
+    // (row, content blocks, expected content)
+    let rows = [
+        (
+            "no member",
+            json!([{"type": "text", "text": "o"}, {"type": "text", "text": "k"}]),
+            json!("ok"),
+        ),
+        (
+            "member on one block",
+            json!([{"type": "text", "text": "o", "zz_block_future": 1},
+                   {"type": "text", "text": "k"}]),
+            json!([{"type": "text", "text": "o"}, {"type": "text", "text": "k"}]),
+        ),
+    ];
+    for (row, content, expected) in rows {
+        // Act
+        let resp = normalize("test", response_with_blocks(content)).expect("normalizes");
+
+        // Assert
+        let content = &resp.choices[0].message.content;
+        assert_eq!(
+            serde_json::to_value(content).expect("serializes"),
+            expected,
+            "{row}"
+        );
+        if let MessageContent::Parts(_) = content {
+            assert_eq!(
+                part_members(&resp),
+                vec![
+                    ("text".into(), members(json!({"zz_block_future": 1}))),
+                    ("text".into(), Map::new()),
+                ],
+                "{row}"
+            );
+        }
+    }
+}

@@ -262,6 +262,8 @@ pub const FUNCTION_CALL_OUTPUT_ITEM_KEYS: &[&str] = &["type", "call_id", "output
 pub const INPUT_TEXT_KEYS: &[&str] = &["type", "text", "prompt_cache_breakpoint"];
 /// Member names an `output_text` block writes.
 pub const OUTPUT_TEXT_KEYS: &[&str] = &["type", "text"];
+/// Member names an `input_text` item of a tool output writes.
+pub const TOOL_OUTPUT_TEXT_KEYS: &[&str] = &["type", "text"];
 /// Member names an `input_image` block writes.
 pub const INPUT_IMAGE_KEYS: &[&str] = &["type", "image_url", "detail"];
 /// Member names a function tool declaration writes: exactly the members
@@ -293,6 +295,8 @@ pub enum FunctionCallOutputBody {
 pub enum FunctionCallOutputContentItem {
     InputText {
         text: String,
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     InputImage {
         image_url: String,
@@ -621,6 +625,7 @@ mod tests {
             output: FunctionCallOutputBody::Items(vec![
                 FunctionCallOutputContentItem::InputText {
                     text: "caption".into(),
+                    carried: CarriedMembers::default(),
                 },
                 FunctionCallOutputContentItem::InputImage {
                     image_url: "data:image/png;base64,AAAA".into(),
@@ -772,7 +777,7 @@ mod tests {
     /// Each wire node's reserved list names exactly the members it writes.
     #[test]
     fn reserved_node_members_match_what_each_node_writes() {
-        let rows: [(&str, Value, &[&str]); 8] = [
+        let rows: [(&str, Value, &[&str]); 9] = [
             (
                 "function tool",
                 serde_json::to_value(ResponsesTool::Function {
@@ -850,6 +855,15 @@ mod tests {
                 })
                 .unwrap(),
                 OUTPUT_TEXT_KEYS,
+            ),
+            (
+                "tool output input_text",
+                serde_json::to_value(FunctionCallOutputContentItem::InputText {
+                    text: String::new(),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                TOOL_OUTPUT_TEXT_KEYS,
             ),
             (
                 "input_image",
