@@ -602,3 +602,20 @@ fn a_library_caller_carried_member_counts_no_gemini_drop() {
     // Assert
     assert!(removes.is_empty(), "{removes:?}");
 }
+
+#[test]
+fn a_withheld_ingress_extra_is_declared_removed_at_its_own_pointer() {
+    // Arrange -- one HTTP client top-level key, no carried member.
+    let req = dispatched(
+        RequestProvenance::AnthropicIngress,
+        json!({"some_future_knob": FUTURE_TELL}),
+        None,
+    );
+
+    // Act
+    let (body, removes) = body_declaring(&req);
+
+    // Assert
+    assert!(!rendered(&body).contains(FUTURE_TELL), "{body}");
+    assert_eq!(removes, ["/some_future_knob"]);
+}

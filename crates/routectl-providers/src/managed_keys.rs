@@ -42,11 +42,18 @@ use crate::anthropic_api::PARALLEL_TOOL_CALLS_KEY;
     feature = "gemini"
 ))]
 use routectl_core::is_canonical_request_key;
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+use routectl_core::tool_def::RESPONSES_FUNCTION_MEMBERS;
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 use routectl_core::wire_check::WireTap;
 use routectl_core::wire_check::{EditKind, EditSite, EgressKind, forwards_unknowns};
 use routectl_core::{
-    ChatRequest, ContentPart, Message, MessageContent, RequestProvenance, SystemContent, ToolDef,
+    ChatRequest, ContentPart, CustomTool, Message, MessageContent, RequestProvenance,
+    SystemContent, ToolDef,
 };
 
 /// The extras merge whose managed set a key is checked against.
@@ -302,7 +309,12 @@ pub fn readable_extra<'a>(
 /// Declare each withheld foreign-dialect key as removed from the top level
 /// of the body (the Converse bag counts as its own top level). A key that is
 /// not token-shaped is left undeclared, so it still surfaces as a finding.
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 pub fn declare_foreign_keys(tap: Option<&WireTap>, foreign_keys: &[&str]) {
     let Some(tap) = tap else {
         return;
@@ -352,9 +364,16 @@ pub fn carried_members(req: &ChatRequest) -> BTreeSet<CarriedMember<'_>> {
             insert_members(&mut members, part, known.forwardable_extras());
         }
     }
+    let responses_tools = req.routectl_internal.provenance == RequestProvenance::ResponsesIngress;
     for tool in req.tools.iter().flatten() {
-        if let ToolDef::Custom(custom) = tool {
-            insert_members(&mut members, "/tools/*", custom.forwardable_extras());
+        match tool {
+            ToolDef::Custom(custom) if responses_tools => {
+                insert_members(&mut members, "/tools/*", responses_tool_members(custom));
+            }
+            ToolDef::Custom(custom) => {
+                insert_members(&mut members, "/tools/*", custom.forwardable_extras());
+            }
+            ToolDef::Other(_) => {}
         }
     }
     if let Some(SystemContent::Blocks(blocks)) = &req.system {
@@ -366,6 +385,17 @@ pub fn carried_members(req: &ChatRequest) -> BTreeSet<CarriedMember<'_>> {
         insert_members(&mut members, &entry.client_pointer, entry.members.iter());
     }
     members
+}
+
+/// The members a Responses client declared on a function tool beyond the
+/// ones the Responses function shape types. Its typed set is not
+/// `CustomTool`'s: a `cache_control` or `defer_loading` it sent is a member
+/// like any other.
+pub fn responses_tool_members(custom: &CustomTool) -> impl Iterator<Item = (&String, &Value)> {
+    custom
+        .extras
+        .iter()
+        .filter(|(key, _)| !RESPONSES_FUNCTION_MEMBERS.contains(&key.as_str()))
 }
 
 fn insert_members<'a>(
@@ -495,7 +525,11 @@ pub struct ForeignDialectExtraTally {
 
 impl ForeignDialectExtraTally {
     /// Note the request's withheld keys, if any.
-    #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+    #[cfg(any(
+        feature = "anthropic-api",
+        feature = "openai-compat",
+        feature = "openai-responses"
+    ))]
     pub fn record(&mut self, foreign_keys: &[&str]) {
         self.keys
             .extend(foreign_keys.iter().map(|k| (*k).to_string()));

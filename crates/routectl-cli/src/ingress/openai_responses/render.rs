@@ -69,6 +69,10 @@ use routectl_core::{
     ReasoningDetailKind, ResponsesItemMembers, Result, is_responses_family, renders_unknowns,
 };
 
+use routectl_providers::openai_responses::{
+    OUTPUT_FUNCTION_CALL_ITEM_KEYS, OUTPUT_MESSAGE_ITEM_KEYS, OUTPUT_REASONING_ITEM_KEYS,
+};
+
 use crate::ingress::ResponseEdits;
 
 /// Render a canonical `ChatResponse` into a Responses `response` object.
@@ -176,17 +180,18 @@ const RESERVED_USAGE: &[&str] = &[
     OUTPUT_TOKENS_DETAILS,
 ];
 
-/// `message` item names this render owns, whether or not it emits them.
-const RESERVED_MESSAGE_ITEM: &[&str] = &["type", "id", "role", "status", "content"];
+/// `message` item names this render owns, whether or not it emits them:
+/// the same list the egress leaves out of the item's carried members.
+const RESERVED_MESSAGE_ITEM: &[&str] = OUTPUT_MESSAGE_ITEM_KEYS;
 
 /// `function_call` item names this render owns, whether or not it emits
 /// them. The upstream item's `id` and `status` are not among them: the
 /// render writes neither, so they come back as carried members.
-const RESERVED_FUNCTION_CALL_ITEM: &[&str] = &["type", "call_id", "name", "arguments", "namespace"];
+const RESERVED_FUNCTION_CALL_ITEM: &[&str] = OUTPUT_FUNCTION_CALL_ITEM_KEYS;
 
 /// `reasoning` item names this render owns, whether or not it emits them.
 /// The upstream item's `status` is not among them: the render writes none.
-const RESERVED_REASONING_ITEM: &[&str] = &["type", "id", "summary", "content", "encrypted_content"];
+const RESERVED_REASONING_ITEM: &[&str] = OUTPUT_REASONING_ITEM_KEYS;
 
 const REASONING_CONTENT: &str = "content";
 

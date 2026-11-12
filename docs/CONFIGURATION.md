@@ -726,7 +726,7 @@ vocabulary:
 |---|---|
 | `anthropic-api` (Mantle's Anthropic lane included), Bedrock Invoke, the Bedrock Converse bag | the Anthropic Messages ingress |
 | `openai-compat` (Mantle's OpenAI-compatible lane included) | the OpenAI Chat Completions ingress |
-| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress. From the Responses ingress, `auth_kind = "api-key"` also forwards any other key except one routectl writes itself; `chatgpt-oauth` and `bedrock-mantle` withhold every other key and count the request once as `unknown_member_withheld` |
+| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress. From the Responses ingress, `auth_kind = "api-key"` also forwards any other key except one routectl writes itself; `chatgpt-oauth` and `bedrock-mantle` withhold every other key and count the request once as `unknown_member_withheld`. Any other key from another ingress counts the request once as `foreign_dialect_extra` |
 | `gemini` | no ingress: only the operator layer |
 
 A library caller that builds its own `ChatRequest` keeps forwarding its
@@ -751,13 +751,15 @@ which win on a name clash. Every other egress has no slot for them: on
 `anthropic-api`, Bedrock Invoke, Bedrock Converse, `openai-compat`,
 `openai-responses` and `gemini` they are dropped, and a request that
 dropped any counts once as `foreign_dialect_extra` on that lane (on
-`anthropic-api`, Bedrock and `openai-compat`, one count with any
-top-level key it dropped). A Responses client's members are withheld in
-two more cases, counted once per request as `unknown_member_withheld`
-instead: on `auth_kind = "bedrock-mantle"`, which forwards no carried
-member, and, on any auth kind, the members of a `function_call` or
-`reasoning` item that does not ship with the identity the client gave
-it.
+every lane but `gemini`, one count with any top-level key it dropped;
+on `gemini` the top-level keys count as their own `ingress_extra_withheld`
+policy action). Each dropped top-level key and member is declared
+removed at its own path. A Responses client's members, a function tool's
+included, are withheld in two more cases, counted once per request as
+`unknown_member_withheld` instead: on `auth_kind = "bedrock-mantle"`,
+which forwards no carried member, and, on any auth kind, the members of
+a `function_call` or `reasoning` item that does not ship with the
+identity the client gave it.
 
 The operator layer is never affected: a key set in `payload_extras` is
 sent whatever the client's dialect. To send a field a client of another

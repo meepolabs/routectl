@@ -489,3 +489,92 @@ fn an_empty_reasoning_content_array_reaches_every_event_that_carries_the_item() 
     let completed = &payloads(&events, "response.completed")[0]["response"]["output"][0];
     assert_eq!(completed["content"], json!([]), "{completed}");
 }
+
+/// Every event the real render writes, across a text item, a reasoning
+/// summary and text item, a function call, and both terminal events.
+fn every_rendered_event() -> Vec<SseEvent> {
+    let reasoning = |kind: ReasoningDetailKind| {
+        chunk(
+            ChunkDelta {
+                reasoning_details: vec![ReasoningDetail {
+                    kind,
+                    id: Some("rs_1".into()),
+                    format: Some(routectl_core::OPENAI_RESPONSES_V1.into()),
+                    index: Some(0),
+                    payload: json!({"text": "think"}),
+                }],
+                ..Default::default()
+            },
+            Vec::new(),
+        )
+    };
+    let call = chunk(
+        ChunkDelta {
+            tool_calls: Some(vec![json!({"index": 0, "id": "call_1", "type": "function",
+                                         "function": {"name": "f", "arguments": "{}"}})]),
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+    let mut closing = finish();
+    closing.choices[0].finish_reason = Some("tool_calls".into());
+    let (mut events, _) = render(vec![
+        reasoning(ReasoningDetailKind::Summary),
+        reasoning(ReasoningDetailKind::Text),
+        text("ok", Vec::new()),
+        call,
+        closing,
+    ]);
+    let mut state = ResponsesStreamState::default();
+    let _ = render_chunk_declared(
+        text("partial", Vec::new()),
+        &mut state,
+        &mut ResponseEdits::default(),
+    );
+    let class = crate::ingress::StreamErrorClass::from_error(&routectl_core::Error::upstream(
+        "p", 503, "x",
+    ));
+    events.extend(super::super::stream::render_error_eos_internal(
+        &mut state, &"boom", &class,
+    ));
+    events
+}
+
+/// The provider strips from each known event exactly the members the
+/// render writes on that event type, beyond the identity it re-stamps on
+/// every event. A name the render writes on one event type alone is never
+/// stripped from another, so an upstream member of that name on another
+/// event still reaches the client.
+#[test]
+fn each_events_managed_members_are_what_the_render_writes_on_that_event() {
+    use routectl_providers::openai_responses::{EVENT_IDENTITY_MEMBERS, MANAGED_EVENT_MEMBERS};
+    use std::collections::{BTreeMap, BTreeSet};
+    // Arrange
+    let mut written: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for event in every_rendered_event() {
+        let name = event.event.clone().expect("named event");
+        let payload: Value = serde_json::from_str(&event.data).expect("json");
+        let keys = payload.as_object().expect("object").keys().cloned();
+        written.entry(name).or_default().extend(keys);
+    }
+
+    // Act + Assert
+    assert!(
+        written.len() >= 14,
+        "the drive reaches every rendered event: {written:?}"
+    );
+    for (event_type, keys) in &written {
+        let managed = MANAGED_EVENT_MEMBERS
+            .iter()
+            .find(|(known, _)| known == event_type)
+            .unwrap_or_else(|| panic!("{event_type} is rendered but not known to the carriage"))
+            .1;
+        let own: BTreeSet<&str> = keys
+            .iter()
+            .map(String::as_str)
+            .filter(|key| !EVENT_IDENTITY_MEMBERS.contains(key))
+            .collect();
+        let expected: BTreeSet<&str> = managed.iter().copied().collect();
+        assert_eq!(own, expected, "{event_type}");
+    }
+}

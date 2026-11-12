@@ -153,8 +153,9 @@ impl CustomTool {
     /// If `v` is a flat OpenAI Responses function declaration (`{type:
     /// "function", name, description?, parameters?, strict?}`), normalize it
     /// into a canonical `CustomTool`: `parameters` becomes `input_schema`
-    /// (defaulting to an empty object schema) and every other field is
-    /// dropped. Returns `None` for any other `type`, a missing or non-string
+    /// (defaulting to an empty object schema) and every member outside
+    /// [`RESPONSES_FUNCTION_MEMBERS`] lands in `extras`, for a Responses
+    /// egress to send back. Returns `None` for any other `type`, a missing or non-string
     /// `name`, or a present field whose value does not fit its canonical
     /// type (e.g. a numeric `description`).
     ///
@@ -178,7 +179,7 @@ impl CustomTool {
             defer_loading: None,
             strict: field("strict").and_then(Value::as_bool),
             type_tag: None,
-            extras: Map::new(),
+            extras: responses_function_extras(v),
         })
     }
 
@@ -204,6 +205,25 @@ impl CustomTool {
         }
         obj.get("name").and_then(Value::as_str)
     }
+}
+
+/// Member names of a flat Responses function declaration that
+/// [`CustomTool::from_responses_function`] reads into typed fields. Every
+/// other member of the declaration is an extra.
+pub const RESPONSES_FUNCTION_MEMBERS: [&str; 5] =
+    ["type", "name", "description", "parameters", "strict"];
+
+/// The members of the Responses function declaration `v` outside
+/// [`RESPONSES_FUNCTION_MEMBERS`].
+fn responses_function_extras(v: &Value) -> Map<String, Value> {
+    v.as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(key, _)| !RESPONSES_FUNCTION_MEMBERS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `type` tag of a Responses tool container that groups member declarations
@@ -590,16 +610,20 @@ mod tests {
     }
 
     #[test]
-    fn responses_function_drops_fields_outside_the_flat_function_shape() {
+    fn responses_function_carries_members_outside_the_flat_function_shape_as_extras() {
         // Arrange: canonical-only and alias spellings are not part of the
-        // flat Responses function shape and must not leak into the result.
+        // flat Responses function shape, so none becomes a typed field; each
+        // rides `extras` with any other member the shape does not type.
         let v = json!({
             "type": "function",
             "name": "shell",
+            "description": "run",
+            "parameters": {"type": "object"},
+            "strict": true,
             "inputSchema": {"type": "object", "required": ["alias"]},
             "cache_control": {"type": "ephemeral"},
             "defer_loading": true,
-            "extra": "ignored"
+            "future_member": {"n": "caf\u{e9}"}
         });
 
         // Act
@@ -608,8 +632,29 @@ mod tests {
         // Assert
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
-            json!({"name": "shell", "input_schema": empty_object_schema()})
+            json!({"name": "shell", "description": "run",
+                   "input_schema": {"type": "object"}, "strict": true})
         );
+        assert_eq!(
+            Value::Object(c.extras),
+            json!({"inputSchema": {"type": "object", "required": ["alias"]},
+                   "cache_control": {"type": "ephemeral"},
+                   "defer_loading": true,
+                   "future_member": {"n": "caf\u{e9}"}})
+        );
+    }
+
+    #[test]
+    fn responses_function_with_only_typed_members_carries_no_extras() {
+        // Arrange
+        let v = json!({"type": "function", "name": "shell", "description": "run",
+                       "parameters": {}, "strict": false});
+
+        // Act
+        let c = CustomTool::from_responses_function(&v).expect("normalizes");
+
+        // Assert
+        assert!(c.extras.is_empty(), "{:?}", c.extras);
     }
 
     /// Values that are not a well-formed flat Responses function

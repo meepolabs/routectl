@@ -204,6 +204,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "openai_responses/request_mantle_guard_tests.rs",
     "openai_responses/request_system_role_tests.rs",
     "openai_responses/request_test_support.rs",
+    "openai_responses/request_tool_member_tests.rs",
     "openai_responses/request_tool_output_tests.rs",
     "openai_responses/request_tests.rs",
     "openai_responses/response_tests.rs",

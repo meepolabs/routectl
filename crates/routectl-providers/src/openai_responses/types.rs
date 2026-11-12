@@ -264,6 +264,9 @@ pub const INPUT_TEXT_KEYS: &[&str] = &["type", "text", "prompt_cache_breakpoint"
 pub const OUTPUT_TEXT_KEYS: &[&str] = &["type", "text"];
 /// Member names an `input_image` block writes.
 pub const INPUT_IMAGE_KEYS: &[&str] = &["type", "image_url", "detail"];
+/// Member names a function tool declaration writes: exactly the members
+/// the Responses ingress reads into a canonical function tool.
+pub const FUNCTION_TOOL_KEYS: &[&str] = &routectl_core::tool_def::RESPONSES_FUNCTION_MEMBERS;
 
 /// The `output` field of a `function_call_output` item. When all tool
 /// result parts are plain text the body collapses to a flat string
@@ -418,6 +421,10 @@ pub enum ResponsesTool {
         parameters: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         strict: Option<bool>,
+        /// Members the client declared on the tool that this hub does not
+        /// model; see [`CarriedMembers`].
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     Other(Value),
 }
@@ -652,6 +659,7 @@ mod tests {
             description: Some("do math".into()),
             parameters: json!({"type": "object"}),
             strict: Some(true),
+            carried: CarriedMembers::default(),
         };
 
         // Act
@@ -764,7 +772,20 @@ mod tests {
     /// Each wire node's reserved list names exactly the members it writes.
     #[test]
     fn reserved_node_members_match_what_each_node_writes() {
-        let rows: [(&str, Value, &[&str]); 7] = [
+        let rows: [(&str, Value, &[&str]); 8] = [
+            (
+                "function tool",
+                serde_json::to_value(ResponsesTool::Function {
+                    kind: ResponsesFunctionTag::Function,
+                    name: "f".into(),
+                    description: Some("d".into()),
+                    parameters: json!({}),
+                    strict: Some(true),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                FUNCTION_TOOL_KEYS,
+            ),
             (
                 "reasoning",
                 serde_json::to_value(ResponseInputItem::Reasoning {

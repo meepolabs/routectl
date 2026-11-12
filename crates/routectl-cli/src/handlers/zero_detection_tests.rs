@@ -1437,7 +1437,35 @@ fn responses_carrier_cases() -> Vec<Case> {
                 responses_provider,
             )
         },
+        case(
+            "responses/function-tool-member",
+            Ingress::Responses,
+            function_tool_member_body(),
+            responses_stream(),
+            responses_provider,
+        ),
+        Case {
+            egress: Egress::ResponsesChatgptOauth,
+            ..case(
+                "responses-chatgpt-oauth/function-tool-member",
+                Ingress::Responses,
+                function_tool_member_body(),
+                responses_stream(),
+                responses_provider,
+            )
+        },
     ]
+}
+
+/// A Responses request declaring a function tool with a member the
+/// function shape does not type: it must reach the wire on that tool.
+fn function_tool_member_body() -> Value {
+    json!({"model": ALIAS,
+           "tools": [{"type": "function", "name": "lookup",
+                      "parameters": {"type": "object"},
+                      "future_member": {"n": "caf\u{e9}"}}],
+           "input": [{"type": "message", "role": "user",
+                      "content": [{"type": "input_text", "text": "hi"}]}]})
 }
 
 /// A Responses request whose signed `reasoning` item carries its `id` and a
@@ -1500,6 +1528,10 @@ fn responses_mantle_cases() -> Vec<Case> {
         mantle(
             "responses-mantle/unmodeled-members",
             mantle_unmodeled_members_body(),
+        ),
+        mantle(
+            "responses-mantle/function-tool-member",
+            function_tool_member_body(),
         ),
     ]
 }
@@ -2344,6 +2376,34 @@ async fn the_walk_surfaces_a_lost_function_call_or_reasoning_item_member() {
             "{kind}"
         );
     }
+}
+
+/// Positive control for a function tool member: the member the deposited
+/// egress body lost comes back as a request-leg finding at its own path, or
+/// a clean walk of the tool-member cases proves nothing.
+#[tokio::test]
+async fn the_walk_surfaces_a_lost_function_tool_member() {
+    let probe = Case {
+        tap_drop: Some("/tools/0/future_member"),
+        ..case(
+            "responses/function-tool-member",
+            Ingress::Responses,
+            function_tool_member_body(),
+            responses_stream(),
+            responses_provider,
+        )
+    };
+
+    let walked = Box::pin(walk_all(vec![probe])).await;
+
+    assert_eq!(walked.total(), 2, "one request, both legs");
+    assert_eq!(
+        walked.unexplained(),
+        [format!(
+            "{} request /tools/0/future_member missing (responses/function-tool-member)",
+            Ingress::Responses.lane()
+        )]
+    );
 }
 
 /// Positive control on each Bedrock lane: a member the deposited egress body

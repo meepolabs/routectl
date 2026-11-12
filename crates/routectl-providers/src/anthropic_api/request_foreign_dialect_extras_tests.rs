@@ -475,6 +475,47 @@ fn a_responses_client_carried_member_is_absent_declared_and_counted_once_on_ever
     }
 }
 
+/// A Responses client's function tool, normalized as its ingress does,
+/// carries every member outside the Responses function shape, including
+/// ones `CustomTool` types for an Anthropic client (`defer_loading`). On an
+/// Anthropic-shape wire none reaches the tool: each is declared removed and
+/// the request counts once.
+#[test]
+fn a_responses_function_tool_member_is_absent_declared_and_counted_once_on_every_anthropic_shape_egress()
+ {
+    // Arrange
+    let mut req = request(RequestProvenance::ResponsesIngress, json!({}));
+    let declared = json!({"type": "function", "name": "lookup",
+                          "parameters": {"type": "object"},
+                          "future_member": {"n": "caf\u{e9}"}, "defer_loading": true});
+    req.tools = Some(vec![routectl_core::ToolDef::Custom(
+        routectl_core::CustomTool::from_responses_function(&declared).expect("a function"),
+    )]);
+
+    for egress in egresses() {
+        // Act
+        let (wire, delta) = wire_and_delta(&egress, &req);
+        let edits = declared_edits(&egress, req.clone());
+
+        // Assert
+        let text = wire.to_string();
+        assert!(!text.contains("future_member"), "{}: {text}", egress.lane);
+        assert!(!text.contains("defer_loading"), "{}: {text}", egress.lane);
+        for path in ["/tools/*/future_member", "/tools/*/defer_loading"] {
+            assert!(
+                edits.contains(&(
+                    EditSite::ManagedExtrasStrip,
+                    path.to_owned(),
+                    EditKind::Remove
+                )),
+                "{} {path}: {edits:?}",
+                egress.lane
+            );
+        }
+        assert_eq!(delta, 1, "{}", egress.lane);
+    }
+}
+
 #[test]
 fn a_chat_client_carried_member_is_declared_at_its_messages_path() {
     // Arrange

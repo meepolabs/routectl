@@ -31,7 +31,9 @@ use super::system::{flush_fingerprint_tally, record_developer_turn_withhold, tra
 use super::tools::{translate_tool_choice, translate_tools};
 use super::types::{ResponseInput, ResponseInputItem, ResponsesContentItem, ResponsesRequest};
 use super::{AuthKind, OpenAiResponsesConfig, extras};
-use crate::managed_keys::{ForeignDialectExtraTally, withhold_carried_members};
+use crate::managed_keys::{
+    ForeignDialectExtraTally, declare_foreign_keys, withhold_carried_members,
+};
 use crate::translation_drop_metrics::{
     ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
 };
@@ -51,7 +53,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // worst.
     record_translation_lane_seen(super::LANE);
     count_unmodeled_thinking_type(req);
-    withhold_foreign_carried_members(&cfg.id, cfg.auth_kind, req);
+    withhold_foreign_extras(&cfg.id, cfg.auth_kind, req);
     log_dropped_cache_control(req);
     count_withheld_sampling_params(req);
     // The canonical sampling knobs have no Responses-API home and are gated
@@ -626,21 +628,28 @@ const fn sampling_params(req: &ChatRequest) -> [(&'static str, bool); 2] {
     ]
 }
 
-/// Withhold the members a client of another dialect carried on its messages,
-/// parts, tools and system blocks: they were spelled for that dialect's wire,
-/// so no input item or tool here emits them. Each is declared removed and
-/// the request counts once. A Responses client's members are this wire's own,
-/// and the input build decides them per surface. Names keys, never values.
+/// Withhold what a client of another dialect spelled for that dialect's
+/// wire: its top-level extras keys outside the ones every surface applies,
+/// and the members it carried on its messages, parts, tools and system
+/// blocks. No field, input item or tool here emits them. Each is declared
+/// removed and the request counts once, whichever of the two it withheld.
+/// A Responses client's members are this wire's own, and the extras merge
+/// and input build decide them per surface. Runs ahead of every fallible
+/// step, so a request that then fails still counts. Names keys, never
+/// values.
 /// TRANSLATION-DROP: lane=openai-responses class=foreign_dialect_extra test=a_foreign_client_carried_member_is_absent_declared_and_counted_once_on_every_responses_surface
-fn withhold_foreign_carried_members(id: &str, auth_kind: AuthKind, req: &ChatRequest) {
+fn withhold_foreign_extras(id: &str, auth_kind: AuthKind, req: &ChatRequest) {
     let mut withheld = ForeignDialectExtraTally::default();
+    let top_level = extras::foreign_top_level_keys(req, auth_kind);
+    withheld.record(&top_level);
+    declare_foreign_keys(crate::wire_declare::tap(req), &top_level);
     withhold_carried_members(req, auth_kind.egress_kind(), &mut withheld);
     if withheld.dropped() {
         record_translation_drop(super::LANE, "foreign_dialect_extra");
         tracing::debug!(
             provider = id,
             keys = %withheld.keys_for_log(),
-            "openai-responses egress: carried members from another ingress dialect dropped",
+            "openai-responses egress: client extras from another ingress dialect dropped",
         );
     }
 }

@@ -24,7 +24,9 @@
 //! ChatGPT-OAuth and Bedrock Mantle surfaces keep the allowlist. Every key a
 //! surface does not forward is withheld, declared as a Remove, and the
 //! request counts once as `unknown_member_withheld`. A key from another
-//! ingress dialect was spelled for another wire and stays unforwarded.
+//! ingress dialect was spelled for another wire and stays unforwarded
+//! ([`foreign_top_level_keys`]); the request-level foreign withhold declares
+//! and counts it.
 //!
 //! Prompt caching: `prompt_cache_options` and `prompt_cache_retention`
 //! forward only for a request the Responses ingress produced, and only on
@@ -246,6 +248,37 @@ pub(super) fn merge_provider_extras(
 /// Extras keys another step of this egress reads into a typed field.
 const CONSUMED_ELSEWHERE: &[&str] = &["reasoning", "parallel_tool_calls"];
 
+/// Allowlisted extras keys the merge applies whatever the request's ingress
+/// dialect. The two prompt-cache fields are not among them: they forward
+/// only for a Responses client.
+const APPLIED_FROM_ANY_INGRESS: &[&str] = &[
+    "prompt_cache_key",
+    "service_tier",
+    "text",
+    "include",
+    "store",
+    "client_metadata",
+];
+
+/// The top-level extras keys of `req` that no surface of `auth_kind`
+/// forwards because a client of another ingress dialect spelled them for
+/// its own wire: every key outside [`APPLIED_FROM_ANY_INGRESS`] and
+/// [`CONSUMED_ELSEWHERE`]. Empty for a request whose extras are spelled for
+/// this wire. [`merge_provider_extras`] leaves exactly these unapplied.
+pub(super) fn foreign_top_level_keys(req: &ChatRequest, auth_kind: AuthKind) -> Vec<&str> {
+    if TopLevelCarry::of(req.routectl_internal.provenance, auth_kind) != TopLevelCarry::Foreign {
+        return Vec::new();
+    }
+    req.provider_extras
+        .as_ref()
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(Map::keys)
+        .map(String::as_str)
+        .filter(|key| !APPLIED_FROM_ANY_INGRESS.contains(key) && !CONSUMED_ELSEWHERE.contains(key))
+        .collect()
+}
+
 /// What the egress does with a top-level extras key outside the allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TopLevelCarry {
@@ -285,7 +318,7 @@ impl TopLevelCarry {
             Self::Allowlist => unforwarded.record(key, EditSite::AuthSurfaceGate),
             // A key a client of another dialect sent names a member of that
             // dialect's wire, which no Responses surface defines.
-            // TRANSLATION-DROP: structural -- a key from another ingress dialect was spelled for another wire, not for this one
+            // TRANSLATION-DROP: structural -- declared and counted once per request by the request-level foreign withhold, from foreign_top_level_keys
             Self::Foreign => {}
         }
     }

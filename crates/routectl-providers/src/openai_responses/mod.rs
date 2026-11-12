@@ -77,7 +77,11 @@ mod quota_headers;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod response_types;
+pub use response_types::{
+    OUTPUT_FUNCTION_CALL_ITEM_KEYS, OUTPUT_MESSAGE_ITEM_KEYS, OUTPUT_REASONING_ITEM_KEYS,
+};
 pub(crate) mod sse;
+pub use sse::{EVENT_IDENTITY_MEMBERS, MANAGED_EVENT_MEMBERS};
 pub(crate) mod system;
 pub(crate) mod tools;
 pub(crate) mod types;

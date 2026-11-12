@@ -410,22 +410,58 @@ fn allowlisted_extras_and_message_members_count_no_withhold() {
     assert_eq!(wire["input"][0]["id"], json!("msg_user_1"), "{wire}");
 }
 
-/// A top-level key from another ingress dialect stays off every surface
-/// and is not this class's to count.
+/// A top-level key from another ingress dialect, alone on its request,
+/// stays off every surface, is declared removed at its own pointer, and
+/// counts the request once as a foreign-dialect extra, never as this
+/// lane's own withhold. An allowlisted key every surface applies is
+/// neither declared nor counted.
 #[test]
-fn a_top_level_key_from_another_dialect_is_neither_forwarded_nor_counted_here() {
-    // Arrange
-    let mut req = req_with(vec![user_text("hi")]);
-    req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
-    req.provider_extras = Some(json!({"context_management": {"edits": []}}));
+fn an_isolated_top_level_key_from_another_dialect_is_declared_and_counted_once() {
+    use routectl_core::RequestProvenance;
+    use routectl_core::wire_check::{EditKind, EditSite};
+    for (surface, cfg) in [
+        ("api-key", cfg_api_key()),
+        ("chatgpt-oauth", cfg()),
+        ("bedrock-mantle", cfg_bedrock_mantle()),
+    ] {
+        for provenance in [
+            RequestProvenance::AnthropicIngress,
+            RequestProvenance::OpenaiIngress,
+        ] {
+            // Arrange
+            let row = format!("{surface} {provenance:?}");
+            let mut req = req_with(vec![user_text("hi")]);
+            req.routectl_internal.provenance = provenance;
+            req.provider_extras = Some(json!({"context_management": {"edits": []},
+                                              "service_tier": "flex"}));
+            let foreign_before = responses_drop_count("foreign_dialect_extra");
+            let withheld_before = responses_drop_count(CARRIER_CLASS);
 
-    // Act
-    let wire = crate::translation_drop_metrics::assert_lane_ran_uncounted(
-        "openai-responses",
-        CARRIER_CLASS,
-        || translate_to_json(&cfg_api_key(), &req),
-    );
+            // Act
+            let (wire, edits) = translate_declaring(&cfg, &req);
 
-    // Assert
-    assert!(wire.get("context_management").is_none(), "{wire}");
+            // Assert
+            assert!(wire.get("context_management").is_none(), "{row}: {wire}");
+            let removed = (
+                EditSite::ManagedExtrasStrip,
+                "/context_management".to_owned(),
+                EditKind::Remove,
+            );
+            assert!(edits.contains(&removed), "{row}: {edits:?}");
+            assert!(
+                !edits.iter().any(|(_, path, _)| path == "/service_tier"),
+                "{row}: an applied key is not withheld: {edits:?}"
+            );
+            assert_eq!(
+                responses_drop_count("foreign_dialect_extra") - foreign_before,
+                1,
+                "{row}"
+            );
+            assert_eq!(
+                responses_drop_count(CARRIER_CLASS) - withheld_before,
+                0,
+                "{row}"
+            );
+        }
+    }
 }

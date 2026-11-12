@@ -63,8 +63,8 @@ pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 use super::empty_optional::EmptyOptionalFilter;
 use super::response::{cache_details, map_finish_reason, upstream_error_from_failed};
 use super::response_types::{
-    FUNCTION_CALL_ITEM_KEYS, MESSAGE_ITEM_KEYS, ResponsesResponse, ResponsesStreamEvent,
-    item_members, reasoning_item_members,
+    OUTPUT_FUNCTION_CALL_ITEM_KEYS, OUTPUT_MESSAGE_ITEM_KEYS, ResponsesResponse,
+    ResponsesStreamEvent, item_members, reasoning_item_members,
 };
 use super::{AuthKind, lane_format_tag};
 
@@ -790,12 +790,12 @@ impl ResponsesStreamState {
             "message" => (
                 &mut by_item.message,
                 identity("id"),
-                item_members(item, MESSAGE_ITEM_KEYS),
+                item_members(item, OUTPUT_MESSAGE_ITEM_KEYS),
             ),
             "function_call" => (
                 &mut by_item.function_call,
                 identity("call_id"),
-                item_members(item, FUNCTION_CALL_ITEM_KEYS),
+                item_members(item, OUTPUT_FUNCTION_CALL_ITEM_KEYS),
             ),
             "reasoning" => (
                 &mut by_item.reasoning,
@@ -1413,6 +1413,8 @@ impl UnwrapOrDefaultResp for serde_json::Result<ResponsesResponse> {
 
 #[path = "sse_carriage.rs"]
 mod carriage;
+
+pub use carriage::{EVENT_IDENTITY_MEMBERS, MANAGED_EVENT_MEMBERS};
 
 #[cfg(test)]
 #[path = "sse_tests.rs"]

@@ -7,7 +7,7 @@ use routectl_core::{ChatChunk, OpaqueSseEvent, RequestProvenance};
 use serde_json::{Map, Value, json};
 
 use super::ResponsesStreamState;
-use super::carriage::{KNOWN_EVENT_TYPES, MANAGED_EVENT_KEYS};
+use super::carriage::{EVENT_IDENTITY_MEMBERS, is_known_event_type};
 use crate::openai_responses::AuthKind;
 
 fn state(provenance: RequestProvenance) -> ResponsesStreamState {
@@ -316,7 +316,34 @@ fn every_event_type_the_ingress_emits_is_known_to_the_carriage() {
         "response.completed",
         "response.failed",
     ] {
-        assert!(KNOWN_EVENT_TYPES.contains(&emitted), "{emitted}");
+        assert!(is_known_event_type(emitted), "{emitted}");
     }
-    assert!(MANAGED_EVENT_KEYS.contains(&"sequence_number"));
+    assert!(EVENT_IDENTITY_MEMBERS.contains(&"sequence_number"));
+}
+
+/// A name the render owns on one event type is an upstream member on
+/// another: `delta` rides an `output_item.added` that carries one, while
+/// the same event's `item` stays managed.
+#[test]
+fn a_member_managed_on_another_event_type_is_carried_on_this_one() {
+    // Arrange
+    let mut state = state(RequestProvenance::ResponsesIngress);
+    let mut added = message_added();
+    added["delta"] = json!("caf\u{e9}");
+
+    // Act
+    let per_event = drive(&mut state, &[created(), added]);
+
+    // Assert
+    let carried = carried(&per_event[1]);
+    let Some(OpaqueSseEvent::KnownEventExtras { members, .. }) = carried.first() else {
+        panic!("members carried: {carried:?}");
+    };
+    assert_eq!(
+        members.get("delta"),
+        Some(&json!("caf\u{e9}")),
+        "{members:?}"
+    );
+    assert!(members.get("output_index").is_none(), "{members:?}");
+    assert!(members.get("sequence_number").is_none(), "{members:?}");
 }

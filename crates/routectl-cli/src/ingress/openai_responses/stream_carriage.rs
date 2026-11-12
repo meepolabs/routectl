@@ -44,7 +44,7 @@ const FUNCTION_CALL: &str = "function_call";
 
 /// Members a carried event's declaration skips: those this render
 /// re-stamps on every event it emits.
-const RESTAMPED_KEYS: &[&str] = &["type", "sequence_number", OUTPUT_INDEX, ITEM_ID];
+const RESTAMPED_KEYS: &[&str] = routectl_providers::openai_responses::EVENT_IDENTITY_MEMBERS;
 
 /// Most carried events held for an item this render has not opened yet.
 const MAX_HELD_EVENTS: usize = 1024;

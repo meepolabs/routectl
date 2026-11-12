@@ -2,7 +2,8 @@ use serde_json::{Map, Value, json};
 
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
-    ChatChunk, Error, OpeningUsage, ReasoningDetail, Result, UsageDelta, renders_unknowns,
+    ChatChunk, Error, OpaqueSseEvent, OpeningUsage, ReasoningDetail, Result, UsageDelta,
+    renders_unknowns,
 };
 
 use crate::ingress::{
@@ -107,10 +108,11 @@ fn render_chunk_events(
         return Ok(events);
     }
     declare_opening_carry(&chunk, edits);
-    if !renders_unknowns(IngressDialect::Anthropic, chunk.upstream_meta.as_ref())
-        && let Some(usage) = chunk.usage.as_mut()
-    {
-        usage.extras.clear();
+    if !renders_unknowns(IngressDialect::Anthropic, chunk.upstream_meta.as_ref()) {
+        if let Some(usage) = chunk.usage.as_mut() {
+            usage.extras.clear();
+        }
+        drop_carried_events(&mut chunk.opaque_events);
     }
 
     // Cache id/model from the first chunk that carries them; both
@@ -222,6 +224,20 @@ fn render_chunk_events(
     }
 
     Ok(events)
+}
+
+/// Remove the carried events and members of a chunk not parsed from an
+/// Anthropic body: this render emits them only for its own dialect. The
+/// opaque content blocks the Anthropic egress captured stay.
+fn drop_carried_events(opaque_events: &mut Vec<OpaqueSseEvent>) {
+    opaque_events.retain(|event| {
+        !matches!(
+            event,
+            OpaqueSseEvent::KnownEventExtras { .. }
+                | OpaqueSseEvent::UnknownEvent { .. }
+                | OpaqueSseEvent::UnknownBlockDelta { .. }
+        )
+    });
 }
 
 /// Emit the stream's `message_start`. With `opening`, its usage is the

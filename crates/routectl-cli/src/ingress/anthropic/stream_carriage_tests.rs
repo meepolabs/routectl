@@ -31,11 +31,16 @@ fn extras(event_type: &str, index: Option<u32>, value: Value) -> OpaqueSseEvent 
     }
 }
 
+/// A chunk carrying `opaque`, stamped as parsed from an Anthropic body when
+/// it carries anything, the way the Anthropic-API egress builds it.
 fn carrier(opaque: Vec<OpaqueSseEvent>) -> ChatChunk {
+    let upstream_meta = (!opaque.is_empty())
+        .then(|| UpstreamMeta::default().with_wire_dialect(IngressDialect::Anthropic));
     ChatChunk {
         id: "msg_1".into(),
         model: "m".into(),
         opaque_events: opaque,
+        upstream_meta,
         ..Default::default()
     }
 }
@@ -118,6 +123,8 @@ fn carried_tool_stream() -> Vec<ChatChunk> {
                 Some(0),
                 json!({"type": "tool_use", "caller": {"type": "direct"}}),
             )];
+            start.upstream_meta =
+                Some(UpstreamMeta::default().with_wire_dialect(IngressDialect::Anthropic));
             start
         },
         tool("{}"),
@@ -762,4 +769,53 @@ fn withheld_count() -> u64 {
         .into_iter()
         .find(|e| e.lane == "anthropic" && e.drop_class == "unknown_member_withheld")
         .map_or(0, |e| e.drop_count)
+}
+
+/// Carried events on a chunk not parsed from an Anthropic body never reach
+/// an Anthropic client: no unknown event, no unknown block delta, no
+/// message_start member. Positive control: the stamped chunk's do.
+#[test]
+fn carried_events_render_only_from_an_anthropic_body() {
+    let rows = [
+        ("unstamped", None, false),
+        ("responses body", Some(IngressDialect::Responses), false),
+        ("chat body", Some(IngressDialect::Chat), false),
+        ("anthropic body", Some(IngressDialect::Anthropic), true),
+    ];
+    for (name, dialect, expected) in rows {
+        // Arrange
+        let stamp = |mut chunk: ChatChunk| {
+            chunk.upstream_meta = dialect.map(|d| UpstreamMeta::default().with_wire_dialect(d));
+            chunk
+        };
+        let chunks = vec![
+            stamp(role(vec![extras(
+                "message_start",
+                None,
+                json!({"zz_start_member": 1}),
+            )])),
+            text("ok"),
+            stamp(carrier(vec![
+                OpaqueSseEvent::UnknownEvent {
+                    event_type: "zz_future_event".into(),
+                    event: json!({"type": "zz_future_event"}),
+                },
+                OpaqueSseEvent::UnknownBlockDelta {
+                    upstream_index: 0,
+                    delta: json!({"type": "zz_future_delta"}),
+                },
+            ])),
+        ];
+
+        // Act
+        let (events, _) = render(chunks);
+
+        // Assert
+        let wire: String = events.iter().map(|e| e.data.as_str()).collect();
+        assert_eq!(wire.contains("zz_start_member"), expected, "{name}: {wire}");
+        assert_eq!(wire.contains("zz_future_event"), expected, "{name}: {wire}");
+        if !expected {
+            assert!(!wire.contains("zz_future_delta"), "{name}: {wire}");
+        }
+    }
 }

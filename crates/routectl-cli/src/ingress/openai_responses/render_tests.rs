@@ -1366,3 +1366,61 @@ fn a_carried_content_array_never_replaces_the_rendered_one_or_reaches_another_di
         assert!(output(&v)[0].get("content").is_none(), "{row}: {v}");
     }
 }
+
+/// Each output item's reserved names, which the egress also leaves out of
+/// the item's carried members, are exactly the members the real item
+/// builders write, every optional member present.
+#[test]
+fn each_output_items_reserved_names_are_what_its_builder_writes() {
+    use std::collections::BTreeMap;
+    let reasoning = super::build_reasoning_items(&[
+        ReasoningDetail {
+            kind: ReasoningDetailKind::Summary,
+            id: Some("rs_1".into()),
+            format: Some(OPENAI_RESPONSES_V1.into()),
+            index: Some(0),
+            payload: json!({"text": "s"}),
+        },
+        ReasoningDetail {
+            kind: ReasoningDetailKind::Text,
+            id: Some("rs_1".into()),
+            format: Some(OPENAI_RESPONSES_V1.into()),
+            index: Some(1),
+            payload: json!({"text": "t"}),
+        },
+        ReasoningDetail {
+            kind: ReasoningDetailKind::Encrypted,
+            id: Some("rs_1".into()),
+            format: Some(OPENAI_RESPONSES_V1.into()),
+            index: Some(2),
+            payload: json!({"encrypted_content": "sig"}),
+        },
+    ])
+    .remove(0);
+    let call = super::stamp_namespace(
+        super::function_call_item(&json!({"id": "c1", "type": "function",
+                                          "function": {"name": "f", "arguments": "{}"}})),
+        &BTreeMap::from([("f".to_owned(), "ns".to_owned())]),
+    );
+    let rows: [(&str, Value, &[&str]); 3] = [
+        (
+            "message",
+            super::message_item(Some("msg_1"), "completed", Vec::new()),
+            super::RESERVED_MESSAGE_ITEM,
+        ),
+        ("function_call", call, super::RESERVED_FUNCTION_CALL_ITEM),
+        ("reasoning", reasoning, super::RESERVED_REASONING_ITEM),
+    ];
+    for (row, item, reserved) in rows {
+        let mut written: Vec<&str> = item
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut reserved = reserved.to_vec();
+        written.sort_unstable();
+        reserved.sort_unstable();
+        assert_eq!(written, reserved, "{row}");
+    }
+}

@@ -21,56 +21,67 @@ use super::ResponsesStreamState;
 use crate::openai_responses::response_types::ResponsesStreamEvent;
 
 /// The stream event types whose content the canonical chunk carries, or
-/// the Responses render rebuilds from it: the parser's own events, and the
-/// part and done events the render synthesizes for every item. Only their
-/// unmodeled members are carried; an event of any other type is carried
-/// whole.
-pub(super) const KNOWN_EVENT_TYPES: &[&str] = &[
-    "response.created",
-    "response.in_progress",
-    "response.output_item.added",
-    "response.output_item.done",
-    "response.content_part.added",
-    "response.content_part.done",
-    "response.output_text.delta",
-    "response.output_text.done",
-    "response.reasoning_summary_part.added",
-    "response.reasoning_summary_part.done",
-    "response.reasoning_summary_text.delta",
-    "response.reasoning_summary_text.done",
-    "response.reasoning_text.delta",
-    "response.reasoning_text.done",
-    "response.function_call_arguments.delta",
-    "response.function_call_arguments.done",
-    "response.custom_tool_call_input.delta",
-    "response.custom_tool_call_input.done",
-    "response.completed",
-    "response.incomplete",
-    "response.failed",
-    "response.cancelled",
+/// the Responses render rebuilds from it (the parser's own events, and the
+/// part and done events the render synthesizes for every item), each with
+/// the members of that event type the render writes itself or whose
+/// content reaches it through the canonical chunk. Only an event's other
+/// members are carried; an event of a type not listed is carried whole.
+/// The members of one event type are never stripped from another: a name
+/// the render owns on one event is an upstream member on any other.
+pub const MANAGED_EVENT_MEMBERS: &[(&str, &[&str])] = &[
+    ("response.created", &["response"]),
+    ("response.in_progress", &["response"]),
+    ("response.output_item.added", &["item"]),
+    ("response.output_item.done", &["item"]),
+    ("response.content_part.added", &["content_index", "part"]),
+    ("response.content_part.done", &["content_index", "part"]),
+    ("response.output_text.delta", &["content_index", "delta"]),
+    ("response.output_text.done", &["content_index", "text"]),
+    (
+        "response.reasoning_summary_part.added",
+        &["summary_index", "part"],
+    ),
+    (
+        "response.reasoning_summary_part.done",
+        &["summary_index", "part"],
+    ),
+    (
+        "response.reasoning_summary_text.delta",
+        &["summary_index", "delta"],
+    ),
+    (
+        "response.reasoning_summary_text.done",
+        &["summary_index", "text"],
+    ),
+    ("response.reasoning_text.delta", &["content_index", "delta"]),
+    ("response.reasoning_text.done", &["content_index", "text"]),
+    ("response.function_call_arguments.delta", &["delta"]),
+    ("response.function_call_arguments.done", &["arguments"]),
+    ("response.custom_tool_call_input.delta", &["delta"]),
+    ("response.custom_tool_call_input.done", &[]),
+    ("response.completed", &["response"]),
+    ("response.incomplete", &["response"]),
+    ("response.failed", &["response"]),
+    ("response.cancelled", &["response"]),
 ];
+
+/// Members the Responses ingress manages on every event it emits: the
+/// event's `type` and `sequence_number`, and the identity of the item it
+/// belongs to, which the ingress re-stamps to its own item.
+pub const EVENT_IDENTITY_MEMBERS: &[&str] = &["type", "sequence_number", "output_index", "item_id"];
 
 /// Event types never carried: the stream's error and terminal handling
 /// stays the parser's.
 const NEVER_CARRIED: &[&str] = &["error"];
 
-/// Members of a modeled event the Responses ingress writes itself, or
-/// whose content reaches it through the canonical chunk.
-pub(super) const MANAGED_EVENT_KEYS: &[&str] = &[
-    "type",
-    "sequence_number",
-    "output_index",
-    "item_id",
-    "content_index",
-    "summary_index",
-    "call_id",
-    "delta",
-    "text",
-    "arguments",
-    "item",
-    "part",
-    "response",
-];
+/// The members of a known `event_type` event the ingress manages beside its
+/// identity; `None` for an event type no entry names.
+fn managed_event_members(event_type: &str) -> Option<&'static [&'static str]> {
+    MANAGED_EVENT_MEMBERS
+        .iter()
+        .find(|(known, _)| *known == event_type)
+        .map(|(_, members)| *members)
+}
 
 const OUTPUT_ITEM_ADDED: &str = "response.output_item.added";
 
@@ -80,7 +91,7 @@ pub(super) const ITEM_IDENTITY_KEY: &str = "item";
 /// Whether the parser or the Responses render models events of
 /// `event_type`.
 pub(super) fn is_known_event_type(event_type: &str) -> bool {
-    KNOWN_EVENT_TYPES.contains(&event_type)
+    managed_event_members(event_type).is_some()
 }
 
 /// Whether an event of `event_type` rides whole to a Responses client.
@@ -117,13 +128,15 @@ impl ResponsesStreamState {
         else {
             return None;
         };
-        if is_carried_whole(kind) {
+        let Some(managed) = managed_event_members(kind) else {
             return Some(OpaqueSseEvent::UnknownEvent {
                 event_type: kind.to_owned(),
                 event: Value::Object(members),
             });
-        }
-        members.retain(|key, _| !MANAGED_EVENT_KEYS.contains(&key.as_str()));
+        };
+        members.retain(|key, _| {
+            !EVENT_IDENTITY_MEMBERS.contains(&key.as_str()) && !managed.contains(&key.as_str())
+        });
         if kind == OUTPUT_ITEM_ADDED
             && let Some(item) = event.item.as_ref()
         {

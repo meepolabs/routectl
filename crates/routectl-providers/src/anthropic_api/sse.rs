@@ -17,7 +17,7 @@ use routectl_core::{
 };
 
 use super::response::map_stop_reason;
-use super::sse_carriage::{MESSAGE_START_KEYS, closing_meta, message_delta_members};
+use super::sse_carriage::{MESSAGE_START_KEYS, carried_meta, closing_meta, message_delta_members};
 use super::sse_opaque::{MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK, OpaqueCapture};
 use super::types::{SseDeltaUsage, SseEvent};
 use super::types_sse::is_known_event_type;
@@ -316,6 +316,9 @@ impl SseState {
         Ok(emitted.map(|mut chunk| {
             if !self.pending_opaque.is_empty() {
                 chunk.opaque_events = std::mem::take(&mut self.pending_opaque);
+            }
+            if !carried.is_empty() {
+                chunk.upstream_meta = carried_meta(chunk.upstream_meta.take());
             }
             chunk.opaque_events.extend(carried);
             chunk

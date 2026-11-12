@@ -98,8 +98,9 @@ fn a_foreign_client_carried_member_is_absent_declared_and_counted_once_on_every_
 
 #[test]
 fn a_foreign_top_level_key_beside_a_carried_member_counts_the_responses_request_once() {
-    // Arrange -- the top-level key is withheld by the extras merge without a
-    // count of its own; the carried members count the request.
+    use routectl_core::wire_check::{EditKind, EditSite};
+    // Arrange -- the top-level key and the carried members share the
+    // request's one foreign-dialect tally.
     let req = foreign_carrying(
         routectl_core::RequestProvenance::AnthropicIngress,
         json!({"container": "zz-container-tell"}),
@@ -107,12 +108,18 @@ fn a_foreign_top_level_key_beside_a_carried_member_counts_the_responses_request_
     let before = responses_drop_count(FOREIGN_CLASS);
 
     // Act
-    let wire = translate_to_json(&cfg_api_key(), &req);
+    let (wire, edits) = translate_declaring(&cfg_api_key(), &req);
 
     // Assert
     let text = wire.to_string();
     assert!(!text.contains("zz-container-tell"), "{text}");
     assert!(!text.contains("zz-message-tell"), "{text}");
+    let removed = (
+        EditSite::ManagedExtrasStrip,
+        "/container".to_owned(),
+        EditKind::Remove,
+    );
+    assert!(edits.contains(&removed), "{edits:?}");
     assert_eq!(responses_drop_count(FOREIGN_CLASS) - before, 1);
 }
 

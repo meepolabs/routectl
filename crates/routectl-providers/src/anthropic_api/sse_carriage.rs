@@ -60,6 +60,12 @@ pub(super) fn closing_meta(
     if usage.is_none_or(|u| u.extras.is_empty()) {
         return meta;
     }
+    carried_meta(meta)
+}
+
+/// `meta` stamped as parsed from an Anthropic body, for a chunk carrying
+/// members or events only an Anthropic render emits.
+pub(super) fn carried_meta(meta: Option<UpstreamMeta>) -> Option<UpstreamMeta> {
     let stamp = UpstreamMeta::default().with_wire_dialect(IngressDialect::Anthropic);
     Some(match meta {
         Some(meta) => meta.merge(stamp),

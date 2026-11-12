@@ -114,7 +114,7 @@ pub enum ResponseOutputItem {
         #[allow(dead_code)]
         status: Option<String>,
         content: Vec<ResponsesOutputContent>,
-        /// The item's members outside [`MESSAGE_ITEM_KEYS`].
+        /// The item's members outside [`OUTPUT_MESSAGE_ITEM_KEYS`].
         members: Map<String, Value>,
     },
     Reasoning {
@@ -129,7 +129,7 @@ pub enum ResponseOutputItem {
         /// item.
         #[allow(dead_code)]
         status: Option<String>,
-        /// The item's members outside [`REASONING_ITEM_KEYS`].
+        /// The item's members outside [`OUTPUT_REASONING_ITEM_KEYS`].
         members: Map<String, Value>,
     },
     FunctionCall {
@@ -143,7 +143,7 @@ pub enum ResponseOutputItem {
         /// `function_call` item.
         #[allow(dead_code)]
         status: Option<String>,
-        /// The item's members outside [`FUNCTION_CALL_ITEM_KEYS`].
+        /// The item's members outside [`OUTPUT_FUNCTION_CALL_ITEM_KEYS`].
         members: Map<String, Value>,
     },
     /// Forward-compat catchall. Preserves the original `{type, ...}`
@@ -177,7 +177,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 // type is still an error (the translator depends on
                 // typed fields), but UNKNOWN types fall to Other and
                 // preserve their JSON.
-                let members = item_members(&value, MESSAGE_ITEM_KEYS);
+                let members = item_members(&value, OUTPUT_MESSAGE_ITEM_KEYS);
                 let m: MessageItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(Self::Message {
@@ -202,7 +202,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 })
             }
             "function_call" => {
-                let members = item_members(&value, FUNCTION_CALL_ITEM_KEYS);
+                let members = item_members(&value, OUTPUT_FUNCTION_CALL_ITEM_KEYS);
                 let f: FunctionCallItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(Self::FunctionCall {
@@ -219,19 +219,22 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
     }
 }
 
-/// The `message` item members the Responses render writes itself: its
-/// `status` is the render's own item lifecycle.
-pub(super) const MESSAGE_ITEM_KEYS: &[&str] = &["type", "id", "role", "status", "content"];
+/// The `message` output item members the Responses render writes itself,
+/// whether or not it emits them: its `status` is the render's own item
+/// lifecycle. Every other member is carried back to a Responses client.
+pub const OUTPUT_MESSAGE_ITEM_KEYS: &[&str] = &["type", "id", "role", "status", "content"];
 
-/// The `reasoning` item members the Responses render writes itself. The
-/// item's `status` is not among them, so it is carried.
-pub(super) const REASONING_ITEM_KEYS: &[&str] =
+/// The `reasoning` output item members the Responses render writes itself,
+/// whether or not it emits them. The item's `status` is not among them, so
+/// it is carried.
+pub const OUTPUT_REASONING_ITEM_KEYS: &[&str] =
     &["type", "id", "summary", "content", "encrypted_content"];
 
-/// The `function_call` item members the Responses render writes itself:
-/// `namespace` is stamped from the client's own tool declarations. The
-/// item's `id` and `status` are not among them, so they are carried.
-pub(super) const FUNCTION_CALL_ITEM_KEYS: &[&str] =
+/// The `function_call` output item members the Responses render writes
+/// itself, whether or not it emits them: `namespace` is stamped from the
+/// client's own tool declarations. The item's `id` and `status` are not
+/// among them, so they are carried.
+pub const OUTPUT_FUNCTION_CALL_ITEM_KEYS: &[&str] =
     &["type", "call_id", "name", "arguments", "namespace"];
 
 /// The members of the output item `item` that `owned` does not name, for a
@@ -249,11 +252,11 @@ pub(super) fn item_members(item: &Value, owned: &[&str]) -> Map<String, Value> {
 }
 
 /// The members of the `reasoning` output item `item` that a Responses client
-/// gets back on that item: those [`REASONING_ITEM_KEYS`] does not name, and
+/// gets back on that item: those [`OUTPUT_REASONING_ITEM_KEYS`] does not name, and
 /// an empty `content` array. The render rebuilds `content` from the item's
 /// reasoning text, so it has no entry to rebuild an empty one from.
 pub(super) fn reasoning_item_members(item: &Value) -> Map<String, Value> {
-    let mut members = item_members(item, REASONING_ITEM_KEYS);
+    let mut members = item_members(item, OUTPUT_REASONING_ITEM_KEYS);
     if let Some(content) = item
         .get("content")
         .filter(|c| c.as_array().is_some_and(Vec::is_empty))

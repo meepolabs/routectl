@@ -24,14 +24,15 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 
 use routectl_core::schema::ResponsesNamespaces;
-use routectl_core::wire_check::{EditKind, EditSite, WireTap};
+use routectl_core::wire_check::{EditKind, EditSite, WireTap, forwards_unknowns};
 use routectl_core::{ChatRequest, CustomTool, ToolDef, sanitize_for_log};
 
 use super::AuthKind;
 use super::extras::UnknownMemberWithheldTally;
-use super::types::{ResponsesFunctionTag, ResponsesTool};
+use super::types::{CarriedMembers, FUNCTION_TOOL_KEYS, ResponsesFunctionTag, ResponsesTool};
+use crate::managed_keys::responses_tool_members;
 use crate::translation_drop_metrics::record_translation_drop;
-use crate::wire_declare::declare;
+use crate::wire_declare::{declare, member_pointer};
 
 /// Responses `input[]` item kind that declares tools inline. The ingress
 /// merges its function declarations into `req.tools` AND preserves the item
@@ -138,18 +139,47 @@ fn splice_containers(out: &mut Vec<ResponsesTool>, namespaces: &ResponsesNamespa
     }
 }
 
+/// What becomes of the members a Responses client declared on a function
+/// tool beyond its typed ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolMembers {
+    /// Emitted beside the typed members, which win on a name clash.
+    Emit,
+    /// Not emitted: withheld on Bedrock Mantle, or spelled for another
+    /// dialect's wire (the request-level carried-member withhold counts
+    /// those).
+    Omit,
+}
+
+impl ToolMembers {
+    fn of(req: &ChatRequest, auth_kind: AuthKind) -> Self {
+        let same_dialect =
+            forwards_unknowns(req.routectl_internal.provenance, auth_kind.egress_kind());
+        if same_dialect && auth_kind != AuthKind::BedrockMantle {
+            Self::Emit
+        } else {
+            Self::Omit
+        }
+    }
+}
+
 /// The flat Responses shape of a canonical function tool.
-fn function_tool(c: &CustomTool) -> ResponsesTool {
+fn function_tool(c: &CustomTool, members: ToolMembers) -> ResponsesTool {
     // Flat Responses shape: {type, name, description?, parameters, strict?}
     // The chat-completions nested shape ({type, function:{name,...}}) is
     // rejected by the chatgpt-oauth backend with
     // "Missing required parameter: 'tools[0].name'" (smoke 2026-05-12).
+    let carried = match members {
+        ToolMembers::Emit => CarriedMembers::new(responses_tool_members(c), FUNCTION_TOOL_KEYS),
+        ToolMembers::Omit => CarriedMembers::default(),
+    };
     ResponsesTool::Function {
         kind: ResponsesFunctionTag::Function,
         name: c.name.clone(),
         description: c.description.clone(),
         parameters: c.input_schema.clone(),
         strict: c.strict,
+        carried,
     }
 }
 
@@ -165,14 +195,14 @@ pub(super) fn translate_tools(
     if auth_kind == AuthKind::BedrockMantle {
         return translate_mantle_tools(req, tap, withheld);
     }
-    translate_first_party_tools(req)
+    translate_first_party_tools(req, ToolMembers::of(req, auth_kind))
 }
 
 /// Tools an `additional_tools` input item already declares are omitted:
 /// that item is replayed verbatim in `input[]`, and declaring a tool twice
 /// is rejected upstream. For the same reason a member flattened out of a
 /// namespace container is omitted and its container sent as written.
-fn translate_first_party_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
+fn translate_first_party_tools(req: &ChatRequest, members: ToolMembers) -> Vec<ResponsesTool> {
     let namespaces = &req.routectl_internal.responses_namespaces;
     let tools = req.tools.as_deref().unwrap_or_default();
     let inline = InlineDeclarations::collect(req);
@@ -185,7 +215,7 @@ fn translate_first_party_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
         .map(|(td, _)| td);
     for td in declared {
         match td {
-            ToolDef::Custom(c) => out.push(function_tool(c)),
+            ToolDef::Custom(c) => out.push(function_tool(c, members)),
             ToolDef::Other(v) => {
                 // Forward-compat passthrough. Anthropic builtins and
                 // future shapes ride here unchanged so the Responses
@@ -214,9 +244,10 @@ fn translate_first_party_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
 
 /// The Bedrock Mantle `tools` array: every canonical function tool, flat,
 /// in canonical order, including those a namespace container or an
-/// `additional_tools` item declared. Every `ToolDef::Other` and every
-/// top-level namespace container is withheld and the request recorded on
-/// `withheld`.
+/// `additional_tools` item declared. Every `ToolDef::Other`, every
+/// top-level namespace container, and every member a Responses client
+/// declared on a function tool beyond its typed ones is withheld and the
+/// request recorded on `withheld`.
 /// TRANSLATION-DROP: lane=openai-responses class=unknown_member_withheld test=mantle_withholds_unmodeled_tools_and_namespace_containers_and_counts_once
 fn translate_mantle_tools(
     req: &ChatRequest,
@@ -229,13 +260,15 @@ fn translate_mantle_tools(
         .filter(|td| matches!(td, ToolDef::Other(_)))
         .count();
     let containers = req.routectl_internal.responses_namespaces.containers.len();
-    if unmodeled + containers > 0 {
+    let tool_members = withheld_tool_members(req, tools);
+    if unmodeled + containers + tool_members > 0 {
         withheld.record();
         tracing::debug!(
             unmodeled,
             containers,
-            "openai-responses egress: omitting unmodeled tools and namespace containers on \
-             bedrock-mantle"
+            tool_members,
+            "openai-responses egress: omitting unmodeled tools, namespace containers and tool \
+             members on bedrock-mantle"
         );
     }
     if let Some(tap) = tap {
@@ -244,10 +277,33 @@ fn translate_mantle_tools(
     tools
         .iter()
         .filter_map(|td| match td {
-            ToolDef::Custom(c) => Some(function_tool(c)),
+            ToolDef::Custom(c) => Some(function_tool(c, ToolMembers::Omit)),
             ToolDef::Other(_) => None,
         })
         .collect()
+}
+
+/// How many members of `tools`' function declarations the Mantle surface
+/// withholds as its own: those of a request whose members are spelled for
+/// this wire. Another dialect's members are the foreign-dialect withhold's.
+fn withheld_tool_members(req: &ChatRequest, tools: &[ToolDef]) -> usize {
+    if !mantle_owns_tool_members(req) {
+        return 0;
+    }
+    tools
+        .iter()
+        .map(|td| match td {
+            ToolDef::Custom(c) => responses_tool_members(c).count(),
+            ToolDef::Other(_) => 0,
+        })
+        .sum()
+}
+
+fn mantle_owns_tool_members(req: &ChatRequest) -> bool {
+    forwards_unknowns(
+        req.routectl_internal.provenance,
+        AuthKind::BedrockMantle.egress_kind(),
+    )
 }
 
 /// Declare how the Mantle `tools` array differs from the client's: a Remove
@@ -265,17 +321,33 @@ fn declare_mantle_tool_edits(tap: &WireTap, req: &ChatRequest, tools: &[ToolDef]
     }
     let mut client_slots = (0..).filter(|index| !container_at.contains(index));
     let mut wire_index = 0;
+    let owns_members = mantle_owns_tool_members(req);
     for (td, is_member) in tools.iter().zip(flattened_members(namespaces, tools)) {
         let client_index = (!is_member && !inline.declares(td))
             .then(|| client_slots.next())
             .flatten();
         match (td, client_index) {
             (ToolDef::Custom(_), None) => declare_tool(tap, wire_index, EditKind::Add),
+            (ToolDef::Custom(c), Some(index)) if owns_members => {
+                declare_tool_members(tap, index, c);
+            }
             (ToolDef::Other(_), Some(index)) => declare_tool(tap, index, EditKind::Remove),
             (ToolDef::Custom(_) | ToolDef::Other(_), _) => {}
         }
         if matches!(td, ToolDef::Custom(_)) {
             wire_index += 1;
+        }
+    }
+}
+
+/// Declare each member of the client's function declaration at `index`
+/// beyond its typed ones as removed. A name that is not token-shaped is left
+/// undeclared, so it still surfaces as a finding.
+fn declare_tool_members(tap: &WireTap, index: usize, c: &CustomTool) {
+    let parent = format!("/tools/{index}");
+    for (key, _) in responses_tool_members(c) {
+        if let Some(path) = member_pointer(&parent, key) {
+            declare(tap, EditSite::AuthSurfaceGate, path, EditKind::Remove);
         }
     }
 }

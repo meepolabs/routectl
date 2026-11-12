@@ -20,8 +20,8 @@ use routectl_core::{ChatRequest, ReasoningDetail, RefusalReason, Result, sanitiz
 use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role, ToolDef};
 
 use crate::managed_keys::{
-    Dialect, ForeignDialectExtraTally, MatchingIngress, client_extras_for, is_managed_key,
-    withhold_carried_members,
+    Dialect, ForeignDialectExtraTally, MatchingIngress, client_extras_for, declare_foreign_keys,
+    is_managed_key, withhold_carried_members,
 };
 use crate::translation_drop_metrics::{
     ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
@@ -188,6 +188,7 @@ pub(super) fn provider_body(provider_id: &str, req: &ChatRequest) -> Result<Valu
     );
     flush_fingerprint_tally(&fingerprint);
     report_withheld_ingress_extras(provider_id, &client_extras.foreign_keys);
+    declare_foreign_keys(crate::wire_declare::tap(req), &client_extras.foreign_keys);
     withhold_foreign_carried_members(provider_id, req);
     body
 }
