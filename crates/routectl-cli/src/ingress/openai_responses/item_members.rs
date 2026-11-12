@@ -7,13 +7,7 @@
 use serde_json::{Map, Value};
 
 use routectl_core::{ResponsesInputItemMembers, ResponsesItemMemberEntry};
-
-/// Members of a `function_call` input item its canonical tool call models.
-const FUNCTION_CALL_MEMBERS: &[&str] = &["type", "call_id", "name", "arguments", "namespace"];
-
-/// Members of a `reasoning` input item its canonical reasoning details
-/// model.
-const REASONING_MEMBERS: &[&str] = &["type", "id", "summary", "content", "encrypted_content"];
+use routectl_providers::openai_responses::{FUNCTION_CALL_ITEM_KEYS, REASONING_ITEM_KEYS};
 
 /// Record the unmodeled members of the `function_call` item at `index` in
 /// the client's `input[]`, keyed by the call id canonical takes for it.
@@ -27,7 +21,7 @@ pub(super) fn capture_function_call(
         .or_else(|| item.get("id"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let Some(entry) = entry(index, item, FUNCTION_CALL_MEMBERS) else {
+    let Some(entry) = entry(index, item, FUNCTION_CALL_ITEM_KEYS) else {
         return;
     };
     insert(&mut record.function_call, &mut record.unkeyed, key, entry);
@@ -41,7 +35,7 @@ pub(super) fn capture_reasoning(
     item: &Value,
 ) {
     let key = item.get("id").and_then(Value::as_str).unwrap_or("");
-    let Some(entry) = entry(index, item, REASONING_MEMBERS) else {
+    let Some(entry) = entry(index, item, REASONING_ITEM_KEYS) else {
         return;
     };
     insert(&mut record.reasoning, &mut record.unkeyed, key, entry);

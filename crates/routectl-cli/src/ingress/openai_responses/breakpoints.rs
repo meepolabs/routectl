@@ -10,7 +10,7 @@ use routectl_core::{Message, ResponsesCacheBreakpoint};
 use routectl_providers::openai_responses::{breakpoint_blocks, breakpoint_text_digest};
 use serde_json::Value;
 
-const BREAKPOINT_KEY: &str = "prompt_cache_breakpoint";
+pub(super) const BREAKPOINT_KEY: &str = "prompt_cache_breakpoint";
 
 /// A breakpoint found in the client's body, before the system-message lift
 /// decides which messages stay in `messages[]`.

@@ -448,6 +448,15 @@ the `max_body_bytes` cap):
     The reference points at a prior turn routectl never stored;
     answering anyway would be a silent wrong answer. Configure the
     client to send the full conversation `input` each turn.
+  - `conversation` (any non-null value) -> **HTTP 400**
+    (`invalid_request_error`), for the same reason: it names a
+    conversation routectl never stored.
+  - `background: true` -> **HTTP 400** (`invalid_request_error`). It asks
+    the server to keep the response for later retrieval, which a
+    stateless proxy cannot do. `background: false` or absent is accepted.
+  - The 400 message names the member it refused (the first of
+    `previous_response_id`, `conversation`, `background` the request
+    sets) and asks the client to send the full conversation instead.
   - `store: true` without a `previous_response_id` -> **accepted**. The
     current turn is self-contained so the answer is correct; the
     persistence intent is ignored and logged at WARN once per process (a
@@ -1360,6 +1369,25 @@ request (and the `reasoning.encrypted_content` include is forced on so
 reasoning survives across turns without server-side storage). A `store`
 key in `payload_extras` is REJECTED at config load -- the flag is not a
 knob on this lane.
+
+Mantle fetches URLs and file references it finds in a request, so this
+lane forwards only request parts routectl has reviewed. Function tools
+are forwarded, flat, with only their typed members (`type`, `name`,
+`description`, `parameters`, `strict`); a function declared inside a
+namespace container or an `additional_tools` input item is forwarded the
+same way in `tools`, without the container or the item. Every other
+tool (hosted tools such as `web_search`, freeform `type:"custom"` tools,
+MCP and unknown tool types) is withheld. Of the input items routectl does
+not model, only `agent_message`, `local_shell_call`, `compaction`,
+`compaction_summary` and `context_compaction` are forwarded, and only
+when every member they carry has the reviewed name and shape; every other
+such item (for example `custom_tool_call`, `custom_tool_call_output`,
+`web_search_call` or `additional_tools`) is withheld. Members a client
+carried on a message, content part, function call or reasoning item are
+withheld too. Each withheld tool, item or member is declared as a removal
+and the request counts once as the `unknown_member_withheld` drop class
+(see [LOGGING.md](LOGGING.md)). The API-key and ChatGPT-OAuth lanes
+forward all of these as the client sent them.
 
 Validation (build, reload, `config check`) rejects an incoherent entry:
 

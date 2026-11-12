@@ -85,6 +85,10 @@ pub use sse::{EVENT_IDENTITY_MEMBERS, MANAGED_EVENT_MEMBERS};
 pub(crate) mod system;
 pub(crate) mod tools;
 pub(crate) mod types;
+pub use types::{
+    FUNCTION_CALL_ITEM_KEYS, FUNCTION_CALL_OUTPUT_ITEM_KEYS, INPUT_IMAGE_KEYS, INPUT_TEXT_KEYS,
+    MESSAGE_ITEM_KEYS, OUTPUT_TEXT_KEYS, REASONING_ITEM_KEYS, TOOL_OUTPUT_TEXT_KEYS,
+};
 
 /// The lane-agnostic Responses format tag this provider used to stamp on
 /// every reasoning detail.

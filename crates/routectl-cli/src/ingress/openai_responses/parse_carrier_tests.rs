@@ -282,3 +282,122 @@ fn item_members_without_an_identity_are_recorded_unkeyed() {
     assert_eq!(record.unkeyed.len(), 1, "{record:?}");
     assert_eq!(record.unkeyed[0].client_pointer, "/input/1");
 }
+
+fn first_part_extras(req: &ChatRequest, message: usize) -> Map<String, Value> {
+    match &req.messages[message].content {
+        MessageContent::Parts(parts) => part_extras(&parts[0]).clone(),
+        other => panic!("expected parts, got {other:?}"),
+    }
+}
+
+/// Every name the Responses egress writes on an input item or block stays
+/// out of the carrier the ingress fills for it, so a same-format request
+/// never carries a member the egress then filters as its own; any other
+/// member is still carried.
+#[test]
+fn names_the_responses_egress_writes_never_enter_a_carrier() {
+    use routectl_providers::openai_responses::{
+        FUNCTION_CALL_ITEM_KEYS, FUNCTION_CALL_OUTPUT_ITEM_KEYS, INPUT_IMAGE_KEYS, INPUT_TEXT_KEYS,
+        MESSAGE_ITEM_KEYS, OUTPUT_TEXT_KEYS, REASONING_ITEM_KEYS, TOOL_OUTPUT_TEXT_KEYS,
+    };
+    type Extras = fn(&ChatRequest) -> Map<String, Value>;
+    let message: Extras = |req| req.messages[0].extras.clone();
+    let first_part: Extras = |req| first_part_extras(req, 0);
+    let function_call: Extras = |req| {
+        req.routectl_internal.responses_item_members.function_call["call_1"]
+            .members
+            .clone()
+    };
+    let reasoning: Extras = |req| {
+        req.routectl_internal.responses_item_members.reasoning["rs_1"]
+            .members
+            .clone()
+    };
+    let user_text = json!({"type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "hi"}]});
+    let assistant_text = json!({"type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": "hi"}]});
+    let tool_output_text = json!({"type": "function_call_output", "call_id": "c1",
+        "output": [{"type": "input_text", "text": "hi"}]});
+    let rows: [(&str, Value, &str, &[&str], Extras); 8] = [
+        (
+            "message",
+            json!({"type": "message", "role": "user", "content": "hi"}),
+            "",
+            MESSAGE_ITEM_KEYS,
+            message,
+        ),
+        (
+            "function_call_output",
+            json!({"type": "function_call_output", "call_id": "c1", "output": "42"}),
+            "",
+            FUNCTION_CALL_OUTPUT_ITEM_KEYS,
+            message,
+        ),
+        (
+            "user input_text",
+            user_text,
+            "/content/0",
+            INPUT_TEXT_KEYS,
+            first_part,
+        ),
+        (
+            "assistant output_text",
+            assistant_text,
+            "/content/0",
+            OUTPUT_TEXT_KEYS,
+            first_part,
+        ),
+        (
+            "tool output input_text",
+            tool_output_text,
+            "/output/0",
+            TOOL_OUTPUT_TEXT_KEYS,
+            first_part,
+        ),
+        (
+            "input_image",
+            json!({"type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": "https://example.com/a.png"}]}),
+            "/content/0",
+            INPUT_IMAGE_KEYS,
+            first_part,
+        ),
+        (
+            "function_call",
+            json!({"type": "function_call", "call_id": "call_1", "name": "f",
+                   "arguments": "{}"}),
+            "",
+            FUNCTION_CALL_ITEM_KEYS,
+            function_call,
+        ),
+        (
+            "reasoning",
+            json!({"type": "reasoning", "id": "rs_1", "summary": [], "content": [],
+                   "encrypted_content": "sig"}),
+            "",
+            REASONING_ITEM_KEYS,
+            reasoning,
+        ),
+    ];
+    for (row, mut item, node, written, extras) in rows {
+        // Arrange
+        let target = item
+            .pointer_mut(node)
+            .expect("node")
+            .as_object_mut()
+            .expect("object");
+        for name in written {
+            target.entry(*name).or_insert(json!("x"));
+        }
+        target.insert("zz_control".into(), json!(1));
+        let body = json!({"model": "m", "input": [item]});
+
+        // Act
+        let req = parse(body);
+
+        // Assert
+        let carried = extras(&req);
+        assert_eq!(carried, map(json!({"zz_control": 1})), "{row}");
+    }
+}

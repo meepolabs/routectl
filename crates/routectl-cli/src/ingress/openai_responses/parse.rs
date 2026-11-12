@@ -58,6 +58,12 @@ use routectl_core::{
     ResponsesPassthroughItem, Result, Role, SystemContent,
 };
 
+use routectl_providers::openai_responses::{
+    FUNCTION_CALL_OUTPUT_ITEM_KEYS, INPUT_IMAGE_KEYS, INPUT_TEXT_KEYS, MESSAGE_ITEM_KEYS,
+    OUTPUT_TEXT_KEYS, TOOL_OUTPUT_TEXT_KEYS,
+};
+
+use super::breakpoints::BREAKPOINT_KEY;
 use crate::ingress::read_alias_header;
 use crate::ingress::session_key::{first_session_header, resolve_session_key};
 use routectl_core::OPENAI_RESPONSES_V1;
@@ -67,22 +73,29 @@ use routectl_core::OPENAI_RESPONSES_V1;
 /// entirely and send every declaration this way).
 const ADDITIONAL_TOOLS_ITEM: &str = "additional_tools";
 
-/// Members of a `message` input item the canonical message models; every
-/// other member rides the message's carrier.
-const MESSAGE_ITEM_MEMBERS: &[&str] = &["type", "role", "content"];
+/// Members of a `message` input item the canonical message models: the
+/// names the Responses egress writes on the item. Every other member rides
+/// the message's carrier.
+const MESSAGE_ITEM_MEMBERS: &[&[&str]] = &[MESSAGE_ITEM_KEYS];
 
 /// Members of a `function_call_output` input item the canonical tool message
 /// models; every other member rides the message's carrier.
-const FUNCTION_CALL_OUTPUT_MEMBERS: &[&str] = &["type", "call_id", "output"];
+const FUNCTION_CALL_OUTPUT_MEMBERS: &[&[&str]] = &[FUNCTION_CALL_OUTPUT_ITEM_KEYS];
 
 /// Members of an `input_text` / `output_text` block the canonical text part
-/// models, plus the per-block cache breakpoint, which the breakpoint record
+/// models: every name a Responses text block the egress rebuilds it as
+/// writes, plus the per-block cache breakpoint, which the breakpoint record
 /// owns.
-const TEXT_BLOCK_MEMBERS: &[&str] = &["type", "text", "prompt_cache_breakpoint"];
+const TEXT_BLOCK_MEMBERS: &[&[&str]] = &[
+    INPUT_TEXT_KEYS,
+    OUTPUT_TEXT_KEYS,
+    TOOL_OUTPUT_TEXT_KEYS,
+    &[BREAKPOINT_KEY],
+];
 
 /// Members of an `input_image` block the canonical image part models, plus
 /// the per-block cache breakpoint.
-const IMAGE_BLOCK_MEMBERS: &[&str] = &["type", "image_url", "detail", "prompt_cache_breakpoint"];
+const IMAGE_BLOCK_MEMBERS: &[&[&str]] = &[INPUT_IMAGE_KEYS, &[BREAKPOINT_KEY]];
 
 /// Top-level Responses request fields handled explicitly below. Anything
 /// NOT in this set is swept into `provider_extras` so a future Responses
@@ -593,14 +606,14 @@ fn push_message_item(messages: &mut Vec<Message>, item: &Value) {
     });
 }
 
-/// Every member of `node` whose name is not in `modeled`, cloned. Empty for
-/// a non-object node.
-fn members_outside(node: &Value, modeled: &[&str]) -> Map<String, Value> {
+/// Every member of `node` whose name none of the `modeled` lists holds,
+/// cloned. Empty for a non-object node.
+fn members_outside(node: &Value, modeled: &[&[&str]]) -> Map<String, Value> {
     node.as_object()
         .map(|members| {
             members
                 .iter()
-                .filter(|(key, _)| !modeled.contains(&key.as_str()))
+                .filter(|(key, _)| !modeled.iter().any(|names| names.contains(&key.as_str())))
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect()
         })
