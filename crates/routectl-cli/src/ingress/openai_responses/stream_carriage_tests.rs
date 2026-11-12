@@ -437,3 +437,55 @@ fn reasoning_item_members_reach_the_items_own_events_and_the_completed_body() {
     assert_eq!(completed["type"], "reasoning");
     assert_eq!(completed["status"], "completed");
 }
+
+#[test]
+fn an_empty_reasoning_content_array_reaches_every_event_that_carries_the_item() {
+    // Arrange
+    let mut item_members = routectl_core::ResponsesItemMembers::default();
+    item_members
+        .reasoning
+        .insert("rs_1".into(), members(json!({"content": []})));
+    let with = |added: bool| {
+        let mut envelope = ResponsesEnvelope::default();
+        if added {
+            envelope.added_item_members = item_members.clone();
+        } else {
+            envelope.item_members = item_members.clone();
+        }
+        let mut chunk = carrier(Vec::new());
+        chunk.upstream_meta = Some(
+            UpstreamMeta::from_responses_envelope(envelope)
+                .with_wire_dialect(IngressDialect::Responses),
+        );
+        chunk
+    };
+    let detail = chunk(
+        ChunkDelta {
+            reasoning_details: vec![ReasoningDetail {
+                kind: ReasoningDetailKind::Summary,
+                id: Some("rs_1".into()),
+                format: Some(routectl_core::OPENAI_RESPONSES_V1.into()),
+                index: Some(0),
+                payload: json!({"text": "think"}),
+            }],
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+
+    // Act
+    let (events, _) = render(vec![
+        with(true),
+        detail,
+        with(false),
+        text("ok", Vec::new()),
+    ]);
+
+    // Assert
+    let added = payloads(&events, "response.output_item.added");
+    assert_eq!(added[0]["item"]["content"], json!([]), "{:?}", added[0]);
+    let done = payloads(&events, "response.output_item.done");
+    assert_eq!(done[0]["item"]["content"], json!([]), "{:?}", done[0]);
+    let completed = &payloads(&events, "response.completed")[0]["response"]["output"][0];
+    assert_eq!(completed["content"], json!([]), "{completed}");
+}

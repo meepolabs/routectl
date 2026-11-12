@@ -189,7 +189,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 })
             }
             "reasoning" => {
-                let members = item_members(&value, REASONING_ITEM_KEYS);
+                let members = reasoning_item_members(&value);
                 let r: ReasoningItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(Self::Reasoning {
@@ -246,6 +246,21 @@ pub(super) fn item_members(item: &Value, owned: &[&str]) -> Map<String, Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The members of the `reasoning` output item `item` that a Responses client
+/// gets back on that item: those [`REASONING_ITEM_KEYS`] does not name, and
+/// an empty `content` array. The render rebuilds `content` from the item's
+/// reasoning text, so it has no entry to rebuild an empty one from.
+pub(super) fn reasoning_item_members(item: &Value) -> Map<String, Value> {
+    let mut members = item_members(item, REASONING_ITEM_KEYS);
+    if let Some(content) = item
+        .get("content")
+        .filter(|c| c.as_array().is_some_and(Vec::is_empty))
+    {
+        members.insert("content".to_owned(), content.clone());
+    }
+    members
 }
 
 #[derive(Debug, Deserialize)]

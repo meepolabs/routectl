@@ -867,3 +867,34 @@ fn translate_carries_reasoning_item_members_by_item_id() {
                "internal_chat_message_metadata_passthrough": {"k": "caf\u{e9}"}})
     );
 }
+
+#[test]
+fn translate_carries_an_empty_reasoning_content_array_as_an_item_member() {
+    // Arrange: the same item with an empty and a non-empty `content`.
+    let body = |content: Value| {
+        json!({
+            "id": "resp_01", "status": "completed", "model": "m",
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": [], "content": content,
+                 "encrypted_content": "enc"}
+            ]
+        })
+    };
+
+    // Act
+    let empty = parse(body(json!([])));
+    let filled = parse(body(json!([{"type": "reasoning_text", "text": "t"}])));
+
+    // Assert
+    let members = |resp: ChatResponse| {
+        resp.upstream_meta
+            .and_then(|meta| meta.openai_responses)
+            .map(|envelope| envelope.item_members.reasoning)
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        Value::Object(members(empty)["rs_1"].clone()),
+        json!({"content": []})
+    );
+    assert!(members(filled).is_empty(), "typed content is not carried");
+}

@@ -5514,6 +5514,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   capture layer (the shared testkit capture is event-only)
 - `tests/cross_lane_system_fingerprint_fallback.rs` -- Gemini -> OpenAI
   Responses fallback against mock upstreams: system-content filtering on each hop
+- `tests/precontent_carriage.rs` -- the real Responses and Anthropic providers
+  against mock upstreams: a stream with more carriage-only chunks before first
+  content than the metadata cap commits for a same-dialect client as it does
+  for a client of another dialect
 - `tests/translation_drop_per_request.rs` -- translation-drop and lane-seen
   counters advance once per client request across a same-target retry, a
   learned beta repair, a fallback hop and two concurrent requests; the global

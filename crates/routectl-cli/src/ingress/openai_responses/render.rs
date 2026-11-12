@@ -188,6 +188,8 @@ const RESERVED_FUNCTION_CALL_ITEM: &[&str] = &["type", "call_id", "name", "argum
 /// The upstream item's `status` is not among them: the render writes none.
 const RESERVED_REASONING_ITEM: &[&str] = &["type", "id", "summary", "content", "encrypted_content"];
 
+const REASONING_CONTENT: &str = "content";
+
 const INPUT_TOKENS_DETAILS: &str = "input_tokens_details";
 const OUTPUT_TOKENS_DETAILS: &str = "output_tokens_details";
 const CACHED_TOKENS: &str = "cached_tokens";
@@ -330,11 +332,22 @@ pub(super) fn with_function_call_members(
 }
 
 /// `item`, a `reasoning` output item, with the members `item_members`
-/// carries for its `id` added after its own.
+/// carries for its `id` added after its own. A carried empty `content`
+/// array is restored when the item has none of its own: the render builds
+/// `content` only from reasoning text, so an item the upstream sent with
+/// an empty one would otherwise reach the client without it.
 pub(super) fn with_reasoning_members(item: Value, item_members: &ResponsesItemMembers) -> Value {
     let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
     let members = item_members.reasoning.get(id);
-    with_members(item, members, RESERVED_REASONING_ITEM)
+    let mut item = with_members(item, members, RESERVED_REASONING_ITEM);
+    let empty_content = members
+        .and_then(|m| m.get(REASONING_CONTENT))
+        .filter(|content| content.as_array().is_some_and(Vec::is_empty));
+    if let (Some(content), Some(obj)) = (empty_content, item.as_object_mut()) {
+        obj.entry(REASONING_CONTENT)
+            .or_insert_with(|| content.clone());
+    }
+    item
 }
 
 fn with_members(mut item: Value, members: Option<&Map<String, Value>>, reserved: &[&str]) -> Value {

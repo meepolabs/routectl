@@ -1291,3 +1291,78 @@ fn item_members_carried_from_another_dialect_or_unstamped_are_not_rendered() {
         assert!(items[1].get("status").is_none(), "{row}: {v}");
     }
 }
+
+fn response_with_reasoning_members(
+    dialect: Option<IngressDialect>,
+    carried: Value,
+) -> ChatResponse {
+    let mut msg = assistant_message(MessageContent::Text("x".into()));
+    msg.reasoning_details = vec![responses_detail(
+        ReasoningDetailKind::Summary,
+        "rs_1",
+        json!({"text": "plan"}),
+    )];
+    let mut resp = response_with(msg, Some("stop"));
+    let mut item_members = ResponsesItemMembers::default();
+    item_members
+        .reasoning
+        .insert("rs_1".into(), object(carried));
+    let mut envelope = ResponsesEnvelope::default();
+    envelope.item_members = item_members;
+    let meta = UpstreamMeta::from_responses_envelope(envelope);
+    resp.upstream_meta = Some(match dialect {
+        Some(dialect) => meta.with_wire_dialect(dialect),
+        None => meta,
+    });
+    resp
+}
+
+#[test]
+fn a_reasoning_item_keeps_the_empty_content_array_its_upstream_sent() {
+    // Arrange
+    let resp = response_with_reasoning_members(
+        Some(IngressDialect::Responses),
+        json!({"content": [], "status": "completed"}),
+    );
+
+    // Act
+    let v = render_responses_response(resp).unwrap();
+
+    // Assert
+    assert_eq!(
+        output(&v)[0],
+        json!({"type": "reasoning", "id": "rs_1",
+               "summary": [{"type": "summary_text", "text": "plan"}],
+               "content": [], "status": "completed"})
+    );
+}
+
+#[test]
+fn a_carried_content_array_never_replaces_the_rendered_one_or_reaches_another_dialect() {
+    // A non-empty carried `content` is the render's to write, never the
+    // carrier's; another dialect's or an unstamped carrier renders nothing.
+    let rows = [
+        (
+            "non-empty carried",
+            Some(IngressDialect::Responses),
+            json!({"content": [{"type": "x"}]}),
+        ),
+        ("unstamped", None, json!({"content": []})),
+        (
+            "anthropic",
+            Some(IngressDialect::Anthropic),
+            json!({"content": []}),
+        ),
+        ("chat", Some(IngressDialect::Chat), json!({"content": []})),
+    ];
+    for (row, dialect, carried) in rows {
+        // Arrange
+        let resp = response_with_reasoning_members(dialect, carried);
+
+        // Act
+        let v = render_responses_response(resp).unwrap();
+
+        // Assert
+        assert!(output(&v)[0].get("content").is_none(), "{row}: {v}");
+    }
+}

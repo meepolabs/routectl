@@ -63,8 +63,8 @@ pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 use super::empty_optional::EmptyOptionalFilter;
 use super::response::{cache_details, map_finish_reason, upstream_error_from_failed};
 use super::response_types::{
-    FUNCTION_CALL_ITEM_KEYS, MESSAGE_ITEM_KEYS, REASONING_ITEM_KEYS, ResponsesResponse,
-    ResponsesStreamEvent, item_members,
+    FUNCTION_CALL_ITEM_KEYS, MESSAGE_ITEM_KEYS, ResponsesResponse, ResponsesStreamEvent,
+    item_members, reasoning_item_members,
 };
 use super::{AuthKind, lane_format_tag};
 
@@ -800,7 +800,7 @@ impl ResponsesStreamState {
             "reasoning" => (
                 &mut by_item.reasoning,
                 identity("id"),
-                item_members(item, REASONING_ITEM_KEYS),
+                reasoning_item_members(item),
             ),
             _ => return None,
         };

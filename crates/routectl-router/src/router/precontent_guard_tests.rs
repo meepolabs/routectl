@@ -2,12 +2,15 @@
 //! buffered, and the kind labels are stable per content-free chunk shape.
 
 use super::*;
-use crate::router::precontent::precontent_kind;
-use crate::router::stream_commit::is_content_bearing;
+use crate::router::precontent::{is_carriage_only, precontent_kind};
+use crate::router::stream_commit::{
+    MAX_PRECONTENT_CARRIAGE_CHUNKS, MAX_PRECONTENT_CHUNKS, is_content_bearing,
+};
 use async_trait::async_trait;
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
-    AnthropicUnifiedQuota, ChunkChoice, ChunkDelta, ReasoningDetail, ReasoningDetailKind, Role,
-    UpstreamMeta, UsageDelta,
+    AnthropicUnifiedQuota, ChunkChoice, ChunkDelta, OpaqueSseEvent, ReasoningDetail,
+    ReasoningDetailKind, ResponsesEnvelope, ResponsesItemMembers, Role, UpstreamMeta, UsageDelta,
 };
 use serde_json::Value;
 
@@ -509,4 +512,252 @@ fn endless_ready_empty_reasoning_stream_still_hits_the_first_content_timeout() {
         }
         other => panic!("expected the first-content timeout, got {other:?}"),
     }
+}
+
+/// A chunk carrying only a known event's unmodeled members, shaped as the
+/// Responses parser stamps one for an `output_item.added`: one empty choice,
+/// the event members, and the Responses wire stamp.
+fn event_carriage() -> ChatChunk {
+    ChatChunk {
+        id: "resp-1".into(),
+        model: "model-1".into(),
+        opaque_events: vec![OpaqueSseEvent::KnownEventExtras {
+            event_type: "response.output_item.added".into(),
+            upstream_index: Some(0),
+            members: serde_json::json!({"item": {"type": "reasoning", "id": "rs_1"}})
+                .as_object()
+                .cloned()
+                .expect("object"),
+        }],
+        upstream_meta: Some(UpstreamMeta::default().with_wire_dialect(IngressDialect::Responses)),
+        ..choice_chunk(ChunkDelta::default(), None)
+    }
+}
+
+/// A chunk carrying only an output item's members, as the Responses parser
+/// stamps one for an `output_item.done`.
+fn item_members_carriage() -> ChatChunk {
+    let mut members = ResponsesItemMembers::default();
+    members.reasoning.insert(
+        "rs_1".into(),
+        serde_json::json!({"status": "completed"})
+            .as_object()
+            .cloned()
+            .expect("object"),
+    );
+    let mut envelope = ResponsesEnvelope::default();
+    envelope.item_members = members;
+    ChatChunk {
+        upstream_meta: Some(
+            UpstreamMeta::from_responses_envelope(envelope)
+                .with_wire_dialect(IngressDialect::Responses),
+        ),
+        ..choice_chunk(ChunkDelta::default(), None)
+    }
+}
+
+/// An Anthropic block-stop carrier: no choices, one known-event member set.
+fn block_stop_carriage() -> ChatChunk {
+    ChatChunk {
+        opaque_events: vec![OpaqueSseEvent::KnownEventExtras {
+            event_type: "content_block_stop".into(),
+            upstream_index: Some(0),
+            members: serde_json::Map::new(),
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn carriage_only_chunks_are_classed_apart_and_anything_else_beside_them_is_not() {
+    let with = |edit: fn(&mut ChatChunk)| {
+        let mut chunk = event_carriage();
+        edit(&mut chunk);
+        chunk
+    };
+    let carriage: Vec<(&str, ChatChunk)> = vec![
+        ("event members", event_carriage()),
+        ("item members", item_members_carriage()),
+        ("block stop, no choices", block_stop_carriage()),
+    ];
+    let not_carriage: Vec<(&str, ChatChunk)> = vec![
+        (
+            "no carriage at all",
+            choice_chunk(ChunkDelta::default(), None),
+        ),
+        ("wire stamp only", with(|c| c.opaque_events.clear())),
+        (
+            "role",
+            with(|c| c.choices[0].delta.role = Some(Role::Assistant)),
+        ),
+        (
+            "empty text",
+            with(|c| c.choices[0].delta.content = Some(String::new())),
+        ),
+        (
+            "empty reasoning",
+            with(|c| c.choices[0].delta.reasoning = Some(String::new())),
+        ),
+        (
+            "empty tool_calls",
+            with(|c| c.choices[0].delta.tool_calls = Some(vec![])),
+        ),
+        (
+            "finish_reason",
+            with(|c| c.choices[0].finish_reason = Some("stop".into())),
+        ),
+        (
+            "matched_stop_sequence",
+            with(|c| c.choices[0].matched_stop_sequence = Some("STOP".into())),
+        ),
+        ("usage", with(|c| c.usage = usage_only().usage)),
+        (
+            "quota meta",
+            with(|c| c.upstream_meta = meta_only().upstream_meta),
+        ),
+        (
+            "created_at",
+            with(|c| {
+                c.upstream_meta = Some(UpstreamMeta::from_responses_envelope(
+                    ResponsesEnvelope::of_created_at(1),
+                ));
+            }),
+        ),
+    ];
+
+    for (name, chunk) in carriage {
+        assert!(!is_content_bearing(&chunk), "{name}: content-free");
+        assert!(is_carriage_only(&chunk), "{name}");
+        assert_eq!(precontent_kind(&chunk), "carriage", "{name}");
+    }
+    for (name, chunk) in not_carriage {
+        assert!(!is_content_bearing(&chunk), "{name}: content-free");
+        assert!(!is_carriage_only(&chunk), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn carriage_beyond_the_metadata_cap_commits_in_order_with_its_meta() {
+    // Arrange: a role opener, then more carriage-only chunks than the
+    // metadata cap allows counted chunks, then content.
+    let carriers = MAX_PRECONTENT_CHUNKS * 3;
+    let mut chunks = vec![role()];
+    for i in 0..carriers {
+        chunks.push(if i % 2 == 0 {
+            event_carriage()
+        } else {
+            item_members_carriage()
+        });
+    }
+    chunks.push(text("hi"));
+
+    // Act
+    let yielded = guard_commit(chunks.clone()).await;
+
+    // Assert
+    assert_eq!(yielded.len(), chunks.len(), "every chunk replayed");
+    for (i, (got, sent)) in yielded.iter().zip(&chunks).enumerate() {
+        assert_eq!(got.upstream_meta, sent.upstream_meta, "chunk {i} meta");
+        assert_eq!(
+            format!("{:?}", got.opaque_events),
+            format!("{:?}", sent.opaque_events),
+            "chunk {i} carriage"
+        );
+    }
+    assert_eq!(
+        yielded[carriers + 1].choices[0].delta.content.as_deref(),
+        Some("hi")
+    );
+}
+
+#[tokio::test]
+async fn carriage_only_chunks_have_their_own_bound() {
+    // Arrange
+    let at_bound = || std::iter::repeat_with(event_carriage).take(MAX_PRECONTENT_CARRIAGE_CHUNKS);
+    let mut fits: Vec<ChatChunk> = at_bound().collect();
+    fits.push(text("hi"));
+    let mut over: Vec<ChatChunk> = at_bound().collect();
+    over.push(event_carriage());
+
+    // Act
+    let yielded = guard_commit(fits).await;
+    let msg = guard_error(over).await;
+
+    // Assert
+    assert_eq!(yielded.len(), MAX_PRECONTENT_CARRIAGE_CHUNKS + 1);
+    assert_eq!(
+        msg,
+        format!(
+            "p1 emitted more than {MAX_PRECONTENT_CARRIAGE_CHUNKS} carriage-only chunks \
+             before any content (buffered: carriage x{})",
+            MAX_PRECONTENT_CARRIAGE_CHUNKS + 1
+        ),
+    );
+}
+
+#[tokio::test]
+async fn carriage_does_not_widen_the_metadata_cap() {
+    // A genuinely content-free stream still fails at the cap, with carriage
+    // interleaved or not.
+    let mut plain: Vec<ChatChunk> = vec![role()];
+    plain.extend(std::iter::repeat_with(usage_only).take(MAX_PRECONTENT_CHUNKS));
+    let mut interleaved = Vec::new();
+    for chunk in plain.clone() {
+        interleaved.push(chunk);
+        interleaved.push(event_carriage());
+    }
+
+    for (name, chunks) in [("plain", plain), ("interleaved", interleaved)] {
+        let msg = guard_error(chunks).await;
+        assert!(
+            msg.starts_with(&format!(
+                "p1 emitted more than {MAX_PRECONTENT_CHUNKS} content-free chunks"
+            )),
+            "{name}: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_buffer_retains_at_most_twice_both_bounds_plus_one() {
+    // Arrange: an empty-reasoning run before, between and after every
+    // counted and carriage-only chunk, each bound filled exactly.
+    let mut chunks = vec![empty_reasoning()];
+    let bounded = std::iter::repeat_with(usage_only)
+        .take(MAX_PRECONTENT_CHUNKS)
+        .chain(std::iter::repeat_with(event_carriage).take(MAX_PRECONTENT_CARRIAGE_CHUNKS));
+    for chunk in bounded {
+        chunks.push(chunk);
+        chunks.extend(std::iter::repeat_with(empty_reasoning).take(3));
+    }
+    chunks.push(text("hi"));
+
+    // Act
+    let yielded = guard_commit(chunks).await;
+
+    // Assert: everything before the text is what the guard retained.
+    let retained = yielded.len() - 1;
+    assert_eq!(
+        retained,
+        2 * (MAX_PRECONTENT_CHUNKS + MAX_PRECONTENT_CARRIAGE_CHUNKS) + 1
+    );
+    assert_eq!(retained, 145);
+}
+
+#[tokio::test]
+async fn without_carriage_the_buffer_retains_at_most_twice_the_cap_plus_one() {
+    // Arrange
+    let mut chunks = vec![empty_reasoning()];
+    for _ in 0..MAX_PRECONTENT_CHUNKS {
+        chunks.push(usage_only());
+        chunks.push(empty_reasoning());
+    }
+    chunks.push(text("hi"));
+
+    // Act
+    let yielded = guard_commit(chunks).await;
+
+    // Assert
+    assert_eq!(yielded.len() - 1, 2 * MAX_PRECONTENT_CHUNKS + 1);
+    assert_eq!(yielded.len() - 1, 17);
 }

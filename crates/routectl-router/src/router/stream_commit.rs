@@ -16,7 +16,7 @@ use routectl_core::{
 use super::breaker_transition;
 use super::class_observe::{apply_remap, upstream_status_for_remap};
 use super::outcome_rule::{BreakerOutcome, breaker_outcome, reset_hint_clamped_to};
-use super::precontent::{is_empty_reasoning_only, precontent_summary};
+use super::precontent::{is_carriage_only, is_empty_reasoning_only, precontent_summary};
 
 /// Wrap an upstream stream so the breaker settles exactly once, on whichever
 /// of three exits the stream takes first:
@@ -186,17 +186,28 @@ impl Drop for BreakerAccounting {
     }
 }
 
-/// Upper bound on the content-free leading chunks that are NOT
-/// empty-reasoning-only (see `is_empty_reasoning_only`), counted while
-/// waiting for the first content-bearing one. A healthy stream opens with
-/// at most a handful of metadata chunks (a role delta, an id/model stamp);
-/// a stream that exceeds this before emitting content is treated as a
-/// pre-content failure rather than buffering unboundedly. Empty-reasoning
-/// chunks are not counted, and each consecutive run of them is buffered as
-/// its first chunk only, so the buffer holds at most twice this many
-/// entries; `stream_first_byte_timeout_ms` bounds a stream that never
-/// sends anything else.
+/// Upper bound on the content-free leading chunks that are neither
+/// empty-reasoning-only (see `is_empty_reasoning_only`) nor carriage-only
+/// (see `is_carriage_only`), counted while waiting for the first
+/// content-bearing one. A healthy stream opens with at most a handful of
+/// metadata chunks (a role delta, an id/model stamp); a stream that exceeds
+/// this before emitting content is treated as a pre-content failure rather
+/// than buffering unboundedly. `stream_first_byte_timeout_ms` bounds a stream
+/// that never sends anything else.
+///
+/// Retained before first content: at most this many counted chunks, at most
+/// [`MAX_PRECONTENT_CARRIAGE_CHUNKS`] carriage-only chunks, and one entry per
+/// consecutive run of empty-reasoning chunks. A run can sit before, between
+/// and after the others, so the buffer holds at most
+/// `2 * (MAX_PRECONTENT_CHUNKS + MAX_PRECONTENT_CARRIAGE_CHUNKS) + 1` chunks.
 pub(super) const MAX_PRECONTENT_CHUNKS: usize = 8;
+
+/// Upper bound on the carriage-only leading chunks (see `is_carriage_only`).
+/// They carry what a same-dialect client gets back on events that produced
+/// no canonical chunk (one per Responses output item opened, one per
+/// Anthropic block start or stop), so they get their own bound and never
+/// spend the metadata budget above.
+pub(super) const MAX_PRECONTENT_CARRIAGE_CHUNKS: usize = 64;
 
 /// True when `chunk` carries client-visible generated content: non-empty
 /// text or reasoning text, typed reasoning blocks, tool-call requests, or
@@ -299,6 +310,7 @@ pub(super) async fn try_stream_with_first_content(
     // stream that never produces content must not buffer forever.
     let mut buffered: Vec<ChatChunk> = Vec::new();
     let mut counted = 0usize;
+    let mut carriage = 0usize;
     loop {
         match upstream.next().await {
             Some(Ok(chunk)) if is_content_bearing(&chunk) => {
@@ -318,6 +330,17 @@ pub(super) async fn try_stream_with_first_content(
                 // that is always ready would never return Pending, and the
                 // first-content timeout around this future could not fire.
                 tokio::task::consume_budget().await;
+            }
+            Some(Ok(chunk)) if is_carriage_only(&chunk) => {
+                if carriage >= MAX_PRECONTENT_CARRIAGE_CHUNKS {
+                    let summary = precontent_summary(buffered.iter().chain([&chunk]));
+                    return Err(Error::Streaming(format!(
+                        "{provider_name} emitted more than {MAX_PRECONTENT_CARRIAGE_CHUNKS} \
+                         carriage-only chunks before any content (buffered: {summary})",
+                    )));
+                }
+                carriage += 1;
+                buffered.push(chunk);
             }
             Some(Ok(chunk)) => {
                 if counted >= MAX_PRECONTENT_CHUNKS {

@@ -529,3 +529,41 @@ fn item_members_ride_to_a_responses_client_only() {
         assert_eq!(item_chunks, 2, "{row}: the items still stream");
     }
 }
+
+#[test]
+fn an_empty_reasoning_content_array_rides_the_items_own_events() {
+    // Arrange
+    let item = |content: Value| json!({"type": "reasoning", "id": "rs_1", "summary": [], "content": content});
+    let events = |content: Value| {
+        vec![
+            json!({"type": "response.created",
+                   "response": {"id": "r", "model": "m", "status": "in_progress"}}),
+            json!({"type": "response.output_item.added", "output_index": 0,
+                   "item": item(content.clone())}),
+            json!({"type": "response.output_item.done", "output_index": 0,
+                   "item": item(content)}),
+        ]
+    };
+
+    // Act
+    let empty = item_member_carriers(&drive_all(&mut responses_state(), events(json!([]))));
+    let filled = item_member_carriers(&drive_all(
+        &mut responses_state(),
+        events(json!([{"type": "reasoning_text", "text": "t"}])),
+    ));
+
+    // Assert
+    assert_eq!(empty.len(), 2, "{empty:?}");
+    assert_eq!(
+        empty[0].1.reasoning["rs_1"],
+        members(json!({"content": []}))
+    );
+    assert_eq!(
+        empty[1].2.reasoning["rs_1"],
+        members(json!({"content": []}))
+    );
+    assert!(
+        filled.is_empty(),
+        "typed content is not carried: {filled:?}"
+    );
+}

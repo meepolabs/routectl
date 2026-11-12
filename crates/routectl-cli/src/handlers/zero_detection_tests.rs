@@ -64,12 +64,7 @@ const ANTHROPIC_TO_RESPONSES: &str = "anthropic->openai-responses";
 const CHAT_TO_RESPONSES: &str = "chat->openai-responses";
 
 /// Findings the check correctly reports that no declaration explains.
-const KNOWN_UNDECLARED: &[KnownUndeclared] = &[KnownUndeclared {
-    lane: "responses->openai-responses",
-    leg: Leg::Response,
-    path: "/output/0/content",
-    reason: "the Responses render omits an empty reasoning `content` array the upstream sent",
-}];
+const KNOWN_UNDECLARED: &[KnownUndeclared] = &[];
 
 /// The client dialect a case speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
