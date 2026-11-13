@@ -36,7 +36,7 @@ license.
   `RefusalReason`, `EligibilityReason`, and the request-observation types
   (incl. `SkipCounts`, `WalkCounts`), the `[log]` knob resolvers
   (`LogKnob`/`LogKnobSource`), and the upstream-text scrub (`scrub_upstream_text`,
-  `names_aws_principal`); declares the `provider_kind`, `upstream_reason`,
+  `scrub_upstream_value`, `upstream_text_for_log`, `names_aws_principal`); declares the `provider_kind`, `upstream_reason`,
   `refusal_reason` and `eligibility` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
@@ -77,10 +77,10 @@ license.
 - `src/config_dir.rs` -- the shared routectl config-folder rule: pure
   `config_dir_from` (absolute `XDG_CONFIG_HOME`, else absolute home +
   `.config`, joined with `routectl`; empty or relative counts as unset; on
-  Windows the home is `HOME` when absolute, else `USERPROFILE`), the env
-  binding `config_dir`, and `config_dir_or_relative[_from]` (relative
-  `.config/routectl` when nothing resolves). The cli, router, auth and the
-  providers cookie jar resolve through it
+  Windows the home is `HOME` when absolute, else `USERPROFILE`) and the env
+  binding `config_dir`; both return `None` when nothing resolves (no relative
+  fallback). The cli, router, auth and the providers cookie jar resolve
+  through it
 - `src/config_dir_census_tests.rs` -- the config-folder census: fails when a
   production source other than `config_dir.rs` and the cli's
   `config_folder.rs` names `XDG_CONFIG_HOME`, `APPDATA`, `USERPROFILE`, a
@@ -88,11 +88,12 @@ license.
   files and inline test modules. A small lexer finds each module's closing
   line, ignoring braces in comments (nested too) and string, raw-string and
   char literals, and panics on a module that never closes
-- `src/upstream_scrub.rs` -- `scrub_upstream_text`: replaces AWS ARNs (plain
-  and percent-encoded), 12-digit account ids after `account`, prefix-keyed
-  vendor credentials and URL userinfo in decoded upstream error text with
-  `[redacted]`, borrowing when nothing matches; `names_aws_principal`: the
-  ARN / account-id verdict alone. Hand-rolled, no regex
+- `src/upstream_scrub.rs` -- `scrub_upstream_text`: redacts credential- and
+  principal-shaped substrings of decoded upstream text (rules in its doc
+  comment); `scrub_upstream_value` (the same over a JSON value, in place),
+  `upstream_text_for_log` (scrub, then control-filter and cap, for log
+  sinks), `names_aws_principal` (the ARN / account-id verdict alone).
+  Hand-rolled, no regex
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift` and the router's wire-check WARN. Decides only --
@@ -102,7 +103,8 @@ license.
   the same attempt; module-scope deny of indexing/unwrap/expect/panic
 - `src/wire_check/path.rs` -- `WirePath`: sanitized RFC 6901 pointer
   (non-token segment -> `*`, depth 8, 256 bytes, coarsened on overflow;
-  remembers index / masked-key segments for wildcard matching)
+  remembers index / masked-key segments for wildcard matching; `pattern`
+  renders them as `*`)
 - `src/wire_check/edits.rs` -- `DeclaredEdit` (site, pointer pattern,
   `EditKind`) with the blanket-container refusal, RFC 6901 segment
   validation and one-segment `*` matching (index or masked key only, never
@@ -486,7 +488,9 @@ license.
   so `Error::Upstream`'s `body` renders as a bounded `body_excerpt` (capped at
   `MAX_LOG_BODY_EXCERPT` chars) + `body_len` marker -- every `?e` log sink is
   bounded from one place even where the request-fault body runs to
-  `MAX_ERROR_BODY_BYTES`; all other variants/fields keep the derived shape
+  `MAX_ERROR_BODY_BYTES`; the upstream-authored text of `Upstream`,
+  `Streaming`, `Auth` and `NormalizeResponse` renders through the upstream
+  scrub in Display and Debug (the fields stay raw)
 - `src/failure_class.rs` -- coarse, stable failure-classification leaf:
   `#[non_exhaustive] FailureClass`
   (RateLimited/Auth/BadRequest/ContentPolicy/ContextWindow/ServerError/Timeout/NetworkError/Overloaded/`FeatureUnsupported{capability}`/Unknown)
@@ -567,8 +571,8 @@ license.
   `trace_upstream_response_headers` (direction 3) collapses a `set-cookie`
   session credential and the SigV4 `x-amz-security-token` STS credential to
   `[REDACTED]` before emit, while a non-secret rate-limit header round-trips
-  verbatim; isolated binary so the `ROUTECTL_TRACE_HEADERS` OnceLock freezes
-  ON
+  verbatim, and a credential echoed under any other header name is scrubbed;
+  isolated binary so the `ROUTECTL_TRACE_HEADERS` OnceLock freezes ON
 - `tests/log_overrides_redact_prompts.rs` -- resolution-rule coverage for the
   `redact_prompts` knob (env > `[log]` > default); isolated binary so OnceLock
   state stays clean
@@ -707,7 +711,9 @@ license.
   escape path, collision-resistant on the digest fold -- and deterministic, so
   a `tool_use` id still equals its `tool_result` correlator on every lane
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures
-  (401/403-vs-other auth-warn split) across egresses
+  (401/403-vs-other auth-warn split) across egresses; renders the raw upstream
+  text through `upstream_text_for_log`. Its `pub` `#[cfg(test)]` `tests`
+  module also holds the planted-credential rows other lanes' sink tests share
 - `src/stream_completion.rs` -- `StreamCompletion`: shared end-of-stream
   verdict for lanes whose wire closes each turn with a terminal event; each
   lane injects its own predicate, and a stream that ends before it yields a
@@ -729,7 +735,8 @@ license.
   `recognize_upstream_reason` (the credential `UpstreamReason` table), and
   `lift_nested_error_tokens` / `lift_nested_status_tokens` for the in-band
   and SSE error readers; `from_parts` parses a raw body, `from_body` takes an
-  `UpstreamBody` that already carries its parse
+  `UpstreamBody` that already carries its parse; `upstream_log_text` /
+  `non_envelope_log_text` are the uncut text the upstream-failure WARN renders
 - `src/upstream_scope.rs` -- the closed `ScopeRow` table read by
   `UpstreamErrorRead::into_error_with_tokens`: `ScopeLane` (set by the
   anthropic-api lane on its own OAuth bearer credential only), the
@@ -1600,6 +1607,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `tests/anthropic_overage_tracing.rs` -- captured-subscriber tracing coverage
   for the overage-flip log: a flip into overage emits one WARN with the
   non-secret quota fields, steady state is silent, recovery emits one INFO;
+  each quota header value on both lines is scrubbed;
   isolated binary so the thread-local capture subscriber does not leak
 - `tests/anthropic_reasoning_format_redaction.rs` -- isolated binary pinning
   the foreign-format WARN's `skipped_formats` field under
@@ -2085,7 +2093,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `validate_bedrock_invoke_model_family`,
   `class_policy_warnings`,
   `codex_identity_warnings`, `cloudcode_host_warnings`,
-  `cloudcode_model_warnings`) so
+  `cloudcode_model_warnings`, `auth_reserved_header_warnings`) so
   `crate::factory::X` and the `lib.rs` `pub use factory::{...}` block resolve
   unchanged
 - `src/factory/build.rs` -- secret resolution +
@@ -2247,7 +2255,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[providers.X]` row and flags a cloud-code-lane entry whose `upstream` hits
   `routectl_providers::gemini::deprecated_alias_replacement`, naming the
   verified replacement -- the auth-mode gate is load-bearing, since the same
-  ids stay current on the api-key lane (advisory only). Units live in the
+  ids stay current on the api-key lane (advisory only);
+  `auth_reserved_header_warnings` flags each auth-reserved key in a
+  `[models.X] header_extras` (dropped from every request). Units live in the
   `#[path]`-included `warnings_tests.rs` (gemini-gated)
 - `src/factory/beta_floor_warnings.rs` -- `beta_floor_override_warnings`,
   the `config check` advisory for an `unsupported` `beta:<flag>` override on
@@ -2266,7 +2276,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   list with conditions and line refs is the module doc of the
   `#[path]`-included `warnings_beta_floor_tests.rs`, one table row per site
 - `src/factory/installation_id.rs` -- (cfg `openai-responses`) read-or-create
-  the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
+  the persistent per-installation UUIDv4 at `<config-dir>/installation_id`
+  (`None`, header omitted, when no config folder resolves);
   `resolve_installation_id` adopts an existing valid file
   (lowercase-normalized), re-mints an empty/corrupt one, and mints an absent
   one via `routectl_auth::atomic_write::write_0600_atomic` (owner-only 0600),
@@ -3476,7 +3487,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`revert_outcome`: `Repaired` when the reverted attempt succeeded,
   `Unrepaired` when it did not, `None` for a declined revert so the
   field-repair outcome stands), and the
-  deduped `routectl_edit_rejected` WARN (lane, masked + sanitized path,
+  deduped `routectl_edit_rejected` WARN (keyed by lane, `WirePath::pattern`
+  and attribution; prints the first masked + sanitized path seen,
   `edit_site`: the declared site label, `conflict`, or `undeclared` for a
   `routectl_added` path no declaration explains, which then falls through to
   the proposers; capped dedupe set reset on Router rebuild). Engages before
@@ -4403,7 +4415,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `outcome_rule_tests.rs` and `outcome_rule_decide_tests.rs`
 - `src/router/breaker_transition.rs` -- the INFO transition lines
   `breaker_opened` / `breaker_parked` / `breaker_closed` (event token and
-  sanitized `state_key`, plus `cooldown_ms` on a park), emitted by `runtime_gate`, `credential_park`
+  sanitized, quoted `state_key`, plus `cooldown_ms` on a park), emitted by `runtime_gate`, `credential_park`
   and `stream_commit` when a settle changes the circuit's state
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_client`/`admit_probe` (take the target's credential account;
@@ -5336,9 +5348,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   beta flags match in any case (a pair differing only in case lands in one
   cell, so `validate_capability_overrides` rejects it as contradictory).
   `resolve(provider, nickname, cap, kind) -> Option<OverrideVerdict>` consults
-  the model-scoped cell, then the provider-scoped cell (model wins). A dead-key
-  WARN fires per override key that normalization rewrites (dead: it could
-  never match). `validate_capability_overrides` (wired into
+  the model-scoped cell, then the provider-scoped cell (model wins).
+  `validate_capability_overrides` (wired into
   `factory::collect_config_validation`, so `serve` load and `config check`
   both see it) fails a config where one `(target,
   capability)` cell carries contradictory `RouteAway` + `ForceSupported`
@@ -5572,7 +5583,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   env/file/literal references at read-time
 - `src/atomic_write.rs` -- crate-internal (`pub(crate)`), unconditional (not
   behind the `oauth` feature) `write_0600_atomic(path, bytes)`: the ONE
-  temp-file + fsync + rename + force-`0o600` + parent-dir-fsync sequence
+  temp-file + fsync + rename + force-`0o600` + parent-dir-fsync (unix only)
+  sequence
   shared by every routectl-auth secret writer (the OAuth credentials store and
   the secret-capture primitive). FORCE-sets `0o600` (unlike routectl-router's
   mode-PRESERVING `config.toml` writer -- a secrets file has one correct mode
@@ -5611,7 +5623,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   folder resolves); load is TOCTOU-safe (fstat + `0o600`
   enforcement on Unix), save serializes to pretty JSON and delegates the write
   to the crate's shared `atomic_write::write_0600_atomic` (temp file + fsync +
-  rename + force-`0o600` + parent-dir fsync) -- every writer fault surfaces as
+  rename + force-`0o600` + parent-dir fsync on unix) -- every writer fault surfaces as
   `OAuthError::Io`
 - `src/oauth/pkce.rs` -- PKCE verifier / SHA-256 challenge / CSRF state;
   `OsRng`-sourced, Drop-zeroized, constant-time state compare
@@ -6061,9 +6073,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 ## routectl-cli
 
 - `src/main.rs` -- clap CLI entry point; `resolve_config_path` defaults to
-  `config.toml` under `routectl_core::config_dir::config_dir_or_relative`, and
-  `run` calls `config_folder::refuse_stranded_config` before dispatch unless
-  `--config` / `ROUTECTL_CONFIG` names the file; `main` wraps `run` (which dispatches
+  `config.toml` under `routectl_core::config_dir::config_dir`, failing with
+  `ConfigFolderError::NoFolder` when no folder resolves, and `run` calls
+  `config_folder::refuse_stranded_config` before dispatch when no `--config` /
+  `ROUTECTL_CONFIG` names the file and `reads_config` classifies the
+  subcommand as one that reads the config; `main` wraps `run` (which dispatches
   `serve` / `init` / `login` / `logout` / `refresh` / `whoami` / `doctor` /
   `test` / `config` / `provider` / `usage` / `prices` / `rc` / `capability`
   subcommands; the hidden
@@ -6076,7 +6090,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   then prints it via `Display` -- preserving the multi-line actionable
   config-load message rather than `Debug`-escaping it -- before exiting 1
 - `src/lib.rs` -- test-scaffolding facade (not a stable library API):
-  re-exposes `commands`, `config_folder`, `handlers` (`#[doc(hidden)]`), `ingress`, `proxy`
+  re-exposes `commands`, `config_folder`, `derived_path` and `handlers` (the
+  last three `#[doc(hidden)]`), `ingress`, `proxy`
   (`#[doc(hidden)]`), and `server` to the crate's own integration-test
   binaries; `config_classify` is crate-internal (`pub(crate)`, consumed only
   via `crate::config_classify::`)
@@ -6319,9 +6334,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/router_build.rs` -- Router construction from a parsed config:
   `build_router_from_config` (the shared build path reused by boot and every
   hot-reload -- runs the whole shared `collect_config_validation` suite and
-  returns its first error BEFORE any construction, then emits each
-  advisory-warning category on its own log line, runs the build-path-only
-  `[mitm]` validator, and installs the resolved models). Split out of `serve`
+  returns its first error BEFORE any construction, then runs the
+  build-path-only `[mitm]` validator and installs the resolved models) and
+  `log_advisory_warnings` (one WARN per advisory config finding, named by
+  category; called at serve startup and per accepted config reload, never from
+  the build, which also runs on seat-set changes). Split out of `serve`
   so the `reload` coordinator depends on this builder directly, keeping the
   serve <-> reload edge one-way; re-exported at a `server::` path from `mod.rs`
 - `src/server/reload.rs` -- config/credential/seat reload + activation
@@ -6337,7 +6354,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   returns `Ok(None)` and records nothing) into `handle_config_reload` (re-read
   config.toml via `read_parse_validate_config` off a
   `spawn_blocking` worker, rebuild the live `Router` behind `ArcSwap`, carry
-  over per-nickname runtime state, flip the usage capture gate, commit one
+  over per-nickname runtime state, flip the usage capture gate, log the new
+  config's advisory warnings (`log_advisory_warnings`), commit one
   capability replay boundary when the routers' revision stamps differ
   (unreachable while the stamps are frozen), and emit the restart-required diff via
   `config_classify::collect_restart_required_changes` --
@@ -6469,7 +6487,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   adds the fail-fast `validate_effective_config` gate.
   `read_parse_validate_config` is the synchronous hot-reload loader over
   `load_effective_config`, so a rejection returns
-  `ReloadFailure::ConfigLoadFailed`;
+  `ReloadFailure::ConfigLoadFailed` (its WARN joins a multi-line loader error
+  onto one line, with a `reasons` count);
   `warn_if_config_world_readable` (unix) WARNs on group/world-readable configs
   carrying secrets; `compute_max_body_bytes` maps the zero-means-default
   body-limit knob
@@ -8142,17 +8161,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
 - `src/config_folder.rs` -- the refusal for a config left only in an old
-  folder: pure `legacy_config_dirs(home, appdata)` (every candidate in
+  folder: pure `legacy_config_dirs(appdata, home)` (every candidate in
   checking order, `<APPDATA>/routectl` when `APPDATA` is absolute, then
   `$HOME/Library/Application Support/routectl` when `HOME` is, chosen by
-  variable on every OS, each a `LegacyConfigDir` with a home-free
-  `display`), `legacy_config_dirs_from_env`, and
-  `refuse_stranded_config(new_cfg, &[LegacyConfigDir])` (no refusal when
+  variable on every OS, a folder both name listed once, each a
+  `LegacyConfigDir` with a home-free `display`), `legacy_config_dirs_from_env`,
+  and `refuse_stranded_config(new_cfg, &[LegacyConfigDir])` (no refusal when
   `new_cfg` exists, else the first candidate holding `config.toml` or failing
-  `try_exists` wins), which `main.rs` `run()` calls once before dispatch
-  unless `--config` / `ROUTECTL_CONFIG` names the file. `ConfigFolderError`
-  (`Stranded` / `Inspect`) texts name both paths and say routectl moved
-  nothing
+  `symlink_metadata` wins; a dangling link counts as present), which `main.rs`
+  `run()` calls once before dispatch for a config-reading subcommand unless
+  `--config` / `ROUTECTL_CONFIG` names the file. `ConfigFolderError`
+  (`Stranded` / `Inspect` / `NoFolder`): the first two name both paths and say
+  routectl moved nothing; `NoFolder` asks for `HOME` or `--config`
 - `src/derived_path.rs` -- the refusal of an empty config-folder default
   (`[usage] db_path`, `[mitm] cert_dir`) where the path is consumed:
   `require_serve_paths` (serve start, before the usage writer and CA),
@@ -8331,7 +8351,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `PriceSnapshot` (`pin(&PriceBook)` = the book's current refreshed table plus
   `shipped_table()`; `from_tables` for tests) is the price-table pair one cost
   read resolves against, and `default_price_book()` is the `PriceBook` over
-  `<config_dir>/prices.json` that `routectl usage` pins once per run and
+  `<config_dir>/prices.json` (an empty path, read as not found, when no config
+  folder resolves) that `routectl usage` pins once per run and
   `AppState.prices` shares with the status surface. The rest are
   `pub(super)` (visible across the `commands` tree, nowhere else).
   `rates_from_pricing(&PricingConfig) -> Rates` is the ONE carry
@@ -8483,7 +8504,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   or a bounded file read (metadata length plus `take(limit + 1)`), both capped
   at `prices::MAX_INPUT_BYTES`; converts through `prices::from_models_dev`,
   then writes `<config_dir>/prices.json` by same-directory temp, fsync,
-  rename, dir fsync (on Unix a failed dir fsync logs a WARN with its error kind). Logs the URL without userinfo, query or fragment; output
+  rename, dir fsync (on Unix a failed dir fsync logs a WARN with its error kind);
+  with no config folder it fails with `PricesError::NoConfigFolder` and writes
+  nothing. Logs the URL without userinfo, query or fragment; output
   is counts and the table date. Tests in `prices_tests.rs`
 - `src/commands/probe/mod.rs` -- `routectl provider probe [<name>]`: the
   read-only, free-only reachability report. `probe_all(config, store,
@@ -8948,11 +8971,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and the default usage-db path resolves under it, never under the real
   `$HOME/.config`
 - `tests/config_folder.rs` -- real-binary pins of the config folder: a
-  config only in the old macOS folder stops `config check`, `serve`,
-  `doctor` and `init` naming both paths (init creates nothing), one only in
+  config only in the old macOS folder stops `config check`, `config show`,
+  `serve` and `init` naming both paths (init creates nothing) while `whoami`
+  and `doctor` still run, one only in
   `$APPDATA/routectl` stops `config check`, `--config` and
   `ROUTECTL_CONFIG` each get past the check (one table row each),
   and an empty `XDG_CONFIG_HOME` reads `$HOME/.config/routectl/config.toml`.
+  With no absolute config folder `config show` refuses instead of reading a
+  cwd-relative config, and an explicit config is read.
   `doctor` lists a file left in either old folder by its home-free name
   (`~/Library/...` or `%APPDATA%\routectl`) and shows nothing for an empty
   old folder; `served_doctor_names_a_file_left_in_the_appdata_folder` pins
