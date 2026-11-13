@@ -1210,8 +1210,10 @@ license.
   `forwarded_passthrough`, `takes_namespace_stamps` and `WithheldCarriers`;
   each withhold declared as a Remove, counted once per request as
   `unknown_member_withheld`. `admit_cache_value` rebuilds a client
-  `prompt_cache_options` / `prompt_cache_retention` from static literals when
-  it parses into a captured shape, else `None` (withheld whole)
+  `prompt_cache_options` / `prompt_cache_retention` from closed literal
+  tables (retention `in_memory` / `24h`; options `mode` `explicit` with an
+  optional `ttl` `30m`, no other member) when it parses into that captured
+  shape, else `None` (withheld whole)
 - `src/openai_responses/mantle_media.rs` -- (cfg `bedrock`)
   `check_forwarded_media_urls`: on the Mantle lane `normalize_request` passes
   the serialized body's `input` to `mantle::refuse_unforwardable_media_urls`
@@ -5978,8 +5980,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   anthropic-api or bedrock kind, gap within the lifetime, a stable prefix epoch,
   prompt at the minimum, and non-NULL read and write totals (`cache_write_total_expr!`,
   so absent stays apart from zero); zero/zero is evidence, else active. Returns
-  per-lane counts with distinct sessions and no session id, capped with a
-  `truncated` flag. The `caller_supplied` and kind tokens are leaf-preserving
+  per-lane counts with distinct sessions and no session id, at most
+  `CACHE_IGNORE_LANE_CAP` (256) lanes with a `truncated` flag; lanes with no
+  active turn sort first, so the cap drops lanes that already showed cache
+  activity before any that might be ignoring. The `caller_supplied` and kind tokens are leaf-preserving
   mirrors of core, welded by a routectl-cli round-trip test
 - `src/query/cache_decision.rs` -- cache-breakpoint decision read query over the
   v16 columns; exports `cache_decision_summary` + `CacheDecisionSummary`
@@ -6401,7 +6405,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `run_router_metrics_snapshot_driver` (in `metrics_driver.rs`),
   `run_probe_driver` (in `probe_driver.rs`), `run_cache_ignore_driver` (in
   `cache_ignore_driver.rs`) and, when a credential store exists,
-  `run_seat_driver` (in `seat_driver.rs`). All three
+  `run_seat_driver` (in `seat_driver.rs`); the cache-ignore driver takes the
+  boot config's `usage.db_path` (restart-required, like the writer's) and
+  reads only eligibility from the live config. All three
   publication sites go through `router_publish::publish_router`, never a direct
   store. `apply_activation` (+ `gather_probes` /
   `emit_activation_delta`, `ActivationTrigger`) recomputes the auto-activation
@@ -6417,16 +6423,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
   per-session prefix-epoch baselines -- a one-site-only carry silently empties
   that store on the missed path, and an empty store reads exactly as health)
-- `src/server/cache_ignore_driver.rs` -- `run_cache_ignore_driver`: every
-  `CACHE_IGNORE_DRIVER_INTERVAL` (15 min) evaluates `cache_ignore_report` on
-  a fresh read-only open of the live router's `usage.db_path`
-  (`spawn_blocking`, 2 s deadline) and logs only changes, computed by the
-  pure `transitions(prev, next)`: WARN `cache_markers_without_cache_activity`
-  per lane entering `ignoring`, INFO on leaving it, WARN / INFO on the report
-  turning unavailable (INFO for `no_data`) and INFO when it returns. Boot
-  compares the report as of one interval ago with the report as of now and
-  logs one INFO `cache_ignore_baseline`. State is task-local; nothing is
-  persisted. Tests in `cache_ignore_driver_tests.rs`
+- `src/server/cache_ignore_driver.rs` -- `run_cache_ignore_driver(router_swap,
+  db_path, shutdown)`: every `CACHE_IGNORE_DRIVER_INTERVAL` (15 min, missed
+  ticks skipped) evaluates `cache_ignore::read_cache_ignore_report` on the
+  boot-time ledger path under the live router's config (`spawn_blocking`, 2 s
+  deadline; a panicked read reads as `db_unavailable`) and logs only changes,
+  computed by the pure `transitions(prev, next)`: WARN
+  `cache_markers_without_cache_activity` per lane entering `ignoring`, INFO
+  `..._cleared` on leaving it (with the verdict it now reads, or
+  `not_evaluated` when its provider left the evaluated set), WARN / INFO on the
+  report turning unavailable (INFO for `no_data`) and INFO when it returns; a
+  lane an unavailable or truncated report cannot speak for keeps its previous
+  state. Boot evaluates once against an empty state, logs one INFO
+  `cache_ignore_baseline`, and WARNs once per lane ignoring now (a lane still
+  ignoring across a restart is re-announced); there is no comparison with an
+  earlier window. State is task-local; nothing is persisted. Tests in
+  `cache_ignore_driver_tests.rs`
 - `src/server/probe_driver.rs` -- `run_probe_driver` and
   `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
 - `src/server/seat_driver.rs` -- the background seat driver: `run_seat_driver`
@@ -8173,21 +8185,28 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   already match byte-for-byte; a partial match writes the missing pieces while
   leaving matching ones untouched. A stale snapshot or a gate failure writes
   nothing
-- `src/cache_ignore.rs` -- the one cache-ignore report every reader
-  renders (report only; nothing logged, no session ids).
+- `src/cache_ignore.rs` -- (`pub(crate)`) the one cache-ignore assembler
+  that the daemon driver, `usage --detail` and doctor all render (report only;
+  nothing logged, no session ids).
   `cache_ignore_report(&UsageDb, &Config, now_ms, deadline) ->
-  CacheIgnoreReport` evaluates configured anthropic-api / bedrock providers
-  whose `ProviderEntry::cache_capability().cache_hit_observable` holds, with
-  rules from `routectl_router::cache_rules`, through
+  CacheIgnoreReport` evaluates configured anthropic-api / bedrock providers,
+  with rules from `routectl_router::cache_rules`, through
   `routectl_usage::cache_ignore_lanes` under a `DeadlineGuard`, over the
-  fixed `CACHE_IGNORE_WINDOW` (6 h) ending at `now_ms`. Lane verdicts
-  `ignoring` (evidence >= `IGNORING_MIN_EVIDENCE`, no active turn) /
-  `clear` / `insufficient`; non-observable providers are listed
-  `unobservable`; a ledger provider absent from config is never counted or
-  listed. Status `Evaluated` or `Unavailable(class)` (`query_timeout`,
-  `db_unavailable`, or via `CacheIgnoreReport::open_failed` `no_data` /
-  the `ledger_reader::open_error_class` token). Tests in
-  `cache_ignore_tests.rs`
+  fixed `CACHE_IGNORE_WINDOW` (6 h) ending at `now_ms`;
+  `read_cache_ignore_report(db_path, ..., budget)` does the same on its own
+  `open_readonly_fastfail` connection with the budget covering open and query.
+  Lane verdicts `LaneVerdict::{Ignoring, Clear, Insufficient}` (`ignoring` =
+  evidence >= `IGNORING_MIN_EVIDENCE`, no active turn). The report lists
+  `evaluated` providers and `not_evaluated` ones with a `NotEvaluatedReason`
+  (`HitsNotObservable`: `cache_hit_observable` false; `ConverseShape`: a
+  Bedrock provider on the Converse egress), each carrying its current
+  `supports_top_level_cache_control`; a ledger provider absent from config is
+  never counted or listed. `LaneIdentifiers::render` is the shared lane
+  provider / seat / model render (`seat_report::safe`, the model through
+  `upstream_text_for_log` first). Status `Evaluated` or `Unavailable(class)`
+  (`query_timeout`, `db_unavailable`, or via `CacheIgnoreReport::open_failed`
+  `no_data` / the `ledger_reader::open_error_class` token); `truncated`
+  carries the query's lane cap. Tests in `cache_ignore_tests.rs`
 - `src/config_classify.rs` -- pure config-diff classifiers shared by
   hot-reload logging and `config set/unset`:
   `collect_restart_required_changes(prev, next)`
@@ -8506,9 +8525,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cache-ignore block: `cache_ignore_block(&UsageDb, &Config, now_ms,
   deadline)` renders `cache_ignore::cache_ignore_report` (fixed 6 h window,
   independent of the window flags and `--since`) once per run from
-  `usage::build_blocks`, with a `CACHE_IGNORE_READ_BUDGET` (2 s) deadline;
-  lane identifiers go through `seat_report::safe` (the model through
-  `upstream_text_for_log` first). Tests in `usage_cache_ignore_tests.rs`
+  `usage::build_blocks`, with a `CACHE_IGNORE_READ_BUDGET` (2 s) deadline.
+  `render_cache_ignore` prints one line per lane through
+  `CacheIgnoreLaneReport::identifiers`, a cap note when truncated, and one
+  `not evaluated (<reason>)` line per `NotEvaluatedReason`. Tests in
+  `usage_cache_ignore_tests.rs`
 - `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to
   20|19|18|17|16 [--db P]`: the offline rollback over
   `routectl_usage::downgrade_to` (a v21 file taken to 16 runs every step);
@@ -8666,7 +8687,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   each naming the reason and the RFC3339 deadline; `with_unusable_seats`
   likewise attaches `UnusableSeat`s (state key, cause, since, fix line from
   `SeatFix` / `unusable_seat_fix`), rendered by `unusable_seat_finding` as one
-  `unusable seat <state_key>` Warn each. `served_layers` folds them into the shared gather's layers with
+  `unusable seat <state_key>` Warn each. `ServedInputs` also carries the
+  daemon's boot-time `usage_db_path` (the cache section reads that ledger,
+  never a reloaded config's path) and the cache read budget
+  (`with_cache_read_budget`). `served_layers` folds them into the shared gather's layers with
   `MatrixOrigin::Resident` (panel `source: resident`, `warm` set with an
   `unreadable` warm's class, no replay tally) and the accepted config's
   version, which the version finding reports instead of preflighting the
@@ -8789,14 +8813,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   home-free display.
   NEVER auto-fixes: every WARN/FAIL names the fix
 - `src/commands/doctor/cache_section.rs` -- the `cache` section producer
-  (`section_cache`) and its gather (`gather_cache_ignore`): the
-  `cache_ignore::CacheIgnoreReport` over the ledger's last window, read on its
-  own `open_readonly_fastfail` connection under `DISK_CACHE_READ_BUDGET`
-  (2000 ms) or the served `SERVED_CACHE_READ_BUDGET` (250 ms, a share of
-  `status_gate::AGGREGATE_RESERVE_MS`). One Warn per `ignoring` lane ("markers
-  sent, no cache activity"), one Pass `cache markers` summary or
-  `unavailable: <class>`, one Pass `unobservable providers`; never Fails.
-  Tests in the `#[path]`-included `cache_section_tests.rs`
+  (`section_cache`) and its gather (`gather_cache_ignore`, over
+  `cache_ignore::read_cache_ignore_report`): the `CacheIgnoreReport` over the
+  ledger's last window, read under `DISK_CACHE_READ_BUDGET` (2000 ms) from the
+  config's ledger on disk, or on the served path from the daemon's boot ledger
+  under `SERVED_CACHE_READ_BUDGET` (250 ms, at most a quarter of
+  `status_gate::AGGREGATE_RESERVE_MS`, asserted at compile time). One Warn per
+  `ignoring` lane ("markers sent, no cache activity", remediation naming the
+  `cache_capability` table), one Pass `cache markers` summary or
+  `unavailable: <class>`, one Pass per not-evaluated reason
+  (`unobservable providers`, `converse providers`); never Fails. Tests in the
+  `#[path]`-included `cache_section_tests.rs`
 - `src/commands/doctor/render.rs` -- human-text rendering of the
   `DoctorReport`: `render_human` walks `SECTIONS` in render order (per-section
   battery via `render_section`/`section_title`/`status_label`, then the
