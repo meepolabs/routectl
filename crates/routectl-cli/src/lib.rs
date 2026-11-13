@@ -12,6 +12,7 @@ pub(crate) mod alloc_probe;
 #[cfg(test)]
 #[global_allocator]
 static ALLOC_PROBE: alloc_probe::ProbeAllocator = alloc_probe::ProbeAllocator;
+pub mod cache_ignore;
 pub mod commands;
 pub(crate) mod config_classify;
 #[doc(hidden)]

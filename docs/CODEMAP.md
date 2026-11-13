@@ -8162,6 +8162,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   already match byte-for-byte; a partial match writes the missing pieces while
   leaving matching ones untouched. A stale snapshot or a gate failure writes
   nothing
+- `src/cache_ignore.rs` -- the one cache-ignore report every reader
+  renders (report only; nothing logged, no session ids).
+  `cache_ignore_report(&UsageDb, &Config, now_ms, deadline) ->
+  CacheIgnoreReport` evaluates configured anthropic-api / bedrock providers
+  whose `ProviderEntry::cache_capability().cache_hit_observable` holds, with
+  rules from `routectl_router::cache_rules`, through
+  `routectl_usage::cache_ignore_lanes` under a `DeadlineGuard`, over the
+  fixed `CACHE_IGNORE_WINDOW` (6 h) ending at `now_ms`. Lane verdicts
+  `ignoring` (evidence >= `IGNORING_MIN_EVIDENCE`, no active turn) /
+  `clear` / `insufficient`; non-observable providers are listed
+  `unobservable`; a ledger provider absent from config is never counted or
+  listed. Status `Evaluated` or `Unavailable(class)` (`query_timeout`,
+  `db_unavailable`, or via `CacheIgnoreReport::open_failed` `no_data` /
+  the `ledger_reader::open_error_class` token). Tests in
+  `cache_ignore_tests.rs`
 - `src/config_classify.rs` -- pure config-diff classifiers shared by
   hot-reload logging and `config set/unset`:
   `collect_restart_required_changes(prev, next)`
