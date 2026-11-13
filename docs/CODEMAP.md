@@ -45,6 +45,8 @@ license.
   capped at `MAX_CACHE_LIFETIME_ENTRIES`; wire serde in `cache_lifetime.rs`),
   `RequestProvenance`, the Anthropic-ingress native `thinking` carrier
   (`AnthropicThinking`, `ThinkingObject`), and the
+  node-local `extras` carriers for unmodeled members on `Message`
+  (`forwardable_extras`, `stays_in_place`; never serialized canonically), the
   `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
   struct's own docs for the field-by-field contract), incl.
@@ -52,7 +54,9 @@ license.
   (text-block ordinal, text digest, verbatim value, client pointer) the
   Responses ingress takes off client content blocks, and
   `responses_namespaces` (`ResponsesNamespaces`: the flattened Responses
-  namespace members, containers and collisions)
+  namespace members, containers and collisions), `responses_item_members`
+  (`ResponsesInputItemMembers`: unmodeled `function_call` / `reasoning` input
+  item members by `call_id` / `id`) and `responses_developer_turns`
 - `src/beta_assembly_report.rs` -- `BetaAssemblyReport`: clone-shared
   per-attempt slot where an anthropic-vocabulary egress records the
   `BetaAssembly` it computed at header / bag assembly (the beta floor it never
@@ -107,7 +111,10 @@ license.
   `RejectionProvenance` label sets
 - `src/wire_check/lane.rs` -- `IngressDialect` (with `of_provenance`),
   `EgressKind`, `Lane::of`
-  (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels
+  (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels;
+  `forwards_unknowns` (does this request's carried unknown members ride this
+  egress) and `renders_unknowns` (may a render emit response members a parser
+  stamped with an upstream wire dialect), the one same-dialect decision
 - `src/wire_check/diff.rs` -- `diff`: total structural compare of two
   `serde_json::Value` bodies into content-free `Finding`s (`WirePath` +
   `PathClass`); FIDELITY order-aware array alignment with declared-edit
@@ -150,7 +157,11 @@ license.
   `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`),
   `OpenAiChatEnvelope` (`openai_chat`), `ResponsesEnvelope`
   (`openai_responses`: the upstream `message` item id and `created_at` a
-  Responses ingress echoes, field-wise `merge`), plus
+  Responses ingress echoes, its unmodeled top-level `extras` and
+  `ResponsesItemMembers` by item id / call_id, field-wise `merge`),
+  `wire_dialect` (the dialect a parser read the body in, which
+  `renders_unknowns` checks), `OpaqueSseEvent` carriage variants
+  (`UnknownEvent`, `UnknownBlockDelta`, `KnownEventExtras`), plus
   `OpeningUsage` (an Anthropic-shape stream's first-event input + disjoint
   cache fields, exact, with `OpeningUsageOrigin` wire label, `observed_at` and
   `from_vendor_endpoint` (first-party host or InvokeModel vs any compatible
@@ -645,7 +656,9 @@ license.
   `ClientExtras` (keyed by `MatchingIngress`: `Http(provenance)`, or
   `LibraryOnly` for the gemini egress), `readable_extra`,
   `ForeignDialectExtraTally`: which extras keys an egress merge may forward,
-  by egress and ingress dialect
+  by egress and ingress dialect; `carried_members` /
+  `withhold_carried_members` (a translation egress declares and counts once
+  every member a request's carriers hold, sidecars included)
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every
   egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the
   redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream ->
@@ -4203,7 +4216,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `MAX_PRECONTENT_CHUNKS` and the first-content timeout, until
   `is_content_bearing` commits the provider; chunks matching
   `precontent::is_empty_reasoning_only` do not count toward the cap and each
-  consecutive run is buffered as one; its overflow and closed-before-content
+  consecutive run is buffered as one; carriage-only chunks
+  (`precontent::is_carriage_only`) have their own bound,
+  `MAX_PRECONTENT_CARRIAGE_CHUNKS`; its overflow and closed-before-content
   errors append `precontent::precontent_summary` of the buffered kinds) and
   `wrap_with_breaker_accounting` over a `BreakerSlot` (settles a post-content
   error frame once through the shared remap + `breaker_outcome` rule, logging
@@ -4284,7 +4299,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   walk
 - `src/router/precontent.rs` -- content-free labels for chunks the
   streaming pre-content guard buffers: `is_empty_reasoning_only` (the
-  uncounted single-choice thinking-liveness shape), `precontent_kind` (role >
+  uncounted single-choice thinking-liveness shape), `is_carriage_only` (a chunk
+  whose only payload is same-dialect carried members), `precontent_kind` (role >
   empty_text > empty_reasoning > finish > usage > upstream_meta >
   empty_choices > other) and `precontent_summary` (ordered run-length
   list, e.g. `role, empty_reasoning, usage x2, finish`) appended to the guard's
