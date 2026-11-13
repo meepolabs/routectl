@@ -57,6 +57,7 @@ const fn const_str_eq(a: &str, b: &str) -> bool {
 
 mod aggregate;
 mod cache_decision;
+mod cache_ignore;
 mod cache_lifetimes;
 mod calibration;
 mod capability;
@@ -74,6 +75,9 @@ pub use aggregate::{
 pub use cache_decision::{
     CacheDecisionSummary, SUPPRESSED_SESSION_CAP, SuppressedSessionRow, SuppressedSessions,
     cache_decision_summary, suppressed_sessions,
+};
+pub use cache_ignore::{
+    CACHE_IGNORE_LANE_CAP, CacheIgnoreLane, CacheIgnoreLanes, CacheIgnoreRule, cache_ignore_lanes,
 };
 pub use cache_lifetimes::{CacheWriteLifetimes, aggregate_with_cache_lifetimes};
 pub use calibration::{CalibrationSampleRow, read_calibration_samples_since};

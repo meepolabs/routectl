@@ -66,7 +66,10 @@ pub use query::{
     read_capability_events_after, read_reuse_samples_since, reduction_summary,
     shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
-pub use query::{ObservationTotals, observation_totals};
+pub use query::{
+    CACHE_IGNORE_LANE_CAP, CacheIgnoreLane, CacheIgnoreLanes, CacheIgnoreRule, ObservationTotals,
+    cache_ignore_lanes, observation_totals,
+};
 pub use record::{
     Harness, Operation, Outcome, PREFIX_EPOCH_RESEEDED, PREFIX_EPOCH_REWRITTEN,
     PREFIX_EPOCH_STABLE, ParseHarnessError, ParseOperationError, ParseOutcomeError, UsageRecord,

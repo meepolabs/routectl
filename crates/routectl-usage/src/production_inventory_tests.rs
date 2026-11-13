@@ -23,6 +23,7 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "migrate.rs",
     "query/aggregate.rs",
     "query/cache_decision.rs",
+    "query/cache_ignore.rs",
     "query/cache_lifetimes.rs",
     "query/calibration.rs",
     "query/capability.rs",

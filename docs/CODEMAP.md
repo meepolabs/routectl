@@ -5962,6 +5962,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   windows the usage channel dropped nothing in (service-side `dropped_full` /
   `dropped_disabled` / `write_errors` flat); a nonzero `strings_rejected`
   signals a minifier defect, not traffic headroom
+- `src/query/cache_ignore.rs` -- per-lane cache-ignore evidence over a window;
+  exports `cache_ignore_lanes` + `CacheIgnoreRule` / `CacheIgnoreLane` /
+  `CacheIgnoreLanes` / `CACHE_IGNORE_LANE_CAP`. Config-agnostic: the caller passes
+  one rule per eligible provider (minimum prompt, cache lifetime), bound as one
+  JSON parameter read through `json_each`. Pairs each inference, non-probe,
+  session-keyed row with its previous same-lane row (`LAG` over session,
+  provider, seat, model) BEFORE applying outcome and the other predicates, so a
+  failed turn breaks a pair. A turn qualifies on ok/ok, `caller_supplied`, an
+  anthropic-api or bedrock kind, gap within the lifetime, a stable prefix epoch,
+  prompt at the minimum, and non-NULL read and write totals (`cache_write_total_expr!`,
+  so absent stays apart from zero); zero/zero is evidence, else active. Returns
+  per-lane counts with distinct sessions and no session id, capped with a
+  `truncated` flag. The `caller_supplied` and kind tokens are leaf-preserving
+  mirrors of core, welded by a routectl-cli round-trip test
 - `src/query/cache_decision.rs` -- cache-breakpoint decision read query over the
   v16 columns; exports `cache_decision_summary` + `CacheDecisionSummary`
   (per-region decided/emitted pair plus the `prefix_epoch_event` breakdown).
