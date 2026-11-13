@@ -288,7 +288,8 @@ fn place_cache_breakpoints(
         return;
     }
     let mut placed = vec![false; breakpoints.len()];
-    let surface_accepts = extras::PromptCacheField::Breakpoint.forwards_on(auth_kind);
+    let surface_accepts =
+        extras::PromptCacheField::Breakpoint.admission(auth_kind) == extras::Admission::Verbatim;
     if let (true, Some(items)) = (surface_accepts, items) {
         attach_matching_breakpoints(breakpoints, messages, items, &mut placed);
     }

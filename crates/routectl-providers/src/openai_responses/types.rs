@@ -68,13 +68,14 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) prompt_cache_key: Option<String>,
 
-    /// Forwarded verbatim from `provider_extras`, only for a request the
-    /// Responses ingress produced and only on the auth surfaces that accept
-    /// it; the gate lives in `extras.rs`.
+    /// Taken from `provider_extras`, only for a request the Responses
+    /// ingress produced and only as the auth surface admits it: verbatim, or
+    /// on Bedrock Mantle rebuilt from a captured literal; the gate lives in
+    /// `extras.rs`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) prompt_cache_options: Option<Value>,
 
-    /// Forwarded under the same gate as `prompt_cache_options`.
+    /// Admitted under the same gate as `prompt_cache_options`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) prompt_cache_retention: Option<Value>,
 

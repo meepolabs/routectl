@@ -998,3 +998,36 @@ async fn a_mantle_block_decides_the_lane_whatever_the_auth_kind() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_mantle_block_gates_cache_values_whatever_auth_kind_the_config_names() {
+    // Arrange: the config names api-key; the mantle block alone makes the
+    // provider a Mantle one.
+    let creds = BedrockCreds::BearerKey {
+        key: "mantle-media-bearer".into(),
+    };
+    let mantle = MantleAuth {
+        region: "us-west-2".into(),
+        creds: resolve(&creds, "us-west-2").await.unwrap(),
+    };
+    let provider = OpenAiResponsesProvider::new(config(
+        "https://mantle.invalid",
+        AuthKind::ApiKey,
+        Some(mantle),
+    ));
+    let planted = planted_http();
+    let mut req = request(vec![message(Role::User, MessageContent::Text("hi".into()))]);
+    req.routectl_internal.provenance = RequestProvenance::ResponsesIngress;
+    req.provider_extras = Some(json!({
+        "prompt_cache_retention": planted,
+        "prompt_cache_options": {"mode": "explicit"},
+    }));
+
+    // Act
+    let body = provider.normalize_request(&req).expect("normalize");
+
+    // Assert
+    assert!(body.get("prompt_cache_retention").is_none(), "{body}");
+    assert!(!body.to_string().contains(PLANTED_HOST), "{body}");
+    assert_eq!(body["prompt_cache_options"], json!({"mode": "explicit"}));
+}

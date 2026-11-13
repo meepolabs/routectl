@@ -29,9 +29,11 @@
 //! and counts it.
 //!
 //! Prompt caching: `prompt_cache_options` and `prompt_cache_retention`
-//! forward only for a request the Responses ingress produced, and only on
-//! the auth surfaces that accept them (see [`PromptCacheField`]); a
-//! withheld one is counted once per request through
+//! forward only for a request the Responses ingress produced, and only as
+//! each auth surface admits them (see [`Admission`]): verbatim on the
+//! surfaces that accept them, rebuilt from a captured literal on Bedrock
+//! Mantle (`mantle_guard::admit_cache_value`), and otherwise withheld whole.
+//! A withheld one is counted once per request through
 //! [`PromptCacheWithheldTally`]. When neither the client nor the operator
 //! set `prompt_cache_key`, the egress sends the hex SHA-256 of the inbound
 //! session key: OpenAI refuses keys over 64 characters, and the raw client
@@ -59,6 +61,7 @@ use routectl_core::wire_check::{EditKind, EditSite, WireTap, forwards_unknowns};
 use routectl_core::{ChatRequest, ReasoningConfig, RequestProvenance, is_canonical_request_key};
 
 use super::AuthKind;
+use super::mantle_guard;
 use super::types::{RESPONSES_REQUEST_MEMBERS, ResponsesReasoning, ResponsesRequest, TextControls};
 use crate::effort::{level_from_budget, wire_effort};
 use crate::translation_drop_metrics::record_translation_drop;
@@ -416,18 +419,40 @@ impl PromptCacheField {
         }
     }
 
-    /// Whether `auth_kind` accepts the field. The ChatGPT-OAuth backend
-    /// refuses fields its codex client never sends: codex sends
+    /// How `auth_kind` admits the field. The ChatGPT-OAuth backend refuses
+    /// fields its codex client never sends: codex sends
     /// `prompt_cache_options` and `prompt_cache_key` but neither
-    /// `prompt_cache_retention` nor a breakpoint. Nothing records that the
-    /// Mantle surface accepts any of them.
-    pub(super) const fn forwards_on(self, auth_kind: AuthKind) -> bool {
-        match auth_kind {
-            AuthKind::ApiKey => true,
-            AuthKind::ChatgptOauth => matches!(self, Self::Options | Self::SessionKeyFallback),
-            AuthKind::BedrockMantle => false,
+    /// `prompt_cache_retention` nor a breakpoint. Bedrock Mantle signs the
+    /// request under the operator's AWS identity and documents no list of
+    /// the members it dereferences, so it takes only the values captured
+    /// against it, rebuilt from literals; nothing records that it accepts a
+    /// breakpoint or the derived session key.
+    pub(super) const fn admission(self, auth_kind: AuthKind) -> Admission {
+        match (auth_kind, self) {
+            (AuthKind::ApiKey, _)
+            | (AuthKind::ChatgptOauth, Self::Options | Self::SessionKeyFallback) => {
+                Admission::Verbatim
+            }
+            (AuthKind::BedrockMantle, Self::Options | Self::Retention) => Admission::Validated,
+            (AuthKind::ChatgptOauth, Self::Retention | Self::Breakpoint)
+            | (AuthKind::BedrockMantle, Self::Breakpoint | Self::SessionKeyFallback) => {
+                Admission::Withheld
+            }
         }
     }
+}
+
+/// What an auth surface does with a client prompt-cache field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Admission {
+    /// Forwarded as the client wrote it.
+    Verbatim,
+    /// Forwarded only as a captured shape rebuilt from literals, else
+    /// withheld whole. Only `apply_prompt_cache_field` admits this way;
+    /// every other reader treats it as withheld.
+    Validated,
+    /// Never forwarded.
+    Withheld,
 }
 
 /// Per-request record that the egress withheld at least one client
@@ -458,10 +483,12 @@ impl PromptCacheWithheldTally {
 }
 
 /// Forward one prompt-cache field when the Responses ingress produced the
-/// request and the auth surface accepts it. A Responses-ingress value the
-/// surface refuses is withheld, recorded in `withheld` and declared as an
-/// auth-surface Remove. A request from any other ingress spelled the field
-/// for another dialect, so it stays unforwarded like any unlisted key.
+/// request and the auth surface admits it: verbatim, or on a validating
+/// surface only as the captured shape the value parses into. A
+/// Responses-ingress value the surface refuses is withheld whole, recorded
+/// in `withheld` and declared as an auth-surface Remove. A request from any
+/// other ingress spelled the field for another dialect, so it stays
+/// unforwarded like any unlisted key.
 fn apply_prompt_cache_field(
     request: &mut ResponsesRequest,
     req: &ChatRequest,
@@ -474,7 +501,22 @@ fn apply_prompt_cache_field(
     if req.routectl_internal.provenance != RequestProvenance::ResponsesIngress {
         return;
     }
-    if !field.forwards_on(auth_kind) {
+    let admitted = match field.admission(auth_kind) {
+        Admission::Verbatim => Some(value.clone()),
+        Admission::Validated => {
+            let admitted = mantle_guard::admit_cache_value(field, value);
+            if admitted.is_none() {
+                tracing::debug!(
+                    reason = "shape_rejected",
+                    field = field.key(),
+                    "openai-responses egress: prompt-cache value withheld, not a captured shape"
+                );
+            }
+            admitted
+        }
+        Admission::Withheld => None,
+    };
+    let Some(admitted) = admitted else {
         withheld.record();
         if let Some(tap) = tap {
             declare(
@@ -485,10 +527,10 @@ fn apply_prompt_cache_field(
             );
         }
         return;
-    }
+    };
     match field {
-        PromptCacheField::Options => request.prompt_cache_options = Some(value.clone()),
-        PromptCacheField::Retention => request.prompt_cache_retention = Some(value.clone()),
+        PromptCacheField::Options => request.prompt_cache_options = Some(admitted),
+        PromptCacheField::Retention => request.prompt_cache_retention = Some(admitted),
         PromptCacheField::Breakpoint | PromptCacheField::SessionKeyFallback => {}
     }
 }
@@ -496,7 +538,8 @@ fn apply_prompt_cache_field(
 /// When neither the client nor the operator set `prompt_cache_key`, key
 /// the upstream prompt cache on the lowercase hex SHA-256 of the inbound
 /// session key (always 64 characters, whatever the session key's length),
-/// on the surfaces [`PromptCacheField::SessionKeyFallback`] forwards on.
+/// on the surfaces that admit [`PromptCacheField::SessionKeyFallback`]
+/// verbatim.
 /// Nothing is withheld where it does not: no client field is involved.
 /// Must run AFTER `merge_provider_extras` so their key wins.
 pub(super) fn apply_session_cache_key(
@@ -506,7 +549,7 @@ pub(super) fn apply_session_cache_key(
     tap: Option<&WireTap>,
 ) {
     if request.prompt_cache_key.is_some()
-        || !PromptCacheField::SessionKeyFallback.forwards_on(auth_kind)
+        || PromptCacheField::SessionKeyFallback.admission(auth_kind) != Admission::Verbatim
     {
         return;
     }

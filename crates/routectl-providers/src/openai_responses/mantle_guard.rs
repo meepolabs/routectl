@@ -15,8 +15,9 @@
 //!   forward (see `messages.rs`).
 //!
 //! Each withheld member is declared as a Remove and the request counts once
-//! as `unknown_member_withheld`. Typed top-level request members are not
-//! this module's: they ride the provider_extras allowlist in `extras.rs`.
+//! as `unknown_member_withheld`. Typed top-level request members ride the
+//! provider_extras allowlist in `extras.rs`; of those, the two prompt-cache
+//! fields forward on this lane only as [`admit_cache_value`] rebuilds them.
 //! The serialized-body media URL walk (`mantle_media`) still runs after
 //! translation, as defence in depth.
 //!
@@ -45,13 +46,13 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use routectl_core::ResponsesPassthroughItem;
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 
 use super::AuthKind;
-use super::extras::UnknownMemberWithheldTally;
+use super::extras::{PromptCacheField, UnknownMemberWithheldTally};
 use super::types::ResponseInputItem;
 use crate::wire_declare::{declare, member_pointer};
 
@@ -325,11 +326,117 @@ impl WithheldCarriers {
     }
 }
 
+/// A `prompt_cache_retention` value captured as accepted on this lane.
+#[derive(Debug, Clone, Copy)]
+enum CacheRetention {
+    InMemory,
+    Hours24,
+}
+
+impl CacheRetention {
+    fn parse(value: &Value) -> Option<Self> {
+        match value.as_str()? {
+            "in_memory" => Some(Self::InMemory),
+            "24h" => Some(Self::Hours24),
+            _ => None,
+        }
+    }
+
+    const fn literal(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::Hours24 => "24h",
+        }
+    }
+}
+
+/// A `prompt_cache_options.mode` captured as accepted on this lane.
+#[derive(Debug, Clone, Copy)]
+enum CacheMode {
+    Explicit,
+}
+
+impl CacheMode {
+    fn parse(value: &Value) -> Option<Self> {
+        (value.as_str()? == "explicit").then_some(Self::Explicit)
+    }
+
+    const fn literal(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+/// A `prompt_cache_options.ttl` this lane echoed back as its own.
+#[derive(Debug, Clone, Copy)]
+enum CacheTtl {
+    Minutes30,
+}
+
+impl CacheTtl {
+    fn parse(value: &Value) -> Option<Self> {
+        (value.as_str()? == "30m").then_some(Self::Minutes30)
+    }
+
+    const fn literal(self) -> &'static str {
+        match self {
+            Self::Minutes30 => "30m",
+        }
+    }
+}
+
+/// A `prompt_cache_options` object of the captured layout: `mode` required,
+/// `ttl` optional, no other member.
+#[derive(Debug, Clone, Copy)]
+struct CacheOptions {
+    mode: CacheMode,
+    ttl: Option<CacheTtl>,
+}
+
+impl CacheOptions {
+    fn parse(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.keys().any(|key| key != "mode" && key != "ttl") {
+            return None;
+        }
+        let mode = CacheMode::parse(object.get("mode")?)?;
+        let ttl = match object.get("ttl") {
+            Some(ttl) => Some(CacheTtl::parse(ttl)?),
+            None => None,
+        };
+        Some(Self { mode, ttl })
+    }
+
+    fn to_value(self) -> Value {
+        let mut object = Map::new();
+        object.insert("mode".into(), Value::from(self.mode.literal()));
+        if let Some(ttl) = self.ttl {
+            object.insert("ttl".into(), Value::from(ttl.literal()));
+        }
+        Value::Object(object)
+    }
+}
+
+/// The Bedrock Mantle wire value of a client prompt-cache `field`: the
+/// captured shape `value` parses into, built from static literals so no
+/// client JSON reaches the signed request. `None` for any other value, and
+/// for a field this lane takes no value of.
+pub(super) fn admit_cache_value(field: PromptCacheField, value: &Value) -> Option<Value> {
+    match field {
+        PromptCacheField::Options => CacheOptions::parse(value).map(CacheOptions::to_value),
+        PromptCacheField::Retention => {
+            CacheRetention::parse(value).map(|retention| Value::from(retention.literal()))
+        }
+        PromptCacheField::Breakpoint | PromptCacheField::SessionKeyFallback => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{AuthKind, forwards_item};
+    use super::{AuthKind, PromptCacheField, admit_cache_value, forwards_item};
 
     fn forwards_on_mantle(item: &serde_json::Value) -> bool {
         forwards_item(AuthKind::BedrockMantle, item)
@@ -443,6 +550,115 @@ mod tests {
             assert!(!forwards_on_mantle(&item), "{row}: {item}");
             assert!(forwards_item(AuthKind::ApiKey, &item), "{row}");
             assert!(forwards_item(AuthKind::ChatgptOauth, &item), "{row}");
+        }
+    }
+
+    #[test]
+    fn captured_cache_values_are_admitted_value_equal() {
+        let rows = [
+            (
+                "retention in_memory",
+                PromptCacheField::Retention,
+                json!("in_memory"),
+            ),
+            ("retention 24h", PromptCacheField::Retention, json!("24h")),
+            (
+                "options mode",
+                PromptCacheField::Options,
+                json!({"mode": "explicit"}),
+            ),
+            (
+                "options echoed ttl",
+                PromptCacheField::Options,
+                json!({"mode": "explicit", "ttl": "30m"}),
+            ),
+            (
+                "options ttl first",
+                PromptCacheField::Options,
+                json!({"ttl": "30m", "mode": "explicit"}),
+            ),
+        ];
+        for (row, field, value) in rows {
+            assert_eq!(admit_cache_value(field, &value), Some(value), "{row}");
+        }
+    }
+
+    #[test]
+    fn uncaptured_cache_values_are_refused() {
+        let rows = [
+            (
+                "retention url",
+                PromptCacheField::Retention,
+                json!("https://h/x"),
+            ),
+            (
+                "retention case variant",
+                PromptCacheField::Retention,
+                json!("24H"),
+            ),
+            (
+                "retention uncaptured",
+                PromptCacheField::Retention,
+                json!("12h"),
+            ),
+            ("retention number", PromptCacheField::Retention, json!(24)),
+            ("retention null", PromptCacheField::Retention, json!(null)),
+            (
+                "retention object",
+                PromptCacheField::Retention,
+                json!({"url": "s3://b/k"}),
+            ),
+            (
+                "options string",
+                PromptCacheField::Options,
+                json!("explicit"),
+            ),
+            ("options empty", PromptCacheField::Options, json!({})),
+            ("options null", PromptCacheField::Options, json!(null)),
+            (
+                "options implicit",
+                PromptCacheField::Options,
+                json!({"mode": "implicit"}),
+            ),
+            (
+                "options mode array",
+                PromptCacheField::Options,
+                json!({"mode": ["explicit"]}),
+            ),
+            (
+                "options null ttl",
+                PromptCacheField::Options,
+                json!({"mode": "explicit", "ttl": null}),
+            ),
+            (
+                "options uncaptured ttl",
+                PromptCacheField::Options,
+                json!({"mode": "explicit", "ttl": "12h"}),
+            ),
+            (
+                "options file member",
+                PromptCacheField::Options,
+                json!({"mode": "explicit", "file_id": "file-1"}),
+            ),
+            (
+                "options prewarm",
+                PromptCacheField::Options,
+                json!({"mode": "explicit", "prewarm": "https://x"}),
+            ),
+            (
+                "options ttl only",
+                PromptCacheField::Options,
+                json!({"ttl": "30m"}),
+            ),
+            ("breakpoint", PromptCacheField::Breakpoint, json!(true)),
+            (
+                "session key",
+                PromptCacheField::SessionKeyFallback,
+                json!("k"),
+            ),
+        ];
+        for (row, field, value) in rows {
+            assert_eq!(admit_cache_value(field, &value), None, "{row}: {value}");
         }
     }
 }

@@ -690,7 +690,7 @@ fn cache_fields_forward_per_surface() {
     let surface_rules = [
         ("api-key", true, true),
         ("chatgpt-oauth", true, false),
-        ("bedrock-mantle", false, false),
+        ("bedrock-mantle", true, true),
     ];
     let provenances = [
         ("responses", RequestProvenance::ResponsesIngress),
@@ -752,11 +752,6 @@ fn withheld_cache_fields_count_once_per_request() {
             cfg(),
             json!({"prompt_cache_options": cache_options_value(), "prompt_cache_retention": "24h"}),
         ),
-        (
-            "bedrock-mantle both",
-            cfg_bedrock_mantle(),
-            json!({"prompt_cache_options": cache_options_value(), "prompt_cache_retention": "24h"}),
-        ),
     ];
     for (row, cfg, extras) in withheld_rows {
         // Arrange
@@ -776,6 +771,7 @@ fn withheld_cache_fields_count_once_per_request() {
     let forwarded_rows = [
         ("api-key both", cfg_api_key()),
         ("chatgpt-oauth options only", cfg()),
+        ("bedrock-mantle both", cfg_bedrock_mantle()),
     ];
     for (row, cfg) in forwarded_rows {
         let mut req = req_with_cache_fields(RequestProvenance::ResponsesIngress);
@@ -791,8 +787,233 @@ fn withheld_cache_fields_count_once_per_request() {
     }
 }
 
-/// The session-key fallback is withheld on Bedrock Mantle, whose acceptance
-/// of `prompt_cache_*` is unrecorded; a client or operator key still
+#[test]
+fn prompt_cache_admission_is_pinned_per_field_and_surface() {
+    use super::extras::{Admission, PromptCacheField};
+    use Admission::{Validated, Verbatim, Withheld};
+    let fields = [
+        PromptCacheField::Options,
+        PromptCacheField::Retention,
+        PromptCacheField::Breakpoint,
+        PromptCacheField::SessionKeyFallback,
+    ];
+    // Per surface, the admission of each field in `fields` order.
+    let table = [
+        (AuthKind::ApiKey, [Verbatim, Verbatim, Verbatim, Verbatim]),
+        (
+            AuthKind::ChatgptOauth,
+            [Verbatim, Withheld, Withheld, Verbatim],
+        ),
+        (
+            AuthKind::BedrockMantle,
+            [Validated, Validated, Withheld, Withheld],
+        ),
+    ];
+    for (auth_kind, expected) in table {
+        for (field, want) in fields.into_iter().zip(expected) {
+            assert_eq!(
+                field.admission(auth_kind),
+                want,
+                "{field:?} on {auth_kind:?}"
+            );
+        }
+    }
+}
+
+fn mantle_planted_url() -> String {
+    format!(
+        "https://{}/{}",
+        "cache-planted-host-q8", "cache-planted-path-w2"
+    )
+}
+
+/// Rows the Bedrock Mantle surface withholds whole: (row, field, value).
+fn mantle_cache_shape_rejects() -> Vec<(&'static str, &'static str, Value)> {
+    let url = mantle_planted_url();
+    vec![
+        ("retention url", "prompt_cache_retention", json!(url)),
+        (
+            "retention case variant",
+            "prompt_cache_retention",
+            json!("24H"),
+        ),
+        (
+            "retention uncaptured",
+            "prompt_cache_retention",
+            json!("12h"),
+        ),
+        ("retention number", "prompt_cache_retention", json!(24)),
+        ("retention null", "prompt_cache_retention", json!(null)),
+        (
+            "retention object",
+            "prompt_cache_retention",
+            json!({"url": "s3://b/k"}),
+        ),
+        ("options string", "prompt_cache_options", json!("explicit")),
+        ("options empty", "prompt_cache_options", json!({})),
+        (
+            "options implicit",
+            "prompt_cache_options",
+            json!({"mode": "implicit"}),
+        ),
+        (
+            "options mode array",
+            "prompt_cache_options",
+            json!({"mode": ["explicit"]}),
+        ),
+        (
+            "options uncaptured ttl",
+            "prompt_cache_options",
+            json!({"mode": "explicit", "ttl": "12h"}),
+        ),
+        (
+            "options file member",
+            "prompt_cache_options",
+            json!({"mode": "explicit", "file_id": "file-1"}),
+        ),
+        (
+            "options prewarm",
+            "prompt_cache_options",
+            json!({"mode": "explicit", "prewarm": url}),
+        ),
+        (
+            "options ttl only",
+            "prompt_cache_options",
+            json!({"ttl": "30m"}),
+        ),
+    ]
+}
+
+fn responses_ingress_req_with_extras(extras: Value) -> ChatRequest {
+    let mut req = req_with(vec![user_text("hi")]);
+    req.provider_extras = Some(extras);
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::ResponsesIngress;
+    req
+}
+
+#[traced_test]
+#[test]
+fn mantle_withholds_uncaptured_cache_values_whole_declared_and_counted_once() {
+    use routectl_core::wire_check::{EditKind, EditSite};
+    let planted = mantle_planted_url();
+    for (row, field, value) in mantle_cache_shape_rejects() {
+        // Arrange
+        let req = responses_ingress_req_with_extras(json!({ field: value }));
+        let before = responses_drop_count("prompt_cache_field_withheld");
+
+        // Act
+        let (wire, edits) = translate_declaring(&cfg_bedrock_mantle(), &req);
+
+        // Assert
+        let after = responses_drop_count("prompt_cache_field_withheld");
+        assert!(wire.get(field).is_none(), "{row}: {wire}");
+        assert!(!wire.to_string().contains(&planted), "{row}: {wire}");
+        let gate = (
+            EditSite::AuthSurfaceGate,
+            format!("/{field}"),
+            EditKind::Remove,
+        );
+        let removes = edits.iter().filter(|e| e.1 == format!("/{field}")).count();
+        assert_eq!(removes, 1, "{row}: one edit at /{field}: {edits:?}");
+        assert!(edits.contains(&gate), "{row}: {edits:?}");
+        assert_eq!(after - before, 1, "{row}: one drop per request");
+    }
+    logs_assert(|lines: &[&str]| {
+        let rejected = |field: &str| {
+            lines
+                .iter()
+                .filter(|l| l.contains("reason=\"shape_rejected\"") && l.contains(field))
+                .count()
+        };
+        if rejected("prompt_cache_retention") != 6 || rejected("prompt_cache_options") != 8 {
+            return Err(format!("shape_rejected lines per field: {lines:?}"));
+        }
+        if lines
+            .iter()
+            .any(|l| l.contains(&planted) || l.contains("cache-planted"))
+        {
+            return Err("a planted value reached a log line".into());
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn url_bearing_cache_values_forward_verbatim_on_api_key() {
+    let planted = mantle_planted_url();
+    let url_rows = mantle_cache_shape_rejects()
+        .into_iter()
+        .filter(|(_, _, value)| value.to_string().contains(&planted));
+    let mut checked = 0;
+    for (row, field, value) in url_rows {
+        let req = responses_ingress_req_with_extras(json!({ field: value.clone() }));
+
+        let wire = crate::translation_drop_metrics::assert_lane_ran_uncounted(
+            "openai-responses",
+            "prompt_cache_field_withheld",
+            || translate_to_json(&cfg_api_key(), &req),
+        );
+
+        assert_eq!(wire[field], value, "{row}");
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "both URL rows ran");
+}
+
+#[test]
+fn mantle_forwards_a_captured_field_beside_a_withheld_one() {
+    use routectl_core::wire_check::{EditKind, EditSite};
+    // Arrange
+    let req = responses_ingress_req_with_extras(json!({
+        "prompt_cache_options": {"mode": "explicit"},
+        "prompt_cache_retention": mantle_planted_url(),
+    }));
+    let before = responses_drop_count("prompt_cache_field_withheld");
+
+    // Act
+    let (wire, edits) = translate_declaring(&cfg_bedrock_mantle(), &req);
+
+    // Assert
+    let after = responses_drop_count("prompt_cache_field_withheld");
+    assert_eq!(wire["prompt_cache_options"], json!({"mode": "explicit"}));
+    assert!(wire.get("prompt_cache_retention").is_none(), "{wire}");
+    let cache_edits: Vec<_> = edits
+        .into_iter()
+        .filter(|e| e.1.starts_with("/prompt_cache"))
+        .collect();
+    assert_eq!(
+        cache_edits,
+        vec![(
+            EditSite::AuthSurfaceGate,
+            "/prompt_cache_retention".to_string(),
+            EditKind::Remove
+        )]
+    );
+    assert_eq!(after - before, 1);
+}
+
+#[test]
+fn mantle_cache_fields_appear_once_in_the_body_and_never_carried() {
+    let req = responses_ingress_req_with_extras(json!({
+        "prompt_cache_options": cache_options_value(),
+        "prompt_cache_retention": "in_memory",
+    }));
+
+    let request = translate(&cfg_bedrock_mantle(), &req).expect("translate");
+    let body = serde_json::to_string(&request).expect("serialize");
+
+    for key in ["prompt_cache_options", "prompt_cache_retention"] {
+        assert!(!request.carried.contains_key(key), "{key} carried");
+        assert_eq!(
+            body.matches(&format!("\"{key}\"")).count(),
+            1,
+            "{key}: {body}"
+        );
+    }
+}
+
+/// The session-key fallback is withheld on Bedrock Mantle, where nothing
+/// records that the derived key is accepted; a client or operator key still
 /// forwards there.
 #[test]
 fn prompt_cache_key_falls_back_to_hashed_session_key() {

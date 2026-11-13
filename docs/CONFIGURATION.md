@@ -741,7 +741,7 @@ vocabulary:
 |---|---|
 | `anthropic-api` (Mantle's Anthropic lane included), Bedrock Invoke, the Bedrock Converse bag | the Anthropic Messages ingress |
 | `openai-compat` (Mantle's OpenAI-compatible lane included) | the OpenAI Chat Completions ingress |
-| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress. From the Responses ingress, `auth_kind = "api-key"` also forwards any other key except one routectl writes itself; `chatgpt-oauth` and `bedrock-mantle` withhold every other key and count the request once as `unknown_member_withheld`. Any other key from another ingress counts the request once as `foreign_dialect_extra` |
+| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress, and on `bedrock-mantle` only as a captured value (`prompt_cache_retention` `"in_memory"` or `"24h"`, `prompt_cache_options` `{"mode": "explicit"}` with an optional `"ttl": "30m"`), any other value withheld whole. From the Responses ingress, `auth_kind = "api-key"` also forwards any other key except one routectl writes itself; `chatgpt-oauth` and `bedrock-mantle` withhold every other key and count the request once as `unknown_member_withheld`. Any other key from another ingress counts the request once as `foreign_dialect_extra` |
 | `gemini` | no ingress: only the operator layer |
 
 A library caller that builds its own `ChatRequest` keeps forwarding its

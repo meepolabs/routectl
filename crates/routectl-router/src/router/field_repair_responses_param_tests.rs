@@ -1,7 +1,8 @@
 // Parameter refusals on openai-responses, where only the effort parameter
 // localizes: a refusal naming `temperature` names no row and repairs nothing,
 // and a refusal naming a parameter an operator payload extra put on the wire
-// does not revert that extra.
+// does not revert that extra. On Bedrock Mantle a refusal naming a
+// prompt-cache member learns nothing either.
 // An `include!`d FRAGMENT of `field_repair_tests.rs`.
 
 #[cfg(feature = "openai-responses")]
@@ -110,8 +111,11 @@ mod responses_param_refusals {
     }
 
     fn responses_router(seat: &Arc<ResponsesSeat>, provider_extra: &str) -> Router {
-        let toml_text = format!("{RESPONSES_TOML}{provider_extra}");
-        let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
+        router_on(seat, &format!("{RESPONSES_TOML}{provider_extra}"))
+    }
+
+    fn router_on(seat: &Arc<ResponsesSeat>, toml_text: &str) -> Router {
+        let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
         config
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
@@ -251,5 +255,48 @@ mod responses_param_refusals {
             assert!(dispatched.meta.field_repairs.is_empty(), "{code}");
             assert!(dispatched.meta.learned_capabilities.is_empty(), "{code}");
         }
+    }
+
+    /// A Bedrock Mantle refusal naming `prompt_cache_options` localizes
+    /// nothing on openai-responses: no row is named, the refusal is sent once
+    /// and reaches the client, and nothing is repaired or learned.
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn a_mantle_prompt_cache_refusal_names_no_row_and_repairs_nothing() {
+        const PROMPT_CACHE_OPTIONS: &str = "prompt_cache_options";
+        const MANTLE_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
+             [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+             [providers.p0]\nkind = \"openai-responses\"\napi_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
+        let code = "unsupported_parameter";
+        let seat = ResponsesSeat::new(PROMPT_CACHE_OPTIONS, code);
+        let router = router_on(&seat, MANTLE_TOML);
+        let mut req = responses_req(None);
+        req.routectl_internal.provenance = routectl_core::RequestProvenance::ResponsesIngress;
+        req.provider_extras = Some(json!({PROMPT_CACHE_OPTIONS: {"mode": "explicit"}}));
+        let refused = refusal(PROMPT_CACHE_OPTIONS, code);
+        let named = super::super::rejected_field(
+            router.field_repair_table(),
+            &classify(&refused, Some("openai-responses")).class,
+            &refused,
+            "openai-responses",
+            Some(routectl_core::wire_check::EgressKind::OpenaiResponsesMantle),
+            crate::router::learn_engine::SentEffort::Unknown,
+        );
+        let (dispatched, _events) = Box::pin(dispatch(&router, req)).await;
+
+        assert!(named.is_none(), "the refusal names no row");
+        assert_eq!(seat.calls(), 1, "sent once, no retry");
+        let err = dispatched.result.expect_err("the refusal stands");
+        assert!(err.to_string().contains(PROMPT_CACHE_OPTIONS), "{err}");
+        assert!(
+            dispatched.meta.field_repairs.is_empty(),
+            "no repair: {:?}",
+            dispatched.meta.field_repairs,
+        );
+        assert!(
+            dispatched.meta.learned_capabilities.is_empty(),
+            "and no verdict"
+        );
     }
 }

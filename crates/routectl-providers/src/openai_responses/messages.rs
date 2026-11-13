@@ -1573,7 +1573,9 @@ fn forward_unknown_part(
 ) -> ResponsesContentItem {
     let mut block = part.extras.clone();
     let breakpoint = PromptCacheField::Breakpoint;
-    if !breakpoint.forwards_on(auth_kind) && block.remove(breakpoint.key()).is_some() {
+    if breakpoint.admission(auth_kind) != super::extras::Admission::Verbatim
+        && block.remove(breakpoint.key()).is_some()
+    {
         tally.record_forwarded_breakpoint_withheld();
     }
     block.insert("type".into(), Value::String(part.type_tag.to_string()));

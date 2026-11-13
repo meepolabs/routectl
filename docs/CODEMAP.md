@@ -1209,7 +1209,9 @@ license.
   reviewed passthrough item kinds and their member shapes),
   `forwarded_passthrough`, `takes_namespace_stamps` and `WithheldCarriers`;
   each withhold declared as a Remove, counted once per request as
-  `unknown_member_withheld`
+  `unknown_member_withheld`. `admit_cache_value` rebuilds a client
+  `prompt_cache_options` / `prompt_cache_retention` from static literals when
+  it parses into a captured shape, else `None` (withheld whole)
 - `src/openai_responses/mantle_media.rs` -- (cfg `bedrock`)
   `check_forwarded_media_urls`: on the Mantle lane `normalize_request` passes
   the serialized body's `input` to `mantle::refuse_unforwardable_media_urls`
@@ -1309,11 +1311,14 @@ license.
   splices their top-level containers back) and `tool_choice` mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 8-key
   provider_extras allowlist; ChatgptOauth + BedrockMantle `store=false` lock.
-  `PromptCacheField` is the per-auth-surface table for the prompt-cache
-  fields (`prompt_cache_options`, `prompt_cache_retention`, per-block
-  breakpoints, the derived session key): the two top-level fields forward
-  only for Responses-ingress requests on a surface that takes them, a
-  withheld one counted once per request via `PromptCacheWithheldTally`;
+  `PromptCacheField::admission` is the exhaustive per-auth-surface table
+  (`Admission::{Verbatim, Validated, Withheld}`) for the prompt-cache fields
+  (`prompt_cache_options`, `prompt_cache_retention`, per-block breakpoints,
+  the derived session key): the two top-level fields forward only for
+  Responses-ingress requests, verbatim or (Bedrock Mantle, `Validated`)
+  through `mantle_guard::admit_cache_value`; every other caller treats only
+  `Verbatim` as forwarding; a withheld one is counted once per request via
+  `PromptCacheWithheldTally`;
   `apply_session_cache_key` sends the hex SHA-256 of the inbound session key
   as `prompt_cache_key` when neither client nor operator set one, on ApiKey
   and ChatGPT-OAuth only (never Bedrock Mantle), whatever the ingress; `breakpoint_text_digest` is the
