@@ -6,8 +6,10 @@
 //! daemon's resident registry, and the boot warm's report says how that
 //! registry was filled. The shared gather body still reads the usage ledger
 //! read-only, on both sources: the all-time would-trim summary and the
-//! cache-ignore window, the latter under [`ServedInputs`]' cache read budget.
+//! cache-ignore window, the latter from the daemon's boot ledger under
+//! [`ServedInputs`]' cache read budget.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -50,6 +52,7 @@ pub struct ServedInputs {
     parked_seats: Vec<ParkedSeat>,
     unusable_seats: Vec<UnusableSeat>,
     cache_read_budget: Duration,
+    usage_db_path: PathBuf,
 }
 
 /// The price tables a served gather prices against.
@@ -233,12 +236,15 @@ pub struct ResidentLearned {
 
 impl ServedInputs {
     /// `prices` are the tables the daemon's own cost reads use, pinned once
-    /// by the gather.
+    /// by the gather. `usage_db_path` is the ledger the daemon opened at boot:
+    /// `usage.db_path` is restart-required, so a reloaded config may name a
+    /// ledger the daemon never writes.
     pub const fn new(
         config: Arc<Config>,
         learned: ResidentLearned,
         warm: WarmReport,
         prices: ServedPrices,
+        usage_db_path: PathBuf,
     ) -> Self {
         Self {
             config,
@@ -249,6 +255,7 @@ impl ServedInputs {
             parked_seats: Vec::new(),
             unusable_seats: Vec::new(),
             cache_read_budget: SERVED_CACHE_READ_BUDGET,
+            usage_db_path,
         }
     }
 
@@ -367,6 +374,8 @@ pub(super) struct GatheredLayers {
     /// The price tables the pricing section resolves against, pinned once
     /// per gather.
     pub(super) prices: PriceSnapshot,
+    /// The usage ledger the cache-ignore read opens.
+    pub(super) usage_db_path: PathBuf,
 }
 
 /// The served layers. The daemon accepted this config, so it carries no load
@@ -381,6 +390,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         parked_seats,
         unusable_seats,
         cache_read_budget: _,
+        usage_db_path,
     } = *inputs;
     GatheredLayers {
         accepted_config_version: Some(config.version),
@@ -393,6 +403,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         parked_seats,
         unusable_seats,
         prices: prices.pin(),
+        usage_db_path,
     }
 }
 

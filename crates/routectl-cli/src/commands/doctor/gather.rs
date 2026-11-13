@@ -94,6 +94,7 @@ pub async fn gather_context_no_network(
         parked_seats,
         unusable_seats,
         prices,
+        usage_db_path,
     } = layers;
 
     let view = derive_effective_view(&config, prices.refreshed(), prices.shipped());
@@ -110,6 +111,7 @@ pub async fn gather_context_no_network(
     let orphan_seats = gather_orphan_seats(&config, &seats);
     let would_trim = compute_would_trim_panel(&config, Local::now());
     let cache_ignore = gather_cache_ignore(
+        &usage_db_path,
         &config,
         cache_read_budget,
         chrono::Utc::now().timestamp_millis(),
@@ -245,6 +247,7 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         routectl_router::shipped_beta_seed_scope(),
     );
 
+    let usage_db_path = config.usage.db_path.clone();
     GatheredLayers {
         config,
         config_parse_error,
@@ -256,6 +259,7 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
         prices: PriceSnapshot::pin(&default_price_book()),
+        usage_db_path,
     }
 }
 

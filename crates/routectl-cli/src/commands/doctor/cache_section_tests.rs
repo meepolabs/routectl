@@ -89,7 +89,9 @@ fn fixture() -> Fixture {
     }
 }
 
-fn served_inputs(config_path: &Path) -> ServedInputs {
+/// The served inputs of a daemon that booted on `boot_db_path` and now holds
+/// the config at `config_path`.
+fn served_inputs(config_path: &Path, boot_db_path: &Path) -> ServedInputs {
     let config: Config =
         crate::server::parse_config_only(config_path).expect("fixture config parses");
     ServedInputs::new(
@@ -106,6 +108,7 @@ fn served_inputs(config_path: &Path) -> ServedInputs {
             loaded_rows: 0,
         },
         ServedPrices::Pinned(PriceSnapshot::default()),
+        boot_db_path.to_path_buf(),
     )
 }
 
@@ -192,7 +195,8 @@ async fn disk_and_served_gathers_produce_identical_cache_findings() {
 
     // Act
     let disk = cache_findings(&disk_report(&fx.config_path).await.findings);
-    let served = served_cache_findings(served_inputs(&fx.config_path), &fx.config_path).await;
+    let served =
+        served_cache_findings(served_inputs(&fx.config_path, &fx.db_path), &fx.config_path).await;
 
     // Assert
     assert!(
@@ -201,6 +205,40 @@ async fn disk_and_served_gathers_produce_identical_cache_findings() {
         "control: the disk gather sees the ignoring lane: {disk:#?}"
     );
     assert_eq!(disk, served);
+}
+
+/// The served gather reads the ledger the daemon booted on, as its driver and
+/// the panel's other ledger reads do, even after a reload names another:
+/// `usage.db_path` is restart-required.
+///
+/// Mutation check: have the served gather read `config.usage.db_path` ->
+/// red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_served_gather_reads_the_boot_ledger_not_a_reloaded_db_path() {
+    // Arrange
+    let fx = fixture();
+    seed_ignoring_lane(&fx.db_path, "direct", "m-ignored", 5);
+    let reloaded_db = fx.db_path.with_file_name("reloaded-usage.db");
+    std::fs::write(&fx.config_path, fixture_toml(&reloaded_db)).unwrap();
+    let inputs = served_inputs(&fx.config_path, &fx.db_path);
+
+    // Act
+    let served = served_cache_findings(inputs, &fx.config_path).await;
+    let disk = cache_findings(&disk_report(&fx.config_path).await.findings);
+
+    // Assert
+    assert!(
+        served
+            .iter()
+            .any(|f| f.status == Status::Warn && f.name == "lane direct m-ignored"),
+        "the served gather reads the boot ledger: {served:#?}"
+    );
+    assert_eq!(
+        named(&disk, "cache markers").detail,
+        "unavailable: no_data",
+        "control: the reloaded config names a ledger that does not exist"
+    );
 }
 
 /// The unobservable line names a custom-base anthropic-api provider with no
@@ -227,6 +265,85 @@ async fn the_unobservable_line_names_a_custom_base_anthropic_provider() {
         assert!(fix.contains(key), "the remediation names both keys: {fix}");
     }
     assert!(cache.iter().all(|f| f.status == Status::Pass), "{cache:#?}");
+}
+
+/// Providers whose current `supports_top_level_cache_control` differs from
+/// the kind's default and from each other: `direct` (default host, true),
+/// `vendor` (custom base, no override, false), `vendor_open` (custom base,
+/// overridden observable with top-level support off), `aws_dark` (bedrock
+/// invoke, overridden unobservable with top-level support on).
+fn capability_toml(db_path: &Path) -> String {
+    format!(
+        "{}\
+         [providers.vendor_open]\n\
+         kind = \"anthropic-api\"\n\
+         base_url = \"https://vendor-open.example.invalid/anthropic\"\n\
+         api_key_ref = \"env://CACHE_SECTION_TEST_UNUSED\"\n\
+         cache_capability = {{ supports_top_level_cache_control = false, \
+         cache_hit_observable = true }}\n\
+         [providers.aws_dark]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-east-1\"\n\
+         creds = {{ kind = \"default-chain\" }}\n\
+         cache_capability = {{ supports_top_level_cache_control = true, \
+         cache_hit_observable = false }}\n",
+        fixture_toml(db_path),
+    )
+}
+
+/// Every remediation that sets `cache_capability` renders the provider's
+/// current `supports_top_level_cache_control`, never the kind's default:
+/// following it by hand leaves auto-emit as it is.
+///
+/// Mutation check: render `supports_top_level_cache_control = true` in place
+/// of the carried value -> red at the vendor and vendor_open rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_remediation_keeps_each_providers_current_top_level_support() {
+    // Arrange
+    let fx = fixture();
+    std::fs::write(&fx.config_path, capability_toml(&fx.db_path)).unwrap();
+    seed_ignoring_lane(&fx.db_path, "direct", "m-a", 4);
+    seed_ignoring_lane(&fx.db_path, "vendor_open", "m-b", 4);
+
+    // Act
+    let cache = cache_findings(&disk_report(&fx.config_path).await.findings);
+
+    // Assert
+    let rows: [(&str, &str, &str); 4] = [
+        (
+            "custom-base anthropic-api vendor, no override",
+            "unobservable providers",
+            "`vendor`: `cache_capability = { supports_top_level_cache_control = false, \
+             cache_hit_observable = true }`",
+        ),
+        (
+            "bedrock overridden unobservable, top-level support on",
+            "unobservable providers",
+            "`aws_dark`: `cache_capability = { supports_top_level_cache_control = true, \
+             cache_hit_observable = true }`",
+        ),
+        (
+            "default-host anthropic-api lane",
+            "lane direct m-a",
+            "`cache_capability = { supports_top_level_cache_control = true, \
+             cache_hit_observable = false }`",
+        ),
+        (
+            "custom-base lane overridden observable, top-level support off",
+            "lane vendor_open m-b",
+            "`cache_capability = { supports_top_level_cache_control = false, \
+             cache_hit_observable = false }`",
+        ),
+    ];
+    for (row, finding, expected) in rows {
+        let fix = named(&cache, finding)
+            .remediation
+            .as_deref()
+            .unwrap_or_else(|| panic!("row {row}: no remediation"));
+        assert!(fix.contains(expected), "row {row}: {fix}");
+        assert!(!fix.contains("kind's default"), "row {row}: {fix}");
+    }
 }
 
 /// A missing ledger is one Pass `unavailable: no_data`, and the
@@ -266,7 +383,7 @@ async fn a_served_read_past_its_deadline_reports_query_timeout() {
     for lane in 0..500 {
         seed_ignoring_lane(&fx.db_path, "direct", &format!("m-{lane}"), 8);
     }
-    let inputs = served_inputs(&fx.config_path).with_cache_read_budget(Duration::ZERO);
+    let inputs = served_inputs(&fx.config_path, &fx.db_path).with_cache_read_budget(Duration::ZERO);
 
     // Act
     let ctx = gather_context_no_network(
@@ -378,10 +495,12 @@ fn each_not_evaluated_reason_is_its_own_pass_line() {
         NotEvaluatedProvider {
             provider: "conv".to_owned(),
             reason: NotEvaluatedReason::ConverseShape,
+            supports_top_level_cache_control: false,
         },
         NotEvaluatedProvider {
             provider: "vendor".to_owned(),
             reason: NotEvaluatedReason::HitsNotObservable,
+            supports_top_level_cache_control: false,
         },
     ];
 

@@ -1529,16 +1529,26 @@ verdict, so an outage logs one `cache_ignore_unavailable` and one
 `cache_ignore_available`, not a clear and a fresh WARN per lane. A report that
 hit its lane cap keeps the verdict of any lane it no longer lists.
 
+**Converse to Invoke.** The ledger records a bedrock provider's turns under
+kind `bedrock` on both API shapes, so the evaluation cannot tell them apart.
+After a provider switches from `api_shape = "converse"` to invoke (a reload or
+a restart), turns it recorded under Converse can read as evidence until they
+leave the 6 h window or the lane reports cache activity. A
+`cache_markers_without_cache_activity` WARN for that lane inside that span is
+this known bound, not a verdict on the Invoke path.
+
 **Operator action.** On `cache_markers_without_cache_activity`, the caller
 keeps marking a prefix for caching and that upstream keeps reporting no cache
 activity, so every turn pays full input price. Check whether the upstream
 (often a custom-base host) supports prompt caching; if it does not, stop
 evaluating it with both keys of that provider's `cache_capability`:
-`cache_capability = { supports_top_level_cache_control = <the kind's default>,
+`cache_capability = { supports_top_level_cache_control = <its current value>,
 cache_hit_observable = false }`, keeping `supports_top_level_cache_control` at
-the kind's default (CONFIGURATION.md "Per-provider capability"; the table
-needs both keys and a guessed one changes auto-emit), or route the client to
-a lane that caches. On `cache_ignore_evaluation_panicked`, the evaluation hit
+its current value (doctor prints it in the lane's remediation;
+CONFIGURATION.md "Per-provider capability"). The table needs both keys, and a
+guessed one changes auto-emit: the kind's default is not that value for an
+`anthropic-api` provider on a custom `base_url`, whose current value is false
+unless overridden. Or route the client to a lane that caches. On `cache_ignore_evaluation_panicked`, the evaluation hit
 a code fault, not a ledger fault: report it with the `error` field. On a WARN
 `cache_ignore_unavailable`, check the usage DB per `class` (`routectl doctor`
 shows the same class).
@@ -2540,7 +2550,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_cli::server::config_load` | `config reload failed; keeping previous config`, `config file is group/world-readable and carries secrets` | Fix config.toml per the redacted error (`routectl config check`); `chmod 600` the config file. |
 | WARN / ERROR | `routectl_cli::server::file_watch` | `watch target has no parent directory`, `failed to install fs watch on parent directory`, `watched file was removed`, `reload coordinator channel closed` (WARN); `fs watcher backend error` (ERROR) | Hot reload for that file is off or degraded: raise inotify limits or reload with SIGHUP. A removed file should be restored (in-memory state is kept). A closed coordinator outside shutdown means the reload pipeline is dead: restart. |
 | WARN | `routectl_cli::server` | `WARNING: routectl bound to {host}, exposing your local LLM credentials` | The listener is reachable beyond loopback: bind to loopback unless public exposure is intended and token-protected. |
-| WARN | `routectl_cli::server::cache_ignore_driver` | `markers sent, no cache activity` (`event=cache_markers_without_cache_activity`, on the change only); `cache-ignore evaluation unavailable` (`event=cache_ignore_unavailable`, on entry; INFO for class `no_data`) | A lane kept receiving the caller's cache markers and reported no cache read or write for three or more turns (fields `provider`, `seat`, `model`, `evidence_turns`, `active_turns`, `sessions`, `window_hours`): check that upstream supports prompt caching, or set both `cache_capability` keys, `cache_hit_observable = false` with `supports_top_level_cache_control` kept at the kind's default. A restart WARNs once more for each lane still ignoring. Unavailable: check the usage DB per `class`. Clears and the boot `cache_ignore_baseline` are INFO; see "Cache-ignore driver lines". |
+| WARN | `routectl_cli::server::cache_ignore_driver` | `markers sent, no cache activity` (`event=cache_markers_without_cache_activity`, on the change only); `cache-ignore evaluation unavailable` (`event=cache_ignore_unavailable`, on entry; INFO for class `no_data`) | A lane kept receiving the caller's cache markers and reported no cache read or write for three or more turns (fields `provider`, `seat`, `model`, `evidence_turns`, `active_turns`, `sessions`, `window_hours`): check that upstream supports prompt caching, or set both `cache_capability` keys, `cache_hit_observable = false` with `supports_top_level_cache_control` kept at its current value (doctor prints it). After a switch from Converse to Invoke, Converse-era turns can raise this WARN until they leave the window. A restart WARNs once more for each lane still ignoring. Unavailable: check the usage DB per `class`. Clears and the boot `cache_ignore_baseline` are INFO; see "Cache-ignore driver lines". |
 | ERROR | `routectl_cli::server::cache_ignore_driver` | `cache-ignore evaluation task failed` (`event=cache_ignore_evaluation_panicked`) | The cache-ignore evaluation panicked: a code fault, not a ledger fault. The report reads `unavailable: db_unavailable` until an evaluation succeeds; report the `error` field. |
 | ERROR | `routectl_cli::server::{purge_settlement,serve}` | `capability purge settlements did not finish before the shutdown deadline`, `a capability purge settlement did not complete ...`, `a capability purge settlement could not be accounted for` | The registry and ledger may disagree for a purged key; the daemon stops on purpose in the terminal cases. Check usage DB health, restart, and re-check the purged keys. |
 | WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `activation inventory: alias-referenced provider entries have no usable credential`, `credentials reload failed`, `credentials reload needed a router rebuild, but it failed` (`seat_set_changed`), `config reload failed: ...` (the loader one carries `is_panic` / `is_cancelled`), `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader (`is_panic=true`; a cancelled loader is the runtime shutting down). |

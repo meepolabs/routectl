@@ -283,9 +283,10 @@ pub(crate) use self::served::{
 /// `/status/doctor` report alike, read from the usage ledger's last 6 h. One
 /// Warn per lane whose caller cache markers drew no cache activity, one Pass
 /// `cache markers` summary (or `unavailable: <class>` when the ledger could
-/// not answer), and one Pass `unobservable providers` line when any
-/// anthropic-api or bedrock provider's cache hits cannot be observed. Never
-/// Fails, so the exit code is unmoved.
+/// not answer), and one Pass line per not-evaluated reason naming the
+/// anthropic-api or bedrock providers it applies to: `unobservable providers`
+/// (cache hits cannot be observed) and `converse providers` (bedrock on
+/// `api_shape = "converse"`). Never Fails, so the exit code is unmoved.
 pub(crate) const SCHEMA_VERSION: u32 = 31;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a

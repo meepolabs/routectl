@@ -193,6 +193,7 @@ fn report_lane(model: &str, verdict: LaneVerdict) -> CacheIgnoreLaneReport {
         evidence_turns: 3,
         active_turns: i64::from(verdict == LaneVerdict::Clear),
         sessions: 1,
+        supports_top_level_cache_control: true,
     }
 }
 
@@ -777,7 +778,8 @@ async fn a_hot_reload_changes_which_providers_are_evaluated() {
             Some((EVENT_IGNORING_CLEARED, "aws", Some("not_evaluated"))),
         ),
         (
-            "bedrock flips to invoke: the lane is now evaluated and warns",
+            "bedrock flips to invoke: Converse-era rows still read as evidence, so it warns; a \
+             known bound until they leave the window, not intended behavior",
             AWS,
             &CONVERSE,
             &ALL_PROVIDERS,

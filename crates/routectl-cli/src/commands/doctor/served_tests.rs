@@ -219,11 +219,13 @@ async fn a_served_version_finding_reads_the_accepted_config_not_the_disk_file() 
         version: CURRENT_CONFIG_VERSION,
         ..Config::default()
     };
+    let usage_db_path = accepted.usage.db_path.clone();
     let inputs = ServedInputs::new(
         Arc::new(accepted),
         learned(Vec::new()),
         warm(WarmOutcome::Replayed),
         ServedPrices::Pinned(PriceSnapshot::default()),
+        usage_db_path,
     );
     let version_finding = |findings: Vec<Finding>| {
         findings

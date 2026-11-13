@@ -239,6 +239,7 @@ fn a_truncated_report_says_more_lanes_exist() {
             evidence_turns: 1,
             active_turns: 0,
             sessions: 1,
+            supports_top_level_cache_control: true,
         }],
         evaluated: Vec::new(),
         not_evaluated: Vec::new(),
@@ -295,11 +296,13 @@ fn lane_identifiers_render_scrubbed_and_neutralized() {
             evidence_turns: 3,
             active_turns: 0,
             sessions: 1,
+            supports_top_level_cache_control: true,
         }],
         evaluated: vec!["direct".to_owned()],
         not_evaluated: vec![NotEvaluatedProvider {
             provider: "v=x".to_owned(),
             reason: NotEvaluatedReason::HitsNotObservable,
+            supports_top_level_cache_control: false,
         }],
         truncated: false,
     };
@@ -368,10 +371,12 @@ fn not_evaluated_providers_render_one_line_per_reason() {
             NotEvaluatedProvider {
                 provider: "conv".to_owned(),
                 reason: NotEvaluatedReason::ConverseShape,
+                supports_top_level_cache_control: false,
             },
             NotEvaluatedProvider {
                 provider: "vendor".to_owned(),
                 reason: NotEvaluatedReason::HitsNotObservable,
+                supports_top_level_cache_control: false,
             },
         ],
         truncated: false,

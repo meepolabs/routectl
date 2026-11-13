@@ -125,10 +125,12 @@ fn expected_not_evaluated() -> Vec<NotEvaluatedProvider> {
         NotEvaluatedProvider {
             provider: "aws_converse".to_owned(),
             reason: NotEvaluatedReason::ConverseShape,
+            supports_top_level_cache_control: false,
         },
         NotEvaluatedProvider {
             provider: "vendor".to_owned(),
             reason: NotEvaluatedReason::HitsNotObservable,
+            supports_top_level_cache_control: false,
         },
     ]
 }

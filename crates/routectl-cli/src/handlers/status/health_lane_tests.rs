@@ -343,6 +343,7 @@ mod doctor_agreement {
                 std::sync::Arc::new(routectl_router::prices::PriceBook::new(
                     std::path::PathBuf::from("absent-prices.json"),
                 )),
+                absent_ledger.clone(),
             ))),
             &[],
         )

@@ -11,6 +11,7 @@
 //! name the private field, so it can never obtain a `&Router`, call
 //! `.complete`/`.stream`, or touch `.config`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -240,12 +241,16 @@ impl StatusRouterView {
     /// book the daemon's cost reads use, pinned by the gather on its
     /// blocking worker.
     ///
+    /// `usage_db_path` is the ledger the daemon opened at boot, which the
+    /// cache-ignore read opens whatever the reloaded config names.
+    ///
     /// The returned value's fields are private to the doctor module: a panel
     /// holding it can pass it to the gather and nothing else.
     pub(crate) fn served_doctor_inputs(
         &self,
         warm: WarmReport,
         prices: Arc<PriceBook>,
+        usage_db_path: PathBuf,
     ) -> ServedInputs {
         let entries = self.router.learned_capability_snapshot();
         let seed_clears = self.router.learned_seed_clear_snapshot();
@@ -261,6 +266,7 @@ impl StatusRouterView {
             learned,
             warm,
             ServedPrices::Book(prices),
+            usage_db_path,
         )
         .with_parked_seats(parked)
         .with_unusable_seats(unusable)
@@ -329,7 +335,11 @@ mod tests {
         let book = Arc::new(PriceBook::new(std::path::PathBuf::from(
             "absent-prices.json",
         )));
-        let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run(), book);
+        let _served: ServedInputs = view.served_doctor_inputs(
+            WarmReport::not_run(),
+            book,
+            std::path::PathBuf::from("absent-usage.db"),
+        );
     }
 
     #[test]

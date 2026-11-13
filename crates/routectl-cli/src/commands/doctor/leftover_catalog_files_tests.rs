@@ -231,6 +231,7 @@ async fn both_gathers_look_in_the_config_folder() {
                 },
                 WarmReport::not_run(),
                 super::ServedPrices::Pinned(PriceSnapshot::default()),
+                Config::default().usage.db_path,
             )))
         } else {
             GatherSources::Disk

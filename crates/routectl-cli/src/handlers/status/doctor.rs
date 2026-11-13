@@ -218,7 +218,11 @@ async fn build_from_path(
         .daemon_meta
         .reload_failure(chrono::Utc::now().timestamp_millis());
     let served = view
-        .served_doctor_inputs(*state.warm_report(), Arc::clone(&state.prices))
+        .served_doctor_inputs(
+            *state.warm_report(),
+            Arc::clone(&state.prices),
+            state.usage_db_path.clone(),
+        )
         .with_reload_failure(reload_failure);
     // Counter reads, not I/O, so these stay out here beside the router snapshot.
     let writer_degraded = state.usage_health.writer_degraded();

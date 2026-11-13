@@ -159,8 +159,10 @@ async fn the_served_no_network_report_carries_the_tuning_section() {
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let config_path = tmp.path().join("config.toml");
+    let config = every_tier_config();
+    let usage_db_path = config.usage.db_path.clone();
     let inputs = ServedInputs::new(
-        Arc::new(every_tier_config()),
+        Arc::new(config),
         ResidentLearned {
             entries: Vec::new(),
             seed_clears: Vec::new(),
@@ -173,6 +175,7 @@ async fn the_served_no_network_report_carries_the_tuning_section() {
             loaded_rows: 0,
         },
         super::ServedPrices::Pinned(crate::commands::pricing::PriceSnapshot::default()),
+        usage_db_path,
     );
 
     let context =

@@ -683,6 +683,7 @@ async fn a_served_gather_reads_the_resident_registry_not_the_ledger() {
             std::sync::Arc::new(routectl_router::prices::PriceBook::new(
                 std::path::PathBuf::from("absent-prices.json"),
             )),
+            absent_ledger.clone(),
         ))),
         &[],
     )

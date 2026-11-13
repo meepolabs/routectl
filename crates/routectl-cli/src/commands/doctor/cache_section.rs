@@ -6,6 +6,7 @@
 //! activity": the ledger cannot tell an upstream that dropped the markers from
 //! a marker lost before the wire.
 
+use std::path::Path;
 use std::time::Duration;
 
 use routectl_router::{Config, Finding, Status};
@@ -48,14 +49,16 @@ pub(super) fn read_budget(sources: &GatherSources) -> Duration {
     }
 }
 
-/// The cache-ignore report over the window ending at `now_ms`, read on a
-/// connection of its own with `budget` bounding the open and the query.
+/// The cache-ignore report over the window ending at `now_ms`, read from the
+/// ledger at `db_path` on a connection of its own with `budget` bounding the
+/// open and the query.
 pub(super) fn gather_cache_ignore(
+    db_path: &Path,
     config: &Config,
     budget: Duration,
     now_ms: i64,
 ) -> CacheIgnoreReport {
-    read_cache_ignore_report(&config.usage.db_path, config, now_ms, budget)
+    read_cache_ignore_report(db_path, config, now_ms, budget)
 }
 
 /// One Warn per `ignoring` lane, one Pass summary when the ledger answered,
@@ -108,12 +111,25 @@ fn ignoring_lane_finding(lane: &CacheIgnoreLaneReport) -> Finding {
         remediation: Some(format!(
             "check that the upstream behind provider `{}` caches prompts and that the caller's \
              markers reach it; if it reports no cache usage, stop evaluating it by setting both \
-             keys, `cache_capability = {{ supports_top_level_cache_control = <the kind's \
-             default>, cache_hit_observable = false }}`, keeping supports_top_level_cache_control \
-             at the kind's default; routing is unchanged",
+             keys, {}, keeping supports_top_level_cache_control at its current value; routing \
+             is unchanged",
             lane.identifiers().provider,
+            capability_setting(lane.supports_top_level_cache_control, false),
         )),
     }
+}
+
+/// The `cache_capability` table that sets `cache_hit_observable` and keeps
+/// `supports_top_level_cache_control` at the provider's current value: the
+/// table needs both keys, and a guessed one changes auto-emit.
+fn capability_setting(
+    supports_top_level_cache_control: bool,
+    cache_hit_observable: bool,
+) -> String {
+    format!(
+        "`cache_capability = {{ supports_top_level_cache_control = \
+         {supports_top_level_cache_control}, cache_hit_observable = {cache_hit_observable} }}`"
+    )
 }
 
 fn status_finding(report: &CacheIgnoreReport) -> Finding {
@@ -155,36 +171,52 @@ fn not_evaluated_findings(providers: &[NotEvaluatedProvider]) -> Vec<Finding> {
     NotEvaluatedReason::ALL
         .into_iter()
         .filter_map(|reason| {
-            let names: Vec<String> = providers
-                .iter()
-                .filter(|p| p.reason == reason)
-                .map(|p| safe(&p.provider))
-                .collect();
-            (!names.is_empty()).then(|| not_evaluated_finding(reason, &names))
+            let listed: Vec<&NotEvaluatedProvider> =
+                providers.iter().filter(|p| p.reason == reason).collect();
+            (!listed.is_empty()).then(|| not_evaluated_finding(reason, &listed))
         })
         .collect()
 }
 
-fn not_evaluated_finding(reason: NotEvaluatedReason, names: &[String]) -> Finding {
+fn not_evaluated_finding(
+    reason: NotEvaluatedReason,
+    providers: &[&NotEvaluatedProvider],
+) -> Finding {
     let (name, remediation) = match reason {
         NotEvaluatedReason::HitsNotObservable => (
             "unobservable providers",
-            Some(
-                "on a provider whose upstream reports cache usage, set both keys: \
-                 `cache_capability = { supports_top_level_cache_control = <the kind's default>, \
-                 cache_hit_observable = true }`, keeping supports_top_level_cache_control at the \
-                 kind's default",
-            ),
+            Some(observable_remediation(providers)),
         ),
         NotEvaluatedReason::ConverseShape => ("converse providers", None),
     };
+    let names: Vec<String> = providers.iter().map(|p| safe(&p.provider)).collect();
     Finding {
         section: SECTION,
         name: name.to_string(),
         status: Status::Pass,
         detail: format!("not evaluated ({}): {}", reason.as_str(), names.join(" ")),
-        remediation: remediation.map(str::to_string),
+        remediation,
     }
+}
+
+/// Per provider, the `cache_capability` that makes its cache hits
+/// observable while keeping its current top-level cache-control support.
+fn observable_remediation(providers: &[&NotEvaluatedProvider]) -> String {
+    let settings: Vec<String> = providers
+        .iter()
+        .map(|p| {
+            format!(
+                "`{}`: {}",
+                safe(&p.provider),
+                capability_setting(p.supports_top_level_cache_control, true)
+            )
+        })
+        .collect();
+    format!(
+        "on a provider whose upstream reports cache usage, set both keys, keeping \
+         supports_top_level_cache_control at its current value: {}",
+        settings.join("; ")
+    )
 }
 
 #[cfg(test)]

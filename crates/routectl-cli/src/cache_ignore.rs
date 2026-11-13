@@ -13,6 +13,7 @@
 //! fails either test is listed with its reason; a ledger provider that is no
 //! longer configured is never counted and never listed.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -134,6 +135,10 @@ pub struct CacheIgnoreLaneReport {
     pub active_turns: i64,
     /// Distinct sessions among the qualifying turns.
     pub sessions: i64,
+    /// The provider's current effective
+    /// `cache_capability.supports_top_level_cache_control`, so a remediation
+    /// that sets `cache_capability` can keep it unchanged.
+    pub supports_top_level_cache_control: bool,
 }
 
 impl CacheIgnoreLaneReport {
@@ -200,21 +205,9 @@ pub struct NotEvaluatedProvider {
     pub provider: String,
     /// Why its lanes are not evaluated.
     pub reason: NotEvaluatedReason,
-}
-
-impl From<CacheIgnoreLane> for CacheIgnoreLaneReport {
-    fn from(lane: CacheIgnoreLane) -> Self {
-        Self {
-            verdict: LaneVerdict::from_counts(lane.evidence_turns, lane.active_turns),
-            provider: lane.provider,
-            seat: lane.seat,
-            model: lane.model,
-            provider_kind: lane.provider_kind,
-            evidence_turns: lane.evidence_turns,
-            active_turns: lane.active_turns,
-            sessions: lane.sessions,
-        }
-    }
+    /// The provider's current effective
+    /// `cache_capability.supports_top_level_cache_control`.
+    pub supports_top_level_cache_control: bool,
 }
 
 /// The whole report. Plain data.
@@ -283,6 +276,7 @@ pub fn cache_ignore_report(
     let evaluated = eligibility.evaluated();
     let Eligibility {
         rules,
+        top_level_support,
         not_evaluated,
     } = eligibility;
     let queried = DeadlineGuard::install(db, deadline)
@@ -291,7 +285,11 @@ pub fn cache_ignore_report(
         Ok(found) => CacheIgnoreReport {
             window,
             status: CacheIgnoreStatus::Evaluated,
-            lanes: found.lanes.into_iter().map(Into::into).collect(),
+            lanes: found
+                .lanes
+                .into_iter()
+                .filter_map(|lane| lane_report(lane, &top_level_support))
+                .collect(),
             evaluated,
             not_evaluated,
             truncated: found.truncated,
@@ -325,6 +323,27 @@ pub fn read_cache_ignore_report(
     }
 }
 
+/// The report of one queried lane. The query counts only providers it was
+/// given a rule for, so every lane's provider is in `top_level_support`; a
+/// lane outside it is not evaluated and is not reported.
+fn lane_report(
+    lane: CacheIgnoreLane,
+    top_level_support: &BTreeMap<String, bool>,
+) -> Option<CacheIgnoreLaneReport> {
+    let supports_top_level_cache_control = *top_level_support.get(&lane.provider)?;
+    Some(CacheIgnoreLaneReport {
+        verdict: LaneVerdict::from_counts(lane.evidence_turns, lane.active_turns),
+        provider: lane.provider,
+        seat: lane.seat,
+        model: lane.model,
+        provider_kind: lane.provider_kind,
+        evidence_turns: lane.evidence_turns,
+        active_turns: lane.active_turns,
+        sessions: lane.sessions,
+        supports_top_level_cache_control,
+    })
+}
+
 const fn query_error_class(err: &QueryError) -> &'static str {
     match err {
         QueryError::Interrupted => UNAVAILABLE_QUERY_TIMEOUT,
@@ -336,18 +355,24 @@ const fn query_error_class(err: &QueryError) -> &'static str {
 /// listed as not evaluated.
 struct Eligibility {
     rules: Vec<CacheIgnoreRule>,
+    /// Each evaluated provider's current top-level cache-control support.
+    top_level_support: BTreeMap<String, bool>,
     not_evaluated: Vec<NotEvaluatedProvider>,
 }
 
 impl Eligibility {
     fn of(config: &Config) -> Self {
         let mut rules = Vec::new();
+        let mut top_level_support = BTreeMap::new();
         let mut not_evaluated = Vec::new();
         for (name, entry) in config.providers.iter().filter(|(_, e)| carries_markers(e)) {
+            let supports_top_level_cache_control =
+                entry.cache_capability().supports_top_level_cache_control;
             if let Some(reason) = not_evaluated_reason(entry) {
                 not_evaluated.push(NotEvaluatedProvider {
                     provider: name.clone(),
                     reason,
+                    supports_top_level_cache_control,
                 });
             } else if let Some(cache) = cache_rules(entry.kind_str()) {
                 rules.push(CacheIgnoreRule {
@@ -355,10 +380,12 @@ impl Eligibility {
                     min_prompt_tokens: i64::from(cache.min_prefix_tokens),
                     lifetime_ms: i64::from(cache.ttl_seconds) * 1000,
                 });
+                top_level_support.insert(name.clone(), supports_top_level_cache_control);
             }
         }
         Self {
             rules,
+            top_level_support,
             not_evaluated,
         }
     }
