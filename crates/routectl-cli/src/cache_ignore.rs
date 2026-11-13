@@ -28,10 +28,6 @@ pub const CACHE_IGNORE_WINDOW: Duration = Duration::from_hours(6);
 /// Fewest evidence turns (with no active turn) for a lane to read `ignoring`.
 pub const IGNORING_MIN_EVIDENCE: i64 = 3;
 
-/// The token a provider is listed under when its cache hits are not
-/// observable, so its lanes cannot be judged.
-pub const UNOBSERVABLE: &str = "unobservable";
-
 /// Unavailable class: the ledger file does not exist yet.
 pub const UNAVAILABLE_NO_DATA: &str = "no_data";
 /// Unavailable class: the query ran past the caller's deadline.

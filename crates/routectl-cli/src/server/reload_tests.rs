@@ -1778,6 +1778,18 @@ fn the_probe_driver_is_spawned_by_the_reload_pipeline() {
     );
 }
 
+/// The cache-ignore driver must be spawned by the production pipeline: its
+/// behavioral tests drive the function directly and stay green without it.
+#[test]
+fn the_cache_ignore_driver_is_spawned_by_the_reload_pipeline() {
+    const RELOAD_SRC: &str = include_str!("reload.rs");
+    assert!(
+        RELOAD_SRC.contains("tokio::spawn(run_cache_ignore_driver("),
+        "the cache-ignore driver must be spawned by the reload pipeline, or the \
+         daemon never logs a lane that keeps getting markers with no cache activity"
+    );
+}
+
 /// A provider whose `count_tokens` stalls far past the probe timeout,
 /// tracking how many of its calls are still LIVE. The live count is what
 /// distinguishes a cancelled future from one still running behind a driver

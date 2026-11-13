@@ -15,6 +15,7 @@ use routectl_router::{ActivationState, Router};
 use routectl_usage::UsageHandle;
 
 pub mod auth;
+mod cache_ignore_driver;
 pub mod calibration_rebuild;
 pub mod capability_boundary;
 mod capability_health;

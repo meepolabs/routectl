@@ -12,6 +12,7 @@ use routectl_router::{
 use routectl_usage::UsageHandle;
 use tokio::sync::{mpsc, watch};
 
+use super::cache_ignore_driver::run_cache_ignore_driver;
 use super::config_load::{LoadedConfig, read_parse_validate_config};
 use super::file_watch::{self, ReloadRequest, WatchTarget};
 #[cfg(test)]
@@ -70,6 +71,12 @@ pub(super) fn spawn_reload_pipeline(
     // construction: it dials nothing until an admitted real request has
     // queued a job, so a daemon that never serves traffic never probes.
     handles.push(tokio::spawn(run_probe_driver(
+        router_swap.clone(),
+        shutdown_rx.clone(),
+    )));
+
+    // Cache-ignore driver: reads the ledger read-only and only logs.
+    handles.push(tokio::spawn(run_cache_ignore_driver(
         router_swap.clone(),
         shutdown_rx.clone(),
     )));

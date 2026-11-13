@@ -6399,8 +6399,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the same pipeline and the same `shutdown_rx`, each reading the live router
   PER TICK so a publication switches them onto the replacement cleanly:
   `run_router_metrics_snapshot_driver` (in `metrics_driver.rs`),
-  `run_probe_driver` (in `probe_driver.rs`) and, when a credential store
-  exists, `run_seat_driver` (in `seat_driver.rs`). All three
+  `run_probe_driver` (in `probe_driver.rs`), `run_cache_ignore_driver` (in
+  `cache_ignore_driver.rs`) and, when a credential store exists,
+  `run_seat_driver` (in `seat_driver.rs`). All three
   publication sites go through `router_publish::publish_router`, never a direct
   store. `apply_activation` (+ `gather_probes` /
   `emit_activation_delta`, `ActivationTrigger`) recomputes the auto-activation
@@ -6416,6 +6417,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
   per-session prefix-epoch baselines -- a one-site-only carry silently empties
   that store on the missed path, and an empty store reads exactly as health)
+- `src/server/cache_ignore_driver.rs` -- `run_cache_ignore_driver`: every
+  `CACHE_IGNORE_DRIVER_INTERVAL` (15 min) evaluates `cache_ignore_report` on
+  a fresh read-only open of the live router's `usage.db_path`
+  (`spawn_blocking`, 2 s deadline) and logs only changes, computed by the
+  pure `transitions(prev, next)`: WARN `cache_markers_without_cache_activity`
+  per lane entering `ignoring`, INFO on leaving it, WARN / INFO on the report
+  turning unavailable (INFO for `no_data`) and INFO when it returns. Boot
+  compares the report as of one interval ago with the report as of now and
+  logs one INFO `cache_ignore_baseline`. State is task-local; nothing is
+  persisted. Tests in `cache_ignore_driver_tests.rs`
 - `src/server/probe_driver.rs` -- `run_probe_driver` and
   `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
 - `src/server/seat_driver.rs` -- the background seat driver: `run_seat_driver`
