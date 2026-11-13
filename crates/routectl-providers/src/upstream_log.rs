@@ -110,6 +110,60 @@ pub mod tests {
         ]
     }
 
+    /// One planted upstream error BODY per row with no string
+    /// `error.message`, so a lane must excerpt the body itself:
+    /// `(name, body, planted)`, each in a plain-text, a flat-JSON and an
+    /// `{"error":...}` envelope shape.
+    /// Each credential sits where an excerpt cut at
+    /// [`routectl_core::MAX_LOG_BODY_EXCERPT`] characters before the scrub
+    /// would break its rule: a key whose body the cut leaves 10 characters
+    /// of (an ARN ahead of it redacts short, pulling the fragment back under
+    /// the field cap), and a JWT longer than the cut.
+    pub fn planted_bodies_without_message() -> Vec<(String, String, &'static str)> {
+        const KEY_AT: usize = routectl_core::MAX_LOG_BODY_EXCERPT - 23;
+        let arn = format!("arn:aws:iam::123456789012:role/{}", "r".repeat(300));
+        let key = "sk-ant-api03-SECRETBODY0123456789abcdefghij";
+        let segment = "abcDEF1234".repeat(30);
+        let jwt = format!("eyJ{segment}.{segment}.{}", &segment[..40]);
+        let shapes = [
+            ("plain text", "", ""),
+            (
+                "flat json",
+                r#"{"__type":"ValidationException","message":""#,
+                r#""}"#,
+            ),
+            (
+                "envelope with a non-string message",
+                r#"{"error":{"type":"server_error","message":7},"detail":""#,
+                r#""}"#,
+            ),
+        ];
+        let mut rows = Vec::new();
+        for (shape, open, close) in shapes {
+            let head = format!("{open}{CLEAN_SENTINEL} {arn} ");
+            let pad = "x".repeat(KEY_AT - head.len() - 1);
+            let straddling = format!("{head}{pad} {key} tail{close}");
+            assert_eq!(straddling.find(key), Some(KEY_AT), "{shape}: key offset");
+            rows.push((
+                format!("{shape}/key straddling the excerpt cut"),
+                straddling,
+                "sk-ant-api03-",
+            ));
+            let long_jwt = format!("{open}{CLEAN_SENTINEL} rejected token {jwt} tail{close}");
+            assert!(
+                long_jwt.find(&jwt).expect("jwt planted") + jwt.len()
+                    > routectl_core::MAX_LOG_BODY_EXCERPT,
+                "{shape}: the jwt must run past the excerpt cut"
+            );
+            rows.push((
+                format!("{shape}/jwt longer than the excerpt cut"),
+                long_jwt,
+                "eyJ",
+            ));
+        }
+        rows
+    }
+
     /// One planted upstream discriminator (an event, item, block or reason
     /// name) per row: `(name, value, expected rendering, planted)`. The
     /// credential rows must render redacted; the clean rows must render

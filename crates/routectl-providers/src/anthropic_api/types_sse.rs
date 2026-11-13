@@ -142,7 +142,7 @@ impl<'de> Deserialize<'de> for SseEvent {
                 let wire_type = v.get("type").and_then(|t| t.as_str());
                 tracing::debug!(
                     wire_type,
-                    error = %e,
+                    error = %routectl_core::upstream_text_for_log(&e.to_string()),
                     "anthropic SSE event: known tag failed typed deserialize; \
                      preserving raw Value as Other",
                 );
@@ -248,7 +248,7 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
                 let wire_type = v.get("type").and_then(|t| t.as_str());
                 tracing::debug!(
                     wire_type,
-                    error = %e,
+                    error = %routectl_core::upstream_text_for_log(&e.to_string()),
                     "anthropic SSE content_block: known tag failed typed deserialize; \
                      preserving raw Value as Other",
                 );
@@ -364,7 +364,7 @@ impl<'de> Deserialize<'de> for SseDelta {
                 let wire_type = v.get("type").and_then(|t| t.as_str());
                 tracing::debug!(
                     wire_type,
-                    error = %e,
+                    error = %routectl_core::upstream_text_for_log(&e.to_string()),
                     "anthropic SSE delta: known tag failed typed deserialize; \
                      preserving raw Value as Other",
                 );
@@ -699,5 +699,30 @@ mod tests {
             }
             other => panic!("expected SseDelta::Other on malformed known tag, got: {other:?}"),
         }
+    }
+
+    /// The soft-fall DEBUG renders serde's error through the upstream scrub:
+    /// a wrong-typed field quotes its string value in the error text.
+    #[test]
+    fn known_tag_deserialize_failure_logs_the_serde_error_scrubbed() {
+        let key = "sk-ant-api03-PlantedWrongTypedIndex0123456789";
+        let raw = json!({
+            "type": "content_block_stop",
+            "index": format!("upstream-sentinel-kept {key}"),
+        });
+
+        let events = routectl_testkit::capture_events(|| {
+            let parsed: SseEvent = serde_json::from_value(raw.clone()).expect("must not error");
+            assert!(matches!(parsed, SseEvent::Other(_)), "{parsed:?}");
+        });
+
+        let line = events
+            .iter()
+            .find(|e| e.message.contains("known tag failed typed deserialize"))
+            .unwrap_or_else(|| panic!("soft-fall DEBUG must fire: {events:?}"));
+        let error = line.field("error").expect("error field");
+        assert!(error.contains("upstream-sentinel-kept"), "{error}");
+        assert!(error.contains("[redacted]"), "{error}");
+        assert!(!error.contains("sk-ant-api03-"), "{error}");
     }
 }

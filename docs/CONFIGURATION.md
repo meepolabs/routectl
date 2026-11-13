@@ -806,7 +806,7 @@ policy action. Only an operator `payload_extras` value for
 
 | Bucket                | Keys                                                | Action on `header_extras` entry             |
 |-----------------------|-----------------------------------------------------|---------------------------------------------|
-| `AUTH_HEADERS`        | `authorization`, `x-api-key`, `anthropic-version`   | drop; advisory WARN at startup and reload   |
+| `AUTH_HEADERS`        | `authorization`, `x-api-key`, `anthropic-version`, `chatgpt-account-id`, any `x-amz-*` | drop; see below for which line logs it |
 | `MANAGED_HEADERS`     | `host`, `content-type`, `content-length`            | DEBUG + drop (wire-shape protection)        |
 | `LIST_VALUED_HEADERS` | `anthropic-beta`                                    | comma-split-union-rejoin across all sources |
 
@@ -815,10 +815,20 @@ per-provider and per-model values via `header_extras`; the list-valued
 post-pass unions them with the ingress lift.
 
 Auth secrets belong in `api_key_ref` / `auth_kind` on the provider, not
-`header_extras`. An auth-reserved key is dropped from every request; the
-`auth-reserved header warning` advisory names it once at `serve` startup
-and once per accepted config reload, and each request logs the drop only
-at DEBUG.
+`header_extras`. An auth-reserved key never reaches the wire, but where
+it is configured decides how the drop is logged:
+
+- `[models.X] header_extras` with `authorization`, `x-api-key` or
+  `anthropic-version`: the dispatch merge drops it. The
+  `auth-reserved header warning` advisory names it once at `serve`
+  startup and once per accepted config reload, and each request logs
+  the drop only at DEBUG.
+- `[providers.X] header_extras` with any auth-reserved key, and
+  `[models.X] header_extras` with `chatgpt-account-id` or an `x-amz-*`
+  key: the dispatch merge keeps it, no startup advisory names it, and
+  the egress drops it with a WARN on every request (`ignoring
+  auth-reserved header from header_extras`). The `x-amz-` prefix is
+  reserved because the Bedrock SigV4 signature covers those headers.
 
 ## Worked example: three-source `anthropic-beta` compose
 

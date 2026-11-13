@@ -702,6 +702,46 @@ impl UpstreamErrorRead {
         }
     }
 
+    /// [`Self::non_envelope_client_message`]'s counterpart for the
+    /// upstream-failure WARN: the same access-denied string on a 403, else
+    /// [`Self::upstream_log_text`].
+    #[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+    pub fn non_envelope_log_text(&self) -> String {
+        if self.status == 403 {
+            self.access_denied_client_message()
+        } else {
+            self.upstream_log_text()
+        }
+    }
+
+    /// The upstream text the upstream-failure WARN renders: the string
+    /// `error.message` when the body carries one, else the redacted body
+    /// with an HTML page collapsed to its marker, bounded at
+    /// [`routectl_core::MAX_ERROR_BODY_BYTES`] characters. Never cut at a
+    /// log excerpt cap, so the log scrub sees each credential whole before
+    /// the field cap applies; the client message keeps its own, shorter
+    /// excerpt.
+    pub fn upstream_log_text(&self) -> String {
+        if let Some(message) = self.parsed().and_then(ParsedErrorBody::error_message) {
+            return message.to_string();
+        }
+        let redacted = match self.parsed().map(ParsedErrorBody::value) {
+            Some(parsed) => {
+                let redacted = routectl_core::redact_prompts_in(parsed);
+                if &redacted == parsed {
+                    std::borrow::Cow::Borrowed(self.text())
+                } else {
+                    std::borrow::Cow::Owned(redacted.to_string())
+                }
+            }
+            None => routectl_core::redact_error_body_text(self.text()),
+        };
+        routectl_core::sanitize_upstream_body_with_cap(
+            &redacted,
+            routectl_core::MAX_ERROR_BODY_BYTES,
+        )
+    }
+
     /// The upstream body for the DEBUG log: a 403 needing the access-denied
     /// scrub ([`Self::needs_access_denied_scrub`]) collapses to the rendered
     /// access-denied string so no ARN or account id reaches the log.

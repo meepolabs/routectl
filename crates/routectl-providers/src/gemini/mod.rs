@@ -698,13 +698,8 @@ fn map_gemini_upstream_error(provider_id: &str, read: UpstreamErrorRead) -> Erro
     let cap_message = read
         .hit_cap()
         .then(crate::http_client::body_cap_exceeded_message);
-    crate::upstream_log::warn_upstream_failure(
-        provider_id,
-        status,
-        None,
-        cap_message.as_deref().unwrap_or(&msg),
-        "gemini",
-    );
+    let log_text = cap_message.unwrap_or_else(|| read.upstream_log_text());
+    crate::upstream_log::warn_upstream_failure(provider_id, status, None, &log_text, "gemini");
     let carried = if read.hit_cap() {
         CarriedBody::Replacement(crate::http_client::body_cap_exceeded_message())
     } else if read.is_native_envelope() || msg == read.text() {

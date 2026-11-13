@@ -585,7 +585,7 @@ fn unknown_user_image_source_kind_drops_from_the_wire_and_counts() {
     );
 }
 
-/// The two user-content drop WARNs name no role: a system turn kept in place
+/// The user-content drop WARNs name no role: a system turn kept in place
 /// walks the same content path a user turn does.
 #[test]
 fn a_system_turn_content_drop_logs_no_user_role() {
@@ -606,6 +606,11 @@ fn a_system_turn_content_drop_logs_no_user_role() {
             "unknown image source",
             image_part(json!({"type": "s3", "key": "img.png"})),
             "dropping image part with unknown source kind in a content part on Responses egress",
+        ),
+        (
+            "forward-compat part",
+            unknown_part(),
+            "dropping forward-compat content part on Responses egress",
         ),
     ];
     for (row, part, message) in rows {

@@ -500,3 +500,24 @@ fn warn_excerpt_is_scrubbed_before_it_is_capped_on_both_body_shapes() {
         }
     }
 }
+
+#[test]
+fn body_without_a_message_reaches_the_warn_scrub_uncut() {
+    use crate::upstream_log::tests::{assert_excerpt_scrubbed, planted_bodies_without_message};
+    for (row, body, planted) in planted_bodies_without_message() {
+        let events = routectl_testkit::capture_events(|| {
+            let _ = map_responses_upstream_error(
+                "p",
+                &AuthKind::ApiKey,
+                UpstreamErrorRead::from_parts(400, &HeaderMap::new(), &body, false),
+            );
+        });
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN && e.field("context") == Some("openai-responses")
+            })
+            .unwrap_or_else(|| panic!("{row}: upstream-failure WARN must fire"));
+        assert_excerpt_scrubbed(&row, warn.field("body_excerpt"), planted);
+    }
+}

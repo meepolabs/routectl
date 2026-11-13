@@ -43,7 +43,6 @@ use serde_json::Value;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, ReplayScheme, Result,
     debug_upstream_error_body, sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
-    upstream_message_or_excerpt,
 };
 
 use crate::stream_completion::StreamCompletion;
@@ -774,12 +773,10 @@ fn map_responses_upstream_error(
         let capped = crate::http_client::body_cap_exceeded_message();
         (capped.clone(), CarriedBody::Replacement(capped))
     } else if read.is_native_envelope() && !read.needs_access_denied_scrub() {
-        let excerpt = upstream_message_or_excerpt(read.text(), read.parsed());
-        (excerpt, CarriedBody::Original)
+        (read.upstream_log_text(), CarriedBody::Original)
     } else {
         let scrubbed = read.non_envelope_client_message();
-        let excerpt = scrubbed.clone();
-        (excerpt, read.aws_carried(scrubbed))
+        (read.non_envelope_log_text(), read.aws_carried(scrubbed))
     };
     crate::upstream_log::warn_upstream_failure(
         provider_id,

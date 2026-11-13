@@ -124,3 +124,25 @@ async fn upstream_failure_warn_scrubs_the_raw_message() {
         }
     }
 }
+
+#[tokio::test]
+async fn upstream_failure_warn_scrubs_a_body_without_a_message_uncut() {
+    for (row, body, planted) in crate::upstream_log::tests::planted_bodies_without_message() {
+        let (provider, _server) =
+            provider_answering(ResponseTemplate::new(500).set_body_string(body)).await;
+
+        let (result, events) = routectl_testkit::with_capture(provider.complete(request())).await;
+
+        assert!(result.is_err(), "{row}: expected an error");
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.message == "upstream error")
+            .collect();
+        assert_eq!(warns.len(), 1, "{row}: captured {events:?}");
+        crate::upstream_log::tests::assert_excerpt_scrubbed(
+            &row,
+            warns[0].field("body_excerpt"),
+            planted,
+        );
+    }
+}

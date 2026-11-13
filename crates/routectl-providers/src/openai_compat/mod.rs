@@ -1032,8 +1032,10 @@ fn map_openai_compat_upstream_error(provider_id: &str, read: UpstreamErrorRead) 
     // openai-compat carries no AuthKind, so the auth_kind field is omitted.
     let warn_excerpt = if read.hit_cap() {
         crate::http_client::body_cap_exceeded_message()
+    } else if is_native_envelope {
+        read.upstream_log_text()
     } else {
-        client_msg.clone()
+        read.non_envelope_log_text()
     };
     crate::upstream_log::warn_upstream_failure(
         provider_id,
@@ -1513,6 +1515,26 @@ mod helper_tests {
     }
 
     #[test]
+    fn body_without_a_message_reaches_the_warn_scrub_uncut() {
+        use crate::upstream_log::tests::{assert_excerpt_scrubbed, planted_bodies_without_message};
+        for (row, body, planted) in planted_bodies_without_message() {
+            let events = routectl_testkit::capture_events(|| {
+                let _ = super::map_openai_compat_upstream_error(
+                    "prov",
+                    UpstreamErrorRead::from_parts(400, &HeaderMap::new(), &body, false),
+                );
+            });
+            let warn = events
+                .iter()
+                .find(|e| {
+                    e.level == tracing::Level::WARN && e.field("context") == Some("openai-compat")
+                })
+                .unwrap_or_else(|| panic!("{row}: upstream-failure WARN must fire"));
+            assert_excerpt_scrubbed(&row, warn.field("body_excerpt"), planted);
+        }
+    }
+
+    #[test]
     fn oversized_non_envelope_json_error_warns_marker_not_prefix() {
         // Over the shared error-body ceiling the body is never parsed, so it
         // cannot be redacted; the WARN excerpt must be the fixed marker
@@ -1980,9 +2002,13 @@ mod helper_tests {
 
     #[test]
     fn inline_error_code_maps_to_an_http_error_status_or_502() {
-        let rows: [(&str, serde_json::Value, u16); 4] = [
+        let rows: [(&str, serde_json::Value, u16); 8] = [
             ("success code", json!(200), 502),
             ("past u16", json!(99999), 502),
+            ("string code", json!("rate_limit"), 502),
+            ("zero", json!(0), 502),
+            ("redirect code", json!(302), 502),
+            ("just past 5xx", json!(600), 502),
             ("rate limit", json!(429), 429),
             ("server error", json!(503), 503),
         ];

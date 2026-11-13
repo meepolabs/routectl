@@ -172,3 +172,32 @@ async fn every_upstream_failure_line_scrubs_the_raw_message() {
         }
     }
 }
+
+#[tokio::test]
+async fn every_upstream_failure_line_scrubs_a_body_without_a_message_uncut() {
+    use crate::upstream_log::tests::planted_bodies_without_message;
+    for sink in &SINKS {
+        for (row, body, planted) in planted_bodies_without_message() {
+            let name = format!("{}/{row}", sink.name);
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(sink.status).set_body_string(body))
+                .mount(&server)
+                .await;
+            let provider = oauth_provider_on(&server);
+
+            let (err, events) = routectl_testkit::with_capture(drive(sink.call, &provider)).await;
+
+            assert!(
+                matches!(err, Some(Error::Upstream { status, .. }) if status == sink.status),
+                "{name}: expected the upstream error, got {err:?}"
+            );
+            let lines: Vec<_> = events
+                .iter()
+                .filter(|e| e.message == sink.message)
+                .collect();
+            assert_eq!(lines.len(), 1, "{name}: captured {events:?}");
+            assert_excerpt_scrubbed(&name, lines[0].field("body_excerpt"), planted);
+        }
+    }
+}

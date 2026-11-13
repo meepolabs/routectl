@@ -755,11 +755,7 @@ fn translate_assistant_message(
                     ContentPart::Other {
                         type_tag, extras, ..
                     } => {
-                        let part = UnknownPart {
-                            role: "assistant",
-                            type_tag,
-                            extras,
-                        };
+                        let part = UnknownPart { type_tag, extras };
                         message_content.extend(unknown_content_part(
                             id,
                             auth_kind,
@@ -1193,11 +1189,7 @@ fn build_user_content(
                     ContentPart::Other {
                         type_tag, extras, ..
                     } => {
-                        let part = UnknownPart {
-                            role: "user",
-                            type_tag,
-                            extras,
-                        };
+                        let part = UnknownPart { type_tag, extras };
                         out.extend(unknown_content_part(
                             id,
                             auth_kind,
@@ -1531,7 +1523,6 @@ fn translate_file_part(
 
 /// A content part this egress does not model, as the ingress preserved it.
 struct UnknownPart<'a> {
-    role: &'static str,
     type_tag: &'a str,
     extras: &'a Map<String, Value>,
 }
@@ -1564,7 +1555,6 @@ fn unknown_content_part(
             tracing::warn!(
                 provider = id,
                 part_type = %sanitize_for_log(part.type_tag),
-                role = part.role,
                 "dropping forward-compat content part on Responses egress"
             );
             tally.record_content_part_unrepresentable();

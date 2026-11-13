@@ -976,8 +976,8 @@ impl Provider for AnthropicApiProvider {
 /// for `complete()`, `stream()`, and `count_tokens()`: a non-JSON upstream
 /// response (HTML 502 from a misconfigured proxy, a CDN cleartext error
 /// page, plain-text 529) must not collapse to an opaque serde error.
-/// Returns both the client message (for the caller's `body_excerpt` log)
-/// and the constructed `Error::Upstream`.
+/// Returns the upstream text for the caller's `body_excerpt` log lines
+/// (see [`anthropic_error_from_read`]) and the constructed `Error::Upstream`.
 async fn read_anthropic_error(
     provider_id: &str,
     resp: reqwest::Response,
@@ -1007,9 +1007,11 @@ impl AnthropicApiProvider {
     }
 }
 
-/// Build the `(message, Error::Upstream)` pair from an error response
+/// Build the `(log text, Error::Upstream)` pair from an error response
 /// already read. The classifier, the DEBUG body, and the client message all
-/// read the read's single parse. Anthropic shape
+/// read the read's single parse. The log text is the client message on a
+/// 403 (the access-denied scrub decides it) and on a cap trip, else the
+/// uncapped [`UpstreamErrorRead::upstream_log_text`]. Anthropic shape
 /// `{type:"error",error:{type,message}}`; tokens come from the shared
 /// precedence rule ([`UpstreamErrorRead::tokens`]).
 fn anthropic_error_from_read(provider_id: &str, read: UpstreamErrorRead) -> (String, Error) {
@@ -1075,8 +1077,13 @@ fn anthropic_error_from_read(provider_id: &str, read: UpstreamErrorRead) -> (Str
     } else {
         CarriedBody::Original
     };
+    let log_text = if status == 403 {
+        msg
+    } else {
+        read.upstream_log_text()
+    };
     let err = read.into_error(provider_id, carried, retry_after);
-    (msg, err)
+    (log_text, err)
 }
 
 /// Build the body for `POST /v1/messages/count_tokens` from the

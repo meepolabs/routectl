@@ -522,7 +522,7 @@ fn extract_chunk_usage(
         Err(e) => {
             tracing::debug!(
                 provider = %provider_id,
-                error = %e,
+                error = %routectl_core::upstream_text_for_log(&e.to_string()),
                 "dropping malformed streaming usage object"
             );
             (None, members)
@@ -2456,5 +2456,29 @@ mod tests {
         names.sort_unstable();
         modeled.sort_unstable();
         assert_eq!(names, modeled);
+    }
+
+    /// The malformed-usage DEBUG renders serde's error through the upstream
+    /// scrub: a wrong-typed count quotes its string value in the error text.
+    #[test]
+    fn malformed_usage_logs_the_serde_error_scrubbed() {
+        let key = "sk-ant-api03-PlantedWrongTypedCount0123456789";
+        let mut val = json!({
+            "usage": {"prompt_tokens": format!("upstream-sentinel-kept {key}")},
+        });
+
+        let events = routectl_testkit::capture_events(|| {
+            let (usage, _) = extract_chunk_usage("t", &mut val);
+            assert!(usage.is_none());
+        });
+
+        let line = events
+            .iter()
+            .find(|e| e.message == "dropping malformed streaming usage object")
+            .unwrap_or_else(|| panic!("malformed-usage DEBUG must fire: {events:?}"));
+        let error = line.field("error").expect("error field");
+        assert!(error.contains("upstream-sentinel-kept"), "{error}");
+        assert!(error.contains("[redacted]"), "{error}");
+        assert!(!error.contains("sk-ant-api03-"), "{error}");
     }
 }
