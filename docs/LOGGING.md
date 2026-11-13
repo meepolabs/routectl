@@ -328,7 +328,9 @@ pass on (a non-envelope body on openai-compat, openai-responses and gemini,
 an AWS-shaped body on anthropic-api, a Bedrock body, the Gemini Cloud Code
 onboarding error), that excerpt is already cut at 512 characters, so a
 rendered error (`%err` / `?err`) scrubs the cut text and can show the
-part of a credential the cut split. The scrub
+part of a credential the cut split. The WARN excerpt itself is bounded
+at 65,536 characters before the scrub, so a credential straddling that bound in a
+larger non-JSON body can do the same. The scrub
 matches shapes, so upstream text still keeps a secret under a query
 parameter or key whose name is not credential-like (`?sig=...`), an
 opaque secret with no known vendor prefix, a bearer token shorter than
