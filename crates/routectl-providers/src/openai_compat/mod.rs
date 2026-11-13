@@ -1033,7 +1033,7 @@ fn map_openai_compat_upstream_error(provider_id: &str, read: UpstreamErrorRead) 
     let warn_excerpt = if read.hit_cap() {
         crate::http_client::body_cap_exceeded_message()
     } else {
-        sanitize_for_log(&client_msg)
+        client_msg.clone()
     };
     crate::upstream_log::warn_upstream_failure(
         provider_id,
@@ -1086,11 +1086,7 @@ fn detect_inline_error_2xx(
     if err.is_null() || err.as_object().is_some_and(serde_json::Map::is_empty) {
         return None;
     }
-    let status = raw
-        .pointer("/error/code")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|n| u16::try_from(n).ok())
-        .unwrap_or(502);
+    let status = crate::http_client::in_band_error_status(raw.pointer("/error/code"));
     Some(map_openai_compat_upstream_error(
         provider_id,
         UpstreamErrorRead::from_body(
@@ -1451,6 +1447,69 @@ mod helper_tests {
         assert!(!excerpt.contains("SENTINEL-COMPAT-KEY"), "{excerpt}");
         assert!(excerpt.contains("[redacted]"), "{excerpt}");
         assert!(!debug.contains("SENTINEL-COMPAT-KEY"), "{debug}");
+    }
+
+    /// An upstream error envelope whose message names an ARN, an account id,
+    /// a vendor key and URL userinfo, ending in clean text that must survive.
+    fn credential_bearing_envelope() -> String {
+        let account = "1234".to_owned() + "56789012";
+        let key = format!("sk-proj-{}", "A".repeat(40));
+        serde_json::json!({"error": {
+            "type": "invalid_request_error",
+            "message": format!(
+                "denied for arn:aws:iam::{account}:role/App; account ID {account}; key {key}; \
+                 see https://alice:pw0rd@internal.host/x; max_tokens is too large"
+            ),
+        }})
+        .to_string()
+    }
+
+    #[test]
+    fn native_envelope_credentials_never_reach_the_warn_excerpt_or_error_debug() {
+        let body = credential_bearing_envelope();
+        let mut err = None;
+        let events = routectl_testkit::capture_events(|| {
+            err = Some(super::map_openai_compat_upstream_error(
+                "prov",
+                UpstreamErrorRead::from_parts(400, &HeaderMap::new(), &body, false),
+            ));
+        });
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN && e.field("context") == Some("openai-compat")
+            })
+            .expect("upstream-failure WARN must fire");
+        let excerpt = warn.field("body_excerpt").expect("body_excerpt field");
+        let debug = format!("{:?}", err.expect("error built"));
+
+        for planted in ["123456789012", "sk-proj-AAAA", "pw0rd"] {
+            assert!(!excerpt.contains(planted), "{planted} in {excerpt}");
+            assert!(!debug.contains(planted), "{planted} in {debug}");
+        }
+        assert!(excerpt.contains("max_tokens is too large"), "{excerpt}");
+        assert!(debug.contains("max_tokens is too large"), "{debug}");
+    }
+
+    #[test]
+    fn native_envelope_warn_excerpt_is_scrubbed_before_it_is_capped() {
+        use crate::upstream_log::tests::{assert_excerpt_scrubbed, planted_messages};
+        for (row, message, planted) in planted_messages() {
+            let body = serde_json::json!({"error": {"message": message}}).to_string();
+            let events = routectl_testkit::capture_events(|| {
+                let _ = super::map_openai_compat_upstream_error(
+                    "prov",
+                    UpstreamErrorRead::from_parts(400, &HeaderMap::new(), &body, false),
+                );
+            });
+            let warn = events
+                .iter()
+                .find(|e| {
+                    e.level == tracing::Level::WARN && e.field("context") == Some("openai-compat")
+                })
+                .unwrap_or_else(|| panic!("{row}: upstream-failure WARN must fire"));
+            assert_excerpt_scrubbed(row, warn.field("body_excerpt"), planted);
+        }
     }
 
     #[test]
@@ -1916,6 +1975,28 @@ mod helper_tests {
         match err {
             Error::Upstream { status, .. } => assert_eq!(status, 503),
             other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_error_code_maps_to_an_http_error_status_or_502() {
+        let rows: [(&str, serde_json::Value, u16); 4] = [
+            ("success code", json!(200), 502),
+            ("past u16", json!(99999), 502),
+            ("rate limit", json!(429), 429),
+            ("server error", json!(503), 503),
+        ];
+        for (name, code, want) in rows {
+            let raw = json!({"error": {"code": code, "message": "m"}});
+            let body = raw.to_string();
+
+            let err = detect_inline_error_2xx("p", &raw, &HeaderMap::new(), &body, false)
+                .expect("inline error envelope must be detected");
+
+            let Error::Upstream { status, .. } = err else {
+                panic!("{name}: expected Error::Upstream, got: {err:?}");
+            };
+            assert_eq!(status, want, "{name}");
         }
     }
 

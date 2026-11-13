@@ -533,6 +533,36 @@ fn a_fingerprint_only_in_a_developer_turn_is_withheld_from_openai_compat_and_cou
     assert_eq!(delta, 1, "the withhold is one policy action");
 }
 
+#[test]
+fn a_developer_turn_withhold_names_both_authority_roles_in_its_debug_line() {
+    let req = req_with(
+        None,
+        vec![
+            user_text_message("hi"),
+            other_role_message("developer", &[COMPAT_FINGERPRINT, "dev-legit-sentinel"]),
+        ],
+    );
+
+    let events = routectl_testkit::capture_events(|| {
+        let _ = lenient_normalize(&req);
+    });
+
+    let lines: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("billing/attribution block dropped from a")
+        })
+        .collect();
+    assert_eq!(lines.len(), 1, "{events:?}");
+    assert!(
+        lines[0]
+            .message
+            .ends_with("dropped from a system- or developer-role message"),
+        "{lines:?}"
+    );
+}
+
 /// A row of the `Other`-role table: name, the turn, the wire messages a
 /// withholding row expects (`None`: the turn rides unchanged), and the
 /// policy-action delta.

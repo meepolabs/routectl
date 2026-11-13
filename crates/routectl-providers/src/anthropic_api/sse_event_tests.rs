@@ -176,3 +176,28 @@ fn in_stream_bare_rate_limit_event_carries_no_scope_row() {
     );
     assert_eq!(err.scope_row(), None);
 }
+
+#[test]
+fn an_unknown_top_level_event_type_is_scrubbed_in_its_debug_line() {
+    use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+    for (row, tag, expected, planted) in planted_tags() {
+        let event = serde_json::json!({"type": tag}).to_string();
+
+        let events = routectl_testkit::capture_events(|| {
+            let mut state = SseState::default();
+            let _ = state.parse_event("test", &event);
+        });
+
+        assert_tag_scrubbed(
+            row,
+            &events,
+            (
+                tracing::Level::DEBUG,
+                "unknown top-level event; sink-draining",
+            ),
+            "event_type",
+            &expected,
+            planted,
+        );
+    }
+}

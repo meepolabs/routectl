@@ -110,6 +110,62 @@ pub mod tests {
         ]
     }
 
+    /// One planted upstream discriminator (an event, item, block or reason
+    /// name) per row: `(name, value, expected rendering, planted)`. The
+    /// credential rows must render redacted; the clean rows must render
+    /// verbatim, so a sink that drops or blanks the field cannot pass.
+    pub fn planted_tags() -> [(&'static str, String, String, Option<&'static str>); 4] {
+        const ARN: &str = "arn:aws:iam::123456789012:role/ops-role";
+        const KEY: &str = "sk-proj-PlantedDiscriminatorKey0123456789";
+        [
+            ("arn", ARN.to_owned(), "[redacted]".to_owned(), Some(ARN)),
+            (
+                "clean beside a key",
+                format!("sentinel_tag {KEY}"),
+                "sentinel_tag [redacted]".to_owned(),
+                Some(KEY),
+            ),
+            (
+                "vendor key",
+                KEY.to_owned(),
+                "[redacted]".to_owned(),
+                Some(KEY),
+            ),
+            (
+                "clean sentinel",
+                "sentinel_future_tag".to_owned(),
+                "sentinel_future_tag".to_owned(),
+                None,
+            ),
+        ]
+    }
+
+    /// The `field` of the single `level` event whose message contains
+    /// `message` renders `expected`, and no captured field carries `planted`.
+    pub fn assert_tag_scrubbed(
+        row: &str,
+        events: &[CapturedEvent],
+        (level, message): (tracing::Level, &str),
+        field: &str,
+        expected: &str,
+        planted: Option<&str>,
+    ) {
+        let matched: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == level && e.message.contains(message))
+            .collect();
+        assert_eq!(matched.len(), 1, "{row}: {message:?} in {events:?}");
+        assert_eq!(matched[0].field(field), Some(expected), "{row}: {field}");
+        if let Some(planted) = planted {
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.fields.iter().all(|(_, v)| !v.contains(planted))),
+                "{row}: planted value reached a log field: {events:?}"
+            );
+        }
+    }
+
     /// The excerpt carries the clean sentinel and a redaction, and none of
     /// the planted fragment.
     pub fn assert_excerpt_scrubbed(row: &str, excerpt: Option<&str>, planted: &str) {

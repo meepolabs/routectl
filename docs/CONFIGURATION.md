@@ -806,7 +806,7 @@ policy action. Only an operator `payload_extras` value for
 
 | Bucket                | Keys                                                | Action on `header_extras` entry             |
 |-----------------------|-----------------------------------------------------|---------------------------------------------|
-| `AUTH_HEADERS`        | `authorization`, `x-api-key`, `anthropic-version`   | WARN + drop (operator misconfig)            |
+| `AUTH_HEADERS`        | `authorization`, `x-api-key`, `anthropic-version`   | drop; advisory WARN at startup and reload   |
 | `MANAGED_HEADERS`     | `host`, `content-type`, `content-length`            | DEBUG + drop (wire-shape protection)        |
 | `LIST_VALUED_HEADERS` | `anthropic-beta`                                    | comma-split-union-rejoin across all sources |
 
@@ -815,8 +815,10 @@ per-provider and per-model values via `header_extras`; the list-valued
 post-pass unions them with the ingress lift.
 
 Auth secrets belong in `api_key_ref` / `auth_kind` on the provider, not
-`header_extras`. The WARN + drop on `authorization` / `x-api-key`
-catches the misconfig at request time.
+`header_extras`. An auth-reserved key is dropped from every request; the
+`auth-reserved header warning` advisory names it once at `serve` startup
+and once per accepted config reload, and each request logs the drop only
+at DEBUG.
 
 ## Worked example: three-source `anthropic-beta` compose
 

@@ -299,7 +299,7 @@ fn project_system(
         debug!(
             provider = id,
             "openai-compat egress: Claude Code billing/attribution block dropped from a \
-             system-role message",
+             system- or developer-role message",
         );
     }
 

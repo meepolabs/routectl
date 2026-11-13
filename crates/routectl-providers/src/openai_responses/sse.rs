@@ -41,7 +41,7 @@ use uuid::Uuid;
 use routectl_core::{
     ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, ReasoningDetailKind, RequestObservation,
     RequestProvenance, ResponsesEnvelope, ResponsesItemMembers, Result, Role, ToolDef,
-    UpstreamMeta, UsageInputSource, sanitize_for_log,
+    UpstreamMeta, UsageInputSource,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
     wire_check::{IngressDialect, WireTap},
 };
@@ -293,7 +293,7 @@ impl ResponsesStreamState {
                 if !(self.carries_unmodeled() && carriage::is_carried_whole(other)) {
                     tracing::debug!(
                         provider = provider_id,
-                        event_type = %sanitize_for_log(other),
+                        event_type = %routectl_core::upstream_text_for_log(other),
                         "openai-responses: skipping unknown stream event"
                     );
                 }
@@ -1037,7 +1037,7 @@ impl ResponsesStreamState {
             tracing::debug!(
                 provider = provider_id,
                 output_index = idx,
-                item_type = %sanitize_for_log(item_type),
+                item_type = %routectl_core::upstream_text_for_log(item_type),
                 "openai-responses: output_item.added beyond cap; skipping"
             );
         } else {
@@ -1045,7 +1045,7 @@ impl ResponsesStreamState {
                 provider = provider_id,
                 output_index = idx,
                 cap = MAX_OUTPUT_BLOCKS,
-                item_type = %sanitize_for_log(item_type),
+                item_type = %routectl_core::upstream_text_for_log(item_type),
                 "openai-responses: output_item.added beyond cap; skipping"
             );
         }
@@ -1069,7 +1069,7 @@ impl ResponsesStreamState {
         tracing::warn!(
             provider = provider_id,
             output_index = idx,
-            item_type = %sanitize_for_log(item_type),
+            item_type = %routectl_core::upstream_text_for_log(item_type),
             "openai-responses: dropping unmodeled output item the client dialect cannot carry"
         );
         if std::mem::replace(&mut self.unrepresentable_counted, true) {

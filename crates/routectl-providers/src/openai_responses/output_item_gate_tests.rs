@@ -293,3 +293,28 @@ async fn usage_members_stay_only_for_a_responses_client() {
         assert_eq!(!usage.extras.is_empty(), kept, "{row}: {:?}", usage.extras);
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_drop_log_scrubs_credential_shaped_item_types() {
+    use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+    for (row, tag, expected, planted) in planted_tags() {
+        let slot = RequestObservation::new();
+        let mut items = text_with_unmodeled_items(0);
+        items.push(json!({"type": tag, "id": "x1", "status": "completed"}));
+
+        let (_, events) = routectl_testkit::with_capture(complete_against(
+            upstream(items),
+            request(RequestProvenance::AnthropicIngress, &slot),
+        ))
+        .await;
+
+        assert_tag_scrubbed(
+            row,
+            &events,
+            (tracing::Level::WARN, "dropping unmodeled output items"),
+            "item_types",
+            &expected,
+            planted,
+        );
+    }
+}

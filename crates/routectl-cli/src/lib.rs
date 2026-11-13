@@ -16,6 +16,7 @@ pub mod commands;
 pub(crate) mod config_classify;
 #[doc(hidden)]
 pub mod config_folder;
+#[doc(hidden)]
 pub mod derived_path;
 #[doc(hidden)]
 pub mod handlers;

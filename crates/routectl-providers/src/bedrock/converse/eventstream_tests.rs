@@ -1527,3 +1527,39 @@ fn converse_metadata_usage_is_an_explicit_final_report_and_its_absence_is_unmark
     assert!(bare[0].usage.is_none());
     assert!(bare[0].upstream_meta.is_none());
 }
+
+/// The unknown block-start payload's key list (DEBUG) and redacted payload
+/// (TRACE) render through the upstream scrub.
+#[test]
+fn unknown_block_start_payload_lines_are_scrubbed() {
+    use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+    for (row, tag, expected, planted) in planted_tags() {
+        let payload = serde_json::json!({"contentBlockIndex": 0, "start": {tag.clone(): {}}});
+
+        let events = routectl_testkit::capture_events(|| {
+            let mut state = ConverseStreamState::default();
+            let _ = run("contentBlockStart", &payload.to_string(), &mut state);
+        });
+
+        assert_tag_scrubbed(
+            &format!("keys/{row}"),
+            &events,
+            (
+                tracing::Level::DEBUG,
+                "unknown contentBlockStart payload type",
+            ),
+            "payload_keys",
+            &expected,
+            planted,
+        );
+        let traced = events
+            .iter()
+            .find(|e| {
+                e.message
+                    .contains("unknown contentBlockStart payload (redacted)")
+            })
+            .and_then(|e| e.field("start_payload"))
+            .unwrap_or_else(|| panic!("trace/{row}: {events:?}"));
+        assert!(traced.contains(&expected), "trace/{row}: {traced}");
+    }
+}

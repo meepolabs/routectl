@@ -545,18 +545,19 @@ fn unknown_user_image_source_kind_drops_from_the_wire_and_counts() {
     let (wire, events) = translate_capturing(&cfg(), &req);
     let after = responses_drop_count("image_source_kind_unrepresentable");
 
-    // Assert 1: the WARN fired at WARN level, naming the source kind and
-    // the role it was dropped from.
+    // Assert 1: the WARN fired at WARN level, naming the source kind and no
+    // role: the path serves system, developer and unrecognized turns too.
     let record = events
         .iter()
         .find(|e| {
-            e.message
-                .contains("dropping image part with unknown source kind on Responses egress")
+            e.message.contains(
+                "dropping image part with unknown source kind in a content part on Responses egress",
+            )
         })
         .unwrap_or_else(|| panic!("the image-source drop must be observable, got: {events:?}"));
     assert_eq!(record.level, tracing::Level::WARN, "got: {record:?}");
     assert_eq!(record.field("source_kind"), Some("s3"), "got: {record:?}");
-    assert_eq!(record.field("role"), Some("user"), "got: {record:?}");
+    assert_eq!(record.field("role"), None, "got: {record:?}");
 
     // Assert 2: neither the unrepresentable kind tag nor the locator it
     // carried reaches the emitted wire value.
@@ -582,6 +583,50 @@ fn unknown_user_image_source_kind_drops_from_the_wire_and_counts() {
         1,
         "the drop must be counted exactly once for the request"
     );
+}
+
+/// The two user-content drop WARNs name no role: a system turn kept in place
+/// walks the same content path a user turn does.
+#[test]
+fn a_system_turn_content_drop_logs_no_user_role() {
+    let tool_use = ContentPart::Known(KnownContentPart::ToolUse {
+        id: "call_1".into(),
+        name: "calc".into(),
+        input: json!({}),
+        cache_control: None,
+        extras: serde_json::Map::new(),
+    });
+    let rows = [
+        (
+            "unsupported part",
+            tool_use,
+            "dropping unsupported content part on Responses egress",
+        ),
+        (
+            "unknown image source",
+            image_part(json!({"type": "s3", "key": "img.png"})),
+            "dropping image part with unknown source kind in a content part on Responses egress",
+        ),
+    ];
+    for (row, part, message) in rows {
+        let system = Message {
+            role: Role::System,
+            ..user_parts(vec![text_part("system-sentinel"), part])
+        };
+        let req = req_with(vec![system, user_text("hi")]);
+
+        let (wire, events) = translate_capturing(&cfg(), &req);
+
+        let drops: Vec<_> = events.iter().filter(|e| e.message == message).collect();
+        assert_eq!(drops.len(), 1, "{row}: {events:?}");
+        assert_eq!(drops[0].level, tracing::Level::WARN, "{row}");
+        assert_eq!(drops[0].field("role"), None, "{row}: {:?}", drops[0]);
+        assert_eq!(wire["input"][0]["role"], "system", "{row}: {wire}");
+        assert!(
+            wire.to_string().contains("system-sentinel"),
+            "{row}: the system turn rode in place: {wire}"
+        );
+    }
 }
 
 #[test]

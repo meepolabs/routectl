@@ -21,7 +21,7 @@ use routectl_core::upstream_meta::UpstreamMeta;
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
 };
 
 use super::types::{AnthropicResponse, AnthropicUsage, ContentBlock};
@@ -165,7 +165,7 @@ pub(crate) fn walk_content_blocks(
             } => {
                 debug!(
                     provider = id,
-                    block_type = %sanitize_for_log(type_tag),
+                    block_type = %routectl_core::upstream_text_for_log(type_tag),
                     "unknown content block type in response dropped from flat-text output",
                 );
                 parts.push(ContentPart::Other {
@@ -971,6 +971,33 @@ mod tests {
             assert_eq!(
                 details[0].payload["signature"], "EqoCCkYIBxgCKkASDGZvbw==",
                 "the signature must survive so the turn stays replayable ({label})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_block_type_is_scrubbed_in_its_debug_line() {
+        use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+        for (row, tag, expected, planted) in planted_tags() {
+            let raw = json!({"id": "msg_1", "type": "message", "role": "assistant",
+                             "model": "claude-test", "stop_reason": "end_turn",
+                             "content": [{"type": tag}],
+                             "usage": {"input_tokens": 1, "output_tokens": 1}});
+
+            let events = routectl_testkit::capture_events(|| {
+                let _ = normalize("test", raw);
+            });
+
+            assert_tag_scrubbed(
+                row,
+                &events,
+                (
+                    tracing::Level::DEBUG,
+                    "unknown content block type in response",
+                ),
+                "block_type",
+                &expected,
+                planted,
             );
         }
     }

@@ -472,3 +472,127 @@ async fn count_tokens_success_body_over_cap_maps_to_502_and_warns() {
     assert_eq!(w.field("body_truncated"), Some("true"));
     assert_eq!(w.field("path"), Some("count_tokens_success_body"));
 }
+
+/// One row per quota header the flip WARN renders: `(field, header suffix)`.
+/// Each row plants a key in that header alone, so a field that skips the
+/// scrub fails its own row.
+#[tokio::test(flavor = "current_thread")]
+async fn quota_header_values_in_the_flip_warn_are_scrubbed() {
+    let key = &format!("sk-proj-{}", "PlantedQuotaHeaderKey0123456789");
+    let rows = [
+        ("overage_status", "overage-status"),
+        ("utilization", "5h-utilization"),
+        ("overage_utilization", "overage-utilization"),
+        ("reset", "reset"),
+    ];
+    for (field, suffix) in rows {
+        // Arrange
+        let server = MockServer::start().await;
+        let mut template = ResponseTemplate::new(200)
+            .set_body_json(response_body())
+            .append_header(
+                "anthropic-ratelimit-unified-representative-claim",
+                "overage",
+            );
+        for (_, other) in rows {
+            let value = if other == suffix {
+                format!("sentinel_value {key}")
+            } else {
+                "clean".to_owned()
+            };
+            template =
+                template.append_header(format!("anthropic-ratelimit-unified-{other}"), value);
+        }
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        // Act
+        let ((), events) = with_capture(async {
+            provider.complete(base_req()).await.unwrap();
+        })
+        .await;
+
+        // Assert
+        let flips = flip_events(&events);
+        assert_eq!(flips.len(), 1, "{field}: {events:#?}");
+        assert_eq!(
+            flips[0].field(field),
+            Some("sentinel_value [redacted]"),
+            "{field}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.fields.iter().all(|(_, v)| !v.contains(key))),
+            "{field}: planted key reached a log field: {events:#?}"
+        );
+    }
+}
+
+/// The recovery INFO renders every quota header: each carries its own
+/// planted key, and each field is asserted on its own.
+#[tokio::test(flavor = "current_thread")]
+async fn quota_header_values_in_the_recovery_info_are_scrubbed() {
+    // Arrange: overage first, then a non-overage answer whose every quota
+    // header names a distinct key.
+    let fields = [
+        ("representative_claim", "representative-claim"),
+        ("overage_status", "overage-status"),
+        ("utilization", "5h-utilization"),
+        ("overage_utilization", "overage-utilization"),
+        ("reset", "reset"),
+    ];
+    let key_for = |field: &str| format!("sk-proj-Planted{}Key0123456789", field.replace('_', ""));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(claim_response("overage"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let mut recovered = ResponseTemplate::new(200).set_body_json(response_body());
+    for (field, suffix) in fields {
+        recovered = recovered.append_header(
+            format!("anthropic-ratelimit-unified-{suffix}"),
+            format!("sentinel_value {}", key_for(field)),
+        );
+    }
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(recovered)
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    // Act
+    let ((), events) = with_capture(async {
+        provider.complete(base_req()).await.unwrap();
+        provider.complete(base_req()).await.unwrap();
+    })
+    .await;
+
+    // Assert
+    let info: Vec<_> = flip_events(&events)
+        .into_iter()
+        .filter(|e| e.level == tracing::Level::INFO)
+        .collect();
+    assert_eq!(info.len(), 1, "{events:#?}");
+    for (field, _) in fields {
+        assert_eq!(
+            info[0].field(field),
+            Some("sentinel_value [redacted]"),
+            "{field}"
+        );
+        let key = key_for(field);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.fields.iter().all(|(_, v)| !v.contains(&key))),
+            "{field}: planted key reached a log field"
+        );
+    }
+}

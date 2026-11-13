@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatResponse, Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Result,
-    Role, Usage, sanitize_for_log,
+    Role, Usage,
 };
 
 use super::GEMINI_FORMAT;
@@ -42,7 +42,7 @@ pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<Cha
                         provider = %provider_id,
                         surface = "complete",
                         origin = "prompt_feedback",
-                        block_reason = %sanitize_for_log(reason),
+                        block_reason = %routectl_core::upstream_text_for_log(reason),
                         "gemini: prompt blocked on 200 surface"
                     );
                     Some("content_filter".to_string())
@@ -162,7 +162,7 @@ fn walk_parts(provider_id: &str, parts: &[ResponsePart]) -> Result<WalkedParts> 
                 Err(e) => {
                     tracing::debug!(
                         provider = %provider_id,
-                        fn_name = %sanitize_for_log(&fc.name),
+                        fn_name = %routectl_core::upstream_text_for_log(&fc.name),
                         error = %e,
                         "gemini: could not serialize function_call args"
                     );
@@ -253,7 +253,7 @@ pub(super) fn map_finish_reason(
         "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" | "TOO_MANY_TOOL_CALLS" => "stop",
         other => {
             tracing::debug!(
-                finish_reason = %sanitize_for_log(other),
+                finish_reason = %routectl_core::upstream_text_for_log(other),
                 "gemini: unmapped finishReason; defaulting to stop"
             );
             "stop"
@@ -808,5 +808,42 @@ mod tests {
             None,
         );
         assert_eq!(classify(&auth, Some("gemini")).class, FailureClass::Auth);
+    }
+
+    #[test]
+    fn upstream_reason_tokens_are_scrubbed_in_their_debug_lines() {
+        use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+        for (row, tag, expected, planted) in planted_tags() {
+            let blocked = GenerateContentResponse {
+                candidates: vec![],
+                prompt_feedback: Some(PromptFeedback {
+                    block_reason: Some(tag.clone()),
+                }),
+                ..text_response("", "STOP")
+            };
+            let block_events = routectl_testkit::capture_events(|| {
+                let _ = translate("test", blocked);
+            });
+            assert_tag_scrubbed(
+                &format!("block_reason/{row}"),
+                &block_events,
+                (tracing::Level::DEBUG, "prompt blocked on 200 surface"),
+                "block_reason",
+                &expected,
+                planted,
+            );
+
+            let finish_events = routectl_testkit::capture_events(|| {
+                let _ = map_finish_reason(Some(&tag), false);
+            });
+            assert_tag_scrubbed(
+                &format!("finish_reason/{row}"),
+                &finish_events,
+                (tracing::Level::DEBUG, "unmapped finishReason"),
+                "finish_reason",
+                &expected,
+                planted,
+            );
+        }
     }
 }

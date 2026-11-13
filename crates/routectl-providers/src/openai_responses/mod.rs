@@ -699,7 +699,7 @@ fn gate_unmodeled_output_items(req: &ChatRequest, resp: &mut ChatResponse) {
     }
     tracing::warn!(
         lane = LANE,
-        item_types = %sanitize_for_log(&dropped.join(",")),
+        item_types = %routectl_core::upstream_text_for_log(&dropped.join(",")),
         count = dropped.len(),
         "openai-responses: dropping unmodeled output items the client dialect cannot carry"
     );
@@ -774,11 +774,11 @@ fn map_responses_upstream_error(
         let capped = crate::http_client::body_cap_exceeded_message();
         (capped.clone(), CarriedBody::Replacement(capped))
     } else if read.is_native_envelope() && !read.needs_access_denied_scrub() {
-        let excerpt = sanitize_for_log(&upstream_message_or_excerpt(read.text(), read.parsed()));
+        let excerpt = upstream_message_or_excerpt(read.text(), read.parsed());
         (excerpt, CarriedBody::Original)
     } else {
         let scrubbed = read.non_envelope_client_message();
-        let excerpt = sanitize_for_log(&scrubbed);
+        let excerpt = scrubbed.clone();
         (excerpt, read.aws_carried(scrubbed))
     };
     crate::upstream_log::warn_upstream_failure(

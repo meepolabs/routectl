@@ -1187,8 +1187,7 @@ fn build_user_content(
                         tracing::warn!(
                             provider = id,
                             part_type = other.type_tag(),
-                            role = "user",
-                            "dropping unsupported user content part on Responses egress"
+                            "dropping unsupported content part on Responses egress"
                         );
                     }
                     ContentPart::Other {
@@ -1723,8 +1722,7 @@ fn translate_image_source(
             tracing::warn!(
                 provider = id,
                 source_kind = other,
-                role = "user",
-                "dropping image part with unknown source kind on Responses egress"
+                "dropping image part with unknown source kind in a content part on Responses egress"
             );
             tally.record_image_source_kind();
             Ok(None)

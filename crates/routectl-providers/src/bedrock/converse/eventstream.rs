@@ -387,7 +387,7 @@ fn handle_block_start(
             };
             tracing::debug!(
                 provider = provider_id,
-                payload_keys = %routectl_core::sanitize_for_log(&payload_keys),
+                payload_keys = %routectl_core::upstream_text_for_log(&payload_keys),
                 "bedrock converse: unknown contentBlockStart payload type; \
                  defaulting to Text block state -- first delta will disambiguate"
             );
@@ -396,7 +396,7 @@ fn handle_block_start(
                 let serialized = serde_json::to_string(&redacted).unwrap_or_default();
                 tracing::trace!(
                     provider = provider_id,
-                    start_payload = %routectl_core::sanitize_for_log(&serialized),
+                    start_payload = %routectl_core::upstream_text_for_log(&serialized),
                     "bedrock converse: unknown contentBlockStart payload (redacted)"
                 );
             }

@@ -305,8 +305,8 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     (
         "openai_responses/messages.rs",
         "build_user_content",
-        "dropping unsupported user content part",
-        "logs the unsupported user part drop for the marked role dispatch above it; one of its \
+        "dropping unsupported content part on responses egress",
+        "logs the unsupported content part drop for the marked role dispatch above it; one of its \
          two callers is itself caller-attributed rather than marked, so the chain does not close",
     ),
     (

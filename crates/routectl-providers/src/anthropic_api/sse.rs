@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, Error, OpaqueSseEvent, OpeningUsage, OpeningUsageOrigin, ReasoningDetail, Result,
-    Role, UpstreamMeta, UsageInputSource, sanitize_for_log,
+    Role, UpstreamMeta, UsageInputSource,
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -855,7 +855,7 @@ impl SseState {
                 }
                 tracing::debug!(
                     provider = %provider_id,
-                    event_type = %sanitize_for_log(event_type),
+                    event_type = %routectl_core::upstream_text_for_log(event_type),
                     "anthropic SSE: unknown top-level event; sink-draining",
                 );
                 Ok(None)

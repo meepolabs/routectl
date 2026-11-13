@@ -898,3 +898,28 @@ fn translate_carries_an_empty_reasoning_content_array_as_an_item_member() {
     );
     assert!(members(filled).is_empty(), "typed content is not carried");
 }
+
+#[test]
+fn a_forward_compat_output_item_type_tag_is_scrubbed_in_its_debug_line() {
+    use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+    for (row, tag, expected, planted) in planted_tags() {
+        let body = json!({"id": "resp_1", "model": "gpt-test", "status": "completed",
+                          "output": [{"type": tag, "id": "x1"}]});
+
+        let events = routectl_testkit::capture_events(|| {
+            let _ = parse(body);
+        });
+
+        assert_tag_scrubbed(
+            row,
+            &events,
+            (
+                tracing::Level::DEBUG,
+                "forward-compat output_item preserved",
+            ),
+            "type_tag",
+            &expected,
+            planted,
+        );
+    }
+}

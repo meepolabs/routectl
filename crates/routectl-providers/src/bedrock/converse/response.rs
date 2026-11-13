@@ -24,7 +24,6 @@ use routectl_core::schema::CacheCreation;
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
     ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, parse_cache_lifetime,
-    sanitize_for_log,
 };
 
 use crate::anthropic_api::response::{map_stop_reason, sum_prompt_tokens};
@@ -124,7 +123,9 @@ pub(super) fn lift_stop_sequence(
     if lifted.is_none() {
         debug!(
             provider = provider_id,
-            additional_model_response_fields = ?additional_fields,
+            additional_model_response_fields = %routectl_core::upstream_text_for_log(
+                &additional_fields.map_or_else(|| "<none>".to_owned(), ToString::to_string)
+            ),
             "converse: stop_reason=stop_sequence but additionalModelResponseFields.stop_sequence missing or non-string"
         );
     }
@@ -222,7 +223,7 @@ fn walk_content_blocks(
                 let (tag, extras) = extract_other_tag_and_extras(v);
                 debug!(
                     provider = provider_id,
-                    block_type = %sanitize_for_log(&tag),
+                    block_type = %routectl_core::upstream_text_for_log(&tag),
                     "unrecognized converse content block preserved as ContentPart::Other on canonical response"
                 );
                 parts.push(ContentPart::Other {
@@ -811,5 +812,40 @@ mod tests {
             invoke_resp.choices[0].finish_reason,
             converse_resp.choices[0].finish_reason,
         );
+    }
+
+    #[test]
+    fn upstream_text_in_converse_debug_lines_is_scrubbed() {
+        use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+        for (row, tag, expected, planted) in planted_tags() {
+            let unknown_block = json!({"output": {"message": {"role": "assistant",
+                                       "content": [{tag.clone(): {}}]}},
+                                       "stopReason": "end_turn"});
+            let block_events = routectl_testkit::capture_events(|| {
+                let _ = translate("test", &unknown_block);
+            });
+            assert_tag_scrubbed(
+                &format!("block/{row}"),
+                &block_events,
+                (tracing::Level::DEBUG, "unrecognized converse content block"),
+                "block_type",
+                &expected,
+                planted,
+            );
+
+            let fields = json!({"note": tag});
+            let lift_events = routectl_testkit::capture_events(|| {
+                let _ = lift_stop_sequence("test", Some("stop_sequence"), Some(&fields));
+            });
+            let lifted = lift_events
+                .iter()
+                .find(|e| e.message.contains("stop_sequence missing"))
+                .and_then(|e| e.field("additional_model_response_fields"))
+                .unwrap_or_else(|| panic!("lift/{row}: {lift_events:?}"));
+            assert!(lifted.contains(&expected), "lift/{row}: {lifted}");
+            if let Some(planted) = planted {
+                assert!(!lifted.contains(planted), "lift/{row}: {lifted}");
+            }
+        }
     }
 }

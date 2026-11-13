@@ -264,7 +264,10 @@ took effect.
 The knob also governs two fields OUTSIDE the traced bodies, both naming
 caller-supplied `format` tags of reasoning details a translator could not
 carry. The foreign-format reasoning WARN's `skipped_formats` names the tag
-of each detail the Anthropic translator could not echo. The OpenAI
+of each detail the Anthropic translator could not echo. That line stays at
+WARN: no drop counter records the skip on the anthropic-api lane, and a
+skip goes to DEBUG only where a counter carries it (Bedrock Converse
+counts the same skip as `reasoning_foreign_format_unsupported`). The OpenAI
 Responses translator's DEBUG line `openai-responses: skipped
 reasoning_details entries with a non-Responses-family format` names the
 tags it skipped in its `formats` field. Both fields follow the same
@@ -317,9 +320,7 @@ there. Prompt redaction does not reach a non-JSON upstream error body,
 which has no structure to walk. Every upstream error body and excerpt,
 JSON or not, still passes the upstream-text scrub (below) before any
 cap, which also redacts a credential-named query parameter
-(`?token=...`) and the token after `Bearer `; the one exception is the
-WARN `body_excerpt` on the OpenAI-compatible and OpenAI Responses lanes,
-which is capped at 256 characters before it is scrubbed. The scrub
+(`?token=...`) and the token after `Bearer `. The scrub
 matches shapes, so upstream text still keeps a secret under a query
 parameter or key whose name is not credential-like (`?sig=...`), an
 opaque secret with no known vendor prefix, a bearer token shorter than
@@ -337,8 +338,7 @@ Two known residual leaks even with the knob ON:
   structure for `redact_prompts_in` to walk, so prompt text it echoes
   back stays readable. Like every upstream error body and excerpt, it
   passes the upstream-text scrub (credentials, ARNs, account ids) over
-  the complete text before any HTML collapse, control-char strip or cap
-  (except the capped-first WARN excerpts noted above).
+  the complete text before any HTML collapse, control-char strip or cap.
   A PARSEABLE JSON error body IS routed through `redact_prompts_in` (the
   same entry point the trace helpers use), so it collapses under the
   knob the same way a success body does. Operators flipping DEBUG (not

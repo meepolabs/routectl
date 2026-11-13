@@ -1276,8 +1276,8 @@ impl AnthropicApiProvider {
         };
         // Every one of these is an upstream header value: `to_str` rejects
         // \n / \r / ESC but lets tab through and caps nothing, so the
-        // rendered `%` field still needs the sanitizer's length cap --
-        // applied at each field site.
+        // rendered `%` field still needs the upstream scrub and the
+        // sanitizer's length cap -- applied at each field site.
         let claim = current_claim.unwrap_or("");
         let overage_status = quota.overage_status.as_deref().unwrap_or("");
         let utilization = quota.utilization.as_deref().unwrap_or("");
@@ -1287,22 +1287,22 @@ impl AnthropicApiProvider {
             Some(ratelimit_unified::OverageTransition::EnteredOverage) => {
                 tracing::warn!(
                     provider = %self.cfg.id,
-                    representative_claim = %sanitize_for_log(claim),
-                    overage_status = %sanitize_for_log(overage_status),
-                    utilization = %sanitize_for_log(utilization),
-                    overage_utilization = %sanitize_for_log(overage_utilization),
-                    reset = %sanitize_for_log(reset),
+                    representative_claim = %routectl_core::upstream_text_for_log(claim),
+                    overage_status = %routectl_core::upstream_text_for_log(overage_status),
+                    utilization = %routectl_core::upstream_text_for_log(utilization),
+                    overage_utilization = %routectl_core::upstream_text_for_log(overage_utilization),
+                    reset = %routectl_core::upstream_text_for_log(reset),
                     "anthropic subscription billing flipped to overage",
                 );
             }
             Some(ratelimit_unified::OverageTransition::RecoveredFromOverage) => {
                 tracing::info!(
                     provider = %self.cfg.id,
-                    representative_claim = %sanitize_for_log(claim),
-                    overage_status = %sanitize_for_log(overage_status),
-                    utilization = %sanitize_for_log(utilization),
-                    overage_utilization = %sanitize_for_log(overage_utilization),
-                    reset = %sanitize_for_log(reset),
+                    representative_claim = %routectl_core::upstream_text_for_log(claim),
+                    overage_status = %routectl_core::upstream_text_for_log(overage_status),
+                    utilization = %routectl_core::upstream_text_for_log(utilization),
+                    overage_utilization = %routectl_core::upstream_text_for_log(overage_utilization),
+                    reset = %routectl_core::upstream_text_for_log(reset),
                     "anthropic subscription billing recovered from overage",
                 );
             }

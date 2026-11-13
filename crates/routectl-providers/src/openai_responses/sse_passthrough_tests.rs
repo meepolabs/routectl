@@ -567,3 +567,83 @@ fn an_empty_reasoning_content_array_rides_the_items_own_events() {
         "typed content is not carried: {filled:?}"
     );
 }
+
+/// Each upstream-authored discriminator the stream parser logs renders
+/// scrubbed, row by row: `(sink, level, message, field, drive)`.
+#[test]
+fn stream_discriminator_log_fields_are_scrubbed() {
+    use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+    use tracing::Level;
+    type Drive = fn(&str) -> Vec<Value>;
+    fn past_cap(offset: u32, tag: &str) -> Value {
+        json!({"type": "response.output_item.added",
+               "output_index": MAX_OUTPUT_BLOCKS as u32 + offset,
+               "item": {"type": tag, "id": format!("x{offset}")}})
+    }
+    let sinks: [(&str, Level, &str, &str, Drive); 4] = [
+        (
+            "unknown event",
+            Level::DEBUG,
+            "skipping unknown stream event",
+            "event_type",
+            |tag| vec![json!({"type": tag})],
+        ),
+        (
+            "first item past the cap",
+            Level::WARN,
+            "output_item.added beyond cap",
+            "item_type",
+            |tag| vec![past_cap(0, tag)],
+        ),
+        (
+            "later item past the cap",
+            Level::DEBUG,
+            "output_item.added beyond cap",
+            "item_type",
+            |tag| vec![past_cap(0, "message"), past_cap(1, tag)],
+        ),
+        (
+            "dialect drop",
+            Level::WARN,
+            "dropping unmodeled output item the client dialect cannot carry",
+            "item_type",
+            |tag| {
+                vec![
+                    json!({"type": "response.output_item.added", "output_index": 0,
+                           "item": {"type": tag, "id": "x"}}),
+                    json!({"type": "response.output_item.done", "output_index": 0,
+                           "item": {"type": tag, "id": "x"}}),
+                ]
+            },
+        ),
+    ];
+    for (sink, level, message, field, drive) in sinks {
+        for (row, tag, expected, planted) in planted_tags() {
+            let slot = RequestObservation::new();
+            let mut state = if sink.contains("past the cap") {
+                state_at_cap(&slot)
+            } else {
+                ResponsesStreamState::new(
+                    AuthKind::ApiKey,
+                    RequestProvenance::AnthropicIngress,
+                    Some(slot.clone()),
+                    &[],
+                    None,
+                )
+            };
+
+            let events = routectl_testkit::capture_events(|| {
+                drive_all(&mut state, drive(&tag));
+            });
+
+            assert_tag_scrubbed(
+                &format!("{sink}/{row}"),
+                &events,
+                (level, message),
+                field,
+                &expected,
+                planted,
+            );
+        }
+    }
+}

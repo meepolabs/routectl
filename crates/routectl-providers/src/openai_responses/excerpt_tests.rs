@@ -417,3 +417,86 @@ fn map_upstream_error_never_panics_on_malformed_bodies() {
         }
     }
 }
+
+/// The native-envelope and non-envelope WARN excerpts both reach the shared
+/// emitter as raw text, so its scrub sees every credential before any cap.
+#[test]
+fn credentials_never_reach_the_warn_excerpt_or_error_debug() {
+    let account = "1234".to_owned() + "56789012";
+    let key = format!("sk-proj-{}", "A".repeat(40));
+    let message = format!(
+        "denied for arn:aws:iam::{account}:role/App; account ID {account}; key {key}; \
+         see https://alice:pw0rd@internal.host/x; max_tokens is too large"
+    );
+    let rows = [
+        (
+            "native envelope",
+            serde_json::json!({"error": {"type": "invalid_request_error", "message": message}})
+                .to_string(),
+        ),
+        ("plain text", message.clone()),
+    ];
+    for (row, body) in rows {
+        let mut err = None;
+        let events = routectl_testkit::capture_events(|| {
+            err = Some(map_responses_upstream_error(
+                "p",
+                &AuthKind::ApiKey,
+                UpstreamErrorRead::from_parts(400, &HeaderMap::new(), &body, false),
+            ));
+        });
+        let warn = events
+            .iter()
+            .find(|e| {
+                e.level == tracing::Level::WARN && e.field("context") == Some("openai-responses")
+            })
+            .unwrap_or_else(|| panic!("{row}: upstream-failure WARN must fire: {events:?}"));
+        let excerpt = warn.field("body_excerpt").expect("body_excerpt field");
+        let debug = format!("{:?}", err.expect("error built"));
+
+        for planted in ["123456789012", "sk-proj-AAAA", "pw0rd"] {
+            assert!(!excerpt.contains(planted), "{row}: {planted} in {excerpt}");
+            assert!(!debug.contains(planted), "{row}: {planted} in {debug}");
+        }
+        assert!(
+            excerpt.contains("max_tokens is too large"),
+            "{row}: {excerpt}"
+        );
+        assert!(debug.contains("max_tokens is too large"), "{row}: {debug}");
+    }
+}
+
+#[test]
+fn warn_excerpt_is_scrubbed_before_it_is_capped_on_both_body_shapes() {
+    use crate::upstream_log::tests::{assert_excerpt_scrubbed, planted_messages};
+    for (row, message, planted) in planted_messages() {
+        let shapes = [
+            (
+                "native envelope",
+                serde_json::json!({"error": {"message": message}}).to_string(),
+            ),
+            ("plain text", message.clone()),
+        ];
+        for (shape, body) in shapes {
+            let events = routectl_testkit::capture_events(|| {
+                let _ = map_responses_upstream_error(
+                    "p",
+                    &AuthKind::ApiKey,
+                    UpstreamErrorRead::from_parts(400, &HeaderMap::new(), &body, false),
+                );
+            });
+            let warn = events
+                .iter()
+                .find(|e| {
+                    e.level == tracing::Level::WARN
+                        && e.field("context") == Some("openai-responses")
+                })
+                .unwrap_or_else(|| panic!("{shape}/{row}: upstream-failure WARN must fire"));
+            assert_excerpt_scrubbed(
+                &format!("{shape}/{row}"),
+                warn.field("body_excerpt"),
+                planted,
+            );
+        }
+    }
+}

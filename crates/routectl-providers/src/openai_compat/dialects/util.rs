@@ -413,16 +413,9 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
             continue;
         }
         let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-        // Char-boundary-safe truncation: `&str[..n]` panics on non-ASCII
-        // when n splits a multi-byte char. `kind` is upstream JSON and
-        // may be Unicode.
-        let kind_for_log = match kind.char_indices().nth(64) {
-            Some((boundary, _)) => &kind[..boundary],
-            None => kind,
-        };
         tracing::debug!(
             provider = provider_id,
-            detail_type = kind_for_log,
+            detail_type = %routectl_core::upstream_text_for_log(kind),
             "preserve_history_reasoning_content: non-text reasoning detail dropped during lowering",
         );
     }
@@ -785,19 +778,37 @@ mod tests {
 
     #[test]
     fn lower_reasoning_details_with_unicode_type_does_not_panic() {
-        // Regression: a non-ASCII `type` field (legitimate for
-        // non-English locales or fuzzing) used to panic the log
-        // truncation when the byte slice landed inside a multi-byte
-        // char. Char-boundary-safe truncation must handle this.
-        // 4-byte chars: a string of 100 emoji is 400 bytes, byte 64
-        // lands inside char 16's third byte.
+        // A non-ASCII `type` field (legitimate for non-English locales or
+        // fuzzing) must not panic the log rendering: 100 four-byte emoji
+        // put most byte offsets inside a multi-byte char.
         let multi_byte_type = "\u{1F4A1}".repeat(100); // 100 light bulb emoji
         let details = json!([{
             "type": multi_byte_type,
-            // No `text` field -> falls through to the warn path that
-            // truncates `kind` for logging.
+            // No `text` field -> falls through to the DEBUG line that
+            // logs `kind`.
         }]);
         // Must not panic.
         let _ = lower_reasoning_details_to_text(&details, "test");
+    }
+
+    #[test]
+    fn a_non_text_reasoning_detail_type_is_scrubbed_in_its_debug_line() {
+        use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+        for (row, tag, expected, planted) in planted_tags() {
+            let details = json!([{"type": tag}]);
+
+            let events = routectl_testkit::capture_events(|| {
+                let _ = lower_reasoning_details_to_text(&details, "test");
+            });
+
+            assert_tag_scrubbed(
+                row,
+                &events,
+                (tracing::Level::DEBUG, "non-text reasoning detail dropped"),
+                "detail_type",
+                &expected,
+                planted,
+            );
+        }
     }
 }

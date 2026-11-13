@@ -469,7 +469,7 @@ fn walk_output(
                 let (type_tag, extras) = split_other_value(raw);
                 tracing::debug!(
                     provider = provider_id,
-                    type_tag = %sanitize_for_log(&type_tag),
+                    type_tag = %routectl_core::upstream_text_for_log(&type_tag),
                     "openai-responses: forward-compat output_item preserved via ContentPart::Other"
                 );
                 parts.push(ContentPart::Other {

@@ -754,3 +754,32 @@ fn usage_carried_from_an_interim_event_onto_the_finish_is_marked_interim() {
         Some(routectl_core::UsageInputSource::InterimCarry)
     );
 }
+
+#[test]
+fn a_stream_prompt_block_reason_is_scrubbed_in_its_debug_line() {
+    use crate::upstream_log::tests::{assert_tag_scrubbed, planted_tags};
+    for (row, tag, expected, planted) in planted_tags() {
+        let events = capture_events(|| {
+            let mut state = GeminiStreamState::default();
+            let ev = GenerateContentResponse {
+                candidates: vec![],
+                usage_metadata: None,
+                model_version: None,
+                response_id: None,
+                prompt_feedback: Some(PromptFeedback {
+                    block_reason: Some(tag.clone()),
+                }),
+            };
+            let _ = state.parse_event(PID, ev);
+        });
+
+        assert_tag_scrubbed(
+            row,
+            &events,
+            (Level::DEBUG, "prompt blocked on 200 surface"),
+            "block_reason",
+            &expected,
+            planted,
+        );
+    }
+}
