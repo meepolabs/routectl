@@ -3,20 +3,19 @@
 //! The block renders the shared [`CacheIgnoreReport`], so it agrees with
 //! the daemon's log lines and with doctor: same fixed window (not the
 //! window-flag / `--since` range), same lanes, same verdicts. It prints lane
-//! identifiers and counts only, each neutralized the way doctor's cache
-//! section neutralizes it; the model can be a name a client sent, so it is
-//! scrubbed as upstream text first.
+//! identifiers and counts only, rendered by the same
+//! [`CacheIgnoreLaneReport::identifiers`] the daemon's log lines and doctor
+//! use.
 
 use std::time::{Duration, Instant};
 
 use chrono::{Local, TimeZone};
-use routectl_core::upstream_text_for_log;
 use routectl_router::Config;
 use routectl_usage::{CACHE_IGNORE_LANE_CAP, UsageDb};
 
 use crate::cache_ignore::{
     CACHE_IGNORE_WINDOW, CacheIgnoreLaneReport, CacheIgnoreReport, CacheIgnoreStatus, LaneVerdict,
-    cache_ignore_report,
+    NotEvaluatedReason, cache_ignore_report,
 };
 use crate::commands::seat_report::safe;
 
@@ -50,7 +49,10 @@ pub fn render_cache_ignore(report: &CacheIgnoreReport) -> String {
             out.push_str(&format!("  unavailable: {class}\n"));
         }
         CacheIgnoreStatus::Evaluated if report.lanes.is_empty() => {
-            out.push_str("  no lane sent cache markers in the window\n");
+            out.push_str(
+                "  no lane had qualifying turns in the window \
+                 (consecutive marked turns within the cache lifetime)\n",
+            );
         }
         CacheIgnoreStatus::Evaluated => {
             for lane in &report.lanes {
@@ -64,29 +66,31 @@ pub fn render_cache_ignore(report: &CacheIgnoreReport) -> String {
             }
         }
     }
-    if !report.unobservable.is_empty() {
-        out.push_str(&format!(
-            "  not evaluated (cache hits not observable): {}\n",
-            report
-                .unobservable
-                .iter()
-                .map(|name| safe(name))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+    for reason in NotEvaluatedReason::ALL {
+        let names: Vec<String> = report
+            .not_evaluated
+            .iter()
+            .filter(|p| p.reason == reason)
+            .map(|p| safe(&p.provider))
+            .collect();
+        if !names.is_empty() {
+            out.push_str(&format!(
+                "  not evaluated ({}): {}\n",
+                reason.as_str(),
+                names.join(", "),
+            ));
+        }
     }
     out
 }
 
 fn render_lane(lane: &CacheIgnoreLaneReport) -> String {
+    let ids = lane.identifiers();
     let mut line = format!(
         "  provider={} seat={} model={} kind={} verdict={} evidence={} active={} sessions={}",
-        safe(&lane.provider),
-        lane.seat.as_deref().map_or_else(|| "-".to_owned(), safe),
-        lane.model.as_deref().map_or_else(
-            || "-".to_owned(),
-            |model| safe(&upstream_text_for_log(model))
-        ),
+        ids.provider,
+        ids.seat.unwrap_or_else(|| "-".to_owned()),
+        ids.model.unwrap_or_else(|| "-".to_owned()),
         safe(&lane.provider_kind),
         lane.verdict.as_str(),
         lane.evidence_turns,

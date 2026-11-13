@@ -6,18 +6,20 @@ use super::*;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Instant;
 
 use routectl_core::cache_decision::CALLER_SUPPLIED;
-use routectl_core::provider_kind::config::ANTHROPIC_API;
+use routectl_core::provider_kind::config::{ANTHROPIC_API, BEDROCK};
 use routectl_testkit::CapturedEvent;
 use routectl_usage::{UsageDb, open};
 
+use crate::cache_ignore::{KEY_SHAPED_DIGITS, key_shaped_model};
 use crate::test_usage_dir::usage_dir;
 
 const NOW_MS: i64 = 10_000_000_000;
-/// Fixture turns sit an hour before `NOW_MS`: inside the window ending at
-/// now AND inside the window ending one interval earlier.
-const TURN_BASE_MS: i64 = NOW_MS - 3_600_000;
+const HOUR_MS: i64 = 3_600_000;
+/// Fixture turns sit an hour before `NOW_MS`, well inside the window.
+const TURN_BASE_MS: i64 = NOW_MS - HOUR_MS;
 const STEP_MS: i64 = 1_000;
 const SESSION_ID: &str = "sess-driver-1";
 const CHECKPOINT: &str = "test checkpoint";
@@ -44,6 +46,7 @@ fn state(status: CacheIgnoreStatus, models: &[&str]) -> DriverState {
         status,
         ignoring: models.iter().map(|m| (key(m), COUNTS)).collect(),
         others: BTreeMap::new(),
+        evaluated: BTreeSet::from(["direct".to_owned()]),
     }
 }
 
@@ -52,7 +55,7 @@ const LOCKED: CacheIgnoreStatus = CacheIgnoreStatus::Unavailable(UNAVAILABLE_DB)
 
 #[test]
 fn transitions_report_only_what_changed() {
-    let rows: [(&str, DriverState, DriverState, Vec<Event>); 8] = [
+    let rows: [(&str, DriverState, DriverState, Vec<Event>); 9] = [
         (
             "{} -> {L} warns once",
             state(EVALUATED, &[]),
@@ -74,7 +77,19 @@ fn transitions_report_only_what_changed() {
             state(EVALUATED, &[]),
             vec![Event::LaneCleared {
                 lane: key("l"),
-                verdict: LaneVerdict::Insufficient,
+                verdict: ClearedVerdict::Evaluated(LaneVerdict::Insufficient),
+            }],
+        ),
+        (
+            "{L} -> {} with the provider no longer evaluated clears as not evaluated",
+            state(EVALUATED, &["l"]),
+            DriverState {
+                evaluated: BTreeSet::new(),
+                ..state(EVALUATED, &[])
+            },
+            vec![Event::LaneCleared {
+                lane: key("l"),
+                verdict: ClearedVerdict::NotEvaluated,
             }],
         ),
         (
@@ -137,7 +152,7 @@ fn event_levels_warn_on_entry_and_inform_on_clear() {
             "lane leaving ignoring",
             Event::LaneCleared {
                 lane: key("l"),
-                verdict: LaneVerdict::Clear,
+                verdict: ClearedVerdict::Evaluated(LaneVerdict::Clear),
             },
             tracing::Level::INFO,
         ),
@@ -190,7 +205,8 @@ fn report(
         window: CacheIgnoreWindow::ending_at(NOW_MS),
         status,
         lanes,
-        unobservable: Vec::new(),
+        evaluated: vec!["direct".to_owned()],
+        not_evaluated: Vec::new(),
         truncated,
     }
 }
@@ -271,8 +287,21 @@ fn an_outage_between_two_ignoring_reads_logs_no_lane_line() {
 
 // ---- driver on paused time -------------------------------------------
 
-fn config_toml(db_path: &Path, with_direct: bool) -> Config {
-    let direct = if with_direct {
+/// The `direct` provider (anthropic-api) when present and the `aws`
+/// provider (bedrock) on `aws_shape`, beside an openai-responses provider
+/// that is never evaluated.
+struct Providers {
+    direct: bool,
+    aws_shape: &'static str,
+}
+
+const ALL_PROVIDERS: Providers = Providers {
+    direct: true,
+    aws_shape: "invoke",
+};
+
+fn config_with(db_path: &Path, providers: &Providers) -> Config {
+    let direct = if providers.direct {
         "[providers.direct]\n\
          kind = \"anthropic-api\"\n\
          api_key_ref = \"env://CACHE_IGNORE_DRIVER_TEST_UNUSED\"\n"
@@ -284,15 +313,25 @@ fn config_toml(db_path: &Path, with_direct: bool) -> Config {
          [providers.other]\n\
          kind = \"openai-responses\"\n\
          api_key_ref = \"env://CACHE_IGNORE_DRIVER_TEST_UNUSED\"\n\
+         [providers.aws]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-east-1\"\n\
+         api_shape = \"{shape}\"\n\
+         creds = {{ kind = \"default-chain\" }}\n\
          {direct}",
         db = toml::Value::String(db_path.display().to_string()),
+        shape = providers.aws_shape,
     );
     toml::from_str(&text).expect("fixture config parses")
 }
 
 fn router_swap(db_path: &Path) -> Arc<ArcSwap<Router>> {
-    Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(config_toml(
-        db_path, true,
+    swap_with(db_path, &ALL_PROVIDERS)
+}
+
+fn swap_with(db_path: &Path, providers: &Providers) -> Arc<ArcSwap<Router>> {
+    Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(config_with(
+        db_path, providers,
     )))))
 }
 
@@ -303,6 +342,24 @@ fn fresh_ledger() -> (PathBuf, UsageDb) {
 }
 
 fn insert_turn(db: &UsageDb, request_id: &str, model: &str, ts_start: i64, cache_read: i64) {
+    insert_provider_turn(
+        db,
+        ("direct", ANTHROPIC_API),
+        request_id,
+        model,
+        ts_start,
+        cache_read,
+    );
+}
+
+fn insert_provider_turn(
+    db: &UsageDb,
+    (provider, kind): (&str, &str),
+    request_id: &str,
+    model: &str,
+    ts_start: i64,
+    cache_read: i64,
+) {
     db.conn()
         .execute(
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
@@ -310,13 +367,14 @@ fn insert_turn(db: &UsageDb, request_id: &str, model: &str, ts_start: i64, cache
              stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
              fallback_count, input_tokens, cache_read, cache_write_tokens, \
              cache_front_decision, prefix_epoch_event, operation, probe) \
-             VALUES (?1, ?1, ?2, 'anthropic', 'req', 'a', ?3, 'direct', ?4, NULL, ?5, 0, \
-             'ok', 0, 0, 0, 1, 0, 5000, ?6, 0, ?7, 0, 'inference', 0)",
+             VALUES (?1, ?1, ?2, 'anthropic', 'req', 'a', ?3, ?4, ?5, NULL, ?6, 0, \
+             'ok', 0, 0, 0, 1, 0, 5000, ?7, 0, ?8, 0, 'inference', 0)",
             rusqlite::params![
                 ts_start,
                 request_id,
                 model,
-                ANTHROPIC_API,
+                provider,
+                kind,
                 SESSION_ID,
                 cache_read,
                 CALLER_SUPPLIED,
@@ -325,17 +383,23 @@ fn insert_turn(db: &UsageDb, request_id: &str, model: &str, ts_start: i64, cache
         .expect("insert turn");
 }
 
-/// Four consecutive zero-cache turns: three evidence turns, so `ignoring`.
-fn seed_ignoring_lane(db: &UsageDb, model: &str) {
+/// Four consecutive zero-cache turns on `provider` from `base_ms`: three
+/// evidence turns, so `ignoring`.
+fn seed_lane_at(db: &UsageDb, provider: (&str, &str), model: &str, base_ms: i64) {
     for i in 0..4 {
-        insert_turn(
+        insert_provider_turn(
             db,
-            &format!("{model}-{i}"),
+            provider,
+            &format!("{}-{model}-{base_ms}-{i}", provider.0),
             model,
-            TURN_BASE_MS + i * STEP_MS,
+            base_ms + i * STEP_MS,
             0,
         );
     }
+}
+
+fn seed_ignoring_lane(db: &UsageDb, model: &str) {
+    seed_lane_at(db, ("direct", ANTHROPIC_API), model, TURN_BASE_MS);
 }
 
 /// One more turn on the lane that read from the cache, so `clear`.
@@ -358,16 +422,23 @@ async fn past_next_tick() {
     tokio::time::sleep(CACHE_IGNORE_DRIVER_INTERVAL).await;
 }
 
-/// Run the driver beside `script` on this thread, then shut it down and
-/// return every captured event. `script` starts after the boot evaluation
-/// and sits half an interval off the tick grid.
+/// Run the driver over the ledger at `db_path` beside `script` on this
+/// thread, then shut it down and return every captured event. `script`
+/// starts after the boot evaluation and sits half an interval off the tick
+/// grid.
 async fn run_with<F: Future<Output = ()>>(
     swap: Arc<ArcSwap<Router>>,
+    db_path: &Path,
     clock_ms: Arc<AtomicI64>,
     script: F,
 ) -> Vec<CapturedEvent> {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
-    let driver = drive(swap, shutdown_rx, move || clock_ms.load(Ordering::SeqCst));
+    let driver = drive(
+        swap,
+        shutdown_rx,
+        move || clock_ms.load(Ordering::SeqCst),
+        ledger_read(db_path.to_path_buf()),
+    );
     let scripted = async move {
         tokio::time::sleep(CACHE_IGNORE_DRIVER_INTERVAL / 2).await;
         script.await;
@@ -419,7 +490,7 @@ async fn the_driver_warns_once_per_entering_lane_and_once_per_change() {
     let (path, db) = fresh_ledger();
 
     // Act
-    let events = run_with(router_swap(&path), clock_at(NOW_MS), async {
+    let events = run_with(router_swap(&path), &path, clock_at(NOW_MS), async {
         seed_ignoring_lane(&db, "m-a");
         seed_ignoring_lane(&db, "m-b");
         checkpoint(1);
@@ -487,11 +558,29 @@ async fn the_driver_warns_once_per_entering_lane_and_once_per_change() {
     }
 }
 
+/// Boot one driver on `path` at `clock_ms`, let one tick pass after a
+/// checkpoint, and return its two segments: boot, then that tick.
+async fn boot_then_one_tick(
+    path: &Path,
+    clock_ms: i64,
+) -> (Vec<CapturedEvent>, Vec<CapturedEvent>) {
+    let events = run_with(router_swap(path), path, clock_at(clock_ms), async {
+        checkpoint(1);
+        past_next_tick().await;
+    })
+    .await;
+    let seg = segments(&events);
+    let [boot, tick] = seg.as_slice() else {
+        panic!("expected two segments, got {}", seg.len());
+    };
+    (boot.clone(), tick.clone())
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_restarted_driver_logs_the_baseline_and_no_warn() {
-    // Arrange: a first run sees the lane enter ignoring.
+async fn a_restart_re_announces_a_lane_still_ignoring_once() {
+    // Arrange: a first run sees the lane enter ignoring, then stops.
     let (path, db) = fresh_ledger();
-    let first = run_with(router_swap(&path), clock_at(NOW_MS), async {
+    let first = run_with(router_swap(&path), &path, clock_at(NOW_MS), async {
         seed_ignoring_lane(&db, "m-a");
         past_next_tick().await;
     })
@@ -503,42 +592,79 @@ async fn a_restarted_driver_logs_the_baseline_and_no_warn() {
     );
 
     // Act: a second process on the same ledger, twenty minutes later.
-    let second = run_with(router_swap(&path), clock_at(NOW_MS + 20 * 60_000), async {}).await;
+    let (boot, tick) = boot_then_one_tick(&path, NOW_MS + 20 * 60_000).await;
 
     // Assert
-    let seg = segments(&second);
-    let baseline = named(&seg[0], EVENT_BASELINE);
+    let baseline = named(&boot, EVENT_BASELINE);
     assert_eq!(baseline.len(), 1);
     assert_eq!(baseline[0].level, tracing::Level::INFO);
     assert_eq!(baseline[0].field("lanes_ignoring"), Some("1"));
-    assert_eq!(warns(&second), 0, "a restart repeats no WARN: {second:?}");
+    let warned = named(&boot, EVENT_IGNORING);
+    assert_eq!(
+        warned.len(),
+        1,
+        "one WARN per lane still ignoring: {boot:?}"
+    );
+    assert_eq!(warned[0].field("model"), Some("m-a"));
+    assert_eq!(warns(&boot), 1);
+    assert!(
+        tick.is_empty(),
+        "an identical tick after boot is silent: {tick:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_lane_that_started_ignoring_while_down_warns_at_boot() {
-    // Arrange: every turn inside the last interval, so the baseline (one
-    // interval ago) has not seen the lane.
+async fn a_lane_that_started_ignoring_during_a_long_downtime_warns_at_boot() {
+    // Arrange: a first run on an empty ledger; the lane's turns land an hour
+    // into a three-hour downtime.
     let (path, db) = fresh_ledger();
-    for i in 0..4 {
-        insert_turn(
-            &db,
-            &format!("t-{i}"),
-            "m-a",
-            NOW_MS - 60_000 + i * STEP_MS,
-            0,
-        );
-    }
+    let first = run_with(router_swap(&path), &path, clock_at(NOW_MS), async {}).await;
+    assert_eq!(
+        warns(&first),
+        0,
+        "premise: nothing ignoring before the stop"
+    );
+    seed_lane_at(&db, ("direct", ANTHROPIC_API), "m-a", NOW_MS + HOUR_MS);
 
     // Act
-    let events = run_with(router_swap(&path), clock_at(NOW_MS), async {}).await;
+    let (boot, tick) = boot_then_one_tick(&path, NOW_MS + 3 * HOUR_MS).await;
 
     // Assert
-    let boot = &segments(&events)[0];
     assert_eq!(
-        named(boot, EVENT_BASELINE)[0].field("lanes_ignoring"),
+        named(&boot, EVENT_BASELINE)[0].field("lanes_ignoring"),
         Some("1")
     );
-    assert_eq!(named(boot, EVENT_IGNORING).len(), 1, "{boot:?}");
+    assert_eq!(named(&boot, EVENT_IGNORING).len(), 1, "{boot:?}");
+    assert!(tick.is_empty(), "{tick:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_driver_logs_lane_identifiers_as_every_surface_renders_them() {
+    // Arrange: a served model nickname carrying an account-shaped run.
+    let (path, db) = fresh_ledger();
+    let model = key_shaped_model();
+    seed_ignoring_lane(&db, &model);
+    let expected = LaneIdentifiers::render("direct", None, Some(&model));
+
+    // Act
+    let events = run_with(router_swap(&path), &path, clock_at(NOW_MS), async {}).await;
+
+    // Assert
+    let warned = named(&events, EVENT_IGNORING);
+    assert_eq!(warned.len(), 1, "{events:?}");
+    assert_eq!(warned[0].field("model"), expected.model.as_deref());
+    assert_eq!(
+        warned[0].field("provider"),
+        Some(expected.provider.as_str())
+    );
+    for e in events.iter().filter(|e| is_driver(e)) {
+        for (name, value) in &e.fields {
+            assert!(
+                !value.contains(KEY_SHAPED_DIGITS),
+                "{name} carries the digits: {value}"
+            );
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -548,7 +674,7 @@ async fn an_unreadable_ledger_warns_once_across_three_ticks() {
     std::fs::write(&path, b"not a database, just bytes long enough to read").unwrap();
 
     // Act
-    let events = run_with(router_swap(&path), clock_at(NOW_MS), async {
+    let events = run_with(router_swap(&path), &path, clock_at(NOW_MS), async {
         for _ in 0..3 {
             past_next_tick().await;
         }
@@ -571,7 +697,7 @@ async fn an_unreadable_ledger_warns_once_across_three_ticks() {
 async fn a_missing_ledger_is_reported_at_info() {
     let path = usage_dir().join("absent.db");
 
-    let events = run_with(router_swap(&path), clock_at(NOW_MS), async {
+    let events = run_with(router_swap(&path), &path, clock_at(NOW_MS), async {
         past_next_tick().await;
     })
     .await;
@@ -583,67 +709,209 @@ async fn a_missing_ledger_is_reported_at_info() {
     assert_eq!(warns(&events), 0);
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_hot_reload_changes_which_providers_are_evaluated() {
-    // Arrange: the lane is ignoring from boot.
+/// Boot on `before` with one ignoring lane on `lane_provider`, publish
+/// `after` (its ledger path `after_db` when set), and return the driver's
+/// lines from the next tick.
+async fn tick_after_reload(
+    lane_provider: (&str, &str),
+    before: &Providers,
+    after: &Providers,
+    after_db: Option<&Path>,
+) -> Vec<CapturedEvent> {
     let (path, db) = fresh_ledger();
-    seed_ignoring_lane(&db, "m-a");
-    let swap = router_swap(&path);
-    let reloaded = Router::new(Arc::new(config_toml(&path, false)));
-
-    // Act: publish a config without the provider between two ticks.
-    let events = run_with(swap.clone(), clock_at(NOW_MS), async {
+    seed_lane_at(&db, lane_provider, "m-a", TURN_BASE_MS);
+    let swap = swap_with(&path, before);
+    let reloaded = Router::new(Arc::new(config_with(after_db.unwrap_or(&path), after)));
+    let events = run_with(swap.clone(), &path, clock_at(NOW_MS), async {
         checkpoint(1);
         swap.store(Arc::new(reloaded));
         past_next_tick().await;
     })
     .await;
-
-    // Assert
     let seg = segments(&events);
-    assert_eq!(
-        named(&seg[0], EVENT_BASELINE)[0].field("lanes_ignoring"),
-        Some("1")
-    );
-    assert_eq!(seg[1].len(), 1, "{:?}", seg[1]);
-    assert_eq!(seg[1][0].field("event"), Some(EVENT_IGNORING_CLEARED));
+    assert_eq!(seg.len(), 2, "{events:?}");
+    seg[1].clone()
 }
 
-/// Shutdown while an evaluation is blocked on a locked ledger: the driver
-/// returns at once rather than waiting out the read's busy timeout.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_during_an_evaluation_returns_promptly() {
-    // Arrange: hold the ledger under an exclusive lock.
-    let (path, db) = fresh_ledger();
-    db.conn()
-        .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
-        .expect("take the exclusive lock");
-    let probe_path = path.clone();
-    let premise = tokio::time::timeout(
-        Duration::from_millis(500),
-        tokio::task::spawn_blocking(move || open_readonly(&probe_path).map(|_| ())),
-    )
-    .await;
-    assert!(
-        premise.is_err(),
-        "premise: a read of the locked ledger blocks"
-    );
+/// What a tick after a reload logs: `(event, provider, verdict)`.
+type ReloadLine<'a> = (&'a str, &'a str, Option<&'a str>);
 
+/// (row, lane, config before, config after, reloaded ledger path, expected line)
+type ReloadRow<'a> = (
+    &'a str,
+    (&'a str, &'a str),
+    &'a Providers,
+    &'a Providers,
+    Option<&'a Path>,
+    Option<ReloadLine<'a>>,
+);
+
+#[tokio::test(start_paused = true)]
+async fn a_hot_reload_changes_which_providers_are_evaluated() {
+    const DIRECT: (&str, &str) = ("direct", ANTHROPIC_API);
+    const AWS: (&str, &str) = ("aws", BEDROCK);
+    const CONVERSE: Providers = Providers {
+        direct: true,
+        aws_shape: "converse",
+    };
+    const NO_DIRECT: Providers = Providers {
+        direct: false,
+        aws_shape: "invoke",
+    };
+    let elsewhere = usage_dir().join("usage.db");
+    let rows: [ReloadRow<'_>; 4] = [
+        (
+            "provider removed: cleared as not evaluated",
+            DIRECT,
+            &ALL_PROVIDERS,
+            &NO_DIRECT,
+            None,
+            Some((EVENT_IGNORING_CLEARED, "direct", Some("not_evaluated"))),
+        ),
+        (
+            "bedrock flips to converse: cleared as not evaluated",
+            AWS,
+            &ALL_PROVIDERS,
+            &CONVERSE,
+            None,
+            Some((EVENT_IGNORING_CLEARED, "aws", Some("not_evaluated"))),
+        ),
+        (
+            "bedrock flips to invoke: the lane is now evaluated and warns",
+            AWS,
+            &CONVERSE,
+            &ALL_PROVIDERS,
+            None,
+            Some((EVENT_IGNORING, "aws", None)),
+        ),
+        (
+            "a changed db_path is restart-required: the boot ledger is still read",
+            DIRECT,
+            &ALL_PROVIDERS,
+            &ALL_PROVIDERS,
+            Some(elsewhere.as_path()),
+            None,
+        ),
+    ];
+
+    for (name, lane, before, after, after_db, expected) in rows {
+        let tick = tick_after_reload(lane, before, after, after_db).await;
+        let got = tick
+            .iter()
+            .map(|e| {
+                (
+                    e.field("event").unwrap_or(""),
+                    e.field("provider").unwrap_or(""),
+                    e.field("verdict"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(got, expected.into_iter().collect::<Vec<_>>(), "row: {name}");
+    }
+}
+
+/// A read that returns at once on every call but `blocked_call`, which
+/// holds until the gate is dropped (or five seconds pass).
+fn gated_read(
+    blocked_call: usize,
+    gate: std::sync::mpsc::Receiver<()>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+) -> impl Fn(&Config, i64) -> CacheIgnoreReport + Send + Sync + 'static {
+    let gate = std::sync::Mutex::new(gate);
+    move |_config, _now_ms| {
+        if calls.fetch_add(1, Ordering::SeqCst) == blocked_call {
+            let _ = gate
+                .lock()
+                .expect("gate lock")
+                .recv_timeout(Duration::from_secs(5));
+        }
+        report(EVALUATED, false, Vec::new())
+    }
+}
+
+/// Shut the driver down while its `blocked_call`-th read is held and return
+/// how long the driver took to return, in real time.
+async fn shutdown_while_read_blocked(blocked_call: usize) -> Duration {
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (shutdown_tx, shutdown_rx) = watch::channel(());
-    let driver = tokio::spawn(run_cache_ignore_driver(router_swap(&path), shutdown_rx));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let driver = tokio::spawn(drive(
+        router_swap(&usage_dir().join("absent.db")),
+        shutdown_rx,
+        || NOW_MS,
+        gated_read(blocked_call, gate_rx, Arc::clone(&calls)),
+    ));
+    let mut advanced = false;
+    let started_waiting = Instant::now();
+    while calls.load(Ordering::SeqCst) <= blocked_call {
+        assert!(
+            started_waiting.elapsed() < Duration::from_secs(5),
+            "the read never started"
+        );
+        if calls.load(Ordering::SeqCst) == blocked_call && !advanced && blocked_call > 0 {
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(CACHE_IGNORE_DRIVER_INTERVAL).await;
+            advanced = true;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert!(
         !driver.is_finished(),
-        "premise: the boot evaluation is in flight"
+        "premise: the evaluation is in flight"
     );
 
-    // Act
     let started = Instant::now();
     shutdown_tx.send(()).expect("driver listening");
-    let joined = tokio::time::timeout(Duration::from_secs(1), driver).await;
+    driver.await.expect("driver task");
+    let elapsed = started.elapsed();
+    drop(gate_tx);
+    elapsed
+}
+
+/// Shutdown while an evaluation is blocked, at boot and at a tick: the
+/// driver returns at once rather than waiting out the read.
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_an_evaluation_returns_promptly() {
+    for (name, blocked_call) in [("boot evaluation", 0), ("tick evaluation", 1)] {
+        let elapsed = shutdown_while_read_blocked(blocked_call).await;
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "row {name}: took {elapsed:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_panicked_evaluation_logs_one_error_and_reads_as_unavailable() {
+    // Arrange
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let read = |_config: &Config, _now_ms: i64| -> CacheIgnoreReport {
+        panic!("evaluation fault");
+    };
+    let driver = drive(
+        router_swap(&usage_dir().join("absent.db")),
+        shutdown_rx,
+        || NOW_MS,
+        read,
+    );
+    let scripted = async move {
+        tokio::time::sleep(CACHE_IGNORE_DRIVER_INTERVAL / 2).await;
+        shutdown_tx.send(()).expect("driver listening");
+    };
+
+    // Act
+    let (((), ()), events) =
+        routectl_testkit::with_capture(async { tokio::join!(driver, scripted) }).await;
 
     // Assert
-    assert!(joined.is_ok(), "the driver did not return after shutdown");
-    assert!(started.elapsed() < Duration::from_secs(1));
-    drop(db);
+    let panicked = named(&events, EVENT_PANICKED);
+    assert_eq!(panicked.len(), 1, "{events:?}");
+    assert_eq!(panicked[0].level, tracing::Level::ERROR);
+    assert_eq!(
+        named(&events, EVENT_UNAVAILABLE)[0].field("class"),
+        Some(UNAVAILABLE_DB)
+    );
 }

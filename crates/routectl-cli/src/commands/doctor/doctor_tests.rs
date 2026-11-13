@@ -52,7 +52,8 @@ pub(super) fn empty_cache_report() -> crate::cache_ignore::CacheIgnoreReport {
         window: crate::cache_ignore::CacheIgnoreWindow::ending_at(0),
         status: crate::cache_ignore::CacheIgnoreStatus::Evaluated,
         lanes: Vec::new(),
-        unobservable: Vec::new(),
+        evaluated: Vec::new(),
+        not_evaluated: Vec::new(),
         truncated: false,
     }
 }

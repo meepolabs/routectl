@@ -16,7 +16,9 @@ const STEP_MS: i64 = 1_000;
 
 /// Providers covering each eligibility path:
 /// - `direct`: anthropic-api on the default base (observable).
-/// - `aws`: bedrock (observable on both shapes).
+/// - `aws`: bedrock on the default invoke shape (observable, evaluated).
+/// - `aws_converse`: bedrock on the converse shape (observable, but never
+///   evaluated: a top-level-only caller marker is forwarded inert there).
 /// - `vendor`: anthropic-api on a custom base with no override (not observable).
 /// - `resp`: openai-responses, observable by default.
 /// - `resp_dark`: openai-responses with an explicit non-observable override.
@@ -28,6 +30,11 @@ fn fixture_config() -> Config {
          [providers.aws]\n\
          kind = \"bedrock\"\n\
          region = \"us-east-1\"\n\
+         creds = { kind = \"default-chain\" }\n\
+         [providers.aws_converse]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-east-1\"\n\
+         api_shape = \"converse\"\n\
          creds = { kind = \"default-chain\" }\n\
          [providers.vendor]\n\
          kind = \"anthropic-api\"\n\
@@ -113,6 +120,19 @@ fn far_deadline() -> Instant {
     Instant::now() + Duration::from_mins(10)
 }
 
+fn expected_not_evaluated() -> Vec<NotEvaluatedProvider> {
+    vec![
+        NotEvaluatedProvider {
+            provider: "aws_converse".to_owned(),
+            reason: NotEvaluatedReason::ConverseShape,
+        },
+        NotEvaluatedProvider {
+            provider: "vendor".to_owned(),
+            reason: NotEvaluatedReason::HitsNotObservable,
+        },
+    ]
+}
+
 fn lane<'r>(
     report: &'r CacheIgnoreReport,
     provider: &str,
@@ -131,6 +151,8 @@ fn lane_verdicts_follow_config_eligibility_and_the_evidence_counts() {
     seed_lane(&db, "direct", ANTHROPIC_API, "m-ignoring", 4, 0);
     seed_lane(&db, "direct", ANTHROPIC_API, "m-clear", 4, 100);
     seed_lane(&db, "aws", BEDROCK, "m-thin", 3, 0);
+    seed_lane(&db, "aws", BEDROCK, "m-invoke", 4, 0);
+    seed_lane(&db, "aws_converse", BEDROCK, "m-converse", 4, 0);
     seed_lane(&db, "vendor", ANTHROPIC_API, "m-dark", 4, 0);
     seed_lane(&db, "gone", ANTHROPIC_API, "m-gone", 4, 0);
     // Tagged with a marker-carrying kind so the query WOULD count it if the
@@ -142,7 +164,7 @@ fn lane_verdicts_follow_config_eligibility_and_the_evidence_counts() {
 
     // Assert
     assert_eq!(report.status, CacheIgnoreStatus::Evaluated);
-    let rows: [(&str, &str, &str, Option<LaneVerdict>); 6] = [
+    let rows: [(&str, &str, &str, Option<LaneVerdict>); 8] = [
         (
             "evidence 3, active 0",
             "direct",
@@ -156,6 +178,18 @@ fn lane_verdicts_follow_config_eligibility_and_the_evidence_counts() {
             "m-thin",
             Some(LaneVerdict::Insufficient),
         ),
+        (
+            "bedrock invoke with qualifying rows",
+            "aws",
+            "m-invoke",
+            Some(LaneVerdict::Ignoring),
+        ),
+        (
+            "bedrock converse with qualifying rows",
+            "aws_converse",
+            "m-converse",
+            None,
+        ),
         ("hit not observable", "vendor", "m-dark", None),
         ("provider absent from config", "gone", "m-gone", None),
         ("openai-responses provider", "resp", "m-resp", None),
@@ -166,15 +200,16 @@ fn lane_verdicts_follow_config_eligibility_and_the_evidence_counts() {
     }
     assert_eq!(
         report.lanes.len(),
-        3,
-        "only the three eligible lanes are reported"
+        4,
+        "only the four eligible lanes are reported"
     );
     assert_eq!(
-        report.unobservable,
-        vec!["vendor".to_owned()],
-        "only configured anthropic-api / bedrock providers are listed; \
-         an absent or openai-responses provider never is"
+        report.not_evaluated,
+        expected_not_evaluated(),
+        "only configured anthropic-api / bedrock providers are listed, each with its \
+         reason; an absent or openai-responses provider never is"
     );
+    assert_eq!(report.evaluated, ["aws", "direct"]);
     assert!(!report.truncated);
     let ignoring = lane(&report, "direct", "m-ignoring").expect("ignoring lane");
     assert_eq!(
@@ -239,7 +274,7 @@ fn an_expired_deadline_reports_query_timeout_and_leaves_the_connection_usable() 
         CacheIgnoreStatus::Unavailable(UNAVAILABLE_QUERY_TIMEOUT)
     );
     assert!(shed.lanes.is_empty());
-    assert_eq!(shed.unobservable, vec!["vendor".to_owned()]);
+    assert_eq!(shed.not_evaluated, expected_not_evaluated());
     let unguarded = unguarded.expect("an unguarded read after the timeout succeeds");
     assert_eq!(unguarded.lanes.len(), CACHE_IGNORE_LANE_CAP);
     assert_eq!(after.status, CacheIgnoreStatus::Evaluated);
@@ -343,7 +378,7 @@ fn a_missing_ledger_reports_no_data_and_still_lists_unobservable_providers() {
         report.status,
         CacheIgnoreStatus::Unavailable(UNAVAILABLE_NO_DATA)
     );
-    assert_eq!(report.unobservable, vec!["vendor".to_owned()]);
+    assert_eq!(report.not_evaluated, expected_not_evaluated());
     assert_eq!(report.window, CacheIgnoreWindow::ending_at(NOW_MS));
 }
 
@@ -353,4 +388,16 @@ fn the_window_is_the_six_hours_ending_at_now() {
 
     assert_eq!(window.to_ms, NOW_MS);
     assert_eq!(window.to_ms - window.from_ms, 6 * 3_600_000);
+}
+
+#[test]
+fn lane_identifiers_scrub_the_model_and_neutralize_every_field() {
+    let model = key_shaped_model();
+    let ids = LaneIdentifiers::render("p=x", Some("s:1"), Some(&model));
+
+    assert_eq!(ids.provider, "p?x");
+    assert_eq!(ids.seat.as_deref(), Some("s?1"));
+    let rendered = ids.model.expect("model rendered");
+    assert!(!rendered.contains(KEY_SHAPED_DIGITS), "{rendered}");
+    assert!(rendered.contains("[redacted]"), "{rendered}");
 }

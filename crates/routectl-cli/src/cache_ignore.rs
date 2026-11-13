@@ -7,19 +7,25 @@
 //! doctor each render the same [`CacheIgnoreReport`], so all three agree.
 //!
 //! Eligibility is a config fact: a provider is evaluated only when its kind
-//! carries caller markers to the wire (anthropic-api, bedrock) AND its
-//! resolved cache capability says cache hits are observable. A ledger
-//! provider that is no longer configured is never counted and never listed.
+//! carries caller markers to the wire (anthropic-api, bedrock), it is not a
+//! Bedrock provider on the Converse shape, AND its resolved cache capability
+//! says cache hits are observable. A configured marker-carrying provider that
+//! fails either test is listed with its reason; a ledger provider that is no
+//! longer configured is never counted and never listed.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use routectl_core::provider_kind::config::{ANTHROPIC_API, BEDROCK};
+use routectl_core::upstream_text_for_log;
+use routectl_core::wire_check::EgressKind;
 use routectl_router::{Config, ProviderEntry, cache_rules};
 use routectl_usage::{
     CacheIgnoreLane, CacheIgnoreRule, DeadlineGuard, OpenError, QueryError, UsageDb,
-    cache_ignore_lanes,
+    cache_ignore_lanes, open_readonly_fastfail,
 };
 
+use crate::commands::seat_report::safe;
 use crate::server::ledger_reader::open_error_class;
 
 /// The one window every reader evaluates, ending at the caller's `now`.
@@ -130,6 +136,72 @@ pub struct CacheIgnoreLaneReport {
     pub sessions: i64,
 }
 
+impl CacheIgnoreLaneReport {
+    /// This lane's identifiers as every surface prints them.
+    pub fn identifiers(&self) -> LaneIdentifiers {
+        LaneIdentifiers::render(&self.provider, self.seat.as_deref(), self.model.as_deref())
+    }
+}
+
+/// A lane's provider, seat and model as doctor, `usage --detail` and the
+/// daemon's log lines all print them, so the three agree on every lane.
+/// Each field is neutralized with the doctor's field sanitizer. The model is
+/// the served config nickname, scrubbed as upstream text first so a
+/// credential- or account-shaped nickname never reaches a log or a report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneIdentifiers {
+    /// Provider name.
+    pub provider: String,
+    /// Seat, when the lane has one.
+    pub seat: Option<String>,
+    /// Served model, when recorded.
+    pub model: Option<String>,
+}
+
+impl LaneIdentifiers {
+    /// Render one lane's raw identifiers.
+    pub fn render(provider: &str, seat: Option<&str>, model: Option<&str>) -> Self {
+        Self {
+            provider: safe(provider),
+            seat: seat.map(safe),
+            model: model.map(|model| safe(&upstream_text_for_log(model))),
+        }
+    }
+}
+
+/// Why a configured anthropic-api or bedrock provider is not evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotEvaluatedReason {
+    /// Its resolved cache capability says cache hits are not observable.
+    HitsNotObservable,
+    /// A Bedrock provider on the Converse shape. A caller's top-level-only
+    /// cache marker is forwarded inert there, so a turn the ledger records
+    /// as caller-marked may have carried no working marker.
+    ConverseShape,
+}
+
+impl NotEvaluatedReason {
+    /// Every reason, in render order.
+    pub const ALL: [Self; 2] = [Self::HitsNotObservable, Self::ConverseShape];
+
+    /// The reason as one short phrase.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HitsNotObservable => "cache hits not observable",
+            Self::ConverseShape => "Bedrock Converse forwards a top-level cache marker inert",
+        }
+    }
+}
+
+/// A configured provider whose lanes are not evaluated, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotEvaluatedProvider {
+    /// Configured provider name.
+    pub provider: String,
+    /// Why its lanes are not evaluated.
+    pub reason: NotEvaluatedReason,
+}
+
 impl From<CacheIgnoreLane> for CacheIgnoreLaneReport {
     fn from(lane: CacheIgnoreLane) -> Self {
         Self {
@@ -155,9 +227,13 @@ pub struct CacheIgnoreReport {
     /// Evaluated lanes: those with no active turn first, then most evidence
     /// first.
     pub lanes: Vec<CacheIgnoreLaneReport>,
-    /// Configured anthropic-api / bedrock providers whose cache hits are not
-    /// observable, sorted by name. Filled from config whatever the status.
-    pub unobservable: Vec<String>,
+    /// Configured providers whose lanes this report evaluates, sorted by
+    /// name. Filled from config whatever the status.
+    pub evaluated: Vec<String>,
+    /// Configured anthropic-api / bedrock providers whose lanes are not
+    /// evaluated, each with its reason, sorted by name. Filled from config
+    /// whatever the status.
+    pub not_evaluated: Vec<NotEvaluatedProvider>,
     /// The window held more lanes than the query returns. When set, a lane
     /// missing from this report may have been cut by the cap: a consumer
     /// diffing two reports must not treat its absence as a transition.
@@ -177,11 +253,13 @@ impl CacheIgnoreReport {
     }
 
     fn unavailable(config: &Config, now_ms: i64, class: &'static str) -> Self {
+        let eligibility = Eligibility::of(config);
         Self {
             window: CacheIgnoreWindow::ending_at(now_ms),
             status: CacheIgnoreStatus::Unavailable(class),
             lanes: Vec::new(),
-            unobservable: Eligibility::of(config).unobservable,
+            evaluated: eligibility.evaluated(),
+            not_evaluated: eligibility.not_evaluated,
             truncated: false,
         }
     }
@@ -201,10 +279,12 @@ pub fn cache_ignore_report(
     deadline: Instant,
 ) -> CacheIgnoreReport {
     let window = CacheIgnoreWindow::ending_at(now_ms);
+    let eligibility = Eligibility::of(config);
+    let evaluated = eligibility.evaluated();
     let Eligibility {
         rules,
-        unobservable,
-    } = Eligibility::of(config);
+        not_evaluated,
+    } = eligibility;
     let queried = DeadlineGuard::install(db, deadline)
         .and_then(|_guard| cache_ignore_lanes(db, window.from_ms, window.to_ms, &rules));
     match queried {
@@ -212,16 +292,36 @@ pub fn cache_ignore_report(
             window,
             status: CacheIgnoreStatus::Evaluated,
             lanes: found.lanes.into_iter().map(Into::into).collect(),
-            unobservable,
+            evaluated,
+            not_evaluated,
             truncated: found.truncated,
         },
         Err(err) => CacheIgnoreReport {
             window,
             status: CacheIgnoreStatus::Unavailable(query_error_class(&err)),
             lanes: Vec::new(),
-            unobservable,
+            evaluated,
+            not_evaluated,
             truncated: false,
         },
+    }
+}
+
+/// The report over the window ending at `now_ms`, read on a fresh
+/// fast-fail read-only open of the ledger at `db_path`. The deadline is
+/// anchored before the open, so `budget` bounds the open and the query
+/// together. The connection is its own, so no caller-held guard can be
+/// replaced (see [`cache_ignore_report`]).
+pub fn read_cache_ignore_report(
+    db_path: &Path,
+    config: &Config,
+    now_ms: i64,
+    budget: Duration,
+) -> CacheIgnoreReport {
+    let deadline = Instant::now() + budget;
+    match open_readonly_fastfail(db_path) {
+        Ok(db) => cache_ignore_report(&db, config, now_ms, deadline),
+        Err(err) => CacheIgnoreReport::open_failed(config, now_ms, &err),
     }
 }
 
@@ -233,19 +333,22 @@ const fn query_error_class(err: &QueryError) -> &'static str {
 }
 
 /// The configured providers split into those the query evaluates and those
-/// listed as unobservable.
+/// listed as not evaluated.
 struct Eligibility {
     rules: Vec<CacheIgnoreRule>,
-    unobservable: Vec<String>,
+    not_evaluated: Vec<NotEvaluatedProvider>,
 }
 
 impl Eligibility {
     fn of(config: &Config) -> Self {
         let mut rules = Vec::new();
-        let mut unobservable = Vec::new();
+        let mut not_evaluated = Vec::new();
         for (name, entry) in config.providers.iter().filter(|(_, e)| carries_markers(e)) {
-            if !entry.cache_capability().cache_hit_observable {
-                unobservable.push(name.clone());
+            if let Some(reason) = not_evaluated_reason(entry) {
+                not_evaluated.push(NotEvaluatedProvider {
+                    provider: name.clone(),
+                    reason,
+                });
             } else if let Some(cache) = cache_rules(entry.kind_str()) {
                 rules.push(CacheIgnoreRule {
                     provider: name.clone(),
@@ -256,8 +359,27 @@ impl Eligibility {
         }
         Self {
             rules,
-            unobservable,
+            not_evaluated,
         }
+    }
+
+    /// The evaluated provider names, sorted (config order is by name).
+    fn evaluated(&self) -> Vec<String> {
+        self.rules
+            .iter()
+            .map(|rule| rule.provider.clone())
+            .collect()
+    }
+}
+
+/// Why a marker-carrying provider is not evaluated, if it is not.
+fn not_evaluated_reason(entry: &ProviderEntry) -> Option<NotEvaluatedReason> {
+    if matches!(entry.egress_kind(), EgressKind::BedrockConverse) {
+        Some(NotEvaluatedReason::ConverseShape)
+    } else if !entry.cache_capability().cache_hit_observable {
+        Some(NotEvaluatedReason::HitsNotObservable)
+    } else {
+        None
     }
 }
 
@@ -265,6 +387,17 @@ impl Eligibility {
 fn carries_markers(entry: &ProviderEntry) -> bool {
     matches!(entry.kind_str(), ANTHROPIC_API | BEDROCK)
 }
+
+/// A served model nickname shaped like an account id after the word
+/// `account`, which the upstream-text scrub redacts. Assembled at runtime.
+#[cfg(test)]
+pub fn key_shaped_model() -> String {
+    format!("m account {}{}", "123456", "789012")
+}
+
+/// The digit run [`key_shaped_model`] carries.
+#[cfg(test)]
+pub const KEY_SHAPED_DIGITS: &str = concat!("123456", "789012");
 
 #[cfg(test)]
 #[path = "cache_ignore_tests.rs"]

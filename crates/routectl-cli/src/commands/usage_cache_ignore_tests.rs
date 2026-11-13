@@ -7,7 +7,9 @@ use routectl_core::cache_decision::CALLER_SUPPLIED;
 use routectl_core::provider_kind::config::ANTHROPIC_API;
 use routectl_usage::open;
 
-use crate::cache_ignore::{CacheIgnoreWindow, UNAVAILABLE_DB, UNAVAILABLE_QUERY_TIMEOUT};
+use crate::cache_ignore::{
+    CacheIgnoreWindow, NotEvaluatedProvider, UNAVAILABLE_DB, UNAVAILABLE_QUERY_TIMEOUT,
+};
 use crate::commands::pricing::PriceSnapshot;
 use crate::commands::usage::{
     UsageArgs, WindowFlag, build_output, build_window_report, render_report, window_bounds,
@@ -238,7 +240,8 @@ fn a_truncated_report_says_more_lanes_exist() {
             active_turns: 0,
             sessions: 1,
         }],
-        unobservable: Vec::new(),
+        evaluated: Vec::new(),
+        not_evaluated: Vec::new(),
         truncated: true,
     };
 
@@ -262,7 +265,8 @@ fn a_timed_out_read_renders_query_timeout_not_an_error() {
         window: CacheIgnoreWindow::ending_at(0),
         status: CacheIgnoreStatus::Unavailable(UNAVAILABLE_QUERY_TIMEOUT),
         lanes: Vec::new(),
-        unobservable: Vec::new(),
+        evaluated: Vec::new(),
+        not_evaluated: Vec::new(),
         truncated: false,
     };
 
@@ -292,7 +296,11 @@ fn lane_identifiers_render_scrubbed_and_neutralized() {
             active_turns: 0,
             sessions: 1,
         }],
-        unobservable: vec!["v=x".to_owned()],
+        evaluated: vec!["direct".to_owned()],
+        not_evaluated: vec![NotEvaluatedProvider {
+            provider: "v=x".to_owned(),
+            reason: NotEvaluatedReason::HitsNotObservable,
+        }],
         truncated: false,
     };
 
@@ -305,4 +313,106 @@ fn lane_identifiers_render_scrubbed_and_neutralized() {
     assert!(block.contains("seat=s verdict?clear"), "{block}");
     assert_eq!(block.matches("verdict=").count(), 1, "{block}");
     assert!(block.contains("not observable): v?x"), "{block}");
+}
+
+#[test]
+fn an_evaluated_report_with_no_lanes_says_no_turn_qualified() {
+    // Arrange: four marked turns ten minutes apart, past the 300 s lifetime,
+    // so not one turn qualifies.
+    let db = open(usage_dir().join("usage.db")).expect("open ledger");
+    let base = fixed_now().timestamp_millis() - 3_600_000;
+    for i in 0..4 {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, provider_kind, seat, session_id, \
+                 stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
+                 fallback_count, input_tokens, output_tokens, cache_read, cache_write_tokens, \
+                 cache_front_decision, prefix_epoch_event, operation, probe) \
+                 VALUES (?1, ?1, ?2, 'anthropic', 'req', 'a', 'm', 'direct', ?3, NULL, \
+                 'sess-1', 0, 'ok', 0, 0, 0, 1, 0, 5000, 10, 0, 0, ?4, 0, 'inference', 0)",
+                rusqlite::params![
+                    base + i * 600_000,
+                    format!("gap-{i}"),
+                    ANTHROPIC_API,
+                    CALLER_SUPPLIED
+                ],
+            )
+            .expect("insert turn");
+    }
+    let far = Instant::now() + Duration::from_mins(10);
+
+    // Act
+    let block = cache_ignore_block(&db, &fixture_config(), fixed_now().timestamp_millis(), far);
+
+    // Assert
+    assert_eq!(
+        block.lines().nth(1),
+        Some(
+            "  no lane had qualifying turns in the window \
+             (consecutive marked turns within the cache lifetime)"
+        ),
+        "{block}"
+    );
+}
+
+#[test]
+fn not_evaluated_providers_render_one_line_per_reason() {
+    // Arrange
+    let report = CacheIgnoreReport {
+        window: CacheIgnoreWindow::ending_at(0),
+        status: CacheIgnoreStatus::Evaluated,
+        lanes: Vec::new(),
+        evaluated: Vec::new(),
+        not_evaluated: vec![
+            NotEvaluatedProvider {
+                provider: "conv".to_owned(),
+                reason: NotEvaluatedReason::ConverseShape,
+            },
+            NotEvaluatedProvider {
+                provider: "vendor".to_owned(),
+                reason: NotEvaluatedReason::HitsNotObservable,
+            },
+        ],
+        truncated: false,
+    };
+
+    // Act
+    let block = render_cache_ignore(&report);
+
+    // Assert
+    let lines: Vec<&str> = block.lines().skip(2).collect();
+    assert_eq!(
+        lines,
+        [
+            "  not evaluated (cache hits not observable): vendor",
+            "  not evaluated (Bedrock Converse forwards a top-level cache marker inert): conv",
+        ],
+        "{block}"
+    );
+}
+
+#[test]
+fn the_lane_line_renders_the_shared_lane_identifiers() {
+    // Arrange: a key-shaped served model nickname on an ignoring lane.
+    let db = open(usage_dir().join("usage.db")).expect("open ledger");
+    let model = crate::cache_ignore::key_shaped_model();
+    seed_lane(&db, &model, 4, 0);
+    let ids = crate::cache_ignore::LaneIdentifiers::render("direct", None, Some(&model));
+    let far = Instant::now() + Duration::from_mins(10);
+
+    // Act
+    let block = cache_ignore_block(&db, &fixture_config(), fixed_now().timestamp_millis(), far);
+
+    // Assert
+    let expected = format!(
+        "  provider={} seat=- model={} kind=",
+        ids.provider,
+        ids.model.expect("model")
+    );
+    assert!(block.contains(&expected), "{block}");
+    assert!(
+        !block.contains(crate::cache_ignore::KEY_SHAPED_DIGITS),
+        "{block}"
+    );
 }

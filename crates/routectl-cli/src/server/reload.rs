@@ -75,9 +75,11 @@ pub(super) fn spawn_reload_pipeline(
         shutdown_rx.clone(),
     )));
 
-    // Cache-ignore driver: reads the ledger read-only and only logs.
+    // Cache-ignore driver: reads the ledger read-only and only logs. The
+    // ledger path is the boot one, like the writer's (restart-required).
     handles.push(tokio::spawn(run_cache_ignore_driver(
         router_swap.clone(),
+        initial_config.usage.db_path.clone(),
         shutdown_rx.clone(),
     )));
 

@@ -158,14 +158,14 @@ async fn one_ignoring_lane_is_one_warn_and_the_exit_code_stays_zero() {
     assert!(
         warns[0]
             .detail
-            .starts_with("markers sent, no cache activity: 3 turns in 1 sessions"),
+            .starts_with("markers sent, no cache activity: 3 turns in 1 session over"),
         "{}",
         warns[0].detail
     );
     assert!(cache.iter().all(|f| f.status != Status::Fail));
     assert_eq!(
         named(&cache, "cache markers").detail,
-        "2 lanes evaluated over the last 6 h: 1 markers sent with no cache activity, 0 with \
+        "2 lanes evaluated over the last 6 h: 1 with markers sent and no cache activity, 0 with \
          cache activity, 1 with too few turns to judge"
     );
     assert_eq!(overall_exit(&cache), 0);
@@ -220,8 +220,12 @@ async fn the_unobservable_line_names_a_custom_base_anthropic_provider() {
     assert_eq!(line.status, Status::Pass);
     assert_eq!(
         line.detail,
-        "cache hits are not observable on vendor, so their lanes are not evaluated"
+        "not evaluated (cache hits not observable): vendor"
     );
+    let fix = line.remediation.as_deref().expect("remediation");
+    for key in ["supports_top_level_cache_control", "cache_hit_observable"] {
+        assert!(fix.contains(key), "the remediation names both keys: {fix}");
+    }
     assert!(cache.iter().all(|f| f.status == Status::Pass), "{cache:#?}");
 }
 
@@ -301,5 +305,105 @@ async fn the_human_render_titles_the_cache_section() {
     assert!(
         lines[at + 1].starts_with("  PASS cache markers: unavailable: no_data"),
         "{lines:?}"
+    );
+}
+
+/// The count nouns follow their counts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn counts_of_one_read_singular() {
+    // Arrange: one ignoring lane with 3 turns in 1 session; one lane total.
+    let fx = fixture();
+    seed_ignoring_lane(&fx.db_path, "direct", "m-ignored", 4);
+
+    // Act
+    let cache = cache_findings(&disk_report(&fx.config_path).await.findings);
+
+    // Assert
+    assert!(
+        named(&cache, "cache markers")
+            .detail
+            .starts_with("1 lane evaluated over the last 6 h: 1 with markers sent"),
+        "{cache:#?}"
+    );
+    let warn = named(&cache, "lane direct m-ignored");
+    assert!(
+        warn.detail.contains("3 turns in 1 session over"),
+        "{}",
+        warn.detail
+    );
+    let fix = warn.remediation.as_deref().expect("remediation");
+    for key in [
+        "supports_top_level_cache_control",
+        "cache_hit_observable = false",
+    ] {
+        assert!(fix.contains(key), "the remediation names both keys: {fix}");
+    }
+}
+
+/// The lane name prints the identifiers every surface prints: a key-shaped
+/// model nickname is scrubbed exactly as the daemon log and usage print it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn the_lane_name_renders_the_shared_lane_identifiers() {
+    // Arrange
+    let fx = fixture();
+    let model = crate::cache_ignore::key_shaped_model();
+    seed_ignoring_lane(&fx.db_path, "direct", &model, 4);
+    let ids = crate::cache_ignore::LaneIdentifiers::render("direct", None, Some(&model));
+
+    // Act
+    let cache = cache_findings(&disk_report(&fx.config_path).await.findings);
+
+    // Assert
+    let warn = cache
+        .iter()
+        .find(|f| f.status == Status::Warn)
+        .unwrap_or_else(|| panic!("no warn: {cache:#?}"));
+    assert_eq!(
+        warn.name,
+        format!("lane direct {}", ids.model.expect("model"))
+    );
+    assert!(
+        !warn.name.contains(crate::cache_ignore::KEY_SHAPED_DIGITS),
+        "{}",
+        warn.name
+    );
+}
+
+#[test]
+fn each_not_evaluated_reason_is_its_own_pass_line() {
+    use crate::cache_ignore::{NotEvaluatedProvider, NotEvaluatedReason};
+    let providers = [
+        NotEvaluatedProvider {
+            provider: "conv".to_owned(),
+            reason: NotEvaluatedReason::ConverseShape,
+        },
+        NotEvaluatedProvider {
+            provider: "vendor".to_owned(),
+            reason: NotEvaluatedReason::HitsNotObservable,
+        },
+    ];
+
+    let findings = super::not_evaluated_findings(&providers);
+
+    let lines: Vec<(&str, &str, Status)> = findings
+        .iter()
+        .map(|f| (f.name.as_str(), f.detail.as_str(), f.status))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            (
+                "unobservable providers",
+                "not evaluated (cache hits not observable): vendor",
+                Status::Pass
+            ),
+            (
+                "converse providers",
+                "not evaluated (Bedrock Converse forwards a top-level cache marker inert): conv",
+                Status::Pass
+            ),
+        ]
     );
 }
