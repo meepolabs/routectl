@@ -119,20 +119,51 @@ fn seed(db: &UsageDb, turns: &[Turn]) {
 }
 
 /// Total `(evidence, active)` over every returned lane.
-fn totals(db: &UsageDb) -> (i64, i64) {
-    let got = cache_ignore_lanes(db, FROM, TO, &rules()).expect("query");
+fn totals(db: &UsageDb, rules: &[CacheIgnoreRule]) -> (i64, i64) {
+    let got = cache_ignore_lanes(db, FROM, TO, rules).expect("query");
     got.lanes.iter().fold((0, 0), |(e, a), lane| {
         (e + lane.evidence_turns, a + lane.active_turns)
     })
 }
 
-/// Seed the positive fixture with `mutate` applied, return the totals.
-fn totals_after(mutate: impl FnOnce(&mut [Turn])) -> (i64, i64) {
+/// Seed the positive fixture with `mutate` applied, return the totals under
+/// `rules`.
+fn totals_under(rules: &[CacheIgnoreRule], mutate: impl FnOnce(&mut [Turn])) -> (i64, i64) {
     let (_dir, db) = open_db();
     let mut turns = positive_fixture();
     mutate(&mut turns);
     seed(&db, &turns);
-    totals(&db)
+    totals(&db, rules)
+}
+
+/// [`totals_under`] the default rules.
+fn totals_after(mutate: impl FnOnce(&mut [Turn])) -> (i64, i64) {
+    totals_under(&rules(), mutate)
+}
+
+type Mutation = fn(&mut [Turn]);
+
+/// One table row: a name, the fixture mutation, the expected totals.
+type Case = (&'static str, Mutation, (i64, i64));
+
+/// A red row: `(name, got, expected)`.
+type Mismatch = (&'static str, (i64, i64), (i64, i64));
+
+/// Every row whose totals under `rules` differ from its expectation, so one
+/// run reports every red row.
+fn mismatches(rules: &[CacheIgnoreRule], cases: &[Case]) -> Vec<Mismatch> {
+    cases
+        .iter()
+        .map(|&(name, mutate, expected)| (name, totals_under(rules, mutate), expected))
+        .filter(|(_, got, expected)| got != expected)
+        .collect()
+}
+
+/// Place the four fixture turns `STEP_MS` apart with the last at `last_ts`.
+fn end_at(t: &mut [Turn], last_ts: i64) {
+    for (i, turn) in t.iter_mut().enumerate() {
+        turn.ts_start = last_ts - (3 - i as i64) * STEP_MS;
+    }
 }
 
 #[test]
@@ -171,12 +202,22 @@ fn bedrock_lanes_qualify_like_anthropic_api_lanes() {
 /// Each row flips one column of the positive fixture; `expected` is the
 /// fixture's `(evidence, active)` afterwards. Mutations land on the LAST turn
 /// unless the row says otherwise, so a row that removes one turn reads 2.
+/// Each row's turn drops for exactly one reason: no other predicate would
+/// also remove it.
 #[test]
 fn a_single_flipped_column_removes_the_turn_from_evidence() {
-    type Mutation = fn(&mut [Turn]);
     let last = 3;
-    let cases: Vec<(&str, Mutation, (i64, i64))> = vec![
-        ("session NULL", |t| t[3].session_id = None, (2, 0)),
+    let cases: Vec<Case> = vec![
+        // Two NULL-session turns share one partition, so the second one has
+        // a previous turn and only the NULL-session filter removes it.
+        (
+            "session NULL",
+            |t| {
+                t[2].session_id = None;
+                t[3].session_id = None;
+            },
+            (1, 0),
+        ),
         (
             "first turn of another session",
             |t| t[3].session_id = Some("sess-2".to_owned()),
@@ -235,13 +276,87 @@ fn a_single_flipped_column_removes_the_turn_from_evidence() {
             |t| t[3].operation = Some("count_tokens"),
             (2, 0),
         ),
-        ("row at the window end", |t| t[3].ts_start = TO, (2, 0)),
+        // The whole fixture moves to the window end so every gap stays
+        // inside the lifetime: only the upper bound removes the last turn.
+        ("row at the window end", |t| end_at(t, TO), (2, 0)),
+        (
+            "row 1 ms before the window end qualifies",
+            |t| end_at(t, TO - 1),
+            (3, 0),
+        ),
     ];
     assert_eq!(totals_after(|_| {}), (last, 0), "positive control");
 
-    for (name, mutate, expected) in cases {
-        assert_eq!(totals_after(mutate), expected, "case: {name}");
-    }
+    let red = mismatches(&rules(), &cases);
+    assert!(red.is_empty(), "(case, got, expected): {red:#?}");
+}
+
+/// Place `t[3]` more than the lifetime after `t[1]` but within it of `t[2]`,
+/// so `t[3]` qualifies only while `t[2]` stays its previous turn.
+fn bridge_over_middle(t: &mut [Turn]) {
+    t[3].ts_start = t[1].ts_start + LIFETIME_MS + 1;
+}
+
+/// Each row flips one non-outcome column on the MIDDLE turn `t[2]`. Those
+/// predicates apply after the pairing, so `t[2]` is still `t[3]`'s previous
+/// turn: `t[2]` alone drops. Applying the predicate before the pairing would
+/// pair `t[3]` with `t[1]`, past the lifetime, and drop it too.
+#[test]
+fn a_middle_turn_failing_a_predicate_still_pairs_with_the_next_turn() {
+    let cases: Vec<Case> = vec![
+        ("control: no flip", bridge_over_middle, (3, 0)),
+        (
+            "control: a turn filtered before the pairing is skipped over",
+            |t| {
+                bridge_over_middle(t);
+                t[2].probe = Some(1);
+            },
+            (1, 0),
+        ),
+        (
+            "decision auto_emitted",
+            |t| {
+                bridge_over_middle(t);
+                t[2].decision = Some("auto_emitted");
+            },
+            (2, 0),
+        ),
+        (
+            "kind openai-responses",
+            |t| {
+                bridge_over_middle(t);
+                t[2].provider_kind = "openai-responses";
+            },
+            (2, 0),
+        ),
+        (
+            "epoch rewritten",
+            |t| {
+                bridge_over_middle(t);
+                t[2].epoch = Some(1);
+            },
+            (2, 0),
+        ),
+        (
+            "epoch reseeded",
+            |t| {
+                bridge_over_middle(t);
+                t[2].epoch = Some(2);
+            },
+            (2, 0),
+        ),
+        (
+            "prompt 4095",
+            |t| {
+                bridge_over_middle(t);
+                t[2].input = 4095;
+            },
+            (2, 0),
+        ),
+    ];
+
+    let red = mismatches(&rules(), &cases);
+    assert!(red.is_empty(), "(case, got, expected): {red:#?}");
 }
 
 #[test]
@@ -331,8 +446,7 @@ fn empty_rules_return_empty_without_reading_the_ledger() {
 
 #[test]
 fn absent_writes_and_reads_are_excluded_and_observed_zeros_are_evidence() {
-    type Mutation = fn(&mut [Turn]);
-    let cases: Vec<(&str, Mutation, (i64, i64))> = vec![
+    let cases: Vec<Case> = vec![
         (
             "write NULL, legacy NULL",
             |t| t[3].write_tokens = None,
@@ -404,9 +518,33 @@ fn absent_writes_and_reads_are_excluded_and_observed_zeros_are_evidence() {
         ),
     ];
 
-    for (name, mutate, expected) in cases {
-        assert_eq!(totals_after(mutate), expected, "case: {name}");
-    }
+    let red = mismatches(&rules(), &cases);
+    assert!(red.is_empty(), "(case, got, expected): {red:#?}");
+}
+
+/// With no minimum, the prompt-size predicate cannot exclude the turn, so an
+/// absent read or write is kept out by its own non-NULL check alone.
+#[test]
+fn absent_reads_and_writes_are_excluded_even_with_no_minimum() {
+    let no_minimum: Vec<CacheIgnoreRule> = rules()
+        .into_iter()
+        .map(|r| CacheIgnoreRule {
+            min_prompt_tokens: 0,
+            ..r
+        })
+        .collect();
+    let cases: Vec<Case> = vec![
+        ("control: observed zeros", |_| {}, (3, 0)),
+        ("cache_read NULL", |t| t[3].cache_read = None, (2, 0)),
+        (
+            "write NULL, legacy NULL",
+            |t| t[3].write_tokens = None,
+            (2, 0),
+        ),
+    ];
+
+    let red = mismatches(&no_minimum, &cases);
+    assert!(red.is_empty(), "(case, got, expected): {red:#?}");
 }
 
 #[test]
@@ -490,18 +628,25 @@ fn seed_lanes(db: &UsageDb, n: usize) {
 
 #[test]
 fn more_lanes_than_the_cap_return_the_cap_and_say_truncated() {
-    for (lanes, expected_len, expected_truncated) in [
+    let red: Vec<_> = [
         (CACHE_IGNORE_LANE_CAP + 1, CACHE_IGNORE_LANE_CAP, true),
         (CACHE_IGNORE_LANE_CAP, CACHE_IGNORE_LANE_CAP, false),
-    ] {
+    ]
+    .into_iter()
+    .filter_map(|(lanes, expected_len, expected_truncated)| {
         let (_dir, db) = open_db();
         seed_lanes(&db, lanes);
-
         let got = cache_ignore_lanes(&db, FROM, TO, &rules()).expect("query");
+        let got = (got.lanes.len(), got.truncated);
+        (got != (expected_len, expected_truncated)).then_some((
+            lanes,
+            got,
+            (expected_len, expected_truncated),
+        ))
+    })
+    .collect();
 
-        assert_eq!(got.lanes.len(), expected_len, "{lanes} lanes");
-        assert_eq!(got.truncated, expected_truncated, "{lanes} lanes");
-    }
+    assert!(red.is_empty(), "(lanes, got, expected): {red:#?}");
 }
 
 #[test]
@@ -616,8 +761,9 @@ fn seed_bench(path: &std::path::Path, now_ms: i64) {
     }
 }
 
-/// Cold read of a 6 h window on a 1M-row ledger, on a fresh read-only
-/// connection. `#[ignore]`d: seeding costs minutes of disk I/O.
+/// The query alone over a 6 h window on a 1M-row ledger, on a fresh
+/// read-only connection (OS cache warm from the seeding). `#[ignore]`d:
+/// seeding costs minutes of disk I/O.
 ///
 /// ```text
 /// cargo test -p routectl-usage --release --lib -- --ignored --exact \

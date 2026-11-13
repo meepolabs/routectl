@@ -85,6 +85,10 @@ pub struct CacheIgnoreLanes {
 /// always two adjacent inference turns of one session on one lane; every
 /// other predicate, outcome included, applies AFTER the pairing, so an
 /// intervening failed turn breaks the pair instead of being skipped over.
+/// The provider pre-filter is the one exception that cannot change a pair:
+/// provider is in the partition key, so a dropped provider's rows were never
+/// another provider's previous turn. Kind and decision are not partition
+/// keys and must stay after the pairing.
 /// `rowid` breaks `ts_start` ties so the pairing is deterministic.
 const CACHE_IGNORE_SQL: &str = concat!(
     "\
@@ -109,6 +113,7 @@ paired AS (
     inference_rows!(),
     "
       AND COALESCE(probe, 0) = 0
+      AND provider IN (SELECT provider FROM rules)
     WINDOW lane AS (
         PARTITION BY session_id, provider, COALESCE(seat, ''), model
         ORDER BY ts_start, rowid
@@ -126,9 +131,13 @@ qualifying AS (
       AND p.provider_kind IN (?6, ?7)
       AND p.ts_start - p.prev_ts <= r.lifetime_ms
       AND p.prefix_epoch_event = ?8
+      -- The absent-vs-zero guard: an unreported read or write never counts
+      -- as zero. The size sum reads absent as zero, so these two checks are
+      -- the only thing that excludes such a turn.
       AND p.cache_read IS NOT NULL
       AND p.write_total IS NOT NULL
-      AND p.input_tokens + p.cache_read + p.write_total >= r.min_prompt_tokens
+      AND p.input_tokens + COALESCE(p.cache_read, 0) + COALESCE(p.write_total, 0)
+          >= r.min_prompt_tokens
 )
 SELECT provider, seat, model, provider_kind,
        SUM(CASE WHEN cache_read = 0 AND write_total = 0 THEN 1 ELSE 0 END) AS evidence_turns,
