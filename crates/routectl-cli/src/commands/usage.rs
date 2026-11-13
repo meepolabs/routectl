@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
 
@@ -36,6 +37,7 @@ use crate::commands::pricing::{
     rates_from_pricing,
 };
 use crate::commands::text_table::render_table;
+use crate::commands::usage_cache_ignore::{CACHE_IGNORE_READ_BUDGET, cache_ignore_block};
 
 /// Parsed `routectl usage` arguments, already validated by clap.
 #[derive(Debug, Clone)]
@@ -1776,9 +1778,19 @@ pub fn build_blocks(
     now: DateTime<Local>,
 ) -> Result<Vec<String>, UsageError> {
     let mut blocks = build_window_blocks(db, config, prices, args, now)?;
-    // Keep the legend out of the block count: append it to the last block so a
-    // multi-window summary still yields exactly one block per window.
+    // Keep the legend and the cache-ignore block out of the block count:
+    // append them to the last block so a multi-window summary still yields
+    // exactly one block per window.
     if let Some(last) = blocks.last_mut() {
+        if args.detail {
+            let deadline = Instant::now() + CACHE_IGNORE_READ_BUDGET;
+            last.push_str(&cache_ignore_block(
+                db,
+                config,
+                now.timestamp_millis(),
+                deadline,
+            ));
+        }
         last.push_str(LEGEND);
         last.push('\n');
     }

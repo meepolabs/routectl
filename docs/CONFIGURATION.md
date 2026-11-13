@@ -4716,6 +4716,20 @@ The `--detail` reduction and k-suppressed-session blocks end with a
 the running service's usage-channel `dropped_full`, `dropped_closed`,
 `dropped_disabled` and `write_errors` counters flat across the window.
 
+`--detail` also ends the output with one `cache-ignore:` block, the same
+report the daemon logs and `routectl doctor` shows in its `cache`
+section. Its window is always the last 6 hours ending now: `--today`,
+`--since` and the other window flags do not change it, and a
+multi-window summary prints it once. One line per lane (provider, seat,
+model, provider kind) on an `anthropic-api` or `bedrock` provider whose
+cache hits are observable, with its verdict (`ignoring`, `clear` or
+`insufficient`) and its `evidence`, `active` and `sessions` counts; an
+`ignoring` lane is marked "markers sent, no cache activity", which says
+only what the ledger shows. A final line names the providers whose cache
+hits are not observable and so are not evaluated. When the ledger cannot
+answer within 2 s the block shows `unavailable: <class>` and the command
+still exits 0.
+
 If the database does not exist yet (or has never been written), the
 command prints `no usage data yet (...)` and exits 0 -- it is not an
 error. A database written by a newer routectl than the running binary is

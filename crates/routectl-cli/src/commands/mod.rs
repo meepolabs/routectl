@@ -34,5 +34,6 @@ pub mod seat_report;
 pub mod test;
 mod text_table;
 pub mod usage;
+mod usage_cache_ignore;
 pub mod usage_downgrade;
 pub mod whoami;

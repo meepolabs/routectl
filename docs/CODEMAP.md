@@ -8502,6 +8502,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the cap, so the grid always covers the window and never exceeds it. The
   footer carries the window's `walk:` line (`render_walk_line` over
   `observation_totals`, marked a lower bound when the ledger recorded a gap)
+- `src/commands/usage_cache_ignore.rs` -- the `routectl usage --detail`
+  cache-ignore block: `cache_ignore_block(&UsageDb, &Config, now_ms,
+  deadline)` renders `cache_ignore::cache_ignore_report` (fixed 6 h window,
+  independent of the window flags and `--since`) once per run from
+  `usage::build_blocks`, with a `CACHE_IGNORE_READ_BUDGET` (2 s) deadline;
+  lane identifiers go through `seat_report::safe` (the model through
+  `upstream_text_for_log` first). Tests in `usage_cache_ignore_tests.rs`
 - `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to
   20|19|18|17|16 [--db P]`: the offline rollback over
   `routectl_usage::downgrade_to` (a v21 file taken to 16 runs every step);
