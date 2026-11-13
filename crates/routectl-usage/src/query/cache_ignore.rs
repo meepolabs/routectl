@@ -74,10 +74,14 @@ pub struct CacheIgnoreLane {
 /// The window's lanes, at most [`CACHE_IGNORE_LANE_CAP`] of them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CacheIgnoreLanes {
-    /// Ordered by evidence turns, then active turns (both descending), then
-    /// the lane keys.
+    /// Lanes with no active turn first, so the cap drops lanes that already
+    /// showed cache activity before any that might be ignoring markers; then
+    /// evidence turns, then active turns (both descending), then the lane
+    /// keys.
     pub lanes: Vec<CacheIgnoreLane>,
-    /// True when the window held more lanes than the cap.
+    /// True when the window held more lanes than the cap. A lane absent from
+    /// a truncated result may simply have been cut, so a consumer comparing
+    /// two results must not read its absence as a change.
     pub truncated: bool,
 }
 
@@ -132,8 +136,10 @@ qualifying AS (
       AND p.ts_start - p.prev_ts <= r.lifetime_ms
       AND p.prefix_epoch_event = ?8
       -- The absent-vs-zero guard: an unreported read or write never counts
-      -- as zero. The size sum reads absent as zero, so these two checks are
-      -- the only thing that excludes such a turn.
+      -- as zero. Absent read/write read as zero in the size sum below, so
+      -- these two checks are the only thing that excludes such a turn.
+      -- Absent input_tokens deliberately keeps the sum NULL: an unknown
+      -- prompt size never qualifies, whatever the minimum.
       AND p.cache_read IS NOT NULL
       AND p.write_total IS NOT NULL
       AND p.input_tokens + COALESCE(p.cache_read, 0) + COALESCE(p.write_total, 0)
@@ -145,7 +151,8 @@ SELECT provider, seat, model, provider_kind,
        COUNT(DISTINCT session_id)                                          AS sessions
 FROM qualifying
 GROUP BY provider, seat, model, provider_kind
-ORDER BY evidence_turns DESC, active_turns DESC, provider, seat, model, provider_kind
+ORDER BY (active_turns = 0) DESC, evidence_turns DESC, active_turns DESC,
+         provider, seat, model, provider_kind
 LIMIT ?9"
 );
 

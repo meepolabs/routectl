@@ -42,7 +42,7 @@ struct Turn {
     outcome: &'static str,
     decision: Option<&'static str>,
     epoch: Option<i64>,
-    input: i64,
+    input: Option<i64>,
     cache_read: Option<i64>,
     write_tokens: Option<i64>,
     write_5m: Option<i64>,
@@ -63,7 +63,7 @@ fn turn(ts_start: i64) -> Turn {
         outcome: "ok",
         decision: Some("caller_supplied"),
         epoch: Some(0),
-        input: 5000,
+        input: Some(5000),
         cache_read: Some(0),
         write_tokens: Some(0),
         write_5m: None,
@@ -245,8 +245,8 @@ fn a_single_flipped_column_removes_the_turn_from_evidence() {
             |t| t[3].ts_start = t[2].ts_start + LIFETIME_MS,
             (3, 0),
         ),
-        ("prompt 4095", |t| t[3].input = 4095, (2, 0)),
-        ("prompt 4096 qualifies", |t| t[3].input = 4096, (3, 0)),
+        ("prompt 4095", |t| t[3].input = Some(4095), (2, 0)),
+        ("prompt 4096 qualifies", |t| t[3].input = Some(4096), (3, 0)),
         ("epoch rewritten", |t| t[3].epoch = Some(1), (2, 0)),
         ("epoch reseeded", |t| t[3].epoch = Some(2), (2, 0)),
         ("epoch NULL", |t| t[3].epoch = None, (2, 0)),
@@ -349,7 +349,7 @@ fn a_middle_turn_failing_a_predicate_still_pairs_with_the_next_turn() {
             "prompt 4095",
             |t| {
                 bridge_over_middle(t);
-                t[2].input = 4095;
+                t[2].input = Some(4095);
             },
             (2, 0),
         ),
@@ -495,7 +495,7 @@ fn absent_writes_and_reads_are_excluded_and_observed_zeros_are_evidence() {
         (
             "read counts toward the minimum",
             |t| {
-                t[3].input = 96;
+                t[3].input = Some(96);
                 t[3].cache_read = Some(4000);
             },
             (2, 1),
@@ -503,7 +503,7 @@ fn absent_writes_and_reads_are_excluded_and_observed_zeros_are_evidence() {
         (
             "write counts toward the minimum",
             |t| {
-                t[3].input = 96;
+                t[3].input = Some(96);
                 t[3].write_tokens = Some(4000);
             },
             (2, 1),
@@ -511,7 +511,7 @@ fn absent_writes_and_reads_are_excluded_and_observed_zeros_are_evidence() {
         (
             "read + input one short of the minimum",
             |t| {
-                t[3].input = 95;
+                t[3].input = Some(95);
                 t[3].cache_read = Some(4000);
             },
             (2, 0),
@@ -522,8 +522,9 @@ fn absent_writes_and_reads_are_excluded_and_observed_zeros_are_evidence() {
     assert!(red.is_empty(), "(case, got, expected): {red:#?}");
 }
 
-/// With no minimum, the prompt-size predicate cannot exclude the turn, so an
-/// absent read or write is kept out by its own non-NULL check alone.
+/// With no minimum, the prompt-size predicate cannot exclude a turn of known
+/// size, so an absent read or write is kept out by its own non-NULL check
+/// alone, and an absent input by the size sum staying NULL.
 #[test]
 fn absent_reads_and_writes_are_excluded_even_with_no_minimum() {
     let no_minimum: Vec<CacheIgnoreRule> = rules()
@@ -541,6 +542,7 @@ fn absent_reads_and_writes_are_excluded_even_with_no_minimum() {
             |t| t[3].write_tokens = None,
             (2, 0),
         ),
+        ("input NULL: unknown size", |t| t[3].input = None, (2, 0)),
     ];
 
     let red = mismatches(&no_minimum, &cases);
@@ -567,9 +569,10 @@ fn sessions_count_distinct_sessions_on_the_lane() {
 }
 
 #[test]
-fn lanes_order_by_evidence_then_active_descending_then_keys() {
+fn lanes_order_no_active_first_then_evidence_then_active_descending_then_keys() {
     // Arrange: lane m-b has 3 evidence; m-a and m-c have 1 evidence each,
-    // m-c with one active turn as well.
+    // m-c with one active turn as well; m-d has 4 evidence and one active
+    // turn, so it outranks every lane on evidence alone.
     let (_dir, db) = open_db();
     let lane = |model: &'static str, n: i64, active_last: bool| {
         let mut turns: Vec<Turn> = (0..=n)
@@ -590,6 +593,7 @@ fn lanes_order_by_evidence_then_active_descending_then_keys() {
     let mut turns = lane("m-a", 1, false);
     turns.extend(lane("m-b", 3, false));
     turns.extend(lane("m-c", 1, true));
+    turns.extend(lane("m-d", 4, true));
     seed(&db, &turns);
 
     // Act
@@ -605,8 +609,9 @@ fn lanes_order_by_evidence_then_active_descending_then_keys() {
         order,
         vec![
             (Some("m-b"), 3, 0),
+            (Some("m-a"), 1, 0),
+            (Some("m-d"), 4, 1),
             (Some("m-c"), 1, 1),
-            (Some("m-a"), 1, 0)
         ]
     );
 }
@@ -647,6 +652,58 @@ fn more_lanes_than_the_cap_return_the_cap_and_say_truncated() {
     .collect();
 
     assert!(red.is_empty(), "(lanes, got, expected): {red:#?}");
+}
+
+#[test]
+fn a_lane_with_no_active_turn_survives_the_cap_behind_lanes_with_more_evidence() {
+    // Arrange: CAP lanes of 10 evidence and 1 active each, plus one lane of
+    // 3 evidence and no active turn that evidence order alone would rank
+    // last, the row the cap cuts.
+    let (_dir, db) = open_db();
+    db.conn().execute_batch("BEGIN").expect("begin");
+    for i in 0..CACHE_IGNORE_LANE_CAP {
+        for k in 0..=11_i64 {
+            let t = Turn {
+                model: format!("m{i:04}"),
+                cache_read: Some(if k == 11 { 10 } else { 0 }),
+                ..turn(FROM + 10_000 + k * STEP_MS)
+            };
+            insert(&db, &format!("busy{i}-{k}"), &t);
+        }
+    }
+    for (k, t) in positive_fixture().into_iter().enumerate() {
+        let t = Turn {
+            model: "zz-quiet".to_owned(),
+            ..t
+        };
+        insert(&db, &format!("quiet-{k}"), &t);
+    }
+    db.conn().execute_batch("COMMIT").expect("commit");
+
+    // Act
+    let got = cache_ignore_lanes(&db, FROM, TO, &rules()).expect("query");
+
+    // Assert
+    assert!(
+        got.truncated,
+        "control: the window holds one lane over the cap"
+    );
+    assert_eq!(got.lanes.len(), CACHE_IGNORE_LANE_CAP);
+    let first = got.lanes.first().expect("lanes");
+    assert_eq!(
+        (
+            first.model.as_deref(),
+            first.evidence_turns,
+            first.active_turns
+        ),
+        (Some("zz-quiet"), 3, 0)
+    );
+    let cut = got
+        .lanes
+        .iter()
+        .filter(|l| l.evidence_turns == 10 && l.active_turns == 1)
+        .count();
+    assert_eq!(cut, CACHE_IGNORE_LANE_CAP - 1, "one busy lane gives way");
 }
 
 #[test]

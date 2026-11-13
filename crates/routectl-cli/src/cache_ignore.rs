@@ -156,12 +156,15 @@ pub struct CacheIgnoreReport {
     pub window: CacheIgnoreWindow,
     /// Whether the ledger answered; `lanes` is empty unless `Evaluated`.
     pub status: CacheIgnoreStatus,
-    /// Evaluated lanes, most evidence first.
+    /// Evaluated lanes: those with no active turn first, then most evidence
+    /// first.
     pub lanes: Vec<CacheIgnoreLaneReport>,
     /// Configured anthropic-api / bedrock providers whose cache hits are not
     /// observable, sorted by name. Filled from config whatever the status.
     pub unobservable: Vec<String>,
-    /// The window held more lanes than the query returns.
+    /// The window held more lanes than the query returns. When set, a lane
+    /// missing from this report may have been cut by the cap: a consumer
+    /// diffing two reports must not treat its absence as a transition.
     pub truncated: bool,
 }
 
@@ -190,6 +193,11 @@ impl CacheIgnoreReport {
 
 /// Evaluate every eligible configured provider over the window ending at
 /// `now_ms`, with every statement interrupted once `deadline` passes.
+///
+/// Installs its own deadline on `db`, replacing any handler already there,
+/// and clears it on return. Never call it on a connection under a
+/// caller-held `DeadlineGuard`: that caller's later reads would run with no
+/// deadline.
 pub fn cache_ignore_report(
     db: &UsageDb,
     config: &Config,
