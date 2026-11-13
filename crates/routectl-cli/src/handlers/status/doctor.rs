@@ -13,10 +13,15 @@
 //! The gather runs over the daemon's SERVED state
 //! ([`GatherSources::Served`]): the config the running router accepted and
 //! its resident learned registry, read through the read-only facade. A poll
-//! parses no config file and replays no ledger. What disk I/O remains (the
-//! raw config bytes for the validation findings, the credential-store probe,
-//! the leftover catalog file check) runs inside the `spawn_blocking` builder
-//! [`guard_panel`] wraps it in, driven to completion with a runtime handle.
+//! parses no config file and replays no capability ledger. It does read the
+//! usage ledger read-only, three times, each on its own fast-fail connection:
+//! the all-time would-trim summary and the cache-ignore window inside the
+//! shared gather (the latter under the gather's served cache read budget), and
+//! today's observation block here ([`read_observation`]). That I/O and the rest
+//! (the raw config bytes for the validation findings, the credential-store
+//! probe, the leftover catalog file check) runs inside the `spawn_blocking`
+//! builder [`guard_panel`] wraps it in, driven to completion with a runtime
+//! handle.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,6 +69,7 @@ use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 /// `default`. At 29 the embedded report drops its `freshness` section and its
 /// `catalog overlay` findings and gains the `leftover catalog files` finding.
 /// At 30 the panel's `observation` block gains the five walk counts.
+/// At 31 the embedded report gains its `cache` section.
 pub const DOCTOR_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// The no-network doctor report plus the circuit-derived reachability summary,

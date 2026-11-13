@@ -30,6 +30,7 @@ use crate::server::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
 };
 
+use super::cache_section::{gather_cache_ignore, read_budget};
 use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
     CapabilityInputs, CapabilityMatrixSource, DoctorContext, KnobRow, LEFTOVER_CATALOG_FILES,
@@ -58,7 +59,7 @@ pub(super) async fn gather_context(
 /// [`gather_probe_results`] (the only caller of `CompositeStore`/`probe_all`)
 /// is never reached. Everything else -- the config layer, auth via
 /// `probe_local` (no network, no refresh), secret presence checks, the orphan
-/// scan, and the would-trim panel -- is retained.
+/// scan, the would-trim panel and the cache-ignore report -- is retained.
 ///
 /// `sources` decides where the config and learned layer come from:
 /// [`GatherSources::Disk`] loads them through [`disk_layers`];
@@ -77,6 +78,7 @@ pub async fn gather_context_no_network(
     legacy_dirs: &[LegacyConfigDir],
 ) -> DoctorContext {
     let raw_config = std::fs::read_to_string(config_path).ok();
+    let cache_read_budget = read_budget(&sources);
     let layers = match sources {
         GatherSources::Disk => disk_layers(config_path),
         GatherSources::Served(inputs) => served_layers(inputs),
@@ -107,6 +109,11 @@ pub async fn gather_context_no_network(
     let orphan_secrets = gather_orphan_secrets(&config);
     let orphan_seats = gather_orphan_seats(&config, &seats);
     let would_trim = compute_would_trim_panel(&config, Local::now());
+    let cache_ignore = gather_cache_ignore(
+        &config,
+        cache_read_budget,
+        chrono::Utc::now().timestamp_millis(),
+    );
     let legacy_folders = legacy_dirs
         .iter()
         .map(|legacy| gather_legacy_folder(legacy, config_path))
@@ -129,6 +136,7 @@ pub async fn gather_context_no_network(
         orphan_seats,
         probe_results: Vec::new(),
         would_trim,
+        cache_ignore,
         now_unix: unix_now(),
         binary_version: env!("CARGO_PKG_VERSION"),
         capability,

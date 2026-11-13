@@ -8579,7 +8579,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (config/credentials/usage DB byte-identical). The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
   Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `pools`,
-  `seats`, `secrets`, `probe`, `capability`, `pricing`, `knobs`, `tuning`) -- one
+  `seats`, `secrets`, `probe`, `capability`, `pricing`, `knobs`, `tuning`,
+  `cache`) -- one
   extension point per
   new section (producer + `section_title`); `NO_NETWORK_SECTIONS` is that list
   MINUS `probe` for the offline status surface. `DoctorContext` (plus the
@@ -8780,6 +8781,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   folder that still holds files or could not be listed, naming it only by its
   home-free display.
   NEVER auto-fixes: every WARN/FAIL names the fix
+- `src/commands/doctor/cache_section.rs` -- the `cache` section producer
+  (`section_cache`) and its gather (`gather_cache_ignore`): the
+  `cache_ignore::CacheIgnoreReport` over the ledger's last window, read on its
+  own `open_readonly_fastfail` connection under `DISK_CACHE_READ_BUDGET`
+  (2000 ms) or the served `SERVED_CACHE_READ_BUDGET` (250 ms, a share of
+  `status_gate::AGGREGATE_RESERVE_MS`). One Warn per `ignoring` lane ("markers
+  sent, no cache activity"), one Pass `cache markers` summary or
+  `unavailable: <class>`, one Pass `unobservable providers`; never Fails.
+  Tests in the `#[path]`-included `cache_section_tests.rs`
 - `src/commands/doctor/render.rs` -- human-text rendering of the
   `DoctorReport`: `render_human` walks `SECTIONS` in render order (per-section
   battery via `render_section`/`section_title`/`status_label`, then the

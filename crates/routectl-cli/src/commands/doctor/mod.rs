@@ -12,6 +12,7 @@
 //! ordered `SECTIONS` list is the single extension point where a new
 //! section is added with a one-line edit (producer + render title).
 
+mod cache_section;
 mod gather;
 mod matrix;
 mod render;
@@ -63,6 +64,7 @@ use std::time::Instant;
 
 use routectl_auth::LocalProbe;
 
+use crate::cache_ignore::CacheIgnoreReport;
 use crate::commands::pricing::CacheWriteSpellingConflict;
 use crate::config_folder::LegacyConfigDir;
 use crate::server::reload_failure::ReloadFailureSnapshot;
@@ -75,6 +77,7 @@ use routectl_router::{
     SeedClearMarker, Status, TuningRow, WouldTrimPanel, overall_exit,
 };
 
+use self::cache_section::section_cache;
 use self::gather::{SecretCheck, gather_context};
 use self::render::render_human;
 use self::sections::{
@@ -275,7 +278,15 @@ pub(crate) use self::served::{
 /// `excluded_target` and `excluded_probe_run`. The `capability` section gains
 /// one Warn `learning` finding when `[capability] enabled = false`, saying
 /// nothing is learned or applied; it never Fails, so the exit code is unmoved.
-pub(crate) const SCHEMA_VERSION: u32 = 30;
+///
+/// v30 -> v31: new `cache` section, on the CLI report and the served
+/// `/status/doctor` report alike, read from the usage ledger's last 6 h. One
+/// Warn per lane whose caller cache markers drew no cache activity, one Pass
+/// `cache markers` summary (or `unavailable: <class>` when the ledger could
+/// not answer), and one Pass `unobservable providers` line when any
+/// anthropic-api or bedrock provider's cache hits cannot be observed. Never
+/// Fails, so the exit code is unmoved.
+pub(crate) const SCHEMA_VERSION: u32 = 31;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -299,12 +310,13 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("pricing", section_pricing),
     ("knobs", section_knobs),
     ("tuning", section_tuning),
+    ("cache", section_cache),
 ];
 
 /// The no-network subset of [`SECTIONS`]: [`SECTIONS`] MINUS the `probe`
 /// entry. Every producer here is pure over [`DoctorContext`] and dials
 /// nothing -- inventory, version, config, auth (`probe_local`, no refresh),
-/// secrets, and capability. A report built from these needs no
+/// secrets, capability, and the ledger-derived cache section. A report built from these needs no
 /// `gather_probe_results` pass, so a status surface can produce a full
 /// doctor report offline and derive reachability from an already-observed
 /// circuit phase rather than an upstream dial.
@@ -322,6 +334,7 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("pricing", section_pricing),
     ("knobs", section_knobs),
     ("tuning", section_tuning),
+    ("cache", section_cache),
 ];
 
 /// The read-only inputs every section producer draws from, gathered once
@@ -372,6 +385,10 @@ pub(crate) struct DoctorContext {
     /// The steady-state would-trim opportunity panel, computed read-only from
     /// the usage DB. `None` when there is no DB / no migrated schema to read.
     would_trim: Option<WouldTrimPanel>,
+    /// The cache-ignore report over the ledger's last window, read on its own
+    /// connection under the source's read budget. Unavailable, never absent,
+    /// when the ledger could not answer.
+    cache_ignore: CacheIgnoreReport,
     now_unix: u64,
     binary_version: &'static str,
     /// The capability section's read-only input (see [`CapabilityInputs`]).

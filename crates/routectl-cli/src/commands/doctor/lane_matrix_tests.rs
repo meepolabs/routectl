@@ -68,6 +68,7 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
         orphan_seats: Vec::new(),
         probe_results: Vec::new(),
         would_trim: None,
+        cache_ignore: super::tests::empty_cache_report(),
         now_unix: 1_000,
         binary_version: "test",
         capability,

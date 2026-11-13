@@ -1,12 +1,15 @@
 //! The served doctor gather's inputs: what a running daemon hands the doctor in
 //! place of a disk load.
 //!
-//! A served gather parses no config file and replays no ledger. The config is
-//! the generation the daemon accepted, the learned layer is the daemon's resident registry, and the boot
-//! warm's report says how that registry was filled.
+//! A served gather parses no config file and replays no capability ledger.
+//! The config is the generation the daemon accepted, the learned layer is the
+//! daemon's resident registry, and the boot warm's report says how that
+//! registry was filled. The shared gather body still reads the usage ledger
+//! read-only, on both sources: the all-time would-trim summary and the
+//! cache-ignore window, the latter under [`ServedInputs`]' cache read budget.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use routectl_auth::SecretRef;
 use routectl_auth::oauth::known_provider_ids;
@@ -21,6 +24,7 @@ use crate::commands::seat_report::safe;
 use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
+use super::cache_section::SERVED_CACHE_READ_BUDGET;
 use super::gather::{replay_summary, scheme_label};
 use super::sections::{oauth_login_command, oauth_login_remediation};
 use super::{CapabilityMatrixSource, MatrixOrigin};
@@ -45,6 +49,7 @@ pub struct ServedInputs {
     reload_failure: Option<ReloadFailureSnapshot>,
     parked_seats: Vec<ParkedSeat>,
     unusable_seats: Vec<UnusableSeat>,
+    cache_read_budget: Duration,
 }
 
 /// The price tables a served gather prices against.
@@ -243,6 +248,22 @@ impl ServedInputs {
             reload_failure: None,
             parked_seats: Vec::new(),
             unusable_seats: Vec::new(),
+            cache_read_budget: SERVED_CACHE_READ_BUDGET,
+        }
+    }
+
+    /// How long the gather's cache-ignore ledger read may run.
+    pub(super) const fn cache_read_budget(&self) -> Duration {
+        self.cache_read_budget
+    }
+
+    /// Replace the cache-ignore read budget.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_cache_read_budget(self, cache_read_budget: Duration) -> Self {
+        Self {
+            cache_read_budget,
+            ..self
         }
     }
 
@@ -359,6 +380,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         reload_failure,
         parked_seats,
         unusable_seats,
+        cache_read_budget: _,
     } = *inputs;
     GatheredLayers {
         accepted_config_version: Some(config.version),

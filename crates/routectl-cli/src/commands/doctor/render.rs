@@ -79,6 +79,7 @@ fn section_title(key: &str) -> &'static str {
         "pricing" => "Cost pricing",
         "knobs" => "Model knobs",
         "tuning" => "Resolved tuning",
+        "cache" => "Cache markers",
         _ => "Other",
     }
 }

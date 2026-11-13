@@ -6,7 +6,7 @@
   // containment for a cached page / mixed assets / a bad build, not version
   // negotiation. `query` sits alongside the four GET panels because the
   // QUERY aggregate is a source of its own (see SOURCES below).
-  var EXPECTED = { usage: 6, health: 9, config: 6, doctor: 30, query: 3 };
+  var EXPECTED = { usage: 6, health: 9, config: 6, doctor: 31, query: 3 };
 
   // The four panels of the aggregate round, each with its own envelope +
   // freshness. NOT the same list as TABS: a tab is a view, a source is a

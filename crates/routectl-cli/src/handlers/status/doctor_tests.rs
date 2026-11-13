@@ -192,7 +192,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 30);
+    assert_eq!(panel.schema_version, 31);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -262,12 +262,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 30);
+    assert_eq!(json["schema_version"], 31);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 30);
+    assert_eq!(json["data"]["report"]["schema_version"], 31);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),
@@ -1019,5 +1019,81 @@ async fn handler_lists_the_old_folders_the_state_carries() {
     assert!(
         !detail.contains(&*dir.path().to_string_lossy()),
         "no absolute path in the served finding: {detail}"
+    );
+}
+
+/// The served `/status/doctor` report carries the `cache` section read from
+/// the ledger the daemon's accepted config names, at schema 31: one Warn for
+/// a lane whose caller markers drew no cache activity.
+///
+/// Mutation check: drop the `cache` row from `NO_NETWORK_SECTIONS` -> red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn the_served_doctor_json_carries_the_cache_section() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    let db_path = dir.path().join("usage.db");
+    std::fs::write(&config_path, served_fixture_config(&db_path)).unwrap();
+    {
+        let db = routectl_usage::open(&db_path).expect("open ledger");
+        let base = chrono::Utc::now().timestamp_millis() - 3_600_000;
+        for i in 0..4_i64 {
+            db.conn()
+                .execute(
+                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                     requested_model, alias, model, provider, provider_kind, session_id, \
+                     stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
+                     fallback_count, input_tokens, cache_read, cache_write_tokens, \
+                     cache_front_decision, prefix_epoch_event, operation, probe) \
+                     VALUES (?1, ?1, ?2, 'anthropic', 'sonnet', 'a', 'claude-sonnet-4-5', \
+                     'anthropic', 'anthropic-api', 'sess-1', 0, 'ok', 0, 0, 0, 1, 0, 5000, \
+                     0, 0, ?3, 0, 'inference', 0)",
+                    rusqlite::params![
+                        base + i * 1_000,
+                        format!("turn-{i}"),
+                        routectl_core::cache_decision::CALLER_SUPPLIED,
+                    ],
+                )
+                .expect("insert turn");
+        }
+    }
+    let config = crate::server::parse_config_only(&config_path).expect("fixture config parses");
+    let router = Router::new(Arc::new(config));
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(StatusState::from_app(
+        &app,
+        Some(config_path),
+        DaemonMeta::for_test(),
+    ));
+
+    // Act
+    let json = doctor_json(&state).await;
+
+    // Assert
+    assert_eq!(json["schema_version"], 31);
+    assert_eq!(json["data"]["report"]["schema_version"], 31);
+    let findings = json["data"]["report"]["findings"].as_array().unwrap();
+    let cache: Vec<&Value> = findings
+        .iter()
+        .filter(|f| f["section"] == "cache")
+        .collect();
+    let warns: Vec<&&Value> = cache.iter().filter(|f| f["status"] == "Warn").collect();
+    assert_eq!(warns.len(), 1, "{cache:#?}");
+    assert_eq!(warns[0]["name"], "lane anthropic claude-sonnet-4-5");
+    assert!(
+        warns[0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("markers sent, no cache activity: 3 turns"),
+        "{}",
+        warns[0]["detail"]
+    );
+    assert!(
+        cache
+            .iter()
+            .any(|f| f["name"] == "cache markers" && f["status"] == "Pass"),
+        "{cache:#?}"
     );
 }

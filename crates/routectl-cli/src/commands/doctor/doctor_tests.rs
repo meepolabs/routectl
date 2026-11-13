@@ -46,6 +46,17 @@ fn token_record_with_refresh(expires_at: u64, refresh: &str) -> TokenRecord {
     serde_json::from_value(json).expect("valid TokenRecord json")
 }
 
+/// A cache report that evaluated a ledger holding no lanes.
+pub(super) fn empty_cache_report() -> crate::cache_ignore::CacheIgnoreReport {
+    crate::cache_ignore::CacheIgnoreReport {
+        window: crate::cache_ignore::CacheIgnoreWindow::ending_at(0),
+        status: crate::cache_ignore::CacheIgnoreStatus::Evaluated,
+        lanes: Vec::new(),
+        unobservable: Vec::new(),
+        truncated: false,
+    }
+}
+
 pub(super) fn ctx(
     config: Config,
     raw_config: Option<&str>,
@@ -76,6 +87,7 @@ pub(super) fn ctx(
         orphan_seats: Vec::new(),
         probe_results: Vec::new(),
         would_trim: None,
+        cache_ignore: empty_cache_report(),
         now_unix: 1_000,
         binary_version: "test",
         capability,
@@ -683,8 +695,8 @@ fn unknown_oauth_provider_remediation_matches_the_served_seat_fix() {
 }
 
 #[test]
-fn schema_version_is_thirty() {
-    assert_eq!(SCHEMA_VERSION, 30);
+fn schema_version_is_thirty_one() {
+    assert_eq!(SCHEMA_VERSION, 31);
 
     let context = ctx(
         config_with_overrides(),
@@ -693,7 +705,7 @@ fn schema_version_is_thirty() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 30);
+    assert_eq!(report.schema_version, 31);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2511,6 +2523,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         orphan_seats: Vec::new(),
         probe_results: Vec::new(),
         would_trim: None,
+        cache_ignore: empty_cache_report(),
         now_unix: 1_000,
         binary_version: "test",
         capability: CapabilityInputs {
@@ -2690,7 +2703,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 30);
+    assert_eq!(no_net.schema_version, 31);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
