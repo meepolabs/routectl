@@ -1387,7 +1387,8 @@ carried on a message, content part, function call or reasoning item are
 withheld too. Each withheld tool, item or member is declared as a removal
 and the request counts once as the `unknown_member_withheld` drop class
 (see [LOGGING.md](LOGGING.md)). The API-key and ChatGPT-OAuth lanes
-forward all of these as the client sent them.
+forward all of these as the client sent them, except a `cache_control`
+member on a non-function tool, which every Responses lane removes.
 
 Validation (build, reload, `config check`) rejects an incoherent entry:
 

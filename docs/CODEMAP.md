@@ -113,8 +113,7 @@ license.
   `EgressKind`, `Lane::of`
   (FIDELITY iff same wire dialect), `LaneClass`, `Leg`; static labels;
   `forwards_unknowns` (does this request's carried unknown members ride this
-  egress) and `renders_unknowns` (may a render emit response members a parser
-  stamped with an upstream wire dialect), the one same-dialect decision
+  egress), the request-leg same-dialect decision
 - `src/wire_check/diff.rs` -- `diff`: total structural compare of two
   `serde_json::Value` bodies into content-free `Finding`s (`WirePath` +
   `PathClass`); FIDELITY order-aware array alignment with declared-edit
@@ -148,7 +147,9 @@ license.
   failed, cancelled and error fail the stream
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for
   upstream stream events the canonical chunk does not model: Anthropic-API
-  `ContentBlock*` raw bytes, and whole Responses `OutputItem` JSON values
+  `ContentBlock*` raw bytes, and whole Responses `OutputItem` JSON values;
+  carriage variants `UnknownEvent`, `UnknownBlockDelta` and `KnownEventExtras`
+  for same-dialect stream events and members
 - `src/upstream_meta.rs` -- transport-internal `UpstreamMeta` carrier
   (skip-serialized on `ChatResponse`/`ChatChunk`) for non-canonical upstream
   metadata; today the provider-namespaced `AnthropicUnifiedQuota` (the
@@ -159,9 +160,9 @@ license.
   (`openai_responses`: the upstream `message` item id and `created_at` a
   Responses ingress echoes, its unmodeled top-level `extras` and
   `ResponsesItemMembers` by item id / call_id, field-wise `merge`),
-  `wire_dialect` (the dialect a parser read the body in, which
-  `renders_unknowns` checks), `OpaqueSseEvent` carriage variants
-  (`UnknownEvent`, `UnknownBlockDelta`, `KnownEventExtras`), plus
+  `wire_dialect` (the dialect a parser read the body in) with
+  `renders_unknowns` (may a render emit response members so stamped: the
+  response-leg same-dialect decision), plus
   `OpeningUsage` (an Anthropic-shape stream's first-event input + disjoint
   cache fields, exact, with `OpeningUsageOrigin` wire label, `observed_at` and
   `from_vendor_endpoint` (first-party host or InvokeModel vs any compatible
