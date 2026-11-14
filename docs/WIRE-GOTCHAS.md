@@ -696,7 +696,12 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   kept only if it sums to that total, and otherwise no split is reported
   (the whole total is unknown lifetime, never guessed); a delta stating no
   write total merges per lifetime over the opener with the placeholder
-  rule. Lifetimes are parsed from the member names, so
+  rule. A turn in which a server tool such as web search adds content
+  partway through hits the no-split case: the opener's split covers only
+  the writes before the tool ran, while the closing delta states the
+  turn's whole write total with no `cache_creation`, so the total is
+  recorded with an unknown lifetime and leaves the row unpriced.
+  Lifetimes are parsed from the member names, so
   `ephemeral_30m_input_tokens` reaches the canonical usage and a
   same-format client as 1800 seconds. Pinned by
   `message_delta_cache_creation_merge_follows_the_stated_total` and

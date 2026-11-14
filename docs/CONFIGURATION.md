@@ -4701,6 +4701,23 @@ equivalent, never `~$0.00`. A group
 whose subscription rows recorded no tokens at all resolves a measured
 `~$0.00`: nothing was used, so nothing is the honest equivalent.
 
+**Cache writes with no lifetime.** Cache writes are priced per lifetime,
+so written tokens the upstream reported with no lifetime cannot be
+priced, and routectl never guesses one. Cost is resolved per group of
+rows sharing a model, provider, upstream, alias and provider kind in
+the window, so one such row leaves that whole group without a price or
+an API-equivalent value. A `routectl usage` line made only of such
+groups reads `n/a` (API key) or plain `n/a (subscription)` (no `~$`);
+a line that also covers priced groups shows only their figure. On the
+dashboard such an API-key group reads `unpriced`, and a view that mixes
+it with priced groups reads `partial`. The tokens still count in
+`cache_wr` and the dashboard's cache-write figure. A streamed Anthropic turn in which a server tool
+such as web search adds content partway through the turn produces such
+a row: the closing event reports the turn's whole cache-write total
+with no per-lifetime split, and the split on the opening event covers
+only the writes made before the tool ran, so the row records the total
+with an unknown lifetime.
+
 A footer reports the window's cache-hit-rate
 (`cache_read / (cache_read + input)`) and error count, then one `walk:`
 line with the window's dispatch walk counts summed over its request rows:
