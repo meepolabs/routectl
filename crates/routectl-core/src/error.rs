@@ -248,8 +248,9 @@ pub enum Error {
 /// chars) plus a `body_len` total-byte marker, so a request-fault envelope
 /// carried up to [`crate::MAX_ERROR_BODY_BYTES`] cannot flood a `?e` log
 /// sink (retry / fallback / stream-fallback WARN lines) at full size. Only
-/// the Debug rendering is bounded; consumers that read the `body` FIELD
-/// directly (the capability matcher) still see it in full. From `extras` it
+/// the Debug rendering is bounded; the classifiers and the capability
+/// matcher read the carried parse ([`Error::parsed_body`]), never this
+/// rendering. From `extras` it
 /// renders the request id and the typed reason (as its stable token), never
 /// the parsed body. A carried [`RefusalReason`] also renders as its stable
 /// token.

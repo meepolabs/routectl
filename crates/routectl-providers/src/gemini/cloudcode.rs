@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use routectl_core::identity::antigravity::{IDE_NAME, PINNED_IDE_VERSION, antigravity_user_agent};
-use routectl_core::{Error, ParsedErrorBody, Result, sanitize_for_log, sanitize_upstream_body};
+use routectl_core::{Error, ParsedErrorBody, Result, sanitize_upstream_body};
 
 use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 
@@ -213,9 +213,11 @@ pub fn default_tier(load_resp: &Value) -> String {
 /// Trim and sanitize an upstream error body for inclusion in a routectl
 /// Error. Two-pass, mirroring the shared reference pattern (bedrock):
 /// `sanitize_upstream_body` trims edges, collapses HTML pages to a short
-/// marker, and caps length on a char boundary (never panics mid-codepoint
-/// on multibyte UTF-8); `sanitize_for_log` then strips the control / ANSI
-/// chars the first pass leaves. Never carries the bearer token (the token
+/// marker, scrubs, and caps length on a char boundary (never panics
+/// mid-codepoint on multibyte UTF-8); `upstream_text_for_log` then scrubs
+/// the excerpt again before its own shorter cap and strips the control /
+/// ANSI chars the first pass leaves, so no cut lands ahead of a scrub.
+/// Never carries the bearer token (the token
 /// is only ever set in the Authorization header, never echoed by these
 /// endpoints in a body).
 ///
@@ -234,7 +236,7 @@ fn clean_error_body(read: &UpstreamErrorRead) -> String {
         }
         None => routectl_core::redact_error_body_text(read.text()),
     };
-    sanitize_for_log(&sanitize_upstream_body(&redacted))
+    routectl_core::upstream_text_for_log(&sanitize_upstream_body(&redacted))
 }
 
 /// Whether `err` signals that the resolved Cloud Code project no longer

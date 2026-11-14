@@ -1924,6 +1924,10 @@ mod upstream_parse_cap_tests;
 mod upstream_detail_scrub_tests;
 
 #[cfg(test)]
+#[path = "carried_excerpt_reader_tests.rs"]
+mod carried_excerpt_reader_tests;
+
+#[cfg(test)]
 #[path = "stream_evidence_settle_tests.rs"]
 mod stream_evidence_settle_tests;
 

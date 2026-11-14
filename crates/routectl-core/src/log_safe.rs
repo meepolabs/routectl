@@ -143,9 +143,10 @@ pub(crate) fn sanitize_detail_with_flag(s: &str, redact: bool) -> String {
 /// error envelope or `body_excerpt=...` log fields. If the upstream
 /// returned HTML (a marketing 404 page from a misconfigured base_url,
 /// a CDN error page, etc.), strip it down to a short marker rather
-/// than dumping kilobytes of markup. Otherwise truncate to
-/// [`crate::MAX_LOG_BODY_EXCERPT`] characters with a `... [truncated]`
-/// tail. Used by openai_compat, anthropic_api, and bedrock so
+/// than dumping kilobytes of markup. Otherwise a body over
+/// [`crate::MAX_LOG_BODY_EXCERPT`] is scrubbed, then truncated to that many
+/// characters with a `... [truncated]` tail (see
+/// [`sanitize_upstream_body_with_cap`] for the order). Used by openai_compat, anthropic_api, and bedrock so
 /// operators see consistent excerpt shapes when grepping `body_excerpt`
 /// across providers.
 pub fn sanitize_upstream_body(body: &str) -> String {
@@ -311,6 +312,14 @@ fn floor_char_boundary(s: &str, cap: usize) -> usize {
 /// [`crate::MAX_ERROR_BODY_BYTES`]) must use
 /// [`sanitize_upstream_body_with_byte_cap`] instead -- char-count
 /// truncation of multi-byte input can emit up to `4 * cap` bytes.
+///
+/// A body at or under `cap` bytes is returned trimmed and otherwise as it
+/// was. A longer one is bounded at [`crate::MAX_ERROR_BODY_BYTES`], run
+/// through [`crate::scrub_upstream_text`], and only then cut to `cap` chars:
+/// the scrub must see the text before the cut, or a credential the cut
+/// splits survives as an unrecognizable fragment. The `... [truncated]`
+/// marker is appended even when the scrub alone brought the text under
+/// `cap`, so an over-cap excerpt never parses as JSON.
 pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
     if let Some(marker) = html_error_marker(body) {
         return marker;
@@ -319,7 +328,11 @@ pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
     if trimmed.len() <= cap {
         return trimmed.to_string();
     }
-    let mut s = trimmed.chars().take(cap).collect::<String>();
+    let bounded = &trimmed[..floor_char_boundary(trimmed, crate::MAX_ERROR_BODY_BYTES)];
+    let mut s = crate::scrub_upstream_text(bounded)
+        .chars()
+        .take(cap)
+        .collect::<String>();
     s.push_str("... [truncated]");
     s
 }
@@ -2250,3 +2263,7 @@ mod credential_tests;
 #[cfg(test)]
 #[path = "log_safe_knob_tests.rs"]
 mod knob_tests;
+
+#[cfg(test)]
+#[path = "log_safe_excerpt_scrub_tests.rs"]
+mod excerpt_scrub_tests;

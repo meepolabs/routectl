@@ -238,6 +238,33 @@ pub mod tests {
         );
     }
 
+    /// What is wrong with the error's Display and Debug renderings, one
+    /// entry per fault (empty when they pass): neither may carry the planted
+    /// fragment; Display keeps the clean sentinel and a redaction; Debug
+    /// keeps the sentinel or, for a JSON-shaped excerpt that cannot parse,
+    /// the fixed not-excerpted marker in its place.
+    pub fn rendering_faults(row: &str, err: &routectl_core::Error, planted: &str) -> Vec<String> {
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        let mut faults = Vec::new();
+        for (sink, text) in [("Display", &display), ("Debug", &debug)] {
+            if text.contains(planted) {
+                faults.push(format!("{row}: planted {planted:?} reached {sink}: {text}"));
+            }
+        }
+        if !(display.contains(CLEAN_SENTINEL) && display.contains("[redacted]")) {
+            faults.push(format!(
+                "{row}: Display lost the sentinel or the redaction: {display}"
+            ));
+        }
+        if !(debug.contains(CLEAN_SENTINEL) || debug.contains("bytes, not excerpted)")) {
+            faults.push(format!(
+                "{row}: Debug shows neither the sentinel nor the marker: {debug}"
+            ));
+        }
+        faults
+    }
+
     #[derive(Debug)]
     enum FakeAuthKind {
         ApiKey,

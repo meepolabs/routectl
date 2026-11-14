@@ -322,15 +322,13 @@ JSON or not, still passes the upstream-text scrub (below) before any
 cap, which also redacts a credential-named query parameter
 (`?token=...`) and the token after `Bearer `. The WARN `body_excerpt`
 renders the upstream `error.message`, or the redacted body when it
-carries none, uncut until the scrub has run. One residual: where a lane
-carries its own client excerpt in place of an error body it will not
-pass on (a non-envelope body on openai-compat, openai-responses and gemini,
-an AWS-shaped body on anthropic-api, a Bedrock body, the Gemini Cloud Code
-onboarding error), that excerpt is already cut at 512 characters, so a
-rendered error (`%err` / `?err`) scrubs the cut text and can show the
-part of a credential the cut split. The WARN excerpt itself is bounded
-at 65,536 characters before the scrub, so a credential straddling that bound in a
-larger non-JSON body can do the same. The scrub
+carries none, uncut until the scrub has run. Where a lane carries its
+own 512-character client excerpt in place of an error body it will not
+pass on, that excerpt is scrubbed before it is cut, so a rendered error
+(`%err` / `?err`) never shows part of a credential the cut split. One
+residual: the WARN excerpt is bounded at 65,536 characters before the
+scrub, so a credential straddling that bound in a larger non-JSON body
+can show its first part. The scrub
 matches shapes, so upstream text still keeps a secret under a query
 parameter or key whose name is not credential-like (`?sig=...`), an
 opaque secret with no known vendor prefix, a bearer token shorter than

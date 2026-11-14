@@ -416,6 +416,18 @@ mod translation_drop_observation_tests;
 ))]
 mod stream_terminal_observation_tests;
 
+// Every lane carrying its own excerpt of an upstream error body renders the
+// error with each credential redacted before the excerpt cut.
+#[cfg(all(
+    test,
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini",
+    feature = "bedrock"
+))]
+mod carried_excerpt_scrub_tests;
+
 // Each provider's own `provider_kind=` token agrees with the shared table.
 #[cfg(test)]
 mod provider_kind_tests;
