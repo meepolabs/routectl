@@ -57,6 +57,7 @@ struct KnownUndeclared {
 }
 
 const CHAT: &str = "chat->openai-compat";
+const RESPONSES: &str = "responses->openai-responses";
 const BEDROCK_INVOKE: &str = "anthropic->bedrock-invoke";
 const BEDROCK_CONVERSE: &str = "anthropic->bedrock-converse";
 const RESPONSES_MANTLE: &str = "responses->openai-responses-mantle";
@@ -64,7 +65,22 @@ const ANTHROPIC_TO_RESPONSES: &str = "anthropic->openai-responses";
 const CHAT_TO_RESPONSES: &str = "chat->openai-responses";
 
 /// Findings the check correctly reports that no declaration explains.
-const KNOWN_UNDECLARED: &[KnownUndeclared] = &[];
+const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
+    KnownUndeclared {
+        lane: RESPONSES,
+        leg: Leg::Request,
+        path: "/input",
+        reason: "undeclared routectl edit: the Responses egress sends a string input as a \
+                 one-message list without declaring the rewrite",
+    },
+    KnownUndeclared {
+        lane: RESPONSES,
+        leg: Leg::Response,
+        path: "/error",
+        reason: "real loss: the render owns `error` and writes it only on a failed response, \
+                 so an upstream's `error: null` never reaches the client",
+    },
+];
 
 /// The client dialect a case speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1121,6 +1137,20 @@ fn responses_cases() -> Vec<Case> {
             responses_provider,
         ),
         case(
+            "responses/string-input",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": "hi"}),
+            responses_stream(),
+            responses_provider,
+        ),
+        case(
+            "responses/upstream-error-null",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            responses_stream_with_error_null(),
+            responses_provider,
+        ),
+        case(
             "responses/instructions",
             Ingress::Responses,
             json!({"model": ALIAS, "instructions": "be brief", "input": input}),
@@ -1215,6 +1245,14 @@ fn responses_cases() -> Vec<Case> {
 fn responses_stream_with_unmodeled_members() -> ResponseTemplate {
     let mut done = responses_document_with_unmodeled_usage();
     done["service_tier"] = json!("default");
+    responses_stream_of(done)
+}
+
+/// The plain answer with the `error: null` a completed upstream response
+/// carries.
+fn responses_stream_with_error_null() -> ResponseTemplate {
+    let mut done = responses_document();
+    done["error"] = Value::Null;
     responses_stream_of(done)
 }
 

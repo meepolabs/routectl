@@ -6,12 +6,13 @@
 # each driven by a curl stub through scripts/capture_driver.sh against the
 # REAL routectl binary:
 #
-#   request-leg-plant   a Responses request carrying `temperature`, which
-#                       the responses->openai-responses egress drops
-#   response-leg-plant  a Responses stream whose message item carries an
-#                       `id`, which the responses->openai-responses egress
-#                       drops; the mock plants the id only for this cell,
-#                       recognised by a marker in its input text
+#   request-leg-plant   a Responses request whose `input` is a bare string,
+#                       which the responses->openai-responses egress
+#                       rewrites into a message list without declaring it
+#   response-leg-plant  a Responses stream whose completed response carries
+#                       `error: null`, which the responses->openai-responses
+#                       render never writes; the mock plants it only for
+#                       this cell, recognised by a marker in its input text
 #   clean-control       a plain chat completion: no finding, nonzero checks
 #
 # Both plants are entries of KNOWN_UNDECLARED in
@@ -110,7 +111,7 @@ python3 - "$KNOWN_SOURCE" "$weld_control" <<'PY'
 import re, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 cut = re.sub(
-    r'\s*KnownUndeclared \{\s*lane: RESPONSES,\s*leg: Leg::Request,\s*path: "/temperature",.*?\},',
+    r'\s*KnownUndeclared \{\s*lane: RESPONSES,\s*leg: Leg::Request,\s*path: "/input",.*?\},',
     "", src, count=1, flags=re.S)
 open(sys.argv[2], "w", encoding="utf-8").write(cut)
 PY

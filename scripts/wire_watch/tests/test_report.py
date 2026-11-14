@@ -179,14 +179,14 @@ class RecordedPlantTests(RunCase):
         rows = self.findings(built)
 
         self.assertEqual([(r["lane"], r["leg"], r["path_class"], r["example_paths"]) for r in rows],
-                         [("responses->openai-responses", "request", "missing", ["/temperature"])])
+                         [("responses->openai-responses", "request", "changed", ["/input"])])
         self.assertEqual(rows[0]["count"], 1)
 
     def test_response_leg_plant_yields_one_response_row(self) -> None:
         rows = self.findings(self.build([plant("response-leg-plant")]))
 
         self.assertEqual([(r["lane"], r["leg"], r["example_paths"]) for r in rows],
-                         [("responses->openai-responses", "response", ["/output/0/id"])])
+                         [("responses->openai-responses", "response", ["/error"])])
 
     def test_clean_control_passes_with_no_rows(self) -> None:
         built = self.build([plant("clean-control")])

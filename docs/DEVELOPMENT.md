@@ -998,8 +998,8 @@ copy of `scripts/` with two throwaway lane configs (`sample_one_in = 1`):
 
 | Cell | Lane | Plant | Expected finding |
 |---|---|---|---|
-| `request-leg-plant` | `responses->openai-responses` | the Responses request carries `temperature` | `request` leg, `/temperature` |
-| `response-leg-plant` | `responses->openai-responses` | the upstream Responses message item carries an `id` (planted only for the request whose input text carries the cell's marker) | `response` leg, `/output/0/id` |
+| `request-leg-plant` | `responses->openai-responses` | the Responses request sends `input` as a bare string | `request` leg, `/input` (`changed`) |
+| `response-leg-plant` | `responses->openai-responses` | the upstream's completed Responses document carries `error: null` (planted only for the request whose input text carries the cell's marker) | `response` leg, `/error` |
 | `clean-control` | `chat->openai-compat` | none (plain completion) | `loss_findings: []`, nonzero `checks` |
 
 Both plants are known undeclared losses (`KNOWN_UNDECLARED` in

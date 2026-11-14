@@ -46,8 +46,8 @@ class Plant:
         return (self.lane, self.leg, self.path)
 
 
-REQUEST_PLANT = Plant(RESPONSES_LANE, "request", "/temperature")
-RESPONSE_PLANT = Plant(RESPONSES_LANE, "response", "/output/0/id")
+REQUEST_PLANT = Plant(RESPONSES_LANE, "request", "/input")
+RESPONSE_PLANT = Plant(RESPONSES_LANE, "response", "/error")
 PLANTS = (REQUEST_PLANT, RESPONSE_PLANT)
 
 # name -> (lane config template, expected ingress, route, plant or None)
@@ -74,10 +74,8 @@ def usage(message: str) -> int:
 
 # The response-leg cell's input text, forwarded verbatim to the mock: it is
 # how the mock tells that cell from the request-leg cell on the same route,
-# so only the response-leg answer carries a message item id. The cell does
-# not ask to stream: a streamed Responses render re-stamps `created_at`, a
-# second known loss that would ride along with the plant.
-ITEM_ID_MARKER = "plant the message item id"
+# so only the response-leg answer carries `error: null`.
+ERROR_NULL_MARKER = "plant the null error member"
 
 
 def responses_input(text: str) -> list:
@@ -88,12 +86,9 @@ def responses_input(text: str) -> list:
 def request_body(cell: str, plants_on: bool) -> tuple[str, dict]:
     _, _, route, _ = CELLS[cell]
     if cell == "request-leg-plant":
-        body: dict = {"model": "planted", "input": responses_input("hi")}
-        if plants_on:
-            body["temperature"] = 0.3
-        return route, body
+        return route, {"model": "planted", "input": "hi" if plants_on else responses_input("hi")}
     if cell == "response-leg-plant":
-        return route, {"model": "planted", "input": responses_input(ITEM_ID_MARKER)}
+        return route, {"model": "planted", "input": responses_input(ERROR_NULL_MARKER)}
     return route, {"model": "planted", "messages": [{"role": "user", "content": "hi"}]}
 
 
@@ -127,26 +122,26 @@ def chat_complete() -> dict:
 RESPONSES_CREATED_AT = 1_700_000_000
 
 
-def carries_item_id_marker(body: dict) -> bool:
-    return ITEM_ID_MARKER in json.dumps(body.get("input"))
+def carries_error_null_marker(body: dict) -> bool:
+    return ERROR_NULL_MARKER in json.dumps(body.get("input"))
 
 
-def responses_stream(item_id: bool) -> bytes:
-    """The upstream answer; `item_id` plants a message item id the egress
-    drops, so the client's document lacks `/output/0/id`."""
-    message = {"type": "message", "role": "assistant", "status": "completed",
+def responses_stream(error_null: bool) -> bytes:
+    """The upstream answer; `error_null` plants the `error: null` a completed
+    response carries, which the render never writes, so the client's
+    document lacks `/error`."""
+    message = {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
                "content": [{"type": "output_text", "text": "ok", "annotations": []}]}
-    if item_id:
-        message["id"] = "msg_planted"
     done = {
         "id": "resp_1", "object": "response", "created_at": RESPONSES_CREATED_AT,
         "status": "completed", "model": UPSTREAM_MODEL,
         "output": [message],
         "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
     }
-    added = {"type": "message", "role": "assistant", "status": "in_progress", "content": []}
-    if item_id:
-        added["id"] = message["id"]
+    if error_null:
+        done["error"] = None
+    added = {"type": "message", "id": message["id"], "role": "assistant",
+             "status": "in_progress", "content": []}
     created = dict(done, status="in_progress", output=[])
     return sse([
         ("response.created", {"type": "response.created", "response": created}),
@@ -188,8 +183,8 @@ def make_handler(plants_on: bool) -> type:
                 self.reply(400, "text/plain", b"bad json")
                 return
             if self.path.endswith("/responses"):
-                item_id = plants_on and carries_item_id_marker(body)
-                self.reply(200, "text/event-stream", responses_stream(item_id))
+                error_null = plants_on and carries_error_null_marker(body)
+                self.reply(200, "text/event-stream", responses_stream(error_null))
             elif self.path.endswith("/chat/completions"):
                 self.reply(200, "application/json", json.dumps(chat_complete()).encode())
             else:

@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-11-01T04:11:46Z",
+  "as_of": "2026-11-14T09:34:08Z",
   "data": {
     "learned_negatives": [],
     "pools": [],
@@ -23,7 +23,7 @@
         },
         "half_open_probe_in_flight": false,
         "last_outcome": "ok",
-        "last_outcome_at_ms": 1793506306979,
+        "last_outcome_at_ms": 1794648848057,
         "learned_lane": "mock#planted-upstream",
         "nickname": "planted",
         "open_since_ms": null,
@@ -41,7 +41,7 @@
         {
           "count": 2,
           "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1793506306,
+          "last_seen_unix_secs": 1794648848,
           "outcome": "clean"
         }
       ],
