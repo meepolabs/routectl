@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Self-test for the gate registry's public-api subcommand, the informational
-# public-API report wrapper, and the wiring that keeps that check
-# informational. Runs no cargo and no cargo-public-api.
+# Self-test for the gate registry's pre-push and public-api subcommands, the
+# informational public-API report wrapper, and the wiring that keeps that
+# check informational. Runs no cargo and no cargo-public-api.
 #
 # Pins:
+#   - `test-gate.sh pre-push` runs the wire-watch self-test, then the
+#     workspace cargo test with HARNESS_ARGS; a failing self-test ends the
+#     gate with its exit code before cargo starts (checked on a scratch copy
+#     of the registry beside stub commands);
 #   - `test-gate.sh --print public-api` is exactly the public-api.sh
 #     --check over every crate, and the subcommand refuses extra arguments;
 #   - public-api-report.sh always exits 0 and classifies a stub check's
@@ -54,6 +58,53 @@ if [[ "$rc" -eq 2 ]]; then
     pass "public-api refuses extra arguments (exit 2)"
 else
     fail "public-api with an extra argument exited $rc, want 2"
+fi
+
+WIRE_WATCH_STEP="bash scripts/wire_watch/wire_watch.test.sh"
+PRE_PUSH_CARGO="cargo test --workspace --profile test-release -- --skip egress_replay_all --skip ingress_replay_all"
+
+got="$(bash "$REGISTRY" --print pre-push --exact x 2>&1)"
+if [[ "$got" == "$(printf '%s\n' "$WIRE_WATCH_STEP" "$PRE_PUSH_CARGO --exact x")" ]]; then
+    pass "--print pre-push is the wire-watch self-test, then cargo test with the harness args"
+else
+    fail "--print pre-push printed '$got'"
+fi
+
+# The registry copied into a scratch root whose wire-watch self-test is a
+# stub exiting $WIRE_WATCH_RC, with a cargo stub on PATH; both append their
+# name and argv to one log, so the log is the run order.
+PRE_PUSH_ROOT="$TMP/pre-push-root"
+PRE_PUSH_LOG="$TMP/pre-push-invoked"
+mkdir -p "$PRE_PUSH_ROOT/scripts/wire_watch" "$PRE_PUSH_ROOT/bin"
+cp "$REGISTRY" "$PRE_PUSH_ROOT/scripts/test-gate.sh"
+# shellcheck disable=SC2016 # the stub expands these when it runs
+printf '#!/bin/sh\necho "wire-watch $*" >>"%s"\nexit "${WIRE_WATCH_RC:-0}"\n' "$PRE_PUSH_LOG" \
+    >"$PRE_PUSH_ROOT/scripts/wire_watch/wire_watch.test.sh"
+printf '#!/bin/sh\necho "cargo $*" >>"%s"\n' "$PRE_PUSH_LOG" >"$PRE_PUSH_ROOT/bin/cargo"
+chmod +x "$PRE_PUSH_ROOT/bin/cargo"
+
+# Runs the scratch pre-push gate with the wire-watch stub exiting $1 and
+# harness args "--exact x". Sets RC and RAN (the invocation log).
+run_pre_push() {
+    rm -f "$PRE_PUSH_LOG"
+    WIRE_WATCH_RC="$1" PATH="$PRE_PUSH_ROOT/bin:$PATH" \
+        bash "$PRE_PUSH_ROOT/scripts/test-gate.sh" pre-push --exact x >/dev/null 2>&1
+    RC=$?
+    RAN="$(cat "$PRE_PUSH_LOG" 2>/dev/null)"
+}
+
+run_pre_push 0
+if [[ "$RC" -eq 0 && "$RAN" == "$(printf '%s\n' "wire-watch " "$PRE_PUSH_CARGO --exact x")" ]]; then
+    pass "pre-push runs the wire-watch self-test, then cargo test with the harness args"
+else
+    fail "pre-push with a passing self-test exited $RC and ran '$RAN'"
+fi
+
+run_pre_push 3
+if [[ "$RC" -eq 3 && "$RAN" == "wire-watch " ]]; then
+    pass "a failing wire-watch self-test ends pre-push with its exit code before cargo"
+else
+    fail "pre-push with a self-test exiting 3 exited $RC and ran '$RAN'"
 fi
 
 # --- public-api report wrapper ---------------------------------------------

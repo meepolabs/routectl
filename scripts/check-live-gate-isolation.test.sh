@@ -311,17 +311,17 @@ fi
 # A registry copy's command for a subcommand, as its --print mode prints it.
 registry_command() { bash "$1" --print "$2" 2>/dev/null; }
 
-# Runs the registry's pre-push subcommand against a `cargo` stub on PATH,
-# with any extra registry flags given, and prints what the stub recorded:
-# its argv when it ran, nothing when the registry never reached it. The stub
-# exits 0, so nothing builds.
+# Runs the registry's workspace-all-features subcommand, whose only command
+# is cargo, against a `cargo` stub on PATH, with any extra registry flags
+# given, and prints what the stub recorded: its argv when it ran, nothing
+# when the registry never reached it. The stub exits 0, so nothing builds.
 stub_cargo_run() {
     local dir="$TMP/stub-cargo" log="$TMP/stub-cargo/invoked"
     mkdir -p "$dir"
     rm -f "$log"
     printf '#!/bin/sh\nprintf "%%s\\n" "$*" >"%s"\n' "$log" >"$dir/cargo"
     chmod +x "$dir/cargo"
-    PATH="$dir:$PATH" bash "$GATE_REGISTRY" "$@" pre-push >/dev/null 2>&1
+    PATH="$dir:$PATH" bash "$GATE_REGISTRY" "$@" workspace-all-features >/dev/null 2>&1
     [[ -f "$log" ]] && cat "$log"
     return 0
 }
@@ -330,7 +330,7 @@ invoked="$(export TEST_GATE_DRY_RUN=1; stub_cargo_run)"
 if [[ "$invoked" == "test --workspace "* ]]; then
     pass "an inherited TEST_GATE_DRY_RUN=1 does not turn a gate into a no-op"
 else
-    fail "with TEST_GATE_DRY_RUN=1 exported, pre-push never ran cargo (stub saw: '$invoked')"
+    fail "with TEST_GATE_DRY_RUN=1 exported, the gate never ran cargo (stub saw: '$invoked')"
 fi
 
 invoked="$(stub_cargo_run --print)"

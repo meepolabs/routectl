@@ -248,14 +248,16 @@ repos:
       # A flaky check on a path where a human is waiting costs more than it
       # catches; CI runs it serially with nobody blocked.
       #
-      # The command itself lives in scripts/test-gate.sh (`pre-push`), the
-      # one place every gate command is defined. It builds with the
-      # `test-release` profile: release correctness semantics (opt-level,
-      # no debug assertions, no overflow checks) without the thin-LTO,
-      # single-codegen-unit and panic=abort build cost of the shipped
-      # release profile.
+      # The commands themselves live in scripts/test-gate.sh (`pre-push`),
+      # the one place every gate command is defined: the wire-watch
+      # self-test first (no build, under a minute; it holds the wire-watch
+      # welds to the daemon's schema versions), then the workspace cargo
+      # test. The cargo test builds with the `test-release` profile:
+      # release correctness semantics (opt-level, no debug assertions, no
+      # overflow checks) without the thin-LTO, single-codegen-unit and
+      # panic=abort build cost of the shipped release profile.
       - id: cargo-test-workspace
-        name: cargo test --workspace --profile test-release (pre-push)
+        name: wire-watch self-test + cargo test --workspace --profile test-release (pre-push)
         entry: bash scripts/test-gate.sh pre-push
         language: system
         stages: [pre-push]

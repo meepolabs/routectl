@@ -3,9 +3,10 @@
 # repo's test gates run. The pre-push hook and CI call it (CI's all-features
 # run goes through scripts/check-live-gate-isolation.sh), and
 # docs/DEVELOPMENT.md points at it, so the commands cannot drift apart
-# across those places. Each subcommand prints the command it runs, then runs
-# it from the repo root. Logic beyond the command itself stays in the
-# dedicated scripts.
+# across those places. Each subcommand prints each command it runs, then runs
+# it from the repo root; a failing command ends the gate with its exit code
+# before any later one starts. Logic beyond the commands themselves stays in
+# the dedicated scripts.
 #
 # Test subcommands use the `test-release` profile (workspace Cargo.toml):
 # release correctness semantics with a cheaper build. The release-build
@@ -14,10 +15,16 @@
 # Usage:
 #   test-gate.sh [--print] <subcommand> [ARGS...]
 #   test-gate.sh pre-push [HARNESS_ARGS...]
+#       bash scripts/wire_watch/wire_watch.test.sh
 #       cargo test --workspace --profile test-release
 #         -- --skip egress_replay_all --skip ingress_replay_all
-#       The two skipped names are kept verbatim: those tests are
-#       report-only drivers over the local captured corpus and never gate.
+#       The wire-watch self-test runs first: it is stdlib python with no
+#       build (well under a minute), and it holds the welds to the daemon's
+#       wire schema versions, so a schema bump without its weld update
+#       fails here before the workspace build starts. HARNESS_ARGS reach
+#       only the cargo test. The two skipped names are kept verbatim: those
+#       tests are report-only drivers over the local captured corpus and
+#       never gate.
 #   test-gate.sh workspace-all-features [HARNESS_ARGS...]
 #       cargo test --workspace --all-features --profile test-release
 #         --offline --no-fail-fast
@@ -42,8 +49,8 @@
 # HARNESS_ARGS are appended after `--`, i.e. passed to the test harness
 # (e.g. a test-name filter or --nocapture), never to cargo.
 #
-# --print, given before the subcommand, prints the command on stdout, one
-# line, and exits 0 without running it, so a self-test can compare the
+# --print, given before the subcommand, prints the commands on stdout, one
+# line each in run order, and exits 0 without running them, so a self-test can compare the
 # commands themselves. It is a flag rather than an environment switch so an
 # inherited variable can never turn a real gate into a passing no-op.
 #
@@ -65,6 +72,18 @@ usage() {
 
 print_only=0
 
+# Runs one command of a multi-command gate; a failure ends the gate with
+# that command's exit code.
+step() {
+    if [[ "$print_only" -eq 1 ]]; then
+        printf '%s\n' "$*"
+        return 0
+    fi
+    printf '+ %s\n' "$*" >&2
+    (cd "$REPO_ROOT" && "$@") || exit
+}
+
+# Runs a gate's last command in place of this script.
 run() {
     if [[ "$print_only" -eq 1 ]]; then
         printf '%s\n' "$*"
@@ -90,6 +109,7 @@ shift
 
 case "$subcommand" in
     pre-push)
+        step bash scripts/wire_watch/wire_watch.test.sh
         run cargo test --workspace --profile test-release \
             -- --skip egress_replay_all --skip ingress_replay_all "$@"
         ;;

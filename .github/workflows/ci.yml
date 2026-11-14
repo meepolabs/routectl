@@ -509,8 +509,9 @@ jobs:
       - name: live-gate isolation self-test
         run: bash scripts/check-live-gate-isolation.test.sh
 
-      # The gate registry's public-api subcommand, the informational report
-      # wrapper, and the wiring that keeps the public-api job informational.
+      # The gate registry's pre-push and public-api subcommands, the
+      # informational report wrapper, and the wiring that keeps the
+      # public-api job informational.
       - name: gate registry self-test
         run: bash scripts/test-gate.test.sh
 

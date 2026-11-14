@@ -22,7 +22,8 @@ crates with feature gates also get reduced-feature legs. The exact gate
 commands live in [`scripts/test-gate.sh`](../scripts/test-gate.sh); run it
 with no
 arguments to list them (`bash scripts/test-gate.sh pre-push` reproduces
-the pre-push test leg; `bash scripts/test-gate.sh public-api` runs the
+the pre-push test leg: the wire-watch self-test, then the workspace
+`cargo test`; `bash scripts/test-gate.sh public-api` runs the
 informational public-API baseline check on demand, which needs the tooling
 described under "Commit gate").
 
@@ -227,6 +228,10 @@ every commit is what drives people to bypass the gate wholesale, taking
 the fast legs with it. It runs at the `pre-push` stage instead, once
 per push rather than once per commit -- the same protection against
 pushing a broken branch, at a fraction of the cost.
+That leg runs the wire-watch self-test
+(`scripts/wire_watch/wire_watch.test.sh`, stdlib python, under a minute)
+first, so a daemon wire-schema bump whose wire-watch weld was not updated
+fails before the workspace build starts rather than in CI after the push.
 
 The public-API baseline check is not a hook at any stage. It is
 informational (see [`public-api/POLICY.md`](../public-api/POLICY.md)):
@@ -235,7 +240,7 @@ which reports clean, drift (crates named) or could-not-run as one warning
 or notice annotation and always exits 0. The job continues on error and
 is not in the `required` job's `needs`, so it never blocks a merge.
 `scripts/test-gate.test.sh` is the self-test for the registry's
-`public-api` subcommand, that wrapper, and this wiring (the CI job runs
+`pre-push` and `public-api` subcommands, that wrapper, and this wiring (the CI job runs
 the wrapper, `required` does not depend on it, no hook runs the check);
 it runs in the commit stage and in CI.
 
