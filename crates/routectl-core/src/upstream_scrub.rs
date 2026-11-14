@@ -789,11 +789,13 @@ fn session_token_span_at(bytes: &[u8], at: usize, run: &mut RunCache) -> Option<
     let value_at = sep + 1 + run_len(bytes, sep + 1, |b| b == b' ' || b == b'\t');
     let start = after_optional_quote(bytes, value_at);
     let end = run.end_from(start, |from| {
-        from + run_len(bytes, from, |b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'%' | b'-')
-        })
+        from + run_len(bytes, from, session_token_char)
     });
     (end - start >= SESSION_TOKEN_MIN).then_some(start..end)
+}
+
+const fn session_token_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'%' | b'-')
 }
 
 /// Past an optional `"`, `'` or `\"` at `at`.
@@ -996,9 +998,7 @@ fn bearer_token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
         return None;
     }
     let start = at + NAME.len() + gap;
-    let body = run_len(bytes, start, |b| {
-        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'+' | b'/' | b'-')
-    });
+    let body = run_len(bytes, start, bearer_token_char);
     let token = &bytes[start..start + body];
     let carries_digit = token.iter().any(u8::is_ascii_digit);
     if !((carries_digit && body >= BEARER_TOKEN_MIN) || body >= BEARER_TOKEN_MIN_PLAIN) {
@@ -1008,11 +1008,33 @@ fn bearer_token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     Some(start..start + body + pad)
 }
 
+const fn bearer_token_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'+' | b'/' | b'-')
+}
+
 /// Shortest bearer token that counts when it carries a digit.
 const BEARER_TOKEN_MIN: usize = 6;
 
 /// Length at which a bearer token with no digit still counts as one.
 const BEARER_TOKEN_MIN_PLAIN: usize = 20;
+
+/// True when no span class above takes `b`, so every span the scrub
+/// redacts, except a quoted value, ends before it. A text cut just before
+/// such a byte loses no part of an unquoted credential the scrub would have
+/// matched whole; a quoted value the cut splits has lost its closing quote,
+/// and [`quoted_value`] then runs it to the end of the text. A rule added
+/// with a new span class joins this conjunction.
+pub const fn ends_every_span(b: u8) -> bool {
+    ends_arn(b)
+        && ends_form_value(b)
+        && ends_authority(b)
+        && !is_key_char(b)
+        && !upper_alnum(b)
+        && !bedrock_key_char(b)
+        && !base64_char(b)
+        && !session_token_char(b)
+        && !bearer_token_char(b)
+}
 
 const fn is_key_char(b: u8) -> bool {
     is_token_char(b) || b == b'.'

@@ -160,3 +160,34 @@ async fn cloud_code_onboarding_error_scrubs_before_its_shorter_cut() {
     let faults = rendering_faults("cloud code/key straddling char 256", &err, "sk-ant-api03-");
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
+
+/// A body over [`routectl_core::MAX_ERROR_BODY_BYTES`]: the sentinel, an ARN
+/// long enough that its `[redacted]` pulls the text after it to the front of
+/// the excerpt, then a JWT whose third segment the error-body bound leaves 5
+/// characters of, short of the scrub's 10-character segment floor.
+fn credential_split_by_the_error_body_bound() -> String {
+    let segment = "abcDEF1234".repeat(3);
+    let jwt = format!("eyJ{segment}.{segment}.{segment}");
+    let jwt_at = routectl_core::MAX_ERROR_BODY_BYTES - ("eyJ".len() + 2 * (segment.len() + 1) + 5);
+    let head = format!("{CLEAN_SENTINEL} arn:aws:iam::123456789012:role/");
+    let body = format!("{head}{} {jwt} tail", "r".repeat(jwt_at - head.len() - 1));
+    assert_eq!(body.find(&jwt), Some(jwt_at), "jwt offset");
+    body
+}
+
+#[tokio::test]
+async fn every_lane_drops_a_credential_the_error_body_bound_splits() {
+    let body = credential_split_by_the_error_body_bound();
+    let mut faults = Vec::new();
+    for lane in LANES {
+        let err = lane_error(lane, STATUS, &body).await;
+
+        faults.extend(rendering_faults(
+            &format!("{lane:?}/credential split by the error-body bound"),
+            &err,
+            "eyJ",
+        ));
+    }
+
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}

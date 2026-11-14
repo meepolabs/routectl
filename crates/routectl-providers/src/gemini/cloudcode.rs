@@ -214,10 +214,11 @@ pub fn default_tier(load_resp: &Value) -> String {
 /// Error. Two-pass, mirroring the shared reference pattern (bedrock):
 /// `sanitize_upstream_body` trims edges, collapses HTML pages to a short
 /// marker, scrubs, and caps length on a char boundary (never panics
-/// mid-codepoint on multibyte UTF-8); `upstream_text_for_log` then scrubs
-/// the excerpt again before its own shorter cap and strips the control /
-/// ANSI chars the first pass leaves, so no cut lands ahead of a scrub.
-/// Never carries the bearer token (the token
+/// mid-codepoint on multibyte UTF-8); `upstream_excerpt_for_log` then
+/// strips the control / ANSI chars the first pass leaves and, when the
+/// excerpt runs past its shorter cap, scrubs it again before that cut and
+/// appends the truncation marker, so no cut lands ahead of a scrub and a
+/// cut excerpt never parses. Never carries the bearer token (the token
 /// is only ever set in the Authorization header, never echoed by these
 /// endpoints in a body).
 ///
@@ -236,7 +237,7 @@ fn clean_error_body(read: &UpstreamErrorRead) -> String {
         }
         None => routectl_core::redact_error_body_text(read.text()),
     };
-    routectl_core::upstream_text_for_log(&sanitize_upstream_body(&redacted))
+    routectl_core::upstream_excerpt_for_log(&sanitize_upstream_body(&redacted))
 }
 
 /// Whether `err` signals that the resolved Cloud Code project no longer

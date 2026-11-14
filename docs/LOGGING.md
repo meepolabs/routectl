@@ -323,12 +323,19 @@ cap, which also redacts a credential-named query parameter
 (`?token=...`) and the token after `Bearer `. The WARN `body_excerpt`
 renders the upstream `error.message`, or the redacted body when it
 carries none, uncut until the scrub has run. Where a lane carries its
-own 512-character client excerpt in place of an error body it will not
-pass on, that excerpt is scrubbed before it is cut, so a rendered error
-(`%err` / `?err`) never shows part of a credential the cut split. One
-residual: the WARN excerpt is bounded at 65,536 characters before the
-scrub, so a credential straddling that bound in a larger non-JSON body
-can show its first part. The scrub
+own client excerpt in place of an error body it will not pass on (512
+characters, or 256 for the Gemini Cloud Code onboarding error), that
+excerpt is scrubbed before it is cut, and the text the scrub sees is
+bounded at 65,536 bytes back to the last byte no scrub rule takes, so a
+token the bound splits is dropped rather than shown. A rendered error
+(`%err` / `?err`) therefore never shows part of a credential the scrub
+recognizes that either cut split. An excerpt whose text ran past its
+cut always ends in `... [truncated]`, even when the scrub alone
+shortened it. The WARN excerpt is bounded the same way, stepping back
+at 65,536 bytes. Two residuals: the Bedrock request-fault envelope a 400
+or 422 carries, and the message a Bedrock in-stream exception carries,
+are cut at 65,536 bytes with no step back, so a credential straddling
+that cut in a larger body can show its first part. The scrub
 matches shapes, so upstream text still keeps a secret under a query
 parameter or key whose name is not credential-like (`?sig=...`), an
 opaque secret with no known vendor prefix, a bearer token shorter than

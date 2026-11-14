@@ -297,3 +297,59 @@ async fn over_cap_body_reads_the_same_to_every_reader_on_every_lane() {
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+/// A Cloud Code onboarding error envelope `len` characters long whose
+/// message ends in a vendor key the scrub collapses to `[redacted]`, so the
+/// scrubbed envelope is far shorter than the onboarding excerpt's 256-char
+/// cut and still valid JSON.
+fn onboarding_envelope(len: usize) -> String {
+    let open = r#"{"error":{"code":400,"status":"FAILED_PRECONDITION","message":"precondition failed ref sk-ant-api03-"#;
+    let close = r#""}}"#;
+    let body = format!(
+        "{open}{}{close}",
+        "S".repeat(len - open.len() - close.len())
+    );
+    assert_eq!(body.chars().count(), len);
+    body
+}
+
+fn onboarding_row(name: &'static str, len: usize, want: Reading) -> Row {
+    Row {
+        name,
+        lane: Lane::CloudCode,
+        status: 400,
+        body: onboarding_envelope(len),
+        want,
+    }
+}
+
+#[tokio::test]
+async fn onboarding_body_around_its_cuts_reads_the_same_to_every_reader() {
+    let not_parsed = || reading("BadRequest", None, false, "upstream error (HTTP 400)");
+    let rows = [
+        onboarding_row(
+            "at the onboarding cut",
+            256,
+            reading(
+                "BadRequest",
+                None,
+                true,
+                "upstream error (HTTP 400): precondition failed ref [redacted]",
+            ),
+        ),
+        onboarding_row("one past the onboarding cut", 257, not_parsed()),
+        onboarding_row("at the excerpt cut", 512, not_parsed()),
+        onboarding_row("one past the excerpt cut", 513, not_parsed()),
+    ];
+    let mut mismatches = Vec::new();
+    for row in rows {
+        let got = read(&row).await;
+
+        if got != row.want {
+            mismatches.push(format!("{}: got {got:?}", row.name));
+        }
+        assert!(!got.client_message.contains("sk-ant"), "{}", row.name);
+    }
+
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}

@@ -96,7 +96,7 @@ pub use log_safe::{
     trace_body_cap, trace_egress_body, trace_egress_headers, trace_ingress_body,
     trace_ingress_headers, trace_outgoing_body, trace_outgoing_headers, trace_stream_summary,
     trace_structural_summary, trace_upstream_response_headers, trace_upstream_success_body,
-    wrap_stream_with_summary,
+    upstream_excerpt_for_log, wrap_stream_with_summary,
 };
 pub use message_extras::split_message_extras;
 pub use parsed_error_body::{ParsedErrorBody, UpstreamBody, upstream_message_or_excerpt};

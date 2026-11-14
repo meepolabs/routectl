@@ -314,12 +314,14 @@ fn floor_char_boundary(s: &str, cap: usize) -> usize {
 /// truncation of multi-byte input can emit up to `4 * cap` bytes.
 ///
 /// A body at or under `cap` bytes is returned trimmed and otherwise as it
-/// was. A longer one is bounded at [`crate::MAX_ERROR_BODY_BYTES`], run
-/// through [`crate::scrub_upstream_text`], and only then cut to `cap` chars:
-/// the scrub must see the text before the cut, or a credential the cut
-/// splits survives as an unrecognizable fragment. The `... [truncated]`
-/// marker is appended even when the scrub alone brought the text under
-/// `cap`, so an over-cap excerpt never parses as JSON.
+/// was. A longer one is bounded at [`crate::MAX_ERROR_BODY_BYTES`] (stepping
+/// back, when that bound cuts it, to the last byte no scrub rule takes, so a
+/// token the bound splits is dropped), run through
+/// [`crate::scrub_upstream_text`], and only then cut to `cap` chars: the
+/// scrub must see the text before the cut, or a credential the cut splits
+/// survives as an unrecognizable fragment. The `... [truncated]` marker is
+/// appended even when the scrub alone brought the text under `cap`, so an
+/// over-cap excerpt never parses as JSON.
 pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
     if let Some(marker) = html_error_marker(body) {
         return marker;
@@ -328,13 +330,51 @@ pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
     if trimmed.len() <= cap {
         return trimmed.to_string();
     }
-    let bounded = &trimmed[..floor_char_boundary(trimmed, crate::MAX_ERROR_BODY_BYTES)];
-    let mut s = crate::scrub_upstream_text(bounded)
+    scrubbed_cut(trimmed, cap)
+}
+
+/// Log-field excerpt of upstream-authored `text`: a text of at most 256
+/// characters is control-filtered as [`sanitize_for_log`] does and not cut.
+/// A longer one is bounded, scrubbed and cut to 256 characters as
+/// [`sanitize_upstream_body_with_cap`] cuts an over-cap body, then
+/// control-filtered. Whether to cut is decided on the characters of `text`
+/// before the scrub, so a text that ran past 256 always ends in the
+/// `... [truncated]` marker and never parses as JSON.
+pub fn upstream_excerpt_for_log(text: &str) -> String {
+    if text.chars().count() <= MAX {
+        return sanitize_for_log(text);
+    }
+    let excerpt = scrubbed_cut(text, MAX);
+    sanitize_capped(&excerpt, excerpt.len())
+}
+
+/// The over-cap excerpt both public cutters share: `text`, already judged
+/// to run past `cap` before any scrub, bounded ([`bound_for_scrub`]),
+/// scrubbed, cut to `cap` chars, and always marked.
+fn scrubbed_cut(text: &str, cap: usize) -> String {
+    let mut s = crate::scrub_upstream_text(bound_for_scrub(text))
         .chars()
         .take(cap)
         .collect::<String>();
     s.push_str("... [truncated]");
     s
+}
+
+/// `text` bounded at [`crate::MAX_ERROR_BODY_BYTES`]. When the bound cuts
+/// it, the cut steps back to the last byte that ends every scrub span
+/// ([`crate::upstream_scrub::ends_every_span`]), so the scrub never sees
+/// part of a token the bound split; with no such byte the whole bounded
+/// text is dropped.
+fn bound_for_scrub(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    if bytes.len() <= crate::MAX_ERROR_BODY_BYTES {
+        return text;
+    }
+    let end = bytes[..=crate::MAX_ERROR_BODY_BYTES]
+        .iter()
+        .rposition(|&b| crate::upstream_scrub::ends_every_span(b))
+        .unwrap_or(0);
+    &text[..end]
 }
 
 /// Variant of [`sanitize_upstream_body_with_cap`] whose `cap` is a hard
