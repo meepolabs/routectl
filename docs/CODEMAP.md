@@ -31,14 +31,8 @@ license.
 
 ## routectl-core
 
-- `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
-  trait, log helpers, the canonical-key allowlist, `UpstreamReason`,
-  `RefusalReason`, `EligibilityReason`, and the request-observation types
-  (incl. `SkipCounts`, `WalkCounts`), the `[log]` knob resolvers
-  (`LogKnob`/`LogKnobSource`), and the upstream-text scrub (`scrub_upstream_text`,
-  `scrub_upstream_value`, `upstream_text_for_log`, `upstream_excerpt_for_log`,
-  `names_aws_principal`); declares the `provider_kind`, `upstream_reason`,
-  `refusal_reason` and `eligibility` modules
+- `src/lib.rs` -- crate root: module declarations and the crate's public
+  re-exports (wire schema, `Error`, `Provider`, log and upstream-scrub helpers)
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
   `ReasoningDetail`, `ReasoningConfig` (`is_off`, `is_off_effort`), `Usage`,
@@ -89,13 +83,9 @@ license.
   files and inline test modules. A small lexer finds each module's closing
   line, ignoring braces in comments (nested too) and string, raw-string and
   char literals, and panics on a module that never closes
-- `src/upstream_scrub.rs` -- `scrub_upstream_text`: redacts credential- and
-  principal-shaped substrings of decoded upstream text (rules in its doc
-  comment); `scrub_upstream_value` (the same over a JSON value, in place),
-  `upstream_text_for_log` (scrub, then control-filter and cap, for log
-  sinks), `names_aws_principal` (the ARN / account-id verdict alone), and the
-  crate-internal `ends_every_span` byte predicate `log_safe` bounds a text
-  at before scrubbing it. Hand-rolled, no regex
+- `src/upstream_scrub.rs` -- `scrub_upstream_text`, `scrub_upstream_value`,
+  `upstream_text_for_log`, `names_aws_principal`, crate-internal
+  `ends_every_span`: credential redaction of upstream-authored text
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift` and the router's wire-check WARN. Decides only --
@@ -387,13 +377,9 @@ license.
   wrapper, untrimmed; the single definition of that literal
 - `src/safe_token.rs` -- `is_safe_token`: shape gate for one token lifted
   from an upstream error message
-- `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions)
-  and their `body_trace_enabled` gate,
-  prompt and credential-key redaction (`redact_error_body_text` for upstream
-  error bodies), the upstream error-body excerpts (`sanitize_upstream_body*`,
-  `upstream_excerpt_for_log`), structural-summary extractor, `[log]`-block override
-  seeding and the per-knob resolvers (`resolve_trace_headers` & co., env >
-  config > default, returning `LogKnob`)
+- `src/log_safe.rs` -- `sanitize_for_log`, the `trace_*` body helpers,
+  `redact_error_body_text`, `sanitize_upstream_body*`, `upstream_excerpt_for_log`
+  and the `[log]` knob resolvers: log-safe rendering of untrusted text
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
   of an upstream error body carried on `Error::Upstream` (read via
   `Error::parsed_body`), plus its envelope / `error.*` accessors and
@@ -713,11 +699,9 @@ license.
   prefix, any form over the ceiling folds to a digest) -- injective on the
   escape path, collision-resistant on the digest fold -- and deterministic, so
   a `tool_use` id still equals its `tool_result` correlator on every lane
-- `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures
-  (401/403-vs-other auth-warn split) across egresses; renders the raw upstream
-  text through `upstream_text_for_log`. Its `pub` `#[cfg(test)]` `tests`
-  module also holds the planted-credential rows and the `rendering_faults`
-  check other lanes' sink tests share
+- `src/upstream_log.rs` -- `warn_upstream_failure`: the shared upstream-failure
+  WARN emitter; its `pub` `#[cfg(test)]` `tests` module holds the
+  planted-credential fixtures and checks other lanes' tests share
 - `src/stream_completion.rs` -- `StreamCompletion`: shared end-of-stream
   verdict for lanes whose wire closes each turn with a terminal event; each
   lane injects its own predicate, and a stream that ends before it yields a
@@ -732,9 +716,8 @@ license.
   stream counts once on slot and total per terminal-checked lane; a
   terminated stream, a consumer drop before the end, and an openai-compat
   mid-tool-call cut count nothing
-- `src/carried_excerpt_scrub_tests.rs` -- cross-lane guard: every lane that
-  carries its own upstream error-body excerpt renders the error (Display and
-  Debug) with each planted credential redacted, end to end against a mock 500
+- `src/carried_excerpt_scrub_tests.rs` -- cross-lane upstream-error excerpt
+  rendering regression tests
 - `src/upstream_error.rs` -- `UpstreamErrorRead` (+ `CarriedBody`): the one
   read of a non-success upstream response every lane's error mapper takes
   (all five lanes); capped body + parse, gated `Retry-After`, request id,
@@ -5884,12 +5867,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `cache_write_total_expr!`, the one both-era write-total expression (the v21
   total, else legacy 5m + 1h) behind `AggRow::cache_write_tokens` /
   `cache_write_present`
-- `src/query/deadline.rs` -- `DeadlineGuard::install(&mut UsageDb, deadline)`
-  (the guard holds that borrow and derefs to `UsageDb`): the
-  reusable connection-level read deadline (SQLite progress handler re-checked
-  every 10_000 VM ops, detached on every exit path including unwind). Per
-  CONNECTION rather than per statement, so one install bounds a multi-statement
-  read; used by `query/grouped.rs` and by the `/status/usage` panel
+- `src/query/deadline.rs` -- `DeadlineGuard::install(&mut UsageDb, deadline)`:
+  the connection-level read deadline shared by the ledger readers
 - `src/query/aggregate.rs` -- aggregate + breakdown queries over the requests
   table; exports `aggregate`, `errors_by_class` (flat per-group failure-class
   breakdown, same window predicate + group key as `aggregate`, sums to
@@ -6070,9 +6049,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `cache_write_lifetimes` bound values (a split with no total takes its sum;
   canonical JSON keyed by decimal seconds in numeric order; a split above the
   total is stored as reported); the writer binds only its output
-- `src/db.rs` -- `UsageDb` (`conn` / `conn_mut`) + `open` (WAL, 0600, migration ladder under
-  IMMEDIATE transactions) and the non-migrating read-only opens
-  `open_readonly`/`open_readonly_fastfail`; `OpenError`
+- `src/db.rs` -- `UsageDb`, `open`, `open_readonly`, `open_readonly_fastfail`,
+  `OpenError`: usage-DB connection open (writer and read-only)
 - `src/schema.rs` -- the ledger DDL (`requests`, `capability_learn_events`,
   `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (21); each
   version's columns are commented in the DDL itself. Also the v21
@@ -8193,28 +8171,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   already match byte-for-byte; a partial match writes the missing pieces while
   leaving matching ones untouched. A stale snapshot or a gate failure writes
   nothing
-- `src/cache_ignore.rs` -- (`pub(crate)`) the one cache-ignore assembler
-  that the daemon driver, `usage --detail` and doctor all render (report only;
-  nothing logged, no session ids).
-  `cache_ignore_report(&mut UsageDb, &Config, now_ms, deadline) ->
-  CacheIgnoreReport` evaluates configured anthropic-api / bedrock providers,
-  with rules from `routectl_router::cache_rules`, through
-  `routectl_usage::cache_ignore_lanes` under a `DeadlineGuard`, over the
-  fixed `CACHE_IGNORE_WINDOW` (6 h) ending at `now_ms`;
-  `read_cache_ignore_report(db_path, ..., budget)` does the same on its own
-  `open_readonly_fastfail` connection with the budget covering open and query.
-  Lane verdicts `LaneVerdict::{Ignoring, Clear, Insufficient}` (`ignoring` =
-  evidence >= `IGNORING_MIN_EVIDENCE`, no active turn). The report lists
-  `evaluated` providers and `not_evaluated` ones with a `NotEvaluatedReason`
-  (`HitsNotObservable`: `cache_hit_observable` false; `ConverseShape`: a
-  Bedrock provider on the Converse egress), each carrying its current
-  `supports_top_level_cache_control`; a ledger provider absent from config is
-  never counted or listed. `LaneIdentifiers::render` is the shared lane
-  provider / seat / model render (`seat_report::safe`, the model through
-  `upstream_text_for_log` first). Status `Evaluated` or `Unavailable(class)`
-  (`query_timeout`, `db_unavailable`, or via `CacheIgnoreReport::open_failed`
-  `no_data` / the `ledger_reader::open_error_class` token); `truncated`
-  carries the query's lane cap. Tests in `cache_ignore_tests.rs`
+- `src/cache_ignore.rs` -- `cache_ignore_report`, `read_cache_ignore_report`,
+  `CacheIgnoreReport`, `LaneVerdict`, `LaneIdentifiers`: the shared cache-ignore
+  report the daemon driver, `usage --detail` and doctor render
 - `src/config_classify.rs` -- pure config-diff classifiers shared by
   hot-reload logging and `config set/unset`:
   `collect_restart_required_changes(prev, next)`
@@ -8529,15 +8488,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the cap, so the grid always covers the window and never exceeds it. The
   footer carries the window's `walk:` line (`render_walk_line` over
   `observation_totals`, marked a lower bound when the ledger recorded a gap)
-- `src/commands/usage_cache_ignore.rs` -- the `routectl usage --detail`
-  cache-ignore block: `cache_ignore_block(&mut UsageDb, &Config, now_ms,
-  deadline)` renders `cache_ignore::cache_ignore_report` (fixed 6 h window,
-  independent of the window flags and `--since`) once per run from
-  `usage::build_blocks`, with a `CACHE_IGNORE_READ_BUDGET` (2 s) deadline.
-  `render_cache_ignore` prints one line per lane through
-  `CacheIgnoreLaneReport::identifiers`, a cap note when truncated, and one
-  `not evaluated (<reason>)` line per `NotEvaluatedReason`. Tests in
-  `usage_cache_ignore_tests.rs`
+- `src/commands/usage_cache_ignore.rs` -- `cache_ignore_block`,
+  `render_cache_ignore`, `CACHE_IGNORE_READ_BUDGET`: the `routectl usage
+  --detail` cache-ignore block
 - `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to
   20|19|18|17|16 [--db P]`: the offline rollback over
   `routectl_usage::downgrade_to` (a v21 file taken to 16 runs every step);
@@ -9389,6 +9342,8 @@ new section or a second doc.
 - `container/build.sh` -- local build of that image (`--claude-version`,
   `--codex-version`, `--hermes-version` with `--hermes-commit`, `--tag`,
   `--dry-run`; the pi version is read from `container/pi/package-lock.json`)
+- `container/pi/package.json` -- the npm manifest for the image's pi client:
+  its pinned package plus dependency `overrides`
 - `container/run_capture.sh` -- host wrapper that runs ONE capture inside the
   image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` /
   `--name` / repeatable `--provider` / `--max-seconds` / `--tmp-size` plus a
@@ -9479,6 +9434,16 @@ new section or a second doc.
   without following a symlink at its final component
 - `wire_watch/wire_watch.test.sh` -- self-test: `python3 -m unittest` over
   `wire_watch/tests/`
+- `wire_watch/tests/report_cells.py` -- shared run-directory builders for the
+  report tests, written through the real ledger and evidence writers
+- `wire_watch/tests/test_report.py` -- unit tests of `report.py` and
+  `classify.py` over those run directories
+- `wire_watch/testdata/clean-control.health.json` -- recorded `/status/health`
+  snapshot of the planted-drop clean-control cell
+- `wire_watch/testdata/request-leg-plant.health.json` -- recorded
+  `/status/health` snapshot of the planted-drop request-leg cell
+- `wire_watch/testdata/response-leg-plant.health.json` -- recorded
+  `/status/health` snapshot of the planted-drop response-leg cell
 - `promote_fixture.sh` -- promotion of one captured fixture from a scratch
   root into the committed driver corpus (`--from`, `--scratch-root`,
   `--expected-ingress`, `--to`); re-runs the landing gates on the staged copy
