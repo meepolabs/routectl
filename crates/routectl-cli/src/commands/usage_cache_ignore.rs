@@ -31,8 +31,13 @@ const IGNORING_NOTE: &str = "markers sent, no cache activity";
 /// it. Never fails: a ledger that cannot answer renders one
 /// `unavailable: <class>` line.
 ///
-/// `db` must not carry a caller-held deadline (see [`cache_ignore_report`]).
-pub fn cache_ignore_block(db: &UsageDb, config: &Config, now_ms: i64, deadline: Instant) -> String {
+/// `db` cannot carry a caller-held deadline (see [`cache_ignore_report`]).
+pub fn cache_ignore_block(
+    db: &mut UsageDb,
+    config: &Config,
+    now_ms: i64,
+    deadline: Instant,
+) -> String {
     render_cache_ignore(&cache_ignore_report(db, config, now_ms, deadline))
 }
 

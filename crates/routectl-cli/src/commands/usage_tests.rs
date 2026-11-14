@@ -785,7 +785,7 @@ fn no_data_path_is_friendly_not_error() {
 
 #[test]
 fn multi_window_summary_emits_four_blocks() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_row(
         &db,
         "m1",
@@ -809,7 +809,7 @@ fn multi_window_summary_emits_four_blocks() {
         db: None,
         k_calibration: false,
     };
-    let blocks = build_blocks(&db, &config, &no_prices(), &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&mut db, &config, &no_prices(), &args, fixed_now()).unwrap();
     assert_eq!(blocks.len(), 4);
     assert!(blocks[0].contains("today"));
     assert!(blocks[3].contains("all time"));
@@ -907,7 +907,7 @@ fn ttft_cell_renders_dash_for_empty_group() {
 fn build_output_k_calibration_returns_calibration_report_not_window_blocks() {
     // Arrange: a plain usage row; no calibrated rows, so the no-data message
     // is the calibration path output. This is distinct from any window-block title.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // A plain usage row to ensure window blocks would be non-empty if produced.
     insert_row(
         &db,
@@ -934,7 +934,7 @@ fn build_output_k_calibration_returns_calibration_report_not_window_blocks() {
     };
 
     // Act
-    let output = build_output(&db, &config, &no_prices(), &args, fixed_now()).unwrap();
+    let output = build_output(&mut db, &config, &no_prices(), &args, fixed_now()).unwrap();
 
     // Assert: calibration-path output present (no-data message), not window blocks.
     assert!(
@@ -950,7 +950,7 @@ fn build_output_k_calibration_returns_calibration_report_not_window_blocks() {
 #[test]
 fn build_output_normal_returns_window_blocks_not_calibration_report() {
     // Arrange: empty DB, no calibrated rows, k_calibration=false.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_row(
         &db,
         "r1",
@@ -976,7 +976,7 @@ fn build_output_normal_returns_window_blocks_not_calibration_report() {
     };
 
     // Act
-    let output = build_output(&db, &config, &no_prices(), &args, fixed_now()).unwrap();
+    let output = build_output(&mut db, &config, &no_prices(), &args, fixed_now()).unwrap();
 
     // Assert: multi-window output present, no calibration header.
     assert!(

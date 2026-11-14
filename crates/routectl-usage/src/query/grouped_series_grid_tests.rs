@@ -87,12 +87,12 @@ fn hand_computed_series_matches_the_edge_buckets_metrics_and_costs() {
     // Arrange: the window [0, 10_000) on a five-bucket 2000 ms grid, so the
     // fixture's traffic lands in bucket 0 ([0, 2000)) and bucket 4
     // ([8000, 10_000)) with three empty buckets between them.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_hand_computed_series(&db);
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 2000, 5),
         price_per_thousand_input,
         no_deadline(),
@@ -176,19 +176,19 @@ fn a_widened_grid_still_covers_the_window_and_reprices_it_whole() {
     // WIDE grid -- the shape the cap's widening produces, built directly rather
     // than through the caller's resolution. Widening changes the GRAIN, never
     // the coverage.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_hand_computed_series(&db);
 
     // Act
     let widened = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 10_000, 1),
         price_per_thousand_input,
         no_deadline(),
     )
     .expect("query");
     let narrow = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 2000, 5),
         price_per_thousand_input,
         no_deadline(),
@@ -249,13 +249,13 @@ fn an_unusable_bucket_grid_is_refused_before_any_statement_runs() {
     // Arrange: the three grids the SQL and the densification cannot answer -- a
     // zero width would divide by zero in SQL (a silent NULL, not an error), and
     // a count outside the cap would densify an unbounded vector.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(&db, &Fixture::default());
 
     for (width_ms, count) in [(0, 10), (-1000, 10), (1000, 0), (1000, 1001)] {
         // Act
         let refused = query(
-            &db,
+            &mut db,
             &bucketed(GroupDim::Model, width_ms, count),
             unpriced,
             no_deadline(),
@@ -272,7 +272,7 @@ fn an_unusable_bucket_grid_is_refused_before_any_statement_runs() {
     // The cap itself is accepted, so the refusal is a bound and not an off-by-one.
     assert!(
         query(
-            &db,
+            &mut db,
             &bucketed(GroupDim::Model, 1000, 1000),
             unpriced,
             no_deadline()
@@ -285,12 +285,12 @@ fn an_unusable_bucket_grid_is_refused_before_any_statement_runs() {
 fn a_grid_whose_last_bucket_start_overflows_is_refused() {
     // Arrange: a width and count that pass the width/cap checks but whose last
     // bucket start does not fit an i64.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(&db, &Fixture::default());
     let overflowing = bucketed(GroupDim::Model, i64::MAX / 2 + 10, 3);
 
     // Act
-    let refused = query(&db, &overflowing, unpriced, no_deadline());
+    let refused = query(&mut db, &overflowing, unpriced, no_deadline());
 
     // Assert: an error rather than a wrapped `start_ms` in release or a panic
     // under overflow checks.
@@ -302,7 +302,7 @@ fn a_grid_whose_last_bucket_start_overflows_is_refused() {
     // The widest grid that still fits is accepted, so the refusal is a bound.
     assert!(
         query(
-            &db,
+            &mut db,
             &bucketed(GroupDim::Model, i64::MAX, 2),
             unpriced,
             no_deadline()
@@ -316,7 +316,7 @@ fn a_row_outside_the_bucket_grid_fails_rather_than_vanishing_from_the_series() {
     // Arrange: a grid that covers only the first 2000 ms of the 10_000 ms window,
     // and a row beyond it. Counting that row in the groups while densification
     // drops it would make the two folds disagree in silence.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -328,7 +328,7 @@ fn a_row_outside_the_bucket_grid_fails_rather_than_vanishing_from_the_series() {
 
     // Act
     let refused = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 2),
         unpriced,
         no_deadline(),
@@ -342,7 +342,7 @@ fn a_row_outside_the_bucket_grid_fails_rather_than_vanishing_from_the_series() {
 
     // A grid that does cover the window answers normally.
     let covered = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 10),
         unpriced,
         no_deadline(),

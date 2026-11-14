@@ -172,19 +172,19 @@ fn no_deadline() -> Instant {
 
 /// Time one grouped-aggregate read on a fresh read-only connection.
 fn time_query(path: &Path, spec: &QuerySpec) -> (Duration, i64) {
-    let db = open_readonly_fastfail(path).expect("open seeded ledger");
+    let mut db = open_readonly_fastfail(path).expect("open seeded ledger");
     let started = Instant::now();
     let result =
-        query(&db, spec, |_row| RowCost::Unpriced, no_deadline()).expect("query completes");
+        query(&mut db, spec, |_row| RowCost::Unpriced, no_deadline()).expect("query completes");
     (started.elapsed(), result.totals.requests)
 }
 
 /// Time one whole usage-panel collection on a fresh read-only connection.
 fn time_usage(path: &Path, bounds: WindowBounds) -> (Duration, i64) {
-    let db = open_readonly_fastfail(path).expect("open seeded ledger");
+    let mut db = open_readonly_fastfail(path).expect("open seeded ledger");
     let started = Instant::now();
     let panel = collect(
-        &db,
+        &mut db,
         "all",
         bounds,
         super::LedgerHealth::default(),

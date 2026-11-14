@@ -172,7 +172,7 @@ fn total_expression_single_source_rows() {
 #[test]
 fn hit_fraction_denominator_includes_new_era_write_total() {
     // Arrange: no uncached input, 1000 read from cache and 1000 written.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed(
         &db,
         &[Writes {
@@ -184,7 +184,7 @@ fn hit_fraction_denominator_includes_new_era_write_total() {
     );
 
     // Act
-    let result = query(&db, &spec(None), |_| RowCost::Unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(None), |_| RowCost::Unpriced, no_deadline()).expect("query");
 
     // Assert
     let pct = result.totals.cache_hit_pct.expect("hit fraction present");
@@ -330,7 +330,7 @@ fn group_without_writes_gets_an_empty_lifetime_set() {
 }
 
 /// Every fine row the pricing closure saw, with its lifetimes.
-fn priced_rows(db: &UsageDb, bucket: Option<BucketSpec>) -> Vec<AggRow> {
+fn priced_rows(db: &mut UsageDb, bucket: Option<BucketSpec>) -> Vec<AggRow> {
     let seen = RefCell::new(Vec::new());
     query(
         db,
@@ -396,11 +396,11 @@ fn spread_fixture() -> Vec<Writes> {
 #[test]
 fn query_attaches_lifetimes_to_every_priced_row() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed(&db, &spread_fixture());
 
     // Act
-    let rows = priced_rows(&db, None);
+    let rows = priced_rows(&mut db, None);
 
     // Assert: the hand-computed per-provider sums.
     let sums = per_provider(&rows);
@@ -419,13 +419,13 @@ fn query_attaches_lifetimes_to_every_priced_row() {
 #[test]
 fn series_bucket_lifetime_sums_reconcile_to_the_group_sums() {
     // Arrange: rows spread across four 1000 ms buckets and two groups.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed(&db, &spread_fixture());
 
     // Act
-    let unbucketed = priced_rows(&db, None);
+    let unbucketed = priced_rows(&mut db, None);
     let bucketed = priced_rows(
-        &db,
+        &mut db,
         Some(BucketSpec {
             width_ms: 1_000,
             count: 10,
@@ -447,7 +447,7 @@ type LegacyOnlyCase = (&'static str, Vec<Writes>, Vec<(u32, i64)>);
 
 /// One ledger read through every priced path: the
 /// unbucketed and bucketed query, and the priced aggregate.
-fn priced_reads(db: &UsageDb) -> [(&'static str, Vec<AggRow>); 3] {
+fn priced_reads(db: &mut UsageDb) -> [(&'static str, Vec<AggRow>); 3] {
     let one_bucket = BucketSpec {
         width_ms: 10_000,
         count: 1,
@@ -489,7 +489,7 @@ fn legacy_only_group_gets_its_lifetimes_on_every_priced_read() {
     ];
     for (name, rows, expected) in cases {
         // Arrange
-        let (_dir, db) = open_db();
+        let (_dir, mut db) = open_db();
         seed(&db, &rows);
         let expected = CacheWriteLifetimes {
             tokens_by_lifetime: expected.into_iter().collect(),
@@ -498,7 +498,7 @@ fn legacy_only_group_gets_its_lifetimes_on_every_priced_read() {
         };
 
         // Act
-        let reads = priced_reads(&db);
+        let reads = priced_reads(&mut db);
 
         // Assert
         for (path, read) in reads {
@@ -674,11 +674,11 @@ fn rows_with_a_zero_write_total_are_not_read() {
     ];
     for (name, rows, expected, unknown, invalid) in cases {
         // Arrange
-        let (_dir, db) = open_db();
+        let (_dir, mut db) = open_db();
         seed(&db, &rows);
 
         // Act
-        let reads = priced_reads(&db);
+        let reads = priced_reads(&mut db);
 
         // Assert: every priced path agrees.
         let expected = CacheWriteLifetimes {

@@ -92,7 +92,7 @@ fn args(window: WindowFlag, since: Option<&str>, detail: bool) -> UsageArgs {
     }
 }
 
-fn output(db: &UsageDb, args: &UsageArgs) -> String {
+fn output(db: &mut UsageDb, args: &UsageArgs) -> String {
     build_output(
         db,
         &fixture_config(),
@@ -114,10 +114,10 @@ fn block_of(out: &str) -> String {
 #[test]
 fn detail_multi_window_summary_carries_the_block_once_with_the_lane_counts() {
     // Arrange
-    let db = ledger_with_ignoring_lane();
+    let mut db = ledger_with_ignoring_lane();
 
     // Act
-    let out = output(&db, &args(WindowFlag::None, None, true));
+    let out = output(&mut db, &args(WindowFlag::None, None, true));
 
     // Assert
     assert_eq!(out.matches(BLOCK_HEADER).count(), 1, "{out}");
@@ -139,7 +139,7 @@ fn detail_multi_window_summary_carries_the_block_once_with_the_lane_counts() {
 #[test]
 fn without_detail_the_output_is_the_window_blocks_and_legend_alone() {
     // Arrange: the pre-block composition, rendered from the same parts.
-    let db = ledger_with_ignoring_lane();
+    let mut db = ledger_with_ignoring_lane();
     let config = fixture_config();
     let windows = [
         (WindowFlag::Today, "== today =="),
@@ -166,7 +166,7 @@ fn without_detail_the_output_is_the_window_blocks_and_legend_alone() {
         .collect();
 
     // Act
-    let out = output(&db, &args(WindowFlag::None, None, false));
+    let out = output(&mut db, &args(WindowFlag::None, None, false));
 
     // Assert: everything before the legend is exactly the four window blocks.
     let legend_start = out.rfind("legend:").expect("legend present");
@@ -180,7 +180,7 @@ fn without_detail_the_output_is_the_window_blocks_and_legend_alone() {
 #[test]
 fn the_block_ignores_the_window_and_since_flags() {
     // Arrange
-    let db = ledger_with_ignoring_lane();
+    let mut db = ledger_with_ignoring_lane();
     let requests = [
         args(WindowFlag::None, None, true),
         args(WindowFlag::Today, None, true),
@@ -189,7 +189,10 @@ fn the_block_ignores_the_window_and_since_flags() {
     ];
 
     // Act
-    let blocks: Vec<String> = requests.iter().map(|a| block_of(&output(&db, a))).collect();
+    let blocks: Vec<String> = requests
+        .iter()
+        .map(|a| block_of(&output(&mut db, a)))
+        .collect();
 
     // Assert
     for (i, block) in blocks.iter().enumerate() {
@@ -201,7 +204,7 @@ fn the_block_ignores_the_window_and_since_flags() {
 #[test]
 fn an_unavailable_report_renders_one_class_line() {
     // Arrange
-    let db = open(usage_dir().join("usage.db")).expect("open ledger");
+    let mut db = open(usage_dir().join("usage.db")).expect("open ledger");
     db.conn()
         .execute_batch("DROP TABLE requests")
         .expect("drop the requests table");
@@ -209,7 +212,7 @@ fn an_unavailable_report_renders_one_class_line() {
     let far = Instant::now() + Duration::from_mins(10);
 
     // Act
-    let block = cache_ignore_block(&db, &fixture_config(), now_ms, far);
+    let block = cache_ignore_block(&mut db, &fixture_config(), now_ms, far);
 
     // Assert
     let unavailable: Vec<&str> = block
@@ -322,7 +325,7 @@ fn lane_identifiers_render_scrubbed_and_neutralized() {
 fn an_evaluated_report_with_no_lanes_says_no_turn_qualified() {
     // Arrange: four marked turns ten minutes apart, past the 300 s lifetime,
     // so not one turn qualifies.
-    let db = open(usage_dir().join("usage.db")).expect("open ledger");
+    let mut db = open(usage_dir().join("usage.db")).expect("open ledger");
     let base = fixed_now().timestamp_millis() - 3_600_000;
     for i in 0..4 {
         db.conn()
@@ -346,7 +349,12 @@ fn an_evaluated_report_with_no_lanes_says_no_turn_qualified() {
     let far = Instant::now() + Duration::from_mins(10);
 
     // Act
-    let block = cache_ignore_block(&db, &fixture_config(), fixed_now().timestamp_millis(), far);
+    let block = cache_ignore_block(
+        &mut db,
+        &fixture_config(),
+        fixed_now().timestamp_millis(),
+        far,
+    );
 
     // Assert
     assert_eq!(
@@ -400,14 +408,19 @@ fn not_evaluated_providers_render_one_line_per_reason() {
 #[test]
 fn the_lane_line_renders_the_shared_lane_identifiers() {
     // Arrange: a key-shaped served model nickname on an ignoring lane.
-    let db = open(usage_dir().join("usage.db")).expect("open ledger");
+    let mut db = open(usage_dir().join("usage.db")).expect("open ledger");
     let model = crate::cache_ignore::key_shaped_model();
     seed_lane(&db, &model, 4, 0);
     let ids = crate::cache_ignore::LaneIdentifiers::render("direct", None, Some(&model));
     let far = Instant::now() + Duration::from_mins(10);
 
     // Act
-    let block = cache_ignore_block(&db, &fixture_config(), fixed_now().timestamp_millis(), far);
+    let block = cache_ignore_block(
+        &mut db,
+        &fixture_config(),
+        fixed_now().timestamp_millis(),
+        far,
+    );
 
     // Assert
     let expected = format!(

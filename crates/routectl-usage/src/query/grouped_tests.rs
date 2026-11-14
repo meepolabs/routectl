@@ -141,10 +141,10 @@ fn assert_close(actual: Option<f64>, expected: f64) {
 #[test]
 fn empty_ledger_yields_no_groups_and_zeroed_totals() {
     // Arrange: an open ledger with no rows at all.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert: zero groups, additive totals at zero, every derived metric
     // absent, and no column-type failure from an all-NULL aggregate row.
@@ -166,7 +166,7 @@ fn empty_ledger_yields_no_groups_and_zeroed_totals() {
 #[test]
 fn rows_reporting_no_metrics_yield_absent_derived_metrics() {
     // Arrange: two non-streaming rows with NULL ttfb / tokens / cache columns.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -185,7 +185,7 @@ fn rows_reporting_no_metrics_yield_absent_derived_metrics() {
     );
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert: only the latency pair is derivable; every metric whose eligible
     // row count is zero is None rather than 0.
@@ -208,7 +208,7 @@ fn rows_reporting_no_metrics_yield_absent_derived_metrics() {
 fn zero_generation_window_is_excluded_from_throughput() {
     // Arrange: a streaming success whose latency equals its TTFB -- a zero
     // generation window, which must never become a division.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -222,7 +222,7 @@ fn zero_generation_window_is_excluded_from_throughput() {
     );
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert: no eligible row for throughput; the TTFB metrics still resolve.
     let m = &group(&result, "m1").metrics;
@@ -235,7 +235,7 @@ fn zero_generation_window_is_excluded_from_throughput() {
 fn zero_prompt_total_is_excluded_from_cache_hit_rate() {
     // Arrange: a row that REPORTS a cache read of 0 with no other prompt
     // dimension -- a zero denominator that must not divide.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -246,7 +246,7 @@ fn zero_prompt_total_is_excluded_from_cache_hit_rate() {
     );
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert
     assert_eq!(group(&result, "m1").metrics.cache_hit_pct, None);
@@ -255,7 +255,7 @@ fn zero_prompt_total_is_excluded_from_cache_hit_rate() {
 #[test]
 fn null_group_column_rolls_up_under_unattributed() {
     // Arrange: a pre-dispatch row with no served provider.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -267,7 +267,7 @@ fn null_group_column_rolls_up_under_unattributed() {
     );
 
     // Act
-    let result = query(&db, &spec(GroupDim::Provider), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Provider), unpriced, no_deadline()).expect("query");
 
     // Assert
     assert_eq!(result.groups.len(), 1);
@@ -277,7 +277,7 @@ fn null_group_column_rolls_up_under_unattributed() {
 #[test]
 fn alias_and_provider_filters_narrow_the_result() {
     // Arrange: two aliases across two providers.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, alias, provider) in [
         ("a", "one", "pa"),
         ("b", "one", "pb"),
@@ -300,13 +300,13 @@ fn alias_and_provider_filters_narrow_the_result() {
         alias_filter: Some("one".to_string()),
         ..spec(GroupDim::Provider)
     };
-    let filtered = query(&db, &by_alias, unpriced, no_deadline()).expect("query");
+    let filtered = query(&mut db, &by_alias, unpriced, no_deadline()).expect("query");
     let both = QuerySpec {
         alias_filter: Some("one".to_string()),
         provider_filter: Some("pb".to_string()),
         ..spec(GroupDim::Provider)
     };
-    let narrowed = query(&db, &both, unpriced, no_deadline()).expect("query");
+    let narrowed = query(&mut db, &both, unpriced, no_deadline()).expect("query");
 
     // Assert
     assert_eq!(filtered.totals.requests, 2);
@@ -319,7 +319,7 @@ fn alias_and_provider_filters_narrow_the_result() {
 #[test]
 fn out_of_window_rows_are_excluded() {
     // Arrange: one row before the window, one inside, one at the exclusive end.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, ts) in [("a", 99), ("b", 150), ("c", 200)] {
         insert(
             &db,
@@ -337,7 +337,7 @@ fn out_of_window_rows_are_excluded() {
         to_ms: 200,
         ..spec(GroupDim::Model)
     };
-    let result = query(&db, &windowed, unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &windowed, unpriced, no_deadline()).expect("query");
 
     // Assert: half-open window keeps only the middle row.
     assert_eq!(result.totals.requests, 1);
@@ -346,7 +346,7 @@ fn out_of_window_rows_are_excluded() {
 #[test]
 fn all_priced_group_reports_priced_with_full_cost() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -358,7 +358,7 @@ fn all_priced_group_reports_priced_with_full_cost() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |_row| RowCost::Priced(1.5),
         no_deadline(),
@@ -376,12 +376,12 @@ fn all_priced_group_reports_priced_with_full_cost() {
 #[test]
 fn all_subscription_group_reports_subscription_without_cost() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(&db, &Fixture::default());
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |_row| RowCost::Subscription(None),
         no_deadline(),
@@ -398,12 +398,12 @@ fn all_subscription_group_reports_subscription_without_cost() {
 #[test]
 fn a_resolved_subscription_equivalent_never_reaches_the_priced_channel() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(&db, &Fixture::default());
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |_row| RowCost::Subscription(Some(12.34)),
         no_deadline(),
@@ -425,7 +425,7 @@ fn an_overflowed_equivalent_degrades_without_touching_the_priced_channel() {
     // Arrange: one priced row plus two subscription rows whose per-row
     // equivalents are each finite but whose SUM overflows -- only an
     // extreme-magnitude configured rate produces figures this large.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, upstream) in [("a", "u-priced"), ("b", "u-sub-1"), ("c", "u-sub-2")] {
         insert(
             &db,
@@ -439,7 +439,7 @@ fn an_overflowed_equivalent_degrades_without_touching_the_priced_channel() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(3.5),
@@ -463,12 +463,12 @@ fn a_non_finite_per_row_equivalent_degrades_instead_of_panicking() {
     // per-row equivalent. This fold runs in debug builds under test and in a
     // network-reachable release build that aborts on panic, so the only
     // acceptable outcome in either profile is the channel's own degrade.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(&db, &Fixture::default());
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |_row| RowCost::Subscription(Some(f64::INFINITY)),
         no_deadline(),
@@ -486,7 +486,7 @@ fn a_non_finite_per_row_equivalent_degrades_instead_of_panicking() {
 fn an_overflowed_priced_sum_degrades_without_touching_the_equivalent_channel() {
     // Arrange: the mirror of the test above -- the priced channel overflows
     // while the equivalent resolves cleanly.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, upstream) in [("a", "u-priced-1"), ("b", "u-priced-2"), ("c", "u-sub")] {
         insert(
             &db,
@@ -500,7 +500,7 @@ fn an_overflowed_priced_sum_degrades_without_touching_the_equivalent_channel() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-sub") => RowCost::Subscription(Some(9.0)),
@@ -520,7 +520,7 @@ fn an_overflowed_priced_sum_degrades_without_touching_the_equivalent_channel() {
 fn a_mixed_group_keeps_real_spend_and_notional_value_in_separate_fields() {
     // Arrange: one priced API row, one subscription row whose equivalent
     // resolved, one subscription row whose equivalent did not.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, upstream) in [("a", "u-priced"), ("b", "u-sub-ok"), ("c", "u-sub-dark")] {
         insert(
             &db,
@@ -534,7 +534,7 @@ fn a_mixed_group_keeps_real_spend_and_notional_value_in_separate_fields() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(4.0),
@@ -558,7 +558,7 @@ fn a_mixed_group_keeps_real_spend_and_notional_value_in_separate_fields() {
 fn mixed_pricing_group_reports_partial_with_priced_subtotal() {
     // Arrange: one model served by three upstreams -- one priced, one on a
     // subscription, one with no price at all.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, upstream) in [("a", "u-priced"), ("b", "u-sub"), ("c", "u-unpriced")] {
         insert(
             &db,
@@ -572,7 +572,7 @@ fn mixed_pricing_group_reports_partial_with_priced_subtotal() {
 
     // Act: pricing is decided per FINE row, i.e. per upstream.
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(2.25),
@@ -595,11 +595,11 @@ fn mixed_pricing_group_reports_partial_with_priced_subtotal() {
 #[test]
 fn unpriced_group_reports_no_cost_rather_than_zero() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(&db, &Fixture::default());
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert
     let m = &group(&result, "m1").metrics;
@@ -611,7 +611,7 @@ fn unpriced_group_reports_no_cost_rather_than_zero() {
 fn failed_streaming_row_with_a_stamped_ttfb_is_excluded_from_both_ttft_figures() {
     // Arrange: a streaming success at 100 ms and a stream that stamped a
     // first-byte time at 900 ms before failing mid-stream.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -636,7 +636,7 @@ fn failed_streaming_row_with_a_stamped_ttfb_is_excluded_from_both_ttft_figures()
     );
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert: both figures see only the ok stream, so they stay consistent --
     // the unfiltered mean would have read 500 against a p95 of 100.
@@ -651,7 +651,7 @@ fn failed_streaming_row_with_a_stamped_ttfb_is_excluded_from_both_ttft_figures()
 fn group_with_no_ttft_eligible_row_reports_neither_ttft_figure() {
     // Arrange: a failed stream and a non-streaming success, both carrying a
     // stamped first-byte time -- neither is TTFT-eligible.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -674,7 +674,7 @@ fn group_with_no_ttft_eligible_row_reports_neither_ttft_figure() {
     );
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert: absent, never a mean over an ineligible population.
     let m = &group(&result, "m1").metrics;

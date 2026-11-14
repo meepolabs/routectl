@@ -53,7 +53,7 @@ fn insert(db: &UsageDb, request_id: &str, model: &str, writes: &Writes) {
 
 /// The three surfaces over one ledger: the `routectl usage --all --by model
 /// --detail` text, the `/status/usage` panel and the `/status/query` result.
-fn three_surfaces(db: &UsageDb) -> (String, UsagePanel, QueryResult) {
+fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
     let now = Local
         .timestamp_millis_opt(TO_MS - 1)
         .single()
@@ -141,7 +141,7 @@ fn every_surface_reports_the_same_both_era_cache_write_total() {
     // floor so it renders exactly. The older-era columns alone sum to 57 and the
     // current totals alone to 2400, so a one-era reader shows neither 2457.
     let dir = TempDir::new().expect("tempdir");
-    let db = open(dir.path().join("usage.db")).expect("open ledger");
+    let mut db = open(dir.path().join("usage.db")).expect("open ledger");
     let older = |five, one| Writes {
         legacy_5m: five,
         legacy_1h: one,
@@ -163,7 +163,7 @@ fn every_surface_reports_the_same_both_era_cache_write_total() {
     insert(&db, "current-total-only", "n", &current(2000, None));
 
     // Act
-    let (report, panel, result) = three_surfaces(&db);
+    let (report, panel, result) = three_surfaces(&mut db);
 
     // Assert
     assert_eq!(report_cache_wr(&report, "total"), "2457", "{report}");
@@ -184,7 +184,7 @@ fn absent_writes_render_dash_and_an_observed_zero_renders_zero() {
     // Arrange: model `absent` reports no write in either era; `zero` reports an
     // observed zero total; `zero-older` an observed zero in an older-era column.
     let dir = TempDir::new().expect("tempdir");
-    let db = open(dir.path().join("usage.db")).expect("open ledger");
+    let mut db = open(dir.path().join("usage.db")).expect("open ledger");
     insert(&db, "a", "absent", &Writes::default());
     insert(
         &db,
@@ -206,7 +206,7 @@ fn absent_writes_render_dash_and_an_observed_zero_renders_zero() {
     );
 
     // Act
-    let (report, panel, result) = three_surfaces(&db);
+    let (report, panel, result) = three_surfaces(&mut db);
 
     // Assert
     for (label, cell, present) in [("absent", "-", 0), ("zero", "0", 1), ("zero-older", "0", 1)] {

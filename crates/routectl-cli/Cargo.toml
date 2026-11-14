@@ -73,7 +73,7 @@ lru.workspace = true
 # `db_busy` shed code (vs `db_unavailable`) by reading the underlying
 # `rusqlite` error code. Already in the graph via routectl-usage; a direct
 # dep lets the status module own its shed-code vocabulary.
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 # MITM front-proxy: reqwest talks to the upstream (promoted from
 # dev-only), the rest terminate/generate the local TLS listener.
 reqwest.workspace = true

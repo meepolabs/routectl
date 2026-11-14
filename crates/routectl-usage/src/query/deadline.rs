@@ -7,6 +7,7 @@
 //! panel) carry a single budget without threading a deadline parameter through
 //! each query function's public signature.
 
+use std::ops::Deref;
 use std::time::Instant;
 
 use crate::db::UsageDb;
@@ -29,11 +30,14 @@ const PROGRESS_OPS: i32 = 10_000;
 /// The deadline can overshoot by up to one callback quantum, and it can only
 /// interrupt work SQLite itself is doing -- a caller-side fold between
 /// statements runs to completion.
+///
+/// The guard holds the only borrow of the [`UsageDb`] for its lifetime and
+/// dereferences to it, so the reads it bounds run through the guard.
 #[must_use = "the deadline lives only as long as this guard: dropping it \
               immediately detaches the handler and leaves the following reads \
               unbounded"]
 pub struct DeadlineGuard<'a> {
-    conn: &'a rusqlite::Connection,
+    db: &'a mut UsageDb,
 }
 
 impl<'a> DeadlineGuard<'a> {
@@ -43,10 +47,18 @@ impl<'a> DeadlineGuard<'a> {
     /// # Errors
     ///
     /// Returns [`QueryError::Sqlite`] when the handler cannot be installed.
-    pub fn install(db: &'a UsageDb, deadline: Instant) -> Result<Self, QueryError> {
-        let conn = db.conn();
-        conn.progress_handler(PROGRESS_OPS, Some(move || Instant::now() > deadline))?;
-        Ok(Self { conn })
+    pub fn install(db: &'a mut UsageDb, deadline: Instant) -> Result<Self, QueryError> {
+        db.conn_mut()
+            .progress_handler(PROGRESS_OPS, Some(move || Instant::now() > deadline))?;
+        Ok(Self { db })
+    }
+}
+
+impl Deref for DeadlineGuard<'_> {
+    type Target = UsageDb;
+
+    fn deref(&self) -> &UsageDb {
+        self.db
     }
 }
 
@@ -56,7 +68,8 @@ impl Drop for DeadlineGuard<'_> {
         // the caller asked for, and a handler that could not be removed is not
         // the caller's problem to interpret.
         let _ = self
-            .conn
+            .db
+            .conn_mut()
             .progress_handler(PROGRESS_OPS, None::<fn() -> bool>);
     }
 }

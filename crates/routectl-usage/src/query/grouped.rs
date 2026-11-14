@@ -279,7 +279,7 @@ pub struct QueryResult {
 /// ([`AggRow::cache_write_lifetimes`] is `Some`); on the series path those are
 /// the writes of that row's bucket alone.
 pub fn query(
-    db: &UsageDb,
+    db: &mut UsageDb,
     spec: &QuerySpec,
     price: impl Fn(&AggRow) -> RowCost,
     deadline: Instant,
@@ -288,8 +288,8 @@ pub fn query(
     // `price` closure panics: the connection outlives this call, and a stale
     // expired deadline left on it would spuriously interrupt the next statement
     // run on it.
-    let _guard = DeadlineGuard::install(db, deadline)?;
-    read_and_fold(db, spec, price)
+    let guard = DeadlineGuard::install(db, deadline)?;
+    read_and_fold(&guard, spec, price)
 }
 
 /// The read + fold, split out so [`query`] can scope its progress guard around

@@ -622,7 +622,7 @@ fn walk_line(totals: [i64; 5]) -> String {
 /// Every window block `routectl usage` prints over `usage_db`, rendered
 /// from the file as the command reads it.
 fn usage_cli_output(config: &Config, usage_db: &std::path::Path) -> String {
-    let db = routectl_usage::open_readonly(usage_db).expect("read-only open");
+    let mut db = routectl_usage::open_readonly(usage_db).expect("read-only open");
     let args = crate::commands::usage::UsageArgs {
         window: crate::commands::usage::WindowFlag::None,
         since: None,
@@ -633,7 +633,7 @@ fn usage_cli_output(config: &Config, usage_db: &std::path::Path) -> String {
         k_calibration: false,
     };
     crate::commands::usage::build_output(
-        &db,
+        &mut db,
         config,
         &crate::commands::pricing::PriceSnapshot::default(),
         &args,

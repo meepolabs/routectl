@@ -160,7 +160,7 @@ fn an_injected_failure_after_the_first_alter_rolls_back_columns_and_both_stamps(
     // requests` and denies every later one.
     let (_dir, path) = temp_db_path();
     file_from(&path, 19, &requests_ddl_through_v19(), &[]);
-    let conn = Connection::open(&path).expect("reopen");
+    let mut conn = Connection::open(&path).expect("reopen");
     let columns_before = requests_column_names(&conn);
     let alters = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&alters);

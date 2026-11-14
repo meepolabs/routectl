@@ -63,12 +63,12 @@ fn seed_hand_computed(db: &UsageDb) {
 #[test]
 fn hand_computed_fixture_matches_every_derived_metric() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_hand_computed(&db);
 
     // Act: u1 is priced at $1 per 1,000 input tokens; u2 has no price.
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |row| {
             if row.key.upstream.as_deref() == Some("u1") {
@@ -128,7 +128,7 @@ fn hand_computed_fixture_matches_every_derived_metric() {
 fn coarse_grouping_maxes_across_fine_rows_without_averaging_averages() {
     // Arrange: the same fixture grouped by alias, which folds BOTH upstreams
     // and both providers into one row.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_hand_computed(&db);
     insert(
         &db,
@@ -147,8 +147,8 @@ fn coarse_grouping_maxes_across_fine_rows_without_averaging_averages() {
     );
 
     // Act
-    let by_model = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
-    let by_alias = query(&db, &spec(GroupDim::Alias), unpriced, no_deadline()).expect("query");
+    let by_model = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let by_alias = query(&mut db, &spec(GroupDim::Alias), unpriced, no_deadline()).expect("query");
 
     // Assert: the maxima are a MAX over the fine maxima, not a re-derivation.
     assert_eq!(by_model.groups.len(), 2);
@@ -167,7 +167,7 @@ fn fallback_served_counts_rows_that_needed_a_fallback_and_sums_to_totals() {
     // Arrange: two models over three upstreams. Two rows needed a fallback --
     // one of them three attempts deep, which must still count as ONE served
     // request -- and two were served first try.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, model, upstream, fallback_count) in [
         ("a", "m1", "u1", 1),
         ("b", "m1", "u2", 3),
@@ -187,7 +187,7 @@ fn fallback_served_counts_rows_that_needed_a_fallback_and_sums_to_totals() {
     }
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert: a count of rows, not a sum of fallback attempts, folded per group
     // and reconciling at totals.
@@ -245,13 +245,13 @@ fn outcome_counts(m: &QueryMetrics) -> (i64, i64, i64, i64, i64) {
 #[test]
 fn cancelled_rows_are_excluded_from_errors_and_reconcile_per_group_and_totals() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_outcome_mix(&db);
 
     // Act
-    let by_model = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let by_model = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
     let by_provider =
-        query(&db, &spec(GroupDim::Provider), unpriced, no_deadline()).expect("query");
+        query(&mut db, &spec(GroupDim::Provider), unpriced, no_deadline()).expect("query");
 
     // Assert: 7 = 3 ok + 1 upstream_error + 1 client_disconnect + 2 cancelled,
     // and only the upstream_error counts as an error.

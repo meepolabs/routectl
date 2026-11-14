@@ -281,11 +281,11 @@ fn build_panel(
     as_of: String,
 ) -> Panel<UsagePanel> {
     let deadline = Instant::now() + Duration::from_millis(USAGE_BUDGET_MS);
-    let db = match open_readonly_fastfail(db_path) {
+    let mut db = match open_readonly_fastfail(db_path) {
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
-    match collect(&db, token, bounds, health, deadline) {
+    match collect(&mut db, token, bounds, health, deadline) {
         Ok(dto) => Panel::available(SCHEMA_VERSION, as_of, dto),
         Err(code) => Panel::unavailable(SCHEMA_VERSION, code),
     }
@@ -301,13 +301,14 @@ fn build_panel(
 /// single install reaches every statement below with no stale-handler risk
 /// across requests, and it detaches on every exit path here.
 fn collect(
-    db: &UsageDb,
+    db: &mut UsageDb,
     token: &'static str,
     bounds: WindowBounds,
     health: LedgerHealth,
     deadline: Instant,
 ) -> Result<UsagePanel, &'static str> {
-    let _guard = DeadlineGuard::install(db, deadline).map_err(|e| query_error_code(&e))?;
+    let guard = DeadlineGuard::install(db, deadline).map_err(|e| query_error_code(&e))?;
+    let db: &UsageDb = &guard;
     let rows = aggregate(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     let breakdown =
         errors_by_class(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
@@ -1724,15 +1725,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_bulk(&path, 4000);
-        let db = open(&path).expect("open ledger");
+        let mut db = open(&path).expect("open ledger");
         let expired = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .expect("instant predates the process start");
 
         // Act
-        let shed = collect(&db, "all", ALL_TIME, LedgerHealth::default(), expired);
+        let shed = collect(&mut db, "all", ALL_TIME, LedgerHealth::default(), expired);
         let after = collect(
-            &db,
+            &mut db,
             "all",
             ALL_TIME,
             LedgerHealth::default(),
@@ -1796,10 +1797,10 @@ mod tests {
 
         // A fresh connection, so no page of this ledger is in THIS connection's
         // cache when the collection starts.
-        let db = open_readonly_fastfail(&path).expect("open ledger read-only");
+        let mut db = open_readonly_fastfail(&path).expect("open ledger read-only");
         let started = Instant::now();
         let collected = collect(
-            &db,
+            &mut db,
             "all",
             ALL_TIME,
             LedgerHealth::default(),

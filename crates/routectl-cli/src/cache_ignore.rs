@@ -262,11 +262,12 @@ impl CacheIgnoreReport {
 /// `now_ms`, with every statement interrupted once `deadline` passes.
 ///
 /// Installs its own deadline on `db`, replacing any handler already there,
-/// and clears it on return. Never call it on a connection under a
-/// caller-held `DeadlineGuard`: that caller's later reads would run with no
-/// deadline.
+/// and clears it on return. It takes `&mut UsageDb` so it cannot run on a
+/// connection under a caller-held `DeadlineGuard`, which lends only
+/// `&UsageDb`: replacing that caller's handler would leave its later reads
+/// with no deadline.
 pub fn cache_ignore_report(
-    db: &UsageDb,
+    db: &mut UsageDb,
     config: &Config,
     now_ms: i64,
     deadline: Instant,
@@ -280,7 +281,7 @@ pub fn cache_ignore_report(
         not_evaluated,
     } = eligibility;
     let queried = DeadlineGuard::install(db, deadline)
-        .and_then(|_guard| cache_ignore_lanes(db, window.from_ms, window.to_ms, &rules));
+        .and_then(|guard| cache_ignore_lanes(&guard, window.from_ms, window.to_ms, &rules));
     match queried {
         Ok(found) => CacheIgnoreReport {
             window,
@@ -318,7 +319,7 @@ pub fn read_cache_ignore_report(
 ) -> CacheIgnoreReport {
     let deadline = Instant::now() + budget;
     match open_readonly_fastfail(db_path) {
-        Ok(db) => cache_ignore_report(&db, config, now_ms, deadline),
+        Ok(mut db) => cache_ignore_report(&mut db, config, now_ms, deadline),
         Err(err) => CacheIgnoreReport::open_failed(config, now_ms, &err),
     }
 }

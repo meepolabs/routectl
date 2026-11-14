@@ -41,11 +41,11 @@ fn additive(m: &QueryMetrics) -> [i64; 14] {
 #[test]
 fn bucket_absent_yields_no_series_and_leaves_the_groups_untouched() {
     // Arrange
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_hand_computed(&db);
 
     // Act
-    let result = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
 
     // Assert: the unbucketed path answers exactly as it did before the series
     // existed, with the series explicitly absent rather than empty.
@@ -57,7 +57,7 @@ fn bucket_absent_yields_no_series_and_leaves_the_groups_untouched() {
 #[test]
 fn bucketed_query_folds_the_same_rows_into_groups_and_a_dense_series() {
     // Arrange: three rows spread over a 10-bucket grid of 1000 ms each.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, ts) in [("a", 100), ("b", 1500), ("c", 9500)] {
         insert(
             &db,
@@ -71,7 +71,7 @@ fn bucketed_query_folds_the_same_rows_into_groups_and_a_dense_series() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 10),
         unpriced,
         no_deadline(),
@@ -96,7 +96,7 @@ fn every_additive_bucket_metric_sums_to_the_window_totals() {
     // Arrange: six rows, one per bucket of a six-bucket grid, populating EVERY
     // additive field with a distinct non-zero total -- a dropped or zeroed field
     // in either fold has to change one of the thirteen expected numbers.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     let rows = [
         Fixture {
             request_id: "r1",
@@ -200,7 +200,7 @@ fn every_additive_bucket_metric_sums_to_the_window_totals() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 6),
         |_row| RowCost::Priced(0.5),
         no_deadline(),
@@ -245,7 +245,7 @@ fn both_cost_channels_reconcile_bucket_wise_with_the_window_totals() {
     // Arrange: four rows on a four-bucket grid, alternating a priced upstream
     // with a subscription one, so each channel has contributions in two
     // separate buckets and neither can be reconstructed from the other.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, ts, upstream) in [
         ("r1", 100, "u-priced"),
         ("r2", 1100, "u-sub"),
@@ -266,7 +266,7 @@ fn both_cost_channels_reconcile_bucket_wise_with_the_window_totals() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 4),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(1.25),
@@ -300,7 +300,7 @@ fn both_cost_channels_reconcile_bucket_wise_with_the_window_totals() {
 #[test]
 fn a_bucket_with_no_rows_reports_zero_requests_and_no_derived_metrics() {
     // Arrange: one row in the first bucket only.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -317,7 +317,7 @@ fn a_bucket_with_no_rows_reports_zero_requests_and_no_derived_metrics() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 3),
         |_row| RowCost::Priced(1.0),
         no_deadline(),
@@ -347,11 +347,11 @@ fn a_bucket_with_no_rows_reports_zero_requests_and_no_derived_metrics() {
 #[test]
 fn an_empty_window_yields_an_empty_series_rather_than_synthetic_zero_buckets() {
     // Arrange: a ledger with nothing in the window at all.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 10),
         unpriced,
         no_deadline(),
@@ -369,7 +369,7 @@ fn an_empty_window_yields_an_empty_series_rather_than_synthetic_zero_buckets() {
 fn per_bucket_maxima_and_cost_status_describe_that_bucket_only() {
     // Arrange: a slow priced row in the first bucket and a fast unpriced one in
     // the second, so neither bucket's figures can be the window's.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(
         &db,
         &Fixture {
@@ -401,7 +401,7 @@ fn per_bucket_maxima_and_cost_status_describe_that_bucket_only() {
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 2),
         |row| {
             if row.key.upstream.as_deref() == Some("u-priced") {

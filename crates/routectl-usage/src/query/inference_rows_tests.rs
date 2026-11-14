@@ -81,7 +81,7 @@ fn grouped_spec(bucket: Option<BucketSpec>) -> QuerySpec {
     }
 }
 
-fn run_grouped(db: &UsageDb, bucket: Option<BucketSpec>) -> String {
+fn run_grouped(db: &mut UsageDb, bucket: Option<BucketSpec>) -> String {
     let deadline = Instant::now() + Duration::from_mins(10);
     let result = query(
         db,
@@ -93,7 +93,7 @@ fn run_grouped(db: &UsageDb, bucket: Option<BucketSpec>) -> String {
     format!("{result:?}")
 }
 
-type Reader = fn(&UsageDb) -> String;
+type Reader = fn(&mut UsageDb) -> String;
 
 /// Every inference reader, rendered through `Debug` so one comparison covers
 /// every field it returns.
@@ -188,14 +188,14 @@ const INFERENCE_READERS: &[(&str, Reader)] = &[
 fn inference_readers_ignore_count_tokens_rows() {
     for (name, read) in INFERENCE_READERS {
         // Arrange
-        let (_a, inference_only) = base_ledger();
-        let (_b, with_counts) = ledger_with(Some(Operation::CountTokens.as_str()));
-        let (_c, with_inference) = ledger_with(Some(Operation::Inference.as_str()));
+        let (_a, mut inference_only) = base_ledger();
+        let (_b, mut with_counts) = ledger_with(Some(Operation::CountTokens.as_str()));
+        let (_c, mut with_inference) = ledger_with(Some(Operation::Inference.as_str()));
 
         // Act
-        let baseline = read(&inference_only);
-        let counted = read(&with_counts);
-        let control = read(&with_inference);
+        let baseline = read(&mut inference_only);
+        let counted = read(&mut with_counts);
+        let control = read(&mut with_inference);
 
         // Assert: the extra rows are visible to this reader as inference, so
         // their absence from `counted` is the predicate, not the fixture.
@@ -211,13 +211,13 @@ fn inference_readers_ignore_count_tokens_rows() {
 fn inference_readers_count_legacy_null_operation_rows() {
     for (name, read) in INFERENCE_READERS {
         // Arrange
-        let (_a, legacy) = ledger_with(None);
-        let (_b, tagged) = ledger_with(Some(Operation::Inference.as_str()));
+        let (_a, mut legacy) = ledger_with(None);
+        let (_b, mut tagged) = ledger_with(Some(Operation::Inference.as_str()));
 
         // Act + Assert
         assert_eq!(
-            read(&legacy),
-            read(&tagged),
+            read(&mut legacy),
+            read(&mut tagged),
             "{name}: a NULL-operation row must read as inference"
         );
     }

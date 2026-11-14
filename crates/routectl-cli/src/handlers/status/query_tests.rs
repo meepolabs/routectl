@@ -315,12 +315,12 @@ async fn an_expired_deadline_sheds_query_timeout_end_to_end() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
     seed_wide_ledger(&path, 4_000);
-    let db = open_readonly_fastfail(&path).expect("open seeded ledger");
+    let mut db = open_readonly_fastfail(&path).expect("open seeded ledger");
     let spec = parse_spec(VALID_BODY.as_bytes(), Local::now()).unwrap();
     let pricer = state_with_ledger(path).pricer().pin();
 
     let err = query(
-        &db,
+        &mut db,
         &spec,
         |row| pricer.price(row),
         Instant::now()

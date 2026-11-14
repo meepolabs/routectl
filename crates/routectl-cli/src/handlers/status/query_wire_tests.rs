@@ -384,11 +384,11 @@ async fn the_pricer_resolves_against_one_pinned_snapshot() {
     let state = state_with_ledger(path.clone());
 
     let pricer = state.pricer().pin();
-    let db = open_readonly_fastfail(&path).expect("open seeded ledger");
+    let mut db = open_readonly_fastfail(&path).expect("open seeded ledger");
     let spec = parse_spec(VALID_BODY.as_bytes(), Local::now()).unwrap();
 
-    let first = query(&db, &spec, |row| pricer.price(row), far_deadline()).unwrap();
-    let second = query(&db, &spec, |row| pricer.price(row), far_deadline()).unwrap();
+    let first = query(&mut db, &spec, |row| pricer.price(row), far_deadline()).unwrap();
+    let second = query(&mut db, &spec, |row| pricer.price(row), far_deadline()).unwrap();
     assert_eq!(first, second);
     // The default config carries no `[registry]` pricing, so a real row is
     // honestly unpriced rather than costed at zero.

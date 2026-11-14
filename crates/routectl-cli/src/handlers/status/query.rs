@@ -339,7 +339,7 @@ fn build_panel(
     now: DateTime<Local>,
 ) -> Panel<QueryResult> {
     let deadline = Instant::now() + Duration::from_millis(QUERY_BUDGET_MS);
-    let db = match open_readonly_fastfail(db_path) {
+    let mut db = match open_readonly_fastfail(db_path) {
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
@@ -374,7 +374,7 @@ fn build_panel(
             }
         }
     };
-    match query(&db, &spec, |row| pricer.price(row), deadline) {
+    match query(&mut db, &spec, |row| pricer.price(row), deadline) {
         Ok(mut result) => {
             if let Some(series) = empty_series {
                 result.series = Some(series);

@@ -9,16 +9,21 @@
 fn an_expired_deadline_during_the_series_fold_yields_no_partial_series() {
     // Arrange: enough rows that the bucketed scan runs past one progress
     // callback interval, plus an already-expired deadline.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_bulk(&db, 4000);
     let expired = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .expect("instant predates the process start");
 
     // Act
-    let interrupted = query(&db, &bucketed(GroupDim::Model, 1000, 10), unpriced, expired);
+    let interrupted = query(
+        &mut db,
+        &bucketed(GroupDim::Model, 1000, 10),
+        unpriced,
+        expired,
+    );
     let after = query(
-        &db,
+        &mut db,
         &bucketed(GroupDim::Model, 1000, 10),
         unpriced,
         no_deadline(),
@@ -60,7 +65,7 @@ fn a_panicking_price_closure_still_detaches_the_progress_handler() {
     // callback interval, plus an ALREADY-EXPIRED deadline. The panicking query
     // is windowed down to a single row, so its own statement finishes inside
     // one interval and the handler never gets to fire on it.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_bulk(&db, 4000);
     let expired = Instant::now()
         .checked_sub(Duration::from_secs(1))
@@ -76,7 +81,7 @@ fn a_panicking_price_closure_still_detaches_the_progress_handler() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        query(&db, &one_row, |_row| panic!("pricing blew up"), expired)
+        query(&mut db, &one_row, |_row| panic!("pricing blew up"), expired)
     }));
     std::panic::set_hook(hook);
 
@@ -94,7 +99,7 @@ fn a_cost_sum_that_overflows_to_infinity_reads_as_unpriced_rather_than_panicking
     // Arrange: one model over two upstreams, each priced at a magnitude an
     // operator could reach with an extreme `[registry.*.pricing]` rate, so the
     // group's SUM overflows f64 to infinity.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     for (id, upstream) in [("a", "u1"), ("b", "u2")] {
         insert(
             &db,
@@ -109,7 +114,7 @@ fn a_cost_sum_that_overflows_to_infinity_reads_as_unpriced_rather_than_panicking
     // Act: the fold is network-reachable and the release profile aborts on
     // panic, so a non-finite total must be a VALUE, never an assertion.
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |_row| RowCost::Priced(f64::MAX),
         no_deadline(),
@@ -130,12 +135,12 @@ fn a_cost_sum_that_overflows_to_infinity_reads_as_unpriced_rather_than_panicking
 #[test]
 fn a_finite_cost_still_prices_normally_beside_the_overflow_guard() {
     // Arrange: the guard must not swallow ordinary large-but-finite costs.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     insert(&db, &Fixture::default());
 
     // Act
     let result = query(
-        &db,
+        &mut db,
         &spec(GroupDim::Model),
         |_row| RowCost::Priced(1e300),
         no_deadline(),
@@ -172,15 +177,15 @@ fn interrupt_error_maps_to_its_own_variant() {
 fn expired_deadline_interrupts_the_query_and_leaves_the_connection_usable() {
     // Arrange: enough rows that the aggregate scan runs past one progress
     // callback interval.
-    let (_dir, db) = open_db();
+    let (_dir, mut db) = open_db();
     seed_bulk(&db, 4000);
     let expired = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .expect("instant predates the process start");
 
     // Act
-    let interrupted = query(&db, &spec(GroupDim::Model), unpriced, expired);
-    let after = query(&db, &spec(GroupDim::Model), unpriced, no_deadline());
+    let interrupted = query(&mut db, &spec(GroupDim::Model), unpriced, expired);
+    let after = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline());
 
     // Assert: the expired deadline sheds as its own variant, and the handler is
     // uninstalled afterwards so the next query on the same connection runs.

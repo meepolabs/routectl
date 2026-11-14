@@ -32,7 +32,7 @@ tokio = { workspace = true, features = ["sync"] }
 # the lean provider build does not pull it in. `hooks` is required for
 # `Connection::progress_handler`, which enforces the read-query deadline
 # from inside SQLite's VM loop (no watchdog thread).
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint", "hooks"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint", "hooks"] }
 
 [dev-dependencies]
 tempfile = "3"

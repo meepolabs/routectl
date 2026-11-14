@@ -32,6 +32,12 @@ impl UsageDb {
         &self.conn
     }
 
+    /// Borrow the underlying connection mutably, for connection-level state
+    /// such as a progress handler.
+    pub const fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     /// The on-disk path this DB was opened from.
     pub fn path(&self) -> &Path {
         &self.path

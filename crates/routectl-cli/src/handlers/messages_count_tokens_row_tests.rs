@@ -28,7 +28,7 @@ const WINDOW_TO: i64 = i64::MAX;
 
 /// Groups the priced per-model query returns over the whole window: the
 /// reader behind the cost columns of `routectl usage` and `/status/usage`.
-fn priced_groups(db: &routectl_usage::UsageDb) -> usize {
+fn priced_groups(db: &mut routectl_usage::UsageDb) -> usize {
     let spec = routectl_usage::QuerySpec {
         from_ms: WINDOW_FROM,
         to_ms: WINDOW_TO,
@@ -296,14 +296,14 @@ async fn a_count_row_is_absent_from_aggregate_and_cost_views_and_present_in_obse
     // Arrange: a refused count, so the row carries a nonzero observation
     // count that observation totals can only report if they read the row.
     let posted = post_count(CountDouble::refusing(), COUNT_BODY).await;
-    let db = routectl_usage::open(&posted.db_path).expect("open ledger");
+    let mut db = routectl_usage::open(&posted.db_path).expect("open ledger");
 
     // Act
     let aggregate = routectl_usage::aggregate(&db, WINDOW_FROM, WINDOW_TO).expect("aggregate");
     let totals =
         routectl_usage::observation_totals(&db, WINDOW_FROM, WINDOW_TO).expect("observation");
 
-    let priced = priced_groups(&db);
+    let priced = priced_groups(&mut db);
 
     // Assert
     assert!(aggregate.is_empty(), "count row leaked into {aggregate:?}");
@@ -317,7 +317,7 @@ async fn a_count_row_is_absent_from_aggregate_and_cost_views_and_present_in_obse
         .expect("retag row");
     let control = routectl_usage::aggregate(&db, WINDOW_FROM, WINDOW_TO).expect("aggregate");
     assert_eq!(control.len(), 1, "{control:?}");
-    assert_eq!(priced_groups(&db), 1);
+    assert_eq!(priced_groups(&mut db), 1);
 }
 
 /// A count and an inference request carrying the same session header, posted

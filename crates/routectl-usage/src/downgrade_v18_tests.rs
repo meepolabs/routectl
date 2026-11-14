@@ -588,7 +588,7 @@ fn the_v18_shape_check_reads_no_row_of_the_tables_it_checks() {
     // two tables the step covers.
     let (_dir, path) = temp_db_path();
     fresh_v18_with_rows(&path);
-    let conn = Connection::open(&path).expect("reopen");
+    let mut conn = Connection::open(&path).expect("reopen");
     conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
         AuthAction::Read {
             table_name: "requests" | "ledger_gaps",

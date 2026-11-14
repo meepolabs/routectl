@@ -405,7 +405,7 @@ fn seed(db: &UsageDb) {
 /// duration of the test.
 fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
     let dir = TempDir::new().expect("tempdir");
-    let db = open(dir.path().join("usage.db")).expect("open ledger");
+    let mut db = open(dir.path().join("usage.db")).expect("open ledger");
     seed(&db);
 
     let bounds = WindowBounds {
@@ -413,7 +413,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
         to_ms: TO_MS,
     };
     let panel = collect(
-        &db,
+        &mut db,
         "today",
         bounds,
         LedgerHealth::default(),
@@ -429,7 +429,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
         bucket: None,
     };
     let result = query(
-        &db,
+        &mut db,
         &spec,
         |_| RowCost::Unpriced,
         Instant::now() + Duration::from_mins(10),

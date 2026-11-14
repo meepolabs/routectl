@@ -2267,7 +2267,7 @@ fn v17_to_v18_failure_after_the_first_alter_leaves_the_file_at_v17() {
     // Arrange: a v17 file whose connection allows the first `ALTER TABLE
     // requests` and denies every later one.
     let (_dir, path) = temp_db_path();
-    let conn = v17_db(&path);
+    let mut conn = v17_db(&path);
     let columns_before = requests_column_names(&conn);
     let alters = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&alters);

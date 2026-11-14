@@ -149,7 +149,7 @@ fn lane<'r>(
 #[test]
 fn lane_verdicts_follow_config_eligibility_and_the_evidence_counts() {
     // Arrange
-    let (_path, db) = fresh_ledger();
+    let (_path, mut db) = fresh_ledger();
     seed_lane(&db, "direct", ANTHROPIC_API, "m-ignoring", 4, 0);
     seed_lane(&db, "direct", ANTHROPIC_API, "m-clear", 4, 100);
     seed_lane(&db, "aws", BEDROCK, "m-thin", 3, 0);
@@ -162,7 +162,7 @@ fn lane_verdicts_follow_config_eligibility_and_the_evidence_counts() {
     seed_lane(&db, "resp", ANTHROPIC_API, "m-resp", 4, 0);
 
     // Act
-    let report = cache_ignore_report(&db, &fixture_config(), NOW_MS, far_deadline());
+    let report = cache_ignore_report(&mut db, &fixture_config(), NOW_MS, far_deadline());
 
     // Assert
     assert_eq!(report.status, CacheIgnoreStatus::Evaluated);
@@ -228,12 +228,12 @@ fn lane_verdicts_follow_config_eligibility_and_the_evidence_counts() {
 fn rows_spelled_with_the_core_kind_and_decision_tokens_are_counted() {
     // Arrange: `insert` writes the core `CALLER_SUPPLIED` token, and each lane
     // carries a core kind constant, so a mirror typo in the query drops them.
-    let (_path, db) = fresh_ledger();
+    let (_path, mut db) = fresh_ledger();
     seed_lane(&db, "direct", ANTHROPIC_API, "m-a", 4, 0);
     seed_lane(&db, "aws", BEDROCK, "m-b", 4, 0);
 
     // Act
-    let report = cache_ignore_report(&db, &fixture_config(), NOW_MS, far_deadline());
+    let report = cache_ignore_report(&mut db, &fixture_config(), NOW_MS, far_deadline());
 
     // Assert
     for (provider, model) in [("direct", "m-a"), ("aws", "m-b")] {
@@ -245,7 +245,7 @@ fn rows_spelled_with_the_core_kind_and_decision_tokens_are_counted() {
 #[test]
 fn an_expired_deadline_reports_query_timeout_and_leaves_the_connection_usable() {
     // Arrange: enough rows that the query runs past one progress callback.
-    let (_path, db) = fresh_ledger();
+    let (_path, mut db) = fresh_ledger();
     db.conn().execute_batch("BEGIN").expect("begin");
     for lane_no in 0..500 {
         seed_lane(&db, "direct", ANTHROPIC_API, &format!("m-{lane_no}"), 8, 0);
@@ -264,11 +264,11 @@ fn an_expired_deadline_reports_query_timeout_and_leaves_the_connection_usable() 
     };
 
     // Act
-    let shed = cache_ignore_report(&db, &config, NOW_MS, expired);
+    let shed = cache_ignore_report(&mut db, &config, NOW_MS, expired);
     // No guard installed here: a deadline left behind by the timed-out call
     // would interrupt this read.
     let unguarded = cache_ignore_lanes(&db, window.from_ms, window.to_ms, &[rule]);
-    let after = cache_ignore_report(&db, &config, NOW_MS, far_deadline());
+    let after = cache_ignore_report(&mut db, &config, NOW_MS, far_deadline());
 
     // Assert
     assert_eq!(
@@ -286,7 +286,7 @@ fn an_expired_deadline_reports_query_timeout_and_leaves_the_connection_usable() 
 /// Evidence on the `direct` lane for two turns `gap_ms` apart, the second
 /// of `input` prompt tokens.
 fn direct_evidence(gap_ms: i64, input: i64) -> Option<i64> {
-    let (_path, db) = fresh_ledger();
+    let (_path, mut db) = fresh_ledger();
     for (i, (ts_start, input)) in [(TURN_BASE_MS, 5000), (TURN_BASE_MS + gap_ms, input)]
         .into_iter()
         .enumerate()
@@ -301,7 +301,7 @@ fn direct_evidence(gap_ms: i64, input: i64) -> Option<i64> {
         };
         insert(&db, &format!("direct-{i}"), &turn);
     }
-    let report = cache_ignore_report(&db, &fixture_config(), NOW_MS, far_deadline());
+    let report = cache_ignore_report(&mut db, &fixture_config(), NOW_MS, far_deadline());
     lane(&report, "direct", "m").map(|l| l.evidence_turns)
 }
 
@@ -328,7 +328,7 @@ fn the_rule_built_from_config_bounds_the_lifetime_and_the_minimum() {
 #[test]
 fn truncation_from_the_query_reaches_the_report() {
     // Arrange: one lane more than the query returns.
-    let (_path, db) = fresh_ledger();
+    let (_path, mut db) = fresh_ledger();
     let lanes = i64::try_from(CACHE_IGNORE_LANE_CAP).expect("cap fits") + 1;
     db.conn().execute_batch("BEGIN").expect("begin");
     for lane_no in 0..lanes {
@@ -337,7 +337,7 @@ fn truncation_from_the_query_reaches_the_report() {
     db.conn().execute_batch("COMMIT").expect("commit");
 
     // Act
-    let report = cache_ignore_report(&db, &fixture_config(), NOW_MS, far_deadline());
+    let report = cache_ignore_report(&mut db, &fixture_config(), NOW_MS, far_deadline());
 
     // Assert
     assert_eq!(report.status, CacheIgnoreStatus::Evaluated);
@@ -348,13 +348,13 @@ fn truncation_from_the_query_reaches_the_report() {
 #[test]
 fn a_failing_query_reports_db_unavailable() {
     // Arrange
-    let (_path, db) = fresh_ledger();
+    let (_path, mut db) = fresh_ledger();
     db.conn()
         .execute_batch("DROP TABLE requests")
         .expect("drop the requests table");
 
     // Act
-    let report = cache_ignore_report(&db, &fixture_config(), NOW_MS, far_deadline());
+    let report = cache_ignore_report(&mut db, &fixture_config(), NOW_MS, far_deadline());
 
     // Assert
     assert_eq!(

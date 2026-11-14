@@ -379,7 +379,7 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
     let path = dir.path().join("usage.db");
     let (from_ms, span_ms) = seed_deep_ledger(&path, 100_000, 400);
     let to_ms = from_ms + span_ms + 1;
-    let db = open_readonly_fastfail(&path).expect("open seeded ledger");
+    let mut db = open_readonly_fastfail(&path).expect("open seeded ledger");
     let spec = QuerySpec {
         from_ms,
         to_ms,
@@ -404,7 +404,7 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
     for _ in 0..REPS {
         let reference = reference_scan(&db, from_ms, to_ms);
         let started = Instant::now();
-        let series = query(&db, &spec, |_row| RowCost::Unpriced, started + budget)
+        let series = query(&mut db, &spec, |_row| RowCost::Unpriced, started + budget)
             .expect("a 100k-row day series must complete inside the budget");
         let elapsed = started.elapsed();
         cost_ratio = cost_ratio.min(elapsed.as_secs_f64() / reference.as_secs_f64());

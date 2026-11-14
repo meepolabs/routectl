@@ -1077,7 +1077,7 @@ fn format_reset_renders_local_timestamp_shape() {
 #[test]
 fn since_with_until_builds_single_range_titled_block() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     let config = cost_config();
     let args = UsageArgs {
         window: WindowFlag::None,
@@ -1090,7 +1090,7 @@ fn since_with_until_builds_single_range_titled_block() {
     };
 
     // Act
-    let blocks = build_blocks(&db, &config, &no_prices(), &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&mut db, &config, &no_prices(), &args, fixed_now()).unwrap();
 
     // Assert
     assert_eq!(blocks.len(), 1);
@@ -1100,7 +1100,7 @@ fn since_with_until_builds_single_range_titled_block() {
 #[test]
 fn since_without_until_builds_single_open_ended_block() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     let config = cost_config();
     let args = UsageArgs {
         window: WindowFlag::None,
@@ -1113,7 +1113,7 @@ fn since_without_until_builds_single_open_ended_block() {
     };
 
     // Act
-    let blocks = build_blocks(&db, &config, &no_prices(), &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&mut db, &config, &no_prices(), &args, fixed_now()).unwrap();
 
     // Assert
     assert_eq!(blocks.len(), 1);

@@ -586,7 +586,7 @@ fn an_injected_failure_after_the_first_v21_alter_rolls_back_the_columns_and_both
     // Arrange: a v20 file whose connection allows the first `ALTER TABLE
     // requests` and denies every later one.
     let (_dir, path) = temp_db_path();
-    let conn = v20_file(&path);
+    let mut conn = v20_file(&path);
     let columns_before = requests_columns(&conn);
     let alters = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&alters);

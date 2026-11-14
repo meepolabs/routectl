@@ -1721,7 +1721,7 @@ pub fn render_k_calibration(cal: &KCalibration) -> String {
 pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = crate::derived_path::usage_db_path(args.db.clone(), config)?;
 
-    let db = match open_readonly(&db_path) {
+    let mut db = match open_readonly(&db_path) {
         Ok(db) => db,
         Err(OpenError::NoData { .. }) => {
             println!(
@@ -1743,7 +1743,7 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
 
     let prices = PriceSnapshot::pin(&default_price_book());
     let now = Local::now();
-    let output = build_output(&db, config, &prices, args, now)?;
+    let output = build_output(&mut db, config, &prices, args, now)?;
     print!("{output}");
     Ok(())
 }
@@ -1752,7 +1752,7 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
 /// when `args.k_calibration` is set, else the joined window blocks. Separated
 /// from `run` so it is testable without touching stdout or the clock.
 pub fn build_output(
-    db: &UsageDb,
+    db: &mut UsageDb,
     config: &Config,
     prices: &PriceSnapshot,
     args: &UsageArgs,
@@ -1771,7 +1771,7 @@ pub fn build_output(
 /// single calendar window. Separated from `run` so it is testable without
 /// touching stdout or the clock.
 pub fn build_blocks(
-    db: &UsageDb,
+    db: &mut UsageDb,
     config: &Config,
     prices: &PriceSnapshot,
     args: &UsageArgs,
