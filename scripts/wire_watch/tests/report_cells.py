@@ -79,10 +79,13 @@ def usage_text() -> str:
         "requests": 1, "ok": 1, "errors": 0, "input_tokens": 3, "output_tokens": 1,
         "reasoning_tokens": 0, "cache_read_billed": 0, "server_tool_calls": 0,
         "errors_by_class": {}, "client_disconnect_total": 0, "cancelled_total": 0, "cache_read_present": 0,
+        "cache_write_tokens": 0, "cache_write_present": 0,
     }
     observation = {
         "from_ms": 0, "to_ms": 1, "wire_losses": 0, "translation_drops": 0, "local_refusals": 0,
-        "field_repairs": 0, "missing_terminals": 0, "gap_rows": 0, "gap_dropped": 0, "complete": True,
+        "field_repairs": 0, "missing_terminals": 0, "request_caused_failures": 0, "excluded_endpoint": 0,
+        "excluded_model": 0, "excluded_target": 0, "excluded_probe_run": 0, "gap_rows": 0, "gap_dropped": 0,
+        "complete": True,
     }
     would_trim = {
         "candidate_requests": 0, "would_trim_tokens": 0, "verdict_met": 0, "verdict_unmet": 0,
