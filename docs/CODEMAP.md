@@ -36,7 +36,8 @@ license.
   `RefusalReason`, `EligibilityReason`, and the request-observation types
   (incl. `SkipCounts`, `WalkCounts`), the `[log]` knob resolvers
   (`LogKnob`/`LogKnobSource`), and the upstream-text scrub (`scrub_upstream_text`,
-  `scrub_upstream_value`, `upstream_text_for_log`, `names_aws_principal`); declares the `provider_kind`, `upstream_reason`,
+  `scrub_upstream_value`, `upstream_text_for_log`, `upstream_excerpt_for_log`,
+  `names_aws_principal`); declares the `provider_kind`, `upstream_reason`,
   `refusal_reason` and `eligibility` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
@@ -92,8 +93,9 @@ license.
   principal-shaped substrings of decoded upstream text (rules in its doc
   comment); `scrub_upstream_value` (the same over a JSON value, in place),
   `upstream_text_for_log` (scrub, then control-filter and cap, for log
-  sinks), `names_aws_principal` (the ARN / account-id verdict alone).
-  Hand-rolled, no regex
+  sinks), `names_aws_principal` (the ARN / account-id verdict alone), and the
+  crate-internal `ends_every_span` byte predicate `log_safe` bounds a text
+  at before scrubbing it. Hand-rolled, no regex
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift` and the router's wire-check WARN. Decides only --
@@ -388,7 +390,8 @@ license.
 - `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions)
   and their `body_trace_enabled` gate,
   prompt and credential-key redaction (`redact_error_body_text` for upstream
-  error bodies), structural-summary extractor, `[log]`-block override
+  error bodies), the upstream error-body excerpts (`sanitize_upstream_body*`,
+  `upstream_excerpt_for_log`), structural-summary extractor, `[log]`-block override
   seeding and the per-knob resolvers (`resolve_trace_headers` & co., env >
   config > default, returning `LogKnob`)
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
@@ -713,7 +716,8 @@ license.
 - `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures
   (401/403-vs-other auth-warn split) across egresses; renders the raw upstream
   text through `upstream_text_for_log`. Its `pub` `#[cfg(test)]` `tests`
-  module also holds the planted-credential rows other lanes' sink tests share
+  module also holds the planted-credential rows and the `rendering_faults`
+  check other lanes' sink tests share
 - `src/stream_completion.rs` -- `StreamCompletion`: shared end-of-stream
   verdict for lanes whose wire closes each turn with a terminal event; each
   lane injects its own predicate, and a stream that ends before it yields a
@@ -728,6 +732,9 @@ license.
   stream counts once on slot and total per terminal-checked lane; a
   terminated stream, a consumer drop before the end, and an openai-compat
   mid-tool-call cut count nothing
+- `src/carried_excerpt_scrub_tests.rs` -- cross-lane guard: every lane that
+  carries its own upstream error-body excerpt renders the error (Display and
+  Debug) with each planted credential redacted, end to end against a mock 500
 - `src/upstream_error.rs` -- `UpstreamErrorRead` (+ `CarriedBody`): the one
   read of a non-success upstream response every lane's error mapper takes
   (all five lanes); capped body + parse, gated `Retry-After`, request id,
@@ -5877,7 +5884,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `cache_write_total_expr!`, the one both-era write-total expression (the v21
   total, else legacy 5m + 1h) behind `AggRow::cache_write_tokens` /
   `cache_write_present`
-- `src/query/deadline.rs` -- `DeadlineGuard::install(db, deadline)`: the
+- `src/query/deadline.rs` -- `DeadlineGuard::install(&mut UsageDb, deadline)`
+  (the guard holds that borrow and derefs to `UsageDb`): the
   reusable connection-level read deadline (SQLite progress handler re-checked
   every 10_000 VM ops, detached on every exit path including unwind). Per
   CONNECTION rather than per statement, so one install bounds a multi-statement
@@ -6062,7 +6070,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `cache_write_lifetimes` bound values (a split with no total takes its sum;
   canonical JSON keyed by decimal seconds in numeric order; a split above the
   total is stored as reported); the writer binds only its output
-- `src/db.rs` -- `UsageDb` + `open` (WAL, 0600, migration ladder under
+- `src/db.rs` -- `UsageDb` (`conn` / `conn_mut`) + `open` (WAL, 0600, migration ladder under
   IMMEDIATE transactions) and the non-migrating read-only opens
   `open_readonly`/`open_readonly_fastfail`; `OpenError`
 - `src/schema.rs` -- the ledger DDL (`requests`, `capability_learn_events`,
@@ -8188,7 +8196,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/cache_ignore.rs` -- (`pub(crate)`) the one cache-ignore assembler
   that the daemon driver, `usage --detail` and doctor all render (report only;
   nothing logged, no session ids).
-  `cache_ignore_report(&UsageDb, &Config, now_ms, deadline) ->
+  `cache_ignore_report(&mut UsageDb, &Config, now_ms, deadline) ->
   CacheIgnoreReport` evaluates configured anthropic-api / bedrock providers,
   with rules from `routectl_router::cache_rules`, through
   `routectl_usage::cache_ignore_lanes` under a `DeadlineGuard`, over the
@@ -8522,7 +8530,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   footer carries the window's `walk:` line (`render_walk_line` over
   `observation_totals`, marked a lower bound when the ledger recorded a gap)
 - `src/commands/usage_cache_ignore.rs` -- the `routectl usage --detail`
-  cache-ignore block: `cache_ignore_block(&UsageDb, &Config, now_ms,
+  cache-ignore block: `cache_ignore_block(&mut UsageDb, &Config, now_ms,
   deadline)` renders `cache_ignore::cache_ignore_report` (fixed 6 h window,
   independent of the window flags and `--since`) once per run from
   `usage::build_blocks`, with a `CACHE_IGNORE_READ_BUDGET` (2 s) deadline.
