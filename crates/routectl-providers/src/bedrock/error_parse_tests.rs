@@ -126,3 +126,62 @@ fn access_denied_403_carries_its_envelope_not_the_raw_principal_body() {
         "the carried parse leaked the principal ARN: {carried_parse:?}"
     );
 }
+
+/// A carryable 400 envelope whose message ends in `Bearer {token}`, with
+/// 200 empty `*_token` keys the credential-key redaction grows, padded so
+/// the lane's carried cut keeps exactly `kept` chars of the token.
+fn envelope_cut_inside_bearer(token: &str, kept: usize) -> String {
+    let envelope = |pad: usize| {
+        let mut map = serde_json::Map::new();
+        map.insert("__type".into(), "ValidationException".into());
+        for i in 0..200 {
+            map.insert(format!("k{i:03}_token"), "".into());
+        }
+        let message = format!("{} Bearer {token}", "x".repeat(pad));
+        map.insert("message".into(), message.into());
+        Value::Object(map)
+    };
+    let redacted = routectl_core::redact_prompts_in(&envelope(0)).to_string();
+    let token_at = redacted
+        .find(token)
+        .expect("token in the redacted envelope");
+    let pad = MAX_ERROR_BODY_BYTES - "... [truncated]".len() - kept - token_at;
+    envelope(pad).to_string()
+}
+
+#[test]
+fn request_fault_display_of_an_envelope_cut_inside_a_bearer_token_redacts_it() {
+    let rows = [
+        (
+            "no digit, 17 chars kept",
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ",
+            17,
+        ),
+        ("digit, 4 chars kept", "a1b2c3d4e5f6g7h8i9j0", 4),
+    ];
+    for (row, token, kept) in rows {
+        let raw = envelope_cut_inside_bearer(token, kept);
+        assert!(
+            raw.len() < MAX_ERROR_BODY_BYTES,
+            "{row}: raw body under the cut"
+        );
+
+        let err = read(400, raw);
+
+        let Error::Upstream { body: carried, .. } = &err else {
+            panic!("{row}: expected Error::Upstream, got {err:?}");
+        };
+        assert!(
+            carried.ends_with(&format!(" Bearer {}... [truncated]", &token[..kept])),
+            "{row}: the carried cut keeps {kept} token chars"
+        );
+        let display = err.to_string();
+        assert!(
+            display.ends_with(" Bearer [redacted]... [truncated]")
+                && display.matches("... [truncated]").count() == 1,
+            "{row}: {:?}",
+            &display[display.len() - 60..]
+        );
+        assert!(!display.contains(&token[..3]), "{row}: token run survives");
+    }
+}

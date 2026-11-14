@@ -35,7 +35,8 @@ const _: () = assert!(std::mem::size_of::<Error>() <= 128);
 /// renders through [`crate::scrub_upstream_text`] in both Display and Debug;
 /// the carried fields stay raw for the classifiers that read them. An
 /// `Upstream` body that already ends in `... [truncated]` (a lane's carried
-/// excerpt) is scrubbed with that marker set aside and keeps it.
+/// excerpt) is scrubbed through the marker's dots with its ` [truncated]`
+/// set aside, and ends in exactly one marker.
 ///
 /// `Debug` is hand-written (not derived) so the [`Error::Upstream`] `body`
 /// -- which can now carry a request-fault envelope up to

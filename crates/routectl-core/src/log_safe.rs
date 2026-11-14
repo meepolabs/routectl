@@ -342,8 +342,9 @@ pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
 /// the scrub is cut even when the scrub shortened it, and one the scrub grew
 /// past 256 is cut too, so a cut excerpt always ends in the marker and never
 /// parses as JSON. A `text` that already ends in the marker (an excerpt
-/// another cut produced) is scrubbed without it, the marker is put back, and
-/// that one marker is kept when the result fits in 256 characters.
+/// another cut produced) is scrubbed with its dots and without the rest of
+/// it, the marker is completed after, and that one marker is kept when the
+/// result fits in 256 characters.
 pub fn upstream_excerpt_for_log(text: &str) -> String {
     let ran_past = text.chars().count() > MAX;
     let scrubbed = scrub_marked_excerpt(bound_for_scrub(text));
@@ -373,19 +374,33 @@ fn marked_cut(text: &str, cap: usize) -> String {
 /// The marker every cut excerpt ends in.
 const TRUNCATION_MARKER: &str = "... [truncated]";
 
-/// [`crate::scrub_upstream_text`] of `text` with one trailing
-/// `... [truncated]` set aside: the scrub reads only the text before it and
-/// the marker is put back after, so a value the cut left open is redacted up
-/// to the marker and the marker itself is never read as upstream text.
+/// The tail of [`TRUNCATION_MARKER`] after its dots.
+const TRUNCATION_TAG: &str = " [truncated]";
+
+/// [`crate::scrub_upstream_text`] of `text` with the ` [truncated]` of one
+/// trailing `... [truncated]` set aside. The scrub reads the text through
+/// the marker's dots, so a token the cut left short still counts them as
+/// it does in the plain scrub, and the tag is put back after; when the
+/// scrub took the dots into a redaction they are put back too. A value the
+/// cut left open is redacted up to the marker, and the result ends in
+/// exactly one marker.
 pub(crate) fn scrub_marked_excerpt(text: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    let Some(head) = text.strip_suffix(TRUNCATION_MARKER) else {
+    let Some(head) = text.strip_suffix(TRUNCATION_TAG) else {
         return crate::scrub_upstream_text(text);
     };
+    if !head.ends_with("...") {
+        return crate::scrub_upstream_text(text);
+    }
     match crate::scrub_upstream_text(head) {
         Cow::Borrowed(_) => Cow::Borrowed(text),
         Cow::Owned(mut scrubbed) => {
-            scrubbed.push_str(TRUNCATION_MARKER);
+            let tail = if scrubbed.ends_with("...") {
+                TRUNCATION_TAG
+            } else {
+                TRUNCATION_MARKER
+            };
+            scrubbed.push_str(tail);
             Cow::Owned(scrubbed)
         }
     }

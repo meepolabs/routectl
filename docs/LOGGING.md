@@ -336,7 +336,11 @@ shortened it; a Cloud Code onboarding excerpt the scrub lengthens past
 same way, stepping back at 65,536 bytes. Two residuals: the Bedrock request-fault envelope a 400
 or 422 carries, and the message a Bedrock in-stream exception carries,
 are cut at 65,536 bytes with no step back, so a credential straddling
-that cut in a larger body can show its first part. The scrub
+that cut can show its first part. The envelope is cut once it reaches
+65,536 bytes after prompt and credential-key redaction, which can grow a
+smaller raw body past it. A rendered request-fault error still redacts
+a bearer token that cut leaves short, as the scrub reads the cut text
+through the dots of its `... [truncated]` marker. The scrub
 matches shapes, so upstream text still keeps a secret under a query
 parameter or key whose name is not credential-like (`?sig=...`), an
 opaque secret with no known vendor prefix, a bearer token shorter than

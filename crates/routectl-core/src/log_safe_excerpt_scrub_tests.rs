@@ -410,3 +410,221 @@ fn upstream_error_rendering_of_a_carried_cut_inside_a_redacted_value_keeps_one_m
         );
     }
 }
+
+/// A flat Bedrock-style validation envelope whose message ends in
+/// `Bearer {token}`, plus 200 empty `*_token` keys the credential-key
+/// redaction grows by 16 bytes each, padded so the carried text routectl
+/// builds from it (redacted, then cut at [`MAX_ERROR_BODY_BYTES`] bytes)
+/// keeps exactly `kept` chars of the token before the marker. Returns the
+/// raw body and the carried text.
+fn bedrock_envelope_cut_inside_bearer(token: &str, kept: usize) -> (String, String) {
+    let envelope = |pad: usize| {
+        let mut map = serde_json::Map::new();
+        map.insert("__type".into(), "ValidationException".into());
+        for i in 0..200 {
+            map.insert(format!("k{i:03}_token"), "".into());
+        }
+        let message = format!("{} Bearer {token}", "x".repeat(pad));
+        map.insert("message".into(), message.into());
+        serde_json::Value::Object(map)
+    };
+    let carry = |value: &serde_json::Value| {
+        super::sanitize_upstream_body_with_byte_cap(
+            &super::redact_prompts_with_flag(value, false).to_string(),
+            MAX_ERROR_BODY_BYTES,
+        )
+    };
+    let unpadded = super::redact_prompts_with_flag(&envelope(0), false).to_string();
+    let token_at = unpadded
+        .find(token)
+        .expect("token in the redacted envelope");
+    let pad = MAX_ERROR_BODY_BYTES - MARKER.len() - kept - token_at;
+    let value = envelope(pad);
+    let raw = value.to_string();
+    let carried = carry(&value);
+    assert!(
+        raw.len() < MAX_ERROR_BODY_BYTES,
+        "raw body is under the cut"
+    );
+    assert!(
+        carried.ends_with(&format!(" Bearer {}{MARKER}", &token[..kept])),
+        "the cut keeps {kept} token chars: {:?}",
+        &carried[carried.len() - 60..]
+    );
+    (raw, carried)
+}
+
+/// Every 3-char window of `kept` that appears in `text`.
+fn surviving_windows<'a>(kept: &'a str, text: &str) -> Vec<&'a str> {
+    (0..kept.len().saturating_sub(2))
+        .map(|i| &kept[i..i + 3])
+        .filter(|w| text.contains(w))
+        .collect()
+}
+
+#[test]
+fn upstream_error_display_of_an_envelope_cut_inside_a_bearer_token_redacts_it() {
+    const PLAIN: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ";
+    const DIGIT: &str = "a1b2c3d4e5f6g7h8i9j0";
+    let rows = [
+        ("no digit, 17 chars kept", PLAIN, 17),
+        ("no digit, 18 chars kept", PLAIN, 18),
+        ("no digit, 19 chars kept", PLAIN, 19),
+        ("digit, 3 chars kept", DIGIT, 3),
+        ("digit, 4 chars kept", DIGIT, 4),
+        ("digit, 5 chars kept", DIGIT, 5),
+    ];
+    for (row, token, kept) in rows {
+        let (_, carried) = bedrock_envelope_cut_inside_bearer(token, kept);
+        let err = crate::Error::upstream("p", 400, carried);
+
+        let display = format!("{err}");
+
+        let survivors = surviving_windows(&token[..kept], &display);
+        assert!(survivors.is_empty(), "{row}: {survivors:?} survive");
+        assert!(
+            display.ends_with(&format!(" Bearer [redacted]{MARKER}"))
+                && display.matches(MARKER).count() == 1,
+            "{row}: {:?}",
+            &display[display.len() - 60..]
+        );
+    }
+}
+
+#[test]
+fn upstream_error_display_of_a_raw_body_ending_in_a_cut_bearer_token_redacts_it() {
+    let body = format!("denied Bearer abcdefghijklmnopq{MARKER}");
+    let err = crate::Error::upstream("p", 400, body.as_str());
+
+    let display = format!("{err}");
+
+    assert_eq!(
+        crate::scrub_upstream_text(&body),
+        "denied Bearer [redacted] [truncated]"
+    );
+    assert_eq!(
+        display,
+        format!("provider `p`: upstream HTTP 400: denied Bearer [redacted]{MARKER}")
+    );
+}
+
+/// `(shape, text before the credential, credential)`: one row per scrub
+/// rule shape, each credential long enough for its rule.
+const MARKED_SHAPES: [(&str, &str, &str); 9] = [
+    (
+        "bearer, no digit",
+        "denied Bearer ",
+        "abcdefghijklmnopqrstuvwxyzABCD",
+    ),
+    ("bearer, digit", "denied Bearer ", "a1b2c3d4e5f6g7h8"),
+    (
+        "session token",
+        "x-amz-security-token: ",
+        "FQoGZXIvYXdzEJr//////////wEaDK7sess",
+    ),
+    ("arn", "role ", "arn:aws:iam::123456789012:role/SecretRole"),
+    ("vendor key", "key ", KEY),
+    ("form value", "?x=1&token=", "ZpQ8sVx2LmN4"),
+    ("quoted value", r#"{"api_key":""#, "Qw9Er7Ty5Ui3"),
+    ("account id", "account ", "123456789012"),
+    (
+        "url userinfo",
+        "see https://",
+        "alice:s3cr3tpw@host.example",
+    ),
+];
+
+/// Each maximal run of ASCII letters and digits, 2+ chars long.
+fn alnum_runs(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|run| run.len() >= 2)
+        .collect()
+}
+
+/// The runs of `shown` that `plain` holds fewer of: text the scrub let
+/// through that the plain scrub of the same input redacted.
+fn runs_beyond<'a>(shown: &'a str, plain: &str) -> Vec<&'a str> {
+    let mut budget = alnum_runs(plain);
+    alnum_runs(shown)
+        .into_iter()
+        .filter(|run| match budget.iter().position(|r| r == run) {
+            Some(i) => {
+                budget.swap_remove(i);
+                false
+            }
+            None => true,
+        })
+        .collect()
+}
+
+#[test]
+fn marked_excerpt_scrub_never_shows_what_the_plain_scrub_redacts() {
+    let mut failures = Vec::new();
+    let mut inputs = 0;
+    for (shape, before, credential) in MARKED_SHAPES {
+        for cut in 1..=credential.len() {
+            let input = format!("{SENTINEL} {before}{}{MARKER}", &credential[..cut]);
+            inputs += 1;
+
+            let shown = super::scrub_marked_excerpt(&input);
+
+            let plain = crate::scrub_upstream_text(&input);
+            if plain.ends_with(MARKER) && shown != plain {
+                failures.push(format!("{shape} cut {cut}: {shown:?} is not {plain:?}"));
+            }
+            match shown.strip_suffix(MARKER) {
+                Some(head) if !head.contains(MARKER) => {
+                    let beyond = runs_beyond(head, &plain);
+                    if !beyond.is_empty() {
+                        failures.push(format!("{shape} cut {cut}: {beyond:?} in {shown:?}"));
+                    }
+                }
+                _ => failures.push(format!("{shape} cut {cut}: not one marker in {shown:?}")),
+            }
+        }
+    }
+    assert_eq!(inputs, 228, "table size");
+    assert!(
+        failures.is_empty(),
+        "{} of {inputs}:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn marked_excerpt_scrub_is_idempotent() {
+    let mut rows: Vec<(String, String)> = MARKED_SHAPES
+        .iter()
+        .map(|(shape, before, credential)| {
+            let cut = credential.len() / 2 + 1;
+            (
+                (*shape).to_string(),
+                format!("{before}{}{MARKER}", &credential[..cut]),
+            )
+        })
+        .collect();
+    rows.push((
+        "bearer, already redacted".into(),
+        format!("Bearer [redacted]{MARKER}"),
+    ));
+    rows.push((
+        "quoted, already redacted".into(),
+        format!("password='[redacted]{MARKER}"),
+    ));
+    for (row, input) in rows {
+        let once = super::scrub_marked_excerpt(&input).into_owned();
+
+        let twice = super::scrub_marked_excerpt(&once).into_owned();
+
+        assert_eq!(twice, once, "{row}");
+    }
+    assert_eq!(
+        super::scrub_marked_excerpt(&format!("Bearer [redacted]{MARKER}")),
+        format!("Bearer [redacted]{MARKER}")
+    );
+    assert_eq!(
+        super::scrub_marked_excerpt(&format!("password='[redacted]{MARKER}")),
+        format!("password='[redacted]{MARKER}")
+    );
+}
