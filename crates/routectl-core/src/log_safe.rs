@@ -341,11 +341,14 @@ pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
 /// `... [truncated]`, then control-filtered. A text that ran past 256 before
 /// the scrub is cut even when the scrub shortened it, and one the scrub grew
 /// past 256 is cut too, so a cut excerpt always ends in the marker and never
-/// parses as JSON.
+/// parses as JSON. A `text` that already ends in the marker (an excerpt
+/// another cut produced) is scrubbed without it, the marker is put back, and
+/// that one marker is kept when the result fits in 256 characters.
 pub fn upstream_excerpt_for_log(text: &str) -> String {
     let ran_past = text.chars().count() > MAX;
-    let scrubbed = crate::scrub_upstream_text(bound_for_scrub(text));
-    if !ran_past && scrubbed.chars().count() <= MAX {
+    let scrubbed = scrub_marked_excerpt(bound_for_scrub(text));
+    let fits = scrubbed.chars().count() <= MAX;
+    if fits && (!ran_past || scrubbed.ends_with(TRUNCATION_MARKER)) {
         return sanitize_for_log(&scrubbed);
     }
     let excerpt = marked_cut(&scrubbed, MAX);
@@ -363,8 +366,29 @@ fn scrubbed_cut(text: &str, cap: usize) -> String {
 /// `... [truncated]` marker.
 fn marked_cut(text: &str, cap: usize) -> String {
     let mut s = text.chars().take(cap).collect::<String>();
-    s.push_str("... [truncated]");
+    s.push_str(TRUNCATION_MARKER);
     s
+}
+
+/// The marker every cut excerpt ends in.
+const TRUNCATION_MARKER: &str = "... [truncated]";
+
+/// [`crate::scrub_upstream_text`] of `text` with one trailing
+/// `... [truncated]` set aside: the scrub reads only the text before it and
+/// the marker is put back after, so a value the cut left open is redacted up
+/// to the marker and the marker itself is never read as upstream text.
+pub(crate) fn scrub_marked_excerpt(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let Some(head) = text.strip_suffix(TRUNCATION_MARKER) else {
+        return crate::scrub_upstream_text(text);
+    };
+    match crate::scrub_upstream_text(head) {
+        Cow::Borrowed(_) => Cow::Borrowed(text),
+        Cow::Owned(mut scrubbed) => {
+            scrubbed.push_str(TRUNCATION_MARKER);
+            Cow::Owned(scrubbed)
+        }
+    }
 }
 
 /// `text` bounded at [`crate::MAX_ERROR_BODY_BYTES`]. When the bound cuts

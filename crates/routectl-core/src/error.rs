@@ -33,7 +33,9 @@ const _: () = assert!(std::mem::size_of::<Error>() <= 128);
 /// Upstream-authored text (the [`Error::Upstream`] body and the free text
 /// of [`Error::Streaming`], [`Error::Auth`] and [`Error::NormalizeResponse`])
 /// renders through [`crate::scrub_upstream_text`] in both Display and Debug;
-/// the carried fields stay raw for the classifiers that read them.
+/// the carried fields stay raw for the classifiers that read them. An
+/// `Upstream` body that already ends in `... [truncated]` (a lane's carried
+/// excerpt) is scrubbed with that marker set aside and keeps it.
 ///
 /// `Debug` is hand-written (not derived) so the [`Error::Upstream`] `body`
 /// -- which can now carry a request-fault envelope up to
@@ -47,7 +49,7 @@ pub enum Error {
     /// `upstream_code`) consumed by the router and surfaced to callers.
     #[error(
         "provider `{provider}`: upstream HTTP {status}: {}",
-        scrub_upstream_text(.body)
+        crate::log_safe::scrub_marked_excerpt(.body)
     )]
     Upstream {
         /// Provider that produced the error.
@@ -457,7 +459,7 @@ fn body_debug_excerpt(body: &str) -> String {
 fn body_debug_excerpt_with_flag(body: &str, redact_prompts: bool) -> String {
     use crate::log_safe::ErrorJsonBody;
     match crate::log_safe::read_error_json_body(body) {
-        ErrorJsonBody::NotJson => excerpt_chars(&scrub_upstream_text(body)),
+        ErrorJsonBody::NotJson => excerpt_chars(&crate::log_safe::scrub_marked_excerpt(body)),
         ErrorJsonBody::Unreadable(marker) => marker,
         ErrorJsonBody::Parsed(mut value) => {
             crate::log_safe::redact_in_place(&mut value, redact_prompts);

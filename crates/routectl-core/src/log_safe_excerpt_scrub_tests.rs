@@ -311,3 +311,102 @@ fn excerpt_bound_inside_a_multibyte_char_drops_the_split_credential() {
     assert!(!excerpt.contains("eyJ"), "fragment in {excerpt:?}");
     assert_eq!(excerpt, format!("{SENTINEL} [redacted]{MARKER}"));
 }
+
+/// The Cloud Code onboarding excerpt as its lane composes it: the 512-char
+/// first pass, then the 256-char log excerpt of that.
+fn onboarding_excerpt(body: &str) -> String {
+    upstream_excerpt_for_log(&sanitize_upstream_body(body))
+}
+
+/// `(name, body, planted run, want)`: a body over 512 bytes whose last value
+/// is credential-named and never closed, so the first pass ends in
+/// `[redacted]` and its marker directly after it.
+fn open_value_past_the_first_cut() -> Vec<(&'static str, String, &'static str, String)> {
+    let a = "a".repeat(173);
+    vec![
+        (
+            "single-quoted form value",
+            format!("{a} password='{}", "b".repeat(330)),
+            "bb",
+            format!("{a} password='[redacted]{MARKER}"),
+        ),
+        (
+            "double-quoted json key",
+            format!(r#"{a} {{"api_key":"{}"#, "Q".repeat(400)),
+            "QQ",
+            format!(r#"{a} {{"api_key":"[redacted]{MARKER}"#),
+        ),
+        (
+            "unquoted form value",
+            format!("{a} token={}", "Z".repeat(400)),
+            "ZZ",
+            format!("{a} token=[redacted]{MARKER}"),
+        ),
+    ]
+}
+
+#[test]
+fn log_excerpt_of_a_first_pass_cut_inside_a_redacted_value_keeps_one_marker() {
+    for (row, body, planted, want) in open_value_past_the_first_cut() {
+        assert!(
+            body.len() > MAX_LOG_BODY_EXCERPT,
+            "{row}: over the first cut"
+        );
+
+        let excerpt = onboarding_excerpt(&body);
+
+        assert!(
+            excerpt.ends_with(MARKER) && excerpt.matches(MARKER).count() == 1,
+            "{row}: not exactly one trailing marker in {excerpt:?}"
+        );
+        assert!(!excerpt.contains(planted), "{row}: fragment in {excerpt:?}");
+        assert_eq!(excerpt, want, "{row}");
+    }
+}
+
+#[test]
+fn log_excerpt_of_a_short_first_pass_cut_the_scrub_leaves_alone_is_unchanged() {
+    let body = format!(r#"{{"error":{{"message":"{}"}}}}"#, "\u{4e2d}".repeat(200));
+    assert!(body.len() > MAX_LOG_BODY_EXCERPT && body.chars().count() < 241);
+
+    let excerpt = onboarding_excerpt(&body);
+
+    assert!(excerpt.chars().count() <= 256);
+    assert_eq!(
+        excerpt,
+        format!(r#"{{"error":{{"message":"{}"}}}}{MARKER}"#, "?".repeat(200))
+    );
+}
+
+#[test]
+fn log_excerpt_of_a_marked_text_the_scrub_shrinks_under_its_cut_keeps_one_marker() {
+    let text = format!("{KEY}{} kept{MARKER}", "k".repeat(300));
+    assert!(text.chars().count() > 256, "past the cut before the scrub");
+
+    let excerpt = upstream_excerpt_for_log(&text);
+
+    assert_eq!(excerpt, format!("[redacted] kept{MARKER}"));
+}
+
+#[test]
+fn upstream_error_rendering_of_a_carried_cut_inside_a_redacted_value_keeps_one_marker() {
+    for (row, body, planted, _) in open_value_past_the_first_cut() {
+        let err = crate::Error::upstream("p", 400, sanitize_upstream_body(&body));
+
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+
+        assert!(
+            display.ends_with(MARKER) && display.matches(MARKER).count() == 1,
+            "{row}: display {display:?}"
+        );
+        assert!(
+            debug.contains(&format!("[redacted]{MARKER}\"")) && debug.matches(MARKER).count() == 1,
+            "{row}: debug {debug:?}"
+        );
+        assert!(
+            !display.contains(planted) && !debug.contains(planted),
+            "{row}: fragment"
+        );
+    }
+}
