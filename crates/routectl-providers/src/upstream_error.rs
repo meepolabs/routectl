@@ -716,11 +716,12 @@ impl UpstreamErrorRead {
 
     /// The upstream text the upstream-failure WARN renders: the string
     /// `error.message` when the body carries one, else the redacted body
-    /// with an HTML page collapsed to its marker, bounded at
-    /// [`routectl_core::MAX_ERROR_BODY_BYTES`] characters. Never cut at a
-    /// log excerpt cap, so the log scrub sees each credential whole before
-    /// the field cap applies; the client message keeps its own, shorter
-    /// excerpt.
+    /// with an HTML page collapsed to its marker. A redacted body over
+    /// [`routectl_core::MAX_ERROR_BODY_BYTES`] bytes is bounded there,
+    /// stepping back so a token the bound splits is dropped, then scrubbed
+    /// and marked `... [truncated]`. Never cut at a log excerpt cap, so the
+    /// log scrub sees each credential whole before the field cap applies;
+    /// the client message keeps its own, shorter excerpt.
     pub fn upstream_log_text(&self) -> String {
         if let Some(message) = self.parsed().and_then(ParsedErrorBody::error_message) {
             return message.to_string();

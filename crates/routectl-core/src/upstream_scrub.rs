@@ -1024,7 +1024,14 @@ const BEARER_TOKEN_MIN_PLAIN: usize = 20;
 /// matched whole; a quoted value the cut splits has lost its closing quote,
 /// and [`quoted_value`] then runs it to the end of the text. A rule added
 /// with a new span class joins this conjunction.
-pub const fn ends_every_span(b: u8) -> bool {
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this module is private, so pub(crate) reads as redundant -- but \
+              the predicate is an internal contract between the scrub and the \
+              cut in `log_safe`, and pub(crate) keeps a later re-export of this \
+              module from publishing it"
+)]
+pub(crate) const fn ends_every_span(b: u8) -> bool {
     ends_arn(b)
         && ends_form_value(b)
         && ends_authority(b)

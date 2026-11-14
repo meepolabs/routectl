@@ -142,22 +142,48 @@ async fn every_lane_renders_a_body_without_a_message_scrubbed_before_the_cut() {
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
-#[tokio::test]
-async fn cloud_code_onboarding_error_scrubs_before_its_shorter_cut() {
+/// `(name, body, planted)` Cloud Code onboarding bodies: one whose key the
+/// 256-char cut splits, and short ones whose credential the scrub finds only
+/// through a tab, which the control filter would turn into `?`.
+fn onboarding_bodies() -> Vec<(&'static str, String, &'static str)> {
     const KEY: &str = "sk-ant-api03-SECRETBODY0123456789abcdefghij";
     let key_at = 256 - 23;
     let head = format!("{CLEAN_SENTINEL} ");
-    let body = format!("{head}{} {KEY} tail", "x".repeat(key_at - head.len() - 1));
-    assert_eq!(body.find(KEY), Some(key_at), "key offset");
+    let straddling = format!("{head}{} {KEY} tail", "x".repeat(key_at - head.len() - 1));
+    assert_eq!(straddling.find(KEY), Some(key_at), "key offset");
     assert!(
-        (257..=512).contains(&body.len()),
+        (257..=512).contains(&straddling.len()),
         "body length {}",
-        body.len()
+        straddling.len()
     );
+    vec![
+        ("key straddling char 256", straddling, "sk-ant-api03-"),
+        (
+            "bearer token after a tab",
+            format!("{CLEAN_SENTINEL} rejected Bearer\tplantedTok3n9xyz"),
+            "plantedTok3n9xyz",
+        ),
+        (
+            "quoted credential value after a tab",
+            format!("{CLEAN_SENTINEL} echoed \"api_key\":\t\"plantedvalue42\""),
+            "plantedvalue42",
+        ),
+    ]
+}
 
-    let err = lane_error(Lane::CloudCode, STATUS, &body).await;
+#[tokio::test]
+async fn cloud_code_onboarding_error_scrubs_before_its_shorter_cut() {
+    let mut faults = Vec::new();
+    for (row, body, planted) in onboarding_bodies() {
+        let err = lane_error(Lane::CloudCode, STATUS, &body).await;
 
-    let faults = rendering_faults("cloud code/key straddling char 256", &err, "sk-ant-api03-");
+        faults.extend(rendering_faults(
+            &format!("cloud code/{row}"),
+            &err,
+            planted,
+        ));
+    }
+
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 

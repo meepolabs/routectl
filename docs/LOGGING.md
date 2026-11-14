@@ -331,8 +331,9 @@ token the bound splits is dropped rather than shown. A rendered error
 (`%err` / `?err`) therefore never shows part of a credential the scrub
 recognizes that either cut split. An excerpt whose text ran past its
 cut always ends in `... [truncated]`, even when the scrub alone
-shortened it. The WARN excerpt is bounded the same way, stepping back
-at 65,536 bytes. Two residuals: the Bedrock request-fault envelope a 400
+shortened it; a Cloud Code onboarding excerpt the scrub lengthens past
+256 characters is cut and marked too. The WARN excerpt is bounded the
+same way, stepping back at 65,536 bytes. Two residuals: the Bedrock request-fault envelope a 400
 or 422 carries, and the message a Bedrock in-stream exception carries,
 are cut at 65,536 bytes with no step back, so a credential straddling
 that cut in a larger body can show its first part. The scrub

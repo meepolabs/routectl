@@ -21,7 +21,6 @@ use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::log_safe::sanitize_for_log;
 use crate::schema::CacheCreation;
 
 /// Most distinct lifetimes one [`CacheCreation`] holds. Members past the
@@ -141,7 +140,7 @@ impl<'de> Visitor<'de> for CacheCreationVisitor {
         while let Some((member, value)) = access.next_entry::<String, serde_json::Value>()? {
             if let Some(reason) = admit_member(&mut creation, &member, &value) {
                 tracing::debug!(
-                    member = %sanitize_for_log(&member),
+                    member = %crate::upstream_text_for_log(&member),
                     reason,
                     "cache write member refused; its tokens count as unknown lifetime"
                 );

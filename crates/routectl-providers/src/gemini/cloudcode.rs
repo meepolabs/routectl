@@ -215,10 +215,11 @@ pub fn default_tier(load_resp: &Value) -> String {
 /// `sanitize_upstream_body` trims edges, collapses HTML pages to a short
 /// marker, scrubs, and caps length on a char boundary (never panics
 /// mid-codepoint on multibyte UTF-8); `upstream_excerpt_for_log` then
-/// strips the control / ANSI chars the first pass leaves and, when the
-/// excerpt runs past its shorter cap, scrubs it again before that cut and
-/// appends the truncation marker, so no cut lands ahead of a scrub and a
-/// cut excerpt never parses. Never carries the bearer token (the token
+/// scrubs the excerpt before it strips the control / ANSI chars the first
+/// pass leaves and, when the excerpt runs past its shorter cap before or
+/// after that scrub, cuts it and appends the truncation marker, so no cut
+/// or filter lands ahead of a scrub and a cut excerpt never parses. Never
+/// carries the bearer token (the token
 /// is only ever set in the Authorization header, never echoed by these
 /// endpoints in a body).
 ///

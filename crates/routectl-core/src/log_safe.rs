@@ -333,29 +333,36 @@ pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
     scrubbed_cut(trimmed, cap)
 }
 
-/// Log-field excerpt of upstream-authored `text`: a text of at most 256
-/// characters is control-filtered as [`sanitize_for_log`] does and not cut.
-/// A longer one is bounded, scrubbed and cut to 256 characters as
-/// [`sanitize_upstream_body_with_cap`] cuts an over-cap body, then
-/// control-filtered. Whether to cut is decided on the characters of `text`
-/// before the scrub, so a text that ran past 256 always ends in the
-/// `... [truncated]` marker and never parses as JSON.
+/// Log-field excerpt of upstream-authored `text`: bounded and scrubbed
+/// before it is control-filtered, so the scrub sees every blank a rule needs
+/// and every credential whole. When neither `text` nor its scrub runs past
+/// 256 characters, the result is [`crate::upstream_text_for_log`] of `text`.
+/// Otherwise the scrubbed text is cut to 256 characters, marked
+/// `... [truncated]`, then control-filtered. A text that ran past 256 before
+/// the scrub is cut even when the scrub shortened it, and one the scrub grew
+/// past 256 is cut too, so a cut excerpt always ends in the marker and never
+/// parses as JSON.
 pub fn upstream_excerpt_for_log(text: &str) -> String {
-    if text.chars().count() <= MAX {
-        return sanitize_for_log(text);
+    let ran_past = text.chars().count() > MAX;
+    let scrubbed = crate::scrub_upstream_text(bound_for_scrub(text));
+    if !ran_past && scrubbed.chars().count() <= MAX {
+        return sanitize_for_log(&scrubbed);
     }
-    let excerpt = scrubbed_cut(text, MAX);
+    let excerpt = marked_cut(&scrubbed, MAX);
     sanitize_capped(&excerpt, excerpt.len())
 }
 
-/// The over-cap excerpt both public cutters share: `text`, already judged
-/// to run past `cap` before any scrub, bounded ([`bound_for_scrub`]),
-/// scrubbed, cut to `cap` chars, and always marked.
+/// The over-cap excerpt [`sanitize_upstream_body_with_cap`] cuts: `text`,
+/// already judged to run past `cap` before any scrub, bounded
+/// ([`bound_for_scrub`]), scrubbed, cut to `cap` chars, and always marked.
 fn scrubbed_cut(text: &str, cap: usize) -> String {
-    let mut s = crate::scrub_upstream_text(bound_for_scrub(text))
-        .chars()
-        .take(cap)
-        .collect::<String>();
+    marked_cut(&crate::scrub_upstream_text(bound_for_scrub(text)), cap)
+}
+
+/// The first `cap` chars of already-scrubbed `text`, then the
+/// `... [truncated]` marker.
+fn marked_cut(text: &str, cap: usize) -> String {
+    let mut s = text.chars().take(cap).collect::<String>();
     s.push_str("... [truncated]");
     s
 }

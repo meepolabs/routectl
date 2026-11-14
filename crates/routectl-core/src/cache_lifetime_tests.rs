@@ -111,6 +111,23 @@ fn refused_member_emits_one_debug_line() {
 }
 
 #[test]
+fn refused_member_name_is_scrubbed_before_it_is_logged() {
+    let member = "sk-ant-api03-SECRETBODY0123456789abcdefghij_tokens";
+    let events = routectl_testkit::capture_events(|| {
+        serde_json::from_value::<CacheCreation>(json!({ member: 1 })).expect("parses");
+    });
+
+    let refused: Vec<_> = events
+        .iter()
+        .filter(|e| e.message.contains("cache write member refused"))
+        .collect();
+    assert_eq!(refused.len(), 1, "{events:?}");
+    let logged = refused[0].field("member").expect("member field");
+    assert!(!logged.contains("sk-ant-api03-"), "{logged}");
+    assert!(logged.contains("[redacted]"), "{logged}");
+}
+
+#[test]
 fn seventeenth_distinct_lifetime_is_dropped_with_one_debug_line() {
     // Built as text: a serde_json::Map would reorder the members.
     let members: Vec<String> = (1..=17)

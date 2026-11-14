@@ -353,3 +353,130 @@ async fn onboarding_body_around_its_cuts_reads_the_same_to_every_reader() {
 
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+const ONBOARDING_OPEN: &str =
+    r#"{"error":{"code":400,"status":"FAILED_PRECONDITION","message":"precondition failed "#;
+
+/// A Cloud Code onboarding error envelope `chars` characters and `bytes`
+/// bytes long, its message localized: 3-byte CJK characters, at most one
+/// 2-byte character, then ASCII padding.
+fn localized_onboarding_envelope(chars: usize, bytes: usize) -> String {
+    let close = r#""}}"#;
+    let message_chars = chars - ONBOARDING_OPEN.len() - close.len();
+    let extra = bytes - chars;
+    let (cjk, accented) = (extra / 2, extra % 2);
+    let message = format!(
+        "{}{}{}",
+        "\u{8a2d}".repeat(cjk),
+        "\u{e9}".repeat(accented),
+        "a".repeat(message_chars - cjk - accented)
+    );
+    let body = format!("{ONBOARDING_OPEN}{message}{close}");
+    assert_eq!((body.chars().count(), body.len()), (chars, bytes));
+    body
+}
+
+/// The client message the parsed localized envelope yields: its message
+/// with each non-ASCII character filtered to `?`.
+fn localized_client_message(body: &str) -> String {
+    let value: Value = serde_json::from_str(body).expect("envelope parses");
+    let filtered: String = value["error"]["message"]
+        .as_str()
+        .expect("message")
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '?' })
+        .collect();
+    format!("upstream error (HTTP 400): {filtered}")
+}
+
+#[tokio::test]
+async fn localized_onboarding_body_at_its_cut_and_over_the_excerpt_bytes_is_status_only() {
+    let status_only = || reading("BadRequest", None, false, "upstream error (HTTP 400)");
+    let parsed = |body: &str| reading("BadRequest", None, true, &localized_client_message(body));
+    let rows = [
+        ("256 chars, 512 bytes", 256, 512, true),
+        ("256 chars, 513 bytes", 256, 513, false),
+        ("256 chars, 550 bytes", 256, 550, false),
+        (
+            "256 chars, 596 bytes, every message char cjk",
+            256,
+            596,
+            false,
+        ),
+        ("255 chars, 513 bytes", 255, 513, false),
+        ("257 chars, 513 bytes", 257, 513, false),
+    ];
+    let mut mismatches = Vec::new();
+    for (name, chars, bytes, parses) in rows {
+        let body = localized_onboarding_envelope(chars, bytes);
+        let want = if parses { parsed(&body) } else { status_only() };
+        let row = Row {
+            name,
+            lane: Lane::CloudCode,
+            status: 400,
+            body,
+            want,
+        };
+
+        let got = read(&row).await;
+
+        if got != row.want {
+            mismatches.push(format!("{name}: got {got:?}"));
+        }
+    }
+
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[tokio::test]
+async fn short_onboarding_body_reads_the_same_except_where_a_credential_was_redacted() {
+    let rows = [
+        onboarding_row_with(
+            "string credential value",
+            r#"{"error":{"code":400,"status":"FAILED_PRECONDITION","message":"precondition failed","api_key":"plantedvalue42"}}"#,
+            reading(
+                "BadRequest",
+                None,
+                true,
+                "upstream error (HTTP 400): precondition failed",
+            ),
+        ),
+        onboarding_row_with(
+            "account number value",
+            r#"{"error":{"code":400,"status":"FAILED_PRECONDITION","message":"precondition failed","account": 123456789012}}"#,
+            reading("BadRequest", None, false, "upstream error (HTTP 400)"),
+        ),
+        Row {
+            name: "credentials the scrub grows past the cut",
+            lane: Lane::CloudCode,
+            status: 400,
+            body: format!(
+                r#"{{"error":{{"code":400,"status":"FAILED_PRECONDITION","message":"precondition failed","detail":"{}"}}}}"#,
+                ["secret=q1"; 16].join(" ")
+            ),
+            want: reading("BadRequest", None, false, "upstream error (HTTP 400)"),
+        },
+    ];
+    let mut mismatches = Vec::new();
+    for row in rows {
+        assert!(row.body.chars().count() <= 256, "{}", row.name);
+
+        let got = read(&row).await;
+
+        if got != row.want {
+            mismatches.push(format!("{}: got {got:?}", row.name));
+        }
+    }
+
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+fn onboarding_row_with(name: &'static str, body: &str, want: Reading) -> Row {
+    Row {
+        name,
+        lane: Lane::CloudCode,
+        status: 400,
+        body: body.to_string(),
+        want,
+    }
+}

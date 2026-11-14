@@ -204,23 +204,36 @@ fn envelope_with_key(len: usize) -> String {
 }
 
 #[test]
-fn log_excerpt_at_or_under_its_cut_is_the_filtered_text() {
+fn log_excerpt_at_or_under_its_cut_is_the_scrubbed_filtered_text() {
+    let json_at_cut = envelope_with_key(256);
+    let multibyte = format!("caf\u{e9} {}", "\u{e9}".repeat(251));
+    let control = "line\r\nnext\u{1b}[31m".to_string();
     let rows = [
-        ("json at the cut", envelope_with_key(256)),
+        (
+            "json at the cut",
+            json_at_cut,
+            r#"{"error":{"message":"ref [redacted]"}}"#.to_string(),
+        ),
         (
             "multibyte at the cut",
-            format!("caf\u{e9} {}", "\u{e9}".repeat(251)),
+            multibyte.clone(),
+            sanitize_for_log(&multibyte),
         ),
-        ("control characters", "line\r\nnext\u{1b}[31m".to_string()),
+        (
+            "control characters",
+            control.clone(),
+            sanitize_for_log(&control),
+        ),
+        (
+            "bearer token after a tab",
+            "denied Bearer\tplantedTok3n9xyz".to_string(),
+            "denied Bearer?[redacted]".to_string(),
+        ),
     ];
-    for (row, text) in rows {
+    for (row, text, want) in rows {
         assert!(text.chars().count() <= 256, "{row}: at or under the cut");
 
-        assert_eq!(
-            upstream_excerpt_for_log(&text),
-            sanitize_for_log(&text),
-            "{row}"
-        );
+        assert_eq!(upstream_excerpt_for_log(&text), want, "{row}");
     }
 }
 
@@ -235,4 +248,66 @@ fn log_excerpt_past_its_cut_ends_in_the_marker_even_when_the_scrub_shrinks_it() 
         format!(r#"{{"error":{{"message":"ref [redacted]"}}}}{MARKER}"#)
     );
     assert!(UpstreamBody::new(excerpt.as_str()).parsed().is_none());
+}
+
+/// `{"password":"a","x":"<pad>"}` padded so the scrub grows it to exactly
+/// 256 characters, then a short tail: under the cut before the scrub, past
+/// it after, and a cut at 256 would leave exactly the scrubbed object.
+fn object_the_scrub_grows_to_the_cut() -> String {
+    let open = r#"{"password":"a","x":""#;
+    let close = r#""}"#;
+    let pad = "p".repeat(256 - "[redacted]".len() + 1 - open.len() - close.len());
+    format!("{open}{pad}{close} t")
+}
+
+#[test]
+fn log_excerpt_the_scrub_grows_past_its_cut_ends_in_the_marker() {
+    let rows = [
+        ("short credential values", "secret=q1 ".repeat(25), "q1"),
+        (
+            "json object the scrub grows to the cut",
+            object_the_scrub_grows_to_the_cut(),
+            r#""a""#,
+        ),
+    ];
+    for (row, text, planted) in rows {
+        assert!(text.chars().count() <= 256, "{row}: under the cut");
+        assert!(
+            crate::scrub_upstream_text(&text).chars().count() > 256,
+            "{row}: the scrub grows it past the cut"
+        );
+
+        let excerpt = upstream_excerpt_for_log(&text);
+
+        assert!(!excerpt.contains(planted), "{row}: fragment in {excerpt:?}");
+        let uncut = UpstreamBody::new(text.as_str())
+            .parsed()
+            .map(|p| p.value().clone());
+        let cut = UpstreamBody::new(excerpt.as_str())
+            .parsed()
+            .map(|p| p.value().clone());
+        assert!(
+            cut.is_none() || cut == uncut,
+            "{row}: the excerpt parses as {cut:?}, the uncut text as {uncut:?}"
+        );
+        assert!(excerpt.ends_with(MARKER), "{row}: {excerpt:?}");
+    }
+}
+
+#[test]
+fn excerpt_bound_inside_a_multibyte_char_drops_the_split_credential() {
+    let (jwt_at, jwt) = jwt_split_by_the_bound();
+    let kept = MAX_ERROR_BODY_BYTES - jwt_at;
+    let tail = format!("{}\u{4e2d}\u{4e2d} tail", &jwt[..kept - 1]);
+    let body = arn_then(jwt_at, &tail);
+    let straddling = body.find('\u{4e2d}').expect("cjk");
+    assert!(
+        straddling < MAX_ERROR_BODY_BYTES && MAX_ERROR_BODY_BYTES < straddling + 3,
+        "a 3-byte char straddles the bound"
+    );
+
+    let excerpt = sanitize_upstream_body(&body);
+
+    assert!(!excerpt.contains("eyJ"), "fragment in {excerpt:?}");
+    assert_eq!(excerpt, format!("{SENTINEL} [redacted]{MARKER}"));
 }

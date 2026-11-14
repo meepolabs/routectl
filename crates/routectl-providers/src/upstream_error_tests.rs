@@ -13,6 +13,35 @@ fn retry_after_is_gated_on_rate_limit_status() {
     }
 }
 
+#[test]
+fn warn_log_text_drops_a_credential_the_error_body_bound_splits() {
+    const SENTINEL: &str = "warn-sentinel-kept";
+    let segment = "abcDEF1234".repeat(3);
+    let jwt = format!("eyJ{segment}.{segment}.{segment}");
+    let kept = "eyJ".len() + 2 * (segment.len() + 1) + 5;
+    let jwt_at = routectl_core::MAX_ERROR_BODY_BYTES - kept;
+    let body = format!(
+        "{SENTINEL} {} {jwt} tail",
+        "x".repeat(jwt_at - SENTINEL.len() - 2)
+    );
+    assert_eq!(body.find(&jwt), Some(jwt_at), "jwt offset");
+    let read = UpstreamErrorRead::from_parts(500, &HeaderMap::new(), body, false);
+
+    let text = read.upstream_log_text();
+
+    assert!(
+        !text.contains("eyJ"),
+        "fragment in {:?}",
+        &text[text.len() - 80..]
+    );
+    assert!(text.starts_with(SENTINEL), "sentinel lost");
+    assert!(
+        text.ends_with("x... [truncated]"),
+        "{:?}",
+        &text[text.len() - 80..]
+    );
+}
+
 #[cfg(feature = "gemini")]
 #[test]
 fn status_lift_reads_gemini_status_and_stringifies_code() {
