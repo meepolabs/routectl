@@ -243,6 +243,13 @@ pub mod tests {
     /// fragment; Display keeps the clean sentinel and a redaction; Debug
     /// keeps the sentinel or, for a JSON-shaped excerpt that cannot parse,
     /// the fixed not-excerpted marker in its place.
+    #[cfg(all(
+        feature = "openai-compat",
+        feature = "anthropic-api",
+        feature = "openai-responses",
+        feature = "gemini",
+        feature = "bedrock"
+    ))]
     pub fn rendering_faults(row: &str, err: &routectl_core::Error, planted: &str) -> Vec<String> {
         let display = format!("{err}");
         let debug = format!("{err:?}");
