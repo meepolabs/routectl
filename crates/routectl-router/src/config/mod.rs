@@ -71,8 +71,8 @@ pub struct Config {
 
     /// Provider definitions keyed by operator-facing name. Carries
     /// transport-side knobs only (auth, base URL, headers, runtime
-    /// gates). Per-model knobs (`reasoning_dialect`, `history_reasoning`,
-    /// `additional_request_fields`) live on `[models.X]` in v0.6.0.
+    /// gates). Per-model knobs (`reasoning_dialect`, `history_reasoning`)
+    /// live on `[models.X]` in v0.6.0.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
 

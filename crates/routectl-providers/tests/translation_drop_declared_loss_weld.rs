@@ -373,7 +373,6 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "flush_foreign_dialect_tally",
         1,
     ),
-    ("bedrock/converse/extras.rs", "insert_operator_extras", 1),
     ("bedrock/converse/extras.rs", "insert_provider_extras", 1),
     (
         "bedrock/converse/extras.rs",
@@ -424,7 +423,6 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ),
     ("bedrock/invoke.rs", "flush_foreign_dialect_tally", 1),
     ("bedrock/invoke.rs", "flush_system_part_tally", 1),
-    ("bedrock/invoke.rs", "merge_operator_extras", 1),
     ("gemini/request.rs", "build_response_format", 1),
     ("gemini/request.rs", "build_system_instruction", 2),
     ("gemini/request.rs", "build_tools_and_config", 2),

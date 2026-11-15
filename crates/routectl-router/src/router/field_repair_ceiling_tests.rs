@@ -496,7 +496,6 @@ mod converse_ceiling {
                     },
                     user_agent: None,
                     header_extras: Vec::new(),
-                    additional_model_request_fields: None,
                 },
                 seat,
                 limit,

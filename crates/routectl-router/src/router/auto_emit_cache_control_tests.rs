@@ -2182,7 +2182,6 @@ mod converse_front_only {
             creds: routectl_providers::bedrock::BedrockCreds::DefaultChain,
             user_agent: None,
             header_extras: Vec::new(),
-            additional_model_request_fields: None,
         };
         let ttl_marker = |ttl: &str| serde_json::json!({"type": "ephemeral", "ttl": ttl});
         let rows = [

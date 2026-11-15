@@ -351,6 +351,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `mitm.mitm_host` | pinned to https://api.anthropic.com |
 | `mitm.tested_cc_version` | routectl pins the Claude Code version it mints; nothing replaces the check |
 | `mitm.upstream_origin` | pinned to https://api.anthropic.com |
+| `models.<name>.additional_request_fields` | use payload_extras |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
 | `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
 | `models.<name>.supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking |
@@ -653,7 +654,6 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `selectable`                   | `[models.X]`        | default true                                                           |
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
-| `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > pool > global > default (`0` on a model is ignored) |
 | `context_window`               | `[models.X]`        | Option<u32>, `0` refused; total context window for the window gate and `/v1/models` `context_length` |
 | `max_output_tokens`            | `[models.X]`        | Option<u32>, `0` refused; `max_tokens` sent when the client omits it (anthropic-api, bedrock-invoke), else 64000 |
@@ -1009,30 +1009,20 @@ what reaches the bag or body:
   `structured_output` under `unsupported` in
   [`[capability.overrides]`](#capabilityoverrides-is-the-durable-decision-surface).
 
-The operator's `[models.X] additional_request_fields` map merges onto
-the Invoke body and into the Converse bag, except a key routectl writes
-itself, which is dropped with the WARN `additional_model_request_fields
-attempted to override routectl-managed key; dropped` naming it and
-counted once per request as the `operator_extra_managed_key_conflict`
-policy action. On Invoke the refused set is every field the
-`anthropic-api` egress manages plus `anthropic_version` (which the Invoke
-body must carry as `bedrock-2023-05-31`): `model`, `messages`, `system`,
-`temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop`,
-`stop_sequences`, `stream`, `n`, `seed`, `logprobs`, `top_logprobs`,
-`logit_bias`, `presence_penalty`, `frequency_penalty`, `user`, `tools`,
-`tool_choice`, `response_format`, `cache_control`, `anthropic_beta`,
-`reasoning`, `reasoning_details`, `provider_extras`,
-`chat_template_kwargs`, `thinking` and `parallel_tool_calls`. On Converse
-it is the same canonical set plus the bag keys `thinking` and
-`output_config` and the Converse body fields `inferenceConfig`,
+An operator body field for Bedrock goes in the provider or model
+`payload_extras`: it merges onto the top level of the Invoke body and
+into the Converse bag, except a key routectl writes itself. On Invoke
+that refused set is every field the `anthropic-api` egress manages, and
+the body's `anthropic_version` is always `bedrock-2023-05-31`. On
+Converse it is the canonical request keys plus the bag keys `thinking`
+and `output_config` and the Converse body fields `inferenceConfig`,
 `toolConfig` and `additionalModelResponseFieldPaths`.
 
 The client's `metadata` block (its `user_id` / `account_uuid`) never
 reaches AWS on Bedrock Invoke, Bedrock Converse, or the
 [Bedrock mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane).
 The operator's own `metadata` is sent in its place: the provider or
-model `payload_extras` value, else (Invoke and Converse only) the
-`additional_model_request_fields` value. Of the `payload_extras` value,
+model `payload_extras` value. Of that value,
 only what the request still carries when it is sent ships: a member a
 retry removed or reverted stays out. On Converse a request whose
 client `metadata` differs from that operator value counts once as the
@@ -3341,8 +3331,8 @@ to `routectl prices refresh` and `[models.X.pricing]` and exits 2.
   `literal:[REDACTED]` and any other value as `[REDACTED]`;
 - every `header_extras` value, on providers and models, prints as
   `[REDACTED]` (header names still print);
-- every string inside `payload_extras` (providers and models) and a
-  model's `additional_request_fields`, at any depth, prints as
+- every string inside `payload_extras` (providers and models), at any
+  depth, prints as
   `[REDACTED]` (keys, numbers and booleans still print);
 - every provider `base_url` is reduced to its ORIGIN
   (`scheme://host:port`), dropping any path, query, or embedded

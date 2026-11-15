@@ -10,8 +10,8 @@
 //! The big "bag" for model-specific extras:
 //! `additional_model_request_fields`. AWS forwards this verbatim to the
 //! underlying model, so for Claude on Converse we route `thinking`,
-//! `anthropic_beta`, `output_config`, and any operator-supplied
-//! `additional_model_request_fields` through it here. A top-level
+//! `anthropic_beta`, `output_config`, and the request's extras (including
+//! the operator's `payload_extras`) through it here. A top-level
 //! `cache_control` marker is also forwarded inert into this bag (with a
 //! WARN), since Converse does not honor a top-level marker for caching
 //! -- only per-block `cachePoint` blocks cache. Non-Claude models on

@@ -465,7 +465,6 @@ fn bedrock_invoke_cfg() -> BedrockConfig {
         header_extras: Vec::new(),
         // No configured extra fields, so everything this test
         // asserts comes from the translation under test.
-        additional_model_request_fields: None,
     }
 }
 

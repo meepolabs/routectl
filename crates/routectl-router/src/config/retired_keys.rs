@@ -79,6 +79,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "pinned to https://api.anthropic.com",
     },
     RetiredKey {
+        path: &["models", ANY_ENTRY, "additional_request_fields"],
+        refused_value: None,
+        replacement: "use payload_extras",
+    },
+    RetiredKey {
         path: &["models", ANY_ENTRY, "effort_levels"],
         refused_value: None,
         replacement: "refused effort levels are learned per lane",

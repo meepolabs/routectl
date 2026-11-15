@@ -23,7 +23,6 @@ use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, ChatResponse, Error, Result, sanitize_for_log};
 
 use crate::anthropic_api::wire_edits;
-use crate::managed_keys::{Dialect, is_managed_key};
 
 use super::BedrockConfig;
 use super::betas::{operator_floor, withhold_betas};
@@ -133,17 +132,6 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // wire verbatim, and the operator floor is never withheld.
     withhold_client_betas(cfg, req, obj);
 
-    // Merge any additional model request fields at the top level
-    // with the same routectl-managed-keys allow-list as the Anthropic
-    // and openai-compat egresses. The Bedrock-Invoke body is in
-    // Anthropic shape (today); without this filter, a config-file
-    // `additional_model_request_fields = { "messages" = [...] }`
-    // would silently replace the assembled history. Filter here
-    // (rather than at config load) so the WARN line carries the
-    // provider id at request time and matches the operator's
-    // existing log workflow.
-    merge_operator_extras(cfg, obj);
-
     // Stream flag is decided at HTTP level (different endpoint suffix),
     // not via a body field, so strip any leftover.
     let tap = wire_edits::tap_of(req);
@@ -164,9 +152,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // sweep (provider_extras -> body, merged inside the shared
     // normalizer above). Bedrock is always a third-party upstream, so
     // the CLIENT-path strip is unconditional. The operator's own
-    // `metadata` (`payload_extras`, else `additional_model_request_fields`)
-    // is restored: that is the operator's choice, not a client fingerprint.
-    strip_client_metadata(cfg, req, obj);
+    // `payload_extras` `metadata` is restored: that is the operator's
+    // choice, not a client fingerprint.
+    strip_client_metadata(req, obj);
 
     // AWS Bedrock InvokeModel REJECTS a top-level `cache_control` body
     // field with HTTP 400 ("Extra inputs are not permitted") -- proven by
@@ -198,18 +186,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         super::body_fields::FilterContext::InvokeBody,
     );
 
-    // Re-run both `output_config` passes the shared assembly already ran, on
-    // the body that ACTUALLY ships. The `additional_model_request_fields`
-    // merge above is a post-normalize write path that
-    // the Invoke operator arm of `managed_keys::is_managed_key` does not cover
-    // for `output_config`, so
-    // an operator-supplied object can both reintroduce the `format` keys
-    // Anthropic cannot represent and replace the whole repaired schema with
-    // an unrepaired one (missing the mandatory `additionalProperties: false`).
-    // Each diagnostic folds into ONE WARN: the shared pass deliberately
-    // deferred its emission so this lane does not warn twice for a single
-    // request.
-    deferred.rescanning(&cfg.id, obj)?.warn(&cfg.id);
+    deferred.warn(&cfg.id);
 
     // Body-implied union (`beta_withhold::body_implied_betas`), LAST so it
     // reads the body that actually ships, and AFTER the withhold: the flags
@@ -246,42 +223,6 @@ fn declare_anthropic_version(req: &ChatRequest) {
         "/anthropic_version",
         kind,
     );
-}
-
-/// Merge the operator's `additional_model_request_fields` over the assembled
-/// body, withholding every key the Invoke operator arm manages. A refusal is
-/// counted once per request, however many keys collide.
-fn merge_operator_extras(cfg: &BedrockConfig, obj: &mut serde_json::Map<String, Value>) {
-    let Some(extras_obj) = cfg
-        .additional_model_request_fields
-        .as_ref()
-        .and_then(Value::as_object)
-    else {
-        return;
-    };
-    let mut refused_a_managed_key = false;
-    for (k, v) in extras_obj {
-        // The operator's value would ride fine; routectl refuses it so its own
-        // assembled field stays authoritative.
-        // TRANSLATION-DROP: policy-action class=operator_extra_managed_key_conflict test=an_operator_extra_naming_a_managed_key_is_withheld_and_counted_once
-        if is_managed_key(Dialect::BedrockInvokeOperator, k) {
-            refused_a_managed_key = true;
-            tracing::warn!(
-                provider = %cfg.id,
-                key = %sanitize_for_log(k),
-                "additional_model_request_fields attempted to override \
-                 routectl-managed key; dropped"
-            );
-            continue;
-        }
-        obj.insert(k.clone(), v.clone());
-    }
-    if refused_a_managed_key {
-        crate::translation_drop_metrics::record_translation_policy_action(
-            LANE,
-            "operator_extra_managed_key_conflict",
-        );
-    }
 }
 
 /// Count this request's `response_format` losses on the Invoke lane.
@@ -415,16 +356,12 @@ fn strip_billing_system_field(id: &str, obj: &mut serde_json::Map<String, Value>
 
 /// Drop the client-fingerprint `metadata` block from the assembled
 /// Bedrock-Invoke body and restore the operator's own value
-/// (`super::operator_metadata`). The removal is declared on the wire tap
+/// (`super::operator_payload_metadata`). The removal is declared on the wire tap
 /// but not counted: this lane's fingerprint surfaces do not share one
 /// per-request tally yet.
-fn strip_client_metadata(
-    cfg: &BedrockConfig,
-    req: &ChatRequest,
-    obj: &mut serde_json::Map<String, Value>,
-) {
+fn strip_client_metadata(req: &ChatRequest, obj: &mut serde_json::Map<String, Value>) {
     let key = super::CLIENT_FINGERPRINT_METADATA_KEY;
-    let operator = super::operator_metadata(cfg, req);
+    let operator = super::operator_payload_metadata(req);
     obj.remove(key);
     if super::client_metadata_differs(req, operator.as_ref()) {
         super::declare_client_metadata_strip(req, operator.as_ref());
@@ -799,10 +736,16 @@ mod tests {
             creds: BedrockCreds::BearerKey { key: "test".into() },
             user_agent: None,
             header_extras: Vec::new(),
-            // `top_p` is a routectl-managed key the merge drops; `top_k`
-            // is a long-tail Anthropic-only knob it forwards.
-            additional_model_request_fields: Some(json!({"top_k": 40})),
         }
+    }
+
+    /// `req` as the dispatch layer leaves it after layering the operator's
+    /// `payload_extras`: merged into `provider_extras` and recorded alone on
+    /// the internal carrier.
+    fn with_payload_extras(mut req: ChatRequest, extras: serde_json::Value) -> ChatRequest {
+        req.provider_extras = Some(extras.clone());
+        req.routectl_internal.operator_payload_extras = Some(std::sync::Arc::new(extras));
+        req
     }
 
     fn user_req() -> ChatRequest {
@@ -834,7 +777,6 @@ mod tests {
         let body = normalize_request(&cfg, &req).unwrap();
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
         assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]),);
-        assert_eq!(body["top_k"], json!(40));
         assert!(body.get("stream").is_none(), "stream should be stripped");
         assert!(
             body.get("model").is_none(),
@@ -938,23 +880,23 @@ mod tests {
     }
 
     #[test]
-    fn additional_model_request_fields_cannot_override_managed_keys() {
-        // A misconfigured
-        // `additional_model_request_fields = { "messages" = [...] }`
-        // would silently replace the assembled history. Now blocked
-        // with a WARN, matching the openai-compat / anthropic_api
-        // egress filters.
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(json!({
-            // managed -- MUST be dropped:
-            "messages": [{"role": "user", "content": "INJECTED"}],
-            "system": "INJECTED",
-            "anthropic_version": "evil-version",
-            "max_tokens": 1,
-            // long-tail -- MUST pass through:
-            "metadata": {"user_id": "u-1"},
-        }));
-        let req = user_req();
+    fn payload_extras_cannot_override_managed_keys() {
+        // An operator `payload_extras = { "messages" = [...] }` must not
+        // replace the assembled history, and the Invoke seam's own
+        // `anthropic_version` wins over any extras value.
+        let cfg = fake_cfg();
+        let req = with_payload_extras(
+            user_req(),
+            json!({
+                // managed -- MUST be dropped:
+                "messages": [{"role": "user", "content": "INJECTED"}],
+                "system": "INJECTED",
+                "anthropic_version": "evil-version",
+                "max_tokens": 1,
+                // long-tail -- MUST pass through:
+                "metadata": {"user_id": "u-1"},
+            }),
+        );
         let body = normalize_request(&cfg, &req).unwrap();
         // Anthropic-version stays as the Bedrock-required value.
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
@@ -1558,26 +1500,24 @@ mod tests {
         );
     }
 
-    /// Mirror of the Converse `operator_metadata_survives_in_converse_bag`:
-    /// operator-config `metadata` (set via
-    /// `additional_model_request_fields`) SURVIVES the strip while a
-    /// client `metadata` fingerprint (via `provider_extras`) is removed.
-    /// Pins that `strip_client_metadata` restores from the OPERATOR
-    /// CONFIG, not from the assembled body -- the security-critical
-    /// property is that operator intent is sourced from cfg, never from
-    /// the client-derived obj.
+    /// Operator `payload_extras` `metadata` SURVIVES the strip while the
+    /// client's members merged beside it are removed. Pins that
+    /// `strip_client_metadata` restores from the operator's recorded layer,
+    /// never from the client-derived merged value.
     #[test]
     fn operator_metadata_survives_while_client_metadata_stripped_from_invoke_body() {
         use serde_json::json;
-        // Arrange: operator deliberately sets metadata via config; client
-        // supplies its own metadata fingerprint via provider_extras.
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(json!({"metadata": {"trace": "operator-set"}}));
+        // Arrange: the operator layer carries `trace`; the client's sweep
+        // merged its fingerprint members under the same key.
+        let cfg = fake_cfg();
         let mut req = user_req();
         req.user = Some("u-1".into());
         req.provider_extras = Some(json!({
-            "metadata": {"user_id": "u-1", "account_uuid": "a-2"}
+            "metadata": {"user_id": "u-1", "account_uuid": "a-2", "trace": "operator-set"}
         }));
+        req.routectl_internal.operator_payload_extras = Some(std::sync::Arc::new(
+            json!({"metadata": {"trace": "operator-set"}}),
+        ));
 
         // Act
         let body = normalize_request(&cfg, &req).unwrap();
@@ -1652,26 +1592,25 @@ mod tests {
         );
     }
 
-    /// An operator `additional_model_request_fields` entry is merged onto the
-    /// assembled Invoke body AFTER the shared normalizer ran, and
-    /// `output_config` is not on the Invoke operator arm of
-    /// `managed_keys::is_managed_key`, so that
-    /// merge is a second write path for the rejected keys. The Invoke-side
-    /// scrub closes it.
+    /// An operator `payload_extras` `output_config` is not a managed key, so
+    /// it reaches the Invoke body whole through the shared assembly's extras
+    /// merge; the shared scrub must still remove the keys Anthropic rejects.
     #[test]
     fn operator_supplied_output_config_format_loses_name_and_strict() {
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(json!({
-            "output_config": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "operator-widget",
-                    "schema": {"type": "object"},
-                    "strict": true
+        let cfg = fake_cfg();
+        let req = with_payload_extras(
+            user_req(),
+            json!({
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "operator-widget",
+                        "schema": {"type": "object"},
+                        "strict": true
+                    }
                 }
-            }
-        }));
-        let req = user_req();
+            }),
+        );
 
         let body = normalize_request(&cfg, &req).unwrap();
 
@@ -1742,26 +1681,27 @@ mod tests {
     }
 
     /// Both sources of the unrepresentable `output_config.format` keys are
-    /// live on this lane at once: the canonical `response_format` (scrubbed by
-    /// the shared assembly) and an operator `additional_model_request_fields`
-    /// object merged AFTER it (scrubbed here). The two records fold into ONE
-    /// WARN -- emitting at both sites would report a single request twice, and
-    /// an operator counting these lines would double-count every such request.
+    /// live on this lane at once: the canonical `response_format` and an
+    /// operator `payload_extras` object. The shared assembly defers its
+    /// record and this seam emits it, so one request yields ONE line --
+    /// emitting at both sites would double-count every such request.
     #[test]
     #[tracing_test::traced_test]
     fn dropped_format_keys_warn_once_across_both_write_paths() {
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(json!({
-            "output_config": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "operator-widget",
-                    "schema": {"type": "object"},
-                    "strict": true
+        let cfg = fake_cfg();
+        let mut req = with_payload_extras(
+            user_req(),
+            json!({
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "operator-widget",
+                        "schema": {"type": "object"},
+                        "strict": true
+                    }
                 }
-            }
-        }));
-        let mut req = user_req();
+            }),
+        );
         req.response_format = Some(json!({
             "type": "json_schema",
             "json_schema": {
@@ -1795,33 +1735,32 @@ mod tests {
         });
     }
 
-    /// An operator `additional_model_request_fields` object replaces the whole
-    /// `output_config` the shared assembly repaired, so its schema arrives on
-    /// this seam never having seen the `additionalProperties: false` pass.
-    /// Anthropic (and AWS, which forwards to the same validator) rejects an
-    /// object schema omitting the key, so the re-run is what makes the
-    /// operator's schema shippable.
+    /// An operator `payload_extras` `output_config` schema must ship with the
+    /// `additionalProperties: false` repair: Anthropic (and AWS, which
+    /// forwards to the same validator) rejects an object schema omitting it.
     #[test]
     fn operator_supplied_output_schema_is_repaired_on_the_invoke_body() {
         // Arrange
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(json!({
-            "output_config": {
-                "format": {
-                    "type": "json_schema",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "address": {
-                                "type": "object",
-                                "properties": {"street": {"type": "string"}}
+        let cfg = fake_cfg();
+        let req = with_payload_extras(
+            user_req(),
+            json!({
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "address": {
+                                    "type": "object",
+                                    "properties": {"street": {"type": "string"}}
+                                }
                             }
                         }
                     }
                 }
-            }
-        }));
-        let req = user_req();
+            }),
+        );
 
         // Act
         let body = normalize_request(&cfg, &req).unwrap();
@@ -1840,23 +1779,24 @@ mod tests {
         );
     }
 
-    /// The repair runs twice on this lane -- once inside the shared assembly,
-    /// once on the merged body -- and a non-`false` value present on both
-    /// passes must still yield ONE WARN. An operator counting these lines
-    /// would otherwise double-count every such request.
+    /// A non-`false` `additionalProperties` from an operator `payload_extras`
+    /// schema beside a `response_format` one yields ONE WARN for the request.
+    /// An operator counting these lines would otherwise double-count it.
     #[test]
-    fn additional_properties_forward_warns_once_across_both_repair_passes() {
+    fn additional_properties_forward_warns_once_across_both_write_paths() {
         // Arrange
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(json!({
-            "output_config": {
-                "format": {
-                    "type": "json_schema",
-                    "schema": {"type": "object", "additionalProperties": true}
+        let cfg = fake_cfg();
+        let mut req = with_payload_extras(
+            user_req(),
+            json!({
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {"type": "object", "additionalProperties": true}
+                    }
                 }
-            }
-        }));
-        let mut req = user_req();
+            }),
+        );
         req.response_format = Some(json!({
             "type": "json_schema",
             "json_schema": {

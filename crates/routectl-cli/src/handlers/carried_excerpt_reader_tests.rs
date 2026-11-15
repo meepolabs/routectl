@@ -225,7 +225,6 @@ async fn provider_for(lane: Lane, base: &str) -> Arc<dyn Provider> {
                 creds: creds.clone(),
                 user_agent: None,
                 header_extras: Vec::new(),
-                additional_model_request_fields: None,
             };
             let resolved = bedrock_auth::resolve(&creds, "us-east-1")
                 .await

@@ -239,7 +239,6 @@ fn bedrock_invoke_body_carries_the_forwarded_thinking() {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     };
     let thinking = json!({"type": "between_tools"});
     let req = ingress_request(Some(thinking.clone()), None, 64_000);

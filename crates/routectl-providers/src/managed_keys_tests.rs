@@ -121,83 +121,6 @@ const ANTHROPIC_API_MANAGED: &[&str] = &[
     "user",
 ];
 
-/// The Invoke operator set before it composed the Anthropic Messages set: a
-/// closed literal list.
-#[cfg(feature = "bedrock")]
-const BEDROCK_INVOKE_OPERATOR_MANAGED_BEFORE: &[&str] = &[
-    "anthropic_beta",
-    "anthropic_version",
-    "cache_control",
-    "max_tokens",
-    "messages",
-    "model",
-    "stop_sequences",
-    "stream",
-    "system",
-    "temperature",
-    "thinking",
-    "tool_choice",
-    "tools",
-    "top_p",
-];
-
-/// The keys composing the Anthropic Messages set added to the Invoke operator
-/// set. Operator `additional_model_request_fields` naming one of these no
-/// longer reach the wire.
-#[cfg(feature = "bedrock")]
-const BEDROCK_INVOKE_OPERATOR_WIDENING: &[&str] = &[
-    "chat_template_kwargs",
-    "frequency_penalty",
-    "logit_bias",
-    "logprobs",
-    "max_completion_tokens",
-    "n",
-    "parallel_tool_calls",
-    "presence_penalty",
-    "provider_extras",
-    "reasoning",
-    "reasoning_details",
-    "response_format",
-    "seed",
-    "stop",
-    "top_logprobs",
-    "user",
-];
-
-#[cfg(feature = "bedrock")]
-const BEDROCK_INVOKE_OPERATOR_MANAGED: &[&str] = &[
-    "anthropic_beta",
-    "anthropic_version",
-    "cache_control",
-    "chat_template_kwargs",
-    "frequency_penalty",
-    "logit_bias",
-    "logprobs",
-    "max_completion_tokens",
-    "max_tokens",
-    "messages",
-    "model",
-    "n",
-    "parallel_tool_calls",
-    "presence_penalty",
-    "provider_extras",
-    "reasoning",
-    "reasoning_details",
-    "response_format",
-    "seed",
-    "stop",
-    "stop_sequences",
-    "stream",
-    "system",
-    "temperature",
-    "thinking",
-    "tool_choice",
-    "tools",
-    "top_logprobs",
-    "top_p",
-    "user",
-];
-
 #[cfg(feature = "bedrock")]
 const BEDROCK_CONVERSE_MANAGED: &[&str] = &[
     "additionalModelResponseFieldPaths",
@@ -324,19 +247,7 @@ fn pairs() -> Vec<Pair> {
         },
         #[cfg(feature = "bedrock")]
         Pair {
-            name: "bedrock-invoke / operator additional_model_request_fields",
-            is_managed: |k| is_managed_key(Dialect::BedrockInvokeOperator, k),
-            expected: BEDROCK_INVOKE_OPERATOR_MANAGED,
-        },
-        #[cfg(feature = "bedrock")]
-        Pair {
             name: "bedrock-converse / client provider_extras",
-            is_managed: |k| is_managed_key(Dialect::BedrockConverse, k),
-            expected: BEDROCK_CONVERSE_MANAGED,
-        },
-        #[cfg(feature = "bedrock")]
-        Pair {
-            name: "bedrock-converse / operator additional_model_request_fields",
             is_managed: |k| is_managed_key(Dialect::BedrockConverse, k),
             expected: BEDROCK_CONVERSE_MANAGED,
         },
@@ -383,8 +294,8 @@ fn every_pair_manages_exactly_its_pinned_key_set() {
 
 #[cfg(all(feature = "bedrock", feature = "openai-compat", feature = "gemini"))]
 #[test]
-fn all_seven_egress_source_pairs_are_welded() {
-    assert_eq!(pairs().len(), 7);
+fn all_five_egress_source_pairs_are_welded() {
+    assert_eq!(pairs().len(), 5);
 }
 
 #[test]
@@ -408,47 +319,6 @@ fn max_completion_tokens_is_managed_on_every_pair() {
         .map(|pair| pair.name)
         .collect();
     assert!(unmanaged.is_empty(), "{unmanaged:?}");
-}
-
-/// The Invoke operator set is its old closed list plus exactly the named
-/// widening, so a key gained or lost beyond that list is a deliberate edit to
-/// one of the two lists below rather than a side effect of the composition.
-#[cfg(feature = "bedrock")]
-#[test]
-fn the_invoke_operator_set_is_the_old_set_plus_exactly_the_named_widening() {
-    let before: BTreeSet<&str> = BEDROCK_INVOKE_OPERATOR_MANAGED_BEFORE
-        .iter()
-        .copied()
-        .collect();
-    let widening: BTreeSet<&str> = BEDROCK_INVOKE_OPERATOR_WIDENING.iter().copied().collect();
-    assert_eq!(widening.len(), 16);
-    assert!(
-        before.is_disjoint(&widening),
-        "the widening names a key the old set already managed: {:?}",
-        before.intersection(&widening).collect::<Vec<_>>()
-    );
-
-    let actual: BTreeSet<&str> = UNIVERSE
-        .iter()
-        .copied()
-        .filter(|k| is_managed_key(Dialect::BedrockInvokeOperator, k))
-        .collect();
-
-    let expected: BTreeSet<&str> = before.union(&widening).copied().collect();
-    assert_eq!(actual, expected);
-}
-
-/// The Invoke seam writes `anthropic_version` before the operator merge, and
-/// the Anthropic Messages set does not name it, so the Invoke operator arm
-/// must add it on top of that set.
-#[cfg(feature = "bedrock")]
-#[test]
-fn anthropic_version_is_managed_on_the_invoke_operator_pair_beyond_the_anthropic_set() {
-    assert!(is_managed_key(
-        Dialect::BedrockInvokeOperator,
-        "anthropic_version"
-    ));
-    assert!(!is_managed_key(Dialect::AnthropicApi, "anthropic_version"));
 }
 
 #[test]
@@ -719,7 +589,7 @@ const PREDICATE_SOURCE: &str = include_str!("managed_keys.rs");
 fn universe_covers_every_predicate_arm() {
     let literals = literals_in_fn(PREDICATE_SOURCE, "is_managed_key");
     assert!(
-        literals.contains("anthropic_version") && literals.contains("generationConfig"),
+        literals.contains("inferenceConfig") && literals.contains("generationConfig"),
         "arm extraction found {literals:?}"
     );
     #[cfg(feature = "anthropic-api")]

@@ -2053,6 +2053,58 @@ fn config_set_refuses_the_retired_provider_anthropic_beta_with_the_loaders_line(
     );
 }
 
+/// A model's `additional_request_fields` is retired; `config set` on a path
+/// under it refuses with the loader's line and writes nothing, while a live
+/// key on the same model writes.
+#[test]
+fn config_set_refuses_the_retired_model_additional_request_fields_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = high_consequence_config(tmp.path());
+    let base = std::fs::read_to_string(&config_path).expect("read config");
+    let path = config_path.to_str().unwrap();
+    let set = |key: &str, value: &str| {
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "set", key, value])
+    };
+    let loader_line = routectl_router::preflight_raw_config(&base.replace(
+        "upstream = \"gpt-4o\"\n",
+        "upstream = \"gpt-4o\"\nadditional_request_fields = { top_k = 40 }\n",
+    ))
+    .expect_err("the loader refuses a file carrying the key")
+    .to_string();
+
+    // Act
+    let (code, stdout, stderr) = set("models.gpt.additional_request_fields.top_k", "40");
+
+    // Assert
+    assert_ne!(code, 0, "refused: {stdout} / {stderr}");
+    assert_eq!(
+        loader_line,
+        "`models.gpt.additional_request_fields` is retired: use payload_extras; delete it"
+    );
+    assert!(
+        stderr.contains(&loader_line),
+        "config set prints the loader's line: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read config"),
+        base,
+        "a refused edit must not write"
+    );
+
+    let (code, stdout, stderr) = set("models.gpt.context_window", "200000");
+    assert_eq!(
+        code, 0,
+        "control: a live key on the same model writes: {stdout} / {stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("context_window = 200000"),
+        "the control edit must land on disk"
+    );
+}
+
 // -- config check's secret-ref validation: read-only by construction, and
 // control-char-filtered at the one point it prints operator-written keys.
 

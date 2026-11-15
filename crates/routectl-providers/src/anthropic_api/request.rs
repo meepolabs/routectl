@@ -570,42 +570,14 @@ impl DroppedFormatKeys {
 }
 
 /// The two deferred `output_config` diagnostics of ONE normalization, kept
-/// together so a seam that keeps writing to `output_config` after assembly
-/// cannot emit one of them and forget the other.
-///
-/// Both records defer for the same reason: the Bedrock-Invoke
-/// `additional_model_request_fields` merge runs after assembly and can
-/// replace `output_config` wholesale, so that seam re-runs BOTH passes on the
-/// body it actually ships and folds the second run's records in here before
-/// emitting once. See [`normalize_deferring_format_key_warn`].
+/// together so the caller that emits them cannot emit one and forget the
+/// other. See [`normalize_deferring_format_key_warn`].
 pub(crate) struct DeferredOutputConfigDiagnostics {
     dropped_format_keys: DroppedFormatKeys,
     repair: super::output_schema::AdditionalPropertiesRepair,
 }
 
 impl DeferredOutputConfigDiagnostics {
-    /// Re-run both `output_config` passes on a body rewritten after assembly
-    /// and fold their records into this one, so the request still yields one
-    /// line per diagnostic however many times the passes ran.
-    ///
-    /// Bedrock-gated: `bedrock/invoke.rs` is its only caller.
-    #[cfg(feature = "bedrock")]
-    pub(crate) fn rescanning(
-        mut self,
-        provider: &str,
-        obj: &mut serde_json::Map<String, Value>,
-    ) -> Result<Self> {
-        self.dropped_format_keys = self
-            .dropped_format_keys
-            .merged(drop_unrepresentable_output_format_keys(obj));
-        self.repair = self
-            .repair
-            .merged(super::output_schema::inject_additional_properties_false(
-                provider, obj,
-            )?);
-        Ok(self)
-    }
-
     /// Emit both aggregated diagnostics. Called exactly once per request, after
     /// every pass that can write `output_config` has run.
     pub(crate) fn warn(&self, provider: &str) {
@@ -796,18 +768,9 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// byte-for-byte everywhere else. Callers with no Anthropic host in play
 /// (the Bedrock Invoke lane) pass `false`.
 /// Assemble the body and RETURN the deferred `output_config` diagnostics
-/// instead of emitting them, for callers that keep writing to
-/// `output_config` after this returns.
-///
-/// Bedrock Invoke is the only such caller: it merges
-/// `additional_model_request_fields` AFTER normalization, a post-normalize
-/// write path the Invoke operator arm of `managed_keys::is_managed_key` does
-/// not cover for
-/// `output_config`, so an operator-supplied object can both reintroduce the
-/// unrepresentable keys this pass removed and replace the repaired schema
-/// wholesale. It re-runs both passes on the body it ships and emits ONE line
-/// per diagnostic covering both sources. Emitting here as well would
-/// double-warn for a single request.
+/// instead of emitting them, for a caller that owns its own lane and emits
+/// them once after its own seam edits (Bedrock Invoke). Emitting here as well
+/// would double-warn for a single request.
 ///
 /// `forward_system_turns` states whether this lane targets the Anthropic
 /// Messages API, which accepts a mid-conversation `role: "system"` turn in
@@ -1157,9 +1120,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // on the assembled body: the converter above no longer emits them, but a
     // caller-supplied output_config rides through provider_extras verbatim and
     // wins over the converter, so this is the only pass that sees that path.
-    // The record is RETURNED, not emitted: the emitting wrapper owns the one
-    // line per request, so a caller that writes to `output_config` after this
-    // returns can fold its own scrub in rather than warning twice.
+    // The record is RETURNED, not emitted: the emitting wrapper (or the
+    // Bedrock-Invoke seam) owns the one line per request.
     if let Some(obj) = body.as_object_mut() {
         dropped_format_keys =
             dropped_format_keys.merged(drop_unrepresentable_output_format_keys(obj));
@@ -1173,11 +1135,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // repair would be a no-op for exactly the callers that omit the key.
     //
     // The record is RETURNED, not emitted, for the same reason as the key
-    // scrub above: the Bedrock-Invoke `additional_model_request_fields` merge
-    // runs after this function and can replace `output_config` wholesale, so
-    // that seam RE-RUNS the repair on the body it actually ships and folds
-    // both records into the one WARN it owns. Emitting here as well would
-    // report a single request twice.
+    // scrub above: the emitting wrapper (or the Bedrock-Invoke seam) owns the
+    // one WARN per request.
     let repair = match body.as_object_mut() {
         Some(obj) => super::output_schema::inject_additional_properties_false(id, obj)?,
         None => super::output_schema::AdditionalPropertiesRepair::default(),
@@ -1331,9 +1290,7 @@ pub(crate) fn normalize(
 /// Replace the `metadata` of a Bedrock Mantle body with the operator's own
 /// `payload_extras` value, by the same rule as the Bedrock Invoke and
 /// Converse seams: the client's block (Claude Code's `user_id`,
-/// `account_uuid`) never reaches AWS. This lane has no
-/// `additional_model_request_fields`, so `payload_extras` is the only
-/// operator source.
+/// `account_uuid`) never reaches AWS.
 #[cfg(feature = "bedrock")]
 fn withhold_mantle_client_metadata(body: &mut Value, req: &ChatRequest) {
     let key = crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY;

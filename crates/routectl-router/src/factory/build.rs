@@ -138,17 +138,6 @@ pub async fn build_provider_with_options(
     }
 }
 
-/// Per-model overrides applied to a Bedrock provider build. These
-/// fields used to live on `[providers.X]` but moved to `[models.X]`
-/// in v0.6.0; the factory threads them through here so each Bedrock
-/// model gets a `BedrockConfig` with the right values.
-#[cfg(feature = "bedrock")]
-#[derive(Debug, Clone, Default)]
-pub(super) struct BedrockModelOverrides {
-    pub model_id: String,
-    pub additional_model_request_fields: Option<serde_json::Value>,
-}
-
 /// Pre-resolved Bedrock credentials. Cached per `[providers.X]` entry
 /// in `build_resolved_models` so multiple models on the same Bedrock
 /// provider share one SSO probe / one `aws-config` chain construction.
@@ -161,13 +150,11 @@ pub(super) struct CachedBedrockAuth {
     pub resolved: routectl_providers::bedrock::auth::ResolvedCreds,
 }
 
-/// Variant that lets the caller override Bedrock model-specific fields
-/// on `BedrockConfig`. v0.6.0 moves the upstream model id, adaptive
-/// thinking flag, and additional request fields from
-/// `[providers.X]` to `[models.X]`, so each Bedrock-targeting model
-/// entry needs its own provider instance with those values. Other
-/// provider kinds ignore the override; one cached `Arc<dyn Provider>`
-/// per `[providers.X]` is shared across all `[models]` referencing it.
+/// Variant that sets the Bedrock upstream model id on `BedrockConfig`
+/// from the `[models.X]` entry, so each Bedrock-targeting model entry
+/// gets its own provider instance. Other provider kinds ignore it; one
+/// cached `Arc<dyn Provider>` per `[providers.X]` is shared across all
+/// `[models]` referencing it.
 ///
 /// `cached_auth` lets the caller skip the per-model SSO probe by
 /// reusing creds resolved once at the parent provider level. When
@@ -179,10 +166,10 @@ pub(super) async fn build_provider_with_bedrock_model_override(
     entry: &ProviderEntry,
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
-    bedrock_overrides: Option<BedrockModelOverrides>,
+    bedrock_model_id: Option<String>,
     cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    build_provider_inner(name, entry, secrets, opts, bedrock_overrides, cached_auth).await
+    build_provider_inner(name, entry, secrets, opts, bedrock_model_id, cached_auth).await
 }
 
 #[tracing::instrument(skip_all, fields(provider = %routectl_core::sanitize_for_log(name)))]
@@ -191,7 +178,7 @@ async fn build_provider_inner(
     entry: &ProviderEntry,
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
-    #[cfg(feature = "bedrock")] bedrock_overrides: Option<BedrockModelOverrides>,
+    #[cfg(feature = "bedrock")] bedrock_model_id: Option<String>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
     validate_managed_oauth_credentials(name, entry)?;
@@ -586,15 +573,12 @@ async fn build_provider_inner(
                     routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
                 (bedrock_creds, resolved)
             };
-            // v0.6.0: model_id and additional_model_request_fields both
-            // come from the model
-            // entry override. The factory pumps them in via
-            // `BedrockModelOverrides` from `build_resolved_models`.
-            let overrides = bedrock_overrides.unwrap_or_default();
+            // The model id comes from the `[models.X]` entry, pumped in by
+            // `build_resolved_models`.
             let cfg = BedrockConfig {
                 id: format!("bedrock:{name}"),
                 region: region.clone(),
-                model_id: overrides.model_id,
+                model_id: bedrock_model_id.unwrap_or_default(),
                 api_shape: map_bedrock_api_shape(*api_shape),
                 creds: bedrock_creds,
                 user_agent: user_agent.clone(),
@@ -602,7 +586,6 @@ async fn build_provider_inner(
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
-                additional_model_request_fields: overrides.additional_model_request_fields,
             };
             Ok(Arc::new(BedrockProvider::new(cfg, resolved)?))
         }
@@ -1444,16 +1427,12 @@ pub async fn build_resolved_models_reported(
                     },
                 };
 
-                let overrides = BedrockModelOverrides {
-                    model_id: entry.upstream.clone(),
-                    additional_model_request_fields: entry.additional_request_fields.clone(),
-                };
                 match build_provider_with_bedrock_model_override(
                     &entry.provider,
                     provider_entry,
                     secrets.clone(),
                     opts.clone(),
-                    Some(overrides),
+                    Some(entry.upstream.clone()),
                     cached,
                 )
                 .await

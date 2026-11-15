@@ -19,7 +19,6 @@ fn cfg() -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "k".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     }
 }
 

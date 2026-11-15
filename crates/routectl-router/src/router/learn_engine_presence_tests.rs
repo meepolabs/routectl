@@ -152,7 +152,6 @@ mod closed_table_presence {
             },
             user_agent: None,
             header_extras: Vec::new(),
-            additional_model_request_fields: None,
         }
     }
 

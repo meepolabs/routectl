@@ -2520,7 +2520,6 @@ async fn bedrock_invoke_forwards_client_betas_through_anthropic_ingress() {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     };
 
     // Act: run the canonical request through the Bedrock-Invoke
@@ -2982,7 +2981,6 @@ async fn converse_request_body_has_camel_case_inference_config() {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     };
 
     // Act: translate canonical -> Converse body.
@@ -3067,7 +3065,6 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     };
 
     // Act
@@ -3223,7 +3220,6 @@ async fn converse_request_system_with_cache_control_emits_cache_point_block() {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     };
 
     // Act
@@ -4220,7 +4216,6 @@ mod bedrock_beta_withhold {
                 creds: creds.clone(),
                 user_agent: None,
                 header_extras: Vec::new(),
-                additional_model_request_fields: None,
             };
             let resolved = auth::resolve(&creds, REGION).await.expect("resolve");
             let provider = BedrockProvider::new(cfg, resolved)

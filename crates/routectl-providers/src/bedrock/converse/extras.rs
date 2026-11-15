@@ -3,11 +3,12 @@
 //! AWS Converse forwards this bag verbatim to the underlying model. For
 //! Claude on Converse it carries the same fields routectl puts on a
 //! direct Anthropic-API body: `thinking`, `anthropic_beta`, top-level
-//! `cache_control`, `output_config`, plus operator-supplied extras.
+//! `cache_control`, `output_config`, plus the request's extras (the client's
+//! forward-compat sweep and the operator's `payload_extras`).
 //!
-//! Routectl-managed keys are shielded from operator overrides via
-//! `managed_keys::is_managed_key` -- a misconfigured TOML cannot silently
-//! replace the `thinking` block we computed.
+//! Routectl-managed keys are shielded from extras overrides via
+//! `managed_keys::is_managed_key` -- an extras entry cannot silently replace
+//! the `thinking` block we computed.
 
 use serde_json::{Map, Value};
 
@@ -55,18 +56,6 @@ pub(super) fn build_additional_fields(
     fingerprint: &mut ClientFingerprintStripTally,
 ) -> Option<Value> {
     let mut bag: Map<String, Value> = Map::new();
-
-    // Bag-insertion ordering invariant (security-relevant): the client
-    // path (`insert_provider_extras`) MUST run before the operator path
-    // (`insert_operator_extras`), and `insert_operator_extras` uses
-    // `entry().or_insert_with()` (first-writer-wins). Together these give
-    // the intentional client-wins-over-operator precedence -- a client
-    // `metadata` is replaced by the operator's own value, and operator
-    // config fills only keys nothing earlier set. INVARIANT: no insertion
-    // step added before `insert_operator_extras` may write an
-    // operator-configurable key (e.g. `top_k`) from any source but the
-    // operator's own value, or that value would be silently shadowed. Do
-    // not reorder these calls or relax the `or_insert_with` semantics.
     let mut foreign = ForeignDialectExtraTally::default();
     insert_thinking(req, &mut bag);
     // After `insert_thinking`, which writes `output_config` wholesale, and
@@ -80,7 +69,6 @@ pub(super) fn build_additional_fields(
     // Converse sends no ingress's wire shape, so carried members never ride
     // it; they count with the request's foreign top-level keys.
     crate::managed_keys::withhold_carried_members(req, EgressKind::BedrockConverse, &mut foreign);
-    let operator_actions = insert_operator_extras(cfg, &mut bag);
     // Once per REQUEST per class, never once per withheld key: a bag whose
     // extras collide on three managed keys is one policy-action event against
     // this lane's request-volume denominator. Flushed here, outside any
@@ -90,7 +78,6 @@ pub(super) fn build_additional_fields(
     // three surfaces of one request across two modules, so its tally is owned
     // by the whole-request translation and flushed there.
     provider_actions.flush();
-    operator_actions.flush();
     flush_foreign_dialect_tally(cfg, &foreign);
 
     // Drop the request's router-withheld client flags; every other flag
@@ -103,8 +90,8 @@ pub(super) fn build_additional_fields(
     // `tool_choice` that forces tool use. Strip it from the bag when
     // toolChoice has resolved to `{any:{}}` or `{tool:{name}}`. Runs
     // last so the check operates on the fully composed bag
-    // (insert_thinking + provider_extras + operator_extras + filtered for
-    // managed keys), matching the wire body the request will carry.
+    // (insert_thinking + provider_extras, filtered for managed keys),
+    // matching the wire body the request will carry.
     strip_thinking_when_tool_choice_forces_use(cfg, req, &mut bag, tool_choice);
 
     // After every writer of `output_config` and before the passes that read
@@ -155,12 +142,6 @@ pub(super) fn build_additional_fields(
 /// per-key log already names the offending key, and the `(lane, class)`
 /// counters are per-REQUEST by contract.
 ///
-/// Split from the operator path's tally deliberately. One shared type would
-/// let a future edit set the same flag from both paths, and the caller flushes
-/// both, so that class would count twice for one request -- breaking the
-/// per-request contract with no test to catch it. Separate types make the
-/// disjointness a compile error instead of a convention.
-///
 /// The client-fingerprint strip this path also performs is NOT a field here:
 /// it fires from two further surfaces outside this module, so the whole-request
 /// translation owns that tally and this path records into the one it is handed.
@@ -181,26 +162,6 @@ impl ProviderExtrasPolicyActions {
     }
 }
 
-/// Per-request record of entries WITHHELD by the OPERATOR-EXTRAS path.
-/// See [`ProviderExtrasPolicyActions`] for why the two paths carry separate
-/// types rather than one shared tally.
-#[must_use = "the tally must be flushed once per request or the policy-action count is lost"]
-#[derive(Default)]
-struct OperatorExtrasPolicyActions {
-    operator_extra_managed_key_conflict: bool,
-}
-
-impl OperatorExtrasPolicyActions {
-    fn flush(&self) {
-        if self.operator_extra_managed_key_conflict {
-            crate::translation_drop_metrics::record_translation_policy_action(
-                super::LANE,
-                "operator_extra_managed_key_conflict",
-            );
-        }
-    }
-}
-
 /// Layer canonical `req.provider_extras` (the Anthropic ingress's
 /// forward-compat sweep destination) into the bag. Without this, top-
 /// level Anthropic body fields routectl doesn't model
@@ -214,9 +175,7 @@ impl OperatorExtrasPolicyActions {
 /// (the swept key conflicts with a key routectl builds itself, e.g.
 /// `thinking`) and was flooding `routectl-warn.log` on every
 /// claude-code request. The refusal log fires at DEBUG with neutral
-/// phrasing. Operator-config extras flow through
-/// `insert_operator_extras` below, which keeps the WARN-level
-/// adversarial phrasing because that path IS an operator misconfig.
+/// phrasing.
 ///
 /// Only a request from the Anthropic ingress (or a library caller) forwards
 /// its swept keys here: the bag reaches Claude as Anthropic body fields.
@@ -276,10 +235,8 @@ fn insert_provider_extras(
         }
         // Withhold the client's `metadata` block: it carries the client
         // fingerprint (`user_id`, `account_uuid`) and Bedrock is always a
-        // third-party upstream. The operator's own value takes its slot;
-        // `insert_operator_extras` cannot shadow it (first writer wins), and
-        // the helper already prefers `payload_extras` over the config bag.
-        // The drop is deliberate and NOT representability-driven: the wire
+        // third-party upstream. The operator's own `payload_extras` value
+        // takes its slot. The drop is deliberate and NOT representability-driven: the wire
         // would carry the block fine, and routectl declines to send it.
         //
         // One of THREE surfaces of this lane that withhold the same
@@ -288,7 +245,7 @@ fn insert_provider_extras(
         // when the client contributed something the operator's value lacks.
         // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=client_fingerprint_strip_bumps_the_policy_action_counter_once
         if k == crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY {
-            let operator = crate::bedrock::operator_metadata(cfg, req);
+            let operator = crate::bedrock::operator_payload_metadata(req);
             if crate::bedrock::client_metadata_differs(req, operator.as_ref()) {
                 fingerprint.record();
                 crate::bedrock::declare_client_metadata_strip(req, operator.as_ref());
@@ -303,10 +260,6 @@ fn insert_provider_extras(
             }
             continue;
         }
-        // Operator extras (insert_operator_extras) run AFTER this and
-        // use `entry().or_insert_with()`, so a provider-extra key
-        // wins over an operator-extra at the same name -- which
-        // matches the Anthropic egress precedence.
         bag.insert(k.clone(), v.clone());
     }
     actions
@@ -549,50 +502,6 @@ fn insert_top_level_cache_control(req: &ChatRequest, bag: &mut Map<String, Value
     }
 }
 
-/// Layer operator-supplied extras (long-tail Anthropic knobs like
-/// top_k, metadata, service_tier). Last in so they fill in keys
-/// routectl didn't set, but lose to canonical-derived fields above when
-/// keys clash -- avoids a misconfigured config silently overriding
-/// anthropic_beta the caller intended to send. Routectl-managed keys
-/// are withheld with a WARN, as on the Invoke egress's operator merge.
-///
-/// Returns the request's policy-action flags for the caller to flush once.
-fn insert_operator_extras(
-    cfg: &BedrockConfig,
-    bag: &mut Map<String, Value>,
-) -> OperatorExtrasPolicyActions {
-    let mut actions = OperatorExtrasPolicyActions::default();
-    let Some(extras) = cfg
-        .additional_model_request_fields
-        .as_ref()
-        .and_then(|v| v.as_object())
-    else {
-        return actions;
-    };
-    for (k, v) in extras {
-        // Same one-slot-per-key constraint as the client path above, with
-        // the operator as the source: forwarding the configured value would
-        // replace a field routectl derived from the canonical request. WARN
-        // rather than DEBUG because this path IS an operator misconfig, not
-        // a forward-compat sweep. Baked seed verdict per foundations sec 14.
-        // SEED-VERDICT: structural -- the bag has one slot per key, so an
-        // operator value cannot coexist with the field routectl derives.
-        // TRANSLATION-DROP: policy-action class=operator_extra_managed_key_conflict test=operator_extra_managed_key_conflict_bumps_the_policy_action_counter_once
-        if is_managed_key(Dialect::BedrockConverse, k) {
-            actions.operator_extra_managed_key_conflict = true;
-            tracing::warn!(
-                provider = %cfg.id,
-                key = %sanitize_for_log(k),
-                "additional_model_request_fields attempted to override \
-                 routectl-managed key; dropped (Converse)"
-            );
-            continue;
-        }
-        bag.entry(k.clone()).or_insert_with(|| v.clone());
-    }
-    actions
-}
-
 /// The Converse half of the anthropic-api egress's forced-tool rule
 /// (`crate::anthropic_api::extras::shipped_thinking`):
 /// AWS forwards the bag verbatim to Claude, which 400s on active thinking
@@ -701,8 +610,8 @@ mod tests {
     /// (`user_id`, `account_uuid`) and must NOT reach AWS via the
     /// CLIENT provider_extras path -- Bedrock is always a third-party
     /// upstream. `insert_provider_extras` skips it so it never lands in
-    /// `additionalModelRequestFields`. (Operator-set metadata via config
-    /// flows through `insert_operator_extras`, which is NOT gated here.)
+    /// `additionalModelRequestFields`. (The operator's own `payload_extras`
+    /// metadata takes its slot; see `metadata_and_beta_trace_tests`.)
     #[test]
     fn client_metadata_fingerprint_skipped_from_converse_bag() {
         use serde_json::{Map, json};
@@ -829,30 +738,6 @@ mod tests {
             .count()
     }
 
-    /// Operator-deliberate `metadata` set via
-    /// `additional_model_request_fields` is the operator's choice and
-    /// survives into the bag -- the skip applies ONLY to the client
-    /// provider_extras path, not `insert_operator_extras`.
-    #[test]
-    fn operator_metadata_survives_in_converse_bag() {
-        use serde_json::{Map, json};
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(json!({
-            "metadata": {"trace": "operator-set"}
-        }));
-
-        let mut bag: Map<String, serde_json::Value> = Map::new();
-        // Drives the helper in isolation and never flushes, so the tally is
-        // deliberately discarded.
-        let _ = super::insert_operator_extras(&cfg, &mut bag);
-
-        assert_eq!(
-            bag.get("metadata").and_then(|m| m.get("trace")),
-            Some(&serde_json::Value::String("operator-set".into())),
-            "operator-deliberate metadata must survive: {bag:?}"
-        );
-    }
-
     // -----------------------------------------------------------------
     // toolChoice + thinking conflict resolution (Converse parallel)
     //
@@ -875,7 +760,6 @@ mod tests {
             creds: BedrockCreds::BearerKey { key: "test".into() },
             user_agent: None,
             header_extras: Vec::new(),
-            additional_model_request_fields: None,
         }
     }
 
@@ -1631,92 +1515,6 @@ mod tests {
 
         // Assert
         assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
-        assert_eq!(after, before);
-    }
-
-    /// NEGATIVE CONTROL. The operator path carries the identical one-slot
-    /// constraint, at WARN rather than DEBUG because this path IS a
-    /// misconfiguration rather than a forward-compat sweep.
-    #[test]
-    fn operator_extra_managed_key_conflict_bumps_the_policy_action_counter_once() {
-        // Arrange
-        let before = bag_policy_action_count("operator_extra_managed_key_conflict");
-        let drops_before = bag_drop_count("operator_extra_managed_key_conflict");
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(serde_json::json!({
-            "thinking": {"type": "sentinel-operator-thinking"},
-            "top_k": 40,
-        }));
-        let req = req_with_thinking();
-
-        // Act
-        let mut bag = serde_json::Value::Null;
-        let events = routectl_testkit::capture_events(|| {
-            bag = emitted_bag(&cfg, &req);
-        });
-        let after = bag_policy_action_count("operator_extra_managed_key_conflict");
-        let drops_after = bag_drop_count("operator_extra_managed_key_conflict");
-
-        // Assert 1 -- the WARN fired, naming the key as a structured field.
-        let warn = events
-            .iter()
-            .find(|e| {
-                e.level == tracing::Level::WARN
-                    && e.message.contains(
-                        "additional_model_request_fields attempted to override routectl-managed key",
-                    )
-            })
-            .unwrap_or_else(|| panic!("the operator conflict must WARN; got: {events:?}"));
-        assert_eq!(warn.field("key"), Some("thinking"));
-
-        // Assert 2 -- the operator's colliding value is absent from the
-        // emitted bag.
-        assert!(
-            !bag.to_string().contains("sentinel-operator-thinking"),
-            "the colliding operator value must not reach the upstream; emitted bag: {bag}"
-        );
-
-        // Assert 3 -- positive control: the non-colliding operator key
-        // survived in that same emitted bag.
-        assert_eq!(
-            bag.get("top_k"),
-            Some(&serde_json::json!(40)),
-            "a non-managed operator extra must survive; emitted bag: {bag}"
-        );
-
-        assert_eq!(after - before, 1);
-        // Assert 4 -- the class left the DROP vocabulary.
-        assert_eq!(
-            drops_after, drops_before,
-            "a refused override must not also count as a translation drop"
-        );
-    }
-
-    /// POSITIVE CONTROL: operator extras that collide with nothing advance
-    /// no counter and emit no conflict WARN.
-    #[test]
-    fn non_colliding_operator_extras_advance_no_conflict_counter() {
-        // Arrange
-        let before = bag_policy_action_count("operator_extra_managed_key_conflict");
-        let mut cfg = fake_cfg();
-        cfg.additional_model_request_fields = Some(serde_json::json!({"top_k": 40}));
-        let req = req_with_thinking();
-
-        // Act
-        let mut bag = serde_json::Value::Null;
-        let events = routectl_testkit::capture_events(|| {
-            bag = emitted_bag(&cfg, &req);
-        });
-        let after = bag_policy_action_count("operator_extra_managed_key_conflict");
-
-        // Assert
-        assert_eq!(bag.get("top_k"), Some(&serde_json::json!(40)));
-        assert!(
-            !events.iter().any(|e| e
-                .message
-                .contains("attempted to override routectl-managed key")),
-            "nothing collided, so no conflict WARN is owed; got: {events:?}"
-        );
         assert_eq!(after, before);
     }
 

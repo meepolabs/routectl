@@ -44,7 +44,6 @@ const EXPECTED_SEED_MARKERS: &[(&str, &str, SeedTag)] = &[
     (PROVIDERS, "anthropic_api/request.rs", AcceptanceSeed),
     (PROVIDERS, "anthropic_family.rs", Structural),
     (PROVIDERS, "bedrock/converse/extras.rs", Structural),
-    (PROVIDERS, "bedrock/converse/extras.rs", Structural),
     (PROVIDERS, "bedrock/invoke.rs", AcceptanceSeed),
     (PROVIDERS, "gemini/cloudcode.rs", AcceptanceSeed),
     (PROVIDERS, "model_profile.rs", Structural),
@@ -523,7 +522,7 @@ fn a_drop_reason_wrapped_across_inner_doc_lines_reads_without_the_bang() {
 
 /// Comments in the production sweep stating a baked seed verdict. Each is
 /// one comment however many paragraphs it spans.
-const BAKED_BLOCK_TOTAL: usize = 56;
+const BAKED_BLOCK_TOTAL: usize = 55;
 
 fn baked(source: &str) -> Vec<BakedBlock> {
     expect_seed(baked_blocks_in("test-crate", "area/item.rs", source))

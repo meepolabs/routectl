@@ -22,7 +22,6 @@ fn cfg(shape: BedrockApiShape) -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "k".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     }
 }
 
@@ -80,53 +79,24 @@ fn shipped_metadata(shape: BedrockApiShape, body: &Value) -> Option<Value> {
 
 #[test]
 fn operator_payload_metadata_survives_and_client_metadata_is_stripped() {
-    struct Row {
-        name: &'static str,
-        client: Value,
-        payload: Option<Value>,
-        config: Option<Value>,
-    }
-    let rows = [
-        Row {
-            name: "operator payload_extras",
-            client: json!({"metadata": {"user_id": "u-client-1"}}),
-            payload: Some(json!({"metadata": {"trace": "op-trace"}})),
-            config: None,
-        },
-        Row {
-            name: "additional_model_request_fields only",
-            client: json!({"metadata": {"user_id": "u-client-1"}}),
-            payload: None,
-            config: Some(json!({"metadata": {"trace": "op-trace"}})),
-        },
-        Row {
-            name: "payload_extras wins over additional_model_request_fields",
-            client: json!({"metadata": {"user_id": "u-client-1"}}),
-            payload: Some(json!({"metadata": {"trace": "op-trace"}})),
-            config: Some(json!({"metadata": {"trace": "config-trace"}})),
-        },
-    ];
     for shape in SHAPES {
-        for row in &rows {
-            let mut cfg = cfg(shape);
-            cfg.additional_model_request_fields = row.config.clone();
-            let req = dispatched(Some(row.client.clone()), row.payload.clone());
+        let req = dispatched(
+            Some(json!({"metadata": {"user_id": "u-client-1"}})),
+            Some(json!({"metadata": {"trace": "op-trace"}})),
+        );
 
-            let body = normalize(&cfg, &req);
+        let body = normalize(&cfg(shape), &req);
 
-            assert_eq!(
-                shipped_metadata(shape, &body),
-                Some(json!({"trace": "op-trace"})),
-                "{shape:?} / {}: {body}",
-                row.name
-            );
-            let serialized = body.to_string();
-            assert!(
-                !serialized.contains("user_id") && !serialized.contains("u-client-1"),
-                "{shape:?} / {}: the client fingerprint reached the upstream: {serialized}",
-                row.name
-            );
-        }
+        assert_eq!(
+            shipped_metadata(shape, &body),
+            Some(json!({"trace": "op-trace"})),
+            "{shape:?}: {body}"
+        );
+        let serialized = body.to_string();
+        assert!(
+            !serialized.contains("user_id") && !serialized.contains("u-client-1"),
+            "{shape:?}: the client fingerprint reached the upstream: {serialized}"
+        );
     }
 }
 
@@ -239,9 +209,8 @@ enum Surface {
 
 const SURFACES: [Surface; 3] = [Surface::Invoke, Surface::Converse, Surface::MantleAnthropic];
 
-/// The body `surface` ships, with `config` as the Bedrock provider's
-/// `additional_model_request_fields` (the mantle lane has no such field).
-fn normalize_on(surface: Surface, config: Option<&Value>, req: &ChatRequest) -> Value {
+/// The body `surface` ships.
+fn normalize_on(surface: Surface, req: &ChatRequest) -> Value {
     let shape = match surface {
         Surface::Invoke => BedrockApiShape::Invoke,
         Surface::Converse => BedrockApiShape::Converse,
@@ -258,9 +227,7 @@ fn normalize_on(surface: Surface, config: Option<&Value>, req: &ChatRequest) -> 
             .expect("assembles");
         }
     };
-    let mut cfg = cfg(shape);
-    cfg.additional_model_request_fields = config.cloned();
-    normalize(&cfg, req)
+    normalize(&cfg(shape), req)
 }
 
 fn shipped_metadata_on(surface: Surface, body: &Value) -> Option<Value> {
@@ -288,11 +255,7 @@ struct MetadataRow {
     name: &'static str,
     merged: Value,
     payload: Option<Value>,
-    config: Option<Value>,
     want: Option<Value>,
-    /// True when the mantle lane ships nothing instead of `want`: `want`
-    /// comes from `additional_model_request_fields`, which it lacks.
-    want_none_on_mantle: bool,
 }
 
 fn metadata_rows() -> Vec<MetadataRow> {
@@ -300,9 +263,7 @@ fn metadata_rows() -> Vec<MetadataRow> {
         name,
         merged,
         payload,
-        config: None,
         want,
-        want_none_on_mantle: false,
     };
     vec![
         row(
@@ -368,22 +329,6 @@ fn metadata_rows() -> Vec<MetadataRow> {
             Some(json!({"metadata": {"trace": "op-trace"}})),
             None,
         ),
-        MetadataRow {
-            name: "merged extras lack the key: the config value still ships",
-            merged: json!({}),
-            payload: Some(json!({"metadata": {"trace": "op-trace"}})),
-            config: Some(json!({"metadata": {"trace": "config-trace"}})),
-            want: Some(json!({"trace": "config-trace"})),
-            want_none_on_mantle: true,
-        },
-        MetadataRow {
-            name: "every operator payload member reverted: the config value ships",
-            merged: json!({"metadata": {"user_id": "u-client-1"}}),
-            payload: Some(json!({"metadata": {"trace": "op-trace"}})),
-            config: Some(json!({"metadata": {"trace": "config-trace"}})),
-            want: Some(json!({"trace": "config-trace"})),
-            want_none_on_mantle: true,
-        },
     ]
 }
 
@@ -394,13 +339,9 @@ fn only_operator_metadata_the_attempt_still_carries_reaches_any_bedrock_surface(
         for row in metadata_rows() {
             let req = attempt(row.merged.clone(), row.payload.clone());
 
-            let body = normalize_on(surface, row.config.as_ref(), &req);
+            let body = normalize_on(surface, &req);
 
-            let want = if surface == Surface::MantleAnthropic && row.want_none_on_mantle {
-                None
-            } else {
-                row.want.clone()
-            };
+            let want = row.want.clone();
             let got = shipped_metadata_on(surface, &body);
             let serialized = body.to_string();
             if got != want {
@@ -433,7 +374,7 @@ fn the_first_party_anthropic_lane_still_carries_the_client_metadata_fixture() {
 fn metadata_strip_edits_on(surface: Surface, mut req: ChatRequest) -> Vec<(EditKind, String)> {
     let tap = WireTap::default();
     req.routectl_internal.wire_tap = Some(tap.clone());
-    normalize_on(surface, None, &req);
+    normalize_on(surface, &req);
     tap.take_request()
         .edits(Leg::Request)
         .iter()

@@ -3,10 +3,9 @@
 //! walk stopped part-way through never reaches an upstream.
 //!
 //! One row per seam a schema can enter by, on all three send paths, against a
-//! mock that records every request it receives. The Invoke operator row is
-//! the only one whose schema enters after the shared assembly, so it alone
-//! pins the Invoke rescan. Each seam's positive control proves the mock and
-//! the delivery route reach the wire when the schema is within the limits.
+//! mock that records every request it receives. Each seam's positive control
+//! proves the mock and the delivery route reach the wire when the schema is
+//! within the limits.
 
 use std::sync::Arc;
 
@@ -28,8 +27,7 @@ enum Seam {
     AnthropicApi,
     /// `response_format` through the shared assembly on Bedrock Invoke.
     InvokeClient,
-    /// Operator `additional_model_request_fields.output_config`, merged by
-    /// Bedrock Invoke after the shared assembly.
+    /// Operator `payload_extras.output_config` on Bedrock Invoke.
     InvokeOperator,
     /// `response_format` through the Bedrock Converse bag.
     Converse,
@@ -81,11 +79,7 @@ async fn recording_upstream() -> MockServer {
     server
 }
 
-async fn bedrock_provider(
-    server: &MockServer,
-    shape: BedrockApiShape,
-    operator_output_config: Option<Value>,
-) -> BedrockProvider {
+async fn bedrock_provider(server: &MockServer, shape: BedrockApiShape) -> BedrockProvider {
     let creds = BedrockCreds::BearerKey {
         key: "schema-limit-test-key".into(),
     };
@@ -97,8 +91,6 @@ async fn bedrock_provider(
         creds: creds.clone(),
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: operator_output_config
-            .map(|output_config| json!({"output_config": output_config})),
     };
     let resolved = auth::resolve(&creds, "us-east-1").await.expect("resolve");
     let mut provider = BedrockProvider::new(cfg, resolved).expect("canonical region");
@@ -139,20 +131,22 @@ async fn seam_target(
     match seam {
         Seam::AnthropicApi => (Box::new(anthropic_provider(server)), request(Some(schema))),
         Seam::InvokeClient => (
-            Box::new(bedrock_provider(server, BedrockApiShape::Invoke, None).await),
+            Box::new(bedrock_provider(server, BedrockApiShape::Invoke).await),
             request(Some(schema)),
         ),
         Seam::InvokeOperator => {
-            let output_config = json!({"format": {"type": "json_schema", "schema": schema}});
+            let extras =
+                json!({"output_config": {"format": {"type": "json_schema", "schema": schema}}});
+            let mut req = request(None);
+            req.provider_extras = Some(extras.clone());
+            req.routectl_internal.operator_payload_extras = Some(Arc::new(extras));
             (
-                Box::new(
-                    bedrock_provider(server, BedrockApiShape::Invoke, Some(output_config)).await,
-                ),
-                request(None),
+                Box::new(bedrock_provider(server, BedrockApiShape::Invoke).await),
+                req,
             )
         }
         Seam::Converse => (
-            Box::new(bedrock_provider(server, BedrockApiShape::Converse, None).await),
+            Box::new(bedrock_provider(server, BedrockApiShape::Converse).await),
             request(Some(schema)),
         ),
     }

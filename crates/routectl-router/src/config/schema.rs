@@ -650,13 +650,6 @@ pub struct ModelEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_reasoning: Option<HistoryReasoning>,
 
-    /// Bedrock Converse `additionalModelRequestFields` -- vendor-
-    /// specific knobs that don't have a top-level Converse slot. The
-    /// Bedrock Invoke egress also reads this map for non-routectl-
-    /// managed body fields. Other egresses ignore it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_request_fields: Option<Value>,
-
     /// Extra HTTP headers applied to every outbound request from this
     /// model's route. Merged with the provider's `header_extras` at
     /// dispatch time; model wins on key collision. The list-valued
@@ -743,7 +736,6 @@ impl ModelEntry {
             selectable: true,
             reasoning_dialect: None,
             history_reasoning: None,
-            additional_request_fields: None,
             header_extras: BTreeMap::new(),
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
@@ -756,14 +748,13 @@ impl ModelEntry {
     }
     /// Redact every credential-bearing value in this entry, in place, for
     /// display: each `header_extras` value and every string leaf of
-    /// `payload_extras` and `additional_request_fields` becomes `[REDACTED]`.
+    /// `payload_extras` becomes `[REDACTED]`.
     /// Names every field, so a new one fails to compile here until someone
     /// decides whether it carries a secret.
     pub fn redact_secrets(&mut self) {
         let Self {
             header_extras,
             payload_extras,
-            additional_request_fields,
             provider: _,
             upstream: _,
             selectable: _,
@@ -777,9 +768,6 @@ impl ModelEntry {
             pricing: _,
         } = self;
         redact_extras(header_extras, payload_extras);
-        if let Some(fields) = additional_request_fields {
-            redact_json_strings(fields);
-        }
     }
 
     /// Set the reasoning dialect that governs how thinking is expressed on the wire.

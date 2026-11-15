@@ -25,12 +25,10 @@ enum Seam {
     ClientBody,
     /// Operator `payload_extras` the router layered into `provider_extras`.
     ProviderExtras,
-    /// Provider config `additional_model_request_fields`.
-    OperatorExtras,
 }
 
 const CARRIERS: [Carrier; 2] = [Carrier::Invoke, Carrier::Converse];
-const SEAMS: [Seam; 3] = [Seam::ClientBody, Seam::ProviderExtras, Seam::OperatorExtras];
+const SEAMS: [Seam; 2] = [Seam::ClientBody, Seam::ProviderExtras];
 
 fn mcp_servers_value() -> Value {
     json!([{
@@ -49,7 +47,7 @@ fn extras_with_mcp_servers_and_adjacent() -> Value {
     json!({ "mcp_servers": mcp_servers_value(), ADJACENT_FIELD: adjacent_value() })
 }
 
-fn cfg(carrier: Carrier, seam: Seam) -> BedrockConfig {
+fn cfg(carrier: Carrier) -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:unrepresentable".into(),
         region: "us-west-2".into(),
@@ -61,15 +59,11 @@ fn cfg(carrier: Carrier, seam: Seam) -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: match seam {
-            Seam::OperatorExtras => Some(extras_with_mcp_servers_and_adjacent()),
-            Seam::ClientBody | Seam::ProviderExtras => None,
-        },
     }
 }
 
-fn request(seam: Seam) -> ChatRequest {
-    let mut req = ChatRequest {
+fn bare_request() -> ChatRequest {
+    ChatRequest {
         model: "anthropic.claude-sonnet-4-5".into(),
         messages: vec![Message {
             refusal: None,
@@ -85,7 +79,11 @@ fn request(seam: Seam) -> ChatRequest {
         .into(),
         max_tokens: Some(64),
         ..Default::default()
-    };
+    }
+}
+
+fn request(seam: Seam) -> ChatRequest {
+    let mut req = bare_request();
     match seam {
         Seam::ClientBody => {
             req.provider_extras = Some(extras_with_mcp_servers_and_adjacent());
@@ -96,7 +94,6 @@ fn request(seam: Seam) -> ChatRequest {
             req.provider_extras = Some(operator.clone());
             req.routectl_internal.operator_payload_extras = Some(Arc::new(operator));
         }
-        Seam::OperatorExtras => {}
     }
     req
 }
@@ -111,7 +108,7 @@ fn forwarded_fields(carrier: Carrier, body: &Value) -> &Value {
 }
 
 fn egress_body(carrier: Carrier, seam: Seam) -> Value {
-    let cfg = cfg(carrier, seam);
+    let cfg = cfg(carrier);
     let req = request(seam);
     match carrier {
         Carrier::Invoke => invoke::normalize_request(&cfg, &req),
@@ -219,8 +216,8 @@ fn the_mcp_servers_drop_logs_the_field_name_and_never_the_connector_token() {
 fn a_body_without_mcp_servers_logs_no_drop() {
     for carrier in CARRIERS {
         // Arrange
-        let cfg = cfg(carrier, Seam::ClientBody);
-        let req = request(Seam::OperatorExtras);
+        let cfg = cfg(carrier);
+        let req = bare_request();
 
         // Act
         let events = routectl_testkit::capture_events(|| {

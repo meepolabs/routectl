@@ -482,14 +482,6 @@ const SECRET_ROWS: &[SecretRow] = &[
         show_line: "user = \"[REDACTED]\"",
     },
     SecretRow {
-        name: "model additional_request_fields",
-        raw: "[models.m]\nprovider = \"gw\"\nupstream = \"u\"\n\
-              [models.m.additional_request_fields]\nsession = \"sk-addfields-FAKE\"\n",
-        secrets: &["sk-addfields-FAKE"],
-        settings_line: "  models.m.additional_request_fields.session=\"[REDACTED]\"(file)",
-        show_line: "session = \"[REDACTED]\"",
-    },
-    SecretRow {
         name: "mantle creds literal",
         raw: "[providers.mantle]\nkind = \"openai-compat\"\napi_key_ref = \"\"\n\
               [providers.mantle.bedrock_mantle]\nregion = \"us-west-2\"\n\

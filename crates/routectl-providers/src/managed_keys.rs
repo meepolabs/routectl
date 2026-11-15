@@ -68,12 +68,7 @@ pub enum Dialect {
     /// reused by Bedrock Invoke for client `provider_extras`.
     #[cfg(feature = "anthropic-api")]
     AnthropicApi,
-    /// Bedrock Invoke operator `additional_model_request_fields`: the
-    /// Anthropic Messages set plus the Invoke seam's own body field.
-    #[cfg(feature = "bedrock")]
-    BedrockInvokeOperator,
-    /// The Bedrock Converse `additionalModelRequestFields` bag, client and
-    /// operator sources alike.
+    /// The Bedrock Converse `additionalModelRequestFields` bag.
     #[cfg(feature = "bedrock")]
     BedrockConverse,
     /// The openai-compat Chat Completions body.
@@ -104,13 +99,6 @@ pub fn is_managed_key(dialect: Dialect, key: &str) -> bool {
                         // not a valid top-level Anthropic field.
                         | PARALLEL_TOOL_CALLS_KEY
                 )
-        }
-        #[cfg(feature = "bedrock")]
-        Dialect::BedrockInvokeOperator => {
-            is_managed_key(Dialect::AnthropicApi, key)
-                // Written by the Invoke seam before the operator merge, which
-                // inserts over the assembled body.
-                || matches!(key, "anthropic_version")
         }
         #[cfg(feature = "bedrock")]
         Dialect::BedrockConverse => {

@@ -56,7 +56,6 @@ fn bedrock_converse_provider() -> BedrockProvider {
         },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     };
     let resolved = ResolvedCreds::Bearer {
         key: "test-key".into(),

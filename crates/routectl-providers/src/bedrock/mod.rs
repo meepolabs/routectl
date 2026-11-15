@@ -80,30 +80,18 @@ pub mod signing;
 /// (`converse::extras::insert_provider_extras`) and the mantle Anthropic
 /// lane (`anthropic_api::request::normalize`) so they cannot drift on the
 /// key name. Stripped only on the CLIENT path; an operator that
-/// deliberately sets `metadata` keeps it (see [`operator_metadata`] and
+/// deliberately sets `metadata` in `payload_extras` keeps it (see
 /// [`operator_payload_metadata`]).
 pub(crate) const CLIENT_FINGERPRINT_METADATA_KEY: &str = "metadata";
 
-/// The operator's own `metadata` for a Bedrock Invoke or Converse body:
-/// [`operator_payload_metadata`], else the provider's
-/// `additional_model_request_fields` value. Never the merged
-/// `provider_extras` value, which can carry the client's block deep-merged
-/// under the operator's.
-pub(crate) fn operator_metadata(cfg: &BedrockConfig, req: &ChatRequest) -> Option<Value> {
-    operator_payload_metadata(req).or_else(|| {
-        cfg.additional_model_request_fields
-            .as_ref()
-            .and_then(|fields| fields.get(CLIENT_FINGERPRINT_METADATA_KEY))
-            .cloned()
-    })
-}
-
-/// The operator `payload_extras` `metadata` the dispatch layer recorded,
-/// cut down to what the attempt's merged `provider_extras` still carries:
-/// an object keeps only the operator members (at any depth) the merged
-/// value still holds unchanged, and any other value ships only when the
-/// merged value equals it. A dispatch-time revert or strip of an operator
-/// member is therefore never undone here, and no client member is read.
+/// The operator's own `metadata` for a Bedrock body: the `payload_extras`
+/// value the dispatch layer recorded, cut down to what the attempt's merged
+/// `provider_extras` still carries. Never the merged value itself, which can
+/// carry the client's block deep-merged under the operator's. An object keeps
+/// only the operator members (at any depth) the merged value still holds
+/// unchanged, and any other value ships only when the merged value equals it.
+/// A dispatch-time revert or strip of an operator member is therefore never
+/// undone here, and no client member is read.
 pub(crate) fn operator_payload_metadata(req: &ChatRequest) -> Option<Value> {
     let operator = req
         .routectl_internal
@@ -340,10 +328,6 @@ pub struct BedrockConfig {
     /// `extra_headers` in v0.6.0). The router merges per-model
     /// `header_extras` into this map at dispatch time.
     pub header_extras: Vec<(String, String)>,
-    /// Free-form fields merged into the request body. For `Invoke`,
-    /// merged at the top level; for `Converse`, merged into
-    /// `additionalModelRequestFields`.
-    pub additional_model_request_fields: Option<Value>,
 }
 
 /// Bedrock egress provider (Invoke or Converse shape).
@@ -1148,6 +1132,10 @@ mod beta_withhold_wire_tests;
 mod output_schema_limit_wire_tests;
 
 #[cfg(test)]
+#[path = "payload_extras_wire_tests.rs"]
+mod payload_extras_wire_tests;
+
+#[cfg(test)]
 #[path = "error_read_tests.rs"]
 mod error_read_tests;
 
@@ -1270,7 +1258,6 @@ mod tests {
             },
             user_agent: None,
             header_extras: Vec::new(),
-            additional_model_request_fields: None,
         };
         let s = format!("{cfg:?}");
         assert!(
@@ -1294,7 +1281,6 @@ mod tests {
             creds,
             user_agent: None,
             header_extras: Vec::new(),
-            additional_model_request_fields: None,
         }
     }
 

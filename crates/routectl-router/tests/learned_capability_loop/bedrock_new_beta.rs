@@ -227,7 +227,6 @@ impl Lane {
             creds: creds.clone(),
             user_agent: None,
             header_extras: Vec::new(),
-            additional_model_request_fields: None,
         };
         let resolved = auth::resolve(&creds, REGION).await.expect("resolve");
         let provider = BedrockProvider::new(cfg, resolved)

@@ -700,7 +700,6 @@ mod fill_presence {
                 },
                 user_agent: None,
                 header_extras: Vec::new(),
-                additional_model_request_fields: None,
             };
 
             let body = routectl_providers::bedrock::invoke::normalize_request(&cfg, &req)
@@ -752,7 +751,6 @@ mod fill_presence {
                 },
                 user_agent: None,
                 header_extras: Vec::new(),
-                additional_model_request_fields: None,
             };
 
             let body = routectl_providers::bedrock::converse::normalize_request(&cfg, &req)

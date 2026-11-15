@@ -1470,8 +1470,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   deposit theirs;
   owns the client-`metadata` withhold shared by the Invoke, Converse and
   mantle Anthropic surfaces
-  (`CLIENT_FINGERPRINT_METADATA_KEY`, `operator_metadata` /
-  `operator_payload_metadata` for the operator's own value,
+  (`CLIENT_FINGERPRINT_METADATA_KEY`, `operator_payload_metadata` for
+  the operator's own value,
   `client_metadata_differs`, `declare_client_metadata_strip`);
   `with_runtime_origin_for_tests` (behind `test-utils`) points a real
   provider at a mock origin

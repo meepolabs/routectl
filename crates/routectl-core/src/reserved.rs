@@ -1,7 +1,7 @@
 //! Canonical `ChatRequest` wire-field names that routectl manages.
 //!
-//! Each egress has its own allow-list for managed keys that operator
-//! `provider_extras` / `additional_model_request_fields` may NOT override.
+//! Each egress has its own allow-list for managed keys that
+//! `provider_extras` may NOT override.
 //! The canonical portion -- fields that live on `ChatRequest` itself -- is
 //! shared here so the three egresses (openai-compat, anthropic-api, Converse)
 //! stay in sync when a new field lands on `ChatRequest`.

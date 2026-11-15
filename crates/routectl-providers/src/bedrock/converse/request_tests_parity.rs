@@ -30,7 +30,6 @@ fn fake_cfg() -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        additional_model_request_fields: None,
     }
 }
 
@@ -197,40 +196,6 @@ fn response_format_maps_to_output_config_format_bag() {
         keys,
         vec!["schema", "type"],
         "Converse output_config.format must carry exactly {{type, schema}}; got: {body}"
-    );
-}
-
-/// The Converse bag shields `output_config` from BOTH extras paths
-/// (`managed_keys::is_managed_key` covers it), so an operator-supplied object
-/// never reaches the bag; the only writers are the composed effort, the
-/// shared converter, and the client's own `format` member. Pinned here
-/// because that is what makes the Converse seam's exposure narrower than the
-/// Invoke seam's, where `output_config` is NOT a managed key.
-#[test]
-fn operator_supplied_output_config_never_reaches_the_bag() {
-    let mut cfg = fake_cfg();
-    cfg.additional_model_request_fields = Some(json!({
-        "output_config": {
-            "format": {
-                "type": "json_schema",
-                "name": "operator-widget",
-                "schema": {"type": "object"},
-                "strict": true
-            }
-        }
-    }));
-    let req = ChatRequest {
-        model: "anthropic.claude-sonnet-4-5".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(1024),
-        ..Default::default()
-    };
-
-    let body = normalize_request(&cfg, &req).unwrap();
-
-    assert!(
-        !body.to_string().contains("operator-widget"),
-        "the operator's schema name must not reach the wire: {body}"
     );
 }
 
