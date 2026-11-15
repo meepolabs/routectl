@@ -259,7 +259,7 @@ fn strippable_keys_are_unchanged_by_the_beta_namespace() {
 }
 
 /// The provider withholds a beta flag at egress, so the interceptor has no
-/// transform for it: it reports Unchanged in both modes, leaves the request
+/// transform for it: it reports Unchanged, leaves the request
 /// untouched even when the flag is present, and never reaches the missing-plan
 /// debug assertion.
 #[test]
@@ -271,18 +271,13 @@ fn the_interceptor_leaves_a_beta_key_unchanged_without_panicking() {
         ..Default::default()
     };
     let before = serde_json::to_value(&req).expect("serializes");
-    let ctx = |strict| StripContext {
-        keys: vec![key.clone()],
-        strict,
-    };
+    let ctx = StripContext { keys: vec![key] };
 
     // Act
-    let lenient = StripInterceptor.apply(&mut req, &ctx(false));
-    let strict = StripInterceptor.apply(&mut req, &ctx(true));
+    let outcome = StripInterceptor.apply(&mut req, &ctx);
 
     // Assert
-    assert!(matches!(lenient, Outcome::Unchanged), "{lenient:?}");
-    assert!(matches!(strict, Outcome::Unchanged), "{strict:?}");
+    assert!(matches!(outcome, Outcome::Unchanged), "{outcome:?}");
     assert_eq!(serde_json::to_value(&req).expect("serializes"), before);
 }
 

@@ -130,6 +130,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "the x-routectl-disable-fallbacks header is always honored",
     },
     RetiredKey {
+        path: &["server", "strict_translation"],
+        refused_value: None,
+        replacement: "lossy seams forward and count",
+    },
+    RetiredKey {
         path: &["trim"],
         refused_value: None,
         replacement: "the advisory trim uses fixed defaults",

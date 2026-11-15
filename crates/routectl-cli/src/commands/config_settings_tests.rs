@@ -29,7 +29,6 @@ version = 2
 [server]
 port = 9000
 host = "127.0.0.1"
-strict_translation = true
 
 [retry]
 max_attempts = 5
@@ -64,7 +63,6 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "version",
         "server.port",
         "server.host",
-        "server.strict_translation",
         "retry.max_attempts",
         "retry.jitter_ms",
         "retry.request_timeout_ms",
@@ -119,10 +117,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (18, 16));
+    assert_eq!((file.len(), default.len()), (17, 16));
     assert_eq!(
         lines.len(),
-        34,
+        33,
         "every line is tagged file or default, once"
     );
 }

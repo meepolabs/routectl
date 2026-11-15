@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
-use crate::router::RouterOptions;
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -114,16 +113,9 @@ fn advisor_request() -> ChatRequest {
 }
 
 fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::ExportedEntry {
-    acting_advisor_negative_of_kind("anthropic-api", state_key)
-}
-
-fn acting_advisor_negative_of_kind(
-    provider_kind: &str,
-    state_key: &str,
-) -> crate::learned_capability::ExportedEntry {
     let base = Instant::now();
     crate::learned_capability::ExportedEntry {
-        provider_kind: provider_kind.into(),
+        provider_kind: "anthropic-api".into(),
         state_key: state_key.into(),
         feature_key: "advisor".into(),
         verdict: crate::learned_capability::EntryVerdict::Negative,
@@ -144,13 +136,8 @@ fn acting_advisor_negative_of_kind(
 /// `haiku` whose upstream is served by `provider`. When `learning` is
 /// off the kill switch disables the learned pass entirely.
 fn build_router(provider: Arc<dyn Provider>, learning: bool) -> Router {
-    build_router_strict(provider, learning, false)
-}
-
-fn build_router_strict(provider: Arc<dyn Provider>, learning: bool, strict: bool) -> Router {
     let toml = format!(
-        "version = 3\n[server]\nstrict_translation = {strict}\n\
-             [capability]\nenabled = {learning}\n\
+        "version = 3\n[capability]\nenabled = {learning}\n\
              [providers.prov]\nkind = \"anthropic-api\"\n"
     );
     let config: Config = toml::from_str(&toml).expect("config parses");
@@ -300,31 +287,6 @@ async fn kill_switch_off_leaves_advisor_intact() {
 }
 
 #[tokio::test]
-async fn complete_strict_rejects_without_dispatching() {
-    let cap = captured();
-    let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
-        captured: cap.clone(),
-    });
-    let router = build_router_strict(provider, true, true);
-    router
-        .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
-
-    let err = router
-        .complete(advisor_request())
-        .await
-        .expect_err("strict translation rejects the strip");
-
-    assert!(matches!(err, Error::Validation(..)), "{err:?}");
-    assert!(
-        cap.lock().is_empty(),
-        "a strict-rejected attempt never reaches the upstream",
-    );
-    assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
-    assert_eq!(router.metrics.strip_total(), 0);
-}
-
-#[tokio::test]
 async fn complete_rollback_routes_away_without_dispatching_mutated_request() {
     // The only chain entry rolls back (dangling forced tool_choice), so
     // the mutated request is never dispatched and the single-entry chain
@@ -347,52 +309,6 @@ async fn complete_rollback_routes_away_without_dispatching_mutated_request() {
     );
     assert_eq!(router.metrics.strip_rollback_total(), 1);
     assert_eq!(router.metrics.strip_total(), 0);
-}
-
-#[tokio::test]
-async fn stream_strict_rejects_without_dispatching() {
-    let cap = captured();
-    let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
-        captured: cap.clone(),
-    });
-    let router = build_router_strict(provider, true, true);
-    router
-        .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
-
-    let err = router
-        .stream(advisor_request())
-        .await
-        .err()
-        .expect("strict translation rejects the strip before the stream opens");
-
-    assert!(matches!(err, Error::Validation(..)), "{err:?}");
-    assert!(cap.lock().is_empty(), "no upstream call on strict reject");
-    assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
-}
-
-#[tokio::test]
-async fn count_tokens_strict_rejects_without_dispatching() {
-    let cap = captured();
-    let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {
-        captured: cap.clone(),
-    });
-    let router = build_router_strict(provider, true, true);
-    router
-        .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("prov#claude-haiku")]);
-
-    let err = router
-        .count_tokens(advisor_request())
-        .await
-        .expect_err("strict translation rejects the strip");
-
-    assert!(matches!(err, Error::Validation(..)), "{err:?}");
-    assert!(
-        cap.lock().is_empty(),
-        "count_tokens never reaches the upstream on strict reject",
-    );
-    assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
 }
 
 #[tokio::test]
@@ -587,172 +503,3 @@ async fn count_tokens_clean_passthrough_emits_no_class_event() {
 }
 
 include!("learned_strip_declare_tests.rs");
-
-/// The lane of the strict chain's first target, an openai-compat entry
-/// fed by the Anthropic ingress.
-const STRICT_CHAIN_FIRST_LANE: &str = "anthropic->openai-compat";
-
-/// A chain whose first target (`p0`, openai-compat) has an acting advisor
-/// negative and whose second (`p1`, anthropic-api) has none, under
-/// `strict_translation`, each served by its own capturing provider. The two
-/// targets sit on different lanes, so a refusal's lane names its target.
-fn strict_chain_router(
-    first: Arc<ParkingMutex<Vec<ChatRequest>>>,
-    second: Arc<ParkingMutex<Vec<ChatRequest>>>,
-) -> Router {
-    let toml = "version = 3\n[server]\nstrict_translation = true\n\
-                [capability]\nenabled = true\n\
-                [providers.p0]\nkind = \"openai-compat\"\n\
-                base_url = \"https://compat.example.test/v1\"\n\
-                api_key_ref = \"literal:k\"\n\
-                [providers.p1]\nkind = \"anthropic-api\"\n\
-                [aliases]\nchain = [\"m0\", \"m1\"]\n";
-    let config: Config = toml::from_str(toml).expect("config parses");
-    let mut router = Router::new(Arc::new(config));
-    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    for (nickname, provider_name, captured, upstream) in
-        [("m0", "p0", first, "u-0"), ("m1", "p1", second, "u-1")]
-    {
-        let provider: Arc<dyn Provider> = Arc::new(ProbeProvider { captured });
-        models.insert(
-            nickname.into(),
-            Arc::new(ResolvedModel::new(
-                nickname,
-                provider_name,
-                provider,
-                upstream,
-            )),
-        );
-    }
-    router.install_resolved_models(models);
-    router
-        .learned_capabilities
-        .import_entries(vec![acting_advisor_negative_of_kind(
-            "openai-compat",
-            "p0#u-0",
-        )]);
-    router
-}
-
-/// The advisor request on the chain alias, arriving through the Anthropic
-/// ingress so a local refusal is counted on a lane.
-fn chain_advisor_request() -> ChatRequest {
-    let mut req = ChatRequest {
-        model: "chain".into(),
-        ..advisor_request()
-    };
-    req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
-    req
-}
-
-/// `(lane, reason, count)` for every local-refusal key the router holds.
-fn local_refusals(router: &Router) -> Vec<(&'static str, &'static str, u64)> {
-    router
-        .wire_check_snapshot()
-        .local_refusals
-        .iter()
-        .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
-        .collect()
-}
-
-#[derive(Clone, Copy, Debug)]
-enum StrictSurface {
-    Complete,
-    Stream,
-}
-
-/// What one strict-chain dispatch returned and its target meta.
-struct StrictWalk {
-    result: Result<()>,
-    served_provider: Option<String>,
-    fallback_count: u32,
-}
-
-async fn strict_walk(router: &Router, surface: StrictSurface, opts: RouterOptions) -> StrictWalk {
-    match surface {
-        StrictSurface::Complete => {
-            let out = Box::pin(router.complete_with_options(chain_advisor_request(), opts)).await;
-            StrictWalk {
-                result: out.result.map(drop),
-                served_provider: out.meta.served_provider,
-                fallback_count: out.meta.fallback_count,
-            }
-        }
-        StrictSurface::Stream => {
-            let out = Box::pin(router.stream_with_options(chain_advisor_request(), opts)).await;
-            StrictWalk {
-                result: out.result.map(drop),
-                served_provider: out.meta.served_provider,
-                fallback_count: out.meta.fallback_count,
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn a_strict_refusal_on_the_first_target_walks_to_the_next_target() {
-    for surface in [StrictSurface::Complete, StrictSurface::Stream] {
-        let first = captured();
-        let second = captured();
-        let router = strict_chain_router(first.clone(), second.clone());
-
-        let out = strict_walk(&router, surface, RouterOptions::new()).await;
-
-        assert!(out.result.is_ok(), "{surface:?}: {:?}", out.result.err());
-        assert_eq!(out.served_provider.as_deref(), Some("p1"), "{surface:?}");
-        assert_eq!(out.fallback_count, 1, "{surface:?}: one fallback hop");
-        assert!(
-            first.lock().is_empty(),
-            "{surface:?}: first never dispatched"
-        );
-        let second = second.lock();
-        assert_eq!(second.len(), 1, "{surface:?}: the next target serves once");
-        assert_eq!(
-            dispatched_tool_types(&second[0]),
-            vec!["advisor".to_string()],
-            "{surface:?}: the next target receives the request unstripped",
-        );
-        assert_eq!(
-            router.metrics.strip_strict_rejected_total(),
-            1,
-            "{surface:?}"
-        );
-        assert_eq!(
-            local_refusals(&router),
-            [(STRICT_CHAIN_FIRST_LANE, "strict-translation", 1)],
-            "{surface:?}: one strict refusal on the first target's lane",
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_strict_refusal_with_fallbacks_disabled_is_returned() {
-    for surface in [StrictSurface::Complete, StrictSurface::Stream] {
-        let first = captured();
-        let second = captured();
-        let router = strict_chain_router(first.clone(), second.clone());
-        let mut opts = RouterOptions::new();
-        opts.disable_fallbacks = true;
-
-        let out = strict_walk(&router, surface, opts).await;
-
-        let err = out.result.expect_err("the strict refusal ends the request");
-        assert!(
-            matches!(
-                err,
-                Error::Validation(_, routectl_core::RefusalReason::StrictTranslation)
-            ),
-            "{surface:?}: {err:?}"
-        );
-        assert!(
-            first.lock().is_empty(),
-            "{surface:?}: first never dispatched"
-        );
-        assert!(second.lock().is_empty(), "{surface:?}: no fallback hop");
-        assert_eq!(
-            local_refusals(&router),
-            [(STRICT_CHAIN_FIRST_LANE, "strict-translation", 1)],
-            "{surface:?}",
-        );
-    }
-}

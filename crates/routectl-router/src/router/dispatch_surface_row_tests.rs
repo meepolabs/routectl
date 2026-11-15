@@ -14,18 +14,6 @@ fn row(read: fn(DispatchSurface) -> bool) -> Vec<(&'static str, bool)> {
 }
 
 #[test]
-fn a_strict_reject_walks_only_on_the_message_surfaces() {
-    assert_eq!(
-        row(DispatchSurface::strict_reject_walks),
-        [
-            ("complete", true),
-            ("stream", true),
-            ("count_tokens", false)
-        ],
-    );
-}
-
-#[test]
 fn an_unknown_provider_walks_only_on_the_message_surfaces() {
     assert_eq!(
         row(DispatchSurface::unknown_provider_walks),

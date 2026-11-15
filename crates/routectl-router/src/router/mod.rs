@@ -578,10 +578,6 @@ struct RouterMetrics {
     /// strip-created hazard; the request was restored and the attempt
     /// routed away. Bumped by the strip interceptor hook.
     strip_rollback_total: AtomicU64,
-    /// Would-be strips refused because `strict_translation` is on; the
-    /// target was not dispatched. Bumped by the strip
-    /// interceptor hook.
-    strip_strict_rejected_total: AtomicU64,
     /// Masked (`force_supported`) capability rejections observed on a
     /// dispatch error arm: the operator forced a capability on for a target,
     /// but upstream still rejected it. Bumped once per request per
@@ -856,11 +852,6 @@ impl RouterMetrics {
         self.strip_rollback_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn incr_strip_strict_rejected(&self) {
-        self.strip_strict_rejected_total
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
     fn incr_mask_suppressed(&self) {
         self.mask_suppressed_total.fetch_add(1, Ordering::Relaxed);
     }
@@ -1095,11 +1086,6 @@ impl RouterMetrics {
         self.strip_rollback_total.load(Ordering::Relaxed)
     }
 
-    /// Read the cumulative strict-rejected-strip count.
-    fn strip_strict_rejected_total(&self) -> u64 {
-        self.strip_strict_rejected_total.load(Ordering::Relaxed)
-    }
-
     /// Read the cumulative masked-rejection-suppression count.
     fn mask_suppressed_total(&self) -> u64 {
         self.mask_suppressed_total.load(Ordering::Relaxed)
@@ -1209,7 +1195,6 @@ impl RouterMetrics {
             rc_capability_hard_excluded_total = self.capability_hard_excluded_total(),
             rc_strip_total = self.strip_total(),
             rc_strip_rollback_total = self.strip_rollback_total(),
-            rc_strip_strict_rejected_total = self.strip_strict_rejected_total(),
             rc_mask_suppressed_total = self.mask_suppressed_total(),
             rc_f2_same_chain_suppressed_total = self.f2_same_chain_suppressed_total(),
             rc_feature_naming_unmatched_total = self.feature_naming_unmatched_total(),
@@ -1260,7 +1245,6 @@ impl RouterMetrics {
             rc_capability_hard_excluded_total = self.capability_hard_excluded_total(),
             rc_strip_total = self.strip_total(),
             rc_strip_rollback_total = self.strip_rollback_total(),
-            rc_strip_strict_rejected_total = self.strip_strict_rejected_total(),
             rc_mask_suppressed_total = self.mask_suppressed_total(),
             rc_f2_same_chain_suppressed_total = self.f2_same_chain_suppressed_total(),
             rc_feature_naming_unmatched_total = self.feature_naming_unmatched_total(),

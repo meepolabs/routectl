@@ -30,7 +30,6 @@ fn config_with(server_url: &str) -> Config {
             host: "127.0.0.1".into(),
             port: 8787,
             auth: None,
-            strict_translation: false,
             ..Default::default()
         },
         providers,
@@ -1832,6 +1831,58 @@ fn config_set_refuses_the_retired_mitm_host_and_origin_with_the_loaders_line() {
             "the control edit must land on disk"
         );
     }
+}
+
+/// `[server]` stays a live table while its `strict_translation` key is
+/// retired: `config set` on the key prints the loader's line for a file
+/// carrying it and writes nothing, while a live sibling key writes.
+#[test]
+fn config_set_refuses_the_retired_strict_translation_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = two_seat_pool_config(tmp.path());
+    let mut base = std::fs::read_to_string(&config_path).expect("read config");
+    base.push_str("[server]\n");
+    std::fs::write(&config_path, &base).expect("write config");
+    let path = config_path.to_str().unwrap();
+    let loader_line =
+        routectl_router::preflight_raw_config(&format!("{base}strict_translation = true\n"))
+            .expect_err("the loader refuses a file carrying the key")
+            .to_string();
+    let set = |key: &str, value: &str| {
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "set", key, value])
+    };
+
+    // Act
+    let (code, stdout, stderr) = set("server.strict_translation", "true");
+
+    // Assert
+    assert_ne!(code, 0, "refused: {stdout} / {stderr}");
+    assert_eq!(
+        loader_line,
+        "`server.strict_translation` is retired: lossy seams forward and count; delete it"
+    );
+    assert!(
+        stderr.contains(&loader_line),
+        "config set prints the loader's line: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read config"),
+        base,
+        "a refused edit must not write"
+    );
+
+    let (code, stdout, stderr) = set("server.port", "9001");
+    assert_eq!(
+        code, 0,
+        "control: a live [server] key writes: {stdout} / {stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("port = 9001"),
+        "the control edit must land on disk"
+    );
 }
 
 // -- config check's secret-ref validation: read-only by construction, and

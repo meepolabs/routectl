@@ -954,13 +954,6 @@ pub struct ServerConfig {
     #[serde(default)]
     pub auth: Option<ServerAuth>,
 
-    /// When true, a learned capability strip that would remove part of
-    /// a request refuses that target with a 400 instead of stripping and
-    /// dispatching. Default false. Egress translation losses always warn,
-    /// drop and count, whatever this is set to.
-    #[serde(default)]
-    pub strict_translation: bool,
-
     /// Maximum incoming JSON body size for `/v1/chat/completions` and
     /// `/v1/messages`, in bytes. Defaults to 32 MiB -- comfortably above
     /// the largest legitimate Anthropic Messages request (long system
@@ -985,7 +978,6 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             auth: None,
-            strict_translation: false,
             max_body_bytes: default_max_body_bytes(),
         }
     }

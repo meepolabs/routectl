@@ -154,7 +154,7 @@ sections:
 ```toml
 version = 5           # config schema version; see "Config schema version"
 
-[server]              # listener: host, port, strict_translation
+[server]              # listener: host, port, body limit
 [server.auth]         # listener auth tokens (when binding non-loopback)
 
 [providers.X]         # transport + auth: how to reach an upstream
@@ -361,6 +361,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `registry` | set prices under `[models.X.pricing]` |
 | `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
 | `server.allow_disable_fallbacks` | the x-routectl-disable-fallbacks header is always honored |
+| `server.strict_translation` | lossy seams forward and count |
 | `trim` | the advisory trim uses fixed defaults |
 | `usage.enabled` | usage recording is always on |
 
@@ -395,7 +396,6 @@ schema version it was generated against. The schema does NOT pin the
 [server]
 host = "127.0.0.1"
 port = 8787
-strict_translation = false      # true: 400 instead of a learned capability strip
 max_body_bytes = 33554432       # 32 MiB default; larger bodies are rejected with HTTP 413
 
 [server.auth]

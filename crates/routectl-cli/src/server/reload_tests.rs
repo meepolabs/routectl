@@ -114,7 +114,6 @@ fn pooled_oauth_config() -> Arc<Config> {
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [providers.anthropic_oauth]
 kind = "anthropic-api"

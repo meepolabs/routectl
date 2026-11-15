@@ -26,8 +26,8 @@
 //! the wrapper that also re-stamps the calibration estimate.
 //!
 //! [`StripInterceptor`] applies the transform under the snapshot ->
-//! strip -> validate -> rollback discipline: strict pre-check before any
-//! mutation, snapshot the touched fields, remove in sorted key order,
+//! strip -> validate -> rollback discipline: detect before any mutation,
+//! snapshot the touched fields, remove in sorted key order,
 //! then a NARROW post-strip check for strip-CREATED hazards only. On a
 //! hazard the snapshot is restored and the caller falls back to
 //! route-away for that attempt.
@@ -98,22 +98,18 @@ pub enum Outcome {
     /// At least one capability was stripped and the result passed the
     /// post-strip check.
     Stripped,
-    /// The request was NOT dispatched: either a strict-mode block (no
-    /// mutation) or a rolled-back post-strip hazard (snapshot restored).
+    /// The request was NOT dispatched: a rolled-back post-strip hazard
+    /// (snapshot restored).
     Reject(Error),
 }
 
 /// The vetted inputs for one interceptor run: the capability keys the
-/// dispatch layer has decided to strip, and whether strict translation
-/// is in force.
+/// dispatch layer has decided to strip.
 #[derive(Debug, Clone, Default)]
 pub struct StripContext {
     /// Capability keys to strip. De-duplicated and sorted internally, so
     /// call order never affects the output.
     pub keys: Vec<String>,
-    /// When true, a would-strip key is a hard error (400) rather than a
-    /// silent degradation.
-    pub strict: bool,
 }
 
 /// The droppable namespace: every key that strips, paired with the primary
@@ -281,7 +277,7 @@ impl RequestInterceptor for StripInterceptor {
         keys.sort_unstable();
         keys.dedup();
 
-        // Detection only -- no mutation before the strict pre-check.
+        // Detection only -- no mutation before every key is classified.
         let would_strip: Vec<&str> = keys
             .into_iter()
             .filter(|key| {
@@ -318,14 +314,6 @@ impl RequestInterceptor for StripInterceptor {
 
         if would_strip.is_empty() {
             return Outcome::Unchanged;
-        }
-
-        if ctx.strict {
-            let named = would_strip.join(", ");
-            return Outcome::Reject(Error::Validation(
-                format!("strict translation forbids stripping capability: {named}"),
-                RefusalReason::StrictTranslation,
-            ));
         }
 
         // Snapshot only the surfaces the matched plans actually touch.
@@ -543,10 +531,9 @@ mod tests {
         ToolDef::Other(value)
     }
 
-    fn ctx(keys: &[&str], strict: bool) -> StripContext {
+    fn ctx(keys: &[&str]) -> StripContext {
         StripContext {
             keys: keys.iter().map(|k| (*k).to_string()).collect(),
-            strict,
         }
     }
 
@@ -617,7 +604,7 @@ mod tests {
             let before = serde_json::to_value(&req).expect("request serializes");
 
             // Act
-            let outcome = StripInterceptor.apply(&mut req, &ctx(&["forced_tool_choice"], false));
+            let outcome = StripInterceptor.apply(&mut req, &ctx(&["forced_tool_choice"]));
 
             // Assert
             assert!(matches!(outcome, Outcome::Unchanged), "tool_choice {tc}");
@@ -737,8 +724,7 @@ mod tests {
     #[test]
     fn interceptor_ignores_the_lane_parameterized_reasoning_key() {
         // The key-only interceptor has no transform for it by design: it
-        // must report Unchanged, not debug-assert on a missing plan, and
-        // must not reject under strict.
+        // must report Unchanged, not debug-assert on a missing plan.
         let mut req = ChatRequest {
             messages: Arc::from(vec![Message {
                 role: Role::Assistant,
@@ -762,12 +748,10 @@ mod tests {
         let before = serde_json::to_value(&req).unwrap();
 
         // Act
-        let lenient = StripInterceptor.apply(&mut req, &ctx(&[REASONING_REPLAY], false));
-        let strict = StripInterceptor.apply(&mut req, &ctx(&[REASONING_REPLAY], true));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&[REASONING_REPLAY]));
 
         // Assert
-        assert!(matches!(lenient, Outcome::Unchanged));
-        assert!(matches!(strict, Outcome::Unchanged));
+        assert!(matches!(outcome, Outcome::Unchanged));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
     }
 
@@ -800,7 +784,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Stripped));
@@ -826,7 +810,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Stripped));
@@ -845,7 +829,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Stripped));
@@ -865,7 +849,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Stripped));
@@ -874,31 +858,7 @@ mod tests {
         assert!(!extras.contains_key("context_management"));
     }
 
-    // --- apply: strict, rollback, determinism, no-op ---
-
-    #[test]
-    fn strict_rejects_would_strip_key_and_leaves_request_unmutated() {
-        // Arrange
-        let mut req = ChatRequest {
-            tools: Some(vec![other_tool(
-                json!({"type": "advisor", "name": "advisor"}),
-            )]),
-            ..Default::default()
-        };
-
-        // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], true));
-
-        // Assert -- 400 naming the key, tools untouched.
-        match outcome {
-            Outcome::Reject(Error::Validation(msg, reason)) => {
-                assert_eq!(reason, RefusalReason::StrictTranslation);
-                assert!(msg.contains("advisor"), "{msg}");
-            }
-            other => panic!("expected Reject(Validation), got {other:?}"),
-        }
-        assert_eq!(req.tools.as_ref().unwrap().len(), 1);
-    }
+    // --- apply: rollback, determinism, no-op ---
 
     #[test]
     fn dangling_forced_tool_choice_rolls_back() {
@@ -913,7 +873,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"]));
 
         // Assert -- rejected AND the snapshot restored (tool + choice back).
         assert!(matches!(outcome, Outcome::Reject(Error::Validation(..))));
@@ -938,7 +898,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Stripped));
@@ -961,7 +921,7 @@ mod tests {
         let tools_before = serde_json::to_value(&tools).unwrap();
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"]));
 
         // Assert -- beta gone, tools identical.
         assert!(matches!(outcome, Outcome::Stripped));
@@ -987,8 +947,7 @@ mod tests {
         };
 
         // Act
-        let outcome =
-            StripInterceptor.apply(&mut req, &ctx(&["advisor", "context_management"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor", "context_management"]));
 
         // Assert -- rejected; tool AND beta token both restored.
         assert!(matches!(outcome, Outcome::Reject(Error::Validation(..))));
@@ -1012,7 +971,7 @@ mod tests {
             provider_extras: Some(json!({"context_management": {}, "service_tier": "auto"})),
             ..Default::default()
         };
-        let keys = ctx(&["context_management", "advisor", "advisor"], false);
+        let keys = ctx(&["context_management", "advisor", "advisor"]);
 
         // Act
         let mut a = base.clone();
@@ -1041,29 +1000,11 @@ mod tests {
         let before = serde_json::to_value(&req).unwrap();
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Unchanged));
         assert_eq!(serde_json::to_value(&req).unwrap(), before);
-    }
-
-    #[test]
-    fn strict_with_no_matching_key_is_unchanged_not_rejected() {
-        // Strict only blocks an ACTUAL would-strip; an absent capability
-        // is a plain no-op even under strict.
-        let mut req = ChatRequest {
-            tools: Some(vec![other_tool(
-                json!({"type": "web_search_20250305", "name": "search"}),
-            )]),
-            ..Default::default()
-        };
-
-        // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], true));
-
-        // Assert
-        assert!(matches!(outcome, Outcome::Unchanged));
     }
 
     #[test]
@@ -1078,7 +1019,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["web_search"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["web_search"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Unchanged));
@@ -1099,7 +1040,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Stripped));
@@ -1156,7 +1097,7 @@ mod tests {
             };
 
             // Act
-            let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+            let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"]));
 
             // Assert -- rejected, and the original Some([...]) restored.
             assert!(
@@ -1190,7 +1131,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["advisor"]));
 
         // Assert
         assert!(matches!(outcome, Outcome::Stripped));
@@ -1211,7 +1152,7 @@ mod tests {
         };
 
         // Act
-        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"], false));
+        let outcome = StripInterceptor.apply(&mut req, &ctx(&["context_management"]));
 
         // Assert -- the beta strip proceeds; pre-existing invalidity is not
         // the strip's hazard.
@@ -1229,7 +1170,7 @@ mod tests {
             tool_choice: Some(json!({"type": "tool", "name": "advisor"})),
             ..Default::default()
         };
-        match StripInterceptor.apply(&mut named, &ctx(&["advisor"], false)) {
+        match StripInterceptor.apply(&mut named, &ctx(&["advisor"])) {
             Outcome::Reject(Error::Validation(msg, reason)) => {
                 assert_eq!(reason, RefusalReason::Unrepresentable);
                 assert!(msg.contains("removed tool `advisor`"), "{msg}");
@@ -1246,7 +1187,7 @@ mod tests {
             tool_choice: Some(json!({"type": "any"})),
             ..Default::default()
         };
-        match StripInterceptor.apply(&mut mandatory, &ctx(&["advisor"], false)) {
+        match StripInterceptor.apply(&mut mandatory, &ctx(&["advisor"])) {
             Outcome::Reject(Error::Validation(msg, reason)) => {
                 assert_eq!(reason, RefusalReason::Unrepresentable);
                 assert!(msg.contains("emptied tools"), "{msg}");

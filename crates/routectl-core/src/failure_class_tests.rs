@@ -417,7 +417,7 @@ fn a_refusal_classifies_by_its_reason_scope() {
     };
     let normalize = |reason| Error::NormalizeRequest("p".into(), "m".into(), reason);
     let validation = |reason| Error::Validation("v".into(), reason);
-    let rows: [(&str, Error, FailureClass); 20] = [
+    let rows: [(&str, Error, FailureClass); 19] = [
         (
             "cache-breakpoint-cap",
             validation(R::CacheBreakpointCap),
@@ -471,11 +471,6 @@ fn a_refusal_classifies_by_its_reason_scope() {
         (
             "unrepresentable",
             normalize(R::Unrepresentable),
-            FailureClass::BadRequest,
-        ),
-        (
-            "strict-translation",
-            local(R::StrictTranslation),
             FailureClass::BadRequest,
         ),
         (

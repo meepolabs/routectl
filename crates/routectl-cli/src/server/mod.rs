@@ -57,12 +57,8 @@ use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 /// locking; handlers `load_full()` once at entry and use that
 /// snapshot for the lifetime of the request.
 ///
-/// The two pre-v0.7 fields `strict_translation` and `max_body_bytes`
-/// were folded back into the `Router.config` because both are
-/// duplicates of `config.server.*` knobs and only `max_body_bytes`
-/// has any read site outside the handler path (in `build_axum_router`,
-/// where it is now read directly from the live config at the same
-/// wiring step).
+/// `max_body_bytes` is not held here: it is computed from `config.server`
+/// and passed to `build_axum_router` at wiring time.
 ///
 /// `usage` is the `Clone` producer handle for the usage-accounting
 /// writer. It lives DIRECTLY on `AppState`, NOT inside the

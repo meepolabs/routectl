@@ -59,10 +59,6 @@ pub(super) enum StripDecision {
     /// Nothing to reject: proceed to dispatch `attempt_req` (either
     /// untouched or with the droppable capability stripped in place).
     Proceed,
-    /// `strict_translation` refused a would-be strip. No mutation
-    /// happened; do not dispatch this target. A messages walk moves on to
-    /// the next target; the token count ends on it.
-    StrictReject(Error),
     /// The post-strip check found a strip-created hazard; the request was
     /// restored to its pre-strip bytes. Do not dispatch it -- route away
     /// for this attempt as an ordinary route-away verdict would.
@@ -490,17 +486,14 @@ impl Router {
         if target.strip_capabilities.is_empty() {
             return StripDecision::Proceed;
         }
-        let strict = self.config.server.strict_translation;
         let ctx = StripContext {
             keys: target.strip_capabilities.to_vec(),
-            strict,
         };
         let before = strip_before(target, attempt_req);
         let outcome = StripInterceptor.apply(attempt_req, &ctx);
         let outcome_token = match &outcome {
             Outcome::Stripped => "applied",
             Outcome::Unchanged => "noop",
-            Outcome::Reject(_) if strict => "strict_rejected",
             Outcome::Reject(_) => "validation_rolled_back",
         };
         // One WARN per strip decision. `capability_key` names the verdict's
@@ -529,10 +522,6 @@ impl Router {
                 StripDecision::Proceed
             }
             Outcome::Unchanged => StripDecision::Proceed,
-            Outcome::Reject(err) if strict => {
-                self.metrics.incr_strip_strict_rejected();
-                StripDecision::StrictReject(err)
-            }
             Outcome::Reject(err) => {
                 self.metrics.incr_strip_rollback();
                 StripDecision::RouteAway(err)

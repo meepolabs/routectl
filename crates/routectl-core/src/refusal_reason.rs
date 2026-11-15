@@ -96,10 +96,6 @@ pub enum RefusalReason {
     /// mandates one (`validate_post_strip`).
     /// Scope: egress. Class: `BadRequest`.
     Unrepresentable,
-    /// The operator enabled the strict loss check and the capability strip
-    /// (`StripInterceptor`) would remove part of the request. Scope:
-    /// egress. Class: `BadRequest`.
-    StrictTranslation,
     /// The target forwards the caller's bearer credential and the request
     /// carries none, so there is nothing to authenticate with. Raised by the
     /// router (`missing_forwarded_bearer_error`) on complete, stream and
@@ -125,7 +121,7 @@ pub enum RefusalReason {
 
 impl RefusalReason {
     /// Every reason, in declaration order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 15] = [
         Self::CacheBreakpointCap,
         Self::CacheTtlOrder,
         Self::ToolCallIdMissing,
@@ -137,7 +133,6 @@ impl RefusalReason {
         Self::TranslationAccounting,
         Self::ToolPairing,
         Self::Unrepresentable,
-        Self::StrictTranslation,
         Self::ForwardedBearerMissing,
         Self::CloakRelocation,
         Self::GeminiSeed,
@@ -159,7 +154,6 @@ impl RefusalReason {
             Self::TranslationAccounting => "translation-accounting",
             Self::ToolPairing => "tool-pairing",
             Self::Unrepresentable => "unrepresentable",
-            Self::StrictTranslation => "strict-translation",
             Self::ForwardedBearerMissing => "forwarded-bearer-missing",
             Self::CloakRelocation => "cloak-relocation",
             Self::GeminiSeed => "gemini-seed",
@@ -182,7 +176,6 @@ impl RefusalReason {
             "translation-accounting" => Some(Self::TranslationAccounting),
             "tool-pairing" => Some(Self::ToolPairing),
             "unrepresentable" => Some(Self::Unrepresentable),
-            "strict-translation" => Some(Self::StrictTranslation),
             "forwarded-bearer-missing" => Some(Self::ForwardedBearerMissing),
             "cloak-relocation" => Some(Self::CloakRelocation),
             "gemini-seed" => Some(Self::GeminiSeed),
@@ -209,7 +202,6 @@ impl RefusalReason {
             | Self::TranslationAccounting
             | Self::ToolPairing
             | Self::Unrepresentable
-            | Self::StrictTranslation
             | Self::ForwardedBearerMissing
             | Self::CloakRelocation
             | Self::GeminiSeed => FailureClass::BadRequest,
@@ -241,7 +233,6 @@ mod tests {
             ),
             (RefusalReason::ToolPairing, "tool-pairing"),
             (RefusalReason::Unrepresentable, "unrepresentable"),
-            (RefusalReason::StrictTranslation, "strict-translation"),
             (
                 RefusalReason::ForwardedBearerMissing,
                 "forwarded-bearer-missing",
@@ -291,7 +282,6 @@ mod tests {
             ),
             (RefusalReason::ToolPairing, FailureClass::BadRequest),
             (RefusalReason::Unrepresentable, FailureClass::BadRequest),
-            (RefusalReason::StrictTranslation, FailureClass::BadRequest),
             (
                 RefusalReason::ForwardedBearerMissing,
                 FailureClass::BadRequest,
@@ -324,8 +314,8 @@ mod tests {
         let reasons: HashSet<RefusalReason> = RefusalReason::ALL.iter().copied().collect();
         let tokens: HashSet<&str> = RefusalReason::ALL.iter().map(|r| r.as_str()).collect();
 
-        assert_eq!(reasons.len(), 16);
-        assert_eq!(tokens.len(), 16);
+        assert_eq!(reasons.len(), 15);
+        assert_eq!(tokens.len(), 15);
         for reason in RefusalReason::ALL {
             assert!(is_kebab_case(reason.as_str()), "{reason:?}");
         }

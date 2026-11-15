@@ -110,7 +110,6 @@ fn base_server_config() -> ServerConfig {
         host: "127.0.0.1".into(),
         port: 1,
         auth: None,
-        strict_translation: false,
         ..Default::default()
     }
 }

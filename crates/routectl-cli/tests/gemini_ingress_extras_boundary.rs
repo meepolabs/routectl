@@ -68,7 +68,6 @@ mock-model = "target"
         host: "127.0.0.1".into(),
         port: 0,
         auth: None,
-        strict_translation: false,
         ..Default::default()
     };
     common::isolate_usage_db(Arc::new(cfg))

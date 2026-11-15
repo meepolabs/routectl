@@ -347,7 +347,6 @@ async fn zero_arg_responses_lane() -> (MockServer, Arc<Config>) {
             host: "127.0.0.1".into(),
             port: 0,
             auth: None,
-            strict_translation: false,
             ..Default::default()
         },
         providers,

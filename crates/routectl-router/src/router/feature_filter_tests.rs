@@ -1718,12 +1718,6 @@ fn with_strip_keys(mut target: DispatchTarget, keys: &[&str]) -> DispatchTarget 
     target
 }
 
-fn strict_router() -> Router {
-    let mut config = Config::default();
-    config.server.strict_translation = true;
-    Router::new(Arc::new(config))
-}
-
 #[test]
 fn strip_helper_applies_and_bumps_strip_total() {
     let router = Router::new(Arc::new(Config::default()));
@@ -1743,7 +1737,6 @@ fn strip_helper_applies_and_bumps_strip_total() {
     );
     assert_eq!(router.metrics.strip_total(), 1);
     assert_eq!(router.metrics.strip_rollback_total(), 0);
-    assert_eq!(router.metrics.strip_strict_rejected_total(), 0);
 
     let warn = events
         .iter()
@@ -1791,44 +1784,6 @@ fn strip_helper_is_noop_when_surface_absent() {
 }
 
 #[test]
-fn strip_helper_strict_rejects_without_mutation() {
-    let router = strict_router();
-    let target = with_strip_keys(strip_target("nick"), &["advisor"]);
-    let mut attempt_req = advisor_request();
-    let before = serde_json::to_value(&attempt_req).unwrap();
-
-    let mut decision = None;
-    let events = routectl_testkit::capture_events(|| {
-        decision = Some(router.apply_strip_interceptor(&target, &mut attempt_req));
-    });
-    let decision = decision.expect("interceptor ran");
-
-    match decision {
-        StripDecision::StrictReject(Error::Validation(msg, _)) => {
-            assert!(msg.contains("advisor"), "{msg}");
-        }
-        other => panic!("expected StrictReject(Validation), got {other:?}"),
-    }
-    assert_eq!(
-        serde_json::to_value(&attempt_req).unwrap(),
-        before,
-        "strict mode blocks before any mutation",
-    );
-    assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
-    assert_eq!(router.metrics.strip_total(), 0);
-    assert_eq!(router.metrics.strip_rollback_total(), 0);
-
-    let warn = events
-        .iter()
-        .find(|e| e.message == "capability_strip_decision")
-        .expect("a strict rejection still emits a WARN");
-    assert_eq!(warn.field("event"), Some("strip"));
-    assert_eq!(warn.field("state_key"), Some("nick"));
-    assert_eq!(warn.field("capability_key"), Some("advisor"));
-    assert_eq!(warn.field("outcome"), Some("strict_rejected"));
-}
-
-#[test]
 fn strip_helper_rolls_back_and_routes_away() {
     // tool_choice forces the advisor tool the strip removes: a
     // strip-created hazard the post-strip check rolls back. The
@@ -1869,11 +1824,11 @@ fn strip_helper_rolls_back_and_routes_away() {
 }
 
 #[test]
-fn strip_helper_is_inert_with_empty_verdict_even_under_strict() {
+fn strip_helper_is_inert_with_empty_verdict() {
     // Kill-switch by construction: an empty strip verdict (disabled
     // learning, probe-admitted, or operator-pinned features) leaves the
-    // helper inert -- no mutation, no counter, even under strict.
-    let router = strict_router();
+    // helper inert -- no mutation, no counter.
+    let router = Router::new(Arc::new(Config::default()));
     let target = strip_target("nick");
     let mut attempt_req = advisor_request();
     let before = serde_json::to_value(&attempt_req).unwrap();
@@ -1883,7 +1838,6 @@ fn strip_helper_is_inert_with_empty_verdict_even_under_strict() {
     assert!(matches!(decision, StripDecision::Proceed));
     assert_eq!(serde_json::to_value(&attempt_req).unwrap(), before);
     assert_eq!(router.metrics.strip_total(), 0);
-    assert_eq!(router.metrics.strip_strict_rejected_total(), 0);
     assert_eq!(router.metrics.strip_rollback_total(), 0);
 }
 

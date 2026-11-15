@@ -92,7 +92,6 @@ fn responses_proxy_config(upstream_base: &str, auth_tokens: Option<Vec<String>>)
         host: "127.0.0.1".into(),
         port: 0,
         auth: auth_tokens.map(|tokens| ServerAuth { tokens }),
-        strict_translation: false,
         ..Default::default()
     };
 
@@ -322,7 +321,6 @@ fn capability_chain_config(no_search_base: &str, fallback_base: &str) -> Arc<Con
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
-            strict_translation: false,
             ..Default::default()
         },
         providers,
@@ -812,7 +810,6 @@ fn single_alias_config(
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
-            strict_translation: false,
             ..Default::default()
         },
         providers,
@@ -987,7 +984,6 @@ tool-chain = "target"
     cfg.server = ServerConfig {
         host: "127.0.0.1".into(),
         port: 0,
-        strict_translation: false,
         ..Default::default()
     };
     let base = helpers::spawn(Arc::new(cfg)).await;

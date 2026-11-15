@@ -99,7 +99,6 @@ fn anthropic_proxy_config(
         host: "127.0.0.1".into(),
         port: 0,
         auth: auth_tokens.map(|tokens| ServerAuth { tokens }),
-        strict_translation: false,
         ..Default::default()
     };
 
@@ -1841,7 +1840,6 @@ fn openai_compat_proxy_config(upstream_base: &str) -> Arc<Config> {
         host: "127.0.0.1".into(),
         port: 0,
         auth: None,
-        strict_translation: false,
         ..Default::default()
     };
     Arc::new(Config {
@@ -2583,7 +2581,6 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
             host: "127.0.0.1".into(),
             port: 0,
             auth: None,
-            strict_translation: false,
             ..Default::default()
         },
         providers,
@@ -2613,7 +2610,6 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
             host: "127.0.0.1".into(),
             port: 0,
             auth: None,
-            strict_translation: false,
             ..Default::default()
         },
         providers,
@@ -3436,7 +3432,6 @@ async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
             host: "127.0.0.1".into(),
             port: 0,
             auth: None,
-            strict_translation: false,
             ..Default::default()
         },
         providers,
@@ -3528,7 +3523,6 @@ async fn per_model_non_beta_header_extras_reaches_wire() {
             host: "127.0.0.1".into(),
             port: 0,
             auth: None,
-            strict_translation: false,
             ..Default::default()
         },
         providers,

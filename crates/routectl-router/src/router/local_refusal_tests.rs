@@ -140,10 +140,9 @@ impl Provider for AnsweringProvider {
 }
 
 /// A router whose alias names one anthropic-api model served by `provider`,
-/// with no retries and the given `[server] strict_translation`.
-fn router_over(entry: ProviderEntry, provider: Arc<dyn Provider>, strict: bool) -> Router {
+/// with no retries.
+fn router_over(entry: ProviderEntry, provider: Arc<dyn Provider>) -> Router {
     let mut config = Config::default();
-    config.server.strict_translation = strict;
     config.retry.max_attempts = 1;
     config.providers.insert(PROVIDER.into(), entry);
     config
@@ -159,7 +158,6 @@ fn failing_router(error: fn() -> Error) -> Router {
     router_over(
         ProviderEntry::anthropic_api("literal:k"),
         Arc::new(FailingProvider { error }),
-        false,
     )
 }
 
@@ -309,7 +307,6 @@ async fn two_egress_refusals_with_different_reasons_on_one_lane_are_two_keys() {
                 errors: &[egress_normalize_refusal, egress_local_refusal],
                 calls: AtomicUsize::new(0),
             }),
-            false,
         );
 
         dispatch_err(&router, surface, anthropic_request()).await;
@@ -367,45 +364,12 @@ fn acting_advisor_negative_of_kind(kind: &str, provider: &str, upstream: &str) -
     }
 }
 
-fn advisor_request() -> ChatRequest {
-    ChatRequest {
-        tools: Some(vec![ToolDef::Other(
-            json!({"type": "advisor", "name": "advisor"}),
-        )]),
-        ..anthropic_request()
-    }
-}
-
-#[tokio::test]
-async fn a_strict_strip_refusal_counts_exactly_once() {
-    for surface in ALL_SURFACES {
-        let router = router_over(
-            ProviderEntry::anthropic_api("literal:k"),
-            Arc::new(AnsweringProvider::default()),
-            true,
-        );
-        router
-            .learned_capabilities
-            .import_entries(vec![acting_advisor_negative(PROVIDER, UPSTREAM)]);
-
-        let err = dispatch_err(&router, surface, advisor_request()).await;
-
-        assert!(matches!(err, Error::Validation(..)), "{surface:?}: {err:?}");
-        assert_eq!(router.metrics.strip_strict_rejected_total(), 1);
-        assert_eq!(
-            refusals(&router),
-            [(ANTHROPIC_LANE, "strict-translation", 1)],
-            "{surface:?}"
-        );
-    }
-}
-
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn a_tool_pairing_refusal_on_gemini_carries_its_reason_and_counts_once() {
     for surface in SURFACES {
         let upstream = Arc::new(AnsweringProvider::default());
-        let router = router_over(ProviderEntry::gemini("literal:k"), upstream.clone(), false);
+        let router = router_over(ProviderEntry::gemini("literal:k"), upstream.clone());
         let mut req = anthropic_request();
         req.messages = vec![routectl_core::Message {
             role: routectl_core::Role::Tool,
@@ -560,7 +524,7 @@ async fn a_missing_forwarded_bearer_counts_once_and_never_reaches_the_upstream()
     let mut observed = Vec::new();
     for surface in ALL_SURFACES {
         let upstream = Arc::new(AnsweringProvider::default());
-        let router = router_over(forwarded_anthropic_api(), upstream.clone(), false);
+        let router = router_over(forwarded_anthropic_api(), upstream.clone());
 
         let err = dispatch_err(&router, surface, anthropic_request_on(surface)).await;
 
@@ -740,8 +704,8 @@ fn refusal_total(router: &Router) -> u64 {
 
 /// A request's local refusals land on its observation slot exactly when
 /// they land on the global counter, through every exit that counts one: a
-/// provider-raised refusal, a pre-dispatch strip refusal (token counts
-/// included), and one per target when the chain walks. No other slot
+/// provider-raised refusal, a rolled-back strip on a single target (token
+/// counts included), and one per target when the chain walks. No other slot
 /// counter moves, and a refusal with no lane counts on neither.
 #[tokio::test]
 async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
@@ -755,11 +719,10 @@ async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
     fn provider_raised() -> Router {
         failing_router(egress_local_refusal)
     }
-    fn strict_strip() -> Router {
+    fn strip_on_one_target() -> Router {
         let router = router_over(
             ProviderEntry::anthropic_api("literal:k"),
             Arc::new(AnsweringProvider::default()),
-            true,
         );
         router
             .learned_capabilities
@@ -780,14 +743,6 @@ async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
     }
     fn plain(surface: Surface) -> ChatRequest {
         anthropic_request_on(surface)
-    }
-    fn advisor(surface: Surface) -> ChatRequest {
-        ChatRequest {
-            tools: Some(vec![ToolDef::Other(
-                json!({"type": "advisor", "name": "advisor"}),
-            )]),
-            ..anthropic_request_on(surface)
-        }
     }
     fn no_ingress(_: Surface) -> ChatRequest {
         ChatRequest {
@@ -817,13 +772,25 @@ async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
             plain,
             1,
         ),
-        ("strict strip", Surface::Complete, strict_strip, advisor, 1),
-        ("strict strip", Surface::Stream, strict_strip, advisor, 1),
         (
-            "strict strip",
+            "strip on one target",
+            Surface::Complete,
+            strip_on_one_target,
+            forcing_advisor_request_on,
+            1,
+        ),
+        (
+            "strip on one target",
+            Surface::Stream,
+            strip_on_one_target,
+            forcing_advisor_request_on,
+            1,
+        ),
+        (
+            "strip on one target",
             Surface::CountTokens,
-            strict_strip,
-            advisor,
+            strip_on_one_target,
+            forcing_advisor_request_on,
             1,
         ),
         (

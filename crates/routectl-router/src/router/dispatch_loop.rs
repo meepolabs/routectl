@@ -499,23 +499,11 @@ impl Router {
             // INTERCEPTOR HOOK: strip runs after layered config compose,
             // before auto-cache / context reduction. Any future interceptor
             // over the per-attempt canonical clone goes here, ordered by
-            // data-dependency. A strict-mode refusal leaves this target
-            // unsent and walks on, since the next target may carry the
-            // capability; a rolled-back post-strip hazard routes away the
-            // same way.
+            // data-dependency. A rolled-back post-strip hazard leaves this
+            // target unsent and routes away, since the next target may carry
+            // the capability.
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
-                StripDecision::StrictReject(err) => {
-                    self.count_refusal_error(&refusal_origin, target, &err);
-                    if !A::SURFACE.strict_reject_walks() {
-                        return Err(err);
-                    }
-                    last_err = Some(err);
-                    if opts.disable_fallbacks {
-                        break 'chain;
-                    }
-                    continue;
-                }
                 StripDecision::RouteAway(err) => {
                     self.count_refusal_error(&refusal_origin, target, &err);
                     if A::SURFACE.holds_recovered_errors() {

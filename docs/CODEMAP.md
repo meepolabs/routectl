@@ -2691,7 +2691,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   committed nothing hands it, `FailureObservation` what a settled failure
   hands `observe_failure`. Boolean surface differences are
   `const fn` rows on `class_observe::DispatchSurface`
-  (`strict_reject_walks`, `unknown_provider_walks`, `health_error_walks`,
+  (`unknown_provider_walks`, `health_error_walks`,
   `sleeps_between_attempts`, `records_success_on_commit`, `shapes_message`,
   `holds_recovered_errors`,
   `gate_refusal_walks`, plus the `gate_blocked_message` text).
@@ -2796,8 +2796,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   both message surfaces. Forwarded-credential handling (all in the walk):
   `dispatch_loop::missing_forwarded_bearer_error` refuses a `use_forwarded_credential` target
   with no client bearer BEFORE egress and ends the request (the one terminal
-  pre-dispatch refusal: a strict strip refusal, a rolled-back strip hazard and
-  the Gemini pairing refusal leave the target unsent and walk on),
+  pre-dispatch refusal: a rolled-back strip hazard and the Gemini pairing
+  refusal leave the target unsent and walk on),
   `resolve_reported_model` (here, used by both adapters' commits) keeps the
   client's requested model verbatim, and `dispatch_loop::forwarded_terminal_status` +
   `log_forwarded_auth_terminal` surface a 401/403/429 on a forwarded
@@ -5394,12 +5394,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   interceptor documents purity, and an essential-flagged key routes away
   upstream of dispatch so it never reaches the interceptor.
   `StripInterceptor` (impl of `RequestInterceptor`) applies the transform
-  under a snapshot -> strict-pre-check -> strip-in-sorted-key-order ->
+  under a snapshot -> strip-in-sorted-key-order ->
   narrow-post-strip-check -> rollback discipline over a per-attempt clone: it
   de-dups/sorts `StripContext.keys` so output is order-independent and
-  byte-stable across identical inputs, returns `Outcome::Reject` without
-  mutation under `strict` (a `RefusalReason::StrictTranslation` validation
-  error), normalizes an emptied `tools` list back to `None` after a
+  byte-stable across identical inputs, normalizes an emptied `tools` list
+  back to `None` after a
   tool-surface strip (never serializing `tools: []`, which Anthropic / Bedrock
   Invoke reject with a 400), and on a strip-created hazard restores the
   touched surfaces and returns `Outcome::Reject` for the caller to route away.

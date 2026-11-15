@@ -2035,7 +2035,7 @@ fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
         .record_compared(lane, Leg::Request, [(&lost, PathClass::Missing)], false);
     before
         .wire_check
-        .record_local_refusal(lane, routectl_core::RefusalReason::StrictTranslation);
+        .record_local_refusal(lane, routectl_core::RefusalReason::CloakRelocation);
     let mut after = Router::new(config.clone());
 
     after.carry_over_metrics_from(&before);
@@ -2187,7 +2187,6 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
         "rc_capability_hard_excluded_total",
         "rc_strip_total",
         "rc_strip_rollback_total",
-        "rc_strip_strict_rejected_total",
         "rc_mask_suppressed_total",
         "rc_f2_same_chain_suppressed_total",
         "rc_feature_naming_unmatched_total",

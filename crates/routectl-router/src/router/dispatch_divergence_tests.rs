@@ -259,38 +259,6 @@ async fn walk_rows(first: Answer, circuit_failures: Option<u32>) -> Vec<HealthRo
     observed
 }
 
-#[tokio::test]
-async fn a_strict_strip_refusal_walks_on_the_message_surfaces_and_is_terminal_on_count() {
-    let mut observed: Vec<WalkRow> = Vec::new();
-    for surface in SURFACES {
-        let second = answering();
-        let router = router_over(
-            vec![
-                seat(FIRST, anthropic_entry(Some(0)), answering()),
-                seat(SECOND, anthropic_entry(Some(0)), second.clone()),
-            ],
-            |config| config.server.strict_translation = true,
-        );
-        router
-            .learned_capabilities
-            .import_entries(vec![advisor_negative(
-                FIRST,
-                Instant::now() + Duration::from_hours(48),
-            )]);
-
-        let end = dispatch(&router, surface, advisor_request()).await;
-
-        observed.push((surface.label(), end, second.calls()));
-    }
-
-    let expected: Vec<WalkRow> = vec![
-        ("complete", Ended::Served, 1),
-        ("stream", Ended::Served, 1),
-        ("count_tokens", failed("validation"), 0),
-    ];
-    assert_eq!(observed, expected);
-}
-
 /// An unknown-provider error an attempt itself returns is classified
 /// Unknown, which the baked class policy ends; only a chain entry with no
 /// provider at all is walked past, before any attempt.

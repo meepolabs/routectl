@@ -32,17 +32,6 @@ impl DispatchSurface {
         }
     }
 
-    /// Whether a strict-translation refusal leaves the target unsent and
-    /// walks on, or ends the request. A message surface walks because the
-    /// next target may carry the capability; a count ends, since it projects
-    /// the same request onto every seat.
-    pub(super) const fn strict_reject_walks(self) -> bool {
-        match self {
-            Self::Complete | Self::Stream => true,
-            Self::CountTokens => false,
-        }
-    }
-
     /// Whether a chain entry naming an unregistered provider is skipped or
     /// ends the request.
     pub(super) const fn unknown_provider_walks(self) -> bool {

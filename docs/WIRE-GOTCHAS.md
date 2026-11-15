@@ -165,8 +165,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 - **A local egress refusal walks the fallback chain, except a missing
   forwarded bearer.** A refusal raised while translating for one target
-  (`tool-pairing`, `tool-call-id-missing`, `unrepresentable`,
-  `strict-translation` and the other egress reasons) moves the request to
+  (`tool-pairing`, `tool-call-id-missing`, `unrepresentable` and the
+  other egress reasons) moves the request to
   the next target in the chain, since that target may hold the shape. A
   request bound for a forwarded-credential target that carries no bearer
   (`forwarded-bearer-missing`) ends instead: it is never retried on

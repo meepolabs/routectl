@@ -45,7 +45,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [providers.fast]
 kind = "openai-compat"
@@ -395,7 +394,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [retry.classes.feature-unsupported]
 retry = 1
@@ -554,7 +552,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 prt = 8080
 
 [providers.fast]
@@ -942,7 +939,6 @@ async fn credentials_atomic_rewrite_surfaces_new_bearer_on_next_request() {
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [providers.anthropic_oauth]
 kind = "anthropic-api"
@@ -1033,7 +1029,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [retry]
 initial_backoff_ms = 0
@@ -1106,7 +1101,6 @@ fn v3_config_with_alias(alias: &str) -> String {
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [providers.fast]
 kind = "openai-compat"
@@ -1282,7 +1276,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [providers.anthropic]
 kind = "anthropic-api"
@@ -1559,7 +1552,6 @@ async fn serve_starts_degraded_on_broken_credentials_then_hot_reloads_recovery()
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [providers.anthropic_oauth]
 kind = "anthropic-api"
@@ -1703,7 +1695,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [providers.prov_a]
 kind = "openai-compat"
@@ -1973,7 +1964,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [reduction]
 enabled = {enabled}
@@ -2010,7 +2000,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 prt = 8080
 
 [reduction]
@@ -2044,7 +2033,6 @@ version = {CURRENT}
 [server]
 host = "127.0.0.1"
 port = 0
-strict_translation = false
 
 [retry]
 max_attempts = 1

@@ -630,8 +630,8 @@ token of the closed refusal vocabulary (`cache-breakpoint-cap`,
 `cache-ttl-order`, `tool-call-id-missing`, `field-type`,
 `previous-response-id`, `beta-header-cap`, `schema-depth`, `schema-size`,
 `translation-accounting`, `tool-pairing`, `unrepresentable`,
-`strict-translation`, `forwarded-bearer-missing`, `cloak-relocation`,
-`gemini-seed`, `unparseable`). The same rows, with a last-seen time, are
+`forwarded-bearer-missing`, `cloak-relocation`, `gemini-seed`,
+`unparseable`). The same rows, with a last-seen time, are
 listed under `wire_check.local_refusals` in `/status/health`.
 
 `path` is a sanitized RFC 6901 pointer, never a body value. An object
@@ -2476,7 +2476,6 @@ message:
 |---|---|
 | `applied` | The strip ran and removed the capability surface from the attempt request. |
 | `noop` | The verdict named a capability the request did not carry; nothing to strip. |
-| `strict_rejected` | `strict_translation` is on and the strip would mutate, so this target is not dispatched; on complete and stream the chain moves to the next target, on `count_tokens` the request ends. |
 | `validation_rolled_back` | The strip created a post-strip hazard; the request was restored byte-for-byte and the attempt routes away. |
 | `probe_bypassed` | A strip-eligible feature was admitted for re-probe, so it was intentionally NOT stripped (emitted at the verdict site). |
 

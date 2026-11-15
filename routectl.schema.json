@@ -1702,11 +1702,6 @@
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
-        },
-        "strict_translation": {
-          "default": false,
-          "description": "When true, a learned capability strip that would remove part of\na request refuses that target with a 400 instead of stripping and\ndispatching. Default false. Egress translation losses always warn,\ndrop and count, whatever this is set to.",
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -1881,8 +1876,7 @@
         "auth": null,
         "host": "127.0.0.1",
         "max_body_bytes": 33554432,
-        "port": 8787,
-        "strict_translation": false
+        "port": 8787
       },
       "description": "Server bind config."
     },
