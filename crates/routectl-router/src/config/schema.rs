@@ -2346,7 +2346,7 @@ impl ProviderEntry {
     }
 
     /// Replace this entry's runtime/rate-limit policy.
-    pub fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
+    pub const fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
         match &mut self {
             Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => {
                 *runtime = rt;
@@ -2839,21 +2839,6 @@ pub struct ProviderRuntimePolicy {
     /// claiming `[pools.X]` > `[retry]` > the shipped 5 min default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
-    /// A map from a raw upstream status code to a config-facing failure
-    /// class, keyed by the numeric status. Parsed and validated only: routing
-    /// never reads it, so a status keeps its built-in class. The
-    /// custom (de)serializer routes the numeric keys through string form
-    /// so the map survives serde's `flatten` buffering (see
-    /// `class_policy::status_class_overrides`).
-    #[serde(
-        default,
-        skip_serializing_if = "BTreeMap::is_empty",
-        with = "crate::class_policy::status_class_overrides"
-    )]
-    #[schemars(
-        with = "std::collections::BTreeMap<String, crate::class_policy::ConfigFailureClass>"
-    )]
-    pub class_overrides: BTreeMap<u16, ConfigFailureClass>,
 }
 
 /// Seat-selection strategy for a set of interchangeable accounts, set on

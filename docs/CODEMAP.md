@@ -1890,10 +1890,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   restart-required via `config_classify::collect_restart_required_changes` in
   routectl-cli); `RetryPolicy` carries `classes: BTreeMap<ConfigFailureClass,
   ClassPolicy>` (per-class retry/fallback overlay resolved by
-  `class_policy::RetryPolicy::resolved_class`) and `ProviderRuntimePolicy`
-  carries `class_overrides: BTreeMap<u16, ConfigFailureClass>` (operator remap
-  of a raw upstream status to a failure class), both empty-by-default and
-  defined in `src/class_policy.rs`; `CapabilityConfig` (global `[capability]`:
+  `class_policy::RetryPolicy::resolved_class`, empty by default, defined in
+  `src/class_policy.rs`); `CapabilityConfig` (global `[capability]`:
   `enabled`, `decay_hours`, `inferred_window_hours`, plus the global `essential` capability-key list that reclassifies a
   droppable's learned negative from strip to route-away -- tightening-only,
   validated against the known-key set minus `reasoning_replay`)
@@ -1910,8 +1908,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   read from the environment. The whole
   `Config` tree derives `schemars::JsonSchema` alongside serde so
   `schema_gen.rs` can render the committed `routectl.schema.json`
-  (`class_overrides`, a `BTreeMap<u16, _>`, carries a `#[schemars(with)]`
-  override so it renders as a string-keyed object rather than a u16 map)
 - `src/config/validate.rs` -- Config version preflight + non-schema
   validation: `version: u32` schema-stamps the file (`CURRENT_CONFIG_VERSION
   == 5`); `preflight_config_version(raw_toml)` reads `version` off the RAW
@@ -2048,8 +2044,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ConfigFailureClass` is the closed, kebab-case-serialized, operator-nameable
   subset (the ten classes; omits `Unknown`, flattens `FeatureUnsupported`'s
   upstream `capability` token away); `to_failure_class` re-synthesizes
-  `FeatureUnsupported` with the stable `OPERATOR_REMAP_CAPABILITY`
-  (`operator-remap`) provenance token, `from_failure_class` returns `None` for
+  `FeatureUnsupported` with an empty `capability`, `from_failure_class` returns `None` for
   `Unknown` and (fail-closed) any future `#[non_exhaustive]` variant.
   `ClassPolicy { retry: Option<u32>, fallback: Option<bool> }`
   (`deny_unknown_fields`, each leaf independently optional) is the per-class
@@ -2124,11 +2119,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[models.X] provider` value in the shared `[pools]` / `[providers]`
   namespace (pool wins on an unvalidated config), read by the factory build
   and `config check`; `validate_class_policy` HARD-rejects an
-  operator override of the reserved `[retry.classes.feature-unsupported]` key
-  and any `[providers.X.class_overrides]` remap whose target falls outside
-  `{bad-request, content-policy, context-window, feature-unsupported}`
-  (`ALLOWED_REMAP_TARGETS`) -- a remap may only move a status into a terminal,
-  non-retrying class, naming the offending provider/status/target on reject;
+  operator override of the reserved `[retry.classes.feature-unsupported]` key;
   `validate_managed_anthropic_credential` (public; also called by the
   factory) confines an `oauth://anthropic` ref, and the
   `MANAGED_OAUTH_FAMILIES` table (anthropic, codex, xai, antigravity) drives
@@ -2197,9 +2188,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   excluded (router-build-specific)
 - `src/factory/warnings.rs` -- non-fatal config warnings;
   `class_policy_warnings` is the advisory twin of `validate_class_policy` over
-  the same surface (never fails): a `class_overrides` remap whose SOURCE
-  status is a breaker health signal (`is_health_status`: 408, 429, any
-  500..=599), an empty `[retry.classes.<c>]` block (both leaves `None`), and
+  the same surface (never fails): an empty `[retry.classes.<c>]` block (both leaves `None`), and
   each set deprecated `[retry] retry_on_*` key (`retry_on_deprecation_warnings`);
   `warn_context_management_needs_preserve` flags the `context_management` +
   `history_reasoning != "preserve"` inconsistency once at build time;
@@ -5493,9 +5482,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   debiting class with a bad-request retry cap (one attempt, empty capability
   registry); a debiting control opens it
 - `tests/status_class_source.rs` -- a status's failure class comes from the
-  built-in table plus `[retry.classes]` only: a provider `class_overrides`
-  table changes no same-provider retry, fallback or committed-stream breaker
-  decision, each path with a positive control that does move it
+  built-in table plus `[retry.classes]` only: same-provider retry, fallback
+  and the committed-stream breaker settle by the built-in class, each path
+  with a positive control that does move it
 - `tests/cross_lane_sampling_strip.rs` -- cross-lane fallback hop onto the
   own-OAuth Anthropic seat: the first hop receives the caller's sampling
   verbatim and fails fallbackably, the OAuth hop ships a sampling-free body

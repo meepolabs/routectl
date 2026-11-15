@@ -277,19 +277,6 @@ pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> R
     }
 }
 
-/// The four config-facing classes a `[providers.X.class_overrides]` remap
-/// may target. All four are terminal, non-retrying classes under the
-/// baked defaults (see `class_policy::baked_class_defaults`) -- a remap
-/// may only move a status INTO one of these, never toward a class the
-/// router retries or uses for breaker/health accounting. Consumed by
-/// [`validate_class_policy`].
-const ALLOWED_REMAP_TARGETS: [crate::class_policy::ConfigFailureClass; 4] = [
-    crate::class_policy::ConfigFailureClass::BadRequest,
-    crate::class_policy::ConfigFailureClass::ContentPolicy,
-    crate::class_policy::ConfigFailureClass::ContextWindow,
-    crate::class_policy::ConfigFailureClass::FeatureUnsupported,
-];
-
 /// Render a [`crate::class_policy::ConfigFailureClass`] as the kebab-case
 /// token it parses from / serializes to in TOML (e.g. `bad-request`), for
 /// validator and warning messages that name a class. Delegates to the
@@ -307,30 +294,16 @@ pub(super) fn class_token(class: crate::class_policy::ConfigFailureClass) -> Str
         .to_string()
 }
 
-/// Validate the `[retry.classes]` overlay and every
-/// `[providers.X.class_overrides]` remap for HARD policy violations that
-/// the loader's serde layer cannot catch on its own (both are
-/// syntactically valid TOML; these are policy rejects).
+/// Validate the `[retry.classes]` overlay for a HARD policy violation the
+/// loader's serde layer cannot catch on its own (syntactically valid TOML,
+/// rejected by policy): `[retry.classes.feature-unsupported]` is present.
 ///
-/// Two rejects:
-///
-///   - `[retry.classes.feature-unsupported]` is present. This class is
-///     reserved: the baked class defaults already govern it, and an
-///     override here has no path to take effect yet. Rejected outright
-///     (rather than silently accepted as a no-op) so the operator does
-///     not carry dead config; see the `[retry]` section of
-///     `docs/CONFIGURATION.md` for the classes that do accept an
-///     override. This reject is lifted by a later, targeted removal once
-///     the class gains real override semantics.
-///
-///   - Any `[providers.X.class_overrides]` entry whose remap TARGET falls
-///     outside `{bad-request, content-policy, context-window,
-///     feature-unsupported}` (`ALLOWED_REMAP_TARGETS`). A remap may
-///     only make behavior less aggressive -- move a status into one of
-///     the terminal, non-retrying classes -- never toward a class the
-///     router retries or debits for health. The error names the
-///     provider, the source status, and the offending target so the
-///     operator can fix the one line.
+/// This class is reserved: the baked class defaults already govern it, and
+/// an override here has no path to take effect yet. Rejected outright
+/// (rather than silently accepted as a no-op) so the operator does not
+/// carry dead config; see the `[retry]` section of `docs/CONFIGURATION.md`
+/// for the classes that do accept an override. This reject is lifted by a
+/// later, targeted removal once the class gains real override semantics.
 ///
 /// Call once per process startup alongside the other validators.
 pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
@@ -349,19 +322,6 @@ pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
              override."
                 .into(),
         ));
-    }
-
-    for (provider_name, entry) in &config.providers {
-        for (status, target) in &entry.runtime().class_overrides {
-            if !ALLOWED_REMAP_TARGETS.contains(target) {
-                return Err(Error::Config(format!(
-                    "[providers.{provider_name}.class_overrides] {status} = {}: a remap \
-                     may only make behavior less aggressive -- the target must be one of \
-                     bad-request, content-policy, context-window, feature-unsupported",
-                    class_token(*target),
-                )));
-            }
-        }
     }
 
     Ok(())

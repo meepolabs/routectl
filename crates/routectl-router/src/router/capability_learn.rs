@@ -763,8 +763,7 @@ impl Router {
     /// pays only the cheap early checks. The full eligibility gate (all
     /// must hold): the kill switch is on; the upstream fault is a request
     /// fault (400/422); the target does not dispatch on a forwarded credential; the resolver attributes the fault
-    /// to a canonical capability; that capability is not the
-    /// operator-remap provenance token; and the capability is a member of
+    /// to a canonical capability; and the capability is a member of
     /// the request's derived feature set
     /// (`super::field_repair::request_feature_keys`'s catalog+field
     /// vocabulary). The resolver keys on the request-capability namespace, so this final
@@ -879,9 +878,6 @@ impl Router {
         probe_guard: &mut LearnedProbeGuard,
     ) {
         let (feature_key, tier, phase) = resolved;
-        if feature_key == crate::class_policy::OPERATOR_REMAP_CAPABILITY {
-            return;
-        }
         // A field-namespace key is minted only through the field-repair guard,
         // from a validated field path: a closed-table row's, or a carried
         // client member's the generic arm removed. Here it could only have

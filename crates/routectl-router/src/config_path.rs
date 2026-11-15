@@ -291,9 +291,9 @@ mod tests {
     }
 
     #[test]
-    fn numeric_class_override_key_validates() {
+    fn digit_led_map_key_validates() {
         assert_eq!(
-            validate_config_path("providers.anthropic.class_overrides.400"),
+            validate_config_path("models.opus.pricing.cache_write_per_mtok.5m"),
             Ok(PathShape::Scalar)
         );
     }

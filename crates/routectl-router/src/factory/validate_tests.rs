@@ -3,21 +3,11 @@ use super::*;
 #[cfg(test)]
 mod class_policy_validation_tests {
     //! Tests for `validate_class_policy` (hard rejects) and
-    //! `class_policy_warnings` (advisory) over `[retry.classes]` and
-    //! `[providers.X.class_overrides]`.
+    //! `class_policy_warnings` (advisory) over `[retry.classes]`.
 
     use super::{class_policy_warnings, validate_class_policy};
     use crate::class_policy::{ClassPolicy, ConfigFailureClass};
-    use crate::config::{Config, ProviderEntry, ProviderRuntimePolicy};
-    use std::collections::BTreeMap;
-
-    fn provider_with_overrides(overrides: &[(u16, ConfigFailureClass)]) -> ProviderEntry {
-        let class_overrides = overrides.iter().copied().collect::<BTreeMap<_, _>>();
-        ProviderEntry::anthropic_api("literal:sk-ant-test").with_runtime(ProviderRuntimePolicy {
-            class_overrides,
-            ..Default::default()
-        })
-    }
+    use crate::config::Config;
 
     #[test]
     fn rejects_reserved_feature_unsupported_classes_block() {
@@ -38,69 +28,6 @@ mod class_policy_validation_tests {
         let msg = err.to_string();
         assert!(msg.contains("feature-unsupported"), "msg: {msg}");
         assert!(msg.contains("reserved"), "msg: {msg}");
-    }
-
-    #[test]
-    fn rejects_class_override_targeting_a_disallowed_class() {
-        // Arrange: 400 remapped to `server-error`, a retrying class
-        // outside the allowed remap-target set.
-        let mut cfg = Config::default();
-        cfg.providers.insert(
-            "acme".to_string(),
-            provider_with_overrides(&[(400, ConfigFailureClass::ServerError)]),
-        );
-
-        // Act
-        let err = validate_class_policy(&cfg).unwrap_err();
-
-        // Assert: names the provider, the status, and the offending target.
-        let msg = err.to_string();
-        assert!(msg.contains("acme"), "msg: {msg}");
-        assert!(msg.contains("400"), "msg: {msg}");
-        assert!(msg.contains("server-error"), "msg: {msg}");
-    }
-
-    #[test]
-    fn accepts_class_override_targeting_feature_unsupported() {
-        // Arrange: 400 remapped to `feature-unsupported`, one of the
-        // allowed (less-aggressive) remap targets.
-        let mut cfg = Config::default();
-        cfg.providers.insert(
-            "acme".to_string(),
-            provider_with_overrides(&[(400, ConfigFailureClass::FeatureUnsupported)]),
-        );
-
-        // Act + Assert
-        validate_class_policy(&cfg).expect("an allowed remap target must validate");
-    }
-
-    #[test]
-    fn warns_that_each_class_override_has_no_effect() {
-        // Arrange: a health status and a request-fault status, both with
-        // targets validation accepts.
-        let mut cfg = Config::default();
-        cfg.providers.insert(
-            "acme".to_string(),
-            provider_with_overrides(&[
-                (400, ConfigFailureClass::BadRequest),
-                (503, ConfigFailureClass::FeatureUnsupported),
-            ]),
-        );
-
-        // Act
-        let warnings = class_policy_warnings(&cfg);
-
-        // Assert
-        validate_class_policy(&cfg).expect("allowed targets still validate");
-        assert_eq!(warnings.len(), 2, "warnings: {warnings:?}");
-        for status in ["400", "503"] {
-            assert!(
-                warnings.iter().any(|w| w.contains("acme.class_overrides] ")
-                    && w.contains(&format!("] {status} = "))
-                    && w.contains("has no effect")),
-                "{status}: warnings: {warnings:?}"
-            );
-        }
     }
 
     #[test]

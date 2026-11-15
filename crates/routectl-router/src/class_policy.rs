@@ -14,13 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::RetryPolicy;
 
-/// Capability token stamped on a [`FailureClass::FeatureUnsupported`]
-/// synthesized from an operator config remap. A stable, provenance-only
-/// constant: it marks the class as config-sourced rather than lifted from
-/// a real upstream envelope, so a downstream consumer can tell the two
-/// apart without inspecting anything else.
-pub const OPERATOR_REMAP_CAPABILITY: &str = "operator-remap";
-
 /// The config-facing failure classes an operator can name in
 /// `config.toml`. Serializes in kebab-case; a key outside this closed set
 /// (a typo or an unknown class) fails deserialization rather than being
@@ -71,10 +64,10 @@ pub struct ClassPolicy {
 
 impl ConfigFailureClass {
     /// Map this config-facing class to the canonical [`FailureClass`].
-    /// `FeatureUnsupported` gains the stable [`OPERATOR_REMAP_CAPABILITY`]
-    /// token marking its config-remap provenance.
+    /// `FeatureUnsupported` carries an empty `capability`: the config surface
+    /// names a class, never an upstream capability.
     #[must_use]
-    pub fn to_failure_class(self) -> FailureClass {
+    pub const fn to_failure_class(self) -> FailureClass {
         match self {
             Self::RateLimited => FailureClass::RateLimited,
             Self::Auth => FailureClass::Auth,
@@ -86,7 +79,7 @@ impl ConfigFailureClass {
             Self::NetworkError => FailureClass::NetworkError,
             Self::Overloaded => FailureClass::Overloaded,
             Self::FeatureUnsupported => FailureClass::FeatureUnsupported {
-                capability: OPERATOR_REMAP_CAPABILITY.to_string(),
+                capability: String::new(),
             },
         }
     }
@@ -175,75 +168,9 @@ const fn baked_class_defaults(policy: &RetryPolicy, class: &FailureClass) -> (u3
     }
 }
 
-/// (De)serialize a `u16`-keyed status-to-class map across serde's flatten
-/// path. `#[serde(flatten)]` buffers a table into string-keyed `Content`,
-/// which drops the toml crate's usual string-to-`u16` map-key coercion, so
-/// a plain `BTreeMap<u16, _>` field fails to deserialize when flattened.
-/// Routing the keys through an explicit `String` map restores the
-/// coercion in both directions while keeping the field's public type
-/// `u16`-keyed.
-pub(crate) mod status_class_overrides {
-    use super::ConfigFailureClass;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-    use std::collections::BTreeMap;
-
-    pub fn serialize<S>(
-        map: &BTreeMap<u16, ConfigFailureClass>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let string_keyed: BTreeMap<String, ConfigFailureClass> = map
-            .iter()
-            .map(|(code, class)| (code.to_string(), *class))
-            .collect();
-        string_keyed.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<BTreeMap<u16, ConfigFailureClass>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let string_keyed = BTreeMap::<String, ConfigFailureClass>::deserialize(deserializer)?;
-        let mut result = BTreeMap::new();
-        for (key, class) in string_keyed {
-            let code = parse_status_code::<D::Error>(&key)?;
-            if result.insert(code, class).is_some() {
-                return Err(D::Error::custom(format!(
-                    "duplicate status code key {key:?}: another key already maps to status \
-                     code {code}"
-                )));
-            }
-        }
-        Ok(result)
-    }
-
-    /// Parse a status-code map key, distinguishing a non-numeric key from
-    /// one that is numeric but outside `u16` range (e.g. `"99999"`) so the
-    /// error names the actual problem instead of calling an in-range
-    /// integer "not an integer".
-    fn parse_status_code<E: serde::de::Error>(key: &str) -> Result<u16, E> {
-        key.parse::<u16>().map_err(|_| {
-            if key.parse::<i64>().is_ok() {
-                E::custom(format!(
-                    "invalid status code key {key:?}: expected an integer status code in \
-                     0..=65535"
-                ))
-            } else {
-                E::custom(format!(
-                    "invalid status code key {key:?}: expected an integer"
-                ))
-            }
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ClassPolicy, ConfigFailureClass, OPERATOR_REMAP_CAPABILITY};
+    use super::{ClassPolicy, ConfigFailureClass};
     use crate::config::RetryPolicy;
     use routectl_core::failure_class::FailureClass;
     use std::collections::BTreeMap;
@@ -417,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn to_failure_class_feature_unsupported_carries_the_constant_capability_token() {
+    fn to_failure_class_feature_unsupported_carries_no_capability_token() {
         // Act
         let got = ConfigFailureClass::FeatureUnsupported.to_failure_class();
 
@@ -425,7 +352,7 @@ mod tests {
         assert_eq!(
             got,
             FailureClass::FeatureUnsupported {
-                capability: OPERATOR_REMAP_CAPABILITY.to_string(),
+                capability: String::new(),
             }
         );
     }
@@ -741,10 +668,8 @@ fallback = false
 
     // --- Config deserialize boundary ---
     //
-    // The two new fields live on serde surfaces (`[retry].classes` on the
-    // normal path, and `class_overrides` FLATTENED off
-    // `ProviderRuntimePolicy` onto every `[providers.X]`). These pin that
-    // both parse from real TOML and survive a serialize round-trip.
+    // `[retry].classes` parses from real TOML and an empty overlay stays
+    // out of the serialized file.
 
     #[test]
     fn retry_classes_overlay_parses_from_toml() {
@@ -799,152 +724,6 @@ fallback = true
         assert!(
             !rendered.contains("classes"),
             "empty overlay must not materialize a [classes] table, got:\n{rendered}"
-        );
-    }
-
-    #[test]
-    fn provider_class_overrides_parse_from_flattened_toml() {
-        // Arrange: class_overrides is flattened onto the provider table
-        // with numeric (u16) status keys.
-        let toml_text = r#"
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-
-[providers.anthropic.class_overrides]
-429 = "rate-limited"
-503 = "server-error"
-"#;
-
-        // Act
-        let cfg: crate::config::Config = toml::from_str(toml_text).expect("parse");
-        let runtime = cfg.providers.get("anthropic").expect("provider").runtime();
-
-        // Assert
-        assert_eq!(
-            runtime.class_overrides.get(&429),
-            Some(&ConfigFailureClass::RateLimited)
-        );
-        assert_eq!(
-            runtime.class_overrides.get(&503),
-            Some(&ConfigFailureClass::ServerError)
-        );
-    }
-
-    #[test]
-    fn provider_class_overrides_reject_a_typo_class() {
-        // Arrange: a status mapped to a non-existent class token.
-        let toml_text = r#"
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-
-[providers.anthropic.class_overrides]
-429 = "rate_limited"
-"#;
-
-        // Act
-        let parsed: Result<crate::config::Config, _> = toml::from_str(toml_text);
-
-        // Assert
-        assert!(parsed.is_err(), "a typo'd class token must fail the load");
-    }
-
-    #[test]
-    fn provider_class_overrides_reject_a_non_numeric_key() {
-        // Arrange: a status key that is not an integer at all.
-        let toml_text = r#"
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-
-[providers.anthropic.class_overrides]
-"4a29" = "rate-limited"
-"#;
-
-        // Act
-        let parsed: Result<crate::config::Config, _> = toml::from_str(toml_text);
-
-        // Assert
-        assert!(parsed.is_err(), "a non-numeric status key must be rejected");
-    }
-
-    #[test]
-    fn provider_class_overrides_reject_an_out_of_range_key_with_range_message() {
-        // Arrange: "99999" is a valid integer but outside u16 range, so the
-        // error must name the range rather than call it "not an integer".
-        let toml_text = r#"
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-
-[providers.anthropic.class_overrides]
-"99999" = "rate-limited"
-"#;
-
-        // Act
-        let err = toml::from_str::<crate::config::Config>(toml_text)
-            .expect_err("an out-of-range status key must be rejected");
-
-        // Assert
-        assert!(
-            err.to_string().contains("0..=65535"),
-            "error must name the valid range, got: {err}"
-        );
-    }
-
-    #[test]
-    fn provider_class_overrides_reject_duplicate_keys_mapping_to_the_same_status_code() {
-        // Arrange: "029" and "29" are distinct string keys that both parse
-        // to status code 29, so a naive collect would silently pick one via
-        // last-write-wins.
-        let toml_text = r#"
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-
-[providers.anthropic.class_overrides]
-"029" = "rate-limited"
-"29" = "server-error"
-"#;
-
-        // Act
-        let parsed: Result<crate::config::Config, _> = toml::from_str(toml_text);
-
-        // Assert
-        assert!(
-            parsed.is_err(),
-            "two keys collapsing to the same status code must be rejected"
-        );
-    }
-
-    #[test]
-    fn provider_class_overrides_survive_a_serialize_round_trip() {
-        // Arrange: parse a config carrying flattened u16 overrides.
-        let toml_text = r#"
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-
-[providers.anthropic.class_overrides]
-529 = "overloaded"
-"#;
-        let cfg: crate::config::Config = toml::from_str(toml_text).expect("parse");
-
-        // Act: serialize back out (exercises the flatten-aware serializer)
-        // and re-parse.
-        let rendered = toml::to_string(&cfg).expect("serialize");
-        let reparsed: crate::config::Config = toml::from_str(&rendered).expect("reparse");
-
-        // Assert: the u16 key survives both directions.
-        let runtime = reparsed
-            .providers
-            .get("anthropic")
-            .expect("provider")
-            .runtime();
-        assert_eq!(
-            runtime.class_overrides.get(&529),
-            Some(&ConfigFailureClass::Overloaded)
         );
     }
 }

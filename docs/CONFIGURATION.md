@@ -357,6 +357,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
 | `pools.<name>.seat_selection = "round-robin"` | use sticky-least-loaded |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
+| `providers.<name>.class_overrides` | per-class policy lives in `[retry.classes.*]`; a status keeps its built-in class |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |
 | `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
@@ -1988,17 +1989,6 @@ target lacks then hard-fails instead of falling over.
 even empty, is rejected at config load (`validate_class_policy`,
 `crates/routectl-router/src/factory/validate.rs`). The baked row above already
 governs it; there is no override path for this class yet.
-
-#### `[providers.X.class_overrides]` -- no effect, pending removal
-
-A `[providers.X]` table may still carry a `class_overrides` map from a
-raw upstream status to a class key. It still parses and validates (a
-target outside `bad-request`, `content-policy`, `context-window`,
-`feature-unsupported` is refused at load), but routing never reads it:
-a status keeps its built-in class for retry, fallback and breaker
-accounting. Each entry logs an advisory warning saying so. The key will
-be refused in a coming change; delete it, and set per-class policy
-under `[retry.classes.<class>]`.
 
 #### Precedence
 

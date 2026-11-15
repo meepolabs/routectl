@@ -17,8 +17,7 @@ release cut. Highlights, roughly in dependency order:
   redaction tightening.
 - **Per-failure-class retry policy** -- a stable failure-class
   taxonomy (`rate-limited`, `auth`, `bad-request`, ...) with
-  `[retry.classes.<class>]` per-class retry/fallback overrides and
-  `[providers.X.class_overrides]` status remaps.
+  `[retry.classes.<class>]` per-class retry/fallback overrides.
 - **Model prices** -- per-field price precedence
   (`[models.X.pricing]`, `[registry]`, the `routectl prices refresh`
   table, the shipped table); window and output ceiling from

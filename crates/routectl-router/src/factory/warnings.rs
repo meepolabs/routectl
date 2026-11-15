@@ -58,16 +58,12 @@ pub(super) fn warn_context_management_needs_preserve(
     );
 }
 
-/// Advisory (never fatal) checks over the same `[retry.classes]` +
-/// `[providers.X.class_overrides]` surface `validate_class_policy`
-/// hard-rejects on. Each finding here is a config smell the operator
-/// probably didn't intend, not a misconfiguration the loader must refuse.
+/// Advisory (never fatal) checks over the same `[retry.classes]` surface
+/// `validate_class_policy` hard-rejects on. Each finding here is a config
+/// smell the operator probably didn't intend, not a misconfiguration the
+/// loader must refuse.
 ///
-/// Three checks, each producing zero or more warning lines:
-///
-///   - Any `class_overrides` entry. The table still parses and validates,
-///     but routing never reads it: a status keeps its built-in class, so
-///     each entry is named as having no effect.
+/// Two checks, each producing zero or more warning lines:
 ///
 ///   - An empty `[retry.classes.<c>]` block (both `retry` and `fallback`
 ///     leaves `None`). Parses fine and does nothing; almost always a
@@ -89,17 +85,6 @@ pub(super) fn warn_context_management_needs_preserve(
 /// the load.
 pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
     let mut warnings = retry_on_deprecation_warnings(&config.retry);
-
-    for (provider_name, entry) in &config.providers {
-        for (status, target) in &entry.runtime().class_overrides {
-            warnings.push(format!(
-                "[providers.{provider_name}.class_overrides] {status} = {}: has no effect; \
-                 a status keeps its built-in class, and per-class policy lives in \
-                 [retry.classes.<class>]",
-                class_token(*target),
-            ));
-        }
-    }
 
     for (class, policy) in &config.retry.classes {
         if policy.retry.is_none() && policy.fallback.is_none() {

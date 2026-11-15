@@ -1,7 +1,7 @@
 //! A status's failure class comes from the built-in table plus
-//! `[retry.classes]` only. A provider's `class_overrides` table still parses,
-//! but no dispatch decision reads it: same-provider retry, fallback and the
-//! committed-stream breaker settle exactly as they do without it.
+//! `[retry.classes]` only: same-provider retry, fallback and the
+//! committed-stream breaker settle by the built-in class, and a
+//! `[retry.classes]` leaf moves retry and fallback.
 //!
 //! Each path carries a positive control showing the fixture can see the
 //! decision move: a `[retry.classes]` leaf for retry and fallback, and a
@@ -89,7 +89,7 @@ impl Provider for Seat {
 }
 
 /// `[retry]` and the two provider tables every row shares; `extra` is
-/// appended verbatim, so a row adds `class_overrides` or `[retry.classes]`.
+/// appended verbatim, so a row adds `[retry.classes]`.
 /// The breaker threshold is high enough that no row opens it.
 fn config(extra: &str) -> Config {
     let text = format!(
@@ -192,30 +192,14 @@ async fn observe(path: Path, status: u16, extra: &str) -> Observed {
     }
 }
 
-const OVERRIDE_503_TO_CONTENT_POLICY: &str =
-    "[providers.p1.class_overrides]\n503 = \"content-policy\"\n";
-const OVERRIDE_503_TO_BAD_REQUEST: &str = "[providers.p1.class_overrides]\n503 = \"bad-request\"\n";
-/// Ends the request at a content-policy failure: a 503 read as
-/// content-policy would stop the walk here.
-const CONTENT_POLICY_NO_FALLBACK: &str = "[retry.classes.content-policy]\nfallback = false\n";
-
 #[tokio::test]
-async fn class_overrides_change_no_retry_fallback_or_breaker_decision() {
-    let override_with_terminal_target =
-        format!("{CONTENT_POLICY_NO_FALLBACK}{OVERRIDE_503_TO_CONTENT_POLICY}");
-    let rows: [(&str, Path, u16, &str, Observed); 9] = [
+async fn retry_fallback_and_breaker_follow_the_built_in_class_and_retry_classes() {
+    let rows: [(&str, Path, u16, &str, Observed); 6] = [
         (
             "retry / 503 built-in",
             Path::Retry,
             503,
             "",
-            Observed::Calls(3),
-        ),
-        (
-            "retry / 503 with class_overrides",
-            Path::Retry,
-            503,
-            OVERRIDE_503_TO_CONTENT_POLICY,
             Observed::Calls(3),
         ),
         (
@@ -229,14 +213,7 @@ async fn class_overrides_change_no_retry_fallback_or_breaker_decision() {
             "fallback / 503 built-in",
             Path::Fallback,
             503,
-            CONTENT_POLICY_NO_FALLBACK,
-            Observed::ReachedSecondSeat(true),
-        ),
-        (
-            "fallback / 503 with class_overrides",
-            Path::Fallback,
-            503,
-            &override_with_terminal_target,
+            "",
             Observed::ReachedSecondSeat(true),
         ),
         (
@@ -251,13 +228,6 @@ async fn class_overrides_change_no_retry_fallback_or_breaker_decision() {
             Path::StreamBreaker,
             503,
             "",
-            Observed::Breaker(Settled::Debited),
-        ),
-        (
-            "stream breaker / 503 with class_overrides",
-            Path::StreamBreaker,
-            503,
-            OVERRIDE_503_TO_BAD_REQUEST,
             Observed::Breaker(Settled::Debited),
         ),
         (

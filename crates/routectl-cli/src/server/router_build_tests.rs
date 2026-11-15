@@ -110,11 +110,11 @@ async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
 
 /// The whole captured startup line SET must be control-byte clean, not just
 /// the one loop a single test happens to name. The fixture fires two
-/// independent hostile loops off ONE provider key -- the per-block
-/// breakpoint advisory and the class-policy advisory (via a
-/// `[providers.X.class_overrides]` health-status remap) -- plus the
-/// provider-build failure warn that an absent `env://` ref produces, so a
-/// sink added to any of those paths without a sanitizer fails here.
+/// independent hostile loops -- the per-block breakpoint advisory off a
+/// provider key and the auth-reserved header advisory off a model key --
+/// plus the provider-build failure warn that an absent `env://` ref
+/// produces, so a sink added to any of those paths without a sanitizer
+/// fails here.
 ///
 /// Positive controls come first, as above: both validators' raw messages are
 /// asserted hostile before the rendered lines are asserted clean.
@@ -126,12 +126,12 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
          base_url = \"https://example.invalid\"\n\
          api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
          auto_emit_per_block_breakpoints = true\n\
-         [providers.\"evil\\nkey\\u001B[31m\".class_overrides]\n\
-         503 = \"bad-request\"\n\
          [models.\"evil\\nmodel\\u001B[31m\"]\n\
          provider = \"evil\\nkey\\u001B[31m\"\n\
          upstream = \"some-upstream\"\n\
-         stream_first_byte_timeout_ms = 0\n",
+         stream_first_byte_timeout_ms = 0\n\
+         [models.\"evil\\nmodel\\u001B[31m\".header_extras]\n\
+         authorization = \"x\"\n",
     )
     .expect("config must parse");
     let _usage_dir = isolate_usage_db(&mut config);
@@ -142,8 +142,8 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
             routectl_router::per_block_breakpoint_warnings(&config),
         ),
         (
-            "class policy",
-            routectl_router::class_policy_warnings(&config),
+            "auth-reserved header",
+            routectl_router::auth_reserved_header_warnings(&config),
         ),
     ] {
         let message = raw
@@ -178,7 +178,7 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
     }
     for msg in [
         "per-block breakpoint warning",
-        "class policy warning",
+        "auth-reserved header warning",
         "skipping provider (build failed)",
     ] {
         assert!(

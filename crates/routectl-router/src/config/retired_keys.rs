@@ -110,6 +110,12 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
                       router withholds from the lane",
     },
     RetiredKey {
+        path: &["providers", ANY_ENTRY, "class_overrides"],
+        refused_value: None,
+        replacement: "per-class policy lives in `[retry.classes.*]`; a status keeps its \
+                      built-in class",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "unsupported_features"],
         refused_value: None,
         replacement: "use `[capability.overrides.<provider>] unsupported`",

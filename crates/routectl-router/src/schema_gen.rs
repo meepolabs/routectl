@@ -175,42 +175,4 @@ mod tests {
             "the generated marker must contain `@generated`"
         );
     }
-
-    /// `class_overrides` is a `BTreeMap<u16, _>` that serializes with STRING
-    /// keys; the `#[schemars(with)]` override must keep the RENDERED schema a
-    /// string-keyed object of `ConfigFailureClass`, never a u16 map.
-    #[test]
-    fn class_overrides_renders_string_keyed() {
-        let value: serde_json::Value =
-            serde_json::from_str(&render_schema_json()).expect("rendered schema parses");
-
-        let arms = value
-            .pointer("/$defs/ProviderEntry/oneOf")
-            .and_then(serde_json::Value::as_array)
-            .expect("ProviderEntry renders as a oneOf of tagged variants");
-
-        let mut seen = 0usize;
-        for arm in arms {
-            let Some(field) = arm.pointer("/properties/class_overrides") else {
-                continue;
-            };
-            seen += 1;
-            assert_eq!(
-                field.pointer("/type").and_then(serde_json::Value::as_str),
-                Some("object"),
-                "class_overrides must be a string-keyed object, got: {field}"
-            );
-            assert_eq!(
-                field
-                    .pointer("/additionalProperties/$ref")
-                    .and_then(serde_json::Value::as_str),
-                Some("#/$defs/ConfigFailureClass"),
-                "class_overrides values must reference ConfigFailureClass, got: {field}"
-            );
-        }
-        assert!(
-            seen > 0,
-            "class_overrides must surface on at least one provider variant"
-        );
-    }
 }
