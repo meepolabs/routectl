@@ -41,7 +41,6 @@ const ENTRY_SECTIONS: &[(&str, &[&str])] = &[
     ("providers", &["kind"]),
     ("pools", &["members"]),
     ("models", &["provider", "upstream"]),
-    ("registry", &[]),
 ];
 
 /// Fenced ```toml blocks as `(1-based opening-fence line, body)` pairs, in
@@ -102,7 +101,7 @@ fn declared_kinds(table: &toml::Table) -> BTreeMap<String, String> {
 /// required fields. Two shapes occur -- a lone sub-table such as
 /// `[providers.anthropic-default.header_extras]` (a provider entry with no
 /// `kind`), and the top-level shape sketch whose `[providers.X]`,
-/// `[models.X]`, `[server.auth]` and `[registry."<glob>"]` placeholders
+/// `[models.X]` and `[server.auth]` placeholders
 /// carry no keys at all. Both are detected the same way: an entry in an
 /// [`ENTRY_SECTIONS`] map that lacks its required keys, or a singleton
 /// section that is an empty table, marks the whole block a fragment. The

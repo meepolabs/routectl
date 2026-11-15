@@ -79,7 +79,7 @@ fn render_settings(loaded: &LoadedConfig) -> Result<()> {
 /// its window, fill and price facts.
 fn render_model_facts(cells: &[ModelCell], dates: &PriceTableDates) {
     println!(
-        "\nmodel facts (prices: [models.X.pricing] > [registry] > refreshed > shipped; \
+        "\nmodel facts (prices: [models.X.pricing] > refreshed > shipped; \
          {}; fill: model-config or default, `routectl doctor` shows a learned ceiling \
          lowering it):",
         table_dates_text(dates)

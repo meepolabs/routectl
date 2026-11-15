@@ -169,8 +169,7 @@ struct PriceWire {
     field: Cow<'static, str>,
     /// USD per million tokens; `null` when unknown.
     per_mtok: Option<f64>,
-    /// `model-config`, `registry`, `refreshed`, `shipped`, `derived` or
-    /// `unknown`.
+    /// `model-config`, `refreshed`, `shipped`, `derived` or `unknown`.
     source: &'static str,
     /// The table date (`YYYY-MM-DD`) for a `refreshed` or `shipped` source,
     /// else `null`.

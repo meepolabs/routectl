@@ -95,6 +95,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "use `[capability.overrides.<provider>] unsupported`",
     },
     RetiredKey {
+        path: &["registry"],
+        refused_value: None,
+        replacement: "set prices under `[models.X.pricing]`",
+    },
+    RetiredKey {
         path: &["seat_quota"],
         refused_value: None,
         replacement: "quota-aware placement always applies on sticky-least-loaded pools",

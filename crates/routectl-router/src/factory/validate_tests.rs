@@ -962,48 +962,6 @@ mod validate_alias_chain_targets_tests {
 }
 
 #[cfg(test)]
-mod validate_registry_patterns_tests {
-    //! Tests for the `[registry]` glob-key validator: a malformed glob
-    //! must reject at startup; well-formed exact and trailing-`*` keys
-    //! must pass.
-
-    use super::validate_registry_patterns;
-    use crate::config::{Config, RegistryEntry};
-
-    fn config_with_keys(keys: &[&str]) -> Config {
-        let mut cfg = Config::default();
-        for key in keys {
-            cfg.registry
-                .insert((*key).to_string(), RegistryEntry::default());
-        }
-        cfg
-    }
-
-    #[test]
-    fn rejects_embedded_asterisk_key() {
-        // Arrange: `a*b` has an asterisk in a non-trailing position.
-        let cfg = config_with_keys(&["a*b"]);
-
-        // Act
-        let err = validate_registry_patterns(&cfg).unwrap_err();
-
-        // Assert
-        let msg = err.to_string();
-        assert!(msg.contains("[registry.a*b]"), "msg: {msg}");
-        assert!(msg.contains("invalid pattern"), "msg: {msg}");
-    }
-
-    #[test]
-    fn accepts_exact_and_trailing_star_keys() {
-        // Arrange
-        let cfg = config_with_keys(&["deepseek-chat", "claude-opus-*"]);
-
-        // Act + Assert
-        validate_registry_patterns(&cfg).expect("clean registry keys must validate");
-    }
-}
-
-#[cfg(test)]
 mod validate_alias_patterns_tests {
     //! Tests for the `[aliases]` glob-key validator: a malformed glob
     //! key (bare or embedded `*`) must reject at startup; well-formed
@@ -1714,18 +1672,6 @@ mod collect_config_validation_tests {
     }
 
     #[test]
-    fn rejects_non_finite_registry_pricing() {
-        let validation = collect_config_validation(&parse(
-            "[registry.\"gpt-4\".pricing]\ninput_per_mtok = nan\n",
-        ));
-        assert!(
-            has_finite_error(&validation),
-            "nan registry pricing must be rejected: {:?}",
-            validation.errors
-        );
-    }
-
-    #[test]
     fn rejects_empty_base_url_openai_compat() {
         let validation = collect_config_validation(&parse(
             "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
@@ -1792,8 +1738,9 @@ mod collect_config_validation_tests {
     }
 
     /// Drift tripwire: every schema leaf whose `type` includes `number`
-    /// (float leaves; integers are out of scope) must be registered in
-    /// `validate_float_fields`' covered set. A future f64/f32 leaf added
+    /// (float leaves; integers are out of scope) must be registered in the
+    /// covered set of `validate_float_fields` or, for `PricingConfig`,
+    /// `validate_model_pricing`. A future f64/f32 leaf added
     /// to the config without registering it here fails this test.
     const COVERED_FLOAT_LEAVES: [&str; 6] = [
         "RetryPolicy.backoff_multiplier",

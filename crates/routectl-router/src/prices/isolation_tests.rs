@@ -1,19 +1,18 @@
 //! Routing and the providers never read a price: no source file under the
 //! router's dispatch module or the providers crate names the price module,
-//! the shipped table, the price book, the effective-price resolvers, the
-//! `[registry]` price lookup, or a model's pricing block.
+//! the shipped table, the price book, the effective-price resolvers, or a
+//! model's pricing block.
 
 use std::path::{Path, PathBuf};
 
 /// The tokens a file reaching price state would have to name. Each is
 /// assembled from parts so this file does not name it whole.
-fn forbidden_tokens() -> [String; 9] {
+fn forbidden_tokens() -> [String; 8] {
     [
         format!("{}{}", "prices", "::"),
         format!("{}{}", "crate::", "prices"),
         format!("{}{}", "shipped", "_table"),
         format!("{}{}", "Price", "Book"),
-        format!("{}{}", "pricing", "_for"),
         format!("{}{}", "Pricing", "Config"),
         format!("{}{}", "effective", "_pricing"),
         format!("{}{}", "derive_effective", "_view"),
@@ -81,7 +80,6 @@ fn the_scan_finds_each_forbidden_token() {
         "crate::prices",
         "shipped_table",
         "PriceBook",
-        "pricing_for",
         "PricingConfig",
         "effective_pricing",
         "derive_effective_view",

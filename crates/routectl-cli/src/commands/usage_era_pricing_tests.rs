@@ -122,15 +122,15 @@ fn era_config(shift_entry: ProviderEntry) -> Config {
     config
         .providers
         .insert(SHIFT_PROVIDER.to_string(), shift_entry);
-    config.registry.insert(
-        SHIFT_UPSTREAM.to_string(),
-        RegistryEntry {
-            pricing: Some(PricingConfig {
-                input_per_mtok: Some(3.0),
-                output_per_mtok: Some(15.0),
-                ..Default::default()
-            }),
-            provider: None,
+    price_models(
+        &mut config,
+        &["m"],
+        SHIFT_PROVIDER,
+        SHIFT_UPSTREAM,
+        &PricingConfig {
+            input_per_mtok: Some(3.0),
+            output_per_mtok: Some(15.0),
+            ..Default::default()
         },
     );
     config

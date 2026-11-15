@@ -6,8 +6,8 @@
 //
 // --- the hand-computed oracle -------------------------------------------
 //
-// Rates on `up-equiv` (an operator `[registry]` row -- an operator's declared
-// API price IS the equivalence basis): input $3.00, output $15.00, cache_read
+// Rates on `up-equiv` (the operator's `[models.m.pricing]` -- an operator's
+// declared API price IS the equivalence basis): input $3.00, output $15.00, cache_read
 // $0.30, cache_write_5m $3.75, cache_write_1h $6.00, all per million tokens.
 //
 // The seeded ledger is TWO rows under one fine key, each carrying 500k input,
@@ -62,12 +62,12 @@ fn equiv_config(api_key_ref: &str, pricing: PricingConfig) -> Config {
         EQUIV_PROVIDER.to_string(),
         ProviderEntry::anthropic_api(api_key_ref),
     );
-    config.registry.insert(
-        EQUIV_UPSTREAM.to_string(),
-        RegistryEntry {
-            pricing: Some(pricing),
-            provider: None,
-        },
+    price_models(
+        &mut config,
+        &["m"],
+        EQUIV_PROVIDER,
+        EQUIV_UPSTREAM,
+        &pricing,
     );
     config
 }
@@ -176,10 +176,10 @@ fn a_subscription_equivalent_equals_what_the_same_row_would_cost_priced() {
 }
 
 #[test]
-fn an_operator_registry_row_is_the_equivalence_basis_for_a_subscription_row() {
-    // A `[registry]` row on an oauth provider is the operator's declared API
-    // price, so it is exactly what their subscription usage is valued at --
-    // and it wins whole over the price tables, as it does on the priced arm.
+fn an_operator_model_price_is_the_equivalence_basis_for_a_subscription_row() {
+    // A `[models.X.pricing]` block on an oauth provider is the operator's
+    // declared API price, so it is exactly what their subscription usage is
+    // valued at.
     let (_dir, _path, db) = temp_db();
     seed_equiv_ledger(&db);
     let halved = PricingConfig {
@@ -314,11 +314,10 @@ fn a_dimension_the_row_never_used_needs_no_rate() {
 }
 
 #[test]
-fn the_priced_arm_keeps_its_none_rate_contributes_zero_semantics() {
-    // The completeness rule is scoped to the subscription arm. `cost_usd` is a
-    // forever contract whose missing-rate-contributes-zero behavior predates
-    // the equivalent, so the identical gap that withholds an equivalent must
-    // still produce the base-only dollar figure on the priced arm.
+fn a_used_unpriced_dimension_withholds_the_figure_on_both_arms() {
+    // The same rate gap withholds the priced figure and the equivalent alike:
+    // a missing rate is never counted as zero, so neither arm reports the
+    // base-only subtotal.
     let (_dir, _path, db) = temp_db();
     seed_equiv_ledger(&db);
     let no_cache_rates = PricingConfig {
@@ -330,14 +329,15 @@ fn the_priced_arm_keeps_its_none_rate_contributes_zero_semantics() {
     let priced = equiv_verdict(&db, &equiv_config_api_key(no_cache_rates.clone()));
     let subscription = equiv_verdict(&db, &equiv_config_subscription(no_cache_rates));
 
-    assert_eq!(priced, RowCost::Priced(EQUIV_BASE_ONLY_USD));
+    assert_eq!(priced, RowCost::Unpriced);
+    assert_ne!(priced, RowCost::Priced(EQUIV_BASE_ONLY_USD));
     assert_eq!(subscription, RowCost::Subscription(None));
 }
 
 #[test]
 fn a_kindless_subscription_row_on_a_removed_provider_resolves_no_equivalent() {
-    // Arrange: the serving entry is gone from config and no `[registry]` row
-    // exists, so only the kind persisted with a row can select a table
+    // Arrange: the serving entry is gone from config and no model entry
+    // prices the row, so only the kind persisted with a row can select a table
     // provider. The kinded sibling is the positive control proving the table
     // path resolves for this fixture.
     let (_dir, _path, db) = temp_db();
@@ -386,7 +386,7 @@ fn a_mixed_group_never_folds_notional_value_into_real_spend() {
         "sub-dark".to_string(),
         ProviderEntry::anthropic_api("oauth://anthropic"),
     );
-    // The dark row's upstream carries no `[registry]` row and no price table
+    // The dark row's upstream carries no model price and no price table
     // is loaded, so no rate resolves for it at all. The subscription row
     // carries HALF the priced row's tokens, so the two channels hold distinct
     // figures -- a cell that copied one channel into the other would show up.

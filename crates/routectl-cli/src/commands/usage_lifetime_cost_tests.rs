@@ -15,7 +15,6 @@
 //   base + 1M written at 30m       18.00 + 5.00         = $23.00
 //   base + 1M written at 5m        18.00 + 3.75         = $21.75
 
-const LIFETIME_BASE_USD: f64 = 18.00;
 const LIFETIME_WITH_30M_USD: f64 = 23.00;
 const LIFETIME_WITH_5M_USD: f64 = 21.75;
 
@@ -69,33 +68,19 @@ fn lifetime_rates(with_30m: bool) -> PricingConfig {
     }
 }
 
-/// Where the rates come from: `[models.X.pricing]` (complete-or-absent) or
-/// a `[registry]` row (an absent rate counts as `0`).
-enum RateSource {
-    ModelConfig,
-    Registry,
-}
-
-fn lifetime_config(api_key_ref: &str, source: RateSource, pricing: PricingConfig) -> Config {
+fn lifetime_config(api_key_ref: &str, pricing: PricingConfig) -> Config {
     let mut config = Config::default();
     config.providers.insert(
         LIFETIME_PROVIDER.to_string(),
         ProviderEntry::anthropic_api(api_key_ref),
     );
-    let mut model = routectl_router::ModelEntry::new(LIFETIME_PROVIDER, LIFETIME_UPSTREAM);
-    match source {
-        RateSource::ModelConfig => model.pricing = Some(pricing),
-        RateSource::Registry => {
-            config.registry.insert(
-                LIFETIME_UPSTREAM.to_string(),
-                RegistryEntry {
-                    pricing: Some(pricing),
-                    provider: None,
-                },
-            );
-        }
-    }
-    config.models.insert(LIFETIME_MODEL.to_string(), model);
+    price_models(
+        &mut config,
+        &[LIFETIME_MODEL],
+        LIFETIME_PROVIDER,
+        LIFETIME_UPSTREAM,
+        &pricing,
+    );
     config
 }
 
@@ -146,11 +131,7 @@ fn assert_equivalent(verdict: RowCost, expected: f64, name: &str) {
 #[test]
 fn a_priced_lifetime_prices_the_row() {
     // Arrange
-    let config = lifetime_config(
-        "env://LT_KEY",
-        RateSource::ModelConfig,
-        lifetime_rates(true),
-    );
+    let config = lifetime_config("env://LT_KEY", lifetime_rates(true));
 
     // Act
     let verdict = lifetime_verdict(&SPLIT_30M, &config);
@@ -162,11 +143,7 @@ fn a_priced_lifetime_prices_the_row() {
 #[test]
 fn a_used_lifetime_with_no_price_leaves_the_row_unpriced() {
     // Arrange: the 5m write is priced, the 30m one is not.
-    let config = lifetime_config(
-        "env://LT_KEY",
-        RateSource::ModelConfig,
-        lifetime_rates(false),
-    );
+    let config = lifetime_config("env://LT_KEY", lifetime_rates(false));
 
     // Act
     let unpriced = lifetime_verdict(&SPLIT_30M, &config);
@@ -181,11 +158,7 @@ fn a_used_lifetime_with_no_price_leaves_the_row_unpriced() {
 fn writes_with_no_reported_lifetime_leave_the_row_unpriced() {
     // Every lifetime the rows report is priced, so only the unknown
     // remainder can refuse them.
-    let config = lifetime_config(
-        "env://LT_KEY",
-        RateSource::ModelConfig,
-        lifetime_rates(true),
-    );
+    let config = lifetime_config("env://LT_KEY", lifetime_rates(true));
     let cases = [
         ("split covering part of the total", PARTIAL_SPLIT),
         ("total with no split", TOTAL_ONLY),
@@ -202,11 +175,7 @@ fn writes_with_no_reported_lifetime_leave_the_row_unpriced() {
 #[test]
 fn a_split_above_its_total_leaves_the_row_unpriced() {
     // Arrange: the only lifetime the split names is priced.
-    let config = lifetime_config(
-        "env://LT_KEY",
-        RateSource::ModelConfig,
-        lifetime_rates(true),
-    );
+    let config = lifetime_config("env://LT_KEY", lifetime_rates(true));
 
     // Act
     let verdict = lifetime_verdict(&SPLIT_ABOVE_TOTAL, &config);
@@ -218,11 +187,7 @@ fn a_split_above_its_total_leaves_the_row_unpriced() {
 #[test]
 fn a_subscription_with_unknown_lifetime_writes_has_no_equivalent() {
     // Arrange
-    let config = lifetime_config(
-        "oauth://anthropic",
-        RateSource::ModelConfig,
-        lifetime_rates(true),
-    );
+    let config = lifetime_config("oauth://anthropic", lifetime_rates(true));
 
     // Act
     let unknown = lifetime_verdict(&PARTIAL_SPLIT, &config);
@@ -231,18 +196,4 @@ fn a_subscription_with_unknown_lifetime_writes_has_no_equivalent() {
     // Assert: the same subscription values a fully split row.
     assert_eq!(unknown, RowCost::Subscription(None));
     assert_equivalent(control, LIFETIME_WITH_30M_USD, "subscription control");
-}
-
-#[test]
-fn a_registry_row_counts_an_unpriced_lifetime_as_zero_but_not_unknown_writes() {
-    // Arrange: a `[registry]` row with no 30m price.
-    let config = lifetime_config("env://LT_KEY", RateSource::Registry, lifetime_rates(false));
-
-    // Act
-    let unpriced_lifetime = lifetime_verdict(&SPLIT_30M, &config);
-    let unknown_remainder = lifetime_verdict(&PARTIAL_SPLIT, &config);
-
-    // Assert
-    assert_priced(unpriced_lifetime, LIFETIME_BASE_USD, "registry 30m at 0");
-    assert_eq!(unknown_remainder, RowCost::Unpriced);
 }

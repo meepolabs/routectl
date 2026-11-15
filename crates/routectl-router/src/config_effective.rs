@@ -223,10 +223,7 @@ impl PriceTableDates {
         match source {
             PriceSource::Refreshed => self.refreshed,
             PriceSource::Shipped => self.shipped,
-            PriceSource::ModelConfig
-            | PriceSource::Registry
-            | PriceSource::Derived
-            | PriceSource::Unknown => None,
+            PriceSource::ModelConfig | PriceSource::Derived | PriceSource::Unknown => None,
         }
     }
 }
@@ -666,8 +663,7 @@ pub fn derive_effective_view(
         .iter()
         .map(|(nickname, entry)| {
             let provider_kind = config.provider_kind_for_target(&entry.provider);
-            // A pool prices through the member entry usage rows bill under,
-            // so a `[registry]` row scoped to that entry applies here too.
+            // A pool prices through the member entry usage rows bill under.
             let billed_provider = config
                 .provider_entry_for_target(&entry.provider)
                 .map_or(entry.provider.as_str(), |(key, _)| key);

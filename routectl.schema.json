@@ -525,7 +525,7 @@
               "type": "null"
             }
           ],
-          "description": "Per-million-token prices for this model, each field optional. A set\nfield wins over every other price source for that field; an unset\nfield falls through to a matching `[registry]` row, then the\nrefreshed and shipped price tables. Prices feed cost display only.\nA non-finite or negative value is refused at load."
+          "description": "Per-million-token prices for this model, each field optional. A set\nfield wins over every other price source for that field; an unset\nfield falls through to the refreshed, then the shipped price table. Prices feed cost display only.\nA non-finite or negative value is refused at load."
         },
         "provider": {
           "description": "Provider name (a key in the `[providers]` table). The router\nvalidates at startup that every model entry references a known\nprovider.",
@@ -676,7 +676,7 @@
     },
     "PricingConfig": {
       "additionalProperties": false,
-      "description": "Per-million-token pricing for a `[registry.*]` or `[models.X]` entry. All fields\nare USD per million tokens -- the CANONICAL operator-facing price unit\nthroughout routectl -- and all are optional: routectl ships no price\ndefaults, so any field left unset means \"this dimension is unpriced\" and\ncontributes nothing to a derived cost. Cost is computed at query time,\nnever persisted, so a corrected price retroactively fixes historical rows.\n\nA `[registry]` row wins WHOLE over the refreshed and shipped price tables,\nwhich fill in only when no row prices an upstream: this struct has no\nexplicitly-unpriced sentinel, so a per-field fill could not tell a\ndeliberate omission from an absent value. A `[models.X.pricing]` block instead fills field by\nfield over the other sources.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
+      "description": "Per-million-token pricing for a `[models.X]` entry or a price-table row.\nAll fields are USD per million tokens -- the CANONICAL operator-facing\nprice unit throughout routectl -- and all are optional: any field left\nunset means \"this dimension is unpriced\" by this source. Cost is computed\nat query time, never persisted, so a corrected price retroactively fixes\nhistorical rows. A `[models.X.pricing]` block fills field by field over\nthe refreshed and shipped price tables.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
       "properties": {
         "cache_read_per_mtok": {
           "description": "USD per million tokens read from the prompt cache. `None` leaves it unpriced.",
@@ -1552,30 +1552,6 @@
       },
       "type": "object"
     },
-    "RegistryEntry": {
-      "description": "One row in the `[registry]` table. Keyed by an upstream-id glob\n(exact id or trailing-`*` prefix). Carries optional pricing and an\noptional `provider` scope so the same upstream id served by two\nproviders can be priced differently. The block is named `[registry.*]`\ndeliberately to leave room for future capability metadata (e.g.\n`[registry.*.capabilities]`); only `pricing` is built today.\n\n`Eq` is deliberately NOT derived: `PricingConfig` carries `f64`.\n\nUnknown fields are tolerated here (no `deny_unknown_fields`): the\nblock is intended to grow a future `[registry.*.capabilities]`\nsub-table, so a newer config carrying that key must not fail against\nan older binary. `PricingConfig` still rejects typos (its field set\nis stable).",
-      "properties": {
-        "pricing": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PricingConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Per-million-token pricing for this registry row. `None` leaves the row unpriced."
-        },
-        "provider": {
-          "description": "Provider scope. When set, the row applies only to the named provider,\nletting the same upstream id be priced differently per provider.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "RetryPolicy": {
       "description": "Retry and backoff policy for a provider chain: attempt caps, backoff\ntiming, and optional per-error-class overrides.",
       "properties": {
@@ -1913,14 +1889,6 @@
         "enabled": true
       },
       "description": "Operator-facing `[reduction]` block. Global switch for the\ndispatch-path token-reduction feature. A missing block keeps the\ndefault: reduction enabled."
-    },
-    "registry": {
-      "additionalProperties": {
-        "$ref": "#/$defs/RegistryEntry"
-      },
-      "default": {},
-      "description": "Operator-facing `[registry]` pricing table. Each key is an\nupstream-id glob (an exact id or a trailing-`*` prefix, parsed\nvia `AliasPattern`); each value carries optional per-million-token\npricing and an optional `provider` scope. routectl ships NO price\ndefaults -- an unlisted upstream is simply unpriced. Cost is\nderived at QUERY time from this table, so correcting a price later\nretroactively fixes the cost of historical rows. The table is\nnamed `[registry.*]` deliberately (room to grow capability\nmetadata later); only pricing is wired today.",
-      "type": "object"
     },
     "retry": {
       "$ref": "#/$defs/RetryPolicy",

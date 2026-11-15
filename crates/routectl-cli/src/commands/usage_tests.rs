@@ -5,14 +5,37 @@
 
 use super::*;
 use routectl_router::prices::PriceTable;
-use routectl_router::{Config, PricingConfig, ProviderEntry, RegistryEntry};
+use routectl_router::{Config, ModelEntry, PricingConfig, ProviderEntry};
 use routectl_usage::{UsageDb, open};
 use tempfile::TempDir;
 
 /// No refreshed and no shipped price table, so a figure a test asserts can
-/// come only from the config it builds (`[registry]`, `[models.X.pricing]`).
+/// come only from the `[models.X.pricing]` blocks the config builds.
 fn no_prices() -> PriceSnapshot {
     PriceSnapshot::default()
+}
+
+/// Every model nickname a fixture row in this suite records.
+const FIXTURE_MODELS: &[&str] = &[
+    "m", "claude", "claude-x", "a", "b", "ga", "gb", "hp", "nocache", "norep", "nulls", "pk",
+    "rep", "zero", "m1", "mix-paid",
+];
+
+/// Price `upstream` served by `provider` at `pricing` under each nickname
+/// in `nicknames`: a `[models.X.pricing]` block applies only to rows whose
+/// recorded model names that entry.
+fn price_models(
+    config: &mut Config,
+    nicknames: &[&str],
+    provider: &str,
+    upstream: &str,
+    pricing: &PricingConfig,
+) {
+    for nickname in nicknames {
+        let mut entry = ModelEntry::new(provider, upstream);
+        entry.pricing = Some(pricing.clone());
+        config.models.insert((*nickname).to_string(), entry);
+    }
 }
 
 fn fixed_now() -> DateTime<Local> {
@@ -454,7 +477,7 @@ fn temp_db() -> (TempDir, PathBuf, UsageDb) {
 }
 
 /// Config with one subscription provider (oauth://) and one API-key
-/// provider that has a registry price.
+/// provider whose `up-paid` models carry a price.
 fn cost_config() -> Config {
     let mut config = Config::default();
     config.providers.insert(
@@ -465,15 +488,15 @@ fn cost_config() -> Config {
         "paid".to_string(),
         ProviderEntry::anthropic_api("env://PAID_KEY"),
     );
-    config.registry.insert(
-        "up-paid".to_string(),
-        RegistryEntry {
-            pricing: Some(PricingConfig {
-                input_per_mtok: Some(3.0),
-                output_per_mtok: Some(15.0),
-                ..Default::default()
-            }),
-            provider: None,
+    price_models(
+        &mut config,
+        FIXTURE_MODELS,
+        "paid",
+        "up-paid",
+        &PricingConfig {
+            input_per_mtok: Some(3.0),
+            output_per_mtok: Some(15.0),
+            ..Default::default()
         },
     );
     config
@@ -612,7 +635,7 @@ fn mixed_priced_and_subscription_group_shows_dollars_plus_sub() {
 #[test]
 fn api_key_without_pricing_shows_na() {
     let (_dir, _path, db) = temp_db();
-    // Provider "paid" but an upstream with NO registry entry.
+    // Provider "paid" but an upstream no model entry prices.
     insert_row(
         &db,
         "u1",

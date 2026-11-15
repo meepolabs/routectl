@@ -3,7 +3,7 @@
 //! Reads the local SQLite usage DB (never writes it), rolls the
 //! finest-grained aggregate rows up to a display dimension, derives cost
 //! at query time from the effective per-field prices (`[models.X.pricing]`,
-//! `[registry]`, then the refreshed and shipped price tables), and prints an
+//! then the refreshed and shipped price tables), and prints an
 //! ASCII report. Subscription providers (managed-OAuth,
 //! `api_key_ref` starting `oauth://`) carry no per-token dollar cost; their
 //! dollar column reads `n/a (subscription)` and the quota line is the real
@@ -33,8 +33,7 @@ use routectl_usage::{
 };
 
 use crate::commands::pricing::{
-    PriceSnapshot, default_price_book, is_complete_or_absent, is_subscription, rate_covers,
-    rates_from_pricing,
+    PriceSnapshot, default_price_book, is_subscription, rate_covers, rates_from_pricing,
 };
 use crate::commands::text_table::render_table;
 use crate::commands::usage_cache_ignore::{CACHE_IGNORE_READ_BUDGET, cache_ignore_block};
@@ -421,8 +420,8 @@ fn parse_local_date_end(s: &str) -> Result<i64, UsageError> {
 /// formatter renders. Cost is intentionally tri-state: `priced_total_usd`
 /// is the summed dollar cost of API-key rows that had a price;
 /// `any_subscription` flags that managed-OAuth rows contributed (no $);
-/// `any_unpriced` flags API-key rows that no price source (`[models.X.pricing]`,
-/// `[registry]`, or a price table) prices. `equivalent_total_usd` is a FOURTH, separate
+/// `any_unpriced` flags API-key rows that no price source (`[models.X.pricing]`
+/// or a price table) prices. `equivalent_total_usd` is a FOURTH, separate
 /// channel: what the subscription rows would have cost at API rates.
 #[derive(Debug, Clone)]
 pub struct DisplayRow {
@@ -590,11 +589,11 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// row goes through, so the two can never disagree on reasoning structure,
 /// cache-read basis, or persisted-kind keying. That equivalent is
 /// complete-or-absent (see [`rates_cover_used_dimensions`]), and so is a
-/// priced row a `[registry]` row does not price (see `priced_usd`).
+/// priced row (see `priced_usd`).
 ///
 /// Rates resolve through `routectl_router::prices::effective_pricing` against
-/// `prices`, field by field: `[models.X.pricing]` on the served model, then a
-/// matching `[registry]` row (whole), then the refreshed and shipped tables.
+/// `prices`, field by field: `[models.X.pricing]` on the served model, then
+/// the refreshed and shipped tables.
 /// The subject is the served `[providers]` entry the row recorded (never a
 /// pool), and the row's persisted kind selects a first-party table provider
 /// when that entry no longer exists. No price for any field leaves the row
@@ -602,8 +601,7 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 ///
 /// Cache writes price per lifetime. Written tokens with no reported lifetime,
 /// or a lifetime split summing above its total, leave the row `Unpriced` (or
-/// with no equivalent) whatever priced it, a `[registry]` row included: no
-/// rate can be matched to them.
+/// with no equivalent) whatever priced it: no rate can be matched to them.
 ///
 /// Reasoning is priced from the row's PERSISTED `provider_kind`, so a provider
 /// whose kind an operator later changed keeps each era priced by what it was.
@@ -632,9 +630,9 @@ pub(crate) fn cost_for_row(config: &Config, prices: &PriceSnapshot, row: &AggRow
 /// The real dollar cost of one non-subscription row, or `None` when no usable
 /// price exists.
 ///
-/// A row is complete-or-absent (see [`is_complete_or_absent`]): a dimension
-/// it used with no rate leaves the row unpriced, unless a `[registry]` row
-/// prices it, which counts an absent rate as `0`, as the operator wrote it.
+/// A row is complete-or-absent: a dimension it used with no rate leaves the
+/// row unpriced. A table gap or a partial `[models.X.pricing]` block is not a
+/// statement that the dimension is free.
 fn priced_usd(
     config: &Config,
     prices: &PriceSnapshot,
@@ -642,7 +640,7 @@ fn priced_usd(
     provider: &str,
 ) -> Option<f64> {
     let resolved = resolve_row_rates(config, prices, row, provider)?;
-    if resolved.complete_or_absent && !rates_cover_used_dimensions(&resolved, row) {
+    if !rates_cover_used_dimensions(&resolved, row) {
         return None;
     }
     price_row(&resolved, row)
@@ -682,8 +680,6 @@ struct RowRates {
     /// and therefore a separately billed dimension. False when they are already
     /// inside output, where a reasoning rate would double-charge.
     reasoning_billed: bool,
-    /// Whether a used dimension with no rate leaves the row unpriced.
-    complete_or_absent: bool,
 }
 
 /// Resolve the rate table for one row and settle its reasoning structure.
@@ -703,8 +699,7 @@ fn resolve_row_rates(
         upstream: row.key.upstream.as_deref()?,
         persisted_kind: row.key.provider_kind.as_deref(),
     };
-    let (pricing, sources) =
-        effective_pricing(config, &subject, prices.refreshed(), prices.shipped())?;
+    let (pricing, _) = effective_pricing(config, &subject, prices.refreshed(), prices.shipped())?;
     let mut rates = rates_from_pricing(&pricing);
     let mut reasoning_billed = false;
     match reasoning_structure(row.key.provider_kind.as_deref()) {
@@ -723,7 +718,6 @@ fn resolve_row_rates(
         rates,
         cache_writes,
         reasoning_billed,
-        complete_or_absent: is_complete_or_absent(&sources),
     })
 }
 

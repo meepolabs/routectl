@@ -1796,12 +1796,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   by the CLI `provider probe` + `doctor` commands
 - `src/config/mod.rs` -- Config schema root: the top-level `Config` struct
   (all
-  `[server]`/`[providers]`/`[models]`/`[aliases]`/`[retry]`/`[cache]`/`[capability]`/`[registry]`/`[mitm]`/...
-  tables) with `version: u32` schema stamp, `pools: BTreeMap<String,
-  PoolEntry>` (the `[pools.<name>]` account-grouping table), and `impl Config`
-  (`pricing_for`
-  resolves an upstream-id glob -- provider-scoped beats agnostic, then
-  longest-prefix -- to a `&PricingConfig`). Re-exports the `pool` + `schema` +
+  `[server]`/`[providers]`/`[models]`/`[aliases]`/`[retry]`/`[cache]`/`[capability]`/`[mitm]`/...
+  tables) with `version: u32` schema stamp and `pools: BTreeMap<String,
+  PoolEntry>` (the `[pools.<name>]` account-grouping table). Re-exports the `pool` + `schema` +
   `tuning` + `validate` submodules so every internal `crate::config::X` path
   AND every
   crate-root `routectl_router::` re-export resolves unchanged
@@ -1875,7 +1872,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `visible_routectl_provider: bool`, accepted with no effect, and the model facts
   `context_window` / `max_output_tokens` / `pricing: Option<PricingConfig>`);
   `ProviderEntry`/`ModelEntry`/`ServerAuth::redact_secrets` for display; `AliasValue`, `ServerAuth`,
-  `RegistryEntry`/`PricingConfig` pricing table (the legacy 5m/1h write keys
+  `PricingConfig` per-model prices (the legacy 5m/1h write keys
   plus `cache_write_per_mtok`, a duration-keyed write-price map;
   `cache_write_rates()` folds them to seconds -> rate, the legacy key winning a
   shared lifetime, and `set_cache_write_rate` writes one); `CacheConfig` (global
@@ -2121,8 +2118,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:
   config-load check of `[models]` and `[providers]` names that key runtime state
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation
-  collection (incl. `validate_registry_patterns`, rejecting malformed
-  `[registry]` glob keys at startup); public `resolve_model_provider` ->
+  collection; public `resolve_model_provider` ->
   `Option<ModelProviderTarget{Pool, Provider}>`, the one lookup of a
   `[models.X] provider` value in the shared `[pools]` / `[providers]`
   namespace (pool wins on an unvalidated config), read by the factory build
@@ -2152,8 +2148,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `did you mean `Y`?` hint via `essential_key_near_miss` when the entry is an
   exact whitespace/case variant of an `essential_accept_set` member, and
   rejects `reasoning_replay` naming the lane-managed replay carve-out) and
-  `validate_float_fields` (rejects a non-finite float leaf -- NaN/inf in a
-  `[registry]` price or a non-positive/non-finite
+  `validate_float_fields` (rejects a non-positive/non-finite
   `retry.backoff_multiplier`) and `validate_base_urls` (rejects an
   `openai-compat` entry with no/empty `base_url` -- it is now defaulted-empty
   in the schema but REQUIRED non-empty on the standard lane, skipped only when
@@ -2295,7 +2290,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `routectl prices refresh` at release time (docs/DEVELOPMENT.md
   "Releasing"); its models.dev MIT notice is `src/prices_shipped.NOTICE`
 - `src/prices/effective.rs` -- `effective_pricing`: per-field price precedence
-  (`[models.X.pricing]`, `[registry]` whole, refreshed, shipped, derived
+  (`[models.X.pricing]`, refreshed, shipped, derived
   Anthropic-family 1h write) with a `PriceSource` per field; `PriceSources`
   holds the write sources as a lifetime-seconds map. Tests in
   `effective_tests.rs`
@@ -8371,9 +8366,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   different values (the legacy key wins), for doctor. Reasoning is not among them --
   a disjoint-reasoning row bills thinking at the OUTPUT rate. Consumed by
   doctor's `render_equivalence_clause` and `render_unpriced_dimensions_clause`
-  (`sections.rs`). `is_complete_or_absent(&PriceSources)` is the one rule for
-  which priced rows are complete-or-absent: every row no `[registry]` row
-  prices
+  (`sections.rs`).
 - `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB
   (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO
   week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges
@@ -8391,7 +8384,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `PriceSubject` is the row's served model, served provider entry (never a
   pool) and upstream, with the PERSISTED `provider_kind` selecting a
   first-party table provider only when that entry is gone from config; per
-  field `[models.X.pricing]` > `[registry]` (whole) > refreshed > shipped >
+  field `[models.X.pricing]` > refreshed > shipped >
   unknown, and no price at all stays `Unpriced`. `run(config, args)` pins
   one snapshot from `default_price_book()` per process. Reasoning tokens are
   priced from the row's PERSISTED `provider_kind` (disjoint for `gemini`,
@@ -8405,9 +8398,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   subscription arm alone wraps that body in `rates_cover_used_dimensions`
   (complete-or-absent: any dimension with a nonzero count and no rate per
   `pricing::rate_covers` withholds the whole figure; a known `0` is a price), yielding
-  `RowCost::Subscription(Option<f64>)`. The priced arm applies the same gate
-  unless a `[registry]` row prices the row (`pricing::is_complete_or_absent`);
-  a `[registry]`-priced row keeps counting a missing rate as zero.
+  `RowCost::Subscription(Option<f64>)`. The priced arm applies the same gate.
   `Acc` accumulates the equivalent in its own `equivalent_usd` /
   `any_equivalent` pair, a non-finite per-row product reading absent before it
   can poison the sum, and `cost_cell` renders both channels in one cell
@@ -8626,7 +8617,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `derive_pricing_rows(config, view)` maps each `ModelCell` of the effective
   view (derived once per gather against the pinned price tables) to a
   `PricingRow`, with `pricing::is_subscription` deciding the row's class before
-  any price does, and records whether a `[registry]` row matched;
+  any price does;
   `derive_knob_rows(config, view, matrix)` maps each cell's
   `fill` to a `KnobRow`, lowered by the learned ceilings `LearnedFills`
   resolves from the same capability matrix source the panel shows.
@@ -8719,10 +8710,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   write lifetime double-spelled at different values (`render_write_conflicts`,
   naming the legacy key in force); a
   subscription row adds the API-equivalence clause
-  (`render_equivalence_clause`), a priced row no `[registry]` row prices names
-  its unpriced dimensions (`render_unpriced_dimensions_clause`), and an
-  unpriced row says usage reports no cost, naming a matching `[registry]` row
-  that prices nothing.
+  (`render_equivalence_clause`), a priced row names its unpriced dimensions
+  (`render_unpriced_dimensions_clause`), and an unpriced row says usage
+  reports no cost.
   `section_knobs`/`knob_finding` are the fill sibling: one informational
   `Pass` per configured model naming its `max_output_tokens` and the
   `FillSource` (`model-config` / `learned` / `default`), or that the egress

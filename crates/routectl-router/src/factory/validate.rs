@@ -377,24 +377,6 @@ pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
     Ok(())
 }
 
-/// Validate that every `[registry]` key is a well-formed upstream-id
-/// glob -- an exact id or a single trailing-`*` prefix. Embedded or bare
-/// asterisks are rejected here at startup so the cost resolver
-/// (`Config::pricing_for`) never silently skips a malformed key at query
-/// time. The error names the offending key verbatim so an operator
-/// running `routectl config check` sees exactly which key to fix.
-///
-/// Call once per process startup alongside the other validators.
-pub fn validate_registry_patterns(config: &crate::config::Config) -> Result<()> {
-    use routectl_core::Error;
-
-    for key in config.registry.keys() {
-        crate::glob::AliasPattern::parse(key)
-            .map_err(|e| Error::Config(format!("[registry.{key}]: invalid pattern: {e}")))?;
-    }
-    Ok(())
-}
-
 /// Validate that every `[aliases]` table key is a well-formed pattern --
 /// an exact wire-model id or a single trailing-`*` prefix. Embedded or
 /// bare asterisks are rejected here at startup; otherwise `Router::new`
@@ -1277,47 +1259,7 @@ fn validate_float_fields(config: &Config) -> Result<()> {
         )));
     }
 
-    for (key, entry) in &config.registry {
-        let Some(pricing) = entry.pricing.as_ref() else {
-            continue;
-        };
-        let leaves: [(&str, Option<f64>); 5] = [
-            ("input_per_mtok", pricing.input_per_mtok),
-            ("output_per_mtok", pricing.output_per_mtok),
-            ("cache_read_per_mtok", pricing.cache_read_per_mtok),
-            ("cache_write_5m_per_mtok", pricing.cache_write_5m_per_mtok),
-            ("cache_write_1h_per_mtok", pricing.cache_write_1h_per_mtok),
-        ];
-        for (field, value) in leaves {
-            let Some(v) = value else { continue };
-            if !v.is_finite() {
-                return Err(Error::Config(format!(
-                    "registry.`{key}`.pricing.{field} is `{v}`; must be a finite number"
-                )));
-            }
-        }
-    }
-
     Ok(())
-}
-
-/// Refuse a `[registry."<pattern>".pricing] cache_write_per_mtok` key that is
-/// not a cache lifetime and a value that is not finite or is negative,
-/// naming every offending dotted key on its own line.
-fn validate_registry_cache_write_prices(config: &Config) -> Result<()> {
-    let lines: Vec<String> = config
-        .registry
-        .iter()
-        .filter_map(|(key, entry)| Some((key, entry.pricing.as_ref()?)))
-        .flat_map(|(key, pricing)| {
-            crate::config::cache_write_map_problems(pricing, &format!("registry.\"{key}\".pricing"))
-        })
-        .collect();
-    if lines.is_empty() {
-        Ok(())
-    } else {
-        Err(routectl_core::Error::Config(lines.join("\n")))
-    }
 }
 
 /// Reject a present-but-empty (or whitespace-only) `base_url` on any
@@ -1766,9 +1708,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = validate_alias_patterns(config) {
         errors.push(bare_validation_message(e));
     }
-    if let Err(e) = validate_registry_patterns(config) {
-        errors.push(bare_validation_message(e));
-    }
     if let Err(e) = validate_class_policy(config) {
         errors.push(bare_validation_message(e));
     }
@@ -1803,9 +1742,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(e);
     }
     if let Err(e) = validate_float_fields(config) {
-        errors.push(bare_validation_message(e));
-    }
-    if let Err(e) = validate_registry_cache_write_prices(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_base_urls(config) {

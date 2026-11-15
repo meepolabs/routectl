@@ -109,10 +109,10 @@ pub use config::{
     CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CapabilityConfig, Config,
     ConfigVersionError, HistoryReasoning, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, RawConfigPreflightError, ReasoningDialect,
-    ReductionConfig, RegistryEntry, Resolved, ResolvedTuning, RetiredKeysError, RetryPolicy,
-    ServerAuth, ServerConfig, TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig,
-    WireCheckConfig, is_config_provider_kind, preflight_config_version, preflight_raw_config,
-    resolve_tuning, retired_key_message,
+    ReductionConfig, Resolved, ResolvedTuning, RetiredKeysError, RetryPolicy, ServerAuth,
+    ServerConfig, TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig, WireCheckConfig,
+    is_config_provider_kind, preflight_config_version, preflight_raw_config, resolve_tuning,
+    retired_key_message,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -160,7 +160,7 @@ pub use factory::{
     pool_member_refusals, resolve_model_provider, resolved_codex_version,
     validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
     validate_codex_version, validate_managed_anthropic_credential, validate_mitm_config,
-    validate_pools, validate_provider_credential_sources, validate_registry_patterns,
+    validate_pools, validate_provider_credential_sources,
 };
 pub use field_canary::CanaryOutcome;
 pub use field_capability::capability_key_is_field_verdict;

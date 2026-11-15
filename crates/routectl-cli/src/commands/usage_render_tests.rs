@@ -337,14 +337,14 @@ fn cache_read_priced_config(cache_read_per_mtok: f64) -> Config {
         "paid".to_string(),
         ProviderEntry::anthropic_api("env://PAID_KEY"),
     );
-    config.registry.insert(
-        "up-paid".to_string(),
-        RegistryEntry {
-            pricing: Some(PricingConfig {
-                cache_read_per_mtok: Some(cache_read_per_mtok),
-                ..Default::default()
-            }),
-            provider: None,
+    price_models(
+        &mut config,
+        FIXTURE_MODELS,
+        "paid",
+        "up-paid",
+        &PricingConfig {
+            cache_read_per_mtok: Some(cache_read_per_mtok),
+            ..Default::default()
         },
     );
     config
@@ -354,12 +354,13 @@ fn cache_read_priced_config(cache_read_per_mtok: f64) -> Config {
 fn cost_prices_summed_cache_read_not_peak() {
     // Arrange: one model group with a CLIMBING cache_read snapshot
     // (88000, 89000, 91000). Cache reads are billed PER TURN, so the cost
-    // basis is the SUM (268000), not the peak (91000). Price only cache_read
-    // at a known rate so the dollar figure is attributable to it alone.
+    // basis is the SUM (268000), not the peak (91000). The rows use no other
+    // dimension and only cache_read is priced, at a known rate, so the dollar
+    // figure is attributable to it alone.
     let (_dir, _path, db) = temp_db();
-    insert_stream_row(&db, "cr1", 1000, "m", 100, 600, Some(1), None, Some(88_000));
-    insert_stream_row(&db, "cr2", 1100, "m", 100, 600, Some(1), None, Some(89_000));
-    insert_stream_row(&db, "cr3", 1200, "m", 100, 600, Some(1), None, Some(91_000));
+    insert_stream_row(&db, "cr1", 1000, "m", 100, 600, None, None, Some(88_000));
+    insert_stream_row(&db, "cr2", 1100, "m", 100, 600, None, None, Some(89_000));
+    insert_stream_row(&db, "cr3", 1200, "m", 100, 600, None, None, Some(91_000));
     let rate = 6.0; // USD per million tokens
     let config = cache_read_priced_config(rate);
     let report = report_all(&db, &config, Some(GroupDim::Model), false);

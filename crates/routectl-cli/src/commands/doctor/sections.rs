@@ -10,13 +10,11 @@ use routectl_router::{
     Status, TuningRow, UnresolvedReason, compute_activation, preflight_config_version,
 };
 
-use routectl_router::prices::{PriceSource, PriceSources, TableDate};
+use routectl_router::prices::{PriceSource, TableDate};
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::config_effective::{tuning_cells, tuning_kind};
-use crate::commands::pricing::{
-    CacheWriteSpellingConflict, is_complete_or_absent, missing_equivalence_dimensions,
-};
+use crate::commands::pricing::{CacheWriteSpellingConflict, missing_equivalence_dimensions};
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
@@ -27,7 +25,7 @@ use super::gather::{SecretCheck, SecretPresence};
 use super::served::{
     SeatFix, parked_seat_finding, unknown_provider_sentence, unusable_seat_finding,
 };
-use super::{DoctorContext, KnobRow, LegacyFolder, PricingBlock, PricingRow};
+use super::{DoctorContext, KnobRow, LegacyFolder, PricingRow};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -785,18 +783,13 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
              prices: {fields}; {}; {tables}",
             render_equivalence_clause(&row.nickname, &row.pricing, unpriced)
         )
-    } else if unpriced && row.registry_matched {
-        format!(
-            "unpriced: the matching [registry] row prices nothing -- {selector}; {fields}; \
-             usage reports no cost for it; {tables}"
-        )
     } else if unpriced {
         format!(
             "unpriced: no source prices it -- {selector}; {fields}; usage reports no cost for \
              it; {tables}"
         )
     } else {
-        match render_unpriced_dimensions_clause(&row.nickname, &row.pricing, &row.sources) {
+        match render_unpriced_dimensions_clause(&row.nickname, &row.pricing) {
             Some(clause) => format!("priced -- {selector}; {fields}; {clause}; {tables}"),
             None => format!("priced -- {selector}; {fields}; {tables}"),
         }
@@ -845,21 +838,18 @@ fn price_label(dimension: PriceDimension) -> String {
 /// there is no such lifetime.
 fn render_write_conflicts(
     nickname: &str,
-    conflicts: &[(PricingBlock, CacheWriteSpellingConflict)],
+    conflicts: &[CacheWriteSpellingConflict],
 ) -> Option<String> {
     if conflicts.is_empty() {
         return None;
     }
     let notes: Vec<String> = conflicts
         .iter()
-        .map(|(block, conflict)| {
-            let block = match block {
-                PricingBlock::Model => format!("[models.{}.pricing]", safe(nickname)),
-                PricingBlock::Registry => "the matching [registry] row".to_string(),
-            };
+        .map(|conflict| {
             format!(
-                "{block} prices the {} cache write twice: {} {} is used and \
+                "[models.{}.pricing] prices the {} cache write twice: {} {} is used and \
                  cache_write_per_mtok.{} {} is ignored (the legacy key wins)",
+                safe(nickname),
                 routectl_core::format_cache_lifetime(conflict.seconds),
                 conflict.legacy_key,
                 render_rate(Some(conflict.legacy_rate)),
@@ -903,18 +893,10 @@ fn render_equivalence_clause(nickname: &str, pricing: &PricingConfig, unpriced: 
     }
 }
 
-/// The priced row's missing-dimensions clause: usage is complete-or-absent
-/// for a row a `[registry]` row does not price, so this names the dimensions
-/// whose traffic usage reports as unpriced. `None` when every price resolves
-/// or a `[registry]` row prices the row.
-fn render_unpriced_dimensions_clause(
-    nickname: &str,
-    pricing: &PricingConfig,
-    sources: &PriceSources,
-) -> Option<String> {
-    if !is_complete_or_absent(sources) {
-        return None;
-    }
+/// The priced row's missing-dimensions clause: usage is complete-or-absent,
+/// so this names the dimensions whose traffic usage reports as unpriced.
+/// `None` when every price resolves.
+fn render_unpriced_dimensions_clause(nickname: &str, pricing: &PricingConfig) -> Option<String> {
     let missing = missing_equivalence_dimensions(pricing);
     (!missing.is_empty()).then(|| {
         format!(

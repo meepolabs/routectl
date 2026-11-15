@@ -58,7 +58,6 @@ overlays merge, what's reserved.
   ([kill switch + recovery](#kill-switch-reduction-enabled-is-the-live-off-switch))
 - [Steady-state advisory trim](#steady-state-advisory-trim)
 - [Model prices (`[models.X.pricing]`)](#model-prices-modelsxpricing)
-- [Pricing registry](#pricing-registry-registrypatternpricing)
 - [Refreshing the price table (`routectl prices refresh`)](#refreshing-the-price-table-routectl-prices-refresh)
 - [Retired: `routectl catalog`](#retired-routectl-catalog)
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
@@ -194,9 +193,6 @@ version = 5           # config schema version; see "Config schema version"
 [wire_check]          # live wire-check sampling (first_n, sample_one_in,
                       # window_secs). Optional; default 8 / 100 / 86400.
                       # Observe-only -- never changes a request.
-
-[registry."<glob>"]   # per-upstream pricing for cost estimation.
-                      # Optional; no defaults shipped.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting a first-party upstream.
@@ -358,6 +354,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
+| `registry` | set prices under `[models.X.pricing]` |
 | `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
 | `server.allow_disable_fallbacks` | the x-routectl-disable-fallbacks header is always honored |
 | `trim` | the advisory trim uses fixed defaults |
@@ -3218,25 +3215,21 @@ own, in this order, and the first source that gives a field wins:
 
 1. **`model-config`**: `[models.X.pricing]` on the served model, while
    that entry still names the served upstream.
-2. **`registry`**: a matching [`[registry]` row](#pricing-registry-registrypatternpricing),
-   taken whole: a field the row leaves unset stays unknown, and the
-   tables below never fill it.
-3. **`refreshed`**: the table `routectl prices refresh` wrote into the
+2. **`refreshed`**: the table `routectl prices refresh` wrote into the
    config folder.
-4. **`shipped`**: the table shipped with the release.
-5. **`derived`**: for the Anthropic family only, the 1-hour cache-write
+3. **`shipped`**: the table shipped with the release.
+4. **`derived`**: for the Anthropic family only, the 1-hour cache-write
    price is twice the effective input price, when no source above gives
    it and the refreshed or shipped row came from the table's `anthropic`
    provider (or the target is `bedrock` with an Anthropic model id). An
    `anthropic-api` gateway priced from another table provider's row
    (OpenRouter, MiniMax) gets no derived figure.
-6. **`unknown`**: shown as unknown, never as zero.
+5. **`unknown`**: shown as unknown, never as zero.
 
 A managed-subscription (`oauth://`) provider resolves through the same
 order; it is still billed by seat, and the figure is its API-equivalent.
 A model on a `[pools]` entry prices through the pool's first member, the
-provider entry its usage rows bill under, so a `[registry]` row scoped to
-that member applies and one scoped to the pool name does not.
+provider entry its usage rows bill under.
 
 The table provider for a target is chosen from the target's base URL:
 the table providers whose `api_host` has the same origin (scheme, host,
@@ -3259,12 +3252,19 @@ upstream = "claude-sonnet-4-6"
 cache_write_1h_per_mtok = 6.0   # fixes one figure; the rest come from the tables
 ```
 
-The fields are those of a `[registry]` pricing row, in USD per million
-tokens: `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`,
+The fields are in USD per million tokens: `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`,
 `cache_write_5m_per_mtok`, `cache_write_1h_per_mtok` and
 `cache_write_per_mtok`. A non-finite or negative value is refused at
 load, reload and every config edit, naming the dotted
-`models.<nick>.pricing.<field>` path; a known `0` is kept.
+`models.<nick>.pricing.<field>` path; a known `0` is kept. A field left
+unset is priced by the tables below it, or stays unknown. There is no
+reasoning rate: reasoning tokens are billed as output upstream, so they
+are never a separate cost dimension.
+
+`routectl doctor`'s **Cost pricing** section names which source priced
+each field for every configured model. Cost is computed at **query
+time**, never persisted, so correcting a price later retroactively fixes
+the cost of every historical row it prices.
 
 `cache_write_per_mtok` prices cache writes per lifetime. Each key is a
 cache lifetime written as a positive whole number and one unit (`s`,
@@ -3281,78 +3281,6 @@ lifetime no source prices stays unknown.
 [models.sonnet.pricing]
 cache_write_per_mtok = { "30m" = 4.5 }   # one more lifetime; 5m and 1h come from the tables
 ```
-
-## Pricing registry (`[registry."<pattern>".pricing]`)
-
-The optional `[registry]` table supplies per-upstream prices so usage
-rows can carry a cost estimate. It is the **authority**, not the only
-source: where `[registry]` is silent, the refreshed and shipped price
-tables fill in, so a common upstream is priced out of the box without any
-`[registry]` entry at all. The precedence is in [Model
-prices](#model-prices-modelsxpricing):
-
-- A matching `[registry]` row wins **whole and verbatim** -- never merged
-  per field with the tables, so a dimension you deliberately left unset
-  stays unset rather than being backfilled. Only `[models.X.pricing]`
-  ranks above it.
-- Otherwise the tables fill in, and an upstream they do not list stays
-  **unpriced**, never priced at zero.
-- A managed-subscription provider (`api_key_ref` starting `oauth://`) is
-  billed by seat, so its usage carries no dollar cost; the same prices
-  give its API-equivalent value.
-
-`routectl doctor`'s **Cost pricing** section names which of these
-resolved for every configured model, so you can see whether a figure came
-from your own config, your `[registry]` row or a price table.
-
-Cost is computed at **query time**, never persisted, so correcting a
-price later retroactively fixes the cost of every historical row priced
-by that entry.
-
-```toml
-[registry."deepseek-*"]
-# optional provider scope; omit to price the upstream for any provider
-provider = "my-deepseek"
-
-[registry."deepseek-*".pricing]
-input_per_mtok          = 0.27   # USD per million input tokens
-output_per_mtok         = 1.10   # USD per million output tokens
-cache_read_per_mtok     = 0.07   # USD per million cache-read tokens
-cache_write_5m_per_mtok = 0.50   # USD per million 5-minute cache-write tokens
-cache_write_1h_per_mtok = 0.90   # USD per million 1-hour cache-write tokens
-cache_write_per_mtok    = { "30m" = 0.70 }   # USD per million cache-write tokens, per lifetime
-```
-
-All six `*_per_mtok` fields are optional and expressed in USD per
-million tokens; `cache_write_per_mtok` follows the key rules in [Model
-prices](#model-prices-modelsxpricing) and is refused naming the dotted
-`registry."<pattern>".pricing.cache_write_per_mtok.<key>` path. A field left unset means that dimension is unpriced and
-contributes nothing to the estimate. There is intentionally no reasoning
-rate: reasoning tokens are billed as output upstream, so they are never
-a separate cost dimension.
-
-**Key semantics.** Each `[registry]` key is an upstream-id glob, parsed
-the same way alias keys are:
-
-- an **exact** id (`"deepseek-chat"`) matches that id only;
-- a **trailing-`*` prefix** (`"deepseek-*"`) matches any id starting
-  with the prefix.
-
-Bare `*` and embedded asterisks (`"a*b"`) are rejected at startup by
-`config check` and by `serve`/`test`. When several keys match one
-upstream, the resolver picks the best by:
-
-1. **provider scope first** -- an entry whose `provider` equals the
-   request's provider beats a provider-agnostic entry (no `provider`).
-   An entry scoped to a *different* provider is never eligible.
-2. **longest matching prefix next** -- among entries of equal scope, the
-   longest prefix wins. An exact key behaves like a maximal-length
-   prefix, so an exact match beats any shorter prefix.
-
-The optional `provider` scope lets the same upstream id served by two
-different providers be priced differently -- give each a distinct key
-(the table is keyed by pattern string) and set `provider` on the scoped
-one.
 
 ## Refreshing the price table (`routectl prices refresh`)
 
@@ -3440,7 +3368,7 @@ catalog`. That catalog is gone. What replaced each part:
 
 - **Prices** resolve per field as described in
   [Model prices](#model-prices-modelsxpricing): `[models.X.pricing]`, then
-  a matching `[registry]` row, then the table
+  the table
   [`routectl prices refresh`](#refreshing-the-price-table-routectl-prices-refresh)
   wrote, then the table shipped with the release; a price none of them
   sets is unknown, never zero.
@@ -3549,7 +3477,7 @@ Five sections are printed:
     shows `learned`; its header says so, and `routectl doctor` and the
     status config panel show a learned ceiling lowering the fill.
   - each price names its source: `model-config` (`[models.X.pricing]`),
-    `registry` (a matching `[registry]` row), `refreshed` or `shipped`
+    `refreshed` or `shipped`
     (followed by `:YYYY-MM-DD`, the table date), or `derived` (the
     Anthropic-family 1h cache write, twice the input price). A field no
     source prices renders `unknown`, never `0`. Sources are fixed tokens:
@@ -4535,22 +4463,18 @@ reported an observed zero.
 
 **Cost.** Cost is derived at read time from the effective prices for
 each row, field by field, in the order [Model
-prices](#model-prices-modelsxpricing) gives: `[models.X.pricing]`, a
-matching `[registry]` row (whole), the refreshed table, the shipped
-table. The tables are read once per `routectl usage` run and once per
+prices](#model-prices-modelsxpricing) gives: `[models.X.pricing]`, the
+refreshed table, the shipped table. The tables are read once per `routectl usage` run and once per
 dashboard query, so a table `routectl prices refresh` writes while the
 daemon runs prices the next query with no restart; a copy that fails
 validation keeps the previous table. The dollar column has three states:
 
 - `$X.XX` -- an API-key provider whose upstream resolved a price for
-  every dimension the row used. Unless the row's rates come from a whole
-  `[registry]` row, a dimension with nonzero usage and no price makes the
-  row `n/a` instead, whether the rates come from a price table
-  (`refreshed`, `shipped` or `derived`) or from a partial
+  every dimension the row used. A dimension with nonzero usage and no
+  price makes the row `n/a` instead, whether the rates come from a price
+  table (`refreshed`, `shipped` or `derived`) or from a partial
   `[models.X.pricing]` block: a source that lists an input price but no
-  cache-read price says nothing about cache reads being free. A row a
-  `[registry]` entry prices keeps counting a dimension the entry leaves
-  unset as `$0`, as written. Reasoning is
+  cache-read price says nothing about cache reads being free. Reasoning is
   billed by the provider kind
   **persisted with the row**, never by what the provider is configured as
   now, so re-kinding a provider in place cannot reprice history.
@@ -4559,11 +4483,10 @@ validation keeps the previous table. The dollar column has three states:
   has no per-token dollar cost; the **quota line** under the table is the
   real spend signal.
 - `n/a` -- an API-key provider whose upstream no source prices: no
-  `[models.X.pricing]`, no matching `[registry]` row, and no table row
+  `[models.X.pricing]` and no table row
   (the tables do not list it, the provider's host is ambiguous, or the
   provider entry is gone and the row carries no persisted provider kind);
-  or a priced row whose rates do not come from a whole `[registry]` row
-  and that used a dimension with no rate. Never shown as `$0`.
+  or a priced row that used a dimension with no rate. Never shown as `$0`.
 
 **Subscription-equivalent value.** Where the effective rates cover every
 dimension a subscription row actually used, the cell also reports what
@@ -4996,7 +4919,7 @@ The battery sections, in render order:
 | Managed secrets (`secrets`) | Managed secret files not referenced by any provider surface as a WARN. The scan is a read-only directory diff; a stored secret is NEVER auto-deleted. |
 | Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty), and, for a config that loads with `[capability] enabled = false`, one WARN `learning` saying nothing is learned and no learned verdict or limit is applied (the daemon's `/status/doctor` panel, and so the dashboard doctor tab, carries the same row for the config it accepted). Never emits a FAIL, so it can never flip the exit code. |
-| Cost pricing (`pricing`) | One row per configured model listing its five prices (input, output, cache read, cache write 5m, cache write 1h), then a `cache write <duration>` price for each other cache-write lifetime a source prices (`cache write 30m`), each with the source that gave it: `model-config`, `registry`, `refreshed`, `shipped`, `derived` or `unknown`, resolved as in [Model prices](#model-prices-modelsxpricing) and as `routectl usage` prices. An unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`. The row ends with the date of each price table read (`none` for an absent one). A model no source prices reads unpriced. A model on a pool is priced through the pool's first member, as usage bills it. When a `[models.X.pricing]` block or the matching `[registry]` row sets the 5m or 1h write under both `cache_write_5m_per_mtok` / `cache_write_1h_per_mtok` and a `cache_write_per_mtok` key, at different values, the row notes that the legacy key's value is used; the row stays PASS. A managed subscription (`oauth://`) row is billed by seat; its prices are the basis of the API-equivalent value, and it adds whether that value is complete or which dimensions it lacks. The CLI reads `prices.json` once per run and `/status/doctor` uses the running daemon's. Nothing from a price table but its prices and date is shown. Never FAILs, so it can never move the exit code. |
+| Cost pricing (`pricing`) | One row per configured model listing its five prices (input, output, cache read, cache write 5m, cache write 1h), then a `cache write <duration>` price for each other cache-write lifetime a source prices (`cache write 30m`), each with the source that gave it: `model-config`, `refreshed`, `shipped`, `derived` or `unknown`, resolved as in [Model prices](#model-prices-modelsxpricing) and as `routectl usage` prices. An unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`. The row ends with the date of each price table read (`none` for an absent one). A model no source prices reads unpriced. A model on a pool is priced through the pool's first member, as usage bills it. When a `[models.X.pricing]` block sets the 5m or 1h write under both `cache_write_5m_per_mtok` / `cache_write_1h_per_mtok` and a `cache_write_per_mtok` key, at different values, the row notes that the legacy key's value is used; the row stays PASS. A managed subscription (`oauth://`) row is billed by seat; its prices are the basis of the API-equivalent value, and it adds whether that value is complete or which dimensions it lacks. The CLI reads `prices.json` once per run and `/status/doctor` uses the running daemon's. Nothing from a price table but its prices and date is shown. Never FAILs, so it can never move the exit code. |
 | Model knobs (`knobs`) | One row per configured model naming the `max_tokens` fill its egress sends when the caller omits one and WHERE it comes from, in the same `model-config`, `learned`, `default` vocabulary `config show --effective` and the status config panel use: `model-config` when `[models.X] max_output_tokens` is set, `learned` when the resident ceiling learned from an upstream refusal on one of its lanes lowers that value (or the egress baseline), else `default` (the Anthropic-shape egress baseline). A learned value is shown only when capability learning is enabled, the lane's kind is one field repair admits, and no `force_supported` override masks `max_tokens` for the model. An egress that forwards caller omission untouched has no fill: with `max_output_tokens` unset the row reads `unset`; with it set the row names the value as `model-config` and says it sizes the window-gate reserve (on `bedrock`, also the limit Converse sends under legacy `enabled` thinking), not a fill. The learned value is the resident ceiling; the pre-flight's per-request gates (writer health, verdict quorum) are not reflected, so a given request may still go unclamped. Every row names the model's `(kind, upstream)`. Never FAILs, so it can never move the exit code. |
 | Resolved tuning (`tuning`) | One PASS row per `[providers.X]` entry (pool members included), named `provider <id>`, then one per `[models.X]` entry that sets its own `stream_first_byte_timeout_ms`, named `model <nickname>` (one row per seat, named `model <nickname>#<member>`, for a model on a pool). The detail lists `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms` and `stream_first_byte_timeout_ms` as `key=value(source)`, the same cells and tier tokens (`model`, `provider`, `pool`, `global`, `default`) `config show --effective` prints; a breaker turned off renders `off`, an unlimited RPM or absent timeout `none`. Read from the config alone. Never WARNs or FAILs, so it can never move the exit code. |
 | Cache markers (`cache`) | Read-only from the usage ledger's last 6 hours, on the CLI and on the daemon's `/status/doctor` alike. A lane is a provider, seat and model on an `anthropic-api` or `bedrock` provider whose cache hits are observable. One WARN `lane <provider>[#<seat>] <model>` per lane where at least 3 turns carried the caller's own cache markers and none read or wrote any cache: "markers sent, no cache activity". That says only what the ledger shows; routectl does not claim the upstream ignored the markers. Then one PASS `cache markers` summary counting the lanes evaluated, or `unavailable: <class>` (`no_data`, `query_timeout`, `db_unavailable`, or an open class) when the ledger could not answer, one PASS `unobservable providers` naming each `anthropic-api` or `bedrock` provider whose cache hits are not observable (an `anthropic-api` provider on a custom `base_url` with no `cache_capability` override, for example), and one PASS `converse providers` naming each `bedrock` provider on `api_shape = "converse"`; the lanes of both are not evaluated. A remediation that sets `cache_capability` names both of its keys and keeps `supports_top_level_cache_control` at its current value (doctor prints it; `false` for an `anthropic-api` provider on a custom `base_url` with no override, whatever the kind's default). The daemon's read gives up after 250 ms, the CLI's after 2 s. Never FAILs, so it can never move the exit code. |

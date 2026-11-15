@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 use routectl_router::prices::{PriceTable, parse_and_validate};
 use routectl_router::{
-    ModelEntry, PricingConfig, ProviderEntry, RegistryEntry, VerdictValue, derive_effective_view,
+    ModelEntry, PricingConfig, ProviderEntry, VerdictValue, derive_effective_view,
 };
 use routectl_testkit::ScopedEnv;
 use serde_json::{Value, json};
@@ -71,10 +71,12 @@ fn pricing_config() -> Config {
         ..Default::default()
     });
     cfg.models.insert("layered".to_string(), layered);
-    cfg.models.insert(
-        "registered".to_string(),
-        ModelEntry::new("anth", "operator-priced"),
-    );
+    let mut own_priced = ModelEntry::new("anth", "operator-priced");
+    own_priced.pricing = Some(PricingConfig {
+        input_per_mtok: Some(1.5),
+        ..Default::default()
+    });
+    cfg.models.insert("own-priced".to_string(), own_priced);
     cfg.models.insert(
         "nothing".to_string(),
         ModelEntry::new("vendor", "unlisted-model"),
@@ -90,16 +92,6 @@ fn pricing_config() -> Config {
     cfg.models.insert(
         "seat-none".to_string(),
         ModelEntry::new("seatprov", "unlisted-model"),
-    );
-    cfg.registry.insert(
-        "operator-priced".to_string(),
-        RegistryEntry {
-            pricing: Some(PricingConfig {
-                input_per_mtok: Some(1.5),
-                ..Default::default()
-            }),
-            provider: None,
-        },
     );
     cfg
 }
@@ -126,9 +118,9 @@ fn pricing_context(cfg: Config, prices: &PriceSnapshot) -> DoctorContext {
 /// `layered` draws one price from each layer: output from its own
 /// `[models.X.pricing]`, input and cache read from the refreshed table (over
 /// the shipped figures), the 5-minute write from the shipped table, and the
-/// 1-hour write derived as twice the input. `registered` takes its whole
-/// `[registry]` row, leaving the rest unknown; `nothing` is priced by no
-/// source and reads unknown, never `$0`.
+/// 1-hour write derived as twice the input. `own-priced` takes its input from
+/// its own `[models.X.pricing]` with no table row, leaving the rest unknown;
+/// `nothing` is priced by no source and reads unknown, never `$0`.
 #[test]
 fn each_pricing_row_names_a_source_per_price_and_the_table_dates() {
     // Arrange
@@ -139,8 +131,8 @@ fn each_pricing_row_names_a_source_per_price_and_the_table_dates() {
              (refreshed), cache write 5m $3.75 (shipped), cache write 1h $6.00 (derived)",
         ),
         (
-            "registered",
-            "input $1.50 (registry), output unknown (unknown), cache read unknown (unknown), \
+            "own-priced",
+            "input $1.50 (model-config), output unknown (unknown), cache read unknown (unknown), \
              cache write 5m unknown (unknown), cache write 1h unknown (unknown)",
         ),
         (
@@ -173,57 +165,42 @@ fn each_pricing_row_names_a_source_per_price_and_the_table_dates() {
     }
 }
 
-/// An absent table layer reads `none` in the dates, and its prices fall to
-/// the next layer.
-/// A pool-backed model prices through its first member's entry, the key a
-/// usage row served through the pool bills under: a `[registry]` row scoped
-/// to that member prices it, one scoped to the pool name does not.
+/// A pool-backed model prices through its first resolvable member's entry,
+/// whose kind selects the table row; a pool whose members resolve to no
+/// entry is unpriced.
 #[test]
 fn a_pool_model_prices_through_its_first_member_entry() {
+    let shipped = table(
+        SHIPPED_DATE,
+        json!({ "id": "anthropic", "models": [{ "id": "pool-model", "input": 4.5 }] }),
+    );
+    let prices = PriceSnapshot::from_tables(None, Some(Box::leak(Box::new(shipped))));
     let rows = [
-        (
-            "registry scoped to the first member",
-            "seat-a",
-            "input $4.50 (registry)",
-        ),
-        (
-            "registry scoped to the pool name",
-            "seats",
-            "input unknown (unknown)",
-        ),
+        ("first member resolves", "seat-a", "input $4.50 (shipped)"),
+        ("no member resolves", "ghost", "input unknown (unknown)"),
     ];
-    for (name, scope, expected) in rows {
+    for (name, first_member, expected) in rows {
         let mut cfg = Config::default();
-        for seat in ["seat-a", "seat-b"] {
-            cfg.providers.insert(
-                seat.to_string(),
-                ProviderEntry::openai_compat("https://pool.invalid/v1", "env://POOL_KEY"),
-            );
-        }
+        cfg.providers.insert(
+            "seat-a".to_string(),
+            ProviderEntry::anthropic_api("env://POOL_KEY"),
+        );
         cfg.pools.insert(
             "seats".to_string(),
-            routectl_router::PoolEntry::new(vec!["seat-a".to_string(), "seat-b".to_string()]),
+            routectl_router::PoolEntry::new(vec![first_member.to_string()]),
         );
         cfg.models
             .insert("pooled".to_string(), ModelEntry::new("seats", "pool-model"));
-        cfg.registry.insert(
-            "pool-model".to_string(),
-            RegistryEntry {
-                pricing: Some(PricingConfig {
-                    input_per_mtok: Some(4.5),
-                    ..Default::default()
-                }),
-                provider: Some(scope.to_string()),
-            },
-        );
 
-        let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
+        let findings = section_pricing(&pricing_context(cfg, &prices));
 
         let detail = pricing_detail(&findings, "pooled");
         assert!(detail.contains(expected), "{name}: {detail}");
     }
 }
 
+/// An absent table layer reads `none` in the dates, and its prices fall to
+/// the next layer.
 #[test]
 fn an_absent_refreshed_table_reads_none_and_the_shipped_prices_apply() {
     let shipped = snapshot().shipped();
@@ -292,11 +269,9 @@ fn a_subscription_row_keeps_its_equivalence_clause() {
     );
 }
 
-/// A non-subscription priced row whose rates do not come from a whole
-/// `[registry]` row names the dimensions usage reports as unpriced; a
-/// `[registry]` row keeps counting them at $0, so it carries no clause. A
-/// matching `[registry]` row that prices nothing is named as the reason the
-/// model is unpriced.
+/// A non-subscription priced row names the dimensions usage reports as
+/// unpriced, whether a table row or a partial `[models.X.pricing]` block
+/// priced it: neither is a statement that a dimension is free.
 #[test]
 fn a_priced_row_names_the_dimensions_usage_reports_as_unpriced() {
     // Arrange
@@ -312,47 +287,26 @@ fn a_priced_row_names_the_dimensions_usage_reports_as_unpriced() {
         "anth".to_string(),
         ProviderEntry::anthropic_api("env://ANTH_KEY"),
     );
-    for (nickname, upstream) in [
-        ("shipped-partial", "claude-partial"),
-        ("registry-partial", "operator-priced"),
-        ("registry-empty", "operator-empty"),
-    ] {
-        cfg.models
-            .insert(nickname.to_string(), ModelEntry::new("anth", upstream));
-    }
-    for (upstream, pricing) in [
-        (
-            "operator-priced",
-            PricingConfig {
-                input_per_mtok: Some(1.5),
-                ..Default::default()
-            },
-        ),
-        ("operator-empty", PricingConfig::default()),
-    ] {
-        cfg.registry.insert(
-            upstream.to_string(),
-            RegistryEntry {
-                pricing: Some(pricing),
-                provider: None,
-            },
-        );
-    }
-    let clause = "usage reports no cost for traffic that uses unpriced dimensions";
-    let rows: [(&str, &str, Option<&str>); 3] = [
+    cfg.models.insert(
+        "shipped-partial".to_string(),
+        ModelEntry::new("anth", "claude-partial"),
+    );
+    let mut own_partial = ModelEntry::new("anth", "operator-priced");
+    own_partial.pricing = Some(PricingConfig {
+        input_per_mtok: Some(1.5),
+        ..Default::default()
+    });
+    cfg.models.insert("own-partial".to_string(), own_partial);
+    let rows: [(&str, &str); 2] = [
         (
             "shipped-partial",
-            "priced -- ",
-            Some(
-                "usage reports no cost for traffic that uses unpriced dimensions (cache read, \
-                 cache write 5m); set them in [models.shipped-partial.pricing]",
-            ),
+            "usage reports no cost for traffic that uses unpriced dimensions (cache read, \
+             cache write 5m); set them in [models.shipped-partial.pricing]",
         ),
-        ("registry-partial", "priced -- ", None),
         (
-            "registry-empty",
-            "unpriced: the matching [registry] row prices nothing -- ",
-            None,
+            "own-partial",
+            "usage reports no cost for traffic that uses unpriced dimensions (output, cache \
+             read, cache write 5m, cache write 1h); set them in [models.own-partial.pricing]",
         ),
     ];
 
@@ -360,18 +314,53 @@ fn a_priced_row_names_the_dimensions_usage_reports_as_unpriced() {
     let findings = section_pricing(&pricing_context(cfg, &prices));
 
     // Assert
-    for (nickname, lead, expected_clause) in rows {
+    for (nickname, clause) in rows {
         let detail = pricing_detail(&findings, nickname);
-        assert!(detail.starts_with(lead), "{nickname}: {detail}");
-        match expected_clause {
-            Some(expected) => assert!(detail.contains(expected), "{nickname}: {detail}"),
-            None => assert!(!detail.contains(clause), "{nickname}: {detail}"),
-        }
+        assert!(detail.starts_with("priced -- "), "{nickname}: {detail}");
+        assert!(detail.contains(clause), "{nickname}: {detail}");
     }
     assert!(
         pricing_detail(&findings, "shipped-partial").contains("cache write 1h $2.00 (derived)"),
         "premise: the derived 1h write resolves and is not named"
     );
+}
+
+/// A model no table row prices stays unpriced in doctor; the same model with
+/// a `[models.X.pricing]` entry shows that price (the positive control).
+#[test]
+fn a_model_with_no_table_row_is_unpriced_until_its_own_pricing_prices_it() {
+    let rows = [
+        ("no own pricing", None, "unpriced: no source prices it -- "),
+        (
+            "own pricing",
+            Some(PricingConfig {
+                input_per_mtok: Some(1.5),
+                ..Default::default()
+            }),
+            "priced -- ",
+        ),
+    ];
+    for (name, pricing, lead) in rows {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "anth".to_string(),
+            ProviderEntry::anthropic_api("env://ANTH_KEY"),
+        );
+        let mut entry = ModelEntry::new("anth", "unlisted-model");
+        entry.pricing = pricing.clone();
+        cfg.models.insert("m".to_string(), entry);
+
+        let findings = section_pricing(&pricing_context(cfg, &snapshot()));
+
+        let detail = pricing_detail(&findings, "m");
+        assert!(detail.starts_with(lead), "{name}: {detail}");
+        let input = if pricing.is_some() {
+            "input $1.50 (model-config)"
+        } else {
+            "input unknown (unknown)"
+        };
+        assert!(detail.contains(input), "{name}: {detail}");
+    }
 }
 
 /// A table provider id distinct from every config string.
@@ -661,11 +650,10 @@ fn own_pricing_config(rows: &[(&str, PricingConfig)]) -> Config {
 }
 
 /// A model priced for 5m, 1h and 30m writes lists a segment per lifetime
-/// with its source, the 30m one after the fixed five; a lifetime priced in
-/// a `[registry]` row carries the registry source.
+/// with its source, the 30m one after the fixed five.
 #[test]
 fn each_extra_priced_write_lifetime_gets_its_own_segment() {
-    let mut cfg = own_pricing_config(&[(
+    let cfg = own_pricing_config(&[(
         "lifetimes",
         PricingConfig {
             input_per_mtok: Some(3.0),
@@ -674,33 +662,12 @@ fn each_extra_priced_write_lifetime_gets_its_own_segment() {
             ..Default::default()
         },
     )]);
-    cfg.models.insert(
-        "registered".to_string(),
-        ModelEntry::new("anth", "operator-priced"),
-    );
-    cfg.registry.insert(
-        "operator-priced".to_string(),
-        RegistryEntry {
-            pricing: Some(PricingConfig {
-                cache_write_per_mtok: lifetime_map(&[("30m", 2.25)]),
-                ..Default::default()
-            }),
-            provider: None,
-        },
-    );
-    let rows = [
-        (
-            "lifetimes",
-            "input $3.00 (model-config), output unknown (unknown), cache read unknown \
+    let rows = [(
+        "lifetimes",
+        "input $3.00 (model-config), output unknown (unknown), cache read unknown \
              (unknown), cache write 5m $3.75 (model-config), cache write 1h $6.00 \
              (model-config), cache write 30m $4.50 (model-config); ",
-        ),
-        (
-            "registered",
-            "cache write 5m unknown (unknown), cache write 1h unknown (unknown), cache write \
-             30m $2.25 (registry); ",
-        ),
-    ];
+    )];
 
     let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
 
@@ -810,36 +777,4 @@ fn a_double_spelled_write_lifetime_notes_that_the_legacy_key_wins() {
             .expect("finding");
         assert_eq!(finding.status, Status::Pass, "{nickname}");
     }
-}
-
-/// The note also covers a matching `[registry]` row's pricing block.
-#[test]
-fn a_double_spelled_registry_lifetime_is_noted_against_the_registry_row() {
-    let mut cfg = own_pricing_config(&[]);
-    cfg.models.insert(
-        "registered".to_string(),
-        ModelEntry::new("anth", "operator-priced"),
-    );
-    cfg.registry.insert(
-        "operator-priced".to_string(),
-        RegistryEntry {
-            pricing: Some(PricingConfig {
-                cache_write_1h_per_mtok: Some(6.0),
-                cache_write_per_mtok: lifetime_map(&[("1h", 5.0)]),
-                ..Default::default()
-            }),
-            provider: None,
-        },
-    );
-
-    let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
-
-    let detail = pricing_detail(&findings, "registered");
-    assert!(
-        detail.contains(
-            "the matching [registry] row prices the 1h cache write twice: \
-             cache_write_1h_per_mtok $6.00 is used and cache_write_per_mtok.1h $5.00 is ignored"
-        ),
-        "{detail}"
-    );
 }

@@ -102,9 +102,8 @@
 //!
 //! # Effective pricing
 //!
-//! [`effective_pricing`] combines `[models.X.pricing]`, a matching
-//! `[registry]` row, the refreshed and shipped tables and a derived 1-hour
-//! cache-write price per field, naming each field's [`PriceSource`].
+//! [`effective_pricing`] combines `[models.X.pricing]`, the refreshed and
+//! shipped tables and a derived 1-hour cache-write price per field, naming each field's [`PriceSource`].
 
 mod book;
 mod bounded;

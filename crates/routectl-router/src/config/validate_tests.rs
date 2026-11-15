@@ -571,7 +571,6 @@ mod cache_write_map_tests {
 
     const MODEL_BLOCK: &str =
         "[models.m]\nprovider = \"p\"\nupstream = \"u\"\n[models.m.pricing]\n";
-    const REGISTRY_BLOCK: &str = "[registry.\"u-*\".pricing]\n";
 
     fn errors_for(block: &str, map: &str) -> Vec<String> {
         let config: Config =
@@ -580,23 +579,15 @@ mod cache_write_map_tests {
         collect_config_validation(&config).errors
     }
 
-    /// Every refusal names the full dotted key, under `[models.X.pricing]`
-    /// and `[registry."<pattern>".pricing]` alike; a valid map beside each
-    /// refused one is the positive control.
+    /// Every refusal names the full dotted key under `[models.X.pricing]`;
+    /// a valid map beside each refused one is the positive control.
     #[test]
     fn a_bad_cache_write_key_or_value_is_refused_naming_the_dotted_key() {
-        let blocks = [
-            (
-                "model",
-                MODEL_BLOCK,
-                "models.m.pricing.cache_write_per_mtok",
-            ),
-            (
-                "registry",
-                REGISTRY_BLOCK,
-                "registry.\"u-*\".pricing.cache_write_per_mtok",
-            ),
-        ];
+        let blocks = [(
+            "model",
+            MODEL_BLOCK,
+            "models.m.pricing.cache_write_per_mtok",
+        )];
         let rows: [(&str, &str, &str, &str); 6] = [
             (
                 "word key",

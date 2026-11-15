@@ -37,7 +37,6 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "aliases",
     "retry",
     "models",
-    "registry",
     "cache",
     "reduction",
     "window_gate",

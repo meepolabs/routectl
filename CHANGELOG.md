@@ -258,11 +258,7 @@ list with more narrative.
   exactly as it did before rather than showing a partial figure, since a
   base-tokens-only number understates a heavily cached workload by most of
   its value, so cache-active subscription traffic reads as absent until
-  some source prices every cache dimension it used. A `[registry] pricing`
-  row on an `oauth://`
-  provider was previously inert config and is now live as the
-  equivalence basis -- an operator's declared API price is what their
-  subscription usage is valued at.
+  some source prices every cache dimension it used.
 
   `routectl doctor`'s **Cost pricing** section answers the question that
   rule creates. A subscription row still leads with "billed by
@@ -299,12 +295,10 @@ list with more narrative.
   the runtime load. An empty or absent list leaves dispatch behavior
   byte-identical. See [CONFIGURATION.md](docs/CONFIGURATION.md).
 
-- **Cost accounting works out of the box** -- when neither
-  `[models.X.pricing]` nor `[registry]` prices an upstream, routectl prices
-  its usage from the price table shipped with the release (or the newer one
-  `routectl prices refresh` writes) instead of reporting it unpriced. An
-  operator `[registry]` row still wins, taken WHOLE and verbatim so a
-  deliberately omitted dimension is never backfilled. The operator-facing
+- **Cost accounting works out of the box** -- when `[models.X.pricing]`
+  does not price an upstream, routectl prices its usage from the price
+  table shipped with the release (or the newer one `routectl prices
+  refresh` writes) instead of reporting it unpriced. The operator-facing
   price unit is USD per million tokens. A usage row whose provider has since
   been renamed or removed is priced by the provider kind recorded with it.
   Subscription providers are unaffected: the subscription check still runs
@@ -822,6 +816,7 @@ list with more narrative.
 
 ### Removed
 
+- **Breaking: the `[registry]` pricing table.** Prices now come from `[models.X.pricing]` on the served model, then the refreshed price table, then the shipped one, field by field; a field none of them prices stays unknown, never `$0`. A config that still carries a `[registry]` table is refused at load, hot reload, `config check`, `doctor` and every config edit with `` `registry` is retired: set prices under `[models.X.pricing]`; delete it ``, and `config set registry.<key>` prints the same line. Move each row's prices into the `[models.X.pricing]` block of every model that serves that upstream before upgrading. A row's whole-row rule goes with it: a dimension a row left unset used to count as `$0` in `routectl usage`; every priced row is now complete-or-absent, so a used dimension with no price leaves the row `n/a`, as a partial `[models.X.pricing]` block already did. `routectl doctor`, `config show --effective` and the status config panel no longer name a `registry` price source. Library callers: `RegistryEntry`, `Config::registry`, `Config::pricing_for`, `validate_registry_patterns` and `PriceSource::Registry` (routectl-router) are gone.
 - **Breaking: the `[log]` table (`trace_headers`, `trace_body_bytes`, `redact_prompts`).** The three log knobs are now set only in the environment that launches `routectl serve`: `ROUTECTL_TRACE_HEADERS`, `ROUTECTL_TRACE_BODY_BYTES` and `ROUTECTL_LOG_REDACT_PROMPTS`, with the same spellings and parsing as before and the same defaults (off, 16384 bytes, off). A config that still carries a `[log]` table is refused at load, hot reload, `config check`, `doctor` and every config edit with `` `log` is retired: set ROUTECTL_TRACE_HEADERS / ROUTECTL_TRACE_BODY_BYTES / ROUTECTL_LOG_REDACT_PROMPTS in the environment; delete it ``, and `config set log.<key>` prints the same line. Move any value the table set into the daemon's environment before upgrading. `serve` still logs one `info` line per knob at boot with the resolved value, and `config show --effective` no longer prints `log.*` rows: that boot line is where the daemon's resolved values are reported. Library callers: `LogConfig` and `Config::log` (routectl-router) are gone; in routectl-core `init_log_overrides` and `LogKnobSource::Config` are gone, `resolve_trace_headers`, `resolve_trace_body_bytes` and `resolve_redact_prompts` take only the env reader, and `log_redaction_status`, `log_trace_body_cap_status` and `log_header_trace_status` are public so a server emits the boot lines itself.
 - **`[fidelity]` and its `prefix_impact_opt_in` list** (added on develop after v0.9.0 and never released). Prefix-impacting pre-flight repair is never admitted for any target: such a verdict at quorum stays dormant on every dispatch walk and the status surface reports it as `no_target_opt_in`, which is what a config that never set the list already got. The confirmation quorums and the canary cadence stay fixed code constants. A config that still carries any `[fidelity]` table, including `paid_probe_daily_caps`, is refused at load, hot reload, `config check`, `doctor` and every config edit with `` `fidelity` is retired: prefix-impacting pre-flight repair is never admitted; class and quorum are fixed; delete it ``. Library callers: `FidelityConfig` and `Config::fidelity` (routectl-router) are gone.
 - **`[calibration]`, `[seat_quota]`, `[trim]` and `[capability] staleness_hint_days`.** Each is now a retired config key, refused at load, hot reload, `config check`, `doctor` and every config edit with a line naming what replaces it. `[calibration]` and `[seat_quota]` already had no effect. The steady-state advisory trim always uses its defaults (trigger 100000 tokens, minimum cut 20000 tokens, 2 head and 6 tail messages kept), and the `doctor` capability matrix always flags a verified capability as stale after 14 days. Delete the tables and the key by hand. Library callers: `CalibrationConfig`, `SeatQuotaConfig`, `TrimConfig` (with `TrimConfig::to_params`), the matching `Config` fields and `CapabilityConfig::staleness_hint_days` (routectl-router) are gone; use `SteadyStateTrimParams::default()`.

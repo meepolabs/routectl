@@ -25,7 +25,7 @@ const TABLE_UPSTREAM: &str = "claude-sonnet-4-6";
 /// An upstream no table and no config prices.
 const UNLISTED_UPSTREAM: &str = "unlisted-model";
 
-/// The served `[providers]` entry. No `[registry]` row names it.
+/// The served `[providers]` entry.
 const TABLE_PROVIDER: &str = "anth";
 
 /// The served `[models]` nickname the seeded rows record.
@@ -70,7 +70,7 @@ fn both_tables() -> PriceSnapshot {
 }
 
 /// An API-key `anthropic-api` provider with a `[models]` entry and no
-/// `[registry]` pricing at all.
+/// `[models.X.pricing]` block.
 fn table_config(api_key_ref: &str) -> Config {
     let mut config = Config::default();
     config.providers.insert(
@@ -126,16 +126,14 @@ fn seeded(upstream: &str, kind: Option<&str>) -> (TempDir, UsageDb) {
     (dir, db)
 }
 
-/// `[registry]` pricing for the table upstream at $1.00 / $1.00 ($2.00).
-fn registry_row() -> RegistryEntry {
-    RegistryEntry {
-        pricing: Some(PricingConfig {
-            input_per_mtok: Some(1.0),
-            output_per_mtok: Some(1.0),
-            ..Default::default()
-        }),
-        provider: None,
-    }
+/// `[models.sonnet.pricing]` at $1.00 / $1.00 ($2.00) for both fields the
+/// seeded rows use.
+fn model_full_price(config: &mut Config) {
+    config.models.get_mut(TABLE_MODEL).unwrap().pricing = Some(PricingConfig {
+        input_per_mtok: Some(1.0),
+        output_per_mtok: Some(1.0),
+        ..Default::default()
+    });
 }
 
 /// `[models.sonnet.pricing]` fixing the output price at $5.00 only.
@@ -146,6 +144,8 @@ fn model_output_price(config: &mut Config) {
     });
 }
 
+/// One row per pair of layers: model-config over refreshed, model-config
+/// over shipped, refreshed over shipped, plus each layer alone and none.
 #[test]
 fn each_price_source_wins_in_its_precedence_order() {
     struct Row {
@@ -168,12 +168,21 @@ fn each_price_source_wins_in_its_precedence_order() {
             expected: RowCost::Priced(REFRESHED_USD),
         },
         Row {
-            name: "registry over both tables, whole",
-            configure: |c| {
-                c.registry
-                    .insert(TABLE_UPSTREAM.to_string(), registry_row());
-            },
-            prices: both_tables,
+            name: "model-config over refreshed",
+            configure: model_full_price,
+            prices: || tables(Some(refreshed_rows()), None),
+            expected: RowCost::Priced(2.00),
+        },
+        Row {
+            name: "model-config over shipped",
+            configure: model_full_price,
+            prices: || tables(None, Some(shipped_rows())),
+            expected: RowCost::Priced(2.00),
+        },
+        Row {
+            name: "model-config alone",
+            configure: model_full_price,
+            prices: no_prices,
             expected: RowCost::Priced(2.00),
         },
         Row {
@@ -222,6 +231,23 @@ fn a_model_no_table_prices_is_unpriced_never_zero() {
     assert_eq!(miss, RowCost::Unpriced);
     assert_ne!(miss, RowCost::Priced(0.0));
     assert_eq!(hit, RowCost::Priced(REFRESHED_USD));
+}
+
+/// A model with no table row stays unpriced in `routectl usage`; the same
+/// model with a `[models.X.pricing]` entry is priced at that entry.
+#[test]
+fn an_unlisted_model_is_priced_only_by_its_own_pricing() {
+    let (_dir, db) = seeded(UNLISTED_UPSTREAM, Some("anthropic-api"));
+    let mut unpriced = table_config("env://ANTH_KEY");
+    unpriced.models.get_mut(TABLE_MODEL).unwrap().upstream = UNLISTED_UPSTREAM.to_string();
+    let mut priced = unpriced.clone();
+    model_full_price(&mut priced);
+
+    let miss = table_verdict(&db, &unpriced, &both_tables());
+    let hit = table_verdict(&db, &priced, &both_tables());
+
+    assert_eq!(miss, RowCost::Unpriced);
+    assert_eq!(hit, RowCost::Priced(2.00));
 }
 
 #[test]
@@ -276,14 +302,12 @@ fn model_pricing(config: &mut Config, input: Option<f64>, output: Option<f64>) {
     });
 }
 
-/// The priced arm is complete-or-absent unless a whole `[registry]` row
-/// prices it: a row that read from cache with no cache-read price is
-/// unpriced, never charged $0 for those reads, whether the rates came from a
-/// table, from `[models.X.pricing]`, or from both. The same rows with no
-/// cache reads are priced. A `[registry]` row that sets no cache-read price
-/// keeps counting the reads at $0, as written.
+/// The priced arm is complete-or-absent: a row that read from cache with no
+/// cache-read price is unpriced, never charged $0 for those reads, whether
+/// the rates came from a table, from `[models.X.pricing]`, or from both. The
+/// same rows with no cache reads are priced.
 #[test]
-fn a_row_with_a_used_unpriced_dimension_is_unpriced_unless_registry_prices_it() {
+fn a_row_with_a_used_unpriced_dimension_is_unpriced() {
     struct Row {
         name: &'static str,
         configure: fn(&mut Config),
@@ -334,16 +358,6 @@ fn a_row_with_a_used_unpriced_dimension_is_unpriced_unless_registry_prices_it() 
             prices: shipped_only,
             cache_read: None,
             expected: RowCost::Priced(6.0),
-        },
-        Row {
-            name: "registry row, cache reads, no cache-read price",
-            configure: |c| {
-                c.registry
-                    .insert(TABLE_UPSTREAM.to_string(), registry_row());
-            },
-            prices: shipped_only,
-            cache_read: Some(500),
-            expected: RowCost::Priced(2.0),
         },
     ];
 

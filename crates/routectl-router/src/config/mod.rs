@@ -25,8 +25,8 @@ pub use schema::{
     AliasValue, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
     CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, HistoryReasoning, MitmConfig, ModelEntry,
     NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry,
-    ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy,
-    SeatSelection, ServerAuth, ServerConfig, UsageConfig, WindowGateConfig, WireCheckConfig,
+    ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RetryPolicy, SeatSelection,
+    ServerAuth, ServerConfig, UsageConfig, WindowGateConfig, WireCheckConfig,
     is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
@@ -38,8 +38,7 @@ pub use validate::{
     RawConfigPreflightError, VersionTooNewError, preflight_config_version, preflight_raw_config,
 };
 pub(crate) use validate::{
-    cache_write_map_problems, validate_model_pricing, validate_model_token_limits,
-    validate_server_body_limit,
+    validate_model_pricing, validate_model_token_limits, validate_server_body_limit,
 };
 
 /// The parsed `config.toml`: server bind, providers, aliases, models, and
@@ -120,18 +119,6 @@ pub struct Config {
     #[serde(default)]
     pub usage: UsageConfig,
 
-    /// Operator-facing `[registry]` pricing table. Each key is an
-    /// upstream-id glob (an exact id or a trailing-`*` prefix, parsed
-    /// via `AliasPattern`); each value carries optional per-million-token
-    /// pricing and an optional `provider` scope. routectl ships NO price
-    /// defaults -- an unlisted upstream is simply unpriced. Cost is
-    /// derived at QUERY time from this table, so correcting a price later
-    /// retroactively fixes the cost of historical rows. The table is
-    /// named `[registry.*]` deliberately (room to grow capability
-    /// metadata later); only pricing is wired today.
-    #[serde(default)]
-    pub registry: BTreeMap<String, RegistryEntry>,
-
     /// Operator-facing `[cache]` block. Controls the dispatch-path
     /// auto-emission of a top-level Anthropic `cache_control` breakpoint.
     /// A missing block keeps the default: auto-emit enabled.
@@ -176,44 +163,6 @@ pub struct Config {
     /// omitted) keeps today's behavior with zero MITM proxy startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mitm: Option<MitmConfig>,
-}
-
-impl Config {
-    /// Resolve the best pricing for an upstream id served by a given
-    /// provider. Walks the `[registry]` table, keeps only eligible
-    /// entries (pattern matches `upstream`, the entry HAS pricing, and
-    /// the entry's provider scope is either this provider or agnostic),
-    /// and returns the best match.
-    ///
-    /// Ordering: a provider-scoped match beats a provider-agnostic one;
-    /// among equal scope, the longest matching prefix wins (an exact key
-    /// has a prefix length equal to the full id, so it naturally beats a
-    /// shorter prefix). When scope AND prefix length tie -- an Exact key
-    /// and a same-length Prefix key both matching the same upstream -- the
-    /// Exact key wins (it is the more specific intent). An entry scoped to
-    /// some OTHER provider is never eligible. Keys that fail to parse are
-    /// skipped here -- startup validation (`validate_registry_patterns`)
-    /// rejects them.
-    pub fn pricing_for(&self, upstream: &str, provider: &str) -> Option<&PricingConfig> {
-        self.registry
-            .iter()
-            .filter_map(|(key, entry)| {
-                let pricing = entry.pricing.as_ref()?;
-                let pattern = crate::glob::AliasPattern::parse(key).ok()?;
-                if !pattern.matches(upstream) {
-                    return None;
-                }
-                let scoped = match entry.provider.as_deref() {
-                    Some(p) if p == provider => true,
-                    Some(_) => return None,
-                    None => false,
-                };
-                let is_exact = matches!(pattern, crate::glob::AliasPattern::Exact(_));
-                Some((scoped, pattern.prefix_len(), is_exact, pricing))
-            })
-            .max_by_key(|(scoped, prefix_len, is_exact, _)| (*scoped, *prefix_len, *is_exact))
-            .map(|(_, _, _, pricing)| pricing)
-    }
 }
 
 /// A full config mirroring `examples/config.toml`'s non-feature-gated

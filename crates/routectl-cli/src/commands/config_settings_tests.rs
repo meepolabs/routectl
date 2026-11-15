@@ -336,11 +336,6 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
     ("ProviderEntry.cloud_project_id", "off: project discovery"),
     ("ProviderEntry.reduction_enabled", "inherit: [reduction]"),
     ("ProviderEntry.user_agent", "inherit: the egress User-Agent"),
-    ("RegistryEntry.pricing", "off: row unpriced"),
-    (
-        "RegistryEntry.provider",
-        "off: row applies to every provider",
-    ),
     (
         "RetryPolicy.retry_on_429",
         "inherit: retry class policy section",

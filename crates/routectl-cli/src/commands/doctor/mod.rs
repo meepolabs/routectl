@@ -131,7 +131,7 @@ pub(crate) use self::served::{
 ///
 /// v8 -> v9: the additive `pricing` section joins the report, one finding per
 /// configured model naming where its cost rates come from (an operator
-/// `[registry]` row, the baked catalog, a managed subscription, or nothing).
+/// price row, the baked catalog, a managed subscription, or nothing).
 ///
 /// v9 -> v10: the additive `knobs` section joins the report, one finding per
 /// configured model naming where its outbound `max_output_tokens` ceiling comes
@@ -511,15 +511,6 @@ struct KnobRow {
 /// view, which resolves them through `routectl_router::prices::effective_pricing`
 /// the way the usage report prices rows, so the diagnostic can never claim a
 /// source the bill does not use.
-/// A config block a model's prices are read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PricingBlock {
-    /// The model's own `[models.X.pricing]`.
-    Model,
-    /// The `[registry]` row that matches the model.
-    Registry,
-}
-
 struct PricingRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
@@ -540,12 +531,9 @@ struct PricingRow {
     /// Each priced dimension with its value and source, in render order:
     /// the five fixed fields, then each other priced cache-write lifetime.
     fields: Vec<(PriceDimension, Option<f64>, PriceSource)>,
-    /// Lifetimes a pricing block feeding this model sets under both
-    /// spellings at different values, each with the block that sets them.
-    write_conflicts: Vec<(PricingBlock, CacheWriteSpellingConflict)>,
-    /// Whether a `[registry]` row matched, which wins whole even when it
-    /// prices nothing.
-    registry_matched: bool,
+    /// Lifetimes the model's own `[models.X.pricing]` block sets under both
+    /// spellings at different values.
+    write_conflicts: Vec<CacheWriteSpellingConflict>,
     /// The dates of the price tables the resolution read.
     tables: PriceTableDates,
 }

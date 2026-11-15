@@ -97,7 +97,7 @@ fn a_panicking_price_closure_still_detaches_the_progress_handler() {
 #[test]
 fn a_cost_sum_that_overflows_to_infinity_reads_as_unpriced_rather_than_panicking() {
     // Arrange: one model over two upstreams, each priced at a magnitude an
-    // operator could reach with an extreme `[registry.*.pricing]` rate, so the
+    // operator could reach with an extreme `[models.X.pricing]` rate, so the
     // group's SUM overflows f64 to infinity.
     let (_dir, mut db) = open_db();
     for (id, upstream) in [("a", "u1"), ("b", "u2")] {

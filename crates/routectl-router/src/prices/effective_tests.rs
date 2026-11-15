@@ -1,6 +1,5 @@
 //! Effective pricing: one positive control per source token, the precedence
-//! between layers, per-field fill, the registry's whole-row rule, the
-//! derived 1-hour write, subscription providers and persisted-kind pricing.
+//! between layers, per-field fill, the derived 1-hour write, subscription providers and persisted-kind pricing.
 
 use std::collections::BTreeMap;
 
@@ -94,17 +93,6 @@ fn with_model_pricing(mut config: Config, pricing: PricingConfig) -> Config {
     config
 }
 
-fn with_registry(mut config: Config, pricing: PricingConfig) -> Config {
-    config.registry.insert(
-        UPSTREAM.to_string(),
-        crate::config::RegistryEntry {
-            pricing: Some(pricing),
-            provider: None,
-        },
-    );
-    config
-}
-
 fn subject<'a>(provider: &'a str, upstream: &'a str) -> PriceSubject<'a> {
     PriceSubject {
         model: Some("m"),
@@ -127,7 +115,6 @@ fn resolve(
 fn every_source_token_renders_its_fixed_text() {
     let rows = [
         (PriceSource::ModelConfig, "model-config"),
-        (PriceSource::Registry, "registry"),
         (PriceSource::Refreshed, "refreshed"),
         (PriceSource::Shipped, "shipped"),
         (PriceSource::Derived, "derived"),
@@ -145,16 +132,10 @@ fn every_source_token_renders_its_fixed_text() {
 fn each_source_alone_supplies_the_field_it_carries() {
     let refreshed = table_for(UPSTREAM, &input_only(3.0));
     let shipped = table_for(UPSTREAM, &input_only(4.0));
-    let rows: [(&str, Config, Option<&PriceTable>, Option<&PriceTable>); 4] = [
+    let rows: [(&str, Config, Option<&PriceTable>, Option<&PriceTable>); 3] = [
         (
             "model-config",
             with_model_pricing(config(), input_only(1.0)),
-            None,
-            None,
-        ),
-        (
-            "registry",
-            with_registry(config(), input_only(2.0)),
             None,
             None,
         ),
@@ -163,7 +144,6 @@ fn each_source_alone_supplies_the_field_it_carries() {
     ];
     let expected = [
         (PriceSource::ModelConfig, 1.0),
-        (PriceSource::Registry, 2.0),
         (PriceSource::Refreshed, 3.0),
         (PriceSource::Shipped, 4.0),
     ];
@@ -184,54 +164,54 @@ fn each_source_alone_supplies_the_field_it_carries() {
     assert_eq!(sources.output, PriceSource::Unknown, "unknown");
 }
 
-/// Each layer wins over every layer below it when all of them carry a
-/// value for every field. Swapping any two layers turns a row red.
+/// One precedence case: name, config, refreshed and shipped tables, and the
+/// source and value every field must resolve to.
+type PrecedenceRow<'t> = (
+    &'static str,
+    Config,
+    Option<&'t PriceTable>,
+    Option<&'t PriceTable>,
+    PriceSource,
+    f64,
+);
+
+/// For every pair of layers, with only those two carrying a value for
+/// every field, the higher one supplies every field: model-config over the
+/// refreshed table, model-config over the shipped table, refreshed over
+/// shipped. Swapping any two layers turns a row red.
 #[test]
 fn each_layer_wins_over_every_layer_below_it() {
     let refreshed = table_for(UPSTREAM, &all_fields(3.0));
     let shipped = table_for(UPSTREAM, &all_fields(4.0));
-    let stacked = |model: bool, registry: bool| {
-        let mut config = config();
-        if model {
-            config = with_model_pricing(config, all_fields(1.0));
-        }
-        if registry {
-            config = with_registry(config, all_fields(2.0));
-        }
-        config
-    };
-    let rows: [(&str, Config, Option<&PriceTable>, PriceSource, f64); 4] = [
+    let model_config = with_model_pricing(config(), all_fields(1.0));
+    let rows: [PrecedenceRow<'_>; 3] = [
         (
-            "model-config over registry and tables",
-            stacked(true, true),
+            "model-config over refreshed",
+            model_config.clone(),
             Some(&refreshed),
+            None,
             PriceSource::ModelConfig,
             1.0,
         ),
         (
-            "registry over both tables",
-            stacked(false, true),
-            Some(&refreshed),
-            PriceSource::Registry,
-            2.0,
+            "model-config over shipped",
+            model_config,
+            None,
+            Some(&shipped),
+            PriceSource::ModelConfig,
+            1.0,
         ),
         (
             "refreshed over shipped",
-            stacked(false, false),
+            config(),
             Some(&refreshed),
+            Some(&shipped),
             PriceSource::Refreshed,
             3.0,
         ),
-        (
-            "shipped with no refreshed table",
-            stacked(false, false),
-            None,
-            PriceSource::Shipped,
-            4.0,
-        ),
     ];
-    for (name, config, refreshed, source, value) in rows {
-        let (pricing, sources) = resolve(&config, refreshed, Some(&shipped)).expect(name);
+    for (name, config, refreshed, shipped, source, value) in rows {
+        let (pricing, sources) = resolve(&config, refreshed, shipped).expect(name);
         assert_eq!(pricing, all_fields(value), "{name}");
         assert_eq!(
             sources,
@@ -265,53 +245,6 @@ fn a_partial_model_pricing_fills_field_by_field_over_the_table() {
     assert_eq!(sources.input, PriceSource::Shipped);
     assert_eq!(pricing.cache_write_1h_per_mtok, Some(4.0));
     assert_eq!(sources.cache_write_at(3600), PriceSource::Shipped);
-}
-
-/// A registry row is taken whole: its unset fields stay unknown although
-/// both tables price them and the target is Anthropic-family, while a
-/// model-config field still wins over it.
-#[test]
-fn a_registry_row_wins_whole_below_model_config() {
-    let refreshed = table_for(UPSTREAM, &all_fields(3.0));
-    let shipped = table_for(UPSTREAM, &all_fields(4.0));
-    let config = with_model_pricing(
-        with_registry(config(), input_only(2.0)),
-        PricingConfig {
-            cache_read_per_mtok: Some(0.1),
-            ..PricingConfig::default()
-        },
-    );
-
-    let (pricing, sources) = resolve(&config, Some(&refreshed), Some(&shipped)).expect("priced");
-
-    assert_eq!(
-        pricing,
-        PricingConfig {
-            input_per_mtok: Some(2.0),
-            cache_read_per_mtok: Some(0.1),
-            ..PricingConfig::default()
-        }
-    );
-    assert_eq!(
-        sources,
-        PriceSources {
-            input: PriceSource::Registry,
-            output: PriceSource::Unknown,
-            cache_read: PriceSource::ModelConfig,
-            cache_write: BTreeMap::new(),
-        }
-    );
-}
-
-#[test]
-fn a_registry_row_that_prices_nothing_is_returned_as_written() {
-    let shipped = table_for(UPSTREAM, &all_fields(4.0));
-    let config = with_registry(config(), PricingConfig::default());
-
-    let (pricing, sources) = resolve(&config, None, Some(&shipped)).expect("registry row");
-
-    assert_eq!(pricing, PricingConfig::default());
-    assert_eq!(sources.input, PriceSource::Unknown);
 }
 
 #[test]
@@ -490,21 +423,15 @@ base_url = "https://openrouter.ai/api/v1"
 }
 
 /// The derived figure needs a refreshed or shipped basis: a model-config
-/// input alone, or a registry row, derives nothing.
+/// input alone derives nothing.
 #[test]
 fn the_1h_write_is_derived_only_on_a_table_basis() {
     let shipped = table_for(UPSTREAM, &input_only(5.0));
-    let rows: [(&str, Config, Option<&PriceTable>, Option<f64>); 4] = [
+    let rows: [(&str, Config, Option<&PriceTable>, Option<f64>); 3] = [
         (
             "model-config input, no table row",
             with_model_pricing(config(), input_only(1.0)),
             None,
-            None,
-        ),
-        (
-            "registry input over a table row",
-            with_registry(config(), input_only(2.0)),
-            Some(&shipped),
             None,
         ),
         (
@@ -604,10 +531,10 @@ fn config_with(extra: &str) -> Config {
 
 /// The generic `cache_write_per_mtok` map prices any lifetime, and the
 /// legacy 5m / 1h keys win their own lifetime over it, in a
-/// `[models.X.pricing]` block and in a `[registry]` row alike.
+/// `[models.X.pricing]` block.
 #[test]
 fn a_cache_write_map_prices_its_lifetimes_and_the_legacy_keys_win_their_own() {
-    let rows: [(&str, &str, u32, (f64, PriceSource)); 4] = [
+    let rows: [(&str, &str, u32, (f64, PriceSource)); 2] = [
         (
             "model-config 30m",
             "[models.m.pricing]\ncache_write_per_mtok = { \"30m\" = 2.0 }\n",
@@ -620,19 +547,6 @@ fn a_cache_write_map_prices_its_lifetimes_and_the_legacy_keys_win_their_own() {
              cache_write_per_mtok = { \"5m\" = 9.0 }\n",
             300,
             (3.75, PriceSource::ModelConfig),
-        ),
-        (
-            "registry 30m",
-            "[registry.\"claude-*\".pricing]\ncache_write_per_mtok = { \"30m\" = 2.0 }\n",
-            1800,
-            (2.0, PriceSource::Registry),
-        ),
-        (
-            "registry legacy 5m beside a generic 5m",
-            "[registry.\"claude-*\".pricing]\ncache_write_5m_per_mtok = 3.75\n\
-             cache_write_per_mtok = { \"5m\" = 9.0 }\n",
-            300,
-            (3.75, PriceSource::Registry),
         ),
     ];
     for (name, extra, seconds, expected) in rows {

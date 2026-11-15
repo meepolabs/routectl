@@ -227,10 +227,9 @@ const fn price_value_problem(value: f64) -> Option<&'static str> {
 }
 
 /// One line per problem in `pricing.cache_write_per_mtok`, each naming the
-/// dotted key under `prefix` (`models.<nick>.pricing` or
-/// `registry.<pattern>.pricing`): a key that is not a cache lifetime, two
-/// keys naming the same lifetime, or a value that is not finite or is
-/// negative.
+/// dotted key under `prefix` (`models.<nick>.pricing`): a key that is not a
+/// cache lifetime, two keys naming the same lifetime, or a value that is not
+/// finite or is negative.
 pub fn cache_write_map_problems(pricing: &PricingConfig, prefix: &str) -> Vec<String> {
     let Some(map) = pricing.cache_write_per_mtok.as_ref() else {
         return Vec::new();

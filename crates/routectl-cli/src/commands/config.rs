@@ -394,7 +394,7 @@ fn locate(raw_text: Option<&str>, message: String) -> String {
 /// validators and check produce are recognized:
 ///
 ///   - a leading TOML header, `[a.b.c] ...` -> `a.b.c` (the `[retry]`,
-///     `[aliases.X]`, `[models.X]`, `[registry.X]`,
+///     `[aliases.X]`, `[models.X]`,
 ///     `[retry.classes.feature-unsupported]`, and
 ///     `[providers.X.class_overrides]` validator errors);
 ///   - a leading ``alias `X` ``/``model `X` ``/``provider `X` `` clause ->

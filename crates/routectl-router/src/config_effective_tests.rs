@@ -1151,7 +1151,6 @@ fn model_prices_carry_each_field_source_and_the_view_carries_table_dates() {
     );
     for source in [
         PriceSource::ModelConfig,
-        PriceSource::Registry,
         PriceSource::Derived,
         PriceSource::Unknown,
     ] {
@@ -1159,30 +1158,21 @@ fn model_prices_carry_each_field_source_and_the_view_carries_table_dates() {
     }
 }
 
-/// A pool-backed model prices through its first member's entry name, the
-/// key a usage row served through the pool bills under, so a `[registry]`
-/// row scoped to that member applies; one scoped to the pool name does not
-/// match a billed row and does not apply here either.
+/// A pool-backed model prices through its first resolvable member's entry,
+/// whose kind selects the table row; a pool with no resolvable member is
+/// unpriced.
 #[test]
 fn a_pool_model_prices_through_its_first_member_entry() {
+    let shipped = dated_table("2026-10-01", 7.0);
     let rows = [
-        ("registry scoped to the first member", "seat-a", Some(7.0)),
-        ("registry scoped to the pool name", "seats", None),
+        ("first member resolves", "seat-a", Some(7.0)),
+        ("no member resolves", "ghost", None),
     ];
-    for (name, scope, expected) in rows {
+    for (name, member, expected) in rows {
         let mut config = facts_config();
-        config.registry.insert(
-            "claude-opus-4-8".to_string(),
-            crate::config::RegistryEntry {
-                pricing: Some(PricingConfig {
-                    input_per_mtok: Some(7.0),
-                    ..PricingConfig::default()
-                }),
-                provider: Some(scope.to_string()),
-            },
-        );
+        config.pools.get_mut("seats").expect("seats pool").members = vec![member.to_string()];
 
-        let view = derive_effective_view(&config, None, None);
+        let view = derive_effective_view(&config, None, Some(&shipped));
 
         assert_eq!(
             model(&view, "pooled").pricing.input_per_mtok,
@@ -1221,16 +1211,10 @@ fn price_fields_list_each_extra_priced_lifetime_after_the_fixed_five() {
         ),
         ..PricingConfig::default()
     });
-    config.registry.insert(
-        "glm-5".to_string(),
-        crate::config::RegistryEntry {
-            pricing: Some(PricingConfig {
-                cache_write_per_mtok: Some([("90s".to_string(), 0.5)].into()),
-                ..PricingConfig::default()
-            }),
-            provider: None,
-        },
-    );
+    config.models.get_mut("plain").expect("plain").pricing = Some(PricingConfig {
+        cache_write_per_mtok: Some([("90s".to_string(), 0.5)].into()),
+        ..PricingConfig::default()
+    });
 
     let view = derive_effective_view(&config, None, None);
 
@@ -1262,7 +1246,7 @@ fn price_fields_list_each_extra_priced_lifetime_after_the_fixed_five() {
             ],
         ),
         (
-            "a registry lifetime below 5m",
+            "a model-config lifetime below 5m",
             "plain",
             vec![
                 (PriceDimension::CacheWrite(300), None, PriceSource::Unknown),
@@ -1270,7 +1254,7 @@ fn price_fields_list_each_extra_priced_lifetime_after_the_fixed_five() {
                 (
                     PriceDimension::CacheWrite(90),
                     Some(0.5),
-                    PriceSource::Registry,
+                    PriceSource::ModelConfig,
                 ),
             ],
         ),

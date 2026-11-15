@@ -5,18 +5,15 @@
 //! field:
 //!
 //! 1. `[models.X.pricing]` on the served model entry.
-//! 2. The matching `[registry]` row. It wins whole and verbatim: a field it
-//!    leaves unset stays unknown, and neither the tables nor the derived
-//!    figure fill it.
-//! 3. The refreshed table, then the shipped table, each selected for the
+//! 2. The refreshed table, then the shipped table, each selected for the
 //!    target as the module's provider selection describes.
-//! 4. A derived 1-hour (3600 s) cache write for the Anthropic family: twice the
+//! 3. A derived 1-hour (3600 s) cache write for the Anthropic family: twice the
 //!    effective input price, only when a refreshed or shipped row was
 //!    selected from the `anthropic` table provider (or for a `bedrock` target
 //!    whose upstream is an Anthropic model) and no source above gives the
 //!    field. A gateway priced from another table provider gets no derived
 //!    figure, whatever its kind.
-//! 5. Unknown.
+//! 4. Unknown.
 
 use std::collections::BTreeMap;
 
@@ -35,8 +32,6 @@ const ANTHROPIC_1H_WRITE_INPUT_MULTIPLE: f64 = 2.0;
 pub enum PriceSource {
     /// The served model's `[models.X.pricing]` block.
     ModelConfig,
-    /// The matching `[registry]` row.
-    Registry,
     /// The refreshed price table in the config directory.
     Refreshed,
     /// The price table shipped with the release.
@@ -58,7 +53,6 @@ impl PriceSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ModelConfig => "model-config",
-            Self::Registry => "registry",
             Self::Refreshed => "refreshed",
             Self::Shipped => "shipped",
             Self::Derived => "derived",
@@ -113,8 +107,7 @@ impl PriceSources {
     }
 
     /// Whether any field came from a price table layer (`refreshed`,
-    /// `shipped` or `derived`). A `[registry]` row wins whole, so a row it
-    /// prices never answers true.
+    /// `shipped` or `derived`).
     pub fn any_from_table(&self) -> bool {
         self.iter().any(PriceSource::is_table)
     }
@@ -139,9 +132,7 @@ pub struct PriceSubject<'a> {
 
 /// The effective pricing for `subject` under `config`, given the refreshed
 /// and shipped tables, with the source of each field (precedence in the
-/// module docs). `None` when no `[registry]` row matches and every field is
-/// unknown; a matching `[registry]` row is returned even when it prices
-/// nothing, as written.
+/// module docs). `None` when every field is unknown.
 ///
 /// A managed-subscription (`oauth://`) provider resolves like any other, so
 /// its API-equivalent value uses the same precedence.
@@ -152,15 +143,10 @@ pub fn effective_pricing(
     shipped: Option<&PriceTable>,
 ) -> Option<(PricingConfig, PriceSources)> {
     let model_config = model_pricing(config, subject);
-    let registry = config.pricing_for(subject.upstream, subject.provider);
-    let tables = match registry {
-        Some(_) => TableRows::default(),
-        None => TableRows::select(config, subject, refreshed, shipped),
-    };
+    let tables = TableRows::select(config, subject, refreshed, shipped);
 
-    let mut layers: Vec<Layer<'_>> = Vec::with_capacity(4);
+    let mut layers: Vec<Layer<'_>> = Vec::with_capacity(3);
     layers.extend(model_config.map(|p| Layer::new(p, PriceSource::ModelConfig)));
-    layers.extend(registry.map(|p| Layer::new(p, PriceSource::Registry)));
     layers.extend(
         tables
             .refreshed
@@ -189,7 +175,7 @@ pub fn effective_pricing(
         derive_1h_write(&mut pricing, &mut sources);
     }
 
-    if registry.is_none() && sources.is_unknown() {
+    if sources.is_unknown() {
         return None;
     }
     Some((pricing, sources))

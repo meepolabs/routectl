@@ -42,7 +42,7 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   walker, retry policy, capability filter (`[capability.overrides]`),
   provider factory, and model facts: `prices/` (the price-table
   format, its bounded parser, the models.dev converter, and the
-  per-field precedence `[models.X.pricing]` > `[registry]` > refreshed
+  per-field precedence `[models.X.pricing]` > refreshed
   table > shipped table > unknown) and `cost_gate.rs` (fixed cache
   rules per provider kind). A model's context window and output
   ceiling come only from its `[models.X]` entry; there is no model

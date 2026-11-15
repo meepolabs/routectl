@@ -513,6 +513,11 @@ default = \"gpt\"
                 "log = { trace_headers = true }\n",
             ),
             (
+                "a price under the retired pricing table",
+                "registry.gpt.pricing.input_per_mtok",
+                "registry.gpt.pricing.input_per_mtok = 1.0\n",
+            ),
+            (
                 "a retired provider key",
                 "providers.fast.allowed_betas",
                 "[providers.fast]\nallowed_betas = 1\n",

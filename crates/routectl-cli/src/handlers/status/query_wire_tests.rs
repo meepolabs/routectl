@@ -390,7 +390,7 @@ async fn the_pricer_resolves_against_one_pinned_snapshot() {
     let first = query(&mut db, &spec, |row| pricer.price(row), far_deadline()).unwrap();
     let second = query(&mut db, &spec, |row| pricer.price(row), far_deadline()).unwrap();
     assert_eq!(first, second);
-    // The default config carries no `[registry]` pricing, so a real row is
+    // The default config carries no `[models.X.pricing]`, so a real row is
     // honestly unpriced rather than costed at zero.
     assert_eq!(first.totals.cost_status, CostStatus::Unpriced);
     assert!(first.totals.cost_usd.is_none());

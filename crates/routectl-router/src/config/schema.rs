@@ -534,18 +534,13 @@ fn default_mitm_host() -> String {
     "api.anthropic.com".into()
 }
 
-/// Per-million-token pricing for a `[registry.*]` or `[models.X]` entry. All fields
-/// are USD per million tokens -- the CANONICAL operator-facing price unit
-/// throughout routectl -- and all are optional: routectl ships no price
-/// defaults, so any field left unset means "this dimension is unpriced" and
-/// contributes nothing to a derived cost. Cost is computed at query time,
-/// never persisted, so a corrected price retroactively fixes historical rows.
-///
-/// A `[registry]` row wins WHOLE over the refreshed and shipped price tables,
-/// which fill in only when no row prices an upstream: this struct has no
-/// explicitly-unpriced sentinel, so a per-field fill could not tell a
-/// deliberate omission from an absent value. A `[models.X.pricing]` block instead fills field by
-/// field over the other sources.
+/// Per-million-token pricing for a `[models.X]` entry or a price-table row.
+/// All fields are USD per million tokens -- the CANONICAL operator-facing
+/// price unit throughout routectl -- and all are optional: any field left
+/// unset means "this dimension is unpriced" by this source. Cost is computed
+/// at query time, never persisted, so a corrected price retroactively fixes
+/// historical rows. A `[models.X.pricing]` block fills field by field over
+/// the refreshed and shipped price tables.
 ///
 /// `Eq` is deliberately NOT derived: `f64` is not `Eq`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
@@ -619,32 +614,6 @@ impl PricingConfig {
             }
         }
     }
-}
-
-/// One row in the `[registry]` table. Keyed by an upstream-id glob
-/// (exact id or trailing-`*` prefix). Carries optional pricing and an
-/// optional `provider` scope so the same upstream id served by two
-/// providers can be priced differently. The block is named `[registry.*]`
-/// deliberately to leave room for future capability metadata (e.g.
-/// `[registry.*.capabilities]`); only `pricing` is built today.
-///
-/// `Eq` is deliberately NOT derived: `PricingConfig` carries `f64`.
-///
-/// Unknown fields are tolerated here (no `deny_unknown_fields`): the
-/// block is intended to grow a future `[registry.*.capabilities]`
-/// sub-table, so a newer config carrying that key must not fail against
-/// an older binary. `PricingConfig` still rejects typos (its field set
-/// is stable).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct RegistryEntry {
-    /// Per-million-token pricing for this registry row. `None` leaves the row unpriced.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pricing: Option<PricingConfig>,
-    /// Provider scope. When set, the row applies only to the named provider,
-    /// letting the same upstream id be priced differently per provider.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
 }
 
 /// One row in the `[models]` table. Carries the nickname-to-upstream
@@ -797,8 +766,7 @@ pub struct ModelEntry {
 
     /// Per-million-token prices for this model, each field optional. A set
     /// field wins over every other price source for that field; an unset
-    /// field falls through to a matching `[registry]` row, then the
-    /// refreshed and shipped price tables. Prices feed cost display only.
+    /// field falls through to the refreshed, then the shipped price table. Prices feed cost display only.
     /// A non-finite or negative value is refused at load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<PricingConfig>,
@@ -3296,9 +3264,6 @@ mod provider_credential_source_schema_tests;
 mod seat_selection_tests;
 
 #[cfg(test)]
-#[path = "registry_tests.rs"]
-mod registry_tests;
-
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
