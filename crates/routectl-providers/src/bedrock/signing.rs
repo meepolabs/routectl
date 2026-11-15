@@ -84,7 +84,7 @@ pub async fn apply_with_service(
                 );
                 Error::Auth("aws credentials unavailable".into())
             })?;
-            sigv4_sign(req, &credentials, region, service)
+            sigv4_sign(req, &credentials, region, service, SystemTime::now())
         }
     }
 }
@@ -94,6 +94,7 @@ fn sigv4_sign(
     credentials: &aws_credential_types::Credentials,
     region: &str,
     service: &str,
+    time: SystemTime,
 ) -> Result<()> {
     // Materialize body bytes for the canonical-request hash. Bedrock
     // request bodies are JSON we built ourselves with `.body(Vec<u8>)`,
@@ -122,7 +123,7 @@ fn sigv4_sign(
         .identity(&identity)
         .region(region)
         .name(service)
-        .time(SystemTime::now())
+        .time(time)
         .settings(signing_settings)
         .build()
         .map_err(|e| {
@@ -299,6 +300,81 @@ mod tests {
         );
         // x-amz-date is mandatory for SigV4.
         assert!(req.headers().contains_key("x-amz-date"));
+    }
+
+    struct KnownAnswer {
+        lane: &'static str,
+        service: &'static str,
+        url: &'static str,
+        headers: &'static [(&'static str, &'static str)],
+        body: &'static str,
+        authorization: &'static str,
+    }
+
+    /// Expected values were recomputed independently from the SigV4 spec
+    /// with fake credentials.
+    const KNOWN_ANSWERS: [KnownAnswer; 2] = [
+        KnownAnswer {
+            lane: "bedrock",
+            service: "bedrock",
+            url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/anthropic.claude-3-haiku/invoke",
+            headers: &[("content-type", "application/json")],
+            body: r#"{"max_tokens":16}"#,
+            authorization: "AWS4-HMAC-SHA256 \
+                Credential=AKIDEXAMPLE/20260102/us-west-2/bedrock/aws4_request, \
+                SignedHeaders=content-type;host;x-amz-date, \
+                Signature=50cafe0ef374ff8c125ec07f5e22b5cc3ab7b5a7bc534279d11f4acc70c4e806",
+        },
+        KnownAnswer {
+            lane: "bedrock-mantle",
+            service: crate::mantle::MANTLE_SERVICE,
+            url: "https://bedrock-mantle.us-west-2.api.aws/anthropic/v1/messages",
+            headers: &[
+                ("content-type", "application/json"),
+                ("anthropic-version", "2023-06-01"),
+            ],
+            body: r#"{"model":"claude-3-opus"}"#,
+            authorization: "AWS4-HMAC-SHA256 \
+                Credential=AKIDEXAMPLE/20260102/us-west-2/bedrock-mantle/aws4_request, \
+                SignedHeaders=anthropic-version;content-type;host;x-amz-date, \
+                Signature=bae25929a52c76dead9e5d676abfacef0c6287a24c50e63a8c77befde2048758",
+        },
+    ];
+
+    #[test]
+    fn sigv4_signs_each_lane_with_the_known_answer_authorization() {
+        let credentials = aws_credential_types::Credentials::new(
+            "AKIDEXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            None,
+            None,
+            "known-answer",
+        );
+        // 2026-01-02T03:04:05Z
+        let time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_767_323_045);
+        for case in &KNOWN_ANSWERS {
+            let mut builder = reqwest::Client::new().post(case.url).body(case.body);
+            for (name, value) in case.headers {
+                builder = builder.header(*name, *value);
+            }
+            let mut req = builder.build().unwrap();
+
+            sigv4_sign(&mut req, &credentials, "us-west-2", case.service, time).unwrap();
+
+            let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok());
+            assert_eq!(
+                header("authorization"),
+                Some(case.authorization),
+                "{}",
+                case.lane
+            );
+            assert_eq!(
+                header("x-amz-date"),
+                Some("20260102T030405Z"),
+                "{}",
+                case.lane
+            );
+        }
     }
 
     #[tokio::test]
