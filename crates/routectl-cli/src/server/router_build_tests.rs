@@ -70,16 +70,16 @@ async fn build_router_from_config_rejects_forwarded_provider_on_non_anthropic_ho
 async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
     let mut config: Config = toml::from_str(
         "[providers.\"evil\\nkey\\u001B[31m\"]\n\
-         kind = \"openai-compat\"\n\
-         base_url = \"https://example.invalid\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
-         auto_emit_per_block_breakpoints = true\n",
+         kind = \"gemini\"\n\
+         auth_mode = \"cloud-code\"\n\
+         base_url = \"https://cloudcode-pa.googleapis.com\"\n\
+         api_key_ref = \"oauth://antigravity\"\n",
     )
     .expect("config must parse");
     let _usage_dir = isolate_usage_db(&mut config);
 
-    let raw = routectl_router::per_block_breakpoint_warnings(&config);
-    let raw_message = raw.first().expect("the inert-knob warning must fire");
+    let raw = routectl_router::cloudcode_host_warnings(&config);
+    let raw_message = raw.first().expect("the production-pin warning must fire");
     assert!(
         raw_message.contains('\n') && raw_message.contains('\u{1b}'),
         "fixture must carry raw control bytes pre-sanitize: {raw_message:?}"
@@ -94,12 +94,12 @@ async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
     .await;
     // `Router` is not `Debug`, so match rather than `expect`.
     if let Err(e) = result {
-        panic!("an inert advisory knob must not fail the router build: {e:?}");
+        panic!("an advisory finding must not fail the router build: {e:?}");
     }
 
     let warned: Vec<&String> = lines
         .iter()
-        .filter(|l| l.contains("per-block breakpoint warning"))
+        .filter(|l| l.contains("cloud-code host warning"))
         .collect();
     assert_eq!(warned.len(), 1, "captured lines: {lines:?}");
     let line = warned[0];
@@ -110,10 +110,10 @@ async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
 
 /// The whole captured startup line SET must be control-byte clean, not just
 /// the one loop a single test happens to name. The fixture fires two
-/// independent hostile loops -- the per-block breakpoint advisory off a
+/// independent hostile loops -- the cloud-code host advisory off one
 /// provider key and the auth-reserved header advisory off a model key --
-/// plus the provider-build failure warn that an absent `env://` ref
-/// produces, so a sink added to any of those paths without a sanitizer
+/// plus the provider-build failure warn that an absent `env://` ref on a
+/// second provider produces, so a sink added to any of those paths without a sanitizer
 /// fails here.
 ///
 /// Positive controls come first, as above: both validators' raw messages are
@@ -125,7 +125,11 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
          kind = \"openai-compat\"\n\
          base_url = \"https://example.invalid\"\n\
          api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
-         auto_emit_per_block_breakpoints = true\n\
+         [providers.\"evil\\ngem\\u001B[31m\"]\n\
+         kind = \"gemini\"\n\
+         auth_mode = \"cloud-code\"\n\
+         base_url = \"https://cloudcode-pa.googleapis.com\"\n\
+         api_key_ref = \"oauth://antigravity\"\n\
          [models.\"evil\\nmodel\\u001B[31m\"]\n\
          provider = \"evil\\nkey\\u001B[31m\"\n\
          upstream = \"some-upstream\"\n\
@@ -138,8 +142,8 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
 
     for (label, raw) in [
         (
-            "per-block breakpoint",
-            routectl_router::per_block_breakpoint_warnings(&config),
+            "cloud-code host",
+            routectl_router::cloudcode_host_warnings(&config),
         ),
         (
             "auth-reserved header",
@@ -177,7 +181,7 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
         );
     }
     for msg in [
-        "per-block breakpoint warning",
+        "cloud-code host warning",
         "auth-reserved header warning",
         "skipping provider (build failed)",
     ] {

@@ -247,15 +247,15 @@ fn documented_config_blocks_parse_and_whole_configs_validate() {
 
     // A refactor that breaks the fence scanner or the block classifier
     // would otherwise leave this test vacuously green over zero blocks.
-    // Floors sit below today's counts (55 blocks, 80 units, 1 whole
+    // Floors sit below today's counts (48 blocks, 70 units, 1 whole
     // config) so ordinary doc edits do not trip them.
     assert!(
-        checked.blocks >= 50,
+        checked.blocks >= 40,
         "expected the docs to carry many config blocks, checked only {}",
         checked.blocks
     );
     assert!(
-        checked.units >= 70,
+        checked.units >= 60,
         "expected the docs to populate many config tables, checked only {}",
         checked.units
     );

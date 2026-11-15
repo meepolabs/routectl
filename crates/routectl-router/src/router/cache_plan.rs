@@ -78,16 +78,16 @@ pub(super) enum CacheInjection {
     Emitted,
     /// Global `[cache] auto_emit_top_level_breakpoint = false`.
     SkippedGlobalDisabled,
-    /// Per-provider `auto_emit_top_level_breakpoint = false` (terminal
-    /// marker) or `auto_emit_per_block_breakpoints = false` (front
-    /// marker). The two knobs are independent.
+    /// The provider kind does not take a front marker by default (every
+    /// kind but `anthropic-api` on the default base URL). Front marker
+    /// only; the terminal marker has no per-provider switch.
     SkippedProviderDisabled,
     /// The target's egress cannot carry this marker to the wire (or its
     /// capability is unknown -- fail closed). For the TERMINAL marker:
     /// `CacheCapability::supports_top_level_cache_control` is false. For
     /// the FRONT marker: the provider kind has no per-block breakpoint
-    /// surface (`ProviderEntry::supports_per_block_breakpoints`), so an
-    /// explicit operator opt-in there is inert rather than honored.
+    /// surface (`ProviderEntry::supports_per_block_breakpoints`), so the
+    /// marker is withheld there even when enabled.
     SkippedNoCapability,
     /// The caller already supplied at least one breakpoint; auto-emit
     /// would risk a second marker / byte rewrite, so we defer entirely.
@@ -168,32 +168,25 @@ pub(super) struct CacheTargetGates {
     /// The target provider's prompt-cache capability, `None` when the
     /// provider is absent from the table (fail closed).
     pub(super) capability: Option<CacheCapability>,
-    /// Per-provider `auto_emit_top_level_breakpoint`, resolved (absent
-    /// inherits the global switch).
-    pub(super) terminal_enabled: bool,
     /// Whether the target's EGRESS can carry a per-block marker to the
     /// wire (`ProviderEntry::supports_per_block_breakpoints`) -- the front
-    /// marker's capability gate, distinct from the operator switch below.
+    /// marker's capability gate, distinct from the kind default below.
     pub(super) front_supported: bool,
-    /// Per-provider `auto_emit_per_block_breakpoints`, resolved through
-    /// `ProviderEntry::per_block_breakpoints_enabled` (absent takes the
-    /// kind-level default). Operator INTENT: placement also requires
-    /// `front_supported`.
+    /// The kind's front-marker default
+    /// (`ProviderEntry::per_block_breakpoints_enabled`); placement also
+    /// requires `front_supported`.
     pub(super) front_enabled: bool,
 }
 
 /// Resolve the per-target cache gates from the target's `[providers.X]`
 /// entry. An absent entry fails closed on every gate (no capability, no
 /// per-block support, no default to read). One resolver so the completion
-/// and streaming call sites cannot resolve the knobs differently.
+/// and streaming call sites cannot resolve the gates differently.
 pub(super) fn cache_target_gates(
     provider_cfg: Option<&crate::config::ProviderEntry>,
 ) -> CacheTargetGates {
     CacheTargetGates {
         capability: provider_cfg.map(crate::config::ProviderEntry::cache_capability),
-        terminal_enabled: provider_cfg
-            .and_then(crate::config::ProviderEntry::auto_emit_top_level_breakpoint)
-            .unwrap_or(true),
         front_supported: provider_cfg
             .is_some_and(crate::config::ProviderEntry::supports_per_block_breakpoints),
         front_enabled: provider_cfg
@@ -213,20 +206,18 @@ pub(super) fn cache_target_gates(
 ///
 /// - FRONT -- a per-block `cache_control` on the resolved
 ///   [`FrontSlot`] (the last wire-eligible system block, else the last
-///   custom tool). Requires BOTH the provider's
-///   `auto_emit_per_block_breakpoints` (operator intent) AND
-///   `supports_per_block_breakpoints` (wire capability: anthropic-api and
-///   Bedrock Converse, where the egress translates the marker into a
-///   `cachePoint` block). `CacheCapability` does NOT gate it -- that
-///   struct describes the TOP-LEVEL field only.
-/// - TERMINAL -- the top-level `cache_control` field. Gated by the
-///   provider's `auto_emit_top_level_breakpoint` and by
-///   `supports_top_level_cache_control`, exactly as before.
+///   custom tool). Requires BOTH the provider kind's default
+///   (`per_block_breakpoints_enabled`) AND `supports_per_block_breakpoints`
+///   (wire capability: anthropic-api and Bedrock Converse, where the
+///   egress translates the marker into a `cachePoint` block).
+///   `CacheCapability` does NOT gate it -- that struct describes the
+///   TOP-LEVEL field only.
+/// - TERMINAL -- the top-level `cache_control` field. Gated by
+///   `supports_top_level_cache_control`.
 ///
 /// The global `[cache] auto_emit_top_level_breakpoint` switch is the
-/// master kill for dispatch-path auto-emission and withholds BOTH
-/// markers, so an operator who has auto-emit off today never starts
-/// receiving a front marker.
+/// only operator kill for dispatch-path auto-emission and withholds BOTH
+/// markers.
 ///
 /// Rollback is by construction: the pre-cache request is never mutated
 /// until the candidate validates, so a discarded candidate preserves
@@ -248,7 +239,7 @@ pub(super) fn cache_target_gates(
 /// `caller_supplied` is evaluated FIRST as a request-level fact: a request
 /// that already carries caller breakpoints is independent of which target /
 /// provider is selected, so it takes precedence over every per-target /
-/// config `auto_skipped:*` reason (global / provider kill-switch, capability).
+/// config `auto_skipped:*` reason (global kill-switch, kind default, capability).
 ///
 /// `k_suppressed` is the per-target verdict of `Router::k_emission_suppressed`,
 /// consulted once at the call site. It withholds BOTH markers as a shared
@@ -278,10 +269,10 @@ pub(super) fn apply_auto_cache_placement(
     let mut front = if !gates.front_enabled {
         CacheInjection::SkippedProviderDisabled
     } else if !gates.front_supported {
-        // An explicit opt-in on a kind whose egress cannot carry a
-        // per-block marker is INERT, not honored: emitting here would ship
-        // a marker the wire drops (openai-compat WARNs and drops it) while
-        // recording a false `auto_emitted`.
+        // Fail closed if a kind default ever enables the front marker on an
+        // egress that cannot carry it: emitting would ship a marker the wire
+        // drops (openai-compat WARNs and drops it) while recording a false
+        // `auto_emitted`.
         CacheInjection::SkippedNoCapability
     } else if plan.volatile_high_veto {
         CacheInjection::SkippedVolatileHigh
@@ -290,9 +281,7 @@ pub(super) fn apply_auto_cache_placement(
     } else {
         CacheInjection::Emitted
     };
-    let terminal = if !gates.terminal_enabled {
-        CacheInjection::SkippedProviderDisabled
-    } else if !gates
+    let terminal = if !gates
         .capability
         .is_some_and(|c| c.supports_top_level_cache_control)
     {

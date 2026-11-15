@@ -17,7 +17,7 @@
 //! HIGH therefore uses only high-precision whole-token patterns so it is both
 //! rare and never trips on prose. Residual missed volatility (the LOW tier)
 //! is backstopped downstream by an empirical thrash signal plus a
-//! per-provider kill-switch, not by this detector.
+//! per-provider `cache_capability` override, not by this detector.
 //!
 //! SCOPE (always-stable prefix only):
 //!

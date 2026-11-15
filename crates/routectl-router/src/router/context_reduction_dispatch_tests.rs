@@ -180,8 +180,6 @@ fn anthropic_entry_reduction_off() -> ProviderEntry {
         context_management: false,
         max_thinking_entry_bytes: None,
         cache_capability: None,
-        auto_emit_top_level_breakpoint: None,
-        auto_emit_per_block_breakpoints: None,
         reduction_enabled: Some(false),
         cloak: routectl_providers::anthropic_api::CloakConfig::default(),
         #[cfg(feature = "bedrock")]

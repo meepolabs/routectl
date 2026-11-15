@@ -37,8 +37,6 @@ fn kind_str_returns_stable_config_tokens() {
             payload_extras: None,
             anthropic_beta: Vec::new(),
             cache_capability: None,
-            auto_emit_top_level_breakpoint: None,
-            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime: Default::default(),
         };
@@ -72,8 +70,6 @@ fn config_provider_kinds_matches_the_kind_str_discriminants() {
             payload_extras: None,
             anthropic_beta: Vec::new(),
             cache_capability: None,
-            auto_emit_top_level_breakpoint: None,
-            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             runtime: Default::default(),
         }
@@ -537,8 +533,6 @@ fn bedrock_entry(
         payload_extras: None,
         anthropic_beta: Vec::new(),
         cache_capability,
-        auto_emit_top_level_breakpoint: None,
-        auto_emit_per_block_breakpoints: None,
         reduction_enabled: None,
         runtime: Default::default(),
     }
@@ -991,11 +985,6 @@ api_key_ref = "literal:sk-ant-test"
     let cfg: Config = toml::from_str(toml_text).expect("parse anthropic default base");
     let entry = cfg.providers.get("anthropic").expect("anthropic provider");
 
-    assert_eq!(
-        entry.auto_emit_per_block_breakpoints(),
-        None,
-        "an omitted key must read as None through the accessor"
-    );
     assert!(
         entry.per_block_breakpoints_enabled(),
         "anthropic-api on the default base URL must default to enabled"
@@ -1003,7 +992,7 @@ api_key_ref = "literal:sk-ant-test"
 }
 
 /// A custom-base anthropic-api entry is an Anthropic-COMPATIBLE third
-/// party, so per-block emission stays opt-in there.
+/// party, so per-block emission stays off there.
 #[test]
 fn per_block_breakpoints_default_false_for_anthropic_custom_base() {
     let toml_text = r#"
@@ -1021,8 +1010,7 @@ base_url = "https://example.invalid/v1"
     );
 }
 
-/// Both Bedrock shapes default to disabled: Converse per-block emission
-/// stays opt-in, and the knob is inert on Invoke.
+/// Both Bedrock shapes default to disabled.
 #[cfg(feature = "bedrock")]
 #[test]
 fn per_block_breakpoints_default_false_for_both_bedrock_shapes() {
@@ -1031,7 +1019,6 @@ fn per_block_breakpoints_default_false_for_both_bedrock_shapes() {
         super::BedrockApiShapeConfig::Converse,
     ] {
         let entry = bedrock_entry(shape, None);
-        assert_eq!(entry.auto_emit_per_block_breakpoints(), None);
         assert!(
             !entry.per_block_breakpoints_enabled(),
             "bedrock {shape:?} must default to disabled"
@@ -1050,45 +1037,6 @@ fn per_block_breakpoints_default_false_for_other_kinds() {
 
     #[cfg(feature = "openai-responses")]
     assert!(!ProviderEntry::openai_responses("literal:k").per_block_breakpoints_enabled());
-}
-
-/// An explicit per-provider override beats the kind-level default in both
-/// directions and round-trips through serde.
-#[test]
-fn per_block_breakpoints_override_beats_kind_default() {
-    let toml_text = r#"
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-auto_emit_per_block_breakpoints = false
-
-[providers.openai]
-kind = "openai-compat"
-base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
-auto_emit_per_block_breakpoints = true
-"#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse overrides");
-
-    let anthropic = cfg.providers.get("anthropic").expect("anthropic");
-    assert_eq!(anthropic.auto_emit_per_block_breakpoints(), Some(false));
-    assert!(!anthropic.per_block_breakpoints_enabled());
-
-    let openai = cfg.providers.get("openai").expect("openai");
-    assert_eq!(openai.auto_emit_per_block_breakpoints(), Some(true));
-    assert!(openai.per_block_breakpoints_enabled());
-
-    let serialized = toml::to_string(&cfg).expect("serialize");
-    let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
-    assert_eq!(
-        cfg_out
-            .providers
-            .get("anthropic")
-            .expect("anthropic")
-            .auto_emit_per_block_breakpoints(),
-        Some(false),
-        "per-provider override must round-trip through serde"
-    );
 }
 
 /// An omitted `[reduction]` block deserializes to the default:
@@ -1455,30 +1403,6 @@ fn per_block_wire_support_splits_the_two_bedrock_shapes() {
     );
     assert!(
         !bedrock_entry(super::BedrockApiShapeConfig::Invoke, None).supports_per_block_breakpoints(),
-    );
-}
-
-/// The two predicates are ORTHOGONAL: an explicit operator `true` sets
-/// intent on any kind, but never manufactures wire support.
-#[test]
-fn explicit_opt_in_does_not_confer_per_block_wire_support() {
-    let toml_text = r#"
-[providers.openai]
-kind = "openai-compat"
-base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
-auto_emit_per_block_breakpoints = true
-"#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse opted-in openai-compat");
-    let entry = cfg.providers.get("openai").expect("openai provider");
-
-    assert!(
-        entry.per_block_breakpoints_enabled(),
-        "the operator switch reads true (intent is recorded)",
-    );
-    assert!(
-        !entry.supports_per_block_breakpoints(),
-        "but the egress still cannot carry a per-block marker",
     );
 }
 

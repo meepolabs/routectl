@@ -1673,7 +1673,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
 
     let mut warnings = class_policy_warnings(config);
     warnings.extend(super::warnings::codex_identity_warnings(config));
-    warnings.extend(super::warnings::per_block_breakpoint_warnings(config));
     warnings.extend(super::warnings::cloudcode_host_warnings(config));
     warnings.extend(super::warnings::cloudcode_model_warnings(config));
     warnings.extend(super::beta_floor_warnings::beta_floor_override_warnings(

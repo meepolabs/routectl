@@ -191,7 +191,7 @@
     },
     "CacheConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[cache]` config block. Global policy for the\ndispatch-path auto-cache feature. A missing `[cache]` table\ndeserializes to `CacheConfig::default()` (auto-emit enabled), and the\nper-field `#[serde(default)]` gives an omitted key that same default --\non for the two emission/normalization switches, off for\n`k_gated_emission`.\n\nThis is the GLOBAL kill-switch; each `[providers.X]` entry carries an\noptional `auto_emit_top_level_breakpoint` override consulted only when\nthe global switch is on. The effective decision is \"global on AND\nprovider not explicitly off\".",
+      "description": "Operator-facing `[cache]` config block. Global policy for the\ndispatch-path auto-cache feature. A missing `[cache]` table\ndeserializes to `CacheConfig::default()` (auto-emit enabled), and the\nper-field `#[serde(default)]` gives an omitted key that same default --\non for the two emission/normalization switches, off for\n`k_gated_emission`.\n\nThis is the only operator switch for auto-emission; past it, each\nprovider kind's capability and default decide.",
       "properties": {
         "auto_emit_top_level_breakpoint": {
           "default": true,
@@ -671,20 +671,6 @@
               "description": "Reference to the API key. One of:\n  - `env://VAR_NAME`             (process env var)\n  - `file:///abs/path/to/key`    (mode-600 file)\n  - `oauth://<provider>[#seat]`  (routectl-managed OAuth token)",
               "type": "string"
             },
-            "auto_emit_per_block_breakpoints": {
-              "description": "Per-provider override for dispatch-path auto-emission of\nper-block cache breakpoints (the FRONT marker). `None` takes\nthe kind-level default: `true` for an anthropic-api entry on\nthe default base URL, `false` everywhere else. Independent of\n`auto_emit_top_level_breakpoint`, which governs the terminal\ntop-level marker alone. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "auto_emit_top_level_breakpoint": {
-              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch (treated as enabled); `Some(false)`\ndisables auto-emit for this provider even when global is on.\nCache policy, NOT a runtime/rate knob -- lives outside\n`runtime`.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
             "base_url": {
               "default": "",
               "description": "Endpoint base URL. Required (non-empty) on the standard lane\n-- validation rejects an omitted / empty value. Defaulted\n(empty) only so the mantle lane may omit it: when\n`bedrock_mantle` is set the factory derives the URL from\n`bedrock_mantle.region`, and validation then REQUIRES this be\nleft unset.",
@@ -813,20 +799,6 @@
               "$ref": "#/$defs/AuthKind",
               "default": "api-key",
               "description": "How the Messages API authenticates this provider. Default\nis `api-key` (the standard `x-api-key` header). Use\n`oauth-bearer` when `api_key_ref` resolves to a Claude Code\nsubscription access token (`sk-ant-oat01-...`)."
-            },
-            "auto_emit_per_block_breakpoints": {
-              "description": "Per-provider override for dispatch-path auto-emission of\nper-block cache breakpoints (the FRONT marker). `None` takes\nthe kind-level default: `true` for an anthropic-api entry on\nthe default base URL, `false` everywhere else. Independent of\n`auto_emit_top_level_breakpoint`, which governs the terminal\ntop-level marker alone. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "auto_emit_top_level_breakpoint": {
-              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
             },
             "base_url": {
               "default": "https://api.anthropic.com",
@@ -995,20 +967,6 @@
               "default": "chatgpt-oauth",
               "description": "Which auth surface to dispatch on. Default\n`chatgpt-oauth`."
             },
-            "auto_emit_per_block_breakpoints": {
-              "description": "Per-provider override for dispatch-path auto-emission of\nper-block cache breakpoints (the FRONT marker). `None` takes\nthe kind-level default: `true` for an anthropic-api entry on\nthe default base URL, `false` everywhere else. Independent of\n`auto_emit_top_level_breakpoint`, which governs the terminal\ntop-level marker alone. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "auto_emit_top_level_breakpoint": {
-              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
             "base_url": {
               "default": null,
               "description": "Endpoint base URL. None -> factory picks an auth_kind-\nappropriate default. Operators can pin a specific value\nto point at a staging shard, a localhost mock, etc. A managed\n`oauth://codex` credential is accepted only on\n`https://chatgpt.com` with `auth_kind = \"chatgpt-oauth\"`; a\nstaging shard, mirror, or mock needs a static `env://` or\n`file://` credential.",
@@ -1146,20 +1104,6 @@
               "default": "invoke",
               "description": "Wire shape: InvokeModel (default) or Converse."
             },
-            "auto_emit_per_block_breakpoints": {
-              "description": "Per-provider override for dispatch-path auto-emission of\nper-block cache breakpoints (the FRONT marker). `None` takes\nthe kind-level default: `true` for an anthropic-api entry on\nthe default base URL, `false` everywhere else. Independent of\n`auto_emit_top_level_breakpoint`, which governs the terminal\ntop-level marker alone. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "auto_emit_top_level_breakpoint": {
-              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
             "cache_capability": {
               "anyOf": [
                 {
@@ -1275,20 +1219,6 @@
               "$ref": "#/$defs/GeminiAuthMode",
               "default": "api-key",
               "description": "Selects the Gemini wire dialect. `api-key` (default) uses the\npublic `generativelanguage.googleapis.com` REST surface with the\n`x-goog-api-key` header. `cloud-code` uses the Cloud Code\n(\"antigravity\") surface with an OAuth bearer; in that mode\n`api_key_ref` MUST be an `oauth://<provider>` reference."
-            },
-            "auto_emit_per_block_breakpoints": {
-              "description": "Per-provider override for dispatch-path auto-emission of\nper-block cache breakpoints (the FRONT marker). `None` takes\nthe kind-level default: `true` for an anthropic-api entry on\nthe default base URL, `false` everywhere else. Independent of\n`auto_emit_top_level_breakpoint`, which governs the terminal\ntop-level marker alone. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "auto_emit_top_level_breakpoint": {
-              "description": "Per-provider override for dispatch-path auto-emission of a\ntop-level `cache_control` breakpoint. `None` inherits the\nglobal `[cache]` switch; `Some(false)` disables auto-emit for\nthis provider. Cache policy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
             },
             "base_url": {
               "default": "https://generativelanguage.googleapis.com/v1beta",

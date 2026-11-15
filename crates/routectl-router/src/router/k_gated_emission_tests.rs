@@ -693,7 +693,6 @@ fn placement_checks_suppression_only_after_the_shared_request_level_reasons() {
     caller.caller_breakpoint_count = 1;
     let gates = CacheTargetGates {
         capability: Some(crate::config::CacheCapability::new(true, true)),
-        terminal_enabled: true,
         front_supported: true,
         front_enabled: true,
     };

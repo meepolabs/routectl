@@ -1380,7 +1380,7 @@ schema, NULL for every row written by this version onward):
 | `caller_supplied`                      | The caller already supplied a breakpoint; routectl deferred entirely.   |
 | `volatile_vetoed`                      | The stable prefix carried high-confidence volatile tokens; vetoed.      |
 | `auto_skipped:global_disabled`         | `[cache] auto_emit_top_level_breakpoint = false` (the master kill for both markers). |
-| `auto_skipped:provider_disabled`       | The provider's `auto_emit_top_level_breakpoint = false` (terminal) or `auto_emit_per_block_breakpoints = false` (front). |
+| `auto_skipped:provider_disabled`       | Front marker only: the provider kind does not take one (every kind but `anthropic-api` on the default base URL). Rows from older releases may also carry it for a since-retired per-provider switch. |
 | `auto_skipped:no_capability`           | The target's egress cannot carry this marker (or its capability is unknown -- fail closed): no top-level support for the terminal marker, no per-block surface for the front marker. |
 | `auto_skipped:breakpoint_cap`          | Injecting would exceed the 4-breakpoint maximum.                        |
 | `auto_skipped:no_placement_region`     | The request offers no slot this marker could occupy -- a front marker on a flat-string system with no typed custom tool. |
@@ -1406,10 +1406,10 @@ breakpoint cost against what it returned.
   but got NO read this request (`cache_creation > 0` and `cache_read ==
   0`). The stable prefix is being cached on every request without ever
   being re-read, so the premium cache-write tokens are spent for no
-  payoff. **Remedy:** disable auto-emit for that provider with the
-  per-provider `auto_emit_top_level_breakpoint = false`, or set its
-  `cache_capability` `supports_top_level_cache_control = false` (see
-  CONFIGURATION.md). A caller-supplied or skipped strategy is never
+  payoff. **Remedy:** stop the terminal marker for that provider by
+  setting its `cache_capability` `supports_top_level_cache_control =
+  false`, or turn auto-emit off everywhere with `[cache]
+  auto_emit_top_level_breakpoint = false` (see CONFIGURATION.md). A caller-supplied or skipped strategy is never
   flagged as thrash -- routectl only warns on decisions it made itself.
 
 ### per-request cache summary (`cache=READ/PROMPT (PCT%)`, DEBUG)
@@ -2565,7 +2565,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `activation inventory: alias-referenced provider entries have no usable credential`, `credentials reload failed`, `credentials reload needed a router rebuild, but it failed` (`seat_set_changed`), `config reload failed: ...` (the loader one carries `is_panic` / `is_cancelled`), `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader (`is_panic=true`; a cancelled loader is the runtime shutting down). |
 | WARN | `routectl_cli::server::reload_shutdown` | `reload task join failed during shutdown` (`event=reload_task_join_failed`), `reload task did not stop within deadline` (`event=reload_task_deadline_exceeded`, field `deadline_secs`) | A reload task panicked or hung at shutdown: file a bug with the preceding lines; check the usage DB if it recurs. Match on the `event` field, not the message. |
 | ERROR | `routectl_cli::server::seat_driver` | `seat driver stopped before shutdown; managed logins are no longer refreshed in the background`; field `exit` | The background refresh loop ended while the daemon kept serving. Seats still refresh on demand when a request uses them; restart the daemon to restore background refresh, and file a bug with the preceding lines. |
-| WARN | `routectl_cli::server::router_build` | `class policy warning`, `codex identity warning`, `per-block breakpoint warning`, `cloud-code host warning`, `cloud-code model warning`, `auth-reserved header warning` (once per finding at serve startup and at each accepted config reload; a credentials seat-change rebuild repeats none) | A config advisory: adjust or remove the named knob, or accept it. `auth-reserved header warning`: a `[models.X] header_extras` key (`authorization`, `x-api-key`, `anthropic-version`) is dropped from every request; remove it and put credentials in `api_key_ref` / `auth_kind`. |
+| WARN | `routectl_cli::server::router_build` | `class policy warning`, `codex identity warning`, `cloud-code host warning`, `cloud-code model warning`, `auth-reserved header warning` (once per finding at serve startup and at each accepted config reload; a credentials seat-change rebuild repeats none) | A config advisory: adjust or remove the named knob, or accept it. `auth-reserved header warning`: a `[models.X] header_extras` key (`authorization`, `x-api-key`, `anthropic-version`) is dropped from every request; remove it and put credentials in `api_key_ref` / `auth_kind`. |
 | WARN | `routectl_cli::server::secrets` | `OAuth credentials store unavailable ...`, `OAuth credentials store could not be constructed` | `oauth://` references will fail: set HOME/XDG, or fix the credentials directory per `error`. |
 | ERROR / WARN | `routectl_cli::server::serve` | `MITM proxy failed to start`, `usage writer drain task failed`, `usage writer panicked while draining` (ERROR); `graceful drain deadline elapsed`, `failed to install SIGTERM handler`, `usage writer stopped at its drain deadline` (WARN) | MITM down: fix its port or cert per `error`, restart. Drain task failed or writer panicked: queued usage rows may be lost; file a bug. Writer drain deadline: see the `routectl_usage::writer` deadline line just before it. Drain deadline: in-flight requests were cut, recurring means stuck requests. No SIGTERM handler: graceful stop is unavailable. |
 | WARN | `routectl::status::gate` | `status surface rejected a request with a disallowed authority claim`, `status surface overloaded; shed a request` (both sampled) | A foreign `Host` on `/status*` suggests DNS rebinding: find the page polling it. Shedding means a poller is hammering `/status`: slow it down. |

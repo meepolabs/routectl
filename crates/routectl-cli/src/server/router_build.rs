@@ -30,7 +30,7 @@ fn sanitize_warning_for_log(warning: &str) -> String {
 /// seat-set change, which would repeat findings about a config that did not
 /// change.
 pub fn log_advisory_warnings(config: &Config) {
-    let categories: [(&str, Vec<String>); 6] = [
+    let categories: [(&str, Vec<String>); 5] = [
         (
             "class policy warning",
             routectl_router::class_policy_warnings(config),
@@ -38,12 +38,6 @@ pub fn log_advisory_warnings(config: &Config) {
         (
             "codex identity warning",
             routectl_router::codex_identity_warnings(config),
-        ),
-        // `auto_emit_per_block_breakpoints` is inert on Bedrock Invoke (the
-        // knob gates the Converse cachePoint surface).
-        (
-            "per-block breakpoint warning",
-            routectl_router::per_block_breakpoint_warnings(config),
         ),
         // A cloud-code Gemini entry pinned to the production Cloud Code host
         // keeps that pin, but the lane default is the daily host.

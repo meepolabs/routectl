@@ -112,8 +112,6 @@ fn build_router_with_breaker(
             payload_extras: None,
             user_agent: None,
             cache_capability: None,
-            auto_emit_top_level_breakpoint: None,
-            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             #[cfg(feature = "bedrock")]
             bedrock_mantle: None,
@@ -181,8 +179,6 @@ fn build_router_with_provider_and_retry(provider: Arc<dyn Provider>, retry: Retr
             context_management: false,
             max_thinking_entry_bytes: None,
             cache_capability: None,
-            auto_emit_top_level_breakpoint: None,
-            auto_emit_per_block_breakpoints: None,
             reduction_enabled: None,
             cloak: routectl_providers::anthropic_api::CloakConfig::default(),
             #[cfg(feature = "bedrock")]

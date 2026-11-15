@@ -110,6 +110,16 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
                       router withholds from the lane",
     },
     RetiredKey {
+        path: &["providers", ANY_ENTRY, "auto_emit_per_block_breakpoints"],
+        refused_value: None,
+        replacement: "use the global [cache] auto_emit_top_level_breakpoint switch",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "auto_emit_top_level_breakpoint"],
+        refused_value: None,
+        replacement: "use the global [cache] auto_emit_top_level_breakpoint switch",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "class_overrides"],
         refused_value: None,
         replacement: "per-class policy lives in `[retry.classes.*]`; a status keeps its \

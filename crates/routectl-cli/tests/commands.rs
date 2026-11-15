@@ -1938,6 +1938,68 @@ fn config_set_refuses_the_retired_class_overrides_with_the_loaders_line() {
     );
 }
 
+/// Both per-provider breakpoint switches are retired while the global
+/// `[cache]` switch of the same name stays live: `config set` on either
+/// provider key prints the loader's line for a file carrying it and writes
+/// nothing, while the global switch writes.
+#[test]
+fn config_set_refuses_the_retired_provider_breakpoint_switches_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = two_seat_pool_config(tmp.path());
+    let base = std::fs::read_to_string(&config_path).expect("read config");
+    let path = config_path.to_str().unwrap();
+    let set = |key: &str, value: &str| {
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "set", key, value])
+    };
+
+    for key in [
+        "auto_emit_top_level_breakpoint",
+        "auto_emit_per_block_breakpoints",
+    ] {
+        let loader_line = routectl_router::preflight_raw_config(&base.replace(
+            "[providers.seat-b]\n",
+            &format!("{key} = false\n[providers.seat-b]\n"),
+        ))
+        .expect_err("the loader refuses a file carrying the key")
+        .to_string();
+
+        // Act
+        let (code, stdout, stderr) = set(&format!("providers.seat-a.{key}"), "false");
+
+        // Assert
+        assert_ne!(code, 0, "{key} refused: {stdout} / {stderr}");
+        assert_eq!(
+            loader_line,
+            format!(
+                "`providers.seat-a.{key}` is retired: use the global [cache] \
+                 auto_emit_top_level_breakpoint switch; delete it"
+            )
+        );
+        assert!(
+            stderr.contains(&loader_line),
+            "config set prints the loader's line: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config"),
+            base,
+            "a refused edit must not write"
+        );
+    }
+
+    let (code, stdout, stderr) = set("cache.auto_emit_top_level_breakpoint", "false");
+    assert_eq!(
+        code, 0,
+        "control: the global switch writes: {stdout} / {stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("auto_emit_top_level_breakpoint = false"),
+        "the control edit must land on disk"
+    );
+}
+
 // -- config check's secret-ref validation: read-only by construction, and
 // control-char-filtered at the one point it prints operator-written keys.
 

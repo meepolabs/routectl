@@ -506,8 +506,6 @@ fn bedrock_provider_entry() -> ProviderEntry {
         payload_extras: None,
         anthropic_beta: vec![],
         cache_capability: None,
-        auto_emit_top_level_breakpoint: None,
-        auto_emit_per_block_breakpoints: None,
         reduction_enabled: None,
         runtime: ProviderRuntimePolicy::default(),
     }

@@ -3,7 +3,7 @@
 //! request (the bytes the egress would see), and the original request
 //! is never mutated.
 use super::*;
-use crate::config::{CacheConfig, ProviderEntry, ProviderRuntimePolicy};
+use crate::config::{CacheConfig, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use parking_lot::Mutex as ParkingMutex;
@@ -140,30 +140,6 @@ fn anthropic_entry() -> ProviderEntry {
     ProviderEntry::anthropic_api("literal:k")
 }
 
-fn anthropic_entry_provider_disabled() -> ProviderEntry {
-    ProviderEntry::AnthropicApi {
-        api_key_ref: "literal:k".into(),
-        base_url: "https://api.anthropic.com".into(),
-        anthropic_version: "2023-06-01".into(),
-        auth_kind: Default::default(),
-        credential_source: Default::default(),
-        header_extras: BTreeMap::new(),
-        payload_extras: None,
-        user_agent: None,
-        forward_client_headers: Vec::new(),
-        context_management: false,
-        max_thinking_entry_bytes: None,
-        cache_capability: None,
-        auto_emit_top_level_breakpoint: Some(false),
-        auto_emit_per_block_breakpoints: None,
-        reduction_enabled: None,
-        cloak: routectl_providers::anthropic_api::CloakConfig::default(),
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle: None,
-        runtime: ProviderRuntimePolicy::default(),
-    }
-}
-
 fn openai_entry() -> ProviderEntry {
     ProviderEntry::openai_compat("https://example.invalid/v1", "literal:k")
 }
@@ -258,44 +234,32 @@ async fn volatile_high_prefix_blocks_injection() {
 
 #[tokio::test]
 async fn global_kill_switch_off_blocks_injection() {
+    // Arrange: the kind whose defaults emit both markers, so every
+    // withheld marker is attributable to the switch.
     let (router, captured) = rig(anthropic_entry(), false, 0);
-    router.complete(base_req()).await.expect("ok");
+
+    // Act
+    let dispatched = router
+        .complete_with_options(blocks_system_req(), RouterOptions::new())
+        .await;
+
+    // Assert
+    dispatched.result.expect("ok");
     let captured = captured.lock();
     let up = captured.first().expect("one dispatch");
     assert_eq!(
         up.cache_control, None,
         "global switch off must block auto-emit"
     );
-}
-
-#[tokio::test]
-async fn provider_kill_switch_off_blocks_injection() {
-    let (router, captured) = rig(anthropic_entry_provider_disabled(), true, 0);
-    router.complete(base_req()).await.expect("ok");
-    let captured = captured.lock();
-    let up = captured.first().expect("one dispatch");
+    assert_eq!(front_marker(up), None);
     assert_eq!(
-        up.cache_control, None,
-        "per-provider switch off must block even with global on",
+        dispatched.meta.cache_front_decision,
+        Some("auto_skipped:global_disabled")
     );
-}
-
-#[tokio::test]
-async fn provider_switch_true_with_global_true_injects() {
-    // Per-provider Some(true) + global true -> injects.
-    let mut entry = anthropic_entry_provider_disabled();
-    if let ProviderEntry::AnthropicApi {
-        auto_emit_top_level_breakpoint,
-        ..
-    } = &mut entry
-    {
-        *auto_emit_top_level_breakpoint = Some(true);
-    }
-    let (router, captured) = rig(entry, true, 0);
-    router.complete(base_req()).await.expect("ok");
-    let captured = captured.lock();
-    let up = captured.first().expect("one dispatch");
-    assert_eq!(up.cache_control, Some(CacheControl::ephemeral_5m()));
+    assert_eq!(
+        dispatched.meta.cache_terminal_decision,
+        Some("auto_skipped:global_disabled")
+    );
 }
 
 #[tokio::test]
@@ -929,17 +893,12 @@ fn plan(
 }
 
 /// Gates for a per-block-CAPABLE target (anthropic-api / Converse
-/// shaped), with each marker's operator switch given explicitly. Use
+/// shaped), with the front-marker kind default given explicitly. Use
 /// [`gates_front_unsupported`] for the kinds whose egress cannot carry a
 /// per-block marker.
-const fn gates(
-    capability: Option<CacheCapability>,
-    terminal: bool,
-    front: bool,
-) -> CacheTargetGates {
+const fn gates(capability: Option<CacheCapability>, front: bool) -> CacheTargetGates {
     CacheTargetGates {
         capability,
-        terminal_enabled: terminal,
         front_supported: true,
         front_enabled: front,
     }
@@ -947,11 +906,10 @@ const fn gates(
 
 /// Gates for a target whose egress cannot carry a per-block marker
 /// (openai-compat, Bedrock Invoke, openai-responses, gemini), with the
-/// operator switch nonetheless opted IN -- the inert-not-honored case.
+/// front marker nonetheless enabled -- the fail-closed case.
 const fn gates_front_unsupported(capability: Option<CacheCapability>) -> CacheTargetGates {
     CacheTargetGates {
         capability,
-        terminal_enabled: true,
         front_supported: false,
         front_enabled: true,
     }
@@ -962,7 +920,7 @@ fn helper_emits_on_clean_capable_request() {
     let mut req = base_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false), false);
     assert_eq!(out.terminal, CacheInjection::Emitted);
     assert_eq!(req.cache_control, Some(CacheControl::ephemeral_5m()));
 }
@@ -971,7 +929,7 @@ fn helper_emits_on_clean_capable_request() {
 fn helper_fails_closed_on_unknown_capability() {
     let mut req = base_req();
     let p = plan(0, false, true, &req);
-    let out = apply_auto_cache_placement(&mut req, &p, gates(None, true, false), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(None, false), false);
     assert_eq!(out.terminal, CacheInjection::SkippedNoCapability);
     assert_eq!(req.cache_control, None);
 }
@@ -1034,7 +992,7 @@ fn helper_rolls_back_when_validation_fails() {
     // branch given the production no-caller gate.
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false), false);
     assert_eq!(out.terminal, CacheInjection::ValidationRolledBack);
     assert_eq!(
         req.cache_control, None,
@@ -1052,7 +1010,7 @@ fn helper_caller_supplied_dominates_all_per_target_skip_reasons() {
 
     // Act + Assert: capability unknown (None) -> caller_supplied, NOT
     // no_capability (the key precedence change).
-    let out = apply_auto_cache_placement(&mut req, &p, gates(None, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(None, true), false);
     assert_eq!(out.front, CacheInjection::SkippedCallerSupplied);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(
@@ -1063,19 +1021,19 @@ fn helper_caller_supplied_dominates_all_per_target_skip_reasons() {
     // Global kill-switch off -> caller still dominates.
     let p_global_off = plan(1, false, false, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p_global_off, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p_global_off, gates(cap, true), false);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(req.cache_control, None);
 
-    // Per-provider kill-switches off -> caller still dominates.
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false, false), false);
+    // Front marker off for the kind -> caller still dominates.
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false), false);
     assert_eq!(out.front, CacheInjection::SkippedCallerSupplied);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(req.cache_control, None);
 
     // Volatile-high veto must not override caller_supplied either.
     let p_volatile = plan(1, true, true, &req);
-    let out = apply_auto_cache_placement(&mut req, &p_volatile, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p_volatile, gates(cap, true), false);
     assert_eq!(out.terminal, CacheInjection::SkippedCallerSupplied);
     assert_eq!(req.cache_control, None);
 }
@@ -1181,8 +1139,7 @@ fn front_marker(req: &ChatRequest) -> Option<CacheControl> {
 async fn clean_anthropic_request_commits_front_and_terminal_together() {
     // Acceptance: a no-marker Anthropic request with a clean prefix gets
     // BOTH markers after one validation. anthropic-api on the default
-    // base URL defaults `auto_emit_per_block_breakpoints` on, so the rig
-    // needs no override.
+    // base URL takes the front marker by default.
     let (router, captured) = rig(anthropic_entry(), true, 0);
     let dispatched = router
         .complete_with_options(blocks_system_req(), RouterOptions::new())
@@ -1293,7 +1250,7 @@ fn front_and_terminal_roll_back_together_on_validation_failure() {
 
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
 
     assert_eq!(out.front, CacheInjection::ValidationRolledBack);
     assert_eq!(out.terminal, CacheInjection::ValidationRolledBack);
@@ -1365,7 +1322,7 @@ fn rollback_preserves_overlay_mutations_and_every_cache_slot() {
 
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
     assert_eq!(out.front, CacheInjection::ValidationRolledBack);
     assert_eq!(out.terminal, CacheInjection::ValidationRolledBack);
 
@@ -1390,7 +1347,7 @@ fn front_missing_skips_only_the_front_marker() {
     req.system = Some(SystemContent::Text("flat system".into()));
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
 
     assert_eq!(out.front, CacheInjection::SkippedNoPlacementRegion);
     assert_eq!(out.terminal, CacheInjection::Emitted);
@@ -1400,13 +1357,13 @@ fn front_missing_skips_only_the_front_marker() {
 
 #[test]
 fn terminal_missing_skips_only_the_terminal_marker() {
-    // Acceptance: a target with no top-level capability (Bedrock
-    // Converse) skips the terminal marker while the opted-in front
-    // marker still emits -- the Converse front-only layout (D2).
+    // A target with no top-level capability skips the terminal marker
+    // while an enabled front marker still emits: the two gates are
+    // independent.
     let mut req = blocks_system_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(false, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
 
     assert_eq!(out.front, CacheInjection::Emitted);
     assert_eq!(out.terminal, CacheInjection::SkippedNoCapability);
@@ -1425,7 +1382,7 @@ fn both_missing_skips_both_with_their_own_reasons() {
     req.system = Some(SystemContent::Text("flat system".into()));
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(false, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
 
     assert_eq!(out.front, CacheInjection::SkippedNoPlacementRegion);
     assert_eq!(out.terminal, CacheInjection::SkippedNoCapability);
@@ -1467,7 +1424,7 @@ fn no_placement_region_survives_a_validation_rollback() {
     .into();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
 
     assert_eq!(
         out.front,
@@ -1484,7 +1441,7 @@ fn front_marker_lands_on_the_last_custom_tool_when_system_is_flat() {
     let mut req = tools_only_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
 
     assert_eq!(out.front, CacheInjection::Emitted);
     let tools = req.tools.as_ref().expect("tools present");
@@ -1519,7 +1476,7 @@ fn placement_fails_closed_when_the_resolved_slot_no_longer_matches() {
     let out = apply_auto_cache_placement(
         &mut req,
         &p,
-        gates(Some(CacheCapability::new(false, true)), true, true),
+        gates(Some(CacheCapability::new(false, true)), true),
         false,
     );
     assert_eq!(
@@ -1551,7 +1508,7 @@ fn placement_skips_a_slot_that_became_wire_ineligible() {
     let out = apply_auto_cache_placement(
         &mut req,
         &p,
-        gates(Some(CacheCapability::new(false, true)), true, true),
+        gates(Some(CacheCapability::new(false, true)), true),
         false,
     );
     assert_eq!(out.front, CacheInjection::SkippedNoPlacementRegion);
@@ -1616,12 +1573,12 @@ async fn cache_auto_decision_line_carries_tokens_only() {
 
 #[test]
 fn front_gate_off_withholds_only_the_front_marker() {
-    // The new knob is an independent kill: with per-block emission off,
-    // the terminal marker is unchanged from today's behavior.
+    // With the kind's front marker off, the terminal marker is still
+    // placed on its own.
     let mut req = blocks_system_req();
     let p = plan(0, false, true, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, false), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false), false);
 
     assert_eq!(out.front, CacheInjection::SkippedProviderDisabled);
     assert_eq!(out.terminal, CacheInjection::Emitted);
@@ -1630,11 +1587,11 @@ fn front_gate_off_withholds_only_the_front_marker() {
 }
 
 #[test]
-fn explicit_opt_in_is_inert_where_the_wire_cannot_carry_the_marker() {
-    // FAIL-CLOSED: an operator `auto_emit_per_block_breakpoints = true` on
-    // a kind whose egress drops (or 400s on) a per-block marker must NOT
-    // emit one. Emitting would ship a marker the wire discards AND record
-    // a false `auto_emitted` in the decision ledger.
+fn front_marker_is_withheld_where_the_wire_cannot_carry_it() {
+    // FAIL-CLOSED: a front marker enabled on a kind whose egress drops (or
+    // 400s on) a per-block marker must NOT be emitted. Emitting would ship
+    // a marker the wire discards AND record a false `auto_emitted` in the
+    // decision ledger.
     let mut req = blocks_system_req();
     let p = plan(0, false, true, &req);
     let before = serde_json::to_vec(&req).expect("serialize before");
@@ -1668,12 +1625,11 @@ fn explicit_opt_in_is_inert_where_the_wire_cannot_carry_the_marker() {
 
 #[test]
 fn global_kill_switch_withholds_both_markers() {
-    // The global `[cache]` switch is the master kill: an operator with
-    // auto-emit off today must not start receiving a front marker.
+    // The global `[cache]` switch is the master kill for both markers.
     let mut req = blocks_system_req();
     let p = plan(0, false, false, &req);
     let cap = Some(CacheCapability::new(true, true));
-    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true, true), false);
+    let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
 
     assert_eq!(out.front, CacheInjection::SkippedGlobalDisabled);
     assert_eq!(out.terminal, CacheInjection::SkippedGlobalDisabled);
@@ -1688,8 +1644,8 @@ fn injected_front_marker_is_never_at_the_messages_position() {
     // mutable-suffix domain is unchanged. Pinned for BOTH anchor shapes.
     for mut req in [blocks_system_req(), tools_only_req()] {
         let p = plan(0, false, true, &req);
-        let cap = Some(CacheCapability::new(true, true));
-        let out = apply_auto_cache_placement(&mut req, &p, gates(cap, false, true), false);
+        let cap = Some(CacheCapability::new(false, true));
+        let out = apply_auto_cache_placement(&mut req, &p, gates(cap, true), false);
         assert_eq!(out.front, CacheInjection::Emitted);
 
         let positions: Vec<_> = compute_frozen_floor(&req).positions().to_vec();
@@ -1834,63 +1790,8 @@ async fn caller_marked_credential_bound_request_is_byte_identical() {
         Some("caller_supplied"),
     );
 }
-
-/// Parse a single `[providers.p]` entry out of TOML. Used for the entries
-/// with no builder, so an operator-authored opt-in is exercised through
-/// the REAL deserializer rather than a hand-built struct literal.
-fn entry_from_toml(toml_text: &str) -> ProviderEntry {
-    let cfg: Config = toml::from_str(toml_text).expect("parse provider entry");
-    cfg.providers.get("p").expect("provider p").clone()
-}
-
-#[tokio::test]
-async fn opted_in_openai_compat_gets_no_front_marker_on_the_wire() {
-    // Acceptance (fail-closed): the openai-compat egress DROPS a per-block
-    // marker with a WARN. An explicit opt-in must therefore be inert -- no front
-    // marker, and the recorded decision must not claim `auto_emitted`.
-    let entry = entry_from_toml(
-        r#"
-[providers.p]
-kind = "openai-compat"
-base_url = "https://example.invalid/v1"
-api_key_ref = "literal:k"
-auto_emit_per_block_breakpoints = true
-"#,
-    );
-    assert!(
-        entry.per_block_breakpoints_enabled(),
-        "the operator opted in, so the switch reads true",
-    );
-
-    let (router, captured) = rig(entry, true, 0);
-    // openai-compat has no top-level capability either, so the dispatched
-    // request must be byte-identical to the input.
-    let mut before = blocks_system_req();
-    before.model = "upstream-model".into();
-    let before_bytes = serde_json::to_vec(&before).expect("serialize before");
-
-    let dispatched = router
-        .complete_with_options(blocks_system_req(), RouterOptions::new())
-        .await;
-    dispatched.result.expect("ok");
-
-    let captured = captured.lock();
-    let up = captured.first().expect("one dispatch");
-    assert_eq!(front_marker(up), None, "no front marker may reach the wire");
-    assert_eq!(
-        serde_json::to_vec(up).expect("serialize after"),
-        before_bytes,
-        "an opted-in openai-compat request must be byte-identical to today",
-    );
-    assert_eq!(
-        dispatched.meta.cache_front_decision,
-        Some("auto_skipped:no_capability"),
-        "the ledger must record the skip, never a false auto_emitted",
-    );
-}
-
 #[test]
-fn front_marker_never_ships_to_an_opted_in_openai_compat_egress() {
+fn front_marker_never_ships_to_an_openai_compat_egress() {
     // The consequences the skip prevents, pinned at the EGRESS itself so
     // the fail-closed rule stays tied to real wire behavior rather than to
     // our model of it: the marker is DROPPED (silently wasted).
@@ -2070,12 +1971,7 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
     // Target 1: both regions enabled -> two injections -> over the cap ->
     // the whole candidate is discarded.
     let mut attempt_one = canonical.clone();
-    let first = apply_auto_cache_placement(
-        &mut attempt_one,
-        &shared_plan,
-        gates(cap, true, true),
-        false,
-    );
+    let first = apply_auto_cache_placement(&mut attempt_one, &shared_plan, gates(cap, true), false);
 
     assert_eq!(first.front, CacheInjection::ValidationRolledBack);
     assert_eq!(first.terminal, CacheInjection::ValidationRolledBack);
@@ -2090,12 +1986,8 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
     // attempt started from the canonical request rather than from target 1's
     // discarded candidate.
     let mut attempt_two = canonical.clone();
-    let second = apply_auto_cache_placement(
-        &mut attempt_two,
-        &shared_plan,
-        gates(cap, true, false),
-        false,
-    );
+    let second =
+        apply_auto_cache_placement(&mut attempt_two, &shared_plan, gates(cap, false), false);
 
     assert_eq!(second.front, CacheInjection::SkippedProviderDisabled);
     assert_eq!(
@@ -2129,12 +2021,8 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
         ),
         "the fixture must offer a front slot for the control to be meaningful",
     );
-    let contaminated_out = apply_auto_cache_placement(
-        &mut contaminated,
-        &shared_plan,
-        gates(cap, true, false),
-        false,
-    );
+    let contaminated_out =
+        apply_auto_cache_placement(&mut contaminated, &shared_plan, gates(cap, false), false);
     assert_eq!(
         contaminated_out.terminal,
         CacheInjection::ValidationRolledBack,
@@ -2145,11 +2033,10 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
 #[cfg(feature = "bedrock")]
 mod converse_front_only {
     use super::*;
-    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
+    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig, ProviderRuntimePolicy};
 
-    /// A Bedrock entry at `api_shape`, with the per-block knob set to
-    /// `per_block`.
-    fn bedrock_entry(api_shape: BedrockApiShapeConfig, per_block: Option<bool>) -> ProviderEntry {
+    /// A Bedrock entry at `api_shape`, every other knob at its default.
+    pub(super) fn bedrock_entry(api_shape: BedrockApiShapeConfig) -> ProviderEntry {
         ProviderEntry::Bedrock {
             region: "us-east-1".into(),
             api_shape,
@@ -2159,100 +2046,18 @@ mod converse_front_only {
             payload_extras: None,
             anthropic_beta: Vec::new(),
             cache_capability: None,
-            auto_emit_top_level_breakpoint: None,
-            auto_emit_per_block_breakpoints: per_block,
             reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
 
     #[tokio::test]
-    async fn opted_in_converse_gets_the_front_marker_only() {
-        // Acceptance: an opted-in no-marker Converse target receives the
-        // per-block front marker (which the existing egress translation
-        // turns into a `cachePoint`) and NO top-level marker.
-        let (router, captured) = rig(
-            bedrock_entry(BedrockApiShapeConfig::Converse, Some(true)),
-            true,
-            0,
-        );
-        let dispatched = router
-            .complete_with_options(blocks_system_req(), RouterOptions::new())
-            .await;
-        dispatched.result.expect("ok");
-
-        let captured = captured.lock();
-        let up = captured.first().expect("one dispatch");
-        assert_eq!(
-            front_marker(up),
-            Some(CacheControl::ephemeral_5m()),
-            "an opted-in Converse target must get the front marker",
-        );
-        assert_eq!(
-            up.cache_control, None,
-            "Converse gets no terminal marker (a top-level field is inert there)",
-        );
-        assert_eq!(dispatched.meta.cache_front_decision, Some("auto_emitted"));
-        assert_eq!(
-            dispatched.meta.cache_terminal_decision,
-            Some("auto_skipped:no_capability"),
-        );
-    }
-
-    /// The canonical front marker reaches the Converse wire as a
-    /// `cachePoint` block through the EXISTING per-block translation --
-    /// zero routectl-providers changes.
-    #[tokio::test]
-    async fn converse_front_marker_becomes_a_cache_point_on_the_wire() {
-        let cfg = routectl_providers::bedrock::BedrockConfig {
-            id: "b".into(),
-            region: "us-east-1".into(),
-            model_id: "anthropic.claude-sonnet-4".into(),
-            api_shape: routectl_providers::bedrock::BedrockApiShape::Converse,
-            creds: routectl_providers::bedrock::BedrockCreds::DefaultChain,
-            user_agent: None,
-            header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
-            additional_model_request_fields: None,
-        };
-        let cache_points = |req: &ChatRequest| {
-            let body = routectl_providers::bedrock::converse::normalize_request(&cfg, req)
-                .expect("converse body");
-            body.get("system")
-                .and_then(serde_json::Value::as_array)
-                .expect("converse system array")
-                .iter()
-                .filter(|b| b.get("cachePoint").is_some())
-                .count()
-        };
-        // Negative control: the un-marked canonical request produces NO
-        // cachePoint, so the assertion below is attributable to placement.
-        assert_eq!(cache_points(&blocks_system_req()), 0);
-
-        let (router, captured) = rig(
-            bedrock_entry(BedrockApiShapeConfig::Converse, Some(true)),
-            true,
-            0,
-        );
-        router.complete(blocks_system_req()).await.expect("ok");
-
-        let up = captured.lock().first().cloned().expect("one dispatch");
-        assert_eq!(
-            cache_points(&up),
-            1,
-            "the front marker must reach the Converse wire as exactly one cachePoint block",
-        );
-    }
-
-    #[tokio::test]
-    async fn non_opted_in_converse_is_unchanged() {
-        // Converse stays opt-in: with the knob absent, neither marker is
-        // emitted and the request is byte-identical to the input.
-        let (router, captured) = rig(
-            bedrock_entry(BedrockApiShapeConfig::Converse, None),
-            true,
-            0,
-        );
+    async fn converse_front_marker_records_provider_disabled() {
+        // Converse takes no front marker by default and has no top-level
+        // capability, so neither marker is emitted, the request is
+        // byte-identical to the input, and the front decision records the
+        // kind default rather than a missing capability.
+        let (router, captured) = rig(bedrock_entry(BedrockApiShapeConfig::Converse), true, 0);
         let mut before = blocks_system_req();
         before.model = "upstream-model".into();
         let before_bytes = serde_json::to_vec(&before).expect("serialize before");
@@ -2267,7 +2072,7 @@ mod converse_front_only {
         assert_eq!(
             serde_json::to_vec(up).expect("serialize after"),
             before_bytes,
-            "a non-opted-in Converse target must be byte-identical to today",
+            "a Converse target must dispatch the input bytes unchanged",
         );
         assert_eq!(
             dispatched.meta.cache_front_decision,
@@ -2275,9 +2080,8 @@ mod converse_front_only {
         );
     }
 
-    /// Bedrock Invoke stands down: the per-block knob defaults off there
-    /// and is inert, so the dispatched bytes keep exactly today's shape
-    /// (the terminal marker only, which the Invoke egress lowers itself).
+    /// Bedrock Invoke takes no front marker, so the dispatched bytes carry
+    /// the terminal marker only, which the Invoke egress lowers itself.
     #[tokio::test]
     async fn invoke_is_byte_identical_across_the_inline_corpus() {
         for req in [
@@ -2286,8 +2090,7 @@ mod converse_front_only {
             tools_only_req(),
             long_tool_request(),
         ] {
-            let (router, captured) =
-                rig(bedrock_entry(BedrockApiShapeConfig::Invoke, None), true, 0);
+            let (router, captured) = rig(bedrock_entry(BedrockApiShapeConfig::Invoke), true, 0);
             let mut expected = req.clone();
             expected.model = "upstream-model".into();
             // Invoke DOES support the top-level marker (the egress lowers
@@ -2408,8 +2211,7 @@ mod converse_front_only {
         ];
         for (name, marker, decision, terminal, expected_markers) in rows {
             // Arrange
-            let (router, captured) =
-                rig(bedrock_entry(BedrockApiShapeConfig::Invoke, None), true, 0);
+            let (router, captured) = rig(bedrock_entry(BedrockApiShapeConfig::Invoke), true, 0);
 
             // Act
             let dispatched = router
@@ -2434,42 +2236,135 @@ mod converse_front_only {
             assert_eq!(wire_cache_markers(&body), expected_markers, "{name}");
         }
     }
+}
 
-    /// Invoke with an EXPLICIT opt-in: the documented-inert knob must stay
-    /// inert at the placement seam too. Invoke has no front-marker path
-    /// (its egress lowers the TOP-LEVEL marker to per-block itself), so the
-    /// bytes match the default-off Invoke case exactly and the front
-    /// decision records the wire skip rather than `auto_emitted`.
-    #[tokio::test]
-    async fn explicit_opt_in_on_invoke_stays_inert() {
-        let (router, captured) = rig(
-            bedrock_entry(BedrockApiShapeConfig::Invoke, Some(true)),
-            true,
-            0,
-        );
+#[cfg(all(feature = "bedrock", feature = "openai-responses", feature = "gemini"))]
+mod kind_default_decisions {
+    use super::converse_front_only::bedrock_entry;
+    use super::*;
+    use crate::config::BedrockApiShapeConfig;
+    use routectl_core::cache_decision::{
+        AUTO_EMITTED, AUTO_SKIPPED_NO_CAPABILITY, AUTO_SKIPPED_PROVIDER_DISABLED,
+    };
+
+    /// What one provider entry must dispatch for a request offering a front
+    /// slot: its (front, terminal) decision tokens.
+    struct KindRow {
+        name: &'static str,
+        entry: ProviderEntry,
+        front: &'static str,
+        terminal: &'static str,
+    }
+
+    fn rows() -> Vec<KindRow> {
+        let row = |name, entry, front, terminal| KindRow {
+            name,
+            entry,
+            front,
+            terminal,
+        };
+        vec![
+            row(
+                "anthropic-api, default base",
+                ProviderEntry::anthropic_api("literal:k"),
+                AUTO_EMITTED,
+                AUTO_EMITTED,
+            ),
+            row(
+                "anthropic-api, custom base",
+                ProviderEntry::anthropic_api("literal:k").with_base_url("https://example.invalid"),
+                AUTO_SKIPPED_PROVIDER_DISABLED,
+                AUTO_SKIPPED_NO_CAPABILITY,
+            ),
+            row(
+                "bedrock invoke",
+                bedrock_entry(BedrockApiShapeConfig::Invoke),
+                AUTO_SKIPPED_PROVIDER_DISABLED,
+                AUTO_EMITTED,
+            ),
+            row(
+                "bedrock converse",
+                bedrock_entry(BedrockApiShapeConfig::Converse),
+                AUTO_SKIPPED_PROVIDER_DISABLED,
+                AUTO_SKIPPED_NO_CAPABILITY,
+            ),
+            row(
+                "openai-compat",
+                ProviderEntry::openai_compat("https://example.invalid/v1", "literal:k"),
+                AUTO_SKIPPED_PROVIDER_DISABLED,
+                AUTO_SKIPPED_NO_CAPABILITY,
+            ),
+            row(
+                "openai-responses",
+                ProviderEntry::openai_responses("literal:k"),
+                AUTO_SKIPPED_PROVIDER_DISABLED,
+                AUTO_SKIPPED_NO_CAPABILITY,
+            ),
+            row(
+                "gemini",
+                ProviderEntry::gemini("literal:k"),
+                AUTO_SKIPPED_PROVIDER_DISABLED,
+                AUTO_SKIPPED_NO_CAPABILITY,
+            ),
+        ]
+    }
+
+    /// The input request plus exactly the markers the row's tokens claim:
+    /// the front marker on the last system block, the terminal marker on
+    /// the top-level field.
+    fn expected_bytes(row: &KindRow) -> Vec<u8> {
         let mut expected = blocks_system_req();
         expected.model = "upstream-model".into();
-        // Today's Invoke shape: the terminal marker only.
-        expected.cache_control = Some(CacheControl::ephemeral_5m());
-        let expected_bytes = serde_json::to_vec(&expected).expect("serialize expected");
+        if row.front == AUTO_EMITTED {
+            let Some(SystemContent::Blocks(blocks)) = expected.system.as_mut() else {
+                panic!("system stays in Blocks form");
+            };
+            blocks[1].cache_control = Some(CacheControl::ephemeral_5m());
+        }
+        if row.terminal == AUTO_EMITTED {
+            expected.cache_control = Some(CacheControl::ephemeral_5m());
+        }
+        serde_json::to_vec(&expected).expect("serialize expected")
+    }
 
-        let dispatched = router
-            .complete_with_options(blocks_system_req(), RouterOptions::new())
-            .await;
-        dispatched.result.expect("ok");
+    /// Every provider kind's default front and terminal decision, through
+    /// the real gate resolver and dispatch path. Each kind's front token
+    /// differs from what a flipped default would record (`auto_emitted`
+    /// where the wire carries a front marker, `no_capability` where it does
+    /// not), so flipping any one kind's default turns its row red.
+    #[tokio::test]
+    async fn each_kind_dispatches_its_default_markers() {
+        for row in rows() {
+            // Arrange
+            let expected = expected_bytes(&row);
+            let (router, captured) = rig(row.entry, true, 0);
 
-        let captured = captured.lock();
-        let up = captured.first().expect("one dispatch");
-        assert_eq!(front_marker(up), None, "Invoke must get no front marker");
-        assert_eq!(
-            serde_json::to_vec(up).expect("serialize after"),
-            expected_bytes,
-            "an explicit opt-in must not change the Invoke wire shape",
-        );
-        assert_eq!(
-            dispatched.meta.cache_front_decision,
-            Some("auto_skipped:no_capability"),
-            "an opted-in-but-unsupported wire records the skip, not auto_emitted",
-        );
+            // Act
+            let dispatched = router
+                .complete_with_options(blocks_system_req(), RouterOptions::new())
+                .await;
+
+            // Assert
+            dispatched.result.expect("ok");
+            assert_eq!(
+                dispatched.meta.cache_front_decision,
+                Some(row.front),
+                "{}: front decision",
+                row.name
+            );
+            assert_eq!(
+                dispatched.meta.cache_terminal_decision,
+                Some(row.terminal),
+                "{}: terminal decision",
+                row.name
+            );
+            let up = captured.lock().first().cloned().expect("one dispatch");
+            assert_eq!(
+                serde_json::to_vec(&up).expect("serialize dispatched"),
+                expected,
+                "{}: dispatched bytes",
+                row.name
+            );
+        }
     }
 }

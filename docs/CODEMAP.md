@@ -1854,13 +1854,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   configured base URL, or the daily Cloud Code host for a `cloud-code` entry
   left at the api-key default base URL; any other kind: `None`),
   read by the field stages' attributability decision; `cache_capability()`
-  fails closed for anthropic-api on a non-default base URL, plus
-  `auto_emit_top_level_breakpoint()` and the per-block front-marker trio
-  `auto_emit_per_block_breakpoints()` / `per_block_breakpoints_enabled()`
-  (operator intent; kind-level default: true only for default-base
-  anthropic-api) / `supports_per_block_breakpoints()` (wire capability:
-  anthropic-api and Bedrock Converse only -- placement requires BOTH, so an
-  opt-in on a kind whose egress drops per-block markers stays inert)); the
+  fails closed for anthropic-api on a non-default base URL, plus the
+  per-block front-marker pair `per_block_breakpoints_enabled()` (kind
+  default: true only for default-base anthropic-api) /
+  `supports_per_block_breakpoints()` (wire capability: anthropic-api and
+  Bedrock Converse only -- placement requires BOTH)); the
   cfg(`bedrock`) `BedrockMantleConfig
   { region, creds }` sub-config is reused verbatim across the mantle lanes --
   `bedrock_mantle: Option<BedrockMantleConfig>` on `AnthropicApi`,
@@ -2195,12 +2193,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `codex_identity_warnings` flags a chatgpt-oauth openai-responses provider
   whose `header_extras` overrides `version` or `user-agent` with a value
   diverging from the derived codex identity (the override still WINS --
-  advisory only); `per_block_breakpoint_warnings` flags an
-  `auto_emit_per_block_breakpoints` key on any entry whose egress cannot carry
-  a per-block marker (`supports_per_block_breakpoints` false: Bedrock
-  `api_shape = "invoke"`, openai-compat, openai-responses, gemini), where the
-  knob is inert (advisory only, never a load error), naming the shape for a
-  Bedrock entry and the kind otherwise via `inert_per_block_surface`;
+  advisory only);
   `cloudcode_host_warnings` flags a `cloud-code` gemini entry whose `base_url`
   pins the PRODUCTION cloud-code host (exact parsed-host match via
   `routectl_providers::gemini::is_prod_host`, lookalike-safe) while the lane
@@ -2770,8 +2763,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   overlays and before the TRANSACTIONAL auto-cache placement helper
   `cache_plan::apply_auto_cache_placement` -- shared by both message surfaces, gated by
   `cache_plan::AutoCacheRequestPlan` plus the per-target `cache_target_gates`
-  (`CacheTargetGates`: terminal capability + switch, front wire-support +
-  switch), applying the FRONT per-block marker
+  (`CacheTargetGates`: terminal capability, front wire-support + kind
+  default), applying the FRONT per-block marker
   (`place_front_marker` at the plan's resolved `FrontSlot`) and the TERMINAL
   top-level marker to ONE candidate clone, validating once, then committing or
   discarding whole (`shared_skip_reason` / `cap_skip` / `rollback_skip` fold the

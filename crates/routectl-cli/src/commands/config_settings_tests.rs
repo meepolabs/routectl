@@ -318,14 +318,6 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
     ("PricingConfig.input_per_mtok", "inherit: price tables"),
     ("PricingConfig.output_per_mtok", "inherit: price tables"),
     ("ProviderEntry.account_id_ref", "off: no ChatGPT account"),
-    (
-        "ProviderEntry.auto_emit_per_block_breakpoints",
-        "inherit: kind rule",
-    ),
-    (
-        "ProviderEntry.auto_emit_top_level_breakpoint",
-        "inherit: [cache]",
-    ),
     ("ProviderEntry.base_url", "inherit: the auth_kind endpoint"),
     ("ProviderEntry.bedrock_mantle", "off: no mantle lane"),
     ("ProviderEntry.cache_capability", "inherit: kind rule"),

@@ -40,5 +40,5 @@ pub use validate::{
 pub use validate_region::validate_aws_regions;
 pub use warnings::{
     auth_reserved_header_warnings, class_policy_warnings, cloudcode_host_warnings,
-    cloudcode_model_warnings, codex_identity_warnings, per_block_breakpoint_warnings,
+    cloudcode_model_warnings, codex_identity_warnings,
 };

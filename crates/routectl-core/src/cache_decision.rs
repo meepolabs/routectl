@@ -38,8 +38,9 @@ pub const VOLATILE_VETOED: &str = "volatile_vetoed";
 /// kill for both markers.
 pub const AUTO_SKIPPED_GLOBAL_DISABLED: &str = "auto_skipped:global_disabled";
 
-/// The provider's own `auto_emit_top_level_breakpoint = false` (terminal
-/// marker) or `auto_emit_per_block_breakpoints = false` (front marker).
+/// The front marker is off by default for the target's provider kind.
+/// Rows written by older releases may also carry it for a marker a
+/// since-retired per-provider switch turned off.
 pub const AUTO_SKIPPED_PROVIDER_DISABLED: &str = "auto_skipped:provider_disabled";
 
 /// The target's egress cannot carry this marker to the wire, or its

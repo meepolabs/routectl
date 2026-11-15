@@ -357,6 +357,8 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
 | `pools.<name>.seat_selection = "round-robin"` | use sticky-least-loaded |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
+| `providers.<name>.auto_emit_per_block_breakpoints` | use the global [cache] auto_emit_top_level_breakpoint switch |
+| `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.class_overrides` | per-class policy lives in `[retry.classes.*]`; a status keeps its built-in class |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |
@@ -669,8 +671,6 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
 | `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
 | `k_gated_emission`             | `[cache]` global                | bool, default **false**; when true, withholds auto-emitted markers on a session whose measured reuse sits below the marker's break-even (see `[cache]`) |
-| `auto_emit_top_level_breakpoint` | `[providers.X]`               | `Option<bool>`, default None (inherits global); `false` disables auto-cache for this provider     |
-| `auto_emit_per_block_breakpoints` | `[providers.X]`              | `Option<bool>`, default None (-> per-kind default: true for default-base `anthropic-api`, false elsewhere); gates the per-block FRONT marker only, and is inert on kinds whose egress cannot carry one |
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
 | `enabled`                      | `[reduction]` global            | bool, default true; master switch for dispatch-path context reduction (see `[reduction]`)         |
 | `reduction_enabled`            | `[providers.X]`                 | `Option<bool>`, default None (inherits global); `false` disables reduction for this provider      |
@@ -3544,14 +3544,15 @@ skipped entirely whenever the caller already supplied any breakpoint
 (so it can never break a caller's own caching); and the injected shape
 is re-validated before dispatch and rolled back on any doubt.
 
-The optional `[cache]` block is the **global** master switch. A missing
-block keeps the default: auto-emit enabled, and the break-even emission
-gate off.
+The optional `[cache]` block is the only operator switch for
+auto-emission; past it, each provider kind's capability and default
+decide. A missing block keeps the default: auto-emit enabled, and the
+break-even emission gate off.
 
 ```toml
 [cache]
-# Master switch for dispatch-path auto-emission of a top-level
-# cache_control breakpoint. Default true.
+# Master switch for dispatch-path auto-emission of both cache
+# breakpoints (front and terminal). Default true.
 auto_emit_top_level_breakpoint = true
 # Stabilize the tool-array order on the non-Claude-Code OAuth Anthropic
 # path so a random client tool order can still hit the prompt cache.
@@ -3567,24 +3568,6 @@ Auto-emit applies to completions and streaming. It is **not** applied to
 `count_tokens` (`/v1/messages/count_tokens`), which is a probe and never
 writes a cache entry.
 
-### Per-provider switch (`auto_emit_top_level_breakpoint`)
-
-Each `[providers.X]` entry carries an optional
-`auto_emit_top_level_breakpoint`. `None` (omitted) inherits the global
-switch (treated as enabled); `false` disables auto-emit for that
-provider even when the global switch is on. The effective decision is
-"global on AND provider not explicitly off". Use this to turn auto-cache
-off for one upstream without touching the global default -- it is the
-first-line remedy for a cache-thrash warning (see LOGGING.md).
-
-```toml
-[providers.some-anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://SOME_ANTHROPIC_API_KEY"
-# Opt this provider out of auto-cache while leaving the global default on.
-auto_emit_top_level_breakpoint = false
-```
-
 ### Per-provider capability (`cache_capability`)
 
 routectl only auto-emits a breakpoint to a provider it knows honors one.
@@ -3598,8 +3581,8 @@ Each provider kind has a **conservative** default capability:
 | `openai-compat`     | false                              | false                  |
 | any unknown kind    | false                              | false                  |
 
-When `supports_top_level_cache_control` is false, auto-emit is skipped
-for that provider regardless of the switches above. An operator can
+When `supports_top_level_cache_control` is false, auto-emit of the
+terminal marker is skipped for that provider. An operator can
 override the default per entry with an explicit `cache_capability`:
 
 ```toml
@@ -3652,68 +3635,26 @@ differently:
 Caller-supplied per-block markers are unaffected on either shape and
 still cache normally; an operator may override per entry.
 
-### Per-block front marker (`auto_emit_per_block_breakpoints`)
+### Per-block front marker
 
-Each `[providers.X]` entry carries an optional
-`auto_emit_per_block_breakpoints` (bool). It gates dispatch-path
-auto-emission of a **per-block** cache breakpoint at the FRONT of the
-cacheable prefix -- the Anthropic per-block `cache_control` marker and the
-Bedrock Converse `cachePoint` block. It does **not** govern the terminal
-top-level marker; that stays entirely under
-`auto_emit_top_level_breakpoint` and the global `[cache]` switch. The two
-knobs are independent, so turning per-block emission off never disturbs
-the terminal marker an existing deployment already gets.
+Besides the terminal top-level marker, the dispatch path can place a
+**per-block** cache breakpoint at the FRONT of the cacheable prefix (the
+last wire-eligible system block, else the last custom tool definition).
+Whether it does is fixed by the provider kind; there is no per-provider
+setting:
 
-When the key is omitted, the kind-level default applies:
+| Provider entry                            | Front marker |
+|-------------------------------------------|--------------|
+| `anthropic-api` on the default base URL   | emitted      |
+| `anthropic-api` on any other base URL     | not emitted  |
+| `bedrock`, either `api_shape`             | not emitted  |
+| every other kind                          | not emitted  |
 
-| Provider entry                            | Default |
-|-------------------------------------------|---------|
-| `anthropic-api` on the default base URL   | true    |
-| `anthropic-api` on any other base URL     | false   |
-| `bedrock`, `api_shape = "converse"`       | false   |
-| `bedrock`, `api_shape = "invoke"`         | false (key is inert -- see below) |
-| every other kind                          | false (key is inert -- see below) |
-
-Only default-base `anthropic-api` defaults on: that is the population
-whose terminal marker is already auto-emitted, so the front marker adds
-no new upstream shape. Everywhere else per-block emission is opt-in, so
-the feature fails toward current behavior.
-
-**The knob is operator INTENT, not a capability override.** Emission also
-requires that the target's egress can actually carry a per-block marker to
-the wire, which only `anthropic-api` and `bedrock` with `api_shape =
-"converse"` can. Setting the key to `true` on any other kind is accepted
-and INERT: no marker is placed, and the recorded decision is
-`auto_skipped:no_capability` rather than `auto_emitted`, so the decision
-ledger never claims a marker that never shipped. This is deliberate
-fail-closed behavior -- on `openai-compat` an emitted per-block marker
-would be dropped with a WARN.
-
-```toml
-# Opt a Bedrock Converse provider in to front-marker emission.
-[providers.bedrock-converse]
-kind = "bedrock"
-region = "us-east-1"
-api_shape = "converse"
-creds = { kind = "default-chain" }
-auto_emit_per_block_breakpoints = true
-
-# Opt the real Anthropic surface back out without touching the terminal
-# marker.
-[providers.anthropic-api-key]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
-auto_emit_per_block_breakpoints = false
-```
-
-**Inert where the wire cannot carry the marker.** Setting the key (to
-either value) on a `bedrock` entry with `api_shape = "invoke"`, or on any
-`openai-compat` / `openai-responses` / `gemini` entry, is accepted -- the
-config still loads -- but changes nothing, and the loader emits a startup
-WARN naming the provider so the key is not mistaken for an active setting.
-Invoke has no front-marker path (its egress lowers the *top-level* marker
-to per-block form itself); the other kinds have no per-block breakpoint
-surface at all.
+Only default-base `anthropic-api` takes it: that is the population whose
+terminal marker is already auto-emitted, so the front marker adds no new
+upstream shape. Everywhere else the front decision records
+`auto_skipped:provider_disabled`. The global `[cache]` switch withholds
+both markers.
 
 **A cachePoint below the upstream's minimum prefix is a silent no-op.**
 AWS (and Anthropic) only cache a prefix that clears a per-model minimum
@@ -3724,10 +3665,8 @@ withhold markers that would have cached -- so a small-prefix request may
 record `auto_emitted` while the upstream reports no cache write. Read the
 decision alongside the reported cache-write tokens, not on its own.
 
-The custom-base `anthropic-api` fail-closed posture above is unchanged:
-that entry is gated by `cache_capability` for the terminal marker and by
-this default of `false` for the front marker; both need an explicit
-operator opt-in.
+A custom-base `anthropic-api` entry can opt in to the terminal marker
+with `cache_capability` (above); it never receives a front marker.
 
 ### Tool-array normalization (`normalize_tools`)
 
