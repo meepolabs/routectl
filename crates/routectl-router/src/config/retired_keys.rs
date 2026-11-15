@@ -34,6 +34,16 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "set prices under `[models.X.pricing]`",
     },
     RetiredKey {
+        path: &["calibration"],
+        refused_value: None,
+        replacement: "the learned token-estimate correction always applies",
+    },
+    RetiredKey {
+        path: &["capability", "staleness_hint_days"],
+        refused_value: None,
+        replacement: "diagnostics use a fixed 14-day hint",
+    },
+    RetiredKey {
         path: &["fidelity", "paid_probe_daily_caps"],
         refused_value: None,
         replacement: "paid capability probes no longer exist; nothing replaces it",
@@ -78,9 +88,19 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "use `[capability.overrides.<provider>] unsupported`",
     },
     RetiredKey {
+        path: &["seat_quota"],
+        refused_value: None,
+        replacement: "quota-aware placement always applies on sticky-least-loaded pools",
+    },
+    RetiredKey {
         path: &["server", "allow_disable_fallbacks"],
         refused_value: None,
         replacement: "the x-routectl-disable-fallbacks header is always honored",
+    },
+    RetiredKey {
+        path: &["trim"],
+        refused_value: None,
+        replacement: "the advisory trim uses fixed defaults",
     },
 ];
 

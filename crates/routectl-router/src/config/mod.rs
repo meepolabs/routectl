@@ -23,12 +23,11 @@ pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::default_responses_base;
 pub use schema::{
     AliasValue, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
-    CalibrationConfig, CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, FidelityConfig,
-    HistoryReasoning, LogConfig, MitmConfig, ModelEntry, NicknameIter, OverrideEntry,
-    PREFIX_QUORUM, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
-    ReductionConfig, RegistryEntry, RetryPolicy, SeatQuotaConfig, SeatSelection, ServerAuth,
-    ServerConfig, TrimConfig, UsageConfig, WindowGateConfig, WireCheckConfig,
-    is_config_provider_kind,
+    CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, FidelityConfig, HistoryReasoning,
+    LogConfig, MitmConfig, ModelEntry, NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig,
+    ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RegistryEntry,
+    RetryPolicy, SeatSelection, ServerAuth, ServerConfig, UsageConfig, WindowGateConfig,
+    WireCheckConfig, is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -163,13 +162,6 @@ pub struct Config {
     #[serde(default)]
     pub capability: CapabilityConfig,
 
-    /// Operator-facing `[trim]` block. Tunes the deterministic steady-state
-    /// advisory trimmer's four knobs. A missing block resolves (via
-    /// `TrimConfig::to_params()`) to `SteadyStateTrimParams::default()` --
-    /// the trimmer's current conservative behavior is unchanged.
-    #[serde(default)]
-    pub trim: TrimConfig,
-
     /// Operator-facing `[window_gate]` block. Kill switch for the
     /// proactive context-window gate. A missing block leaves the gate
     /// disabled, which is byte-identical to no gate at all; `enabled = true`
@@ -177,18 +169,6 @@ pub struct Config {
     /// resolution, so a live config swap applies without a restart.
     #[serde(default)]
     pub window_gate: WindowGateConfig,
-
-    /// Operator-facing `[calibration]` block. Accepted so existing configs
-    /// keep loading; it has no effect. The learned per-lane correction of
-    /// the router's token estimate always applies.
-    #[serde(default)]
-    pub calibration: CalibrationConfig,
-
-    /// Operator-facing `[seat_quota]` block. Accepted so existing configs
-    /// keep loading; it has no effect. Quota-aware birth placement under
-    /// `sticky-least-loaded` always applies.
-    #[serde(default)]
-    pub seat_quota: SeatQuotaConfig,
 
     /// Operator-facing `[fidelity]` block. Opt-in surface for
     /// prefix-impacting pre-flight repair. A missing block keeps
@@ -304,5 +284,4 @@ initial_backoff_ms = 250
 enabled               = true
 decay_hours           = 48
 inferred_window_hours = 1
-staleness_hint_days   = 14
 "#;

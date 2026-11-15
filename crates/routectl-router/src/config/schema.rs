@@ -102,7 +102,7 @@ impl Default for ReductionConfig {
 /// Operator-facing `[capability]` config block. Kill switch plus tempo
 /// knobs for the learned-capability subsystem. A missing `[capability]`
 /// table deserializes to `CapabilityConfig::default()` (enabled, 48h
-/// decay, 1h inferred window, 14d staleness hint), and each per-field
+/// decay, 1h inferred window), and each per-field
 /// `#[serde(default)]` keeps an omitted key at its default too.
 ///
 /// `enabled` is the master switch: off leaves any learned entries
@@ -110,9 +110,7 @@ impl Default for ReductionConfig {
 /// `decay_hours` sets how long a learned negative acts before it lapses
 /// into a single re-probe; `inferred_window_hours` bounds how long a
 /// pending single-observation inferred signal waits for a confirming
-/// second observation before it resets. `staleness_hint_days` sets the
-/// age past which a verified capability reads as stale in diagnostics
-/// (display-only; not wired into the act path).
+/// second observation before it resets.
 ///
 /// `#[non_exhaustive]` leaves room for later knobs without breaking
 /// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
@@ -141,11 +139,6 @@ pub struct CapabilityConfig {
     /// confirming second observation before it resets. Default 1.
     #[serde(default = "default_inferred_window_hours")]
     pub inferred_window_hours: u64,
-    /// Days past which a verified capability stamp reads as stale in
-    /// diagnostics. Display-only -- surfaced in doctor / CLI hints, never
-    /// wired into router construction or the act path. Default 14.
-    #[serde(default = "default_staleness_hint_days")]
-    pub staleness_hint_days: u64,
     /// Operator capability overrides, keyed by two-tier target spec:
     /// `"provider_name"` applies to every model on that provider, and
     /// `"provider_name:nickname"` targets a single model. An omitted
@@ -184,7 +177,6 @@ impl Default for CapabilityConfig {
             enabled: true,
             decay_hours: default_decay_hours(),
             inferred_window_hours: default_inferred_window_hours(),
-            staleness_hint_days: default_staleness_hint_days(),
             overrides: BTreeMap::new(),
             essential: Vec::new(),
         }
@@ -216,96 +208,6 @@ const fn default_decay_hours() -> u64 {
 
 const fn default_inferred_window_hours() -> u64 {
     1
-}
-
-const fn default_staleness_hint_days() -> u64 {
-    14
-}
-
-/// Operator-facing `[trim]` config block. Wraps the deterministic
-/// steady-state advisory trimmer's four knobs
-/// (`crate::context_trim::SteadyStateTrimParams`) for TOML config. A missing
-/// `[trim]` block deserializes to `TrimConfig::default()`; `to_params()` then
-/// resolves that to the SAME `SteadyStateTrimParams` as
-/// `SteadyStateTrimParams::default()`, because every per-field default fn
-/// below delegates to the exact const `SteadyStateTrimParams::default()`
-/// uses -- one source of truth for "missing block == current conservative
-/// defaults", never a second hardcoded copy.
-///
-/// `to_params()` is the ONLY constructor for `SteadyStateTrimParams` from
-/// config, and BOTH production consumers (`Router::record_would_trim`,
-/// `prompt_size::build_steady_state_economics`) call it -- they can never
-/// resolve to different params from the same `Config`.
-///
-/// `SteadyStateTrimParams` itself is deliberately NOT serde-derived: it is
-/// the advisory trimmer's pure-function input (built ad hoc by tests too),
-/// and coupling it to serde would leak a config-loading concern into a
-/// module that has none today. This wrapper is the wire-side boundary.
-///
-/// No `enabled` switch, no band knobs, no per-provider override: the
-/// steady-state trimmer is an always-on ADVISORY recorder that never mutates
-/// a dispatched request, so there is no "off" state to represent.
-/// `#[non_exhaustive]` leaves room for a later knob without breaking
-/// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
-/// config-load time instead of silently ignoring it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct TrimConfig {
-    /// Estimated total tokens at or below which no trim is proposed.
-    #[serde(default = "default_trim_trigger_tokens")]
-    pub trigger_tokens: u64,
-    /// Minimum tokens the elided span must free for a trim to be proposed.
-    #[serde(default = "default_trim_clear_at_least_tokens")]
-    pub clear_at_least_tokens: u64,
-    /// Number of leading messages kept fully intact (never elided).
-    #[serde(default = "default_trim_head_keep_messages")]
-    pub head_keep_messages: usize,
-    /// Number of trailing messages protected from elision.
-    #[serde(default = "default_trim_keep_recent_messages")]
-    pub keep_recent_messages: usize,
-}
-
-impl Default for TrimConfig {
-    fn default() -> Self {
-        Self {
-            trigger_tokens: default_trim_trigger_tokens(),
-            clear_at_least_tokens: default_trim_clear_at_least_tokens(),
-            head_keep_messages: default_trim_head_keep_messages(),
-            keep_recent_messages: default_trim_keep_recent_messages(),
-        }
-    }
-}
-
-impl TrimConfig {
-    /// Resolve this config block to the advisory trimmer's pure-function
-    /// params. The single shared constructor -- see the struct doc for why
-    /// both production consumers must call this instead of building
-    /// `SteadyStateTrimParams` themselves.
-    pub const fn to_params(&self) -> crate::context_trim::SteadyStateTrimParams {
-        crate::context_trim::SteadyStateTrimParams {
-            trigger_tokens: self.trigger_tokens,
-            clear_at_least_tokens: self.clear_at_least_tokens,
-            head_keep_messages: self.head_keep_messages,
-            keep_recent_messages: self.keep_recent_messages,
-        }
-    }
-}
-
-const fn default_trim_trigger_tokens() -> u64 {
-    crate::context_trim::DEFAULT_TRIGGER_TOKENS
-}
-
-const fn default_trim_clear_at_least_tokens() -> u64 {
-    crate::context_trim::DEFAULT_CLEAR_AT_LEAST_TOKENS
-}
-
-const fn default_trim_head_keep_messages() -> usize {
-    crate::context_trim::DEFAULT_HEAD_KEEP_MESSAGES
-}
-
-const fn default_trim_keep_recent_messages() -> usize {
-    crate::context_trim::DEFAULT_KEEP_RECENT_MESSAGES
 }
 
 /// Operator-facing `[window_gate]` config block. Kill switch for the
@@ -340,59 +242,6 @@ impl Default for WindowGateConfig {
     fn default() -> Self {
         Self {
             enabled: default_window_gate_enabled(),
-        }
-    }
-}
-
-/// Operator-facing `[calibration]` config block. Accepted so existing
-/// configs keep loading; it has no effect.
-///
-/// The learned per-lane correction of the router's token estimate always
-/// applies. A lane produces no correction until it has accumulated real
-/// evidence, and every refusal path (thin evidence, stale evidence, an
-/// out-of-band reduced ratio) falls back to the uncorrected estimate, so
-/// there is nothing for a switch to protect.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct CalibrationConfig {
-    /// No effect. Parsed and kept only so a config that sets it still loads.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for CalibrationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_true(),
-        }
-    }
-}
-
-/// Operator-facing `[seat_quota]` config block. Accepted so existing
-/// configs keep loading; it has no effect.
-///
-/// Subscription-quota-aware seat placement, which orders a NEW conversation's
-/// birth seat on a `sticky-least-loaded` pool by each credential account's
-/// remaining short-window budget, always applies. A seat produces no reading
-/// until a real upstream response carries one, and every refusal path (no
-/// reading, an expired one, a reading the trust rules declined, a provider
-/// with no curated short window) falls back to the pre-quota chooser, so
-/// there is nothing for a switch to protect. Affinity pins and the one-time
-/// migration off an unhealthy seat are unaffected.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct SeatQuotaConfig {
-    /// No effect. Parsed and kept only so a config that sets it still loads.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for SeatQuotaConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_true(),
         }
     }
 }
@@ -3488,14 +3337,6 @@ mod capability_config_tests;
 #[cfg(test)]
 #[path = "window_gate_config_tests.rs"]
 mod window_gate_config_tests;
-
-#[cfg(test)]
-#[path = "calibration_config_tests.rs"]
-mod calibration_config_tests;
-
-#[cfg(test)]
-#[path = "seat_quota_config_tests.rs"]
-mod seat_quota_config_tests;
 
 #[cfg(test)]
 #[path = "fidelity_config_tests.rs"]

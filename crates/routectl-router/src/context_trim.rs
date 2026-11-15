@@ -73,9 +73,7 @@ pub const BYTES_PER_TOKEN_ESTIMATE: u64 = 4;
 const ELISION_PLACEHOLDER: &str = "[elided: prior tool content removed to bound context]";
 
 /// Conservative default trigger: start trimming only once the conversation is
-/// large enough that a bounded cut is worthwhile. `pub` so `config::TrimConfig`
-/// can reference the SAME const its `[trim]` per-field defaults resolve to --
-/// one source of truth for "missing block == these defaults".
+/// large enough that a bounded cut is worthwhile.
 pub const DEFAULT_TRIGGER_TOKENS: u64 = 100_000;
 /// Conservative default minimum freed tokens per cut.
 pub const DEFAULT_CLEAR_AT_LEAST_TOKENS: u64 = 20_000;
@@ -85,12 +83,9 @@ pub const DEFAULT_HEAD_KEEP_MESSAGES: usize = 2;
 /// Conservative default recent messages to protect from elision.
 pub const DEFAULT_KEEP_RECENT_MESSAGES: usize = 6;
 
-/// Knobs for the steady-state trim. Populated from the operator-facing
-/// `[trim]` block via `crate::config::TrimConfig::to_params()`; the
-/// [`Default`] impl here carries the conservative named consts above and is
-/// what a missing `[trim]` block resolves to. Deliberately NOT serde-derived
-/// -- `TrimConfig` is the config-wire wrapper so this pure-function struct
-/// stays free of a config-loading concern.
+/// Knobs for the steady-state trim. Production dispatch and the
+/// `prompt-size` command both run on [`Default`], which carries the
+/// conservative named consts above; no config key tunes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SteadyStateTrimParams {
     /// Estimated total tokens at or below which no trim is proposed.

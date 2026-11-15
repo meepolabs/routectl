@@ -48,15 +48,15 @@ overlays merge, what's reserved.
 - [history_reasoning](#history_reasoning-reasoning-echo-back)
 - [Retry and fallback defaults](#retry-and-fallback-defaults)
 - [Proactive context-window gate (`[window_gate]`)](#proactive-context-window-gate-window_gate)
-- [Learned token-estimate correction (`[calibration]`)](#learned-token-estimate-correction-calibration)
-- [Quota-aware seat placement (`[seat_quota]`)](#quota-aware-seat-placement-seat_quota)
+- [Learned token-estimate correction](#learned-token-estimate-correction)
+- [Quota-aware seat placement](#quota-aware-seat-placement)
 
 **Caching and cost**
 - [Prompt-cache auto-emission (`[cache]`)](#prompt-cache-auto-emission-cache)
   ([break-even emission gate](#break-even-emission-gate-k_gated_emission))
 - [Context reduction (`[reduction]`)](#context-reduction-reduction)
   ([kill switch + recovery](#kill-switch-reduction-enabled-is-the-live-off-switch))
-- [Steady-state advisory trim (`[trim]`)](#steady-state-advisory-trim-trim)
+- [Steady-state advisory trim](#steady-state-advisory-trim)
 - [Model prices (`[models.X.pricing]`)](#model-prices-modelsxpricing)
 - [Pricing registry](#pricing-registry-registrypatternpricing)
 - [Refreshing the price table (`routectl prices refresh`)](#refreshing-the-price-table-routectl-prices-refresh)
@@ -186,20 +186,8 @@ version = 5           # config schema version; see "Config schema version"
 [reduction]           # dispatch-time context-reduction policy
                       # (enabled). Optional; default on.
 
-[trim]                # steady-state advisory-trim knobs (trigger_tokens,
-                      # clear_at_least_tokens, head_keep_messages,
-                      # keep_recent_messages). Optional; default
-                      # 100000 / 20000 / 2 / 6. Advisory only -- never
-                      # mutates a dispatched request.
-
 [window_gate]         # proactive context-window gate switch
                       # (enabled). Optional; default off.
-
-[calibration]         # accepted for existing configs (enabled); has no
-                      # effect. The learned correction always applies.
-
-[seat_quota]          # accepted for existing configs (enabled); has no
-                      # effect. Quota-aware placement always applies.
 
 [log]                 # operator-configurable runtime log knobs
                       # (trace_headers, trace_body_bytes,
@@ -366,6 +354,8 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | --- | --- |
 | `bedrock` | nothing replaces it: client betas and body fields pass through, minus what the router withholds from the lane |
 | `cache_pricing` | set prices under `[models.X.pricing]` |
+| `calibration` | the learned token-estimate correction always applies |
+| `capability.staleness_hint_days` | diagnostics use a fixed 14-day hint |
 | `fidelity.paid_probe_daily_caps` | paid capability probes no longer exist; nothing replaces it |
 | `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
@@ -374,7 +364,9 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
+| `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
 | `server.allow_disable_fallbacks` | the x-routectl-disable-fallbacks header is always honored |
+| `trim` | the advisory trim uses fixed defaults |
 
 ## Editor autocomplete (JSON Schema)
 
@@ -685,17 +677,10 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
 | `enabled`                      | `[reduction]` global            | bool, default true; master switch for dispatch-path context reduction (see `[reduction]`)         |
 | `reduction_enabled`            | `[providers.X]`                 | `Option<bool>`, default None (inherits global); `false` disables reduction for this provider      |
-| `trigger_tokens`               | `[trim]` global                 | u64, default 100000; see `[trim]`                                                                 |
-| `clear_at_least_tokens`        | `[trim]` global                 | u64, default 20000; see `[trim]`                                                                  |
-| `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
-| `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
 | `enabled`                      | `[window_gate]` global          | bool, default false; master switch for the proactive context-window gate (see `[window_gate]`)    |
-| `enabled`                      | `[calibration]` global          | bool, default true; accepted and has no effect: the correction always applies (see `[calibration]`)|
-| `enabled`                      | `[seat_quota]` global           | bool, default true; accepted and has no effect: quota-aware placement always applies (see `[seat_quota]`)|
 | `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
 | `decay_hours`                  | `[capability]` global           | u64, default 48; hours a learned negative acts before a re-probe (see `[capability]`)             |
 | `inferred_window_hours`        | `[capability]` global           | u64, default 1; window a pending inferred signal waits for confirmation (see `[capability]`)      |
-| `staleness_hint_days`          | `[capability]` global           | u64, default 14; display-only age past which a capability reads as stale in diagnostics (see `[capability]`) |
 
 **`base_url` scheme requirement.** `base_url` must use `https://` (or
 `http://` for loopback hosts only: an IPv4 loopback literal such as
@@ -2246,7 +2231,7 @@ window, and the running skip total.
 Routectl-internal identifiers and token figures only -- never anything
 from the request body.
 
-## Learned token-estimate correction (`[calibration]`)
+## Learned token-estimate correction
 
 The gate above compares its estimate against a target's configured window,
 and that estimate is serialized bytes over four -- wrong per model, and
@@ -2278,16 +2263,7 @@ the gate is more willing to skip a small-window target; below 1.0 it
 means the estimator over-counts, so the gate is more willing to admit a
 target it would otherwise have skipped.
 
-The correction always applies. The optional `[calibration]` block and its
-`enabled` key are still accepted so existing configs keep loading, but
-the key has **no effect**: `enabled = false` does not turn the correction
-off.
-
-```toml
-[calibration]
-# Accepted for existing configs; no effect.
-enabled = true
-```
+The correction always applies; no config key turns it off.
 
 **Always on is safe because a cold lane corrects nothing.** A lane
 produces no correction until it has accumulated real evidence, so a
@@ -2334,8 +2310,6 @@ upstream reads that upstream's own (possibly cold) lane, and the old
 upstream's lane goes once nothing serves it. The startup warm applies the
 same rule to ledger rows, whatever nickname recorded them.
 
-An unknown key inside the `[calibration]` block still fails config load.
-
 Whether a correction is moving a decision is observable in the gate's
 own throttled `window_gate_skip` WARN, which reports both the raw
 estimate and the corrected figure the decision actually used. They are
@@ -2344,7 +2318,7 @@ see a learned correction move a skip. The startup warm logs its own
 tally: rows loaded, rows accepted, rows rejected, and how many lanes
 came back calibrated.
 
-## Quota-aware seat placement (`[seat_quota]`)
+## Quota-aware seat placement
 
 On a multi-seat OAuth pool running `sticky-least-loaded`, a NEW
 conversation's birth seat is ordered by each credential account's
@@ -2395,15 +2369,7 @@ Ties inside the chosen group still fall to the existing deterministic
 anti-herd rotation, so a burst of new conversations spreads rather than
 herding onto the emptiest seat.
 
-Placement always applies. The optional `[seat_quota]` block and its
-`enabled` key are still accepted so existing configs keep loading, but the
-key has **no effect**: `enabled = false` does not turn placement off.
-
-```toml
-[seat_quota]
-# Accepted for existing configs; no effect.
-enabled = true
-```
+Placement always applies; no config key turns it off.
 
 **Always on is safe because thin evidence places nothing.** A seat
 produces no reading until a real upstream response carries one, so a
@@ -2419,8 +2385,6 @@ guard and the freshness bounds are constants grounded in captured
 upstream evidence, not operator knobs: a threshold tuned per deployment
 turns a routing decision into a support surface, and the fallback in
 every direction is the pre-quota chooser rather than a denial.
-
-An unknown key inside the `[seat_quota]` block still fails config load.
 
 Whether placement is acting is observable in the log: a throttled line
 (at most one per five minutes per process) names the model and which arm
@@ -4073,10 +4037,6 @@ decay_hours = 48
 # Hours a pending single-observation inferred signal waits for a
 # confirming second observation before it resets. Default 1.
 inferred_window_hours = 1
-# Days past which a verified capability reads as stale in diagnostics.
-# Display-only -- surfaced in doctor / CLI hints, never wired into the
-# act path. Default 14.
-staleness_hint_days = 14
 # Capability keys declared ESSENTIAL globally: a target that only fails on
 # one of them is routed away from rather than having the capability
 # stripped in place. Default empty (the baked strip-vs-route table applies).
@@ -4095,11 +4055,10 @@ essential = []
 - **`inferred_window_hours`** (u64, default 1) -- how long a pending
   single-observation inferred signal waits for a confirming second
   observation before it resets.
-- **`staleness_hint_days`** (u64, default 14) -- the age past which a
-  verified capability reads as stale in diagnostics. This is
-  **display-only**: it drives the stale-cell flag in the `routectl
-  doctor` capability matrix, and is never wired into router construction
-  or the act path.
+
+The `routectl doctor` capability matrix flags a verified capability as
+stale once it was last seen more than 14 days ago. The hint is fixed and
+display-only: it never affects routing.
 
 ### Global essential capabilities (`essential`)
 
@@ -4568,7 +4527,7 @@ Run these in order; stop as soon as the transition log confirms the flip.
    accepts still fails to reload, restart the daemon; a cold start runs the
    same loader with no prior state to carry over.
 
-#### Independence from advisory trim (`[trim]`)
+#### Independence from advisory trim
 
 The lossless minifier's switch and the advisory trimmer's controls are
 SEPARATE mechanisms and never share a switch:
@@ -4577,8 +4536,8 @@ SEPARATE mechanisms and never share a switch:
   minifier**, and each `[providers.X] reduction_enabled` is a per-provider
   override of that one transform.
 - The advisory trimmer's live-cut switch, when trimming gains one, is a
-  NEW key under `[trim]` -- distinct from `[reduction] enabled` and from
-  every per-provider `reduction_enabled`.
+  NEW key, distinct from `[reduction] enabled` and from every
+  per-provider `reduction_enabled`.
 
 This is deliberate. Killing a risky lossy cut must not silently kill the
 safe lossless minifier, and all four on/off combinations stay legal:
@@ -4598,32 +4557,21 @@ Two consequences follow directly, and neither may be traded away:
   the would-trim recorder is a measurement surface, independent of whether
   anything acts on it.
 
-## Steady-state advisory trim (`[trim]`)
+## Steady-state advisory trim
 
 routectl carries a deterministic, front-anchored steady-state context
 trimmer that is **advisory only** in this release: it computes what a
 cache-coherent prefix cut WOULD look like for a long-running
-conversation, but never mutates a dispatched request. The `[trim]`
-block tunes the four knobs the trimmer's proposal is a pure function
-of; it carries no `enabled` switch and no per-provider override, because
-an always-on advisory recorder that never mutates has no "off" state to
-represent.
+conversation, but never mutates a dispatched request. Its proposal is a
+pure function of four fixed defaults; no config key tunes them, and an
+always-on advisory recorder that never mutates has no "off" state:
 
-```toml
-[trim]
-# Estimated total tokens at or below which no trim is proposed.
-trigger_tokens = 100000
-# Minimum tokens the elided span must free for a trim to be proposed.
-clear_at_least_tokens = 20000
-# Leading messages kept fully intact (never elided).
-head_keep_messages = 2
-# Trailing messages protected from elision.
-keep_recent_messages = 6
-```
-
-A missing `[trim]` block keeps these same conservative defaults. All
-four fields are required to have sane values -- an unknown key inside
-the block fails config load rather than being silently ignored.
+| Default | Value | Meaning |
+|---|---|---|
+| trigger | 100000 tokens | estimated total at or below which no trim is proposed |
+| minimum cut | 20000 tokens | the elided span must free at least this much |
+| head kept | 2 messages | leading messages never elided |
+| tail kept | 6 messages | trailing messages never elided |
 
 ## Reading usage (`routectl usage`)
 
@@ -5810,7 +5758,7 @@ to choose between and every strategy behaves identically:
   seat with the most remaining short-window budget, otherwise the most
   RPM headroom, with a deterministic tiebreak so a burst of new
   conversations does not herd onto one seat; see
-  [`[seat_quota]`](#quota-aware-seat-placement-seat_quota)); every
+  [quota-aware seat placement](#quota-aware-seat-placement)); every
   later request for that conversation routes back to the same seat. If
   that seat later goes unhealthy (rate-limited or breaker-open), the
   conversation migrates ONCE to a healthy sibling and does not flap back

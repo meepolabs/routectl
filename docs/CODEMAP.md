@@ -1902,18 +1902,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   carries `class_overrides: BTreeMap<u16, ConfigFailureClass>` (operator remap
   of a raw upstream status to a failure class), both empty-by-default and
   defined in `src/class_policy.rs`; `CapabilityConfig` (global `[capability]`:
-  `enabled`, `decay_hours`, `inferred_window_hours`, `staleness_hint_days`,
-  plus the global `essential` capability-key list that reclassifies a
+  `enabled`, `decay_hours`, `inferred_window_hours`, plus the global `essential` capability-key list that reclassifies a
   droppable's learned negative from strip to route-away -- tightening-only,
   validated against the known-key set minus `reasoning_replay`)
   drives the learned-capability registry and is hot-reloadable;
   `WindowGateConfig` (global `[window_gate]`: `enabled`, default false; a
   missing block is off) is the hot-reloadable switch for the proactive
   context-window gate;
-  `CalibrationConfig` (global `[calibration]`) and `SeatQuotaConfig` (global
-  `[seat_quota]`) each keep an `enabled` field that is parsed only so an
-  existing config still loads and has no effect: the learned per-lane
-  token-estimate correction and quota-aware birth placement always apply;
   `FidelityConfig` (global `[fidelity]`: `prefix_impact_opt_in:
   Vec<String>` reusing the `[capability.overrides]` two-tier target-spec
   grammar) is fully defaulted (empty list), so a missing block changes
@@ -4442,8 +4437,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH
   only -> `seat_pool::sticky_least_loaded_order`),
   `gather_capacity_snapshots`, `quota_tiers_for_birth` (returns EMPTY for a
-  provider curating no FAST window -- no cap, no diagnostic; `[seat_quota]
-  enabled` is not read), `record_quota_placement` (per-arm counters plus one
+  provider curating no FAST window -- no cap, no diagnostic),
+  `record_quota_placement` (per-arm counters plus one
   throttled line, silent on the dormant arm), and
   `apply_sticky_outcome` (applies the pin write the outcome implies; quota
   changes which seat a birth picks, never the pin write)
@@ -8617,7 +8612,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and `overrode_layer` (`Resolution::overridden`, the tier the
   winner beat). It then layers on
   the display-only age and stale flag (only a verified learned cell past the
-  `[capability] staleness_hint_days` hint is stale), and the
+  fixed `STALENESS_HINT_DAYS` = 14 hint is stale), and the
   learned entry's epoch-ms timestamps mapped through the reader's pinned
   `now`/`now_ms` anchor pair, and its `value` via `lane_cell::encoded_value`.
   The shipped beta seed is its own layer: its

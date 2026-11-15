@@ -49,10 +49,6 @@ decay_hours = 24
 enabled = true
 inferred_window_hours = 2
 
-[trim]
-trigger_tokens = 50000
-head_keep_messages = 3
-
 [log]
 trace_headers = true
 
@@ -82,8 +78,6 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "capability.decay_hours",
         "capability.enabled",
         "capability.inferred_window_hours",
-        "trim.trigger_tokens",
-        "trim.head_keep_messages",
         "log.trace_headers",
         "providers.relay.kind",
         "providers.relay.base_url",
@@ -96,9 +90,7 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
     let expected_default: BTreeSet<&str> = [
         "cache.auto_emit_top_level_breakpoint",
         "cache.k_gated_emission",
-        "calibration.enabled",
         "capability.essential",
-        "capability.staleness_hint_days",
         "fidelity.prefix_impact_opt_in",
         "log.redact_prompts",
         "log.trace_body_bytes",
@@ -109,10 +101,7 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "retry.initial_backoff_ms",
         "retry.max_honored_retry_after_ms",
         "retry.probe_max_tokens",
-        "seat_quota.enabled",
         "server.max_body_bytes",
-        "trim.clear_at_least_tokens",
-        "trim.keep_recent_messages",
         "usage.db_path",
         "usage.enabled",
         "window_gate.enabled",
@@ -140,10 +129,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (21, 25));
+    assert_eq!((file.len(), default.len()), (19, 20));
     assert_eq!(
         lines.len(),
-        46,
+        39,
         "every line is tagged file or default, once"
     );
 }

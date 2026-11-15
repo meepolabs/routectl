@@ -48,7 +48,7 @@ const ANTHROPIC_KIND: &str = "anthropic-api";
 
 /// Two standalone models on distinct provider kinds, an alias chain whose
 /// head is the second one, and a `default` catch-all naming the first.
-fn standalone_config(calibration_enabled: bool) -> Config {
+fn standalone_config() -> Config {
     let mut config = Config::default();
     config.providers.insert(
         "compat".into(),
@@ -64,7 +64,6 @@ fn standalone_config(calibration_enabled: bool) -> Config {
     config
         .aliases
         .insert("default".into(), AliasValue::Single("glm".into()));
-    config.calibration.enabled = calibration_enabled;
     config
 }
 
@@ -89,7 +88,7 @@ fn install_standalone(config: Config) -> Router {
 }
 
 fn standalone_router() -> Router {
-    install_standalone(standalone_config(true))
+    install_standalone(standalone_config())
 }
 
 /// One model on a two-member pool with the given seat selection.
@@ -247,7 +246,7 @@ fn an_unmatched_model_falls_to_the_default_catch_all_like_dispatch() {
 
 #[test]
 fn an_unresolvable_model_has_no_lane() {
-    let mut config = standalone_config(true);
+    let mut config = standalone_config();
     config.aliases.remove("default");
     let router = install_standalone(config);
 
@@ -400,17 +399,6 @@ fn a_stale_lane_has_no_calibrated_estimate() {
     assert_eq!(
         router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000),
         None
-    );
-}
-
-#[test]
-fn calibration_enabled_false_still_corrects_the_estimate() {
-    let router = install_standalone(standalone_config(false));
-    feed_lane(&router, OPENAI_KIND, "glm-4.6", SystemTime::now());
-
-    assert_eq!(
-        router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000),
-        Some(20_000)
     );
 }
 

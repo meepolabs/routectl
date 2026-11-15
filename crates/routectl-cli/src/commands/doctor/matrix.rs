@@ -37,7 +37,6 @@ use routectl_router::{
     OverrideRegistry, VERDICT_MIXED, beta_override_key,
 };
 
-use super::sections::staleness_threshold_days;
 use super::{CapabilityMatrixSource, DoctorContext, MatrixOrigin};
 use crate::lane_cell::{
     CellSources, LaneCell, LaneMeta, LearnedSnapshot, NicknameCell, encoded_value, entry_stamps,
@@ -45,8 +44,11 @@ use crate::lane_cell::{
 };
 
 /// Milliseconds per day, for converting a cell's last-seen age to whole days
-/// against the operator staleness hint.
+/// against the staleness hint.
 const MS_PER_DAY: i64 = 86_400_000;
+
+/// Whole days past which a verified learned cell is flagged stale.
+pub(super) const STALENESS_HINT_DAYS: u64 = 14;
 
 /// The layer tag the display-only age and stale flag key on.
 const LAYER_LEARNED: &str = "learned";
@@ -105,8 +107,6 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
         learned,
         beta_seed: ctx.beta_seed,
     };
-    let threshold = staleness_threshold_days(ctx.config.capability.staleness_hint_days);
-
     let lanes = lanes_meta
         .iter()
         .map(|meta| MatrixLane {
@@ -116,7 +116,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
             routed: meta.routed,
             cells: columns
                 .iter()
-                .map(|cap| build_cell(meta, cap, &sources, threshold))
+                .map(|cap| build_cell(meta, cap, &sources))
                 .collect(),
         })
         .collect();
@@ -190,12 +190,7 @@ fn insert_other(set: &mut BTreeSet<String>, key: &str) {
 
 /// Resolve one `(lane, capability)` cell through the shared lane-cell
 /// helper, then layer on the display-only age, timestamps, and stale flag.
-fn build_cell(
-    meta: &LaneMeta,
-    capability: &str,
-    sources: &CellSources,
-    threshold: i64,
-) -> MatrixCell {
+fn build_cell(meta: &LaneMeta, capability: &str, sources: &CellSources) -> MatrixCell {
     let cell = resolve_cell(meta, capability, sources);
     let shown = cell.shown();
     let action = cell.action();
@@ -207,12 +202,9 @@ fn build_cell(
 
     let layer = cell.layer();
     let (age_ms, stale) = match layer {
-        Some(LAYER_LEARNED) => learned_age(
-            &cell,
-            sources.learned.now,
-            shown.and_then(|s| s.supported),
-            threshold,
-        ),
+        Some(LAYER_LEARNED) => {
+            learned_age(&cell, sources.learned.now, shown.and_then(|s| s.supported))
+        }
         _ => (None, false),
     };
     let stamps = cell
@@ -256,7 +248,6 @@ fn learned_age(
     cell: &LaneCell,
     now: Option<(std::time::Instant, i64)>,
     supported: Option<bool>,
-    threshold: i64,
 ) -> (Option<i64>, bool) {
     let age = cell.entry.zip(now).map(|(entry, (now, _))| {
         let elapsed = now.saturating_duration_since(entry.last_seen).as_millis();
@@ -264,6 +255,8 @@ fn learned_age(
     });
     // Only a verified positive (supported) carries a staleness flag; a
     // learned negative's freshness is governed by its decay window.
-    let stale = supported == Some(true) && age.is_some_and(|a| a / MS_PER_DAY > threshold);
+    let stale = supported == Some(true)
+        && age
+            .is_some_and(|a| u64::try_from(a / MS_PER_DAY).is_ok_and(|d| d > STALENESS_HINT_DAYS));
     (age, stale)
 }

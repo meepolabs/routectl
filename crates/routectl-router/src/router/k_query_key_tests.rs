@@ -243,7 +243,7 @@ fn shadow_store_and_k_store_key_identically_under_an_alias() {
     // upstream key would be `FirstSeen` if the store had been keyed on it.
     let fp = trimmed_prefix_fingerprint(
         &req,
-        &propose_steady_state_trim(&req, &router.config.trim.to_params())
+        &propose_steady_state_trim(&req, &SteadyStateTrimParams::default())
             .expect("the fixture request trips the trim trigger"),
     );
     assert_eq!(

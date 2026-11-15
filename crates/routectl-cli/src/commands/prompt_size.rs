@@ -19,7 +19,7 @@ use routectl_core::schema::Role;
 use routectl_core::{ChatRequest, Error, RefusalReason, Result, scan_volatile};
 use routectl_router::{
     ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CacheRules, Config, GateDecision,
-    KeepReason, PrefixReductionCandidate, TrimConfig, break_even_k, cache_rules,
+    KeepReason, PrefixReductionCandidate, SteadyStateTrimParams, break_even_k, cache_rules,
     collect_config_validation, evaluate, propose_steady_state_trim,
 };
 
@@ -225,10 +225,9 @@ fn build_economics(
 /// Build the advisory economics projection for the REAL steady-state-trim
 /// candidate of `req`, instead of an operator-supplied `--hypothetical-d`.
 ///
-/// Runs the deterministic trimmer using `trim.to_params()` -- the SAME
-/// shared constructor `Router::record_would_trim` calls on the live dispatch
-/// path, so both resolve identical `SteadyStateTrimParams` from the same
-/// `Config`. When it produces a cut, the cut's own `(d, c_after, c)`
+/// Runs the deterministic trimmer on `SteadyStateTrimParams::default()`, the
+/// params `Router::record_would_trim` uses on the live dispatch path. When it
+/// produces a cut, the cut's own `(d, c_after, c)`
 /// candidate is priced and `steady_state_would_trim` is `Some(true)`. When
 /// the trimmer declines (request too short / below trigger / no safe
 /// elidable span), the projection reports `Some(false)` and a zero candidate
@@ -238,9 +237,8 @@ fn build_steady_state_economics(
     req: &ChatRequest,
     target: Option<(&'static str, String)>,
     args: &ProjectionArgs,
-    trim: &TrimConfig,
 ) -> EconomicsProjection {
-    let params = trim.to_params();
+    let params = SteadyStateTrimParams::default();
     if let Some(plan) = propose_steady_state_trim(req, &params) {
         price_candidate(plan.candidate, target, args, Some(true))
     } else {
@@ -488,12 +486,7 @@ pub fn run(
     // Without either, the report renders exactly as before.
     if projection.steady_state {
         let target = resolve_target(&config, alias);
-        report.economics = Some(build_steady_state_economics(
-            &req,
-            target,
-            &projection,
-            &config.trim,
-        ));
+        report.economics = Some(build_steady_state_economics(&req, target, &projection));
     } else if projection.hypothetical_d.is_some() {
         let target = resolve_target(&config, alias);
         report.economics = Some(build_economics(
@@ -1444,10 +1437,11 @@ fast = "sonnet"
     }
 
     /// Build a long tool-heavy request that clears the steady-state trigger:
-    /// head + many bulky tool turns + a small recent tail.
+    /// head + many bulky tool turns + a small recent tail. The second head
+    /// message carries tool payload, so a shorter head changes the cut.
     fn long_tool_heavy_request() -> ChatRequest {
         let payload = "z".repeat(48_000); // ~12k tokens each at 4 bytes/token
-        let mut messages = vec![user_text("head one"), user_text("head two")];
+        let mut messages = vec![user_text("head one"), bulky_tool_use(&"y".repeat(4_000))];
         for _ in 0..6 {
             messages.push(bulky_tool_use(&payload));
             messages.push(bulky_tool_result(&payload));
@@ -1476,12 +1470,17 @@ fast = "sonnet"
             steady_state: true,
         };
 
-        // Act
-        let economics = build_steady_state_economics(&req, target, &args, &config.trim);
+        let expected = propose_steady_state_trim(&req, &SteadyStateTrimParams::default())
+            .expect("the default params trim this request");
 
-        // Assert: a real cut was proposed, a live K* exists, and the rendered
-        // projection surfaces the would-trim line + the candidate.
+        // Act
+        let economics = build_steady_state_economics(&req, target, &args);
+
+        // Assert: the cut priced is the one the default params propose, a
+        // live K* exists, and the rendered projection surfaces the would-trim
+        // line + the candidate.
         assert_eq!(economics.steady_state_would_trim, Some(true));
+        assert_eq!(economics.candidate, expected.candidate);
         assert!(
             economics.candidate.d > 0,
             "real candidate should free tokens"
@@ -1517,7 +1516,7 @@ fast = "sonnet"
         };
 
         // Act
-        let economics = build_steady_state_economics(&req, target, &args, &config.trim);
+        let economics = build_steady_state_economics(&req, target, &args);
 
         // Assert: would-trim no, a zero candidate, and a KEEP verdict.
         assert_eq!(economics.steady_state_would_trim, Some(false));

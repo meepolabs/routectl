@@ -3314,6 +3314,40 @@ mod matrix_panel {
         );
     }
 
+    /// The stale flag of a verified cell last seen `age_days` whole days ago.
+    #[allow(clippy::duration_suboptimal_units)]
+    fn verified_cell_is_stale_at(age_days: u64) -> bool {
+        let base = Instant::now();
+        let now = base + Duration::from_secs(age_days * 86_400 + 60);
+        let entries = vec![entry(
+            LANE_A,
+            "web_search",
+            Verdict::VerifiedWorking,
+            EvidenceSource::Live,
+            base,
+        )];
+        let ctx = matrix_ctx(CapabilityMatrixSource::Available {
+            entries,
+            now,
+            now_ms: 0,
+            replay: Some(MatrixReplaySummary::default()),
+            seed_clears: Vec::new(),
+        });
+        find_cell(&build_capability_matrix_panel(&ctx), LANE_A, "web_search").stale
+    }
+
+    #[test]
+    fn stale_threshold_is_fourteen_whole_days() {
+        assert!(
+            !verified_cell_is_stale_at(14),
+            "a verified cell 14 days old is not yet stale"
+        );
+        assert!(
+            verified_cell_is_stale_at(15),
+            "a verified cell 15 days old is stale"
+        );
+    }
+
     #[test]
     fn learned_lane_without_config_entry_renders_unrouted() {
         let now = Instant::now();

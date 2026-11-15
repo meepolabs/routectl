@@ -211,21 +211,9 @@
       },
       "type": "object"
     },
-    "CalibrationConfig": {
-      "additionalProperties": false,
-      "description": "Operator-facing `[calibration]` config block. Accepted so existing\nconfigs keep loading; it has no effect.\n\nThe learned per-lane correction of the router's token estimate always\napplies. A lane produces no correction until it has accumulated real\nevidence, and every refusal path (thin evidence, stale evidence, an\nout-of-band reduced ratio) falls back to the uncorrected estimate, so\nthere is nothing for a switch to protect.",
-      "properties": {
-        "enabled": {
-          "default": true,
-          "description": "No effect. Parsed and kept only so a config that sets it still loads.",
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "CapabilityConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window, 14d staleness hint), and each per-field\n`#[serde(default)]` keeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets. `staleness_hint_days` sets the\nage past which a verified capability reads as stale in diagnostics\n(display-only; not wired into the act path).\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.\n\n`overrides` is the operator capability-override map. It nests under\nthis existing `[capability]` parent as `[capability.overrides]` -- no\nnew top-level Config section is introduced, so the config-classify\ncoverage in routectl-cli stays exhaustive. `essential` is a sibling\nGLOBAL list (no target-spec path segment -- that absence IS its\nglobal-ness), deliberately not target-scoped: droppability is operator\nintent that holds everywhere, while support is a per-target fact.",
+      "description": "Operator-facing `[capability]` config block. Kill switch plus tempo\nknobs for the learned-capability subsystem. A missing `[capability]`\ntable deserializes to `CapabilityConfig::default()` (enabled, 48h\ndecay, 1h inferred window), and each per-field\n`#[serde(default)]` keeps an omitted key at its default too.\n\n`enabled` is the master switch: off leaves any learned entries\nresident but inert (both the learn path and the act path are skipped).\n`decay_hours` sets how long a learned negative acts before it lapses\ninto a single re-probe; `inferred_window_hours` bounds how long a\npending single-observation inferred signal waits for a confirming\nsecond observation before it resets.\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time (matching the sibling feature blocks) instead of\nsilently ignoring it.\n\n`overrides` is the operator capability-override map. It nests under\nthis existing `[capability]` parent as `[capability.overrides]` -- no\nnew top-level Config section is introduced, so the config-classify\ncoverage in routectl-cli stays exhaustive. `essential` is a sibling\nGLOBAL list (no target-spec path segment -- that absence IS its\nglobal-ness), deliberately not target-scoped: droppability is operator\nintent that holds everywhere, while support is a per-target fact.",
       "properties": {
         "decay_hours": {
           "default": 48,
@@ -261,13 +249,6 @@
           "default": {},
           "description": "Operator capability overrides, keyed by two-tier target spec:\n`\"provider_name\"` applies to every model on that provider, and\n`\"provider_name:nickname\"` targets a single model. An omitted\n`[capability.overrides]` table yields an empty map. The\ncapability-value namespace is open -- values are not validated\nagainst any known-capability list here.",
           "type": "object"
-        },
-        "staleness_hint_days": {
-          "default": 14,
-          "description": "Days past which a verified capability stamp reads as stale in\ndiagnostics. Display-only -- surfaced in doctor / CLI hints, never\nwired into router construction or the act path. Default 14.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
         }
       },
       "type": "object"
@@ -1742,18 +1723,6 @@
       },
       "type": "object"
     },
-    "SeatQuotaConfig": {
-      "additionalProperties": false,
-      "description": "Operator-facing `[seat_quota]` config block. Accepted so existing\nconfigs keep loading; it has no effect.\n\nSubscription-quota-aware seat placement, which orders a NEW conversation's\nbirth seat on a `sticky-least-loaded` pool by each credential account's\nremaining short-window budget, always applies. A seat produces no reading\nuntil a real upstream response carries one, and every refusal path (no\nreading, an expired one, a reading the trust rules declined, a provider\nwith no curated short window) falls back to the pre-quota chooser, so\nthere is nothing for a switch to protect. Affinity pins and the one-time\nmigration off an unhealthy seat are unaffected.",
-      "properties": {
-        "enabled": {
-          "default": true,
-          "description": "No effect. Parsed and kept only so a config that sets it still loads.",
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "SeatSelection": {
       "description": "Seat-selection strategy for a set of interchangeable accounts, set on\nthe `pools.<name>` block that groups them. Default is `fill-first` so a\nsingle-member pool (the common case) keeps its current behavior with no\nconfig.\n\nSubscription-quota-aware placement and the session-affinity layer reach\n`sticky-least-loaded` ONLY. The other two variants keep their own contracts\nunchanged: neither pins a session nor reads a seat's remaining budget.",
       "oneOf": [
@@ -1851,41 +1820,6 @@
       ],
       "type": "object"
     },
-    "TrimConfig": {
-      "additionalProperties": false,
-      "description": "Operator-facing `[trim]` config block. Wraps the deterministic\nsteady-state advisory trimmer's four knobs\n(`crate::context_trim::SteadyStateTrimParams`) for TOML config. A missing\n`[trim]` block deserializes to `TrimConfig::default()`; `to_params()` then\nresolves that to the SAME `SteadyStateTrimParams` as\n`SteadyStateTrimParams::default()`, because every per-field default fn\nbelow delegates to the exact const `SteadyStateTrimParams::default()`\nuses -- one source of truth for \"missing block == current conservative\ndefaults\", never a second hardcoded copy.\n\n`to_params()` is the ONLY constructor for `SteadyStateTrimParams` from\nconfig, and BOTH production consumers (`Router::record_would_trim`,\n`prompt_size::build_steady_state_economics`) call it -- they can never\nresolve to different params from the same `Config`.\n\n`SteadyStateTrimParams` itself is deliberately NOT serde-derived: it is\nthe advisory trimmer's pure-function input (built ad hoc by tests too),\nand coupling it to serde would leak a config-loading concern into a\nmodule that has none today. This wrapper is the wire-side boundary.\n\nNo `enabled` switch, no band knobs, no per-provider override: the\nsteady-state trimmer is an always-on ADVISORY recorder that never mutates\na dispatched request, so there is no \"off\" state to represent.\n`#[non_exhaustive]` leaves room for a later knob without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time instead of silently ignoring it.",
-      "properties": {
-        "clear_at_least_tokens": {
-          "default": 20000,
-          "description": "Minimum tokens the elided span must free for a trim to be proposed.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "head_keep_messages": {
-          "default": 2,
-          "description": "Number of leading messages kept fully intact (never elided).",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "keep_recent_messages": {
-          "default": 6,
-          "description": "Number of trailing messages protected from elision.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "trigger_tokens": {
-          "default": 100000,
-          "description": "Estimated total tokens at or below which no trim is proposed.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
     "UsageConfig": {
       "additionalProperties": false,
       "description": "Operator-facing `[usage]` config block. Controls the\nusage-accounting subsystem. Each field carries a default, so a\nconfig with no `[usage]` block deserializes to the same value as\n`UsageConfig::default()`.\n\nReload semantics: `db_path` is restart-required (the writer opens\nthe db at boot and holds the handle); `enabled` and\n`retention_days` hot-reload on the next config swap. See\n`collect_restart_required_changes` in the CLI server module for the\nclassification.",
@@ -1972,13 +1906,6 @@
       },
       "description": "Operator-facing `[cache]` block. Controls the dispatch-path\nauto-emission of a top-level Anthropic `cache_control` breakpoint.\nA missing block keeps the default: auto-emit enabled."
     },
-    "calibration": {
-      "$ref": "#/$defs/CalibrationConfig",
-      "default": {
-        "enabled": true
-      },
-      "description": "Operator-facing `[calibration]` block. Accepted so existing configs\nkeep loading; it has no effect. The learned per-lane correction of\nthe router's token estimate always applies."
-    },
     "capability": {
       "$ref": "#/$defs/CapabilityConfig",
       "default": {
@@ -1986,8 +1913,7 @@
         "enabled": true,
         "essential": [],
         "inferred_window_hours": 1,
-        "overrides": {},
-        "staleness_hint_days": 14
+        "overrides": {}
       },
       "description": "Operator-facing `[capability]` block. Kill switch plus tempo knobs\nfor the learned-capability subsystem. A missing block keeps all\ndefaults: enabled, a 48h decay window, a 1h inferred-signal window.\nThe table is deliberately top-level (not nested under `[server]`)\nso a later override layer can nest per-target overrides under the\nsame parent."
     },
@@ -2065,13 +1991,6 @@
       },
       "description": "Default retry policy applied per-provider attempt."
     },
-    "seat_quota": {
-      "$ref": "#/$defs/SeatQuotaConfig",
-      "default": {
-        "enabled": true
-      },
-      "description": "Operator-facing `[seat_quota]` block. Accepted so existing configs\nkeep loading; it has no effect. Quota-aware birth placement under\n`sticky-least-loaded` always applies."
-    },
     "server": {
       "$ref": "#/$defs/ServerConfig",
       "default": {
@@ -2082,16 +2001,6 @@
         "strict_translation": false
       },
       "description": "Server bind config."
-    },
-    "trim": {
-      "$ref": "#/$defs/TrimConfig",
-      "default": {
-        "clear_at_least_tokens": 20000,
-        "head_keep_messages": 2,
-        "keep_recent_messages": 6,
-        "trigger_tokens": 100000
-      },
-      "description": "Operator-facing `[trim]` block. Tunes the deterministic steady-state\nadvisory trimmer's four knobs. A missing block resolves (via\n`TrimConfig::to_params()`) to `SteadyStateTrimParams::default()` --\nthe trimmer's current conservative behavior is unchanged."
     },
     "usage": {
       "$ref": "#/$defs/UsageConfig",

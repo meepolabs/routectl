@@ -67,7 +67,7 @@ impl Router {
     /// Empty for a provider that curates no short recovering window, which is
     /// how an uncurated egress stays dormant by construction: the pure
     /// selector then ranks on RPM headroom with no cap consulted and no
-    /// diagnostic emitted. `[seat_quota] enabled` is not read here.
+    /// diagnostic emitted.
     ///
     /// The provider kind is read off each SEAT's own `[providers]` entry
     /// rather than the model's `provider` value: a pool-backed model's

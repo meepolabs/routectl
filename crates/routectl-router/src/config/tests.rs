@@ -1241,88 +1241,16 @@ reduction_enabled = false
     );
 }
 
-/// A missing `[trim]` block must resolve, via `to_params()`, to params
-/// byte-identical to `SteadyStateTrimParams::default()` -- the whole
-/// point of driving both the per-field serde defaults and the struct's
-/// own `Default` impl off the SAME consts in `context_trim.rs`.
-#[test]
-fn trim_omitted_block_matches_steady_state_trim_params_default() {
-    // Arrange: a config with no [trim] table at all.
-    let toml_text = r#"
-[providers.openai]
-kind = "openai-compat"
-base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
-"#;
-
-    // Act
-    let cfg: Config = toml::from_str(toml_text).expect("parse without trim block");
-    let resolved = cfg.trim.to_params();
-
-    // Assert: byte-identical to the trimmer's own Default.
-    assert_eq!(
-        resolved,
-        crate::context_trim::SteadyStateTrimParams::default(),
-        "missing [trim] must resolve to SteadyStateTrimParams::default()"
-    );
-}
-
-/// A `[trim]` block with explicit knobs parses and resolves through
-/// `to_params()`; an unknown key inside it is rejected
-/// (deny_unknown_fields, mirroring `reduction_block_parses_and_rejects_unknown_fields`).
-#[test]
-fn trim_block_parses_and_rejects_unknown_fields() {
-    // Arrange + Act: explicit knobs.
-    let toml_text = r"
-[trim]
-trigger_tokens = 50000
-clear_at_least_tokens = 10000
-head_keep_messages = 1
-keep_recent_messages = 3
-";
-    let cfg: Config = toml::from_str(toml_text).expect("parse explicit trim block");
-
-    // Assert
-    let params = cfg.trim.to_params();
-    assert_eq!(params.trigger_tokens, 50_000);
-    assert_eq!(params.clear_at_least_tokens, 10_000);
-    assert_eq!(params.head_keep_messages, 1);
-    assert_eq!(params.keep_recent_messages, 3);
-
-    // Arrange: an unknown key inside [trim].
-    let bad = r"
-[trim]
-trigger_tokens = 50000
-bogus = 1
-";
-
-    // Act + Assert: deny_unknown_fields must reject it.
-    assert!(
-        toml::from_str::<Config>(bad).is_err(),
-        "deny_unknown_fields must reject an unknown TrimConfig field",
-    );
-}
-
-/// PARITY: the router recording path (`Router::record_would_trim`) and
-/// the prompt-size path (`prompt_size::build_steady_state_economics`)
-/// both resolve `SteadyStateTrimParams` via `TrimConfig::to_params()`.
-/// Neither is directly callable from here -- `record_would_trim` is
-/// module-private to `router.rs`, and `build_steady_state_economics`
-/// lives in `routectl-cli`, which depends on this crate (not the other
-/// way around). So this test drives the router's PUBLIC dispatch entry
-/// point end-to-end and reads the OBSERVABLE it stamps onto
-/// `DispatchMeta`, then cross-checks it against a local recomputation
-/// using the prompt-size path's exact two-call shape (`trim.to_params()`
-/// then `propose_steady_state_trim`). Calling `to_params()` twice in
-/// isolation can never fail -- it is a pure deterministic mapping -- so
-/// that alone would prove nothing; this version fails if
-/// `record_would_trim` ever stops resolving params via
-/// `self.config.trim.to_params()` (e.g. a revert to
-/// `SteadyStateTrimParams::default()`), because the custom trigger
-/// below is tuned to fire ONLY under the configured value, not the
-/// stock default.
+/// The router recording path (`Router::record_would_trim`) trims on
+/// `SteadyStateTrimParams::default()`, as the prompt-size path does. The
+/// recording path is module-private, so this drives the public dispatch
+/// entry point and compares the freed-token count it stamps onto
+/// `DispatchMeta` with a direct run of the trimmer on the default params.
+/// The request carries a span of tool payload above the default 100k-token
+/// trigger, sized so any other trigger, head or tail count changes the
+/// outcome or the freed-token count.
 #[tokio::test]
-async fn trim_to_params_is_identical_across_both_consumers() {
+async fn dispatch_trims_on_the_default_steady_state_params() {
     use crate::resolved::ResolvedModel;
     use crate::router::{Router, RouterOptions};
     use routectl_core::{
@@ -1398,80 +1326,74 @@ async fn trim_to_params_is_identical_across_both_consumers() {
         }
     }
 
-    // A request sized to cross a LOW custom trigger but stay well
-    // under the stock default trigger (100_000 tokens): a reversion to
-    // the default in either consumer flips the observable outcome from
-    // Some to None.
-    fn parity_request() -> ChatRequest {
-        let payload = "x".repeat(400);
+    fn tool_msg(role: Role, tokens: usize) -> Message {
+        let payload = serde_json::json!("x".repeat(tokens * 4));
+        let part = if matches!(role, Role::Assistant) {
+            KnownContentPart::ToolUse {
+                id: "toolu_1".into(),
+                name: "Tool".into(),
+                input: payload,
+                cache_control: None,
+                extras: serde_json::Map::new(),
+            }
+        } else {
+            KnownContentPart::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: payload,
+                is_error: None,
+                cache_control: None,
+                extras: serde_json::Map::new(),
+            }
+        };
+        Message {
+            content: MessageContent::Parts(vec![ContentPart::Known(part)]),
+            ..text_msg(role, "")
+        }
+    }
+
+    // About 105k estimated tokens, just over the 100k trigger. The head's
+    // second message carries tool payload a one-message head would elide;
+    // exactly two 11k payloads sit between head and tail, so the 20k floor
+    // takes both and a seven-message tail leaves too little to elide; the
+    // first tail message carries the bulk that lifts the total over the
+    // trigger and is never elided.
+    fn steady_state_request() -> ChatRequest {
         ChatRequest {
             model: "m".into(),
             messages: vec![
                 text_msg(Role::User, "head turn"),
-                Message {
-                    role: Role::Assistant,
-                    content: MessageContent::Parts(vec![ContentPart::Known(
-                        KnownContentPart::ToolUse {
-                            id: "toolu_1".into(),
-                            name: "Tool".into(),
-                            input: serde_json::json!({}),
-                            cache_control: None,
-                            extras: serde_json::Map::new(),
-                        },
-                    )]),
-                    reasoning: None,
-                    reasoning_details: vec![],
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                    refusal: None,
-                    extras: serde_json::Map::new(),
-                },
-                Message {
-                    role: Role::User,
-                    content: MessageContent::Parts(vec![ContentPart::Known(
-                        KnownContentPart::ToolResult {
-                            tool_use_id: "toolu_1".into(),
-                            content: serde_json::json!(payload),
-                            is_error: None,
-                            cache_control: None,
-                            extras: serde_json::Map::new(),
-                        },
-                    )]),
-                    reasoning: None,
-                    reasoning_details: vec![],
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                    refusal: None,
-                    extras: serde_json::Map::new(),
-                },
-                text_msg(Role::User, "recent turn"),
+                tool_msg(Role::Assistant, 3_000),
+                tool_msg(Role::User, 11_000),
+                tool_msg(Role::Assistant, 11_000),
+                tool_msg(Role::User, 80_000),
+                text_msg(Role::Assistant, "recent 1"),
+                text_msg(Role::User, "recent 2"),
+                text_msg(Role::Assistant, "recent 3"),
+                text_msg(Role::User, "recent 4"),
+                text_msg(Role::Assistant, "recent 5"),
             ]
             .into(),
             ..Default::default()
         }
     }
 
-    // Arrange: one Config with an explicit, non-default [trim] block.
-    let toml_text = r"
-[trim]
-trigger_tokens = 50
-clear_at_least_tokens = 20
-head_keep_messages = 1
-keep_recent_messages = 1
-";
-    let cfg: Config = toml::from_str(toml_text).expect("parse trim block");
-    let params = cfg.trim.to_params();
-    assert_ne!(
-        params,
-        crate::context_trim::SteadyStateTrimParams::default(),
-        "sanity: the explicit block must differ from the stock default"
+    let defaults = crate::context_trim::SteadyStateTrimParams::default();
+    let expected =
+        crate::context_trim::propose_steady_state_trim(&steady_state_request(), &defaults)
+            .expect("the default params trim this request");
+    assert_eq!(
+        expected
+            .marks
+            .iter()
+            .map(|m| m.message_index)
+            .collect::<Vec<_>>(),
+        vec![2, 3],
+        "the fixture must elide exactly the two payloads between head and tail"
     );
 
-    // Act: drive the REAL router recording path via the public
-    // dispatch entry point (`record_would_trim` is module-private).
-    let mut router = Router::new(Arc::new(cfg));
+    // Act: drive the router recording path via the public dispatch entry
+    // point (`record_would_trim` is module-private).
+    let mut router = Router::new(Arc::new(Config::default()));
     let provider: Arc<dyn routectl_core::Provider> = Arc::new(EchoProvider);
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
@@ -1480,32 +1402,14 @@ keep_recent_messages = 1
     );
     router.install_resolved_models(models);
     let dispatched = router
-        .complete_with_options(parity_request(), RouterOptions::new())
+        .complete_with_options(steady_state_request(), RouterOptions::new())
         .await;
     dispatched.result.expect("dispatch succeeds");
-    let router_observed_d = dispatched
-        .meta
-        .would_trim_tokens
-        .expect("router path must propose a trim for this request under the custom trim block");
 
-    // Act: recompute the prompt-size path's exact call shape --
-    // `trim.to_params()` then `propose_steady_state_trim` -- since
-    // `build_steady_state_economics` itself lives in a crate that
-    // depends on this one and is not callable from here.
-    let prompt_size_plan =
-        crate::context_trim::propose_steady_state_trim(&parity_request(), &params).expect(
-            "prompt-size path must propose a trim for this request under the custom trim block",
-        );
-
-    // Assert: both paths agree on the freed-token count, proving they
-    // resolved the SAME params from the SAME Config. A reverted
-    // consumer would either fail the `.expect(...)` calls above (no
-    // trim proposed under the stock default) or, if it transformed the
-    // params instead of reverting them outright, land here with a
-    // mismatched `d`.
+    // Assert
     assert_eq!(
-        router_observed_d, prompt_size_plan.candidate.d,
-        "router and prompt-size paths must resolve identical SteadyStateTrimParams from the same Config"
+        dispatched.meta.would_trim_tokens,
+        Some(expected.candidate.d)
     );
 }
 

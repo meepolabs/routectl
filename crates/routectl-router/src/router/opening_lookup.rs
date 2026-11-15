@@ -118,9 +118,6 @@ impl Router {
 
     /// The learned correction for one lane. The one factor lookup both the
     /// window gate and [`Self::calibrated_estimate`] go through.
-    ///
-    /// `[calibration] enabled` is not read: the correction always applies,
-    /// and the key is accepted only so existing configs keep loading.
     pub(super) fn lane_calibration_factor(
         &self,
         provider_kind: &str,

@@ -2,9 +2,8 @@
 //!
 //! The pure partition is tested in `quota::placement`; what needs a ROUTER is
 //! everything the partition cannot see: that the store read is keyed the way
-//! the feed writes, that a healthy pin never reaches the store at all, that
-//! the provider kind is read off each seat's own entry, and that the
-//! `[seat_quota] enabled` key has no say in the pick.
+//! the feed writes, that a healthy pin never reaches the store at all, and
+//! that the provider kind is read off each seat's own entry.
 //!
 //! Every seat here has `rpm_available: None`, which is what a real pool reports
 //! (no RPM limit configured). Under the pre-quota chooser that makes every seat
@@ -97,24 +96,20 @@ fn seat_key(member: &str) -> SeatKey {
     seat_key_for_secret_ref(Some(&secret_ref(member))).expect("an oauth ref yields a key")
 }
 
-/// A three-seat `StickyLeastLoaded` pool on one Anthropic provider, with
-/// `seat_quota.enabled` as given.
-fn pooled_router(seat_quota_enabled: bool) -> Router {
-    pooled_router_with_selection(SeatSelection::StickyLeastLoaded, seat_quota_enabled)
+/// A three-seat `StickyLeastLoaded` pool on one Anthropic provider.
+fn pooled_router() -> Router {
+    pooled_router_with_selection(SeatSelection::StickyLeastLoaded)
 }
 
-/// A three-seat pool on one Anthropic provider under `selection`, with
-/// `seat_quota.enabled` as given.
-fn pooled_router_with_selection(selection: SeatSelection, seat_quota_enabled: bool) -> Router {
-    pooled_router_on(selection, seat_quota_enabled, ProviderEntry::anthropic_api)
+/// A three-seat pool on one Anthropic provider under `selection`.
+fn pooled_router_with_selection(selection: SeatSelection) -> Router {
+    pooled_router_on(selection, ProviderEntry::anthropic_api)
 }
 
 /// A three-seat pool under `selection` whose every member's `[providers]`
-/// entry is built by `provider_entry` from that member's credential ref, with
-/// `seat_quota.enabled` as given.
+/// entry is built by `provider_entry` from that member's credential ref.
 fn pooled_router_on(
     selection: SeatSelection,
-    seat_quota_enabled: bool,
     provider_entry: fn(String) -> ProviderEntry,
 ) -> Router {
     let mut seats: Vec<SeatTarget> = Vec::new();
@@ -145,12 +140,11 @@ fn pooled_router_on(
         )
         .with_seat_selection(selection),
     );
-    let mut cfg = Config {
+    let cfg = Config {
         providers,
         pools,
         ..Config::default()
     };
-    cfg.seat_quota.enabled = seat_quota_enabled;
 
     let mut router = Router::new(Arc::new(cfg));
     let model = ResolvedModel::new("opus", SEAT_POOL, default_provider, "claude-opus-4-7")
@@ -216,7 +210,7 @@ fn home_of(router: &Router, session: &str) -> String {
 fn a_birth_pick_lands_on_the_emptiest_below_cap_seat() {
     // Arrange: every seat tied on RPM (none configured), so only quota can
     // move the pick off the rotation's choice.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(
         &router,
         &[("anthropic-default", 0.40), ("anthropic-seat-b", 0.05)],
@@ -233,7 +227,7 @@ fn a_birth_pick_lands_on_the_emptiest_below_cap_seat() {
 fn a_known_empty_seat_beats_the_seats_with_no_reading() {
     // The signal the feature exists to use: seat-c has never reported, and a
     // seat known to be nearly empty must win over it rather than the reverse.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(&router, &[("anthropic-seat-c", 0.02)]);
 
     assert_eq!(home_of(&router, "S"), "opus#anthropic-seat-c");
@@ -244,7 +238,7 @@ fn a_healthy_pin_is_never_moved_by_a_capped_reading() {
     // The birth pins seat-b (its only reading, below cap). Then seat-b's window
     // is reported FULL while a sibling reports empty. The session must stay:
     // a soft cap never costs a warm prompt cache.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(&router, &[("anthropic-seat-b", 0.05)]);
     assert_eq!(home_of(&router, "S"), "opus#anthropic-seat-b");
 
@@ -266,7 +260,7 @@ fn a_keyless_request_places_by_cap_and_creates_no_pin() {
     // preservation is the only thing that outranks quota fairness -- so it
     // places by remaining budget. It still mints no pin: there is no key to
     // pin under. The emptiest seat therefore LEADS the walk.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
 
     let order: Vec<String> = router
@@ -296,7 +290,7 @@ fn a_keyless_request_places_by_cap_and_creates_no_pin() {
 fn a_keyless_request_falls_back_to_the_unchanged_walk_without_quota_evidence() {
     // The other half of the same boundary: with nothing observed, a keyless
     // request keeps exactly the fill-first collapse it has always had.
-    let router = pooled_router(true);
+    let router = pooled_router();
 
     let order: Vec<String> = router
         .dispatch_chain("opus", None)
@@ -316,37 +310,34 @@ fn a_keyless_request_falls_back_to_the_unchanged_walk_without_quota_evidence() {
 }
 
 #[test]
-fn a_keyless_request_places_by_quota_whatever_the_seat_quota_key_says() {
-    // Keyless placement reads the same tiers as a birth pick, so the key has
-    // no say there either: the below-cap seat leads the walk in both rows.
-    for seat_quota_enabled in [true, false] {
-        let router = pooled_router(seat_quota_enabled);
-        seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
+fn a_keyless_request_places_by_quota() {
+    // Keyless placement reads the same tiers as a birth pick: the below-cap
+    // seat leads the walk.
+    let router = pooled_router();
+    seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
 
-        let order: Vec<String> = router
-            .dispatch_chain("opus", None)
-            .expect("chain resolves")
-            .into_iter()
-            .map(|t| t.state_key)
-            .collect();
+    let order: Vec<String> = router
+        .dispatch_chain("opus", None)
+        .expect("chain resolves")
+        .into_iter()
+        .map(|t| t.state_key)
+        .collect();
 
-        assert_eq!(
-            order,
-            vec![
-                "opus#anthropic-seat-c",
-                "opus#anthropic-default",
-                "opus#anthropic-seat-b"
-            ],
-            "seat_quota.enabled = {seat_quota_enabled}"
-        );
-    }
+    assert_eq!(
+        order,
+        vec![
+            "opus#anthropic-seat-c",
+            "opus#anthropic-default",
+            "opus#anthropic-seat-b"
+        ]
+    );
 }
 
 #[test]
 fn an_all_capped_pool_still_places_and_takes_the_most_remaining() {
     // Every seat over its cap. The request is NOT failed; it lands on the seat
     // with the most left.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(
         &router,
         &[
@@ -359,14 +350,12 @@ fn an_all_capped_pool_still_places_and_takes_the_most_remaining() {
     assert_eq!(home_of(&router, "S"), "opus#anthropic-seat-b");
 }
 
-// ---- the `[seat_quota] enabled` key has no effect ----
+// ---- quota tiers decide the birth pick ----
 
-/// The paired rows: `enabled = false` places a birth exactly as `enabled =
-/// true` does, by quota, and the decision is counted in both. Each reading set
-/// pulls the pick off the rotation's seat 0, so a row that skipped quota would
-/// land on `opus#anthropic-default` and count nothing.
+/// Each reading set pulls the pick off the rotation's seat 0, so a row that
+/// skipped quota would land on `opus#anthropic-default` and count nothing.
 #[test]
-fn birth_placement_follows_quota_tiers_whatever_the_seat_quota_key_says() {
+fn birth_placement_follows_quota_tiers() {
     let cases = [
         (
             "below-cap tier",
@@ -388,67 +377,51 @@ fn birth_placement_follows_quota_tiers_whatever_the_seat_quota_key_says() {
         ),
     ];
     for (name, readings, expected_home) in cases {
-        for seat_quota_enabled in [true, false] {
-            // Arrange
-            let router = pooled_router(seat_quota_enabled);
-            seed_readings(&router, &readings);
+        // Arrange
+        let router = pooled_router();
+        seed_readings(&router, &readings);
 
-            // Act
-            let home = home_of(&router, "S");
+        // Act
+        let home = home_of(&router, "S");
 
-            // Assert
-            assert_eq!(
-                home, expected_home,
-                "{name}: seat_quota.enabled = {seat_quota_enabled}"
-            );
-            let totals = router.metrics.quota_placement_totals();
-            assert_eq!(
-                totals.below_cap + totals.all_capped,
-                1,
-                "{name}: seat_quota.enabled = {seat_quota_enabled} must count \
-                 the placing arm: {totals:?}"
-            );
-        }
+        // Assert
+        assert_eq!(home, expected_home, "{name}");
+        let totals = router.metrics.quota_placement_totals();
+        assert_eq!(
+            totals.below_cap + totals.all_capped,
+            1,
+            "{name}: the placing arm must be counted: {totals:?}"
+        );
     }
 }
 
 /// An uncurated provider kind still contributes no tiers: the same reading
 /// that moves an Anthropic pool's birth pick leaves an `openai-compat` pool on
-/// the rotation's seat 0, and quota counts nothing, whatever the key says.
+/// the rotation's seat 0, and quota counts nothing.
 #[test]
 fn an_uncurated_provider_kind_gets_no_tiers() {
     fn openai_compat(member_ref: String) -> ProviderEntry {
         ProviderEntry::openai_compat("https://api.example.com/v1", member_ref)
     }
 
-    for seat_quota_enabled in [true, false] {
-        // Arrange
-        let router = pooled_router_on(
-            SeatSelection::StickyLeastLoaded,
-            seat_quota_enabled,
-            openai_compat,
-        );
-        seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
+    // Arrange
+    let router = pooled_router_on(SeatSelection::StickyLeastLoaded, openai_compat);
+    seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
 
-        // Act
-        let home = home_of(&router, "S");
+    // Act
+    let home = home_of(&router, "S");
 
-        // Assert
-        assert_eq!(
-            home, "opus#anthropic-default",
-            "seat_quota.enabled = {seat_quota_enabled}"
-        );
-        assert_eq!(
-            router.metrics.quota_placement_totals(),
-            QuotaPlacementTotals {
-                below_cap: 0,
-                all_capped: 0,
-                mixed_unknown: 0,
-                all_unknown: 0,
-            },
-            "seat_quota.enabled = {seat_quota_enabled}"
-        );
-    }
+    // Assert
+    assert_eq!(home, "opus#anthropic-default");
+    assert_eq!(
+        router.metrics.quota_placement_totals(),
+        QuotaPlacementTotals {
+            below_cap: 0,
+            all_capped: 0,
+            mixed_unknown: 0,
+            all_unknown: 0,
+        }
+    );
 }
 
 #[test]
@@ -479,7 +452,7 @@ fn the_default_seat_and_its_labelled_siblings_mint_distinct_quota_keys() {
     // And the model-scoped state keys stay distinct from the account-scoped
     // quota keys: the two are not interchangeable, which is exactly why a
     // `state_key` cannot be passed where a seat key is expected.
-    let router = pooled_router(true);
+    let router = pooled_router();
     let state_keys = chain_order(&router, "S");
     for key in &keys {
         assert!(
@@ -495,7 +468,7 @@ fn a_reading_on_one_labelled_seat_does_not_bleed_onto_its_family_siblings() {
     // ONE labelled sibling must leave the family's default seat and the other
     // sibling with no evidence. A collapsed keyspace (all three keying by the
     // bare family) would show the same reading on all three.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(&router, &[("anthropic-seat-b", 0.05)]);
 
     let now = ObservationStamp::now();
@@ -525,13 +498,13 @@ fn a_reading_on_one_labelled_seat_does_not_bleed_onto_its_family_siblings() {
 #[test]
 fn each_partition_arm_is_counted_on_a_real_birth_pick() {
     // Arrange: a below-cap pick.
-    let below = pooled_router(true);
+    let below = pooled_router();
     seed_readings(&below, &[("anthropic-seat-b", 0.05)]);
     let _ = chain_order(&below, "S");
     assert_eq!(below.metrics.quota_placement_totals().below_cap, 1);
 
     // An all-capped pick.
-    let capped = pooled_router(true);
+    let capped = pooled_router();
     seed_readings(
         &capped,
         &[
@@ -544,13 +517,13 @@ fn each_partition_arm_is_counted_on_a_real_birth_pick() {
     assert_eq!(capped.metrics.quota_placement_totals().all_capped, 1);
 
     // A mixed capped-known / unknown fall-through.
-    let mixed = pooled_router(true);
+    let mixed = pooled_router();
     seed_readings(&mixed, &[("anthropic-default", 0.99)]);
     let _ = chain_order(&mixed, "S");
     assert_eq!(mixed.metrics.quota_placement_totals().mixed_unknown, 1);
 
     // An all-unknown fall-through -- a fresh process's normal state.
-    let unknown = pooled_router(true);
+    let unknown = pooled_router();
     let _ = chain_order(&unknown, "S");
     assert_eq!(unknown.metrics.quota_placement_totals().all_unknown, 1);
 }
@@ -560,7 +533,7 @@ fn a_quota_birth_writes_an_unrepinned_pin_that_a_follow_up_keeps() {
     // Quota changes WHICH seat wins inside the existing birth path and never
     // whether or how the pin is written: the quota-chosen home is pinned as an
     // ordinary birth, and the next turn stays on it without a rewrite.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
     let pin_key = super::chain::sticky_pin_key("S", SEAT_POOL);
 
@@ -599,7 +572,7 @@ fn a_keyless_walk_leads_with_the_emptiest_of_several_below_cap_seats() {
     // "picks the MOST REMAINING below-cap seat". Three seats, all below cap,
     // and the emptiest is deliberately NOT the one the fixed order would
     // reach first.
-    let router = pooled_router(true);
+    let router = pooled_router();
     seed_readings(
         &router,
         &[
@@ -645,7 +618,7 @@ struct Engagement {
 /// reaches the store therefore leaves every total at zero, and one that does
 /// cannot.
 fn engagement_of(selection: SeatSelection, keyed: bool) -> Engagement {
-    let router = pooled_router_with_selection(selection, true);
+    let router = pooled_router_with_selection(selection);
     seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
 
     let _ = router
@@ -744,7 +717,7 @@ fn fill_first_stays_at_seat_zero_with_a_reading_that_would_move_a_sticky_pool() 
     // The same reading that leads a sticky walk with seat-c must leave a
     // fill-first pool draining seat 0, request after request. Its contract is
     // the drain order itself, not a placement.
-    let router = pooled_router_with_selection(SeatSelection::FillFirst, true);
+    let router = pooled_router_with_selection(SeatSelection::FillFirst);
     seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
 
     for _ in 0..3 {
@@ -764,7 +737,7 @@ fn round_robin_still_advances_per_request_with_quota_readings_present() {
     // RoundRobin's contract is a per-REQUEST advance, not a per-session one, so
     // repeated requests under one session key must keep rotating -- and a
     // below-cap reading must not reorder the walk.
-    let router = pooled_router_with_selection(SeatSelection::RoundRobin, true);
+    let router = pooled_router_with_selection(SeatSelection::RoundRobin);
     seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
 
     assert_eq!(

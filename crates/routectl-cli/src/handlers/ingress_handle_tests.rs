@@ -2891,7 +2891,7 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
 
 /// Regression pin: the K-sample write is UNCONDITIONAL on a successful keyed
 /// dispatch and must NOT inherit the trim trigger. `record_would_trim`
-/// early-returns for a request at or below `[trim] trigger_tokens`, so every
+/// early-returns for a request at or below the trim trigger, so every
 /// `would_trim_*` advisory stays `None` on ordinary traffic -- but the K
 /// estimator's evidence comes from the post-response write path, which is
 /// deliberately outside that gate. Sliding the write behind the trigger would
@@ -2913,7 +2913,7 @@ async fn sub_trigger_keyed_dispatch_still_lands_a_k_sample() {
     // trigger declines while the K write path stays eligible.
     let upstream = calibration_upstream().await;
     let router = Arc::new(calibration_recording_router(&upstream.uri()).await);
-    let trigger_tokens = router.config.trim.to_params().trigger_tokens;
+    let trigger_tokens = routectl_router::SteadyStateTrimParams::default().trigger_tokens;
     let rig = CaptureRig::new();
     let mut req = sample_request("a", false);
     req.routectl_internal.inbound_session_key = Some("sess-sub-trigger".to_string());

@@ -944,13 +944,6 @@ fn render_rate(per_mtok: Option<f64>) -> String {
     )
 }
 
-/// The operator staleness hint as the `i64` the epoch-day checks take. A
-/// hint larger than `i64::MAX` days is nonsensical; saturate rather than
-/// wrap so an absurd config never reads as fresh.
-pub(super) fn staleness_threshold_days(hint_days: u64) -> i64 {
-    i64::try_from(hint_days).unwrap_or(i64::MAX)
-}
-
 /// Knobs section: one deterministic row per configured model naming where its
 /// outbound `max_output_tokens` ceiling comes from and what it resolves to.
 /// Purely informational -- every state is a legitimate configuration -- so no

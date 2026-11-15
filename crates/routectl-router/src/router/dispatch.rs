@@ -614,7 +614,7 @@ impl Router {
         context_window: Option<u32>,
         meta: &mut DispatchMeta,
     ) {
-        let params = self.config.trim.to_params();
+        let params = SteadyStateTrimParams::default();
         let estimated_tokens = estimate_total_tokens(attempt_req);
         // The calibration numerator is stamped HERE, before the trigger
         // check, so it lands for every dispatched attempt rather than only

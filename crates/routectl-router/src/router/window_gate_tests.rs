@@ -48,12 +48,6 @@ impl Provider for StubProvider {
 }
 
 fn router(gate_enabled: bool) -> Router {
-    router_with(gate_enabled, true)
-}
-
-/// A router with both switches set explicitly. `[calibration] enabled` is
-/// accepted and has no effect, which the calibration rows below pin.
-fn router_with(gate_enabled: bool, calibration_enabled: bool) -> Router {
     let body = format!(
         "version = 3\n\
          [providers.p]\n\
@@ -61,9 +55,7 @@ fn router_with(gate_enabled: bool, calibration_enabled: bool) -> Router {
          base_url = \"https://x\"\n\
          api_key_ref = \"literal:k\"\n\
          [window_gate]\n\
-         enabled = {gate_enabled}\n\
-         [calibration]\n\
-         enabled = {calibration_enabled}\n"
+         enabled = {gate_enabled}\n"
     );
     let config: Config = toml::from_str(&body).expect("config parses");
     Router::new(Arc::new(config))
@@ -714,26 +706,6 @@ fn a_lane_whose_ratio_is_out_of_range_behaves_exactly_as_the_static_gate() {
         verdict_on_boundary_chain(&router, &req),
         static_gate_verdict()
     );
-}
-
-#[test]
-fn calibration_enabled_false_still_applies_a_learned_factor() {
-    // The key parses and is ignored: a lane with evidence that corrects moves
-    // the gate exactly as it does with the key absent.
-    let router = router_with(true, false);
-    let req = oversized_request();
-    let raw = estimated_tokens(&req);
-    feed_lane(
-        &router,
-        Some("boundary"),
-        raw,
-        raw * UNDER_COUNT_PERMILLE / 1_000,
-    );
-
-    let (kept, skips) = verdict_on_boundary_chain(&router, &req);
-
-    assert_eq!(kept, vec!["roomy".to_string()]);
-    assert_eq!(skips, 1);
 }
 
 #[test]
