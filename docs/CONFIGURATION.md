@@ -65,7 +65,7 @@ overlays merge, what's reserved.
 - [OpenAI chat-lane rule (`reasoning_dialect`)](#openai-chat-lane-rule-reasoning_dialect)
 
 **Operating the daemon**
-- [Log knobs (`[log]`)](#log-knobs-log)
+- [Log knobs (environment only)](#log-knobs-environment-only)
 - [Usage accounting (`[usage]`)](#usage-accounting-usage)
 - [Live wire check (`[wire_check]`)](#live-wire-check-wire_check)
 - [Reading usage (`routectl usage`)](#reading-usage-routectl-usage)
@@ -187,12 +187,6 @@ version = 5           # config schema version; see "Config schema version"
 
 [window_gate]         # proactive context-window gate switch
                       # (enabled). Optional; default off.
-
-[log]                 # operator-configurable runtime log knobs
-                      # (trace_headers, trace_body_bytes,
-                      # redact_prompts). Optional. The env-filter
-                      # directive ROUTECTL_LOG is intentionally
-                      # env-only and is NOT part of this block.
 
 [usage]               # usage-accounting subsystem: enabled, db_path,
                       # retention_days. Optional.
@@ -356,6 +350,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `calibration` | the learned token-estimate correction always applies |
 | `capability.staleness_hint_days` | diagnostics use a fixed 14-day hint |
 | `fidelity` | prefix-impacting pre-flight repair is never admitted; class and quorum are fixed |
+| `log` | set ROUTECTL_TRACE_HEADERS / ROUTECTL_TRACE_BODY_BYTES / ROUTECTL_LOG_REDACT_PROMPTS in the environment |
 | `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
 | `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
@@ -2858,23 +2853,21 @@ built directly as a library, bypassing config validation, refuses each
 cloaked request with a config error before egress instead of sending the
 terms unmarked.
 
-## Log knobs (`[log]`)
+## Log knobs (environment only)
 
-The optional `[log]` block carries operator-facing fallbacks for the
-three runtime log-safe knobs:
+The three runtime log-safe knobs are set only in the environment that
+launches `routectl serve`; `config.toml` has no key for them (a `log`
+table is refused, see [Retired config keys](#retired-config-keys)):
 
-```toml
-[log]
-trace_headers    = false    # ROUTECTL_TRACE_HEADERS fallback
-trace_body_bytes = 16384    # ROUTECTL_TRACE_BODY_BYTES fallback (16 KB default)
-redact_prompts   = false    # ROUTECTL_LOG_REDACT_PROMPTS fallback
+```sh
+ROUTECTL_TRACE_HEADERS=1          # default off
+ROUTECTL_TRACE_BODY_BYTES=1048576 # default 16384 (16 KB)
+ROUTECTL_LOG_REDACT_PROMPTS=1     # default off
 ```
 
-Per-knob resolution: env wins when set; otherwise the matching
-`[log]` field (when `Some`); otherwise the hardcoded default
-(`false` / `16384` / `false`). All fields are optional. A missing
-`[log]` block leaves current behavior unchanged (env-only or
-hardcoded default for each knob).
+Each knob takes its env var when set, otherwise the hardcoded default
+(`false` / `16384` / `false`). A `ROUTECTL_TRACE_BODY_BYTES` that is
+zero or not a positive integer falls back to the default.
 
 Accepted truthy spellings for the boolean env vars
 (`ROUTECTL_TRACE_HEADERS`, `ROUTECTL_LOG_REDACT_PROMPTS`): `1`,
@@ -2883,18 +2876,18 @@ else (including empty string) is treated as false.
 
 What each knob does:
 
-- `trace_headers` -- opt-in for the four `trace_*_headers`
+- `ROUTECTL_TRACE_HEADERS` -- opt-in for the four `trace_*_headers`
   directions. Directions 1 (ingress), 2 (outgoing), and 3 (upstream
   response) redact secret-bearing header values before emission;
   direction 4 (egress response) stays raw. Default off. See
   [LOGGING.md](LOGGING.md) for the per-direction emit contract.
-- `trace_body_bytes` -- cap on the serialized body emitted at
+- `ROUTECTL_TRACE_BODY_BYTES` -- cap on the serialized body emitted at
   TRACE level by the four body-trace helpers (ingress, outgoing,
   upstream success, egress). Default 16 KB. Bump to ~1 MB
   (`1048576`) when capturing live-traffic fixtures so full
   conversation history with cache_control breakpoints is not
   truncated.
-- `redact_prompts` -- opt-in for prompt redaction in TRACE-level
+- `ROUTECTL_LOG_REDACT_PROMPTS` -- opt-in for prompt redaction in TRACE-level
   body logs. Strips known user-content fields (text blocks,
   tool_use input, instructions, refusal blocks, image data URIs,
   Bedrock Converse `toolUse.input`) and replaces them with
@@ -2903,16 +2896,15 @@ What each knob does:
   (verbatim bodies in TRACE).
 
 Caveat -- the env-filter directive (`ROUTECTL_LOG`, e.g.
-`routectl=info,routectl_core::log_safe=trace`) is intentionally
-NOT part of `[log]`. It stays env-only because it must reach the
-tracing subscriber BEFORE any config load runs. To raise log level
-for one process, export `ROUTECTL_LOG` in the environment that
-launches `routectl serve`.
+`routectl=info,routectl_core::log_safe=trace`) is env-only too: it
+must reach the tracing subscriber BEFORE any config load runs. To
+raise log level for one process, export `ROUTECTL_LOG` in the
+environment that launches `routectl serve`.
 
 Caveat -- like every routectl log-safe knob, the resolved value
-freezes at process startup. Flipping the env var or editing
-`[log]` after launch has no effect until the next restart. The
-seeder fires a single `info` line per knob at boot
+freezes at process startup. Flipping the env var after launch has
+no effect until the next restart. `serve` logs a single `info` line
+per knob at boot
 (`ROUTECTL_LOG_REDACT_PROMPTS resolved`,
 `ROUTECTL_TRACE_BODY_BYTES resolved`, `ROUTECTL_TRACE_HEADERS
 resolved`) so operators can confirm the effective value once.
@@ -3514,18 +3506,11 @@ Five sections are printed:
 
 - **settings** -- one row per setting, sorted by its dotted key path,
   as `path=value(source)`, where the value is the one the runtime
-  resolves and `source` is one of four, computed by the same resolution
+  resolves and `source` is one of three, computed by the same resolution
   the runtime uses:
   - `file` -- `config.toml` writes the key (as a `[section]` key, a
     dotted key or an inline table: all three read alike);
   - `default` -- nothing sets it and the value is the one in code;
-  - `env: <VAR>` -- an environment variable decides the value over the
-    file: `ROUTECTL_TRACE_HEADERS`, `ROUTECTL_LOG_REDACT_PROMPTS` and
-    `ROUTECTL_TRACE_BODY_BYTES` for the three `[log]` knobs. This
-    reflects the environment of the shell that runs `config show`,
-    which is not necessarily the daemon's: a daemon started by a
-    service manager or another terminal may see different variables.
-    Its own startup log line for each knob states what it resolved;
   - `from <path>` -- the key is unset here and another entry's value
     applies: an `openai-responses` entry with no `codex_version` runs
     under the one another entry sets (`from
@@ -3536,8 +3521,8 @@ Five sections are printed:
   value redacted there (listed above) prints its sentinel here too and a
   `base_url` prints only its origin. An array prints as one row. A key
   that has no value until you set one is not printed unless its default
-  is a fixed value in code: `[retry] max_honored_retry_after_ms`, the three `[log]` knobs,
-  and on each entry of the matching kind `max_thinking_entry_bytes`
+  is a fixed value in code: `[retry] max_honored_retry_after_ms`, and
+  on each entry of the matching kind `max_thinking_entry_bytes`
   (`anthropic-api`) and `codex_version` (`openai-responses`). The five
   tiered tuning keys an entry leaves unset resolve in **resolved
   tuning** below; the rest of these keys mean off, or that the value
@@ -3648,7 +3633,7 @@ a rejected edit leaves the file byte-identical:
 
 A running daemon's file watcher picks up the rename and hot-reloads
 automatically. Fields that only apply at startup (`[server]` bind and
-listener auth, the `[log]` knobs, `usage.db_path`,
+listener auth, `usage.db_path`,
 `usage.retention_days`, and the whole `[mitm]` block) are still written,
 and `config set` prints exactly which ones need a restart to take
 effect. A no-op set (the value already matches) writes nothing and

@@ -433,36 +433,6 @@
         }
       ]
     },
-    "LogConfig": {
-      "additionalProperties": false,
-      "description": "Operator-facing `[log]` config block. Each field mirrors a\nwell-known env var:\n\n  - `trace_headers` -> `ROUTECTL_TRACE_HEADERS`\n  - `trace_body_bytes` -> `ROUTECTL_TRACE_BODY_BYTES`\n  - `redact_prompts` -> `ROUTECTL_LOG_REDACT_PROMPTS`\n\nPer-knob resolution: env wins when set; otherwise the field below\n(when `Some(_)`); otherwise the hardcoded default. All fields are\noptional. A missing `[log]` block leaves current behavior\nunchanged.\n\nThe env-filter directive (`ROUTECTL_LOG`, e.g.\n`routectl=info,routectl_core::log_safe=trace`) is intentionally\nout of scope here. It stays env-only because it must reach the\ntracing subscriber BEFORE any config load runs, and the\narchitect-validated design declines to reorder boot to introduce a\nconfig-side fallback for it.",
-      "properties": {
-        "redact_prompts": {
-          "description": "Opt-in for prompt redaction in TRACE-level body logs. Default\noff (verbatim bodies in TRACE).",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "trace_body_bytes": {
-          "description": "Cap on the serialized body emitted at TRACE level by the four\nbody-trace helpers. Zero or missing falls through to the\nhardcoded 16 KB default.",
-          "format": "uint",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "trace_headers": {
-          "description": "Opt-in for the four `trace_*_headers` directions (raw, no\nredaction). Default off.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "MitmConfig": {
       "additionalProperties": false,
       "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts a first-party upstream\n(e.g. Claude Code talking to `api.anthropic.com`) so routectl can\nobserve and translate the decrypted traffic. Presence of the\n`[mitm]` block gates the feature on, matching the `[server.auth]`\nconvention -- `Config::mitm == None` keeps zero proxy startup and\nzero behavior change.\n\nTransport-only (the original shape): this block carries no credential\nknob. Which credential a forwarded egress uses is a per-provider\nchoice (`ProviderEntry::AnthropicApi.credential_source`); the retired\n`[mitm] credential_source` key is refused by the pre-parse retired-key\ntable (`RETIRED_KEYS`), which names the replacement.",
@@ -1901,11 +1871,6 @@
         "overrides": {}
       },
       "description": "Operator-facing `[capability]` block. Kill switch plus tempo knobs\nfor the learned-capability subsystem. A missing block keeps all\ndefaults: enabled, a 48h decay window, a 1h inferred-signal window.\nThe table is deliberately top-level (not nested under `[server]`)\nso a later override layer can nest per-target overrides under the\nsame parent."
-    },
-    "log": {
-      "$ref": "#/$defs/LogConfig",
-      "default": {},
-      "description": "Operator-facing `[log]` block. Each field is an optional\nfallback consulted by the runtime log-safe knobs when the\nmatching env var is unset. Env always wins over config; missing\nblock keeps the pre-`[log]` env-only-or-hardcoded behavior. The\nenv-filter directive (`ROUTECTL_LOG`) is intentionally NOT part\nof this block -- it stays env-only."
     },
     "mitm": {
       "anyOf": [

@@ -3,9 +3,7 @@
 //!
 //! A leaf reads `(file)` when `config.toml` writes its key and `(default)`
 //! when the value is the one in code. A key the runtime resolves from
-//! somewhere else reads `(env: <VAR>)` when an environment variable of this
-//! process decides it, or `(from <path>)` when another config entry's value
-//! applies. The values come from the redacted tree `config show`
+//! another config entry reads `(from <path>)`. The values come from the redacted tree `config show`
 //! serializes, so this block can never print a secret the plain dump
 //! withholds; the raw text is parsed only to test key presence and none of
 //! its values are printed.
@@ -19,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use routectl_core::{Error, LogKnob, LogKnobSource, Result};
+use routectl_core::{Error, Result};
 use routectl_router::Config;
 use toml::{Table, Value};
 
@@ -32,8 +30,6 @@ enum SettingSource {
     File,
     /// Nothing writes the key; the value is the one in code.
     Default,
-    /// The named environment variable decides the value.
-    Env(&'static str),
     /// Another entry's key, at this rendered path, supplies the value.
     From(String),
 }
@@ -43,7 +39,6 @@ impl SettingSource {
         match self {
             Self::File => "file".to_string(),
             Self::Default => "default".to_string(),
-            Self::Env(var) => format!("env: {var}"),
             Self::From(path) => format!("from {path}"),
         }
     }
@@ -65,21 +60,15 @@ pub enum Resolution {
     File,
     /// The code default applies.
     Default(Value),
-    /// The named environment variable decides the value.
-    Env(Value, &'static str),
     /// Another entry's key, at this dotted path, supplies the value.
     From(Value, Vec<String>),
 }
 
-/// An environment variable lookup.
-pub type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
-
-/// What a [`CodeDefault`] resolves against: the loaded config, whether the
-/// config sets the key in the table being resolved, and the environment.
+/// What a [`CodeDefault`] resolves against: the loaded config and whether
+/// the config sets the key in the table being resolved.
 pub struct ResolveCx<'a> {
     pub config: &'a Config,
     pub is_set: bool,
-    pub env: EnvLookup<'a>,
 }
 
 /// One `Option` key whose unset value is a concrete default in code.
@@ -107,36 +96,6 @@ pub const CODE_DEFAULTS: &[CodeDefault] = &[
         },
     },
     CodeDefault {
-        scope: DefaultScope::Section("log"),
-        key: "trace_headers",
-        resolve: |cx| {
-            log_resolution(
-                routectl_core::resolve_trace_headers(cx.env, cx.config.log.trace_headers),
-                Value::Boolean,
-            )
-        },
-    },
-    CodeDefault {
-        scope: DefaultScope::Section("log"),
-        key: "trace_body_bytes",
-        resolve: |cx| {
-            log_resolution(
-                routectl_core::resolve_trace_body_bytes(cx.env, cx.config.log.trace_body_bytes),
-                usize_value,
-            )
-        },
-    },
-    CodeDefault {
-        scope: DefaultScope::Section("log"),
-        key: "redact_prompts",
-        resolve: |cx| {
-            log_resolution(
-                routectl_core::resolve_redact_prompts(cx.env, cx.config.log.redact_prompts),
-                Value::Boolean,
-            )
-        },
-    },
-    CodeDefault {
         scope: DefaultScope::ProviderKind("anthropic-api"),
         key: "max_thinking_entry_bytes",
         resolve: |cx| {
@@ -154,15 +113,6 @@ pub const CODE_DEFAULTS: &[CodeDefault] = &[
         resolve: codex_version_resolution,
     },
 ];
-
-/// A `[log]` knob as its runtime resolver reports it.
-fn log_resolution<T>(knob: LogKnob<T>, to_value: fn(T) -> Value) -> Resolution {
-    match knob.source {
-        LogKnobSource::Config => Resolution::File,
-        LogKnobSource::Default => Resolution::Default(to_value(knob.value)),
-        LogKnobSource::Env(var) => Resolution::Env(to_value(knob.value), var),
-    }
-}
 
 /// An entry's own `codex_version` applies as written; an unset one runs
 /// under the config-wide value another entry sets, else the pinned build.
@@ -193,23 +143,13 @@ fn usize_value(n: usize) -> Value {
 type Settings = BTreeMap<Vec<String>, (Value, SettingSource)>;
 
 /// [`settings_lines`] over `config` as `config show` prints it: secrets
-/// redacted, each provider `base_url` reduced to its origin. Environment
-/// sources are read from this process's environment.
+/// redacted, each provider `base_url` reduced to its origin.
 pub fn redacted_settings_lines(config: &Config, raw_text: &str) -> Result<Vec<String>> {
-    redacted_settings_lines_with_env(config, raw_text, &routectl_core::process_env)
-}
-
-/// [`redacted_settings_lines`] resolving environment sources through `env`.
-pub fn redacted_settings_lines_with_env(
-    config: &Config,
-    raw_text: &str,
-    env: EnvLookup<'_>,
-) -> Result<Vec<String>> {
     let tree = Table::try_from(redacted_config(config))
         .map_err(|e| Error::Internal(format!("serialize: {e}")))?;
     // The parse error quotes the offending source line, which may hold a
     // secret; the loader has already parsed this text, so name no detail.
-    settings_lines(config, &tree, raw_text, env)
+    settings_lines(config, &tree, raw_text)
         .map_err(|_| Error::Config("config.toml does not parse as TOML".to_string()))
 }
 
@@ -223,12 +163,11 @@ fn settings_lines(
     config: &Config,
     tree: &Table,
     raw_text: &str,
-    env: EnvLookup<'_>,
 ) -> std::result::Result<Vec<String>, toml::de::Error> {
     let raw: Table = toml::from_str(raw_text)?;
     let mut settings = Settings::new();
     collect_leaves(tree, &mut Vec::new(), &raw, &mut settings);
-    apply_code_defaults(config, tree, env, &mut settings);
+    apply_code_defaults(config, tree, &mut settings);
     Ok(settings
         .into_iter()
         .map(|(path, (value, source))| {
@@ -273,10 +212,10 @@ fn tree_has_path(raw: &Table, path: &[String]) -> bool {
 }
 
 /// Resolve each [`CODE_DEFAULTS`] key in every table its scope names. A
-/// key the runtime takes from the code default, the environment or another
-/// entry prints that value and source in place of any file leaf; a key it
-/// takes from the file keeps the leaf.
-fn apply_code_defaults(config: &Config, tree: &Table, env: EnvLookup<'_>, out: &mut Settings) {
+/// key the runtime takes from the code default or another entry prints that
+/// value and source in place of any file leaf; a key it takes from the file
+/// keeps the leaf.
+fn apply_code_defaults(config: &Config, tree: &Table, out: &mut Settings) {
     for default in CODE_DEFAULTS {
         for table in scope_tables(tree, default.scope) {
             let mut path = table;
@@ -284,13 +223,11 @@ fn apply_code_defaults(config: &Config, tree: &Table, env: EnvLookup<'_>, out: &
             let cx = ResolveCx {
                 config,
                 is_set: tree_has_path(tree, &path),
-                env,
             };
             let resolution = (default.resolve)(&cx);
             let resolved = match resolution {
                 Resolution::File => continue,
                 Resolution::Default(value) => (value, SettingSource::Default),
-                Resolution::Env(value, var) => (value, SettingSource::Env(var)),
                 Resolution::From(value, from) => (value, SettingSource::From(render_path(&from))),
             };
             out.insert(path, resolved);

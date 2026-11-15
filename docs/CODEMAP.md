@@ -379,7 +379,8 @@ license.
   from an upstream error message
 - `src/log_safe.rs` -- `sanitize_for_log`, the `trace_*` body helpers,
   `redact_error_body_text`, `sanitize_upstream_body*`, `upstream_excerpt_for_log`
-  and the `[log]` knob resolvers: log-safe rendering of untrusted text
+  and the env-only log knob resolvers and boot status lines: log-safe
+  rendering of untrusted text
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
   of an upstream error body carried on `Error::Upstream` (read via
   `Error::parsed_body`), plus its envelope / `error.*` accessors and
@@ -562,13 +563,6 @@ license.
   `[REDACTED]` before emit, while a non-secret rate-limit header round-trips
   verbatim, and a credential echoed under any other header name is scrubbed;
   isolated binary so the `ROUTECTL_TRACE_HEADERS` OnceLock freezes ON
-- `tests/log_overrides_redact_prompts.rs` -- resolution-rule coverage for the
-  `redact_prompts` knob (env > `[log]` > default); isolated binary so OnceLock
-  state stays clean
-- `tests/log_overrides_trace_body_bytes.rs` -- resolution-rule coverage for
-  `trace_body_bytes`; isolated binary
-- `tests/log_overrides_trace_headers.rs` -- resolution-rule coverage for
-  `trace_headers`; isolated binary
 
 ## routectl-providers
 
@@ -6336,7 +6330,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   capability replay boundary when the routers' revision stamps differ
   (unreachable while the stamps are frozen), and emit the restart-required diff via
   `config_classify::collect_restart_required_changes` --
-  bind/listener-auth/body-limit, the three `[log]` knobs, `usage.db_path`, and
+  bind/listener-auth/body-limit, `usage.db_path`, and
   `[mitm]` all restart-required since their listeners/state are startup-only;
   the success line stamps a before/after pair per kill switch that FLIPPED
   (`[reduction] enabled`, `[cache] k_gated_emission`), single-sourcing the
@@ -7991,7 +7985,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `tuning_cells` / `tuning_kind` shared with doctor, capability cells)
 - `src/commands/config_settings.rs` -- the settings block of `config show
   --effective`: each scalar of `config::redacted_config` tagged `file` /
-  `default` / `env: <VAR>` / `from <path>`; `CODE_DEFAULTS` resolves unset keys
+  `default` / `from <path>`; `CODE_DEFAULTS` resolves unset keys
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
   auto-surface, `init`): `preflight`, one call to
@@ -8145,7 +8139,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/config_classify.rs` -- pure config-diff classifiers shared by
   hot-reload logging and `config set/unset`:
   `collect_restart_required_changes(prev, next)`
-  (bind/listener-auth/body-limit, the `[log]` knobs, `usage.db_path`,
+  (bind/listener-auth/body-limit, `usage.db_path`,
   `usage.retention_days`, `[mitm]`, and per-provider `codex_version` -- all
   startup-only state; `codex_version` is stamped into the process-global codex
   identity once at boot) and `collect_high_consequence_changes(prev, next)`

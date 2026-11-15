@@ -16,7 +16,7 @@ use routectl_router::{Config, ProviderEntry};
 /// [`every_top_level_field_is_classified`]); the runtime
 /// [`collect_restart_required_changes`] diffs the individual knobs inside.
 #[cfg(test)]
-pub const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "log", "usage", "mitm"];
+pub const RESTART_REQUIRED_SECTIONS: &[&str] = &["server", "usage", "mitm"];
 
 /// Top-level sections carrying egress-defining knobs (where requests go,
 /// which credential authenticates them) that warrant an operator prompt on
@@ -47,12 +47,11 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
 
 /// Diff the previous config against the new one and return the names of
 /// fields whose change requires a daemon restart to take effect. Per the
-/// architect-validated classification: bind, listener auth, the
-/// `DefaultBodyLimit` axum layer, and the three `[log]` knobs (deliberately
-/// frozen behind `OnceLock` in `routectl-core/src/log_safe.rs`) all stay
-/// restart-required. `usage.db_path` (the writer holds a handle opened at
-/// boot) and `usage.retention_days` (pruning runs only at startup, so a
-/// changed value takes effect only on the next daemon start) are
+/// architect-validated classification: bind, listener auth and the
+/// `DefaultBodyLimit` axum layer all stay restart-required.
+/// `usage.db_path` (the writer holds a handle opened at boot) and
+/// `usage.retention_days` (pruning runs only at startup, so a changed
+/// value takes effect only on the next daemon start) are
 /// restart-required too; `usage.enabled` alone flips live. A `[mitm]` edit
 /// is restart-required because the front-proxy listener is spawned once at
 /// boot.
@@ -80,16 +79,6 @@ pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'s
     }
     if prev.server.max_body_bytes != next.server.max_body_bytes {
         out.push("server.max_body_bytes");
-    }
-
-    if prev.log.trace_headers != next.log.trace_headers {
-        out.push("log.trace_headers");
-    }
-    if prev.log.trace_body_bytes != next.log.trace_body_bytes {
-        out.push("log.trace_body_bytes");
-    }
-    if prev.log.redact_prompts != next.log.redact_prompts {
-        out.push("log.redact_prompts");
     }
 
     if prev.usage.db_path != next.usage.db_path {
@@ -273,13 +262,6 @@ mod tests {
         };
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(changes.contains(&"server.auth.tokens"), "got {changes:?}");
-
-        // Log knob change -> log.redact_prompts.
-        prev = Config::default();
-        next = prev.clone();
-        next.log.redact_prompts = Some(true);
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(changes.contains(&"log.redact_prompts"), "got {changes:?}");
 
         // usage.db_path change -> restart-required.
         prev = Config::default();

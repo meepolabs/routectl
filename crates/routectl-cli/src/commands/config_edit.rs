@@ -508,6 +508,11 @@ default = \"gpt\"
                 "[bedrock]\nallowed_betas = 1\n",
             ),
             (
+                "a key that moved to the environment",
+                "log.trace_headers",
+                "log = { trace_headers = true }\n",
+            ),
+            (
                 "a retired provider key",
                 "providers.fast.allowed_betas",
                 "[providers.fast]\nallowed_betas = 1\n",

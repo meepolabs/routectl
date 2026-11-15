@@ -6,8 +6,7 @@
 //! competes for a value, tagging each with the layer that won:
 //!
 //!   - settings (every scalar key, `(file)` when `config.toml` sets it,
-//!     `(default)` when the value is the one in code, `(env: <VAR>)` when an
-//!     environment variable of this process decides it, `(from <path>)` when
+//!     `(default)` when the value is the one in code, `(from <path>)` when
 //!     another entry's value applies),
 //!   - model facts (context window, output fill and each price field, tagged
 //!     with a fixed source token and, for a table price, the table date),
@@ -66,10 +65,9 @@ fn settings_block(loaded: &LoadedConfig) -> Result<Vec<String>> {
 fn render_settings(loaded: &LoadedConfig) -> Result<()> {
     let lines = settings_block(loaded)?;
     println!(
-        "\nsettings (file: config.toml sets it; default: the value in code; env: an \
-         environment variable of this shell decides it, which a daemon started \
-         elsewhere may not share; from: another entry's value applies; the five \
-         tiered keys an entry leaves unset resolve under resolved tuning):"
+        "\nsettings (file: config.toml sets it; default: the value in code; from: \
+         another entry's value applies; the five tiered keys an entry leaves unset \
+         resolve under resolved tuning):"
     );
     for line in lines {
         println!("{line}");

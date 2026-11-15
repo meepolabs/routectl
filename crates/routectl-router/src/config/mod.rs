@@ -23,8 +23,8 @@ pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::default_responses_base;
 pub use schema::{
     AliasValue, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
-    CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, HistoryReasoning, LogConfig, MitmConfig,
-    ModelEntry, NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry,
+    CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, HistoryReasoning, MitmConfig, ModelEntry,
+    NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry,
     ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy,
     SeatSelection, ServerAuth, ServerConfig, UsageConfig, WindowGateConfig, WireCheckConfig,
     is_config_provider_kind,
@@ -112,15 +112,6 @@ pub struct Config {
     /// references entries by nickname. See the v0.6.0-rc.1 changelog.
     #[serde(default)]
     pub models: BTreeMap<String, ModelEntry>,
-
-    /// Operator-facing `[log]` block. Each field is an optional
-    /// fallback consulted by the runtime log-safe knobs when the
-    /// matching env var is unset. Env always wins over config; missing
-    /// block keeps the pre-`[log]` env-only-or-hardcoded behavior. The
-    /// env-filter directive (`ROUTECTL_LOG`) is intentionally NOT part
-    /// of this block -- it stays env-only.
-    #[serde(default)]
-    pub log: LogConfig,
 
     /// Operator-facing `[usage]` block. Controls the usage-accounting
     /// subsystem (per-request token/cost rows persisted to a local

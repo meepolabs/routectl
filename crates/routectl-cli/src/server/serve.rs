@@ -424,24 +424,15 @@ async fn serve_inner(
     );
 
     // Resolve the three runtime log knobs (redact_prompts,
-    // trace_body_bytes, trace_headers) once at server boot so the
-    // matching `info` confirmation lines land before any TRACE
-    // request fires. Without this, each reader's OnceLock initializes
-    // at the first call from a body/header trace helper, which means
-    // an operator who set the env var or `[log]` config after launch
-    // would silently get the wrong policy.
-    //
-    // Per-knob resolution: env wins when set; otherwise the matching
-    // `[log]` config field (when `Some(_)`); otherwise the hardcoded
-    // default. The single `init_log_overrides` entrypoint seeds the
-    // config-side fallbacks AND fires the three status emitters in
-    // one atomic step, closing the seed-then-status ordering window
-    // by structure (one public seeder, no second-seeder path).
-    routectl_core::init_log_overrides(
-        config.log.trace_headers,
-        config.log.trace_body_bytes,
-        config.log.redact_prompts,
-    );
+    // trace_body_bytes, trace_headers) from the environment once at
+    // server boot so the matching `info` confirmation lines land before
+    // any TRACE request fires. Without this, each reader's OnceLock
+    // initializes at the first call from a body/header trace helper,
+    // which means an operator who set the env var after launch would
+    // silently get the wrong policy.
+    routectl_core::log_redaction_status();
+    routectl_core::log_trace_body_cap_status();
+    routectl_core::log_header_trace_status();
 
     let max_body_bytes = compute_max_body_bytes(&config);
     // The capability-persistence health read, installed on the OWNED Router: after

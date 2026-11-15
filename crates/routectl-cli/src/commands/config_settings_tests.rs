@@ -3,13 +3,11 @@ use std::collections::BTreeSet;
 use routectl_router::Config;
 use serde_json::Value as Json;
 
-use super::{CODE_DEFAULTS, CodeDefault, DefaultScope, redacted_settings_lines_with_env};
+use super::{CODE_DEFAULTS, CodeDefault, DefaultScope, redacted_settings_lines};
 
-/// The settings block with no environment variable set, whatever the
-/// invoking shell exports.
 fn lines_for(raw_text: &str) -> Vec<String> {
     let config: Config = toml::from_str(raw_text).expect("fixture config parses");
-    redacted_settings_lines_with_env(&config, raw_text, &|_| None).expect("settings render")
+    redacted_settings_lines(&config, raw_text).expect("settings render")
 }
 
 /// `path=value(source)` -> (`path`, `source`).
@@ -49,9 +47,6 @@ decay_hours = 24
 enabled = true
 inferred_window_hours = 2
 
-[log]
-trace_headers = true
-
 [providers.relay]
 kind = "openai-compat"
 base_url = "https://relay.example/v1"
@@ -78,7 +73,6 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "capability.decay_hours",
         "capability.enabled",
         "capability.inferred_window_hours",
-        "log.trace_headers",
         "providers.relay.kind",
         "providers.relay.base_url",
         "providers.relay.api_key_ref",
@@ -91,8 +85,6 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "cache.auto_emit_top_level_breakpoint",
         "cache.k_gated_emission",
         "capability.essential",
-        "log.redact_prompts",
-        "log.trace_body_bytes",
         "models.fast.selectable",
         "models.fast.visible_routectl_provider",
         "reduction.enabled",
@@ -128,25 +120,20 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (19, 19));
+    assert_eq!((file.len(), default.len()), (18, 17));
     assert_eq!(
         lines.len(),
-        38,
+        35,
         "every line is tagged file or default, once"
     );
 }
 
 #[test]
 fn an_unset_code_default_key_prints_its_value_from_code() {
-    let rows = [
-        (
-            "retry ceiling",
-            "  retry.max_honored_retry_after_ms=3600000(default)",
-        ),
-        ("trace body cap", "  log.trace_body_bytes=16384(default)"),
-        ("trace headers", "  log.trace_headers=true(file)"),
-        ("redact prompts", "  log.redact_prompts=false(default)"),
-    ];
+    let rows = [(
+        "retry ceiling",
+        "  retry.max_honored_retry_after_ms=3600000(default)",
+    )];
     let lines = lines_for(HALF_SET_FIXTURE);
     for (name, expected) in rows {
         assert!(
@@ -424,7 +411,6 @@ fn schema_option_keys() -> BTreeSet<String> {
 fn census_key(default: &CodeDefault) -> String {
     let owner = match default.scope {
         DefaultScope::Section("retry") => "RetryPolicy",
-        DefaultScope::Section("log") => "LogConfig",
         DefaultScope::ProviderKind(_) => "ProviderEntry",
         DefaultScope::Section(other) => panic!("no schema type mapped for [{other}]"),
     };

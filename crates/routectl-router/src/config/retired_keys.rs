@@ -50,6 +50,12 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
                       are fixed",
     },
     RetiredKey {
+        path: &["log"],
+        refused_value: None,
+        replacement: "set ROUTECTL_TRACE_HEADERS / ROUTECTL_TRACE_BODY_BYTES / \
+                      ROUTECTL_LOG_REDACT_PROMPTS in the environment",
+    },
+    RetiredKey {
         path: &["mitm", "credential_source"],
         refused_value: None,
         replacement: "a forwarded credential is a per-provider choice: add \

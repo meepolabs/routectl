@@ -373,42 +373,6 @@ const _: () = assert!(
      collapse into the envelope gate",
 );
 
-/// Operator-facing `[log]` config block. Each field mirrors a
-/// well-known env var:
-///
-///   - `trace_headers` -> `ROUTECTL_TRACE_HEADERS`
-///   - `trace_body_bytes` -> `ROUTECTL_TRACE_BODY_BYTES`
-///   - `redact_prompts` -> `ROUTECTL_LOG_REDACT_PROMPTS`
-///
-/// Per-knob resolution: env wins when set; otherwise the field below
-/// (when `Some(_)`); otherwise the hardcoded default. All fields are
-/// optional. A missing `[log]` block leaves current behavior
-/// unchanged.
-///
-/// The env-filter directive (`ROUTECTL_LOG`, e.g.
-/// `routectl=info,routectl_core::log_safe=trace`) is intentionally
-/// out of scope here. It stays env-only because it must reach the
-/// tracing subscriber BEFORE any config load runs, and the
-/// architect-validated design declines to reorder boot to introduce a
-/// config-side fallback for it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LogConfig {
-    /// Opt-in for the four `trace_*_headers` directions (raw, no
-    /// redaction). Default off.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_headers: Option<bool>,
-    /// Cap on the serialized body emitted at TRACE level by the four
-    /// body-trace helpers. Zero or missing falls through to the
-    /// hardcoded 16 KB default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_body_bytes: Option<usize>,
-    /// Opt-in for prompt redaction in TRACE-level body logs. Default
-    /// off (verbatim bodies in TRACE).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub redact_prompts: Option<bool>,
-}
-
 /// Operator-facing `[usage]` config block. Controls the
 /// usage-accounting subsystem. Each field carries a default, so a
 /// config with no `[usage]` block deserializes to the same value as

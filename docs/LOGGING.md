@@ -231,9 +231,8 @@ What you get at trace, additionally (full 4-direction visibility):
   signal beyond the summary.
 
 The 16 KB trace body cap is the DEFAULT. Override it with
-`ROUTECTL_TRACE_BODY_BYTES=<N>` (env, read once at first trace) or
-`[log] trace_body_bytes = <N>` (config, applied at startup). The
-resolved value is announced at boot. The 4 KB debug excerpt cap is fixed.
+`ROUTECTL_TRACE_BODY_BYTES=<N>` in the environment that launches
+routectl; the resolved value is announced at boot. The 4 KB debug excerpt cap is fixed.
 
 Sensitivity caveat: bodies contain user prompts AND assistant outputs
 at TRACE. Leave `ROUTECTL_LOG` unset (the default `info,aws_config=warn`) in
