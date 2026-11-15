@@ -373,7 +373,7 @@ enum ConfigCmd {
     /// re-validating the whole file through the shared gate before an
     /// atomic write. The value's scalar type is inferred (bool / int /
     /// float / string). An egress-defining change (a provider `base_url`
-    /// or `credential_source`, a `[mitm]` origin) prompts for confirmation
+    /// or `credential_source`, a pool's members) prompts for confirmation
     /// unless `--yes` is given; a non-interactive run without `--yes`
     /// declines.
     Set {

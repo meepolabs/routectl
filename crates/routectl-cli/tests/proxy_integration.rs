@@ -30,21 +30,16 @@
 //!
 //! Test (c) ("a control-plane path forwards verbatim to the fake
 //! Anthropic origin with the client token intact") is NOT exercised in
-//! THIS file: `routectl_router::validate_mitm_config` (wired into
-//! `build_router_from_config`, and correctly so -- it is a real
-//! production coherence check) rejects any `[mitm].upstream_origin`
-//! that is not an absolute `https://` URL, and `wiremock` (the crate's
-//! only test-double HTTP server) has no TLS mode, so there is no
-//! in-process fake origin this file's booted server could legally point
-//! `upstream_origin` at without either dialing the real internet or
-//! weakening the forward clients' TLS verification (out of scope -- that is
-//! the MITM proxy's forward-leg transport, not this file's to change). That same
-//! scenario IS covered end-to-end -- CONNECT parse, TLS handoff, and the
-//! control-plane forward, all through this module's own real code paths
-//! -- by
+//! THIS file: the booted server always forwards to the pinned
+//! `https://api.anthropic.com` (`routectl_cli::proxy::pin`), and no
+//! config key can point it elsewhere, so there is no in-process fake
+//! origin this file's booted server could forward to without dialing the
+//! real internet. That same scenario IS covered end-to-end -- CONNECT
+//! parse, TLS handoff, and the control-plane forward, all through this
+//! module's own real code paths -- by
 //! `proxy::listener::tests::connect_to_a_control_plane_path_forwards_to_upstream_origin_with_token_intact`
 //! in `src/proxy/listener.rs`, which builds `MitmCtx` directly (bypassing
-//! `Config`/`validate_mitm_config`, exactly like `split.rs`'s and
+//! `Config` and the pinned pair, exactly like `split.rs`'s and
 //! `mitm.rs`'s own existing test suites already do) so it can use a
 //! plain-`http` wiremock server as the upstream double.
 
@@ -61,7 +56,7 @@ mod common;
 
 use common::readiness::{READY_DEADLINE, await_health, sleep_until_cadence_or_deadline};
 
-const MITM_HOST: &str = "api.anthropic.com";
+use routectl_cli::proxy::pin::MITM_HOST;
 const CONNECT_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
 /// Binds an ephemeral loopback port, reads it back, then drops the
@@ -96,17 +91,10 @@ async fn reserve_free_port() -> u16 {
     port
 }
 
-fn mitm_config(
-    cert_dir: &Path,
-    listen_port: u16,
-    upstream_origin: &str,
-    mitm_host: &str,
-) -> MitmConfig {
+fn mitm_config(cert_dir: &Path, listen_port: u16) -> MitmConfig {
     MitmConfig {
-        upstream_origin: upstream_origin.to_string(),
         listen_port,
         cert_dir: cert_dir.to_path_buf(),
-        mitm_host: mitm_host.to_string(),
     }
 }
 
@@ -124,10 +112,7 @@ fn mitm_config(
 /// latent flake the moment the suite runs loaded and in parallel.
 async fn spawn_test_server(config: Arc<Config>) -> String {
     let config = common::isolate_usage_db(config);
-    let proxy_front = config
-        .mitm
-        .as_ref()
-        .map(|mitm| (mitm.listen_port, mitm.mitm_host.clone()));
+    let proxy_front = config.mitm.as_ref().map(|mitm| mitm.listen_port);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
@@ -139,8 +124,8 @@ async fn spawn_test_server(config: Arc<Config>) -> String {
     });
 
     await_health(&base_url).await;
-    if let Some((port, mitm_host)) = proxy_front {
-        await_proxy_front(port, &mitm_host).await;
+    if let Some(port) = proxy_front {
+        await_proxy_front(port, MITM_HOST).await;
     }
 
     base_url
@@ -248,22 +233,15 @@ async fn tls_handshake(
 /// end-to-end through the real booted server, with no TLS involved --
 /// this is the traffic shape Claude Code's telemetry/Sentry calls take
 /// when `HTTPS_PROXY` points every outbound HTTPS call at this same
-/// proxy port. `upstream_origin` is a placeholder here (never dialed:
-/// a blind-tunnel target is reached directly via the raw CONNECT
-/// authority, not via `[mitm].upstream_origin`) -- `validate_mitm_config`
-/// still requires it to be a syntactically valid absolute `https://` URL.
+/// proxy port. The pinned upstream origin is never dialed here: a
+/// blind-tunnel target is reached directly via the raw CONNECT authority.
 #[tokio::test]
 async fn blind_tunnel_relays_bytes_through_the_booted_server() {
     let dir = tempfile::tempdir().unwrap();
     let mitm_port = reserve_free_port().await;
 
     let config = Config {
-        mitm: Some(mitm_config(
-            dir.path(),
-            mitm_port,
-            "https://api.anthropic.com",
-            MITM_HOST,
-        )),
+        mitm: Some(mitm_config(dir.path(), mitm_port)),
         ..Config::default()
     };
     let _base_url = spawn_test_server(Arc::new(config)).await;
@@ -294,21 +272,16 @@ async fn blind_tunnel_relays_bytes_through_the_booted_server() {
 /// actual (dynamically OS-assigned) bound port, not a stale or
 /// hardcoded one. `/v1/models` is served entirely in-process (no
 /// provider dispatch), so a coherent 200 with the expected JSON shape
-/// can only have come from the live main listener. `upstream_origin` is
-/// again a never-dialed placeholder: a const inference path is always
-/// re-injected, never forwarded to `upstream_origin`.
+/// can only have come from the live main listener. The pinned upstream
+/// origin is again never dialed: a const inference path is always
+/// re-injected, never forwarded upstream.
 #[tokio::test]
 async fn connect_to_mitm_host_reinjects_v1_models_to_the_live_main_listener() {
     let dir = tempfile::tempdir().unwrap();
     let mitm_port = reserve_free_port().await;
 
     let config = Config {
-        mitm: Some(mitm_config(
-            dir.path(),
-            mitm_port,
-            "https://api.anthropic.com",
-            MITM_HOST,
-        )),
+        mitm: Some(mitm_config(dir.path(), mitm_port)),
         ..Config::default()
     };
     let _base_url = spawn_test_server(Arc::new(config)).await;
@@ -364,12 +337,7 @@ async fn mitm_enabled_on_a_non_loopback_bind_is_hard_refused() {
     let mitm_port = reserve_free_port().await;
 
     let config = Config {
-        mitm: Some(mitm_config(
-            dir.path(),
-            mitm_port,
-            "https://api.anthropic.com",
-            MITM_HOST,
-        )),
+        mitm: Some(mitm_config(dir.path(), mitm_port)),
         ..Config::default()
     };
     let config = common::isolate_usage_db(Arc::new(config));

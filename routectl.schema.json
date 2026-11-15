@@ -435,7 +435,7 @@
     },
     "MitmConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts a first-party upstream\n(e.g. Claude Code talking to `api.anthropic.com`) so routectl can\nobserve and translate the decrypted traffic. Presence of the\n`[mitm]` block gates the feature on, matching the `[server.auth]`\nconvention -- `Config::mitm == None` keeps zero proxy startup and\nzero behavior change.\n\nTransport-only (the original shape): this block carries no credential\nknob. Which credential a forwarded egress uses is a per-provider\nchoice (`ProviderEntry::AnthropicApi.credential_source`); the retired\n`[mitm] credential_source` key is refused by the pre-parse retired-key\ntable (`RETIRED_KEYS`), which names the replacement.",
+      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts `api.anthropic.com` (e.g.\nClaude Code's own traffic) so routectl can observe and translate the\ndecrypted traffic. Presence of the `[mitm]` block gates the feature\non, matching the `[server.auth]` convention -- `Config::mitm == None`\nkeeps zero proxy startup and zero behavior change.\n\nTransport-only and local-only: the block names where the listener\nbinds and where its certificates live, never where traffic goes. The\nupstream origin and TLS host are fixed in routectl-cli's proxy module,\nbecause the proxy forwards the client's full-scope claude.ai token.\nWhich credential a forwarded egress uses is a per-provider choice\n(`ProviderEntry::AnthropicApi.credential_source`). Retired keys of\nthis block are refused by the pre-parse retired-key table\n(`RETIRED_KEYS`), which names each replacement.",
       "properties": {
         "cert_dir": {
           "default": "~/.config/routectl/mitm-certs",
@@ -449,16 +449,6 @@
           "maximum": 65535,
           "minimum": 0,
           "type": "integer"
-        },
-        "mitm_host": {
-          "default": "api.anthropic.com",
-          "description": "TLS SNI / `Host` header the proxy expects from the client and\npresents to the upstream when dialing out. Must be EXACTLY\n`api.anthropic.com` -- a subdomain like `evil.api.anthropic.com`\nis rejected, not matched as a suffix (enforced by\n`validate_mitm_config`).",
-          "type": "string"
-        },
-        "upstream_origin": {
-          "default": "https://api.anthropic.com",
-          "description": "Upstream origin the proxy forwards decrypted requests to. Must\nbe EXACTLY `https://api.anthropic.com` -- no userinfo, path,\nquery, fragment, explicit non-default port, or other host\n(enforced by `validate_mitm_config`). Pinned rather than\npattern-matched: the MITM proxy forwards the client's full-scope\nclaude.ai token, which must never reach a non-Anthropic egress.",
-          "type": "string"
         }
       },
       "type": "object"

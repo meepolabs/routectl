@@ -1882,7 +1882,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `CacheCapability` (`supports_top_level_cache_control` +
   `cache_hit_observable`, conservative `for_provider_kind` per-kind defaults
   incl. `gemini` -> implicit prefix cache) with per-`ProviderEntry` overrides;
-  `MitmConfig` transport-only (bind port, cert dir, upstream/host pin) -- a
+  `MitmConfig` transport-only (bind port, cert dir; the upstream host and
+  origin are pinned in routectl-cli's `proxy::pin`) -- a
   forwarded credential is a per-provider choice
   (`ProviderEntry::AnthropicApi.credential_source: CredentialSource`, `Own`
   default / `Forwarded`), not a `[mitm]` one (a hot-reloaded `[mitm]` edit is
@@ -7808,8 +7809,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   terminates TLS + serves HTTP/1.1 per connection, `split` classifies each
   decrypted request against `ANTHROPIC_INFERENCE_PATHS`, `forward` is the
   shared classification-agnostic byte forwarder both legs reuse, `ca` owns the
-  CA / leaf lifecycle, `metrics` the lock-free counters. The three outside call sites are
-  `commands/rc.rs` (`proxy::ca`), `server/mod.rs` (`proxy::listener`), and
+  CA / leaf lifecycle, `metrics` the lock-free counters, `pin` the fixed
+  host/origin pair. The three outside call sites are
+  `commands/rc.rs` (`proxy::ca` + `proxy::pin`), `server/mod.rs` (`proxy::listener`), and
   `handlers/models.rs` (`proxy::forward` + `proxy::metrics`); the whole task
   is spawned only when `Config::mitm.is_some()`
 - `src/proxy/ca.rs` -- local CA + leaf certificate lifecycle for the
@@ -7866,6 +7868,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and the `seam_nonce` (the
   SAME `Arc<ingress::MitmSeamNonce>` on `AppState`, so the proxy stamper and
   the ingress checkers agree without re-generating it)
+- `src/proxy/pin.rs` -- the one host (`MITM_HOST`) and upstream origin
+  (`MITM_UPSTREAM_ORIGIN`) the proxy terminates and forwards to, fixed in code
+  so no config can name another; `listener_config` is the only production
+  constructor of `ProxyListenerConfig` (a `serve_tests.rs` source scan fails
+  on any other literal in `src/`)
 - `src/proxy/split.rs` -- request classification + split-leg dispatch.
   `handle_request(ctx, req)` (generic over `B: http_body::Body` so tests drive
   a synthetic body without a real TLS / HTTP1 connection; production
@@ -8128,8 +8135,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   startup-only state; `codex_version` is stamped into the process-global codex
   identity once at boot) and `collect_high_consequence_changes(prev, next)`
   (provider `base_url`, `credential_source`, pool `members` -- a membership
-  edit repoints traffic onto a different account's credential -- and `[mitm]`
-  egress fields; the confirm-before-write set. A pool's `seat_selection`
+  edit repoints traffic onto a different account's credential; the
+  confirm-before-write set. `[mitm]` names no egress. A pool's `seat_selection`
   reorders members without changing which credentials are in play, so it is
   not in the set). A coverage-tripwire test walks the schema's
   top-level properties and fails on any unclassified new `Config` section; the
@@ -8815,8 +8822,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `read_gated_lanes`, `parse_gated_lanes`, `is_lane_gated`, `GatedLaneError`
 - `tests/common/replay/front_proxy.rs` -- front-proxy reachability per ingress
   (`front_proxy_reachability`, `Reachability`, `reachability_for_pin`,
-  `SETTLED_PIN`), keyed on the MITM host pin parsed out of the router's
-  `validate.rs` by a comment-and-literal-stripped top-level-item scan
+  `SETTLED_PIN`), keyed on the MITM host pin parsed out of routectl-cli's
+  `src/proxy/pin.rs` by a comment-and-literal-stripped top-level-item scan
   (`mitm_pinned_host`, `parse_mitm_pinned_host`, `PinError`)
 - `tests/common/replay/harness.rs` -- the two fixture roots (`local_root`,
   `driver_root`), `headers_from_pairs`, `FixtureOutcome`, the

@@ -1,24 +1,24 @@
 //! Front-proxy reachability, derived from the MITM host pin.
 //!
 //! The MITM front is Anthropic-only PERMANENTLY, and that is a
-//! structural limit rather than a coverage gap: `validate_mitm_config`
-//! rejects any `upstream_origin` other than exactly
-//! `https://<pinned host>` and any `mitm_host` other than the pinned
-//! host, because a forwarded full-scope claude.ai token must never reach
-//! a non-Anthropic egress. So every non-Anthropic front-proxy cell is
+//! structural limit rather than a coverage gap: the proxy's host and
+//! upstream origin are one pair fixed in `routectl_cli::proxy::pin`, and
+//! `listener_config` there is the only production constructor of the
+//! listener inputs, because a forwarded full-scope claude.ai token must
+//! never reach a non-Anthropic egress. No config key names either value. So every non-Anthropic front-proxy cell is
 //! unreachable BY CONSTRUCTION and must be reported naming the pin,
 //! never as a missing credential.
 //!
 //! The answer is DERIVED from the pin rather than from a hand-listed
 //! exclusion set: widening or narrowing the pin moves the reachable set
-//! automatically. The pin's constant is private to `routectl-router`, so
-//! it is read out of that crate's source by declaration -- the same
-//! cross-language weld `lane::resolve_site_symbol` and
-//! `tests/scrub_gate_provider_shapes.rs` use.
+//! automatically. The pin is read out of its source file by declaration
+//! -- the same weld `lane::resolve_site_symbol` and
+//! `tests/scrub_gate_provider_shapes.rs` use -- and cross-checked against
+//! the compiled constant, so a moved or renamed pin fails loudly.
 //!
 //! Reading is FAIL-CLOSED in every direction. An unreadable source, an
 //! absent constant, two competing declarations, a pinned host outside
-//! the settled constraint, or a validator that no longer exists are all
+//! the settled constraint, or an enforcer that no longer exists are all
 //! errors rather than a default answer: a derivation that silently
 //! defaulted would report a permanent structural limit as a coverage
 //! gap, which is exactly the confusion this module exists to prevent.
@@ -40,16 +40,17 @@ use thiserror::Error;
 
 use super::lane::{SymbolError, resolve_site_symbol, workspace_root};
 
-/// Workspace-relative source that declares the pin and the validator
+/// Workspace-relative source that declares the pin and the constructor
 /// enforcing it.
-pub const MITM_PIN_SITE_PATH: &str = "crates/routectl-router/src/factory/validate.rs";
+pub const MITM_PIN_SITE_PATH: &str = "crates/routectl-cli/src/proxy/pin.rs";
 
-/// Name of the private constant carrying the pinned host.
-pub const MITM_PIN_CONST: &str = "MITM_REQUIRED_HOST";
+/// Name of the constant carrying the pinned host.
+pub const MITM_PIN_CONST: &str = "MITM_HOST";
 
-/// The validator whose rejection makes the limit structural. Named in
-/// every unreachable reason so a reader can go read the rejection.
-pub const MITM_VALIDATOR_SYMBOL: &str = "validate_mitm_config";
+/// The only production constructor of the MITM listener inputs, whose
+/// fixed host and origin make the limit structural. Named in every
+/// unreachable reason so a reader can go read it.
+pub const MITM_PIN_ENFORCER_SYMBOL: &str = "listener_config";
 
 /// The host the pin is settled at, and the ingress reachable under it.
 ///
@@ -126,11 +127,11 @@ pub enum PinError {
         /// The host this derivation was settled against.
         expected: String,
     },
-    /// The validator enforcing the pin is gone, so the reason string
+    /// The constructor enforcing the pin is gone, so the reason string
     /// would cite a symbol that no longer exists.
-    #[error("cannot cite `{symbol}` as the enforcing validator: {source}")]
-    ValidatorUnresolved {
-        /// The validator that was cited.
+    #[error("cannot cite `{symbol}` as the pin's enforcer: {source}")]
+    EnforcerUnresolved {
+        /// The enforcer that was cited.
         symbol: String,
         /// Why the citation did not resolve.
         #[source]
@@ -145,7 +146,7 @@ pub enum Reachability {
     /// front-proxy cell for it is reachable.
     Reachable,
     /// No front-proxy cell for this ingress can ever exist. The reason
-    /// names the enforcing validator and the pinned host, so a reader
+    /// names the pin's enforcer and the pinned host, so a reader
     /// never mistakes it for a missing credential.
     Unreachable {
         /// Human-readable structural reason.
@@ -174,17 +175,17 @@ pub fn mitm_pin_site_path() -> Result<PathBuf, PinError> {
     Ok(root.join(MITM_PIN_SITE_PATH))
 }
 
-/// The pinned MITM host, read out of the committed router source.
+/// The pinned MITM host, read out of the committed proxy source.
 ///
-/// Also resolves [`MITM_VALIDATOR_SYMBOL`] in the same file: the reason
-/// strings cite that validator, and citing a symbol that has since been
+/// Also resolves [`MITM_PIN_ENFORCER_SYMBOL`] in the same file: the reason
+/// strings cite that constructor, and citing a symbol that has since been
 /// renamed would send a reader to nothing.
 pub fn mitm_pinned_host() -> Result<String, PinError> {
     let path = mitm_pin_site_path()?;
     let host = mitm_pinned_host_at(&path)?;
-    resolve_site_symbol(MITM_VALIDATOR_SYMBOL, MITM_PIN_SITE_PATH).map_err(|source| {
-        PinError::ValidatorUnresolved {
-            symbol: MITM_VALIDATOR_SYMBOL.to_string(),
+    resolve_site_symbol(MITM_PIN_ENFORCER_SYMBOL, MITM_PIN_SITE_PATH).map_err(|source| {
+        PinError::EnforcerUnresolved {
+            symbol: MITM_PIN_ENFORCER_SYMBOL.to_string(),
             source,
         }
     })?;
@@ -395,8 +396,8 @@ pub fn reachability_for_pin(ingress: &str, pinned_host: &str) -> Result<Reachabi
     Ok(Reachability::Unreachable {
         reason: format!(
             "front proxy is structurally {reachable_ingress}-only: \
-             {MITM_VALIDATOR_SYMBOL} in {MITM_PIN_SITE_PATH} pins both the MITM \
-             upstream origin and mitm_host to {pinned_host}, so no `{ingress}` \
+             {MITM_PIN_ENFORCER_SYMBOL} in {MITM_PIN_SITE_PATH} pins both the MITM \
+             upstream origin and host to {pinned_host}, so no `{ingress}` \
              front-proxy cell can exist -- this is a permanent limit, not a \
              missing credential"
         ),
@@ -416,13 +417,32 @@ mod tests {
     /// The committed pin must be derivable at all: every assertion below
     /// that walks it would be vacuous against an unreadable source.
     #[test]
-    fn the_committed_router_source_declares_the_mitm_host_pin() {
+    fn the_committed_proxy_source_declares_the_mitm_host_pin() {
         let host = mitm_pinned_host().expect("the MITM host pin must be derivable from source");
 
         assert!(
             host.contains('.') && !host.contains('/'),
             "pin `{host}` does not look like a bare host",
         );
+        assert_eq!(
+            host,
+            routectl_cli::proxy::pin::MITM_HOST,
+            "the parsed declaration is the compiled pin",
+        );
+    }
+
+    /// The pinned origin is exactly `https://<derived host>`: scheme https,
+    /// default port, no path. Read from the same pin site as the host, so a
+    /// changed scheme, host or trailing path fails here.
+    #[test]
+    fn the_committed_pin_origin_is_https_on_the_derived_host_with_no_path() {
+        let host = mitm_pinned_host().expect("the pin must be derivable");
+
+        assert_eq!(
+            routectl_cli::proxy::pin::MITM_UPSTREAM_ORIGIN,
+            format!("https://{host}"),
+        );
+        assert_eq!(host, SETTLED_PIN.0);
     }
 
     /// The reachable set is EXACTLY `{anthropic}`, asserted as a set over
@@ -445,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn every_unreachable_ingress_reason_names_the_pinned_host_and_the_validator() {
+    fn every_unreachable_ingress_reason_names_the_pinned_host_and_the_enforcer() {
         let host = mitm_pinned_host().expect("the pin must be derivable");
         let unreachable: Vec<&str> = INGRESS_IDS
             .iter()
@@ -469,8 +489,8 @@ mod tests {
                 "reason for `{ingress}` does not name the pinned host `{host}`: {reason}",
             );
             assert!(
-                reason.contains(MITM_VALIDATOR_SYMBOL),
-                "reason for `{ingress}` does not name `{MITM_VALIDATOR_SYMBOL}`: {reason}",
+                reason.contains(MITM_PIN_ENFORCER_SYMBOL),
+                "reason for `{ingress}` does not name `{MITM_PIN_ENFORCER_SYMBOL}`: {reason}",
             );
             assert!(
                 reason.contains(ingress),
@@ -522,23 +542,19 @@ mod tests {
         assert_eq!(host, SETTLED_PIN.0);
     }
 
-    /// The reason strings cite the enforcing validator by name, so that
+    /// The reason strings cite the pin's enforcer by name, so that
     /// symbol must actually be defined where they point. The paired
     /// negative proves the citation check is falsifiable rather than
     /// satisfied by any file that happens to be readable.
     #[test]
-    fn the_cited_validator_resolves_in_the_cited_file_and_a_bogus_symbol_does_not() {
+    fn the_cited_enforcer_resolves_in_the_cited_file_and_a_bogus_symbol_does_not() {
         assert!(
-            resolve_site_symbol(MITM_VALIDATOR_SYMBOL, MITM_PIN_SITE_PATH).is_ok(),
-            "`{MITM_VALIDATOR_SYMBOL}` is not defined in {MITM_PIN_SITE_PATH}, so every \
+            resolve_site_symbol(MITM_PIN_ENFORCER_SYMBOL, MITM_PIN_SITE_PATH).is_ok(),
+            "`{MITM_PIN_ENFORCER_SYMBOL}` is not defined in {MITM_PIN_SITE_PATH}, so every \
              reason string cites a symbol a reader cannot find",
         );
         assert!(
-            resolve_site_symbol(
-                "validate_mitm_config_that_does_not_exist",
-                MITM_PIN_SITE_PATH
-            )
-            .is_err(),
+            resolve_site_symbol("listener_config_that_does_not_exist", MITM_PIN_SITE_PATH).is_err(),
         );
     }
 
@@ -547,11 +563,11 @@ mod tests {
     #[test]
     fn fails_closed_against_a_source_that_declares_no_pin() {
         let tmp = tempdir().unwrap();
-        let stub = tmp.path().join("validate.rs");
+        let stub = tmp.path().join("pin.rs");
         fs::write(
             &stub,
-            "// mentions MITM_REQUIRED_HOST in prose only\n\
-             pub fn validate_mitm_config() {}\n",
+            "// mentions MITM_HOST in prose only\n\
+             pub fn listener_config() {}\n",
         )
         .unwrap();
 
@@ -574,7 +590,7 @@ mod tests {
              const {MITM_PIN_CONST}: &str = \"api.anthropic.com\";\n"
         );
 
-        let host = parse_mitm_pinned_host(&text, "validate.rs").unwrap();
+        let host = parse_mitm_pinned_host(&text, "pin.rs").unwrap();
 
         assert_eq!(host, "api.anthropic.com");
     }
@@ -621,7 +637,7 @@ mod tests {
         ];
 
         for (label, text) in cases {
-            let err = match parse_mitm_pinned_host(&text, "validate.rs") {
+            let err = match parse_mitm_pinned_host(&text, "pin.rs") {
                 Ok(host) => panic!("{label} copy parsed as the pin: {host}"),
                 Err(err) => err,
             };
@@ -662,7 +678,7 @@ mod tests {
         ];
 
         for (label, text) in cases {
-            let host = parse_mitm_pinned_host(&text, "validate.rs")
+            let host = parse_mitm_pinned_host(&text, "pin.rs")
                 .unwrap_or_else(|e| panic!("{label} hid the real declaration: {e}"));
 
             assert_eq!(host, "api.anthropic.com", "case: {label}");
@@ -676,7 +692,7 @@ mod tests {
         let decl = format!("const {MITM_PIN_CONST}: &str = \"api.anthropic.com\";");
         let text = format!("/*\n{decl}\n*/\n{decl}\n");
 
-        let host = parse_mitm_pinned_host(&text, "validate.rs").unwrap();
+        let host = parse_mitm_pinned_host(&text, "pin.rs").unwrap();
 
         assert_eq!(host, "api.anthropic.com");
     }
@@ -701,7 +717,7 @@ mod tests {
              const {MITM_PIN_CONST}: &str = \"api.example.com\";\n"
         );
 
-        let err = parse_mitm_pinned_host(&text, "validate.rs").unwrap_err();
+        let err = parse_mitm_pinned_host(&text, "pin.rs").unwrap_err();
 
         assert!(
             matches!(err, PinError::PinAmbiguous { count: 2, .. }),
@@ -713,7 +729,7 @@ mod tests {
     fn fails_closed_when_the_declaration_pins_an_empty_host() {
         let text = format!("const {MITM_PIN_CONST}: &str = \"\";\n");
 
-        let err = parse_mitm_pinned_host(&text, "validate.rs").unwrap_err();
+        let err = parse_mitm_pinned_host(&text, "pin.rs").unwrap_err();
 
         assert!(
             matches!(err, PinError::PinEmpty { .. }),

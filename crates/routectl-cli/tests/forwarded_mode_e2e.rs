@@ -93,13 +93,11 @@ fn unique_cert_dir(tag: &str) -> std::path::PathBuf {
 /// now; forwardedness lives on the `[providers.X]` entry, not
 /// here). `listen_port: 0` (OS-assigned) avoids colliding with the
 /// sentinel `[server] port` these tests use (see `base_server_config`);
-/// the pinned `upstream_origin` / `mitm_host` defaults are left untouched
-/// (`validate_mitm_config` requires them exact).
+/// the upstream origin and host are pinned in code.
 fn mitm_config(scenario: &str) -> MitmConfig {
     MitmConfig {
         listen_port: 0,
         cert_dir: unique_cert_dir(scenario),
-        ..Default::default()
     }
 }
 

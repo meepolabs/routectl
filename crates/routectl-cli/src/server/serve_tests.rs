@@ -247,10 +247,8 @@ async fn mitm_start_failure_degrades_and_server_keeps_serving() {
     let mut config = Config::default();
     let _usage_dir = isolate_usage_db(&mut config);
     config.mitm = Some(MitmConfig {
-        upstream_origin: "https://api.anthropic.com".into(),
         listen_port: 0,
         cert_dir: bad_cert_dir.path().to_path_buf(),
-        mitm_host: "api.anthropic.com".into(),
     });
     let (trigger, server) = spawn_with_shutdown_trigger(Arc::new(config), listener);
 
@@ -280,6 +278,125 @@ async fn mitm_start_failure_degrades_and_server_keeps_serving() {
     assert!(
         outcome.is_ok(),
         "degraded serve (MITM failed to start) must still return Ok: {outcome:?}"
+    );
+}
+
+/// Serve feeds the MITM listener the operator's bind port and cert dir and
+/// nothing else: host and origin are the pinned pair whatever the `[mitm]`
+/// block says.
+#[test]
+fn serve_builds_the_mitm_listener_from_the_pinned_host_and_origin() {
+    use crate::proxy::pin::{MITM_HOST, MITM_UPSTREAM_ORIGIN};
+    use routectl_router::MitmConfig;
+
+    // Arrange
+    let mitm = MitmConfig {
+        listen_port: 9443,
+        cert_dir: std::path::PathBuf::from("/tmp/operator-certs"),
+    };
+    let nonce = Arc::new(crate::ingress::MitmSeamNonce::generate());
+
+    // Act
+    let config = mitm_listener_config(&mitm, 9100, nonce);
+
+    // Assert
+    assert_eq!(config.mitm_host, MITM_HOST);
+    assert_eq!(config.upstream_origin, MITM_UPSTREAM_ORIGIN);
+    assert_eq!(config.mitm_host, "api.anthropic.com");
+    assert_eq!(config.upstream_origin, "https://api.anthropic.com");
+    assert_eq!(config.listen_port, 9443);
+    assert_eq!(
+        config.cert_dir,
+        std::path::PathBuf::from("/tmp/operator-certs")
+    );
+    assert_eq!(config.reinject_port, 9100);
+}
+
+/// Whether the `ProxyListenerConfig {` at `idx` in `src` opens a struct
+/// literal, rather than the type's declaration or a return type whose
+/// function body opens on the same line.
+#[cfg(test)]
+fn opens_a_struct_literal(src: &str, idx: usize) -> bool {
+    let path_start = src[..idx]
+        .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        .len();
+    let before = src[..path_start].trim_end();
+    !(before.ends_with("struct") || before.ends_with("->"))
+}
+
+/// The production struct-literal sites of `ProxyListenerConfig` in `src`,
+/// as `(file name, count)`.
+#[cfg(test)]
+fn proxy_listener_config_literal_sites() -> Vec<(String, usize)> {
+    let needle = "ProxyListenerConfig {";
+    let mut sites = Vec::new();
+    for path in production_rust_sources(&crate_src_dir()) {
+        let src = std::fs::read_to_string(&path).expect("read crate source file");
+        let production = production_prefix(&without_comments(&src)).to_string();
+        let count = production
+            .match_indices(needle)
+            .filter(|(idx, _)| opens_a_struct_literal(&production, *idx))
+            .count();
+        if count > 0 {
+            let name = path
+                .strip_prefix(crate_src_dir())
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            sites.push((name, count));
+        }
+    }
+    sites.sort();
+    sites
+}
+
+/// The literal scan counts a struct literal, qualified or not, and skips the
+/// declaration and a return type, so its verdict on the real tree can fail.
+#[test]
+fn the_listener_input_scan_tells_a_literal_from_a_declaration_or_return_type() {
+    let cases = [
+        ("pub struct ProxyListenerConfig {", false),
+        ("fn f() -> ProxyListenerConfig {", false),
+        (
+            "fn f() -> crate::proxy::listener::ProxyListenerConfig {",
+            false,
+        ),
+        ("let c = ProxyListenerConfig {", true),
+        (
+            "let c = crate::proxy::listener::ProxyListenerConfig {",
+            true,
+        ),
+    ];
+
+    for (src, expected) in cases {
+        let idx = src
+            .find("ProxyListenerConfig {")
+            .expect("case names the type");
+        assert_eq!(opens_a_struct_literal(src, idx), expected, "case: {src}");
+    }
+}
+
+/// No production code outside `proxy/pin.rs` constructs the listener
+/// inputs, so no other value can reach the host or origin fields; and
+/// serve's MITM start goes through its pinned helper.
+#[test]
+fn only_the_pin_module_constructs_the_mitm_listener_inputs() {
+    let sites = proxy_listener_config_literal_sites();
+
+    assert_eq!(
+        sites,
+        vec![("proxy/pin.rs".to_string(), 1)],
+        "the MITM listener inputs are built only from the pinned pair"
+    );
+    let serve = production_prefix(&without_comments(include_str!("serve.rs"))).to_string();
+    let start = serve
+        .find("async fn start_mitm_proxy(")
+        .expect("serve declares start_mitm_proxy");
+    let body = &serve[start..];
+    let body = &body[..body.find("\n}\n").expect("start_mitm_proxy body ends")];
+    assert!(
+        body.contains("mitm_listener_config(mitm, reinject_port, seam_nonce)"),
+        "start_mitm_proxy builds its listener inputs through the pinned helper: {body}"
     );
 }
 
@@ -969,10 +1086,8 @@ async fn a_refused_mitm_boot_never_opens_the_usage_ledger() {
     let (mut config, usage_dir) = config_with_single_listener_token(&uri);
     let db_path = config.usage.db_path.clone();
     config.mitm = Some(MitmConfig {
-        upstream_origin: "https://api.anthropic.com".into(),
         listen_port: 0,
         cert_dir: usage_dir.path().join("certs"),
-        mitm_host: "api.anthropic.com".into(),
     });
     let listener = TcpListener::bind("0.0.0.0:0")
         .await

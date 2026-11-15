@@ -566,24 +566,12 @@ fn detect_alias_cycles_dfs(
     globally_visited.insert(current.to_string());
 }
 
-/// The only host the MITM front is ever allowed to terminate or egress
-/// to. The milestone constraint is a HARD "the forwarded full-scope
-/// claude.ai token must NEVER be sent to a non-Anthropic egress"; both
-/// checks below pin to this exact string (never a suffix/subdomain
-/// match) so a mistyped or poisoned config cannot widen the blast
-/// radius of that token.
-const MITM_REQUIRED_HOST: &str = "api.anthropic.com";
-
 /// Validate the optional `[mitm]` block: `Ok` when the block is
 /// absent (feature off, matching the `[server.auth]` presence-gates
-/// convention). When present, reject:
-/// - an `upstream_origin` that is not EXACTLY `https://api.anthropic.com`
-///   (any other scheme, host, explicit port, userinfo, path, query, or
-///   fragment is rejected -- see `MITM_REQUIRED_HOST` for why this is
-///   pinned rather than pattern-matched);
-/// - a `listen_port` that collides with `[server] port` (the two are
-///   separate bound sockets on the same host);
-/// - a `mitm_host` that is not EXACTLY `api.anthropic.com`.
+/// convention). When present, reject a `listen_port` that collides with
+/// `[server] port` (the two are separate bound sockets on the same host).
+/// The block names no upstream origin or host, so there is nothing else
+/// to check: both are fixed in routectl-cli's proxy module.
 ///
 /// Call once per process startup alongside the other validators. This
 /// function only validates the config schema -- building and spawning
@@ -596,42 +584,11 @@ pub fn validate_mitm_config(config: &crate::config::Config) -> Result<()> {
         return Ok(());
     };
 
-    let is_pinned_origin = url::Url::parse(&mitm.upstream_origin).is_ok_and(|url| {
-        url.scheme() == "https"
-            && url.host_str() == Some(MITM_REQUIRED_HOST)
-            && url.port().is_none()
-            && url.username().is_empty()
-            && url.password().is_none()
-            && matches!(url.path(), "" | "/")
-            && url.query().is_none()
-            && url.fragment().is_none()
-    });
-    if !is_pinned_origin {
-        return Err(Error::Config(format!(
-            "[mitm] upstream_origin {:?} must be exactly \
-             https://{MITM_REQUIRED_HOST} -- no userinfo, path, query, or fragment, and no \
-             other host. This is a hard containment guarantee: the MITM proxy forwards the \
-             client's full-scope claude.ai token, which must never be sent to a \
-             non-Anthropic egress",
-            mitm.upstream_origin
-        )));
-    }
-
     if mitm.listen_port == config.server.port {
         return Err(Error::Config(format!(
             "[mitm] listen_port {} collides with [server] port {}; the MITM \
              listener and the routectl HTTP server must bind different ports",
             mitm.listen_port, config.server.port
-        )));
-    }
-
-    if mitm.mitm_host != MITM_REQUIRED_HOST {
-        return Err(Error::Config(format!(
-            "[mitm] mitm_host {:?} must be exactly {MITM_REQUIRED_HOST:?} -- no other host \
-             (including a subdomain) is accepted. This is a hard containment guarantee: the \
-             MITM proxy forwards the client's full-scope claude.ai token, which must never be \
-             presented to a non-Anthropic host",
-            mitm.mitm_host
         )));
     }
 
@@ -650,8 +607,8 @@ pub fn validate_mitm_config(config: &crate::config::Config) -> Result<()> {
 ///   containment guarantee: a forwarded provider carries the client's
 ///   full-scope claude.ai bearer, which must never be sent to a
 ///   non-Anthropic egress -- pinning the host at config-validation time
-///   makes containment true by construction, mirroring
-///   `validate_mitm_config`'s host pin.
+///   makes containment true by construction, as the MITM front-proxy's
+///   fixed upstream does for its own egress.
 /// - `Own` requires a non-empty `api_key_ref`, exactly as before this
 ///   field existed on the variant.
 pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {

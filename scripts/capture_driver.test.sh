@@ -1726,22 +1726,19 @@ check "the comparison reports a difference when the provider block drifts" "no" 
     "$(twins_agree "$LANE_CONFIG" "$mutated")"
 rm -f "$mutated"
 
-# The `[mitm]` table itself: present on the twin, absent from the base,
-# and pinned to the Anthropic origin and host -- config validation refuses
-# any other value, because the proxy forwards the client's full-scope
-# token. The base-config direction is this matcher's positive control in
-# reverse: it must report absence there or its presence report proves
-# nothing.
+# The `[mitm]` table itself: present on the twin, absent from the base.
+# Its upstream origin and host are pinned in code, so the table carries
+# no egress key to check. The base-config direction is this matcher's
+# positive control in reverse: it must report absence there or its
+# presence report proves nothing.
 declares_pinned_mitm() {
-    if grep -q '^\[mitm\]$' "$1" &&
-        grep -qE '^[[:space:]]*upstream_origin[[:space:]]*=[[:space:]]*"https://api\.anthropic\.com"[[:space:]]*$' "$1" &&
-        grep -qE '^[[:space:]]*mitm_host[[:space:]]*=[[:space:]]*"api\.anthropic\.com"[[:space:]]*$' "$1"; then
+    if grep -q '^\[mitm\]$' "$1"; then
         printf 'yes\n'
     else
         printf 'no\n'
     fi
 }
-check "the front-proxy config carries a [mitm] table pinned to the Anthropic origin" \
+check "the front-proxy config carries a [mitm] table" \
     "yes" "$(declares_pinned_mitm "$FRONT_PROXY_CONFIG")"
 check "the base lane config carries no [mitm] table" "no" \
     "$(declares_pinned_mitm "$LANE_CONFIG")"

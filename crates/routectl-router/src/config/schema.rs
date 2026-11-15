@@ -448,29 +448,23 @@ pub enum CredentialSource {
 }
 
 /// Operator-facing `[mitm]` config block for the MITM front-proxy: a
-/// local TLS-terminating listener that fronts a first-party upstream
-/// (e.g. Claude Code talking to `api.anthropic.com`) so routectl can
-/// observe and translate the decrypted traffic. Presence of the
-/// `[mitm]` block gates the feature on, matching the `[server.auth]`
-/// convention -- `Config::mitm == None` keeps zero proxy startup and
-/// zero behavior change.
+/// local TLS-terminating listener that fronts `api.anthropic.com` (e.g.
+/// Claude Code's own traffic) so routectl can observe and translate the
+/// decrypted traffic. Presence of the `[mitm]` block gates the feature
+/// on, matching the `[server.auth]` convention -- `Config::mitm == None`
+/// keeps zero proxy startup and zero behavior change.
 ///
-/// Transport-only (the original shape): this block carries no credential
-/// knob. Which credential a forwarded egress uses is a per-provider
-/// choice (`ProviderEntry::AnthropicApi.credential_source`); the retired
-/// `[mitm] credential_source` key is refused by the pre-parse retired-key
-/// table (`RETIRED_KEYS`), which names the replacement.
+/// Transport-only and local-only: the block names where the listener
+/// binds and where its certificates live, never where traffic goes. The
+/// upstream origin and TLS host are fixed in routectl-cli's proxy module,
+/// because the proxy forwards the client's full-scope claude.ai token.
+/// Which credential a forwarded egress uses is a per-provider choice
+/// (`ProviderEntry::AnthropicApi.credential_source`). Retired keys of
+/// this block are refused by the pre-parse retired-key table
+/// (`RETIRED_KEYS`), which names each replacement.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MitmConfig {
-    /// Upstream origin the proxy forwards decrypted requests to. Must
-    /// be EXACTLY `https://api.anthropic.com` -- no userinfo, path,
-    /// query, fragment, explicit non-default port, or other host
-    /// (enforced by `validate_mitm_config`). Pinned rather than
-    /// pattern-matched: the MITM proxy forwards the client's full-scope
-    /// claude.ai token, which must never reach a non-Anthropic egress.
-    #[serde(default = "default_mitm_upstream_origin")]
-    pub upstream_origin: String,
     /// Local TCP port the MITM listener binds. Must differ from
     /// `[server] port` -- the listener and the routectl HTTP server
     /// are separate bound sockets on the same host (enforced by
@@ -484,28 +478,15 @@ pub struct MitmConfig {
     /// refuses it until this key is set.
     #[serde(default = "default_mitm_cert_dir")]
     pub cert_dir: PathBuf,
-    /// TLS SNI / `Host` header the proxy expects from the client and
-    /// presents to the upstream when dialing out. Must be EXACTLY
-    /// `api.anthropic.com` -- a subdomain like `evil.api.anthropic.com`
-    /// is rejected, not matched as a suffix (enforced by
-    /// `validate_mitm_config`).
-    #[serde(default = "default_mitm_host")]
-    pub mitm_host: String,
 }
 
 impl Default for MitmConfig {
     fn default() -> Self {
         Self {
-            upstream_origin: default_mitm_upstream_origin(),
             listen_port: default_mitm_listen_port(),
             cert_dir: default_mitm_cert_dir(),
-            mitm_host: default_mitm_host(),
         }
     }
-}
-
-fn default_mitm_upstream_origin() -> String {
-    "https://api.anthropic.com".into()
 }
 
 const fn default_mitm_listen_port() -> u16 {
@@ -514,10 +495,6 @@ const fn default_mitm_listen_port() -> u16 {
 
 fn default_mitm_cert_dir() -> PathBuf {
     config_folder_child("mitm-certs")
-}
-
-fn default_mitm_host() -> String {
-    "api.anthropic.com".into()
 }
 
 /// Per-million-token pricing for a `[models.X]` entry or a price-table row.
@@ -2805,9 +2782,8 @@ fn redact_mantle(mantle: Option<&mut BedrockMantleConfig>) {
 /// # When a surface must reduce
 ///
 /// A `base_url` is allowed to carry a credential: the provider validator checks
-/// scheme, link-local targets, and cleartext-on-non-loopback, but only the
-/// `[mitm]` origin validator rejects userinfo. So
-/// `https://user:<secret>@upstream.example/v1` is an ACCEPTED provider config
+/// scheme, link-local targets, and cleartext-on-non-loopback, not userinfo.
+/// So `https://user:<secret>@upstream.example/v1` is an ACCEPTED provider config
 /// and the raw string sits in the entry. Classify each surface that touches the
 /// value into one of three buckets:
 ///

@@ -2,7 +2,7 @@
 //! that binds a loopback TCP port, speaks the HTTP `CONNECT` tunneling
 //! protocol a client configures via `HTTPS_PROXY`, and dispatches each
 //! accepted connection to one of two fates -- decrypt-and-classify (the
-//! configured `mitm_host`) via [`handle_mitm_connection`], or an opaque
+//! pinned MITM host) via [`handle_mitm_connection`], or an opaque
 //! byte-for-byte blind tunnel (any other host) via
 //! `tokio::io::copy_bidirectional`.
 //!
@@ -440,8 +440,10 @@ async fn run_listener(
     }
 }
 
-/// The subset of the operator's `[mitm]` config block [`build_and_bind`]
-/// needs, plus `reinject_port` (the MAIN routectl listener's bound
+/// The inputs [`build_and_bind`] needs: the operator's `[mitm]` bind port
+/// and cert dir, the pinned host/origin pair (production builds this only
+/// through `proxy::pin::listener_config`; tests may point it at a
+/// loopback double), plus `reinject_port` (the MAIN routectl listener's bound
 /// port, resolved at runtime by the caller -- never a config value,
 /// since the main listener's port is only known once it is actually
 /// bound). Deliberately plain data rather than `routectl_router::MitmConfig`
@@ -471,7 +473,7 @@ pub struct ProxyListenerConfig {
 pub enum ProxyStartError {
     #[error("failed to prepare the MITM CA/leaf certificate: {0}")]
     Cert(#[from] ca::CaError),
-    #[error("[mitm] upstream_origin {origin:?} is not a valid URL: {reason}")]
+    #[error("MITM upstream origin {origin:?} is not a valid URL: {reason}")]
     UpstreamOrigin { origin: String, reason: String },
     #[error("failed to build the MITM forward-leg HTTP client: {0}")]
     Client(#[from] reqwest::Error),

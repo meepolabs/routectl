@@ -195,7 +195,7 @@ version = 5           # config schema version; see "Config schema version"
                       # Observe-only -- never changes a request.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
-                      # listener fronting a first-party upstream.
+                      # listener fronting api.anthropic.com.
                       # Optional; presence gates the feature on
                       # (absence = zero proxy startup).
 ```
@@ -348,7 +348,9 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `fidelity` | prefix-impacting pre-flight repair is never admitted; class and quorum are fixed |
 | `log` | set ROUTECTL_TRACE_HEADERS / ROUTECTL_TRACE_BODY_BYTES / ROUTECTL_LOG_REDACT_PROMPTS in the environment |
 | `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
+| `mitm.mitm_host` | pinned to https://api.anthropic.com |
 | `mitm.tested_cc_version` | routectl pins the Claude Code version it mints; nothing replaces the check |
+| `mitm.upstream_origin` | pinned to https://api.anthropic.com |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
 | `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
 | `models.<name>.supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking |
@@ -3025,34 +3027,22 @@ window_secs = 86400
 ## MITM front-proxy (`[mitm]`)
 
 The optional `[mitm]` block gates on a local TLS-terminating listener
-that fronts a first-party upstream (e.g. Claude Code talking to
-`api.anthropic.com`), the same presence-gates-the-feature convention as
-`[server.auth]`. A missing block keeps every default below AND zero
-proxy startup -- routectl's behavior is unchanged until an operator
-declares `[mitm]`.
+that fronts `api.anthropic.com` (e.g. Claude Code's own traffic), the
+same presence-gates-the-feature convention as `[server.auth]`. A
+missing block keeps every default below AND zero proxy startup --
+routectl's behavior is unchanged until an operator declares `[mitm]`.
 
 ```toml
 [mitm]
-upstream_origin = "https://api.anthropic.com"
-listen_port     = 8443
-cert_dir        = "/home/you/.config/routectl/mitm-certs"
-mitm_host       = "api.anthropic.com"
+listen_port = 8443
+cert_dir    = "/home/you/.config/routectl/mitm-certs"
 ```
 
-| Knob              | Default                                 | Reload  |
-|-------------------|-----------------------------------------|---------|
-| `upstream_origin` | `https://api.anthropic.com`             | restart |
-| `listen_port`     | `8443`                                  | restart |
-| `cert_dir`        | `<config-dir>/routectl/mitm-certs`      | restart |
-| `mitm_host`       | `api.anthropic.com`                     | restart |
+| Knob          | Default                                 | Reload  |
+|---------------|-----------------------------------------|---------|
+| `listen_port` | `8443`                                  | restart |
+| `cert_dir`    | `<config-dir>/routectl/mitm-certs`      | restart |
 
-- `upstream_origin` -- the first-party origin the proxy forwards
-  decrypted requests to. Must be EXACTLY `https://api.anthropic.com`
-  (no userinfo, path, query, fragment, or explicit non-default port,
-  and no other host); startup validation rejects anything else. This
-  pins the MITM egress to first-party Anthropic so the client's
-  full-scope claude.ai token can never be forwarded to a non-Anthropic
-  origin.
 - `listen_port` -- the local TCP port the MITM listener binds. Must
   differ from `[server] port` -- the two are separate bound sockets on
   the same host; startup validation rejects a collision.
@@ -3065,11 +3055,13 @@ mitm_host       = "api.anthropic.com"
   unset). With no config folder the default is empty, and `serve` and
   `rc` refuse with `no config folder for mitm.cert_dir: set HOME, or set
   mitm.cert_dir` until the key is set.
-- `mitm_host` -- the TLS SNI / `Host` header the proxy expects from the
-  client and presents to the upstream. Must be EXACTLY
-  `api.anthropic.com` (a subdomain like `evil.api.anthropic.com` is
-  rejected, not matched as a suffix); startup validation rejects any
-  other value.
+
+The host the proxy terminates and the origin it forwards to are fixed:
+the proxy decrypts only a CONNECT to `api.anthropic.com` (an exact
+match, never a suffix) and forwards to `https://api.anthropic.com`, so
+the client's full-scope claude.ai token can never reach a non-Anthropic
+origin. No config key names either one; see
+[Retired config keys](#retired-config-keys).
 
 The whole `[mitm]` block is read once at startup -- editing it takes
 effect only on the next restart, since there is no reload path that
@@ -3538,7 +3530,7 @@ a rejected edit leaves the file byte-identical:
   incoherent cross-field combination) is rendered and the write is
   abandoned.
 - **High-consequence confirmation.** An egress-defining change -- a
-  provider `base_url` or `credential_source`, a `[mitm]` origin or host
+  provider `base_url` or `credential_source`, or a pool's members
   -- prompts for confirmation first. `--yes` bypasses the prompt for
   scripting. With no terminal on stdin the prompt is DECLINED rather
   than read, so an automated caller neither hangs nor applies the edit

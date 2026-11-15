@@ -11,7 +11,7 @@
 use routectl_core::{Error, Result};
 use routectl_router::{Config, MitmConfig};
 
-use crate::proxy::ca;
+use crate::proxy::{ca, pin};
 
 const NOT_CONFIGURED_MSG: &str =
     "mitm passthrough not configured: add a [mitm] block to your config to enable it";
@@ -51,7 +51,7 @@ pub fn regen_ca(config: &Config) -> Result<i32> {
         eprintln!("{NOT_CONFIGURED_MSG}");
         return Ok(1);
     };
-    let ca_path = ca::regenerate(&mitm.cert_dir, &mitm.mitm_host)
+    let ca_path = ca::regenerate(&mitm.cert_dir, pin::MITM_HOST)
         .map_err(|e| Error::Internal(format!("mitm CA regeneration failed: {e}")))?;
     println!("regenerated MITM CA: {}", ca_path.display());
     Ok(0)
@@ -65,10 +65,8 @@ mod tests {
 
     fn mitm_config(cert_dir: PathBuf) -> MitmConfig {
         MitmConfig {
-            upstream_origin: "https://api.anthropic.com".into(),
             listen_port: 8788,
             cert_dir,
-            mitm_host: "api.anthropic.com".into(),
         }
     }
 

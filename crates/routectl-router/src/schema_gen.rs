@@ -124,9 +124,9 @@ mod tests {
         );
         assert_eq!(
             value
-                .pointer("/$defs/MitmConfig/properties/mitm_host/default")
+                .pointer("/$defs/ServerConfig/properties/host/default")
                 .and_then(serde_json::Value::as_str),
-            Some("api.anthropic.com"),
+            Some("127.0.0.1"),
         );
     }
 

@@ -320,7 +320,7 @@ pub struct ProviderCell {
 ///
 /// A `base_url` may legitimately carry a credential. `validate_base_url_scheme`
 /// rejects bad schemes, link-local targets, and cleartext-on-non-loopback, but
-/// it does NOT reject userinfo -- only the `[mitm]` origin validator does. So
+/// it does NOT reject userinfo. So
 /// `https://user:<secret>@upstream.example/v1` is an ACCEPTED provider config,
 /// and that raw string is what sits in the entry. Path and query are equally
 /// unsafe: some compat gateways carry the key there.

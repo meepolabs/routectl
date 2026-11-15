@@ -124,10 +124,10 @@ pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'s
 /// `credential_source`, and `bedrock_mantle` (the Bedrock mantle lane
 /// selector: its region derives the endpoint host and its creds carry the
 /// credential), every pool's membership (which repoints traffic onto a
-/// different account's credential), plus the `[mitm]` block's upstream
-/// origin + SNI/Host. Local knobs (`[mitm] listen_port`, `cert_dir`) are not
-/// egress and stay out; so does a pool's `seat_selection`, which reorders
-/// members without changing the set of credentials in play.
+/// different account's credential). `[mitm]` carries only local knobs
+/// (`listen_port`, `cert_dir`; its upstream is pinned in code), so it stays
+/// out; so does a pool's `seat_selection`, which reorders members without
+/// changing the set of credentials in play.
 pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
 
@@ -170,17 +170,6 @@ pub fn collect_high_consequence_changes(prev: &Config, next: &Config) -> Vec<&'s
         .any(|key| members_of(prev, key) != members_of(next, key))
     {
         out.push("pools.members");
-    }
-
-    let prev_origin = prev.mitm.as_ref().map(|m| m.upstream_origin.as_str());
-    let next_origin = next.mitm.as_ref().map(|m| m.upstream_origin.as_str());
-    if prev_origin != next_origin {
-        out.push("mitm.upstream_origin");
-    }
-    let prev_host = prev.mitm.as_ref().map(|m| m.mitm_host.as_str());
-    let next_host = next.mitm.as_ref().map(|m| m.mitm_host.as_str());
-    if prev_host != next_host {
-        out.push("mitm.mitm_host");
     }
 
     out
@@ -556,38 +545,17 @@ mod tests {
         );
     }
 
+    /// `[mitm]` names no egress: enabling the block or editing a local knob
+    /// raises no high-consequence flag.
     #[test]
-    fn high_consequence_flags_mitm_egress_absent_on_no_op() {
+    fn high_consequence_never_flags_a_mitm_edit() {
         use routectl_router::MitmConfig;
 
-        // Enabling [mitm] surfaces both egress fields.
         let prev = Config::default();
         let mut next = prev.clone();
         next.mitm = Some(MitmConfig::default());
-        let changes = collect_high_consequence_changes(&prev, &next);
-        assert!(
-            changes.contains(&"mitm.upstream_origin") && changes.contains(&"mitm.mitm_host"),
-            "got {changes:?}"
-        );
+        assert!(collect_high_consequence_changes(&prev, &next).is_empty());
 
-        // upstream_origin change alone -> only that field.
-        let prev = Config {
-            mitm: Some(MitmConfig::default()),
-            ..Config::default()
-        };
-        let mut next = prev.clone();
-        next.mitm = Some(MitmConfig {
-            upstream_origin: "https://api.anthropic.com/".into(),
-            ..MitmConfig::default()
-        });
-        let changes = collect_high_consequence_changes(&prev, &next);
-        assert!(
-            changes.contains(&"mitm.upstream_origin") && !changes.contains(&"mitm.mitm_host"),
-            "got {changes:?}"
-        );
-
-        // A local-only [mitm] edit (listen_port) is not egress -> no
-        // high-consequence flag.
         let prev = Config {
             mitm: Some(MitmConfig::default()),
             ..Config::default()

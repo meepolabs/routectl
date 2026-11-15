@@ -77,9 +77,9 @@ sample_one_in = 1
 # stays `api.anthropic.com` and the captured egress carries whatever a
 # CONNECT-tunnelled client actually sends.
 #
-# `upstream_origin` and `mitm_host` are PINNED, not configurable: config
-# validation refuses any other origin or host, because the proxy forwards
-# the client's full-scope token and it must never reach a non-Anthropic
+# The upstream origin and TLS host are PINNED in code to
+# api.anthropic.com, not configurable, because the proxy forwards the
+# client's full-scope token and it must never reach a non-Anthropic
 # egress.
 #
 # `listen_port` is a placeholder only, exactly like `[server] port` above.
@@ -88,6 +88,4 @@ sample_one_in = 1
 # identical across runs and `meta.config_sha` keeps distinguishing config
 # drift from noise.
 [mitm]
-upstream_origin = "https://api.anthropic.com"
-mitm_host       = "api.anthropic.com"
-listen_port     = 8443
+listen_port = 8443

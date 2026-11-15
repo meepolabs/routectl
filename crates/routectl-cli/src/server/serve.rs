@@ -685,7 +685,8 @@ async fn serve_inner(
 }
 
 /// Build and spawn the MITM front-proxy listener from the operator's
-/// `[mitm]` config block. `reinject_port` is the routectl HTTP
+/// `[mitm]` config block (bind port and cert dir) and the pinned
+/// host/origin pair in `proxy::pin`. `reinject_port` is the routectl HTTP
 /// listener's OWN bound port (resolved from `bound.port()` in the
 /// caller, never a config value) -- the proxy's re-inject leg targets
 /// it. Returns the spawned task's `JoinHandle` on success; every
@@ -698,14 +699,8 @@ async fn start_mitm_proxy(
     shutdown: watch::Receiver<()>,
     seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
 ) -> std::result::Result<tokio::task::JoinHandle<()>, crate::proxy::listener::ProxyStartError> {
-    let proxy_config = crate::proxy::listener::ProxyListenerConfig {
-        listen_port: mitm.listen_port,
-        cert_dir: mitm.cert_dir.clone(),
-        mitm_host: mitm.mitm_host.clone(),
-        upstream_origin: mitm.upstream_origin.clone(),
-        reinject_port,
-        seam_nonce,
-    };
+    let proxy_config = mitm_listener_config(mitm, reinject_port, seam_nonce);
+    let mitm_host = proxy_config.mitm_host.clone();
     let (listener, acceptor, ctx) = crate::proxy::listener::build_and_bind(proxy_config).await?;
     let listen_addr = listener
         .local_addr()
@@ -713,16 +708,27 @@ async fn start_mitm_proxy(
         .unwrap_or_default();
     tracing::info!(
         addr = %listen_addr,
-        mitm_host = %mitm.mitm_host,
+        mitm_host = %mitm_host,
         "MITM front-proxy listening",
     );
     Ok(crate::proxy::listener::spawn(
-        listener,
-        acceptor,
-        ctx,
-        mitm.mitm_host.clone(),
-        shutdown,
+        listener, acceptor, ctx, mitm_host, shutdown,
     ))
+}
+
+/// The listener inputs for the operator's `[mitm]` block: bind port and
+/// cert dir from the block, host and origin from the pinned pair.
+fn mitm_listener_config(
+    mitm: &routectl_router::MitmConfig,
+    reinject_port: u16,
+    seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
+) -> crate::proxy::listener::ProxyListenerConfig {
+    crate::proxy::pin::listener_config(
+        mitm.listen_port,
+        mitm.cert_dir.clone(),
+        reinject_port,
+        seam_nonce,
+    )
 }
 
 /// Construct the usage writer from `config.usage`. Construction never

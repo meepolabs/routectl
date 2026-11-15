@@ -64,13 +64,14 @@ Or spell out the fields (all optional; shown with their real defaults):
 
 ```toml
 [mitm]
-upstream_origin = "https://api.anthropic.com"
 listen_port = 8443
 cert_dir = "~/.config/routectl/mitm-certs"   # actual default resolves
                                               # via XDG_CONFIG_HOME/HOME,
                                               # never a literal "~"
-mitm_host = "api.anthropic.com"
 ```
+
+The proxy always terminates `api.anthropic.com` and forwards to
+`https://api.anthropic.com`; no config key changes either one.
 
 `listen_port` must differ from `[server] port` -- the MITM listener and
 routectl's own HTTP server are two separate bound sockets on the same

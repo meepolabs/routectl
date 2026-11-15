@@ -93,10 +93,9 @@ pub async fn build_router_from_config(
         return Err(Error::Config(first));
     }
 
-    // Reject an incoherent `[mitm]` block (bad upstream_origin, a
-    // listen_port colliding with [server] port, an empty mitm_host) at
-    // startup. NOT part of the shared suite -- it is specific to this
-    // router-build path. A no-op (`Ok(())`) when `[mitm]` is absent --
+    // Reject an incoherent `[mitm]` block (a listen_port colliding with
+    // [server] port) at startup. NOT part of the shared suite -- it is
+    // specific to this router-build path. A no-op (`Ok(())`) when `[mitm]` is absent --
     // gated here on `mitm.is_some()` purely for readability at the call
     // site, since the validator itself already treats absence as
     // trivially valid.
