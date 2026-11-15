@@ -436,6 +436,35 @@ fn the_path_lookup_ignores_every_other_path() {
     );
 }
 
+/// A key nested under a retired table is reported once, as the table: one
+/// line naming `fidelity`, never a second line for the nested key.
+#[test]
+fn a_key_under_a_retired_table_is_reported_once_as_the_table() {
+    let rows = [
+        (
+            "the paid-probe caps sub-table",
+            "[fidelity.paid_probe_daily_caps]\nfast = 5\n",
+        ),
+        (
+            "the opt-in list beside the caps",
+            "[fidelity]\nprefix_impact_opt_in = [\"fast\"]\npaid_probe_daily_caps = 1\n",
+        ),
+    ];
+    let row = RETIRED_KEYS
+        .iter()
+        .find(|row| row.path == ["fidelity"])
+        .expect("the table retires `fidelity` whole");
+    let expected = format!("`fidelity` is retired: {}; delete it", row.replacement);
+
+    for (name, body) in rows {
+        let raw = format!("version = {CURRENT_CONFIG_VERSION}\n{body}");
+
+        let msg = refusal_message(&raw);
+
+        assert_eq!(msg, expected, "row `{name}`");
+    }
+}
+
 fn assert_accepted(row: &str, raw: &str) {
     assert_eq!(
         preflight_retired_keys(raw, RETIRED_KEYS),

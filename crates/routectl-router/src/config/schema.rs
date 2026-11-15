@@ -323,8 +323,7 @@ pub const CANARY_INTERVAL: u32 = 100;
 pub const ENVELOPE_QUORUM: u32 = 1;
 
 /// Confirmed repair-cycle quorum a prefix-impacting transform needs
-/// before it may act pre-flight (in addition to the target's explicit
-/// opt-in below). A code constant for the same reason as
+/// before it may act pre-flight (and admission, which no target has). A code constant for the same reason as
 /// [`CANARY_INTERVAL`], and strictly greater than [`ENVELOPE_QUORUM`] -- the
 /// anonymous `const _` assertions below enforce that ORDER at build time, and
 /// the named test `the_three_quorum_values_are_exactly_one_one_and_two` pins this
@@ -373,40 +372,6 @@ const _: () = assert!(
      confirmation count could ever separate the two classes and the content gate would \
      collapse into the envelope gate",
 );
-
-/// Operator-facing `[fidelity]` config block. Fully defaulted: a missing
-/// `[fidelity]` table deserializes to `FidelityConfig::default()`, which
-/// permits no prefix-impacting pre-flight -- current behavior is unchanged
-/// until the operator opts in.
-///
-/// `prefix_impact_opt_in` reuses the same two-tier target-spec grammar as
-/// `[capability.overrides]`: `"provider_name"` opts in every model on
-/// that provider, `"provider_name:nickname"` opts in a single model. A
-/// prefix-impacting transform still requires the confirmed-repair quorum
-/// ([`PREFIX_QUORUM`]) on top of listing here; this field alone never
-/// makes one act.
-///
-/// That list is an ACTIVE dispatch gate: the pre-flight planner refuses a
-/// prefix-impacting transform for any target it does not name, so an entry added
-/// here can change what goes upstream.
-///
-/// The re-verification cadence and confirmation quorum are code constants
-/// ([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are
-/// hard safety parameters, never read from the environment.
-///
-/// `#[non_exhaustive]` leaves room for later knobs without breaking
-/// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
-/// config-load time instead of silently ignoring it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct FidelityConfig {
-    /// Target specs opted into prefix-impacting pre-flight, using the
-    /// `"provider_name"` / `"provider_name:nickname"` grammar shared with
-    /// `[capability.overrides]`. Default empty -- no target is opted in.
-    #[serde(default)]
-    pub prefix_impact_opt_in: Vec<String>,
-}
 
 /// Operator-facing `[log]` config block. Each field mirrors a
 /// well-known env var:
@@ -3337,10 +3302,6 @@ mod capability_config_tests;
 #[cfg(test)]
 #[path = "window_gate_config_tests.rs"]
 mod window_gate_config_tests;
-
-#[cfg(test)]
-#[path = "fidelity_config_tests.rs"]
-mod fidelity_config_tests;
 
 #[cfg(test)]
 #[path = "wire_check_config_tests.rs"]

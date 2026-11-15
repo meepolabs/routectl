@@ -60,7 +60,7 @@ fn refusal_rows() -> [(&'static str, String, ClassMatcher); 5] {
             at_version(
                 current,
                 "[mitm]\ncredential_source = \"forwarded\"\n\
-                 [fidelity.paid_probe_daily_caps]\nfast = 5\n\
+                 [fidelity]\nprefix_impact_opt_in = [\"fast\"]\n\
                  [models.m]\neffort_levels = [\"low\"]\n",
             ),
             |e| matches!(e, Refusal::RetiredKeys(_)),

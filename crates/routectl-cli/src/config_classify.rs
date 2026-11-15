@@ -42,7 +42,6 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
     "reduction",
     "window_gate",
     "capability",
-    "fidelity",
     "wire_check",
 ];
 

@@ -20,8 +20,8 @@
 ///
 /// Not a tautology, because what it catches is the WIRING: swapping two arms leaves
 /// every literal intact and every other assertion green, and the result is a surface
-/// telling an operator to add a `[fidelity]` entry for a verdict that is actually short
-/// of confirmations -- or to edit config for one that simply lacks evidence.
+/// telling an operator a verdict is never admitted when it is actually short of
+/// confirmations -- or to edit config for one that simply lacks evidence.
 #[test]
 fn each_blocked_reason_resolves_to_its_own_operator_facing_token() {
     assert_eq!(
@@ -447,10 +447,10 @@ fn the_status_lane_gate_reads_the_view_pre_flight_reads() {
 }
 
 /// A pooled seat (`nick#member`) resolves the MEMBER provider entry for kind, base
-/// URL, and override mask, and the BASE (model nick) for nickname and opt-in.
+/// URL, and override mask, and the BASE (model nick) for nickname.
 ///
-/// The member-scoped override on the member's provider entry must be found; a
-/// member-scoped prefix opt-in must be found. Without this, a pooled verdict would
+/// The member-scoped override on the member's provider entry must be found. Without
+/// this, a pooled verdict would
 /// resolve the pool name or the model nick as the provider entry and miss the
 /// member's own override and base URL.
 #[test]

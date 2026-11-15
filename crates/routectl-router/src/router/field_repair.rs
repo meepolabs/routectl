@@ -924,9 +924,9 @@ impl TransformClass {
         }
     }
 
-    /// Whether this class additionally requires an explicit `[fidelity]`
-    /// target opt-in. Prefix-impacting repair stays dormant until the
-    /// operator names the target; envelope repair never needs one.
+    /// Whether this class additionally requires admission
+    /// (`field_preflight::PREFIX_IMPACT_ADMITTED`), which no target has.
+    /// Prefix-impacting repair stays dormant; envelope repair never needs it.
     pub(super) const fn requires_target_opt_in(self) -> bool {
         matches!(self, Self::PrefixImpacting)
     }

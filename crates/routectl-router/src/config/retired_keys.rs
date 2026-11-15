@@ -44,9 +44,10 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "diagnostics use a fixed 14-day hint",
     },
     RetiredKey {
-        path: &["fidelity", "paid_probe_daily_caps"],
+        path: &["fidelity"],
         refused_value: None,
-        replacement: "paid capability probes no longer exist; nothing replaces it",
+        replacement: "prefix-impacting pre-flight repair is never admitted; class and quorum \
+                      are fixed",
     },
     RetiredKey {
         path: &["mitm", "credential_source"],

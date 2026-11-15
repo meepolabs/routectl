@@ -23,11 +23,11 @@ pub(crate) use schema::default_gemini_base;
 pub(crate) use schema::default_responses_base;
 pub use schema::{
     AliasValue, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
-    CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, FidelityConfig, HistoryReasoning,
-    LogConfig, MitmConfig, ModelEntry, NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig,
-    ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RegistryEntry,
-    RetryPolicy, SeatSelection, ServerAuth, ServerConfig, UsageConfig, WindowGateConfig,
-    WireCheckConfig, is_config_provider_kind,
+    CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, HistoryReasoning, LogConfig, MitmConfig,
+    ModelEntry, NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry,
+    ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy,
+    SeatSelection, ServerAuth, ServerConfig, UsageConfig, WindowGateConfig, WireCheckConfig,
+    is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -169,22 +169,6 @@ pub struct Config {
     /// resolution, so a live config swap applies without a restart.
     #[serde(default)]
     pub window_gate: WindowGateConfig,
-
-    /// Operator-facing `[fidelity]` block. Opt-in surface for
-    /// prefix-impacting pre-flight repair. A missing block keeps
-    /// `FidelityConfig::default()`: no target opted into prefix-impacting
-    /// pre-flight, so no config change permits a prefix-impacting pre-flight
-    /// action by itself.
-    ///
-    /// `prefix_impact_opt_in` is an ACTIVE dispatch gate. The pre-flight
-    /// planner refuses a prefix-impacting transform for any target this list
-    /// does not name, so adding an entry can change what goes upstream (for a
-    /// target whose verdict also clears the confirmed-repair quorum).
-    ///
-    /// See `FidelityConfig` for the fixed cadence/quorum constants this
-    /// block deliberately does not expose.
-    #[serde(default)]
-    pub fidelity: FidelityConfig,
 
     /// Operator-facing `[wire_check]` block. Sampling knobs for the live
     /// wire check on successful attempts, plus the status window. A missing

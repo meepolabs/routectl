@@ -486,6 +486,11 @@ pub struct Router {
     /// for. `None` everywhere but the tests of that walk.
     #[cfg(test)]
     providerless_model: Option<&'static str>,
+    /// Test-only: admit prefix-impacting pre-flight on this Router so the
+    /// gates behind it stay reachable. `false` everywhere but those tests;
+    /// see [`Router::prefix_impact_admitted`].
+    #[cfg(test)]
+    prefix_impact_admitted_for_tests: bool,
     /// `true` iff `config.providers` contains a `ProviderEntry::AnthropicApi`
     /// with `credential_source == Forwarded`. Computed ONCE here at
     /// construction (a full `config.providers` scan) rather than re-scanned
@@ -2247,6 +2252,8 @@ impl Router {
             wire_tap_drop: None,
             #[cfg(test)]
             providerless_model: None,
+            #[cfg(test)]
+            prefix_impact_admitted_for_tests: false,
             has_forwarded_provider,
             volatile_prefix_warned: Mutex::new(HashSet::new()),
             prefix_rewrite_warned: Arc::new(AtomicBool::new(false)),
@@ -3257,6 +3264,16 @@ impl Router {
         nickname: &'static str,
     ) -> Self {
         self.providerless_model = Some(nickname);
+        self
+    }
+
+    /// This router, admitting prefix-impacting pre-flight on every target, so
+    /// a test can drive the quorum, canary and accounting paths that class
+    /// shares with the envelope class. No shipped build can reach this.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_prefix_impact_admitted_for_tests(mut self) -> Self {
+        self.prefix_impact_admitted_for_tests = true;
         self
     }
 

@@ -1,8 +1,8 @@
 // POOLED-SEAT identity parity: every status row fact a pooled seat's lane
 // (`member#upstream`) resolves must come from the SAME identity a live
 // `DispatchTarget` for that seat carries -- the member provider entry for kind,
-// base URL, override mask, and prefix-impact opt-in, and the base model nickname
-// for the model-scoped tier.
+// base URL and override mask, and the base model nickname for the model-scoped
+// tier.
 //
 // Why this needs its own section rather than one case beside the non-pooled rows:
 // a pooled seat has THREE plausible resolutions (the member entry, the base model
@@ -29,8 +29,7 @@ const POOL: &str = "anthropic-pool";
 /// URL, so the lane the member resolves admits pre-flight.
 const MEMBER: &str = "seat-a";
 
-/// A SECOND member, for the opt-in tier controls: a spec naming this one must not
-/// opt the member above in.
+/// A SECOND member of the same pool, so the member and pool resolutions differ.
 const OTHER_MEMBER: &str = "seat-b";
 
 /// `nick#member`, the runtime state key a live pooled `DispatchTarget` carries.
@@ -52,8 +51,8 @@ fn pooled_lane() -> crate::state_key::StateKey {
     crate::state_key::StateKey::parse(&pooled_key()).expect("the pooled lane parses")
 }
 
-/// The prefix-impacting closed-table path, whose class is the one that requires a
-/// target opt-in. Read from the table's own constant, never spelled here.
+/// The prefix-impacting closed-table path, whose class is the one that requires
+/// admission. Read from the table's own constant, never spelled here.
 fn prefix_path() -> &'static str {
     crate::router::field_repair::TEST_PREFIX_IMPACTING_PATH
 }
@@ -104,17 +103,15 @@ fn pooled_config() -> Config {
 ///
 /// Every case below asserts what a pooled identity resolves to, and that claim is
 /// only about a deployment if the config could BE a deployment. A pool with an
-/// API-key member, a mixed-kind pool, a name colliding with a provider entry, or an
-/// opt-in spec naming a target outside its pool are each refused at load -- so a
-/// fixture carrying one proves a resolution for a state no daemon ever serves, which
-/// is exactly the shape that makes a green test say nothing.
+/// API-key member, a mixed-kind pool, or a name colliding with a provider entry are
+/// each refused at load -- so a fixture carrying one proves a resolution for a state
+/// no daemon ever serves, which is exactly the shape that makes a green test say
+/// nothing.
 ///
 /// Both validators run, because they refuse different things and neither implies the
 /// other: `validate_pools` owns the pool table's own coherence, while
 /// `collect_config_validation` is the whole suite `config check` and the serve gate
-/// apply -- and it is the one that checks a `[fidelity] prefix_impact_opt_in` entry
-/// against the provider/model directory, which is the surface half these fixtures
-/// vary.
+/// apply.
 fn assert_pool_config_is_valid(config: &Config) {
     crate::factory::validate_pools(config).expect("the pooled fixture must be a servable pool");
     let validation = crate::factory::collect_config_validation(config);
@@ -375,143 +372,50 @@ fn a_pooled_row_whose_confirmation_was_seeded_under_another_kind_is_not_eligible
 }
 
 // ---------------------------------------------------------------------------
-// Member-scoped prefix-impact opt-in
+// Prefix-impact admission on a pooled seat
 // ---------------------------------------------------------------------------
 
 /// Plant a prefix-impacting pooled verdict at its class quorum and report the
-/// blocked reason under `opt_in`.
-///
-/// One driver for every opt-in tier case below, so the cases differ ONLY in the
-/// spec list -- which is what makes the comparison between them the evidence.
-fn pooled_prefix_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlockedReason> {
-    let mut config = pooled_config();
-    config.fidelity.prefix_impact_opt_in = opt_in.iter().map(|s| (*s).to_string()).collect();
-    let router = pooled_router(config);
+/// blocked reason, with the test seam admitting the class when `admitted`.
+fn pooled_prefix_blocked_reason(admitted: bool) -> Option<PreflightBlockedReason> {
+    let mut router = pooled_router(pooled_config());
+    if admitted {
+        router = router.with_prefix_impact_admitted_for_tests();
+    }
     plant_pooled_verdict(&router, &prefix_key(), PREFIX_QUORUM);
 
     let rows = router.field_verdict_status();
     let row = only_row(&rows);
     assert!(
         row.prefix_impacting,
-        "premise: the planted row is prefix-impacting, so the target opt-in is the \
-         gate under test rather than an inert one",
+        "premise: the planted row is prefix-impacting, so admission is the gate \
+         under test rather than an inert one",
     );
     assert_eq!(
         row.confirmations, PREFIX_QUORUM,
-        "and it clears its class's quorum, so a refusal below is the opt-in's and not \
+        "and it clears its class's quorum, so a refusal below is admission's and not \
          a confirmation shortfall",
     );
     row.blocked_reason
 }
 
-/// A MEMBER-scoped, model-scoped opt-in (`member:nickname`) opts the pooled seat in.
-///
-/// The spec shape an operator actually writes for one seat of a pool, and the one
-/// config validation accepts for it (the model belongs to the pool, and the member
-/// belongs to that pool). The live planner resolves it against the target's own
-/// `provider_name` -- the MEMBER -- and its `nickname` -- the BASE model -- so a
-/// status read resolving either half differently reports a seat as dormant while
-/// its traffic is being rewritten.
-///
-/// Mutation check: resolve the opt-in's provider half through the pool base instead
-/// of the lane's member entry -> red here with `no_target_opt_in`.
+/// A fully confirmed pooled seat reports `no_target_opt_in`: no config admits
+/// a prefix-impacting rewrite on any seat of any pool.
 #[test]
-fn a_member_scoped_model_scoped_opt_in_unblocks_a_pooled_seat() {
-    let spec = format!("{MEMBER}:{POOLED_NICK}");
-
-    let blocked = pooled_prefix_blocked_reason(&[&spec]);
-
+fn a_pooled_seat_at_quorum_is_never_admitted() {
     assert_eq!(
-        blocked, None,
-        "the member-scoped opt-in is found for the pooled key: the provider half \
-         resolves to the MEMBER suffix and the model half to the BASE nickname, \
-         exactly as a live DispatchTarget carries them",
-    );
-}
-
-/// A MEMBER-scoped, provider-scoped opt-in (a bare `member`) opts every model on
-/// that member in, the pooled seat included.
-///
-/// The second tier of the same grammar, asserted separately because the tiers match
-/// on different halves: this one ignores the nickname entirely, so a resolution
-/// that got the provider half right and the model half wrong passes here and fails
-/// the case above -- and the pair localizes which half moved.
-#[test]
-fn a_member_scoped_provider_scoped_opt_in_unblocks_a_pooled_seat() {
-    let blocked = pooled_prefix_blocked_reason(&[MEMBER]);
-
-    assert_eq!(
-        blocked, None,
-        "a bare member entry opts in every model dispatched through that member",
-    );
-}
-
-/// The MISSING-OPT-IN control: with no opt-in at all, the same fully-confirmed
-/// pooled row reports `no_target_opt_in`.
-///
-/// Without it every case above would pass against a surface that never consulted
-/// the opt-in list, which is a fidelity defect (a prefix-impacting rewrite running
-/// on a target the operator never named) rather than the feature.
-#[test]
-fn a_pooled_seat_with_no_opt_in_reports_no_target_opt_in() {
-    let blocked = pooled_prefix_blocked_reason(&[]);
-
-    assert_eq!(
-        blocked,
+        pooled_prefix_blocked_reason(false),
         Some(PreflightBlockedReason::NoTargetOptIn),
-        "a prefix-impacting rewrite stays dormant until the operator names the target, \
-         however well confirmed the verdict",
+        "a prefix-impacting rewrite stays dormant however well confirmed the verdict",
     );
 }
 
-/// An opt-in naming the OTHER member of the same pool does not opt this seat in.
-///
-/// THE discriminating case for the provider half, and the one a pool-scoped
-/// resolution cannot survive: both members sit in one pool and behind one base
-/// model, so a resolution keyed on the pool or on the base nickname matches this
-/// spec and opts in a seat the operator opted out of -- running a cache-prefix
-/// rewrite on an account they deliberately left alone.
+/// The positive control: the same pooled row reads unblocked once the test seam
+/// admits the class, so the refusal above is admission's and not the pooled
+/// identity failing to resolve.
 #[test]
-fn an_opt_in_naming_a_sibling_pool_member_does_not_opt_this_seat_in() {
-    let blocked = pooled_prefix_blocked_reason(&[OTHER_MEMBER]);
-
-    assert_eq!(
-        blocked,
-        Some(PreflightBlockedReason::NoTargetOptIn),
-        "one member's opt-in is not the pool's: a resolution through the pool or the \
-         base nickname would rewrite traffic on an account the operator left out",
-    );
-}
-
-/// An opt-in naming the right member but a DIFFERENT model does not opt this seat
-/// in.
-///
-/// The discriminating case for the model half. A resolution that dropped the
-/// nickname comparison, or matched any model on the member rather than the ones
-/// on this lane, would match this spec and opt in a model the operator named
-/// nowhere.
-#[test]
-fn an_opt_in_naming_another_model_on_the_same_member_does_not_opt_this_seat_in() {
-    let mut config = pooled_config();
-    // A second model on the SAME member, so the spec below is one config validation
-    // accepts and the only thing distinguishing it is the nickname.
-    config.models.insert(
-        "haiku".to_string(),
-        crate::config::ModelEntry::new(MEMBER, "claude-haiku-4-5"),
-    );
-    config.fidelity.prefix_impact_opt_in = vec![format!("{MEMBER}:haiku")];
-    let router = pooled_router(config);
-    plant_pooled_verdict(&router, &prefix_key(), PREFIX_QUORUM);
-
-    let rows = router.field_verdict_status();
-
-    let row = only_row(&rows);
-    assert_eq!(
-        row.blocked_reason,
-        Some(PreflightBlockedReason::NoTargetOptIn),
-        "a model-scoped opt-in for a sibling model on the same member matches neither \
-         tier for this target, so it opts it in not at all",
-    );
+fn a_pooled_seat_at_quorum_reads_unblocked_once_the_test_seam_admits() {
+    assert_eq!(pooled_prefix_blocked_reason(true), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +492,7 @@ fn a_lane_on_a_gemini_entry_is_an_unsupported_lane() {
 // ---------------------------------------------------------------------------
 
 /// Plant a prefix-impacting pooled verdict on a CONFIG-ONLY router and report the
-/// blocked reason under `opt_in`.
+/// blocked reason, with the test seam admitting the class when `admitted`.
 ///
 /// Config-only is not a contrived state: it is what a cold boot looks like before
 /// the resolved table is installed, and what a Router whose provider build FAILED
@@ -600,12 +504,14 @@ fn a_lane_on_a_gemini_entry_is_an_unsupported_lane() {
 /// The verdict is planted at the kind the CONFIG resolves, since there is no live
 /// target to read one off: that is the same resolution the seed path uses on a cold
 /// boot, so what this plants is a state a real replay produces.
-fn config_only_pooled_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlockedReason> {
-    let mut config = pooled_config();
-    config.fidelity.prefix_impact_opt_in = opt_in.iter().map(|s| (*s).to_string()).collect();
+fn config_only_pooled_blocked_reason(admitted: bool) -> Option<PreflightBlockedReason> {
+    let config = pooled_config();
     assert_pool_config_is_valid(&config);
     // No `install_resolved_models`: THE branch under test.
-    let router = router_assuming_durable_writes(config);
+    let mut router = router_assuming_durable_writes(config);
+    if admitted {
+        router = router.with_prefix_impact_admitted_for_tests();
+    }
     let state_key = pooled_key();
     let capability_key = prefix_key();
     plant_verdict_on(&router, &state_key, capability_key.clone());
@@ -614,7 +520,7 @@ fn config_only_pooled_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlocked
         kind, "anthropic-api",
         "premise: even with no resolved table the pooled key resolves its MEMBER \
          entry's kind -- an empty token here would mean the row below is blocked by \
-         the lane rather than by the opt-in, and every case would read the same",
+         the lane rather than by admission, and both cases would read the same",
     );
     let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
         pooled_lane(),
@@ -635,69 +541,30 @@ fn config_only_pooled_blocked_reason(opt_in: &[&str]) -> Option<PreflightBlocked
     let row = only_row(&rows);
     assert_eq!(
         row.confirmations, PREFIX_QUORUM,
-        "and the acknowledgement is reachable, so a refusal below is the opt-in's \
+        "and the acknowledgement is reachable, so a refusal below is admission's \
          rather than a confirmation shortfall",
     );
     row.blocked_reason
 }
 
-/// On a CONFIG-ONLY router, a member-scoped model-scoped opt-in (`member:nickname`)
-/// opts the pooled seat in.
-///
-/// The gap the installed-model cases cannot reach. A pooled seat's identity has to
-/// resolve from `[models]` and `[providers]` alone, because that is the state a cold
-/// boot replays its ledger in -- and a resolution that only consulted the resolved
-/// table would report every such row blocked, telling an operator their opt-in was
-/// ignored on exactly the boot where the verdict was restored.
-///
-/// Mutation check: delete the configured-model arm from
-/// `override_identities_for_lane` -> red here with `no_target_opt_in`.
+/// On a CONFIG-ONLY router a fully confirmed pooled seat is never admitted
+/// either.
 #[test]
-fn a_config_only_pooled_seat_honours_a_member_scoped_model_scoped_opt_in() {
-    let spec = format!("{MEMBER}:{POOLED_NICK}");
-
-    let blocked = config_only_pooled_blocked_reason(&[&spec]);
-
+fn a_config_only_pooled_seat_at_quorum_is_never_admitted() {
     assert_eq!(
-        blocked, None,
-        "with no resolved table the pooled lane still resolves the MEMBER for the \
-         provider half and the BASE nickname for the model half, so the operator's \
-         opt-in is honoured",
+        config_only_pooled_blocked_reason(false),
+        Some(PreflightBlockedReason::NoTargetOptIn),
+        "no admission on this branch as on the other",
     );
 }
 
-/// The MISSING-OPT-IN control for the config-only branch.
-///
-/// Without it the case above would pass against a resolution that never consulted
-/// the opt-in list at all on this branch -- a prefix-impacting rewrite running on a
-/// target the operator never named.
+/// The positive control for the config-only branch: the seam admits, and the row
+/// reads unblocked, so the pooled identity still resolves its MEMBER entry's kind
+/// with no resolved table -- a resolution that only consulted the resolved table
+/// would report the row `not_eligible` here.
 #[test]
-fn a_config_only_pooled_seat_with_no_opt_in_reports_no_target_opt_in() {
-    let blocked = config_only_pooled_blocked_reason(&[]);
-
-    assert_eq!(
-        blocked,
-        Some(PreflightBlockedReason::NoTargetOptIn),
-        "no opt-in means no prefix-impacting rewrite, on this branch as on the other",
-    );
-}
-
-/// The SIBLING-MEMBER control for the config-only branch: an opt-in naming the other
-/// member of the same pool does not opt this seat in.
-///
-/// The discriminating case, and the one a pool-scoped or base-scoped resolution
-/// cannot survive on this branch either: both members sit in one pool behind one
-/// base model, so a resolution keyed on either would match this spec and rewrite
-/// traffic on an account the operator deliberately left out.
-#[test]
-fn a_config_only_opt_in_naming_a_sibling_pool_member_does_not_opt_this_seat_in() {
-    let blocked = config_only_pooled_blocked_reason(&[OTHER_MEMBER]);
-
-    assert_eq!(
-        blocked,
-        Some(PreflightBlockedReason::NoTargetOptIn),
-        "one member's opt-in is not the pool's, with or without a resolved table",
-    );
+fn a_config_only_pooled_seat_at_quorum_reads_unblocked_once_the_test_seam_admits() {
+    assert_eq!(config_only_pooled_blocked_reason(true), None);
 }
 
 // ---------------------------------------------------------------------------

@@ -61,7 +61,7 @@ fn two_acting_rows_on_one_request_count_two_adopted_row_rewrite_actions() {
     // (per request). Reading either as the other is the misattribution the
     // wording in every doc now guards against. Asserted at two
     // rather than one because the two numbers differ exactly here.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
@@ -89,7 +89,7 @@ fn a_request_whose_two_rows_both_act_still_emits_exactly_one_warn() {
     //
     // Mutation check: move the `warn!` inside the per-record loop -> red on the
     // count here.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 

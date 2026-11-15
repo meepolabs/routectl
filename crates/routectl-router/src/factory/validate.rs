@@ -1675,78 +1675,6 @@ fn essential_key_near_miss(key: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// Reject a config whose `[fidelity]` block names a malformed or unknown
-/// target spec in `prefix_impact_opt_in`.
-///
-/// `prefix_impact_opt_in` entries reuse the same two-tier target-spec
-/// GRAMMAR as `[capability.overrides]`: `"provider_name"` or
-/// `"provider_name:nickname"`, split on the first `:` only (a nickname may
-/// itself contain `:`). Unlike `[capability.overrides]` -- which accepts
-/// any string as a target spec and validates only RouteAway /
-/// ForceSupported conflicts -- this validator also enforces directory
-/// membership: a malformed shape (empty provider segment or empty nickname
-/// segment) or a spec naming an unconfigured provider or an unknown model
-/// nickname is rejected. The provider segment is ALWAYS a concrete
-/// `[providers.X]` name, never a pool name -- but for a model-scoped spec,
-/// the model's OWN `provider` field is allowed to name either that same
-/// concrete provider or a pool that has it as a member: pool membership is
-/// what actually dispatches the model, so `<member>:<nickname>` for a
-/// pool-backed model is a real, reachable target.
-///
-/// Returns the first offending entry in config order.
-fn validate_fidelity_config(config: &Config) -> Result<(), String> {
-    for spec in &config.fidelity.prefix_impact_opt_in {
-        validate_prefix_impact_target_spec(config, spec)?;
-    }
-    Ok(())
-}
-
-/// Validate one `[fidelity] prefix_impact_opt_in` entry against the
-/// shared two-tier target-spec grammar (see
-/// [`crate::override_registry::split_target_spec`]) and the configured
-/// provider/model/pool directory.
-fn validate_prefix_impact_target_spec(config: &Config, spec: &str) -> Result<(), String> {
-    let (provider_name, nickname) = crate::override_registry::split_target_spec(spec);
-    if provider_name.is_empty() || nickname == Some("") {
-        return Err(format!(
-            "[fidelity] prefix_impact_opt_in entry `{spec}` is malformed -- expected \
-             `provider_name` or `provider_name:nickname`"
-        ));
-    }
-    if !config.providers.contains_key(provider_name) {
-        return Err(format!(
-            "[fidelity] prefix_impact_opt_in entry `{spec}` names unknown provider \
-             `{provider_name}`"
-        ));
-    }
-    if let Some(nickname) = nickname {
-        match config.models.get(nickname) {
-            None => {
-                return Err(format!(
-                    "[fidelity] prefix_impact_opt_in entry `{spec}` names unknown model \
-                     nickname `{nickname}`"
-                ));
-            }
-            Some(model) if model.provider != provider_name => {
-                let member_of_named_pool = config
-                    .pools
-                    .get(&model.provider)
-                    .is_some_and(|pool| pool.members.iter().any(|member| member == provider_name));
-                if !member_of_named_pool {
-                    return Err(format!(
-                        "[fidelity] prefix_impact_opt_in entry `{spec}`: model `{nickname}` \
-                         belongs to provider `{}`, not `{provider_name}` (and `{provider_name}` \
-                         is not a member of that pool)",
-                        model.provider
-                    ));
-                }
-            }
-            Some(_) => {}
-        }
-    }
-    Ok(())
-}
-
 /// What a `[models.X] provider` value names: a `[pools]` block or a
 /// `[providers]` entry.
 #[derive(Debug, Clone, Copy)]
@@ -1872,9 +1800,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(e);
     }
     if let Err(e) = validate_capability_essential(config) {
-        errors.push(e);
-    }
-    if let Err(e) = validate_fidelity_config(config) {
         errors.push(e);
     }
     if let Err(e) = validate_float_fields(config) {

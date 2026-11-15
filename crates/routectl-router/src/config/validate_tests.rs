@@ -269,7 +269,7 @@ mod raw_config_preflight_tests {
     fn a_clean_current_config_passes() {
         let raw = at_version(
             super::CURRENT_CONFIG_VERSION,
-            "[mitm]\n[fidelity]\n[providers.p]\nkind = \"anthropic-api\"\n",
+            "[mitm]\n[providers.p]\nkind = \"anthropic-api\"\n",
         );
 
         assert_eq!(preflight_raw_config(&raw), Ok(()));

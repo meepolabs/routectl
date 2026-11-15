@@ -508,11 +508,11 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
         planner_reason_override: None,
     });
 
-    // MISSING PREFIX OPT-IN: quorum satisfied, target not named in `[fidelity]`.
+    // NOT ADMITTED: quorum satisfied, and no build admits a prefix-impacting rewrite.
     let no_opt_in = convergence_ok_router();
     plant_convergence_verdict(&no_opt_in, prefix, PREFIX_QUORUM);
     cases.push(ConvergenceCase {
-        name: "prefix-impacting at quorum with no target opt-in",
+        name: "prefix-impacting at quorum, never admitted",
         router: no_opt_in,
         req: convergence_prefix_req(),
         path: prefix,
@@ -520,17 +520,15 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
         planner_reason_override: None,
     });
 
-    // The OPT-IN present: the same fixture unblocks, which is what makes the row
-    // above the opt-in's refusal rather than a permanently-dormant class.
-    let opted_in = convergence_ok_router();
+    // ADMITTED through the test seam: the same fixture unblocks, which is what
+    // makes the row above admission's refusal rather than a fixture that never
+    // reaches the gate.
     {
-        let mut config = (*opted_in.config).clone();
-        config.fidelity.prefix_impact_opt_in = vec!["p0".to_string()];
-        let opted_in = rebuild_convergence_router_with(opted_in, config);
-        plant_convergence_verdict(&opted_in, prefix, PREFIX_QUORUM);
+        let admitted = convergence_ok_router().with_prefix_impact_admitted_for_tests();
+        plant_convergence_verdict(&admitted, prefix, PREFIX_QUORUM);
         cases.push(ConvergenceCase {
-            name: "prefix-impacting at quorum WITH the target opt-in",
-            router: opted_in,
+            name: "prefix-impacting at quorum, admitted by the test seam",
+            router: admitted,
             req: convergence_prefix_req(),
             path: prefix,
             expect: None,

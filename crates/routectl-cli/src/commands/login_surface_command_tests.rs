@@ -372,8 +372,8 @@ fn a_removed_key_skip_separates_the_refusal_from_nothing_was_written_with_one_pe
             format!("{}[models.fast]\nmax_thinking_budget = 1\n", base()),
         ),
         (
-            "removed paid probe caps",
-            format!("{}[fidelity]\npaid_probe_daily_caps = 1\n", base()),
+            "retired fidelity table",
+            format!("{}[fidelity]\nprefix_impact_opt_in = []\n", base()),
         ),
     ];
 

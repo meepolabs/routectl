@@ -34,14 +34,14 @@ fn config_body(extra: &str) -> String {
 }
 
 fn with_one_retired_key() -> String {
-    config_body("[fidelity.paid_probe_daily_caps]\nfast = 5\n")
+    config_body("[fidelity]\nprefix_impact_opt_in = [\"fast\"]\n")
 }
 
 /// Three retired keys from three different rows.
 fn with_three_retired_keys() -> String {
     config_body(
         "[mitm]\ncredential_source = \"forwarded\"\n\
-         [fidelity.paid_probe_daily_caps]\nfast = 5\n\
+         [fidelity]\nprefix_impact_opt_in = [\"fast\"]\n\
          [bedrock]\nallowed_betas = [\"x\"]\n",
     )
 }
@@ -164,7 +164,7 @@ async fn hot_reload_three_retired_keys() {
 #[test]
 #[serial_test::serial]
 fn a_config_without_a_retired_key_loads_on_every_path() {
-    let body = config_body("[fidelity]\nprefix_impact_opt_in = [\"fast\"]\n");
+    let body = config_body("[capability]\ndecay_hours = 24\n");
     let (_dir, _xdg, path) = write_config(&body);
 
     if let Err(e) = load_effective_config(&path) {

@@ -1909,12 +1909,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `WindowGateConfig` (global `[window_gate]`: `enabled`, default false; a
   missing block is off) is the hot-reloadable switch for the proactive
   context-window gate;
-  `FidelityConfig` (global `[fidelity]`: `prefix_impact_opt_in:
-  Vec<String>` reusing the `[capability.overrides]` two-tier target-spec
-  grammar) is fully defaulted (empty list), so a missing block changes
-  nothing. `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight
-  planner refuses a prefix-impacting transform for any target it does not name,
-  so an entry can change what goes upstream. `WireCheckConfig` (global
+  `WireCheckConfig` (global
   `[wire_check]`: `first_n` 8, `sample_one_in` 100, `window_secs` 86400; the
   latter two non-zero by type) is the live wire check's sampler and status
   window. The re-verification
@@ -2209,19 +2204,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   pools, a non-`oauth://` member (milestone-scoped wording), a pool name held
   by a provider entry or a model nickname, an empty `members`, and more than
   `MAX_POOL_MEMBERS` (32) members; the `[mitm]` validator is deliberately
-  excluded (router-build-specific); `validate_fidelity_config` walks
-  `[fidelity] prefix_impact_opt_in` through
-  `validate_prefix_impact_target_spec` (rejects a malformed entry -- empty
-  provider or empty nickname segment, via
-  `override_registry::split_target_spec`'s first-colon-only parse, so a
-  nickname containing `:` is not a second delimiter -- and an entry naming an
-  unknown provider or an unknown model nickname; a bare pool name is
-  rejected as an unknown provider, since a pool is never itself a
-  dispatch's `provider_name`; a nickname-scoped entry whose provider segment
-  differs from the model's own `provider` is accepted, not rejected, when
-  the model's `provider` names a pool and the segment is one of that pool's
-  members -- pool dispatch resolves to a concrete member, which is exactly
-  what reaches capability-override resolution)
+  excluded (router-build-specific)
 - `src/factory/warnings.rs` -- non-fatal config warnings;
   `class_policy_warnings` is the advisory twin of `validate_class_policy` over
   the same surface (never fails): a `class_overrides` remap whose SOURCE
@@ -3131,25 +3114,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   capability key, through the same two-tier resolver the act and learn sides
   share -> `FieldVerdictRegistry::preflight_authorization` -> that
   authorization's own confirmation count against `class.required_quorum()` ->
-  for a PREFIX-IMPACTING class only, `prefix_impact_opted_in`. The quorum reads
+  for a PREFIX-IMPACTING class only, `prefix_impact_admitted`. The quorum reads
   the count the SAME authorization returned rather than making a second registry
   call, so a concurrent reconciliation cannot make a confirmed verdict report a
   shortfall it never had. The mask is consulted
   above the quorum (it holds at any confirmation count, so it is the operative
-  reason), and the opt-in below it (an opted-in target with an unconfirmed
-  verdict must still report the verdict gate, so the opt-in never reads as the
-  only thing between a target and a content rewrite). `prefix_impact_opted_in`
-  reads `[fidelity] prefix_impact_opt_in` through
-  `override_registry::split_target_spec` -- the SAME two-tier target-spec
-  GRAMMAR `[capability.overrides]` resolution uses, so a bare `provider` entry
-  covers every model dispatched through that provider entry (pool-backed models
-  included, since pool dispatch resolves to a concrete member) and
-  `provider:nickname` covers exactly that model, with no
-  second grammar and no second store. What it does NOT share is precedence:
-  `[capability.overrides]` has two verdicts (`unsupported` / `force_supported`)
-  and so needs a rule deciding which tier wins, while this list has one -- listed
-  or not -- so a target is opted in when EITHER tier matches and there is nothing
-  to arbitrate. Positive-only membership, not tier precedence.
+  reason), and admission below it (a verdict short of eligibility or quorum
+  still reports that gate first). `prefix_impact_admitted` returns
+  `PREFIX_IMPACT_ADMITTED` (`false`: no target is ever admitted); the status
+  surface's `blocked_reason_for` calls the same method, so dispatch and status
+  cannot disagree. A test build's `with_prefix_impact_admitted_for_tests` seam
+  admits, so the gates behind it stay reachable.
   A masked decision suppresses the ACTION
   and never the state: the verdict stays resident, acting, and confirmed.
   The gate chain is split across four helpers rather than one long function --
@@ -5349,10 +5324,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `snapshot()` returns rows. The routing consult that reads this model lives
   in `router.rs`. `split_target_spec(spec) -> (provider, Option<nickname>)`
   is the ONE first-colon-only parser for the two-tier grammar (a nickname may
-  itself contain `:`); `provider_of_spec` and
-  `factory::validate::validate_prefix_impact_target_spec` (the `[fidelity]
-  prefix_impact_opt_in` directory-membership check) both delegate to it so
-  the two sites can never read a spec differently
+  itself contain `:`); `provider_of_spec` and the beta-floor warnings
+  delegate to it so no site can read a spec differently
 - `src/capability_display.rs` -- the panel-only display tokens a read-only
   surface renders for a capability cell: `FORCED_SUPPORTED` /
   `FORCED_UNSUPPORTED` / `VERDICT_MIXED` / `VERDICT_UNREPRESENTABLE` and the
@@ -8182,9 +8155,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   reorders members without changing which credentials are in play, so it is
   not in the set). A coverage-tripwire test walks the schema's
   top-level properties and fails on any unclassified new `Config` section; the
-  `[capability]` and `[fidelity]` sections classify as plain hot-reloadable
-  (neither restart-required nor high-consequence -- `[fidelity]` has no
-  active runtime behavior yet) and `[pools]` as high-consequence
+  `[capability]` section classifies as plain hot-reloadable (neither
+  restart-required nor high-consequence) and `[pools]` as high-consequence
   beside `[providers]`
 - `src/config_folder.rs` -- the refusal for a config left only in an old
   folder: pure `legacy_config_dirs(appdata, home)` (every candidate in

@@ -91,7 +91,6 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "cache.auto_emit_top_level_breakpoint",
         "cache.k_gated_emission",
         "capability.essential",
-        "fidelity.prefix_impact_opt_in",
         "log.redact_prompts",
         "log.trace_body_bytes",
         "models.fast.selectable",
@@ -129,10 +128,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (19, 20));
+    assert_eq!((file.len(), default.len()), (19, 19));
     assert_eq!(
         lines.len(),
-        39,
+        38,
         "every line is tagged file or default, once"
     );
 }

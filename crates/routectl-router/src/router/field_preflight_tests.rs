@@ -191,7 +191,7 @@ fn install_raw(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc
 /// Stated rather than defaulted: learned pre-flight suspends unless a
 /// capability-persistence health read reports durable writes, and `Router::new`
 /// installs none -- so a fixture that said nothing would exercise the SUSPENDED path
-/// in every test here, and every eligibility, quorum, opt-in, and cadence assertion
+/// in every test here, and every eligibility, quorum, admission, and cadence assertion
 /// would pass for the wrong reason. The suspension itself is asserted on
 /// `install_without_durable_writes`, which deliberately omits this call.
 fn install(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc<Observed>>) {
@@ -2135,13 +2135,13 @@ fn a_transform_claiming_removal_while_the_field_remains_is_ambiguous() {
 }
 
 // ===========================================================================
-// The content gate: prefix-impacting opt-in and repair quorum
+// The content gate: prefix-impacting admission and repair quorum
 // ===========================================================================
 //
 // The closed table ships one ENVELOPE row and no prefix-impacting one, so the
 // prefix-impacting class is driven through the test-only row the table adds in
 // a test build (`TEST_PREFIX_IMPACTING_PATH` / the system-prompt surface).
-// Without it every branch of the quorum and opt-in gates would be unreachable,
+// Without it every branch of the quorum and admission gates would be unreachable,
 // and an unreachable gate is one whose removal no test would notice.
 //
 // The two classes' surfaces are DISJOINT (envelope metadata carriers vs the
@@ -2252,11 +2252,12 @@ fn plant_prefix_verdict(router: &Router, state_key: &str, confirmations: u32) {
     );
 }
 
-/// `chain_config` plus a `[fidelity] prefix_impact_opt_in` list.
-fn config_with_opt_in(specs: &[&str]) -> Config {
-    let mut config = chain_config(ALIAS, 1, ANTHROPIC);
-    config.fidelity.prefix_impact_opt_in = specs.iter().map(|spec| (*spec).to_string()).collect();
-    config
+/// One seat with prefix-impacting pre-flight ADMITTED through the test seam,
+/// so the quorum, canary and accounting paths behind the admission gate stay
+/// reachable. No config admits it; see `prefix_impact_is_never_admitted_*`.
+fn install_admitted(answer: Answer) -> (Router, Vec<Arc<Observed>>) {
+    let (router, observed) = install(chain_config(ALIAS, 1, ANTHROPIC), 1, answer);
+    (router.with_prefix_impact_admitted_for_tests(), observed)
 }
 
 /// The single decision for the prefix row in `records`.
@@ -2288,12 +2289,12 @@ fn envelope_decision(records: &[FieldPreflight]) -> &FieldPreflight {
 }
 
 #[test]
-fn a_prefix_impacting_row_at_one_confirmation_is_blocked_even_with_opt_in() {
+fn a_prefix_impacting_row_at_one_confirmation_is_blocked_even_when_admitted() {
     // THE quorum pin. One confirmation is what an ENVELOPE row acts on; a
     // prefix-impacting rewrite costs a full cache-prefix recompute per
-    // request, so it needs two confirmed cycles. The target IS opted in here,
+    // request, so it needs two confirmed cycles. The target IS admitted here,
     // which is what makes the refusal attributable to the quorum alone.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_prefix_verdict(&router, "m0", 1);
     let original = req_prefix_only(ALIAS);
 
@@ -2318,11 +2319,11 @@ fn a_prefix_impacting_row_at_one_confirmation_is_blocked_even_with_opt_in() {
 }
 
 #[test]
-fn a_prefix_impacting_row_at_quorum_without_opt_in_is_blocked() {
-    // THE opt-in pin. The verdict is confirmed twice over -- the quorum gate
-    // is satisfied -- and the rewrite still must not fire, because no operator
-    // has named this target in `[fidelity]`. A content rewrite stays dormant
-    // until the operator activates it, however well confirmed.
+fn a_prefix_impacting_row_at_quorum_is_never_admitted() {
+    // THE admission pin. The verdict is confirmed twice over -- the quorum
+    // gate is satisfied -- and the rewrite still must not fire, because no
+    // build admits a prefix-impacting rewrite. A content rewrite stays dormant
+    // however well confirmed.
     let (router, _seen) = single_seat(Answer::ServeImmediately);
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let original = req_prefix_only(ALIAS);
@@ -2343,19 +2344,23 @@ fn a_prefix_impacting_row_at_quorum_without_opt_in_is_blocked() {
 }
 
 #[test]
-fn a_prefix_impacting_row_acts_at_quorum_plus_opt_in() {
+fn a_prefix_impacting_row_acts_at_quorum_once_the_test_seam_admits_it() {
     // The ONE state a prefix-impacting rewrite may act on: two confirmed
-    // cycles AND an explicit target opt-in. Both other gates were asserted
-    // above with this one satisfied, so this case is what makes those two
-    // refusals about their own gate rather than about the row never acting.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    // cycles AND admission, which only the test seam grants. Both other gates
+    // were asserted above with this one satisfied, so this case is what makes
+    // those two refusals about their own gate rather than about the row never
+    // acting.
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let original = req_prefix_only(ALIAS);
 
     let (planned, records) = plan_all(&router, &original, "m0");
 
     let decision = prefix_decision(&records);
-    assert!(decision.acted, "quorum plus opt-in authorizes the rewrite");
+    assert!(
+        decision.acted,
+        "quorum plus admission authorizes the rewrite"
+    );
     assert_eq!(decision.reason, FIELD_PREFLIGHT_ACTION_DROP);
     assert_eq!(decision.transform_class, Some("prefix_impacting"));
     assert!(
@@ -2369,17 +2374,17 @@ fn a_prefix_impacting_row_acts_at_quorum_plus_opt_in() {
 }
 
 #[test]
-fn an_envelope_row_acts_at_one_confirmation_without_any_opt_in() {
+fn an_envelope_row_acts_at_one_confirmation_without_admission() {
     // The counterpart that keeps the two classes' gates distinct: the same
     // single confirmation that BLOCKS a prefix-impacting row acts on an
-    // envelope row, and no `[fidelity]` entry exists for this target. Without
-    // this case a planner that simply required quorum two and an opt-in for
-    // EVERYTHING would satisfy every prefix test above.
+    // envelope row, on a Router that admits no prefix-impacting rewrite.
+    // Without this case a planner that simply required quorum two and
+    // admission for EVERYTHING would satisfy every prefix test above.
     let (router, _seen) = single_seat(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     assert!(
-        router.config.fidelity.prefix_impact_opt_in.is_empty(),
-        "fixture premise: no target is opted into prefix-impacting pre-flight",
+        !router.prefix_impact_admitted(),
+        "fixture premise: this Router admits no prefix-impacting pre-flight",
     );
 
     let (planned, decision) = plan(&router, &req_on(ALIAS), "m0");
@@ -2393,18 +2398,17 @@ fn an_envelope_row_acts_at_one_confirmation_without_any_opt_in() {
 }
 
 #[test]
-fn an_opted_in_target_still_needs_its_verdict_confirmed_twice() {
-    // The opt-in is not a bypass: an opted-in target with an unconfirmed
-    // verdict reports the VERDICT gate, so an operator reading the record
-    // cannot mistake the opt-in for the only thing between a target and a
-    // content rewrite.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+fn an_admitted_target_still_needs_its_verdict_confirmed_twice() {
+    // Admission is not a bypass: an admitted target with an unconfirmed
+    // verdict reports the VERDICT gate, so the admission gate's ordering
+    // cannot hide an evidence shortfall.
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_prefix_verdict(&router, "m0", 0);
 
     let (planned, records) = plan_all(&router, &req_prefix_only(ALIAS), "m0");
 
     let decision = prefix_decision(&records);
-    assert!(!decision.acted, "an opt-in authorizes nothing on its own");
+    assert!(!decision.acted, "admission authorizes nothing on its own");
     assert_eq!(
         decision.reason, FIELD_PREFLIGHT_NOT_ELIGIBLE,
         "zero confirmations is not eligible at all, which is a different \
@@ -2413,62 +2417,100 @@ fn an_opted_in_target_still_needs_its_verdict_confirmed_twice() {
     assert!(carries_system(&planned));
 }
 
-#[test]
-fn opt_in_is_membership_in_either_tier_of_the_existing_target_spec_grammar() {
-    // The opt-in reuses `[capability.overrides]`'s target-spec GRAMMAR, not its
-    // precedence rule -- and there is no precedence to reuse: that surface has
-    // two verdicts (`unsupported` / `force_supported`) and so needs a rule for a
-    // target both tiers name, while this list has one -- listed, or not -- so a
-    // target is opted in when EITHER tier matches and nothing arbitrates between
-    // them. What the grammar gives is the SHAPE of a match: a bare provider spec
-    // covers every model dispatched through that provider, a `provider:nickname`
-    // spec covers exactly that model, and a model-scoped spec for a DIFFERENT
-    // model matches neither tier. Driven as a table so the cases cannot drift
-    // apart, and every case runs with quorum satisfied so the opt-in is the only
-    // variable.
-    for (specs, expected_acted, label) in [
-        (vec!["p0"], true, "provider-scoped spec opts in every model"),
-        (vec!["p0:m0"], true, "model-scoped spec opts in that model"),
-        (
-            vec!["p0:other"],
-            false,
-            "a model-scoped spec for a different model opts this one in for neither tier",
-        ),
-        (
-            vec!["other"],
-            false,
-            "a spec naming another provider opts nothing in here",
-        ),
-        (vec![], false, "an empty list opts nothing in"),
-    ] {
-        let (router, _seen) = install(config_with_opt_in(&specs), 1, Answer::ServeImmediately);
-        plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
+/// Seats in the multi-target fixture below: every one carries its own provider
+/// entry and lane, so each is a distinct target.
+const NEVER_ADMITTED_SEATS: usize = 3;
 
-        let (planned, records) = plan_all(&router, &req_prefix_only(ALIAS), "m0");
-
-        let decision = prefix_decision(&records);
-        assert_eq!(decision.acted, expected_acted, "{label}: {decision:?}");
-        assert_eq!(
-            carries_system(&planned),
-            !expected_acted,
-            "{label}: the dispatched body must match the decision",
-        );
-        if !expected_acted {
-            assert_eq!(
-                decision.reason,
-                super::FIELD_PREFLIGHT_NO_TARGET_OPT_IN,
-                "{label}: the refusal names the opt-in gate, since quorum is satisfied",
+/// Plan the prefix-only request on every seat of `router` and read its status
+/// rows, returning one `(planner reason, status reason)` pair per seat.
+fn prefix_reasons_on_every_seat(
+    router: &Router,
+) -> Vec<(
+    &'static str,
+    Option<crate::router::fidelity_status::PreflightBlockedReason>,
+)> {
+    let rows = router.field_verdict_status();
+    (0..NEVER_ADMITTED_SEATS)
+        .map(|idx| {
+            let nickname = format!("m{idx}");
+            let target = target_for(router, &nickname, &format!("p{idx}"));
+            let (_planned, records, _plan) = router.plan_field_preflight(
+                &req_prefix_only(ALIAS),
+                &target,
+                DispatchSurface::Complete,
             );
-        }
+            let lane = crate::router::probe_test_support::seat_chain_lane(&nickname);
+            let status: Vec<_> = rows
+                .iter()
+                .filter(|row| row.state_key == lane.as_lane_key() && row.prefix_impacting)
+                .collect();
+            assert_eq!(status.len(), 1, "one prefix row on `{nickname}`: {rows:?}");
+            (prefix_decision(&records).reason, status[0].blocked_reason)
+        })
+        .collect()
+}
+
+/// A Router over `NEVER_ADMITTED_SEATS` seats from a config that sets nothing
+/// about prefix-impacting pre-flight, each seat's prefix verdict at quorum.
+fn every_seat_at_prefix_quorum() -> Router {
+    let (router, _seen) = install(
+        chain_config(ALIAS, NEVER_ADMITTED_SEATS, ANTHROPIC),
+        NEVER_ADMITTED_SEATS,
+        Answer::ServeImmediately,
+    );
+    for idx in 0..NEVER_ADMITTED_SEATS {
+        plant_prefix_verdict(&router, &format!("m{idx}"), crate::config::PREFIX_QUORUM);
     }
+    router
 }
 
 #[test]
-fn a_force_supported_override_masks_a_prefix_impacting_row_at_quorum_and_opt_in() {
+fn prefix_impact_is_never_admitted_by_dispatch_or_status_on_any_target() {
+    // Both readers of the admission answer, over every target of a config that
+    // never mentioned prefix-impacting pre-flight, each at quorum so admission
+    // is the only gate left. Dispatch refuses every one and the status surface
+    // reports every one blocked on the same gate: if either reader admitted a
+    // target, its pair here would differ.
+    let router = every_seat_at_prefix_quorum();
+
+    let reasons = prefix_reasons_on_every_seat(&router);
+
+    assert_eq!(
+        reasons,
+        vec![
+            (
+                super::FIELD_PREFLIGHT_NO_TARGET_OPT_IN,
+                Some(crate::router::fidelity_status::PreflightBlockedReason::NoTargetOptIn),
+            );
+            NEVER_ADMITTED_SEATS
+        ],
+        "no target is admitted, by the planner or by the status surface",
+    );
+}
+
+#[test]
+fn every_target_acts_and_reads_unblocked_once_the_test_seam_admits() {
+    // The positive control for the case above, on the same fixture: with the
+    // seam admitting, every seat's planner acts and every status row reads
+    // unblocked. Without it a fixture that could never reach the admission
+    // gate (a lane refused, a verdict short of quorum) would pass the refusal
+    // assertions for the wrong reason.
+    let router = every_seat_at_prefix_quorum().with_prefix_impact_admitted_for_tests();
+
+    let reasons = prefix_reasons_on_every_seat(&router);
+
+    assert_eq!(
+        reasons,
+        vec![(FIELD_PREFLIGHT_ACTION_DROP, None); NEVER_ADMITTED_SEATS],
+    );
+}
+
+#[test]
+fn a_force_supported_override_masks_a_prefix_impacting_row_at_quorum_and_admitted() {
     // The operator mask outranks the learned verdict for a content row too,
     // and it is reported as the mask rather than as a gate shortfall -- every
     // other gate is satisfied here, so the mask is the operative reason.
-    let mut config = config_with_opt_in(&["p0"]);
+    let mut config = chain_config(ALIAS, 1, ANTHROPIC);
     config.capability.overrides.insert(
         "p0".to_string(),
         crate::config::OverrideEntry {
@@ -2477,6 +2519,7 @@ fn a_force_supported_override_masks_a_prefix_impacting_row_at_quorum_and_opt_in(
         },
     );
     let (router, _seen) = install(config, 1, Answer::ServeImmediately);
+    let router = router.with_prefix_impact_admitted_for_tests();
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
     let (planned, records) = plan_all(&router, &req_prefix_only(ALIAS), "m0");
@@ -2496,7 +2539,7 @@ fn a_force_supported_override_does_not_delete_the_masked_verdict() {
     // cleared the verdict instead would look identical on the masked request
     // and then, the moment the operator removed the override, would have
     // silently discarded the confirmed evidence.
-    let mut config = config_with_opt_in(&["p0"]);
+    let mut config = chain_config(ALIAS, 1, ANTHROPIC);
     config.capability.overrides.insert(
         "p0".to_string(),
         crate::config::OverrideEntry {
@@ -2505,6 +2548,7 @@ fn a_force_supported_override_does_not_delete_the_masked_verdict() {
         },
     );
     let (router, _seen) = install(config, 1, Answer::ServeImmediately);
+    let router = router.with_prefix_impact_admitted_for_tests();
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
     let (_planned, records) = plan_all(&router, &req_prefix_only(ALIAS), "m0");
@@ -2528,8 +2572,8 @@ fn a_force_supported_override_does_not_delete_the_masked_verdict() {
 #[test]
 fn each_present_row_is_gated_on_its_own_terms_in_one_request() {
     // The composition property. One request carries BOTH rows, the envelope
-    // row is confirmed once (its quorum) and the prefix row twice with no
-    // opt-in. The envelope row must act and the prefix row must not, on the
+    // row is confirmed once (its quorum) and the prefix row twice, never
+    // admitted. The envelope row must act and the prefix row must not, on the
     // same request: a planner that gated per REQUEST rather than per ROW would
     // either block both or act on both.
     let (router, _seen) = single_seat(Answer::ServeImmediately);
@@ -2550,7 +2594,7 @@ fn each_present_row_is_gated_on_its_own_terms_in_one_request() {
     );
     assert!(
         !prefix_decision(&records).acted,
-        "the prefix row has no opt-in: {records:?}",
+        "the prefix row is not admitted: {records:?}",
     );
     assert_eq!(
         prefix_decision(&records).reason,
@@ -2571,7 +2615,7 @@ fn two_authorized_rows_compose_onto_one_planned_body() {
     // The converse: both rows authorized, so both rewrites land on one body.
     // A planner that returned each row's rewrite from a fresh clone of the
     // original would drop whichever row it planned first.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
@@ -2711,7 +2755,7 @@ fn a_purge_moves_learned_state_only_and_cannot_touch_the_compiled_strip_table() 
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn all_three_walks_block_a_prefix_impacting_row_without_opt_in() {
+async fn all_three_walks_block_a_prefix_impacting_row_that_is_not_admitted() {
     // The gates are asserted on the DISPATCHED bytes, not only on the decision
     // record: a planner that recorded a refusal while still adopting the
     // rewrite would satisfy every record-level assertion above.
@@ -2744,12 +2788,12 @@ async fn all_three_walks_block_a_prefix_impacting_row_without_opt_in() {
 }
 
 #[tokio::test]
-async fn all_three_walks_dispatch_the_content_rewrite_once_opted_in() {
+async fn all_three_walks_dispatch_the_content_rewrite_once_admitted() {
     // The positive control for the case above, on the same three walks: with
-    // the opt-in present and the quorum met, every walk sends the rewritten
+    // admission granted and the quorum met, every walk sends the rewritten
     // body. Without it, an implementation that blocked unconditionally would
     // pass the refusal assertions.
-    let (router, mut observed) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, mut observed) = install_admitted(Answer::ServeImmediately);
     let seen = observed.remove(0);
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
@@ -3261,7 +3305,7 @@ fn each_class_consumes_the_co_located_quorum_constant_for_its_own_tier() {
     //   green. Caught by `the_three_quorum_values_are_exactly_one_one_and_two`.
     // - CONSUMER mutation (`PrefixImpacting => ENVELOPE_QUORUM`, or either arm
     //   returning a literal): compiles, and goes RED here plus at
-    //   `a_prefix_impacting_row_at_one_confirmation_is_blocked_even_with_opt_in`.
+    //   `a_prefix_impacting_row_at_one_confirmation_is_blocked_even_when_admitted`.
     use super::super::field_repair::TransformClass;
     use crate::config::{ENVELOPE_QUORUM, PREFIX_QUORUM};
 
@@ -3284,7 +3328,7 @@ fn each_class_consumes_the_co_located_quorum_constant_for_its_own_tier() {
     );
     assert!(
         !TransformClass::Envelope.requires_target_opt_in(),
-        "an envelope rewrite needs no [fidelity] entry",
+        "an envelope rewrite needs no admission",
     );
     assert!(
         TransformClass::PrefixImpacting.requires_target_opt_in(),
@@ -3357,7 +3401,7 @@ fn a_prefix_impacting_decision_leaks_no_system_prompt_into_its_diagnostic() {
     // fired and names the prefix-impacting class, so the value under test is a
     // prompt the planner genuinely dropped.
     const SYSTEM_SENTINEL: &str = SYSTEM_PROMPT;
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let req = req_prefix_only(ALIAS);
     assert!(
@@ -3718,7 +3762,7 @@ fn every_eligible_request_advances_both_rows_cadences() {
     //
     // Run past TWO intervals so the assertion is about a repeating cadence
     // rather than about one lucky boundary.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
@@ -3768,7 +3812,7 @@ fn a_row_denied_the_settlement_slot_claims_on_the_next_request() {
     // and driving them together), so the later row is denied once and must claim
     // on the very next eligible request -- the sticky due flag is what makes that
     // hold, and without it the row would wait out a further full interval.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
@@ -3796,7 +3840,7 @@ fn a_denied_row_stays_due_in_the_registry_until_it_claims() {
     // rows came due, the DENIED identity is still flagged due and the one that
     // claimed is not. This is what a mutation clearing `due` on the trip (rather
     // than on the claim) trips directly.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let target = target_for(&router, "m0", "p0");
@@ -3862,7 +3906,7 @@ fn one_canary_per_request_holds_under_hostile_concurrency() {
     // racing thread makes either dueness outcome legal here, so an assertion
     // about it would be unfalsifiable. The restoration count below is a PREMISE
     // (the window was reached at all), not evidence about the cadence.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let router = Arc::new(router);
@@ -3937,7 +3981,7 @@ fn every_acting_rows_accounting_guard_is_held_for_the_request() {
     // row's guard would show the later identity at zero in flight while its
     // request was outstanding: the exposure an operator reads to size a disproof
     // would be silently short.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let target = target_for(&router, "m0", "p0");
@@ -4001,7 +4045,7 @@ fn two_concurrent_both_rows_requests_each_count_against_both_identities() {
     // once per acting row" from "counted once per request". Two simultaneous
     // requests make the two answers differ: each identity must see two in flight
     // and two modified.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let target = target_for(&router, "m0", "p0");
@@ -4171,7 +4215,7 @@ fn the_request_warn_names_the_prefix_impacting_class_when_both_rows_act() {
     // FIRST in the closed table -- so an emitter naming the first acting decision
     // would report `envelope` and understate a request that rewrote a cache
     // prefix. The aggregate counts still describe both decisions.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_eligible(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
 
@@ -4238,7 +4282,7 @@ fn the_request_warn_names_the_envelope_class_when_it_is_the_only_acting_row() {
     assert_eq!(
         field_of(warns[0], "transform_class"),
         Some("envelope"),
-        "with no opt-in the prefix row is blocked, so the only ACTING class is the \
+        "without admission the prefix row is blocked, so the only ACTING class is the \
          envelope one and the WARN names it",
     );
     assert_eq!(

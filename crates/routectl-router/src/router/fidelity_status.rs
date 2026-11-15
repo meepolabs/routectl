@@ -60,7 +60,7 @@ use super::{ActingFieldVerdict, FieldRepairCounters, LaneBudgetExhaustions, Lane
 ///
 /// What keeps the two from MEANING different things is not a shared literal: it is
 /// that each variant is produced by consulting the planner's own predicate
-/// (`preflight_authorization`, `required_quorum`, the target-spec membership), not
+/// (`preflight_authorization`, `required_quorum`, `prefix_impact_admitted`), not
 /// by paraphrasing its conditions. A test additionally pins that every token this
 /// surface can emit is distinct and stable.
 ///
@@ -78,8 +78,8 @@ pub enum PreflightBlockedReason {
     NotEligible,
     /// Eligible, but short of this transform class's confirmation quorum.
     BelowQuorum,
-    /// At quorum, but the class needs an explicit `[fidelity]` target opt-in
-    /// this target does not have.
+    /// At quorum, but the class is one this build never admits for any target
+    /// (`field_preflight::PREFIX_IMPACT_ADMITTED`).
     NoTargetOptIn,
     /// The capability kill switch is off (`capability.enabled = false`), so no learned
     /// verdict can act at all. Distinct from the per-key reasons below because it is
@@ -522,7 +522,7 @@ impl Router {
         if confirmations < class.required_quorum() {
             return Some(PreflightBlockedReason::BelowQuorum);
         }
-        if class.requires_target_opt_in() && !self.prefix_impact_opted_in_for_state_key(key) {
+        if class.requires_target_opt_in() && !self.prefix_impact_admitted() {
             return Some(PreflightBlockedReason::NoTargetOptIn);
         }
         None
@@ -617,32 +617,6 @@ impl Router {
                     ),
                     Some(crate::override_registry::OverrideVerdict::ForceSupported)
                 )
-            })
-    }
-
-    /// Whether the operator opted the lane `key` names into prefix-impacting
-    /// pre-flight.
-    ///
-    /// Resolves the lane to its `(provider, nickname)` pairs through
-    /// `override_identities_for_lane` and applies the same two-tier target-spec
-    /// membership the planner applies to any of them. The planner reads one pair
-    /// off a live `DispatchTarget` it already holds; a status read has only the
-    /// lane, so an opt-in naming any nickname on it is reported.
-    fn prefix_impact_opted_in_for_state_key(&self, key: &FieldVerdictKey) -> bool {
-        let identities = self.override_identities_for_lane(key.lane());
-        self.config
-            .fidelity
-            .prefix_impact_opt_in
-            .iter()
-            .any(|spec| {
-                let (spec_provider, spec_model) = crate::override_registry::split_target_spec(spec);
-                identities.iter().any(|(provider_name, nickname)| {
-                    spec_provider == provider_name
-                        && match spec_model {
-                            Some(model) => model == nickname,
-                            None => true,
-                        }
-                })
             })
     }
 }

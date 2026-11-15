@@ -415,7 +415,7 @@ fn the_one_request_warn_renders_the_headline_decisions_provenance() {
     // Mutation checks: read the provenance off `acted[0]` instead of `headline`
     // -> the envelope count appears and this reds; drop the WARN's provenance
     // fields -> the assertions find them absent.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_distinguishable_provenance(&router, "m0");
     // The prefix row's own count, distinct from the envelope row's seven and from
     // both quorums, so the headline attribution is unambiguous.
@@ -473,7 +473,7 @@ fn no_provenance_field_carries_a_request_value_or_a_body() {
     //
     // A positive control runs first: the fixture's marker must be findable in the
     // request itself, or "not found in the log" would be free.
-    let (router, _seen) = install(config_with_opt_in(&["p0"]), 1, Answer::ServeImmediately);
+    let (router, _seen) = install_admitted(Answer::ServeImmediately);
     plant_distinguishable_provenance(&router, "m0");
     plant_prefix_verdict(&router, "m0", crate::config::PREFIX_QUORUM);
     let mut original = req_both_rows(ALIAS);

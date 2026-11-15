@@ -68,13 +68,12 @@
 //!
 //! An ENVELOPE-class row acts on one acknowledged confirmation. A
 //! PREFIX-IMPACTING row additionally needs the confirmation quorum
-//! ([`crate::config::PREFIX_QUORUM`]) and an explicit `[fidelity]
-//! prefix_impact_opt_in` entry for the target, resolved through the SAME
-//! two-tier target-spec grammar `[capability.overrides]` uses -- so a
-//! prefix-impacting rewrite stays dormant until the operator names the
-//! target, however well confirmed the verdict is. Both the quorum and the
-//! cadence are code constants: a knob an operator (or an agent) can turn
-//! mid-session with no diff is an unlogged exemption, not a config option.
+//! ([`crate::config::PREFIX_QUORUM`]) and admission
+//! ([`PREFIX_IMPACT_ADMITTED`]), which no target has -- so a prefix-impacting
+//! rewrite stays dormant however well confirmed the verdict is. The quorum,
+//! the cadence and the admission are code constants: a knob an operator (or an
+//! agent) can turn mid-session with no diff is an unlogged exemption, not a
+//! config option.
 //!
 //! # The canary, and why it is one row's business
 //!
@@ -187,10 +186,15 @@ pub(super) const FIELD_PREFLIGHT_NOT_ELIGIBLE: &str = "not_eligible";
 pub(super) const FIELD_PREFLIGHT_BELOW_QUORUM: &str = "below_quorum";
 
 /// Reason token: a prefix-impacting transform whose quorum is satisfied but
-/// whose target is not named in `[fidelity] prefix_impact_opt_in`. A content
-/// rewrite stays dormant until the operator opts the target in, however well
-/// confirmed the verdict.
+/// which [`PREFIX_IMPACT_ADMITTED`] refuses. A content rewrite stays dormant
+/// however well confirmed the verdict.
 pub(super) const FIELD_PREFLIGHT_NO_TARGET_OPT_IN: &str = "no_target_opt_in";
+
+/// Whether prefix-impacting pre-flight may act on any target. Never: a content
+/// rewrite costs a full cache-prefix recompute per request, and no config key
+/// admits one. Both the planner and the status surface read this one value
+/// (through `Router::prefix_impact_admitted`).
+pub(super) const PREFIX_IMPACT_ADMITTED: bool = false;
 
 /// Reason token: the transform was authorized but removed nothing, or
 /// removed something the presence check did not predict. Fails open to a
@@ -974,50 +978,32 @@ impl Router {
         if authorization.confirmations < class.required_quorum() {
             return Err(FIELD_PREFLIGHT_BELOW_QUORUM);
         }
-        // The CONTENT gate: a prefix-impacting rewrite additionally needs the
-        // operator to have named this target in `[fidelity]`. Last of the
-        // gates deliberately -- an opted-in target with no confirmed verdict
-        // must still report the verdict gate, so the opt-in cannot be read as
-        // the only thing standing between a target and a content rewrite.
-        if class.requires_target_opt_in() && !self.prefix_impact_opted_in(target) {
+        // The CONTENT gate: a prefix-impacting rewrite is never admitted. Last
+        // of the gates deliberately, so a verdict short of eligibility or
+        // quorum still reports that gate first, exactly as the status surface
+        // orders them.
+        if class.requires_target_opt_in() && !self.prefix_impact_admitted() {
             return Err(FIELD_PREFLIGHT_NO_TARGET_OPT_IN);
         }
         Ok(authorization)
     }
 
-    /// Whether the operator opted `target` into prefix-impacting pre-flight
-    /// through `[fidelity] prefix_impact_opt_in`.
-    ///
-    /// POSITIVE-ONLY MEMBERSHIP, which is what distinguishes this from
-    /// `[capability.overrides]` resolution: that surface has two verdicts
-    /// (`unsupported` / `force_supported`) and therefore needs a precedence rule
-    /// deciding which tier wins. This list has one verdict -- listed, or not --
-    /// so a target is opted in when EITHER tier matches and there is nothing for
-    /// a precedence rule to arbitrate. What is shared is the target-spec
-    /// GRAMMAR, read through the same splitter
-    /// ([`crate::override_registry::split_target_spec`]): a
-    /// `"provider:nickname"` entry names exactly that model, and a bare
-    /// `"provider"` entry names every model dispatched through that provider
-    /// entry. A model-scoped entry for a DIFFERENT model on the same provider
-    /// matches neither tier, so it opts this target in not at all.
-    ///
-    /// No second grammar and no second store: the entries are plain config
-    /// strings validated at load time against the provider/model directory,
-    /// and this is a pure read over them.
-    fn prefix_impact_opted_in(&self, target: &DispatchTarget) -> bool {
-        let nickname = target.nickname.as_deref().unwrap_or("");
-        self.config
-            .fidelity
-            .prefix_impact_opt_in
-            .iter()
-            .any(|spec| {
-                let (provider, model) = crate::override_registry::split_target_spec(spec);
-                provider == target.provider_name
-                    && match model {
-                        Some(model) => model == nickname,
-                        None => true,
-                    }
-            })
+    /// Whether this Router admits prefix-impacting pre-flight. Reads
+    /// [`PREFIX_IMPACT_ADMITTED`], the one answer dispatch and the status
+    /// surface share, so the two can never disagree about a target.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "only a test build carries the per-Router admission seam"
+        )
+    )]
+    pub(super) const fn prefix_impact_admitted(&self) -> bool {
+        #[cfg(test)]
+        if self.prefix_impact_admitted_for_tests {
+            return true;
+        }
+        PREFIX_IMPACT_ADMITTED
     }
 
     /// Answer a rejection the CANARY request drew: settle what it proves about

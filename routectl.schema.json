@@ -398,21 +398,6 @@
         }
       ]
     },
-    "FidelityConfig": {
-      "additionalProperties": false,
-      "description": "Operator-facing `[fidelity]` config block. Fully defaulted: a missing\n`[fidelity]` table deserializes to `FidelityConfig::default()`, which\npermits no prefix-impacting pre-flight -- current behavior is unchanged\nuntil the operator opts in.\n\n`prefix_impact_opt_in` reuses the same two-tier target-spec grammar as\n`[capability.overrides]`: `\"provider_name\"` opts in every model on\nthat provider, `\"provider_name:nickname\"` opts in a single model. A\nprefix-impacting transform still requires the confirmed-repair quorum\n([`PREFIX_QUORUM`]) on top of listing here; this field alone never\nmakes one act.\n\nThat list is an ACTIVE dispatch gate: the pre-flight planner refuses a\nprefix-impacting transform for any target it does not name, so an entry added\nhere can change what goes upstream.\n\nThe re-verification cadence and confirmation quorum are code constants\n([`CANARY_INTERVAL`], [`PREFIX_QUORUM`]), not config fields: both are\nhard safety parameters, never read from the environment.\n\n`#[non_exhaustive]` leaves room for later knobs without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time instead of silently ignoring it.",
-      "properties": {
-        "prefix_impact_opt_in": {
-          "default": [],
-          "description": "Target specs opted into prefix-impacting pre-flight, using the\n`\"provider_name\"` / `\"provider_name:nickname\"` grammar shared with\n`[capability.overrides]`. Default empty -- no target is opted in.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
-    },
     "GeminiAuthMode": {
       "description": "Selects which Gemini wire dialect a provider speaks.",
       "oneOf": [
@@ -1916,13 +1901,6 @@
         "overrides": {}
       },
       "description": "Operator-facing `[capability]` block. Kill switch plus tempo knobs\nfor the learned-capability subsystem. A missing block keeps all\ndefaults: enabled, a 48h decay window, a 1h inferred-signal window.\nThe table is deliberately top-level (not nested under `[server]`)\nso a later override layer can nest per-target overrides under the\nsame parent."
-    },
-    "fidelity": {
-      "$ref": "#/$defs/FidelityConfig",
-      "default": {
-        "prefix_impact_opt_in": []
-      },
-      "description": "Operator-facing `[fidelity]` block. Opt-in surface for\nprefix-impacting pre-flight repair. A missing block keeps\n`FidelityConfig::default()`: no target opted into prefix-impacting\npre-flight, so no config change permits a prefix-impacting pre-flight\naction by itself.\n\n`prefix_impact_opt_in` is an ACTIVE dispatch gate. The pre-flight\nplanner refuses a prefix-impacting transform for any target this list\ndoes not name, so adding an entry can change what goes upstream (for a\ntarget whose verdict also clears the confirmed-repair quorum).\n\nSee `FidelityConfig` for the fixed cadence/quorum constants this\nblock deliberately does not expose."
     },
     "log": {
       "$ref": "#/$defs/LogConfig",

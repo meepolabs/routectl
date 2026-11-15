@@ -220,10 +220,10 @@ fn override_cell_key(raw: &str, provider_kind: &str) -> String {
 /// The split is on the FIRST `:` only: a model nickname may itself contain
 /// `:` (nothing in the `[models]` table or in [`OverrideRegistry::resolve`]
 /// bans it), so everything after the first colon is the nickname, not a
-/// second delimiter. This is the one place that decision is made; both
-/// override extraction ([`provider_of_spec`]) and the `[fidelity]`
-/// `prefix_impact_opt_in` validator call through here so the two stay in
-/// lockstep with how `resolve` itself reads a spec.
+/// second delimiter. This is the one place that decision is made; override
+/// extraction ([`provider_of_spec`]) and every other target-spec reader call
+/// through here so they stay in lockstep with how `resolve` itself reads a
+/// spec.
 pub fn split_target_spec(spec: &str) -> (&str, Option<&str>) {
     match spec.split_once(':') {
         Some((provider, nickname)) => (provider, Some(nickname)),

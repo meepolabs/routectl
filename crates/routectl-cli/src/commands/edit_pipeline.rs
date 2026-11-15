@@ -229,7 +229,7 @@ mod tests {
                 at(
                     current,
                     "[mitm]\ncredential_source = \"forwarded\"\n\
-                     [fidelity.paid_probe_daily_caps]\nx = 1\n\
+                     [fidelity.legacy]\nx = 1\n\
                      [models.m]\neffort_levels = []\n",
                 ),
                 |e| matches!(e, Refusal::RetiredKeys(_)),
@@ -257,17 +257,12 @@ mod tests {
         );
         preflight(&clean).expect("control: the file without the keys passes");
 
-        let err = preflight(&format!(
-            "{clean}[fidelity.paid_probe_daily_caps]\nx = 1\n[bedrock]\n"
-        ))
-        .expect_err("the retired keys must be refused");
+        let err = preflight(&format!("{clean}[fidelity.legacy]\nx = 1\n[bedrock]\n"))
+            .expect_err("the retired keys must be refused");
 
         let shown = err.to_string();
         assert!(shown.contains("`bedrock` is retired: "), "{shown}");
-        assert!(
-            shown.contains("`fidelity.paid_probe_daily_caps` is retired: "),
-            "{shown}"
-        );
+        assert!(shown.contains("`fidelity` is retired: "), "{shown}");
         assert_eq!(shown.lines().count(), 2, "{shown}");
     }
 

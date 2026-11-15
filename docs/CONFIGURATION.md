@@ -62,7 +62,6 @@ overlays merge, what's reserved.
 - [Refreshing the price table (`routectl prices refresh`)](#refreshing-the-price-table-routectl-prices-refresh)
 - [Retired: `routectl catalog`](#retired-routectl-catalog)
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
-- [Fidelity pre-flight opt-in (`[fidelity]`)](#fidelity-pre-flight-opt-in-fidelity)
 - [OpenAI chat-lane rule (`reasoning_dialect`)](#openai-chat-lane-rule-reasoning_dialect)
 
 **Operating the daemon**
@@ -356,7 +355,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `cache_pricing` | set prices under `[models.X.pricing]` |
 | `calibration` | the learned token-estimate correction always applies |
 | `capability.staleness_hint_days` | diagnostics use a fixed 14-day hint |
-| `fidelity.paid_probe_daily_caps` | paid capability probes no longer exist; nothing replaces it |
+| `fidelity` | prefix-impacting pre-flight repair is never admitted; class and quorum are fixed |
 | `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
 | `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
@@ -4325,72 +4324,6 @@ What it does and does not do:
 - **It touches learned entries only.** It never edits your config, your
   `[capability.overrides]` cells.
 
-## Fidelity pre-flight opt-in (`[fidelity]`)
-
-The optional `[fidelity]` block is the operator opt-in surface for
-prefix-impacting pre-flight repair. A missing block deserializes to the
-default below, which permits no prefix-impacting pre-flight action.
-
-```toml
-[fidelity]
-# Target specs opted into prefix-impacting pre-flight, using the same
-# "provider_name" / "provider_name:nickname" grammar as
-# [capability.overrides], but restricted to configured providers/models
-# (a bare pool name is not accepted -- see below). Default empty -- no
-# target is opted in.
-prefix_impact_opt_in = []
-```
-
-- **`prefix_impact_opt_in`** (list of target specs, default empty) --
-  each entry uses the same two-tier grammar as `[capability.overrides]`
-  (`provider_name`, or `provider_name:nickname` with the nickname taking
-  everything after the first `:`). Unlike `[capability.overrides]` --
-  which accepts any string as a target spec -- this list also enforces
-  directory membership: a malformed entry, or one naming a provider or
-  model nickname that is not configured, fails config load naming the
-  entry. Listing a target here is necessary but not sufficient for
-  prefix-impacting pre-flight to act on it -- the target also needs its
-  confirmed-repair quorum. The provider segment is always a concrete
-  `[providers.X]` name -- a bare `[pools.<name>]` name is rejected as an
-  unknown provider, since a pool is never itself the provider a
-  dispatch resolves to. For a model-scoped entry (`provider:nickname`),
-  the named provider does not have to match the model's own `provider`
-  field verbatim: it is also accepted when the model's `provider` names
-  a pool and the named provider is one of that pool's members, because
-  pool dispatch always resolves to a concrete member, and that member
-  name is exactly what reaches capability-override resolution.
-- **The re-verification cadence and confirmation quorum are fixed, not
-  configurable** -- both are hard safety parameters baked into the
-  binary and read from no environment variable, so they cannot drift
-  per deployment or be raised past their tested values.
-- **A bare provider entry covers every model dispatched through that
-  provider.** The provider segment names a concrete `[providers.X]`
-  entry, and listing it alone opts in every model whose dispatch
-  resolves to that entry -- including a model whose own `provider` field
-  names a pool the entry is a member of, because pool dispatch always
-  resolves to a concrete member and that member name is what reaches
-  resolution. Name `provider:nickname` to opt in one model instead.
-- **Membership, not precedence.** This list shares the target-spec
-  *grammar* with `[capability.overrides]`, not its precedence rule.
-  `[capability.overrides]` has two verdicts (`unsupported` and
-  `force_supported`), so it needs a rule deciding which tier wins for a
-  target both tiers name. This list has one verdict -- listed, or not --
-  so a target is opted in when **either** tier matches, and there is
-  nothing for a precedence rule to arbitrate. Listing both
-  `"anthropic"` and `"anthropic:sonnet"` is redundant rather than
-  conflicting.
-- **`prefix_impact_opt_in` is wired, and it is one of two gates.** The
-  pre-dispatch repair planner refuses a prefix-impacting transform for
-  any target this list does not name, and refuses it for a named target
-  whose learned verdict has fewer than the fixed quorum of confirmed
-  repair cycles. Both refusals leave the request exactly as the client
-  sent it and are reported per decision with their own reason token
-  (`no_target_opt_in` / `below_quorum`), so an operator reading the
-  diagnostic can tell which gate is holding. An operator
-  `force_supported` override for the same capability key outranks both:
-  it suppresses the action without deleting the learned verdict.
-  Envelope-class repair needs neither gate -- it acts on one confirmed
-  cycle and no opt-in.
 ## Context reduction (`[reduction]`)
 
 routectl can strip insignificant whitespace from JSON-formatted string
