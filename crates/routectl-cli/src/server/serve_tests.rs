@@ -251,7 +251,6 @@ async fn mitm_start_failure_degrades_and_server_keeps_serving() {
         listen_port: 0,
         cert_dir: bad_cert_dir.path().to_path_buf(),
         mitm_host: "api.anthropic.com".into(),
-        tested_cc_version: None,
     });
     let (trigger, server) = spawn_with_shutdown_trigger(Arc::new(config), listener);
 
@@ -974,7 +973,6 @@ async fn a_refused_mitm_boot_never_opens_the_usage_ledger() {
         listen_port: 0,
         cert_dir: usage_dir.path().join("certs"),
         mitm_host: "api.anthropic.com".into(),
-        tested_cc_version: None,
     });
     let listener = TcpListener::bind("0.0.0.0:0")
         .await

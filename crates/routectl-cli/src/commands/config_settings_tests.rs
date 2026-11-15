@@ -283,7 +283,6 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
     ),
     ("ClassPolicy.retry", "inherit: retry class policy section"),
     ("Config.mitm", "off: no MITM listener"),
-    ("MitmConfig.tested_cc_version", "off: no version check"),
     (
         "ModelEntry.context_window",
         "off: window unknown, model facts section",

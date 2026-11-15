@@ -348,6 +348,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `fidelity` | prefix-impacting pre-flight repair is never admitted; class and quorum are fixed |
 | `log` | set ROUTECTL_TRACE_HEADERS / ROUTECTL_TRACE_BODY_BYTES / ROUTECTL_LOG_REDACT_PROMPTS in the environment |
 | `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
+| `mitm.tested_cc_version` | routectl pins the Claude Code version it mints; nothing replaces the check |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
 | `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
 | `models.<name>.supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking |
@@ -3032,20 +3033,18 @@ declares `[mitm]`.
 
 ```toml
 [mitm]
-upstream_origin   = "https://api.anthropic.com"
-listen_port       = 8443
-cert_dir          = "/home/you/.config/routectl/mitm-certs"
-mitm_host         = "api.anthropic.com"
-tested_cc_version = "2.1.143"
+upstream_origin = "https://api.anthropic.com"
+listen_port     = 8443
+cert_dir        = "/home/you/.config/routectl/mitm-certs"
+mitm_host       = "api.anthropic.com"
 ```
 
-| Knob                | Default                                | Reload  |
-|---------------------|-----------------------------------------|---------|
-| `upstream_origin`   | `https://api.anthropic.com`             | restart |
-| `listen_port`       | `8443`                                  | restart |
-| `cert_dir`          | `<config-dir>/routectl/mitm-certs`      | restart |
-| `mitm_host`         | `api.anthropic.com`                     | restart |
-| `tested_cc_version` | unset                                   | restart |
+| Knob              | Default                                 | Reload  |
+|-------------------|-----------------------------------------|---------|
+| `upstream_origin` | `https://api.anthropic.com`             | restart |
+| `listen_port`     | `8443`                                  | restart |
+| `cert_dir`        | `<config-dir>/routectl/mitm-certs`      | restart |
+| `mitm_host`       | `api.anthropic.com`                     | restart |
 
 - `upstream_origin` -- the first-party origin the proxy forwards
   decrypted requests to. Must be EXACTLY `https://api.anthropic.com`
@@ -3071,15 +3070,10 @@ tested_cc_version = "2.1.143"
   `api.anthropic.com` (a subdomain like `evil.api.anthropic.com` is
   rejected, not matched as a suffix); startup validation rejects any
   other value.
-- `tested_cc_version` -- the Claude Code version this `[mitm]` config
-  was last verified against. Consulted by the proxy at runtime: on a
-  decrypted request whose `User-Agent` reports a different Claude Code
-  version, the proxy logs a WARNING once per distinct observed version
-  but never refuses the request. Unset (the default) disables the
-  check entirely. The whole `[mitm]` block, including this field, is
-  read once at startup -- editing it takes effect only on the next
-  restart, since there is no reload path that respawns the proxy
-  listener.
+
+The whole `[mitm]` block is read once at startup -- editing it takes
+effect only on the next restart, since there is no reload path that
+respawns the proxy listener.
 
 `[mitm]` is transport-only: it carries no credential knob. Which
 credential a forwarded egress uses is a per-provider choice -- see

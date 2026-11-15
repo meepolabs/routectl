@@ -23,7 +23,6 @@ fn mitm_present_with_all_fields_omitted_uses_defaults() {
     assert_eq!(mitm.upstream_origin, "https://api.anthropic.com");
     assert_eq!(mitm.listen_port, 8443);
     assert_eq!(mitm.mitm_host, "api.anthropic.com");
-    assert!(mitm.tested_cc_version.is_none());
     assert!(
         mitm.cert_dir.ends_with("routectl/mitm-certs"),
         "cert_dir: {:?}",
@@ -40,7 +39,6 @@ upstream_origin = "https://api.example.com"
 listen_port = 9443
 cert_dir = "/tmp/routectl-mitm-certs"
 mitm_host = "api.example.com"
-tested_cc_version = "2.1.143"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse explicit [mitm]");
     let mitm = cfg.mitm.expect("mitm present");
@@ -51,7 +49,6 @@ tested_cc_version = "2.1.143"
         std::path::PathBuf::from("/tmp/routectl-mitm-certs")
     );
     assert_eq!(mitm.mitm_host, "api.example.com");
-    assert_eq!(mitm.tested_cc_version, Some("2.1.143".to_string()));
 }
 
 #[test]

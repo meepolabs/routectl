@@ -6260,7 +6260,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   fails. Tests in the `#[path]`-included `capability_rebuild_tests.rs`
 - `src/server/cc_pin_drift.rs` -- `CcPinDriftGuard`: warns once per distinct
   ingress-observed Claude Code version differing from the compiled pin.
-  `AppState`-owned; distinct log target/fields from `proxy::cc_version`
+  `AppState`-owned
 - `src/server/ledger_reader.rs` -- shared read-only bridge from the usage
   capability-event ledger to the `routectl-router` replay seam, constructed by
   BOTH the serve warm (`capability_rebuild.rs`) and the offline doctor gather
@@ -7808,8 +7808,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   terminates TLS + serves HTTP/1.1 per connection, `split` classifies each
   decrypted request against `ANTHROPIC_INFERENCE_PATHS`, `forward` is the
   shared classification-agnostic byte forwarder both legs reuse, `ca` owns the
-  CA / leaf lifecycle, `metrics` the lock-free counters, `cc_version` the
-  warn-and-proceed Claude Code version check. The three outside call sites are
+  CA / leaf lifecycle, `metrics` the lock-free counters. The three outside call sites are
   `commands/rc.rs` (`proxy::ca`), `server/mod.rs` (`proxy::listener`), and
   `handlers/models.rs` (`proxy::forward` + `proxy::metrics`); the whole task
   is spawned only when `Config::mitm.is_some()`
@@ -7822,9 +7821,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `not_after` (truncated to midnight UTC to match the `Time::MIDNIGHT` rcgen
   bakes into the DER) is mirrored into a sidecar TOML read directly on reload,
   rather than re-parsing the X.509 DER `notAfter`
-- `src/proxy/cc_version.rs` -- `CcVersionWarnGuard`: opt-in MITM check of the
-  observed version against the operator's `[mitm] tested_cc_version`. Warns,
-  never refuses; reads any post-prefix token through core's loose helper
 - `src/proxy/forward.rs` -- classification-agnostic byte forwarder both split
   legs reuse: `forward`, `ForwardState` (per-leg clients + concurrency cap),
   `ForwardRequest`, `ForwardBody`
@@ -7867,7 +7863,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `MitmCtx` is the shared per-proxy context built once by the listener behind
   an `Arc`: `forward_state`, `metrics`, `warn_once`, `upstream_origin` (real
   Anthropic origin), `reinject_base` (routectl's own loopback listener),
-  `tested_cc_version` + `cc_version_warn_guard`, and the `seam_nonce` (the
+  and the `seam_nonce` (the
   SAME `Arc<ingress::MitmSeamNonce>` on `AppState`, so the proxy stamper and
   the ingress checkers agree without re-generating it)
 - `src/proxy/split.rs` -- request classification + split-leg dispatch.
@@ -9153,8 +9149,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   reviewed `Relation` against routectl's minted values. Only UNPINNED reds
 - `tests/mitm_forward_proxy_policy.rs` -- isolated binary pinning the MITM
   forwarder's per-leg environment-proxy policy
-- `tests/cc_version_warn_log.rs` -- pins each version warning's log target and
-  exact field set, and that the two guards share no field name
+- `tests/cc_pin_drift_log.rs` -- pins the ingress version-drift warning's log
+  target, exact field set, dedup and cap, and that no header value is logged
 - `tests/log_sink.rs` -- byte-exact record-integrity tests for the production
   subscriber builder against a stock `DefaultFields` control and the
   `fixtures/ucd_escape_extract.txt` Unicode oracle

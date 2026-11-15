@@ -139,17 +139,6 @@ where
     let mut headers = parts.headers;
     let reqwest_body = into_reqwest_body(body);
 
-    // Runs on every request regardless of leg -- Claude Code's
-    // `User-Agent` appears on both its inference and control-plane
-    // calls alike, so the tested-vs-observed check does not depend on
-    // the classification below. Never gates the request either way;
-    // see `proxy::cc_version` for the warn-and-proceed contract.
-    let observed_cc_version = super::cc_version::observed_cc_version(&headers);
-    ctx.cc_version_warn_guard.check(
-        ctx.tested_cc_version.as_deref(),
-        observed_cc_version.as_deref(),
-    );
-
     if is_anthropic_inference_path(&path) {
         headers.insert(MITM_PROXIED_HEADER_NAME, ctx.seam_nonce.header_value());
         let forward_req = ForwardRequest {
@@ -261,8 +250,6 @@ mod tests {
             warn_once: Arc::new(WarnOnce::new()),
             upstream_origin,
             reinject_base,
-            tested_cc_version: None,
-            cc_version_warn_guard: crate::proxy::cc_version::CcVersionWarnGuard::new(),
             seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         }
     }
@@ -490,70 +477,6 @@ mod tests {
                 .headers
                 .get("x-routectl-mitm-proxied")
                 .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_request_wires_the_cc_version_check_from_the_user_agent_header() {
-        let reinject_server = MockServer::start().await;
-        let upstream_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/hello"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&upstream_server)
-            .await;
-
-        let mut ctx = test_ctx(
-            Url::parse(&reinject_server.uri()).unwrap(),
-            Url::parse(&upstream_server.uri()).unwrap(),
-        );
-        ctx.tested_cc_version = Some("2.1.169".to_string());
-
-        let req = Request::builder()
-            .method("GET")
-            .uri("/api/hello")
-            .header("user-agent", "claude-cli/2.0.0 (external, cli)")
-            .body(body(b""))
-            .unwrap();
-        let response = handle_request(&ctx, req).await;
-        assert_eq!(response.status(), StatusCode::OK);
-
-        assert!(
-            !ctx.cc_version_warn_guard
-                .check(Some("2.1.169"), Some("2.0.0")),
-            "handle_request must already have warned for this mismatch through the same guard"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_request_never_warns_when_the_user_agent_version_matches_tested() {
-        let reinject_server = MockServer::start().await;
-        let upstream_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/hello"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&upstream_server)
-            .await;
-
-        let mut ctx = test_ctx(
-            Url::parse(&reinject_server.uri()).unwrap(),
-            Url::parse(&upstream_server.uri()).unwrap(),
-        );
-        ctx.tested_cc_version = Some("2.1.169".to_string());
-
-        let req = Request::builder()
-            .method("GET")
-            .uri("/api/hello")
-            .header("user-agent", "claude-cli/2.1.169 (external, cli)")
-            .body(body(b""))
-            .unwrap();
-        let _ = handle_request(&ctx, req).await;
-
-        assert!(
-            ctx.cc_version_warn_guard
-                .check(Some("2.1.169"), Some("2.0.0")),
-            "a matching request must not have consumed the guard's dedup slot -- \
-             the first genuine mismatch afterward must still warn"
         );
     }
 

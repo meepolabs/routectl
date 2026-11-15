@@ -1,15 +1,10 @@
 //! Compiled-pin drift guard: warns when an inbound client self-reports a
 //! Claude Code CLI version that differs from the one THIS BUILD mints.
 //!
-//! Distinct from the MITM `proxy::cc_version` check in both question and
-//! vocabulary. That one compares the wire against a version the OPERATOR
-//! recorded as tested in `[mitm]`, is opt-in, and only sees the
-//! front-proxy leg. This one compares the wire against
+//! It compares the wire against
 //! `routectl_core::identity::anthropic::compiled_claude_cli_version` --
 //! the fingerprint routectl actually presents upstream -- and observes at
-//! the HTTP ingress, so it fires in base-url mode too. Front-proxy traffic
-//! can produce both warnings when both contracts drift; the log targets
-//! and field names keep them separable.
+//! the HTTP ingress, so it fires in base-url and front-proxy mode alike.
 //!
 //! Owned by `AppState`, which outlives router hot-swaps, so a reload does
 //! not re-warn a version already reported. A test builds its own
@@ -20,8 +15,7 @@ use axum::http::HeaderMap;
 
 use routectl_core::warn_dedup::{CappedWarnSet, WarnDecision};
 
-/// Log target both events on this guard carry. Distinct from the MITM
-/// check's target so an operator can filter the two questions apart.
+/// Log target both events on this guard carry.
 const DRIFT_TARGET: &str = "routectl_cli::server::cc_pin_drift";
 
 /// Fixed token naming WHERE the observed version came from. A static

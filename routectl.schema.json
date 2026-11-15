@@ -455,13 +455,6 @@
           "description": "TLS SNI / `Host` header the proxy expects from the client and\npresents to the upstream when dialing out. Must be EXACTLY\n`api.anthropic.com` -- a subdomain like `evil.api.anthropic.com`\nis rejected, not matched as a suffix (enforced by\n`validate_mitm_config`).",
           "type": "string"
         },
-        "tested_cc_version": {
-          "description": "Free-form Claude Code version this `[mitm]` config was last\nverified against. Consulted at runtime by the MITM proxy: when\nthe version actually observed on a decrypted request's\n`User-Agent` differs from this, it logs a WARNING (once per\ndistinct observed version) but never refuses the request --\n`None` (the default) disables the check entirely.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "upstream_origin": {
           "default": "https://api.anthropic.com",
           "description": "Upstream origin the proxy forwards decrypted requests to. Must\nbe EXACTLY `https://api.anthropic.com` -- no userinfo, path,\nquery, fragment, explicit non-default port, or other host\n(enforced by `validate_mitm_config`). Pinned rather than\npattern-matched: the MITM proxy forwards the client's full-scope\nclaude.ai token, which must never reach a non-Anthropic egress.",

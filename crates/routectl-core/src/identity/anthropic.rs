@@ -61,12 +61,10 @@ pub const fn compiled_claude_cli_version() -> &'static str {
 /// `claude-cli/` prefix, whatever it is -- a stable version, a
 /// prerelease, a build-suffixed value, or an opaque string.
 ///
-/// This is the shape a caller wants when it compares against a string a
-/// human supplied: an operator's recorded tested-version is matched
-/// verbatim, so narrowing what counts as a token here would silently stop
-/// warning about the very drift they asked to be told about. Callers that
-/// key durable state on the result want [`parse_claude_cli_version`]
-/// instead, which refuses the values that vary per request.
+/// This is the shape a caller wants when it only asks whether the client
+/// is Claude Code at all. Callers that key durable state on the result
+/// want [`parse_claude_cli_version`] instead, which refuses the values
+/// that vary per request.
 ///
 /// `None` for a value that does not START with the prefix, or that
 /// carries no non-whitespace token after it.

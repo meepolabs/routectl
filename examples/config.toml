@@ -355,11 +355,8 @@ inferred_window_hours = 1       # window for a second observation to confirm an 
 # field. listen_port must differ from [server] port.
 
 # [mitm]
-# upstream_origin   = "https://api.anthropic.com"
-# listen_port       = 8443
-# cert_dir          = "/home/you/.config/routectl/mitm-certs"  # CA/leaf certs
-# mitm_host         = "api.anthropic.com"
-# tested_cc_version = "2.1.143"
-# ^ last-verified CC version; triggers a once-per-version runtime mismatch
-#   WARNING (advisory in that it never refuses)
+# upstream_origin = "https://api.anthropic.com"
+# listen_port     = 8443
+# cert_dir        = "/home/you/.config/routectl/mitm-certs"  # CA/leaf certs
+# mitm_host       = "api.anthropic.com"
 

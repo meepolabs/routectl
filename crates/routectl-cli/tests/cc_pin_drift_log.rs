@@ -1,18 +1,9 @@
-//! Structured-log contract for the two Claude-Code-version warnings, and
-//! the proof that they stay distinguishable.
+//! Structured-log contract for the ingress Claude Code version drift
+//! warning (`server::cc_pin_drift`): "is this client the version THIS BUILD
+//! mints", checked in every mode.
 //!
-//! routectl carries TWO version checks answering two questions. The MITM
-//! guard (`proxy::cc_version`) asks "is this client the version the operator
-//! recorded as tested in `[mitm]`", is opt-in, and only sees the front-proxy
-//! leg. The ingress guard (`server::cc_pin_drift`) asks "is this client the
-//! version THIS BUILD mints", and fires in every mode. Front-proxy traffic
-//! can produce both at once.
-//!
-//! That is only useful if an operator can tell them apart in a log, so this
-//! pins each event's target and its EXACT field set -- including that they
-//! share no version field NAME, so a grep for one cannot silently match the
-//! other. It also pins what must never appear: the full User-Agent, any
-//! header value, and any billing attribution text.
+//! Pins the event's target and its EXACT field set, and what must never
+//! appear: the full User-Agent or any other part of the header value.
 //!
 //! Its own integration binary for the same reason as the sibling admission
 //! log test: a thread-local capture subscriber over a shared `warn!`
@@ -23,15 +14,11 @@
 //! default) rather than plain `#[test]`.
 
 use axum::http::{HeaderMap, HeaderValue, header::USER_AGENT};
-use routectl_cli::proxy::cc_version::CcVersionWarnGuard;
 use routectl_cli::server::cc_pin_drift::CcPinDriftGuard;
 use routectl_testkit::{CapturedEvent, with_capture};
 
 /// Log target the ingress compiled-pin guard emits under.
 const INGRESS_TARGET: &str = "routectl_cli::server::cc_pin_drift";
-
-/// Log target the opt-in MITM tested-version guard emits under.
-const MITM_TARGET: &str = "routectl_cli::proxy::cc_version";
 
 /// A drifted version well clear of anything routectl could mint.
 const DRIFTED: &str = "99.9.9";
@@ -85,54 +72,6 @@ async fn the_ingress_drift_warning_carries_its_pinned_target_and_exact_field_set
     assert_eq!(warns[0].field("ingress_cc_version"), Some(DRIFTED));
     assert_eq!(warns[0].field("source"), Some("ingress_user_agent"));
     assert!(!warns[0].message.is_empty());
-}
-
-#[tokio::test]
-async fn the_two_guards_share_no_version_field_name() {
-    // The whole point of separate vocabularies: an operator grepping for one
-    // question's field must not match the other's answer.
-    let (_, ingress_events) = with_capture(async {
-        CcPinDriftGuard::new().observe_headers(&headers_with_ua(&ua_for(DRIFTED)))
-    })
-    .await;
-    let (_, mitm_events) =
-        with_capture(async { CcVersionWarnGuard::new().check(Some("2.1.0"), Some(DRIFTED)) }).await;
-
-    let ingress = warns(&ingress_events, INGRESS_TARGET);
-    let mitm = warns(&mitm_events, MITM_TARGET);
-    assert_eq!(ingress.len(), 1, "control: the ingress guard emitted");
-    assert_eq!(mitm.len(), 1, "control: the MITM guard emitted");
-
-    let ingress_names = field_names(&ingress[0]);
-    let mitm_names = field_names(&mitm[0]);
-    assert!(
-        ingress_names.contains(&"ingress_cc_version"),
-        "got {ingress_names:?}"
-    );
-    assert!(
-        mitm_names.contains(&"observed_cc_version"),
-        "got {mitm_names:?}"
-    );
-    assert!(
-        !ingress_names.contains(&"observed_cc_version"),
-        "the ingress guard must not reuse the MITM guard's observed-version field name"
-    );
-    assert!(
-        !mitm_names.contains(&"ingress_cc_version"),
-        "the MITM guard must not adopt the ingress guard's field name"
-    );
-    assert_ne!(
-        ingress[0].target, mitm[0].target,
-        "the two questions keep distinct targets"
-    );
-    assert!(
-        mitm_names.contains(&"tested_cc_version"),
-        "the MITM guard still names the operator-recorded side; got {mitm_names:?}"
-    );
-    assert!(
-        ingress_names.contains(&"pinned_cc_version"),
-        "the ingress guard names the compiled side; got {ingress_names:?}"
-    );
 }
 
 #[tokio::test]

@@ -35,7 +35,6 @@ use tokio::sync::{Semaphore, watch};
 use tokio_rustls::TlsAcceptor;
 
 use super::ca;
-use super::cc_version::CcVersionWarnGuard;
 use super::forward::{DEFAULT_MAX_CONCURRENT_STREAMS, ForwardState, STREAM_IDLE_WINDOW};
 use super::metrics::{Leg, PathClass, ProxyMetrics, ResultClass, WarnOnce};
 use super::mitm::{MitmCtx, handle_mitm_connection};
@@ -455,10 +454,6 @@ pub struct ProxyListenerConfig {
     pub mitm_host: String,
     pub upstream_origin: String,
     pub reinject_port: u16,
-    /// The operator's `[mitm].tested_cc_version`, threaded straight into
-    /// the shared `MitmCtx` for the CC-version warn-and-proceed check
-    /// (see `proxy::cc_version`).
-    pub tested_cc_version: Option<String>,
     /// The SAME `Arc<MitmSeamNonce>` the server bootstrap put on `AppState`
     /// -- threaded through so the reinject leg stamps the exact value the
     /// ingress admission/capture gates compare against. Generated ONCE per
@@ -515,8 +510,6 @@ pub async fn build_and_bind(
         warn_once,
         upstream_origin,
         reinject_base,
-        tested_cc_version: config.tested_cc_version,
-        cc_version_warn_guard: CcVersionWarnGuard::new(),
         seam_nonce: config.seam_nonce,
     });
 
@@ -753,8 +746,6 @@ mod tests {
             warn_once: Arc::new(WarnOnce::new()),
             upstream_origin,
             reinject_base,
-            tested_cc_version: None,
-            cc_version_warn_guard: CcVersionWarnGuard::new(),
             seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         })
     }
@@ -1339,7 +1330,6 @@ mod tests {
             mitm_host: "api.anthropic.com".to_string(),
             upstream_origin: "not a url".to_string(),
             reinject_port: 9100,
-            tested_cc_version: None,
             seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         };
 
@@ -1359,7 +1349,6 @@ mod tests {
             mitm_host: "api.anthropic.com".to_string(),
             upstream_origin: "https://api.anthropic.com".to_string(),
             reinject_port: 9100,
-            tested_cc_version: None,
             seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         };
 

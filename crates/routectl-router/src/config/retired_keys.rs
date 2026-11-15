@@ -64,6 +64,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
                       `credential_source = \"forwarded\"`, and no `api_key_ref`",
     },
     RetiredKey {
+        path: &["mitm", "tested_cc_version"],
+        refused_value: None,
+        replacement: "routectl pins the Claude Code version it mints; nothing replaces the check",
+    },
+    RetiredKey {
         path: &["models", ANY_ENTRY, "effort_levels"],
         refused_value: None,
         replacement: "refused effort levels are learned per lane",

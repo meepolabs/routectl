@@ -704,7 +704,6 @@ async fn start_mitm_proxy(
         mitm_host: mitm.mitm_host.clone(),
         upstream_origin: mitm.upstream_origin.clone(),
         reinject_port,
-        tested_cc_version: mitm.tested_cc_version.clone(),
         seam_nonce,
     };
     let (listener, acceptor, ctx) = crate::proxy::listener::build_and_bind(proxy_config).await?;

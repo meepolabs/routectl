@@ -23,7 +23,6 @@ use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_rustls::TlsAcceptor;
 
-use super::cc_version::CcVersionWarnGuard;
 use super::forward::ForwardState;
 use super::metrics::{ProxyMetrics, WarnOnce};
 use super::split;
@@ -54,8 +53,7 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// destinations a request can be dispatched to -- `upstream_origin`
 /// (the real Anthropic origin, for the catch-all/control-plane leg) and
 /// `reinject_base` (routectl's own loopback listener, for the inference
-/// leg's re-inject) -- and the CC-version warn-and-proceed check
-/// (`tested_cc_version` plus its dedup guard). Built once by the caller
+/// leg's re-inject) -- and the seam nonce. Built once by the caller
 /// and shared across every accepted connection behind an `Arc`.
 pub struct MitmCtx {
     pub forward_state: ForwardState,
@@ -63,14 +61,6 @@ pub struct MitmCtx {
     pub warn_once: Arc<WarnOnce>,
     pub upstream_origin: Url,
     pub reinject_base: Url,
-    /// The `[mitm].tested_cc_version` config value, if the operator set
-    /// one. `None` disables the check entirely -- never a hard refuse
-    /// either way, only whether a mismatch gets logged (see
-    /// `proxy::cc_version`).
-    pub tested_cc_version: Option<String>,
-    /// Dedups the mismatch warning so a steady mismatch doesn't spam
-    /// every request.
-    pub cc_version_warn_guard: CcVersionWarnGuard,
     /// The per-process value `split::handle_request` stamps onto the seam
     /// header on the reinject leg -- the SAME `Arc` the server bootstrap put
     /// on `AppState`, so the proxy stamper and the ingress checkers agree on
@@ -211,8 +201,6 @@ mod tests {
             warn_once: Arc::new(WarnOnce::new()),
             upstream_origin,
             reinject_base,
-            tested_cc_version: None,
-            cc_version_warn_guard: CcVersionWarnGuard::new(),
             seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         })
     }

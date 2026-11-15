@@ -1720,6 +1720,59 @@ fn config_set_refuses_a_retired_seat_selection_value_with_the_loaders_line() {
     );
 }
 
+/// `[mitm]` stays a live table while its `tested_cc_version` key is retired:
+/// `config set` on the key prints the loader's line for a file carrying it
+/// and writes nothing, while a live sibling key in the same table writes.
+#[test]
+fn config_set_refuses_the_retired_mitm_tested_version_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = two_seat_pool_config(tmp.path());
+    let mut base = std::fs::read_to_string(&config_path).expect("read config");
+    base.push_str("[mitm]\n");
+    std::fs::write(&config_path, &base).expect("write config");
+    let path = config_path.to_str().unwrap();
+    let loader_line =
+        routectl_router::preflight_raw_config(&format!("{base}tested_cc_version = \"2.1.0\"\n"))
+            .expect_err("the loader refuses a file carrying the key")
+            .to_string();
+    let set = |key: &str, value: &str| {
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "set", key, value])
+    };
+
+    // Act
+    let (code, stdout, stderr) = set("mitm.tested_cc_version", "2.1.0");
+
+    // Assert
+    assert_ne!(code, 0, "refused: {stdout} / {stderr}");
+    assert_eq!(
+        loader_line,
+        "`mitm.tested_cc_version` is retired: routectl pins the Claude Code version it \
+         mints; nothing replaces the check; delete it"
+    );
+    assert!(
+        stderr.contains(&loader_line),
+        "config set prints the loader's line: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read config"),
+        base,
+        "a refused edit must not write"
+    );
+
+    let (code, stdout, stderr) = set("mitm.listen_port", "9443");
+    assert_eq!(
+        code, 0,
+        "control: a live [mitm] key writes: {stdout} / {stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("listen_port = 9443"),
+        "the control edit must land on disk"
+    );
+}
+
 // -- config check's secret-ref validation: read-only by construction, and
 // control-char-filtered at the one point it prints operator-written keys.
 

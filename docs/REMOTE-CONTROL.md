@@ -70,7 +70,6 @@ cert_dir = "~/.config/routectl/mitm-certs"   # actual default resolves
                                               # via XDG_CONFIG_HOME/HOME,
                                               # never a literal "~"
 mitm_host = "api.anthropic.com"
-tested_cc_version = "2.1.143"                # optional; see below
 ```
 
 `listen_port` must differ from `[server] port` -- the MITM listener and
@@ -132,31 +131,6 @@ Remote Control assumes listener auth is off, which is routectl's
 loopback default (an omitted or empty `[server.auth]` accepts
 unauthenticated requests). Do not combine `[mitm]` with a populated
 `[server.auth].tokens` list.
-
-## `tested_cc_version`: runtime warn-and-proceed check
-
-`tested_cc_version` records the Claude Code version you last verified
-this setup against. Unlike a purely advisory field, routectl DOES
-consult it at runtime: on each decrypted request, the proxy extracts
-the observed Claude Code version from the `claude-cli/<version>`
-`User-Agent` header and compares it against `tested_cc_version`. On a
-mismatch it logs a WARNING once per distinct observed version (a
-version change re-warns) -- it never refuses or alters the request.
-Any post-prefix token is compared verbatim, including a prerelease,
-build-suffixed, or otherwise opaque one, because `tested_cc_version` is
-a value you entered and narrowing what counts as a version here would
-silently stop warning about exactly the drift you asked to hear about
-(the stricter version parser routectl uses for its own compiled-pin
-check does not narrow this guard).
-Leaving `tested_cc_version` unset (the default) disables the check
-entirely: no extraction, no comparison, no warning.
-
-This is a signal, not a gate: Remote Control rides on Claude Code's and
-Anthropic's own `HTTPS_PROXY` / `NODE_EXTRA_CA_CERTS` handling and the
-server-side `tengu_ccr_bridge` flag, none of which routectl controls.
-Any Claude Code update can change that behavior and break this feature
-outright; the warning only tells you the CLI version moved, not
-whether that move broke anything -- see the fragility caveat below.
 
 ## Rotating or regenerating the CA
 

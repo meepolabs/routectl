@@ -491,14 +491,6 @@ pub struct MitmConfig {
     /// `validate_mitm_config`).
     #[serde(default = "default_mitm_host")]
     pub mitm_host: String,
-    /// Free-form Claude Code version this `[mitm]` config was last
-    /// verified against. Consulted at runtime by the MITM proxy: when
-    /// the version actually observed on a decrypted request's
-    /// `User-Agent` differs from this, it logs a WARNING (once per
-    /// distinct observed version) but never refuses the request --
-    /// `None` (the default) disables the check entirely.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tested_cc_version: Option<String>,
 }
 
 impl Default for MitmConfig {
@@ -508,7 +500,6 @@ impl Default for MitmConfig {
             listen_port: default_mitm_listen_port(),
             cert_dir: default_mitm_cert_dir(),
             mitm_host: default_mitm_host(),
-            tested_cc_version: None,
         }
     }
 }
