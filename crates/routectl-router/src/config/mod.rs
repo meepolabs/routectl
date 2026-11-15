@@ -37,7 +37,6 @@ use validate::default_config_version;
 pub use validate::{
     CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,
     RawConfigPreflightError, VersionTooNewError, preflight_config_version, preflight_raw_config,
-    validate_cache_pricing_retired,
 };
 pub(crate) use validate::{
     cache_write_map_problems, validate_model_pricing, validate_model_token_limits,
@@ -213,16 +212,6 @@ pub struct Config {
     /// sampler keeps survive a reload.
     #[serde(default)]
     pub wire_check: WireCheckConfig,
-
-    /// RETIRED `[cache_pricing]` table, kept as raw TOML. Prices live under
-    /// `[models.X.pricing]`; this field is parsed only so a non-empty table,
-    /// whatever its entries hold, is refused by name
-    /// ([`crate::config::validate_cache_pricing_retired`]) instead of
-    /// surfacing as an unknown-key error. An empty or omitted table is the
-    /// only accepted form.
-    #[serde(default)]
-    #[schemars(with = "BTreeMap<String, serde_json::Value>")]
-    pub cache_pricing: toml::Table,
 
     /// Optional `[mitm]` block for the MITM front-proxy (TLS-terminating
     /// local listener that fronts a first-party upstream, e.g. Claude

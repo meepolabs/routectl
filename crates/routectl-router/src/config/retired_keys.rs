@@ -29,6 +29,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
                       what the router withholds from the lane",
     },
     RetiredKey {
+        path: &["cache_pricing"],
+        refused_value: None,
+        replacement: "set prices under `[models.X.pricing]`",
+    },
+    RetiredKey {
         path: &["fidelity", "paid_probe_daily_caps"],
         refused_value: None,
         replacement: "paid capability probes no longer exist; nothing replaces it",

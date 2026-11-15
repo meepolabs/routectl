@@ -1819,9 +1819,6 @@ fn bare_validation_message(e: routectl_core::Error) -> String {
 pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     let mut errors: Vec<String> = Vec::new();
 
-    if let Err(e) = crate::config::validate_cache_pricing_retired(config) {
-        errors.push(e);
-    }
     if let Err(e) = crate::config::validate_model_token_limits(config) {
         errors.push(e);
     }

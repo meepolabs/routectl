@@ -3,7 +3,7 @@ use super::*;
 mod config_version_tests {
     use super::{
         CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, Config, ConfigVersionError,
-        preflight_config_version, preflight_raw_config, validate_cache_pricing_retired,
+        preflight_config_version, preflight_raw_config,
     };
 
     #[test]
@@ -34,7 +34,6 @@ mod config_version_tests {
             let config: Config =
                 toml::from_str(example).expect("example config must parse as Config");
             assert_eq!(config.version, CURRENT_CONFIG_VERSION);
-            validate_cache_pricing_retired(&config).expect("example must not carry retired tables");
         }
     }
 
@@ -57,8 +56,6 @@ mod config_version_tests {
         let config: Config =
             toml::from_str(example).expect("lean example config must parse as Config");
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
-        validate_cache_pricing_retired(&config)
-            .expect("lean example must not carry retired tables");
     }
 
     #[test]
@@ -231,66 +228,29 @@ mod config_version_tests {
         );
     }
 
-    fn one_entry_table() -> toml::Table {
-        toml::from_str("\"openai-compat:grok-*\" = { wm = 1.5 }\n").expect("table parses")
-    }
-
-    fn parse_current(body: &str) -> Config {
-        toml::from_str(&format!("version = {CURRENT_CONFIG_VERSION}\n{body}"))
-            .expect("fixture must parse as Config")
-    }
-
+    /// Every `[cache_pricing]` shape, the empty table included, is refused
+    /// before the typed parse with the one retired-key line, never its
+    /// entry count or contents.
     #[test]
-    fn validate_cache_pricing_retired_allows_nonempty_at_v1() {
-        let config = Config {
-            version: 1,
-            cache_pricing: one_entry_table(),
-            ..Config::default()
-        };
-
-        assert!(validate_cache_pricing_retired(&config).is_ok());
-    }
-
-    #[test]
-    fn validate_cache_pricing_retired_allows_empty_or_omitted_at_current_version() {
-        for (name, body) in [("omitted", ""), ("empty table", "[cache_pricing]\n")] {
-            let config = parse_current(body);
-
-            assert!(
-                validate_cache_pricing_retired(&config).is_ok(),
-                "{name} must load"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_cache_pricing_retired_rejects_any_nonempty_shape_at_current_version() {
+    fn every_cache_pricing_shape_is_refused_naming_its_replacement() {
+        let expected =
+            "`cache_pricing` is retired: set prices under `[models.X.pricing]`; delete it";
         for (name, body) in [
+            ("empty table", "[cache_pricing]\n"),
             (
                 "legacy override cell",
                 "[cache_pricing.\"openai-compat:grok-*\"]\nwm = 1.5\nrm = 0.1\n",
-            ),
-            (
-                "cell with unknown field",
-                "[cache_pricing.\"m\"]\nnot_a_field = true\n",
             ),
             ("empty cell", "[cache_pricing.\"m\"]\n"),
             ("scalar entry", "[cache_pricing]\nm = 1\n"),
             ("string entry", "[cache_pricing]\nm = \"x\"\n"),
             ("array entry", "[cache_pricing]\nm = [1, 2]\n"),
         ] {
-            let config = parse_current(body);
+            let raw = format!("version = {CURRENT_CONFIG_VERSION}\n{body}");
 
-            let err = validate_cache_pricing_retired(&config)
-                .expect_err(&format!("{name} must be refused"));
+            let err = preflight_raw_config(&raw).expect_err(&format!("{name} must be refused"));
 
-            assert!(err.contains("[models.X.pricing]"), "{name}: {err}");
-            assert!(
-                err.contains("remove the [cache_pricing] table by hand"),
-                "{name}: {err}"
-            );
-            assert!(!err.contains("catalog"), "{name}: {err}");
-            assert!(err.contains("(1 entries)"), "{name}: {err}");
+            assert_eq!(err.to_string(), expected, "{name}");
         }
     }
 }

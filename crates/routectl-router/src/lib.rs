@@ -113,7 +113,6 @@ pub use config::{
     RetryPolicy, SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, TuningSource, UsageConfig,
     VersionTooNewError, WindowGateConfig, WireCheckConfig, is_config_provider_kind,
     preflight_config_version, preflight_raw_config, resolve_tuning, retired_key_message,
-    validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};

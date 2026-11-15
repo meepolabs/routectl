@@ -3231,35 +3231,6 @@ async fn render_checked_stream_task_records_one_k_sample_on_eos_and_none_on_erro
     );
 }
 
-/// A non-empty `[cache_pricing]` table at the current config version fails
-/// the server bootstrap, pointing at `[models.X.pricing]`. Drives the real
-/// `build_router_from_config` startup path.
-#[tokio::test]
-async fn bootstrap_refuses_a_nonempty_cache_pricing_table() {
-    use routectl_auth::{MemoryStore, SecretStore};
-    use routectl_router::{CURRENT_CONFIG_VERSION, Config};
-    use std::sync::Arc;
-
-    // Arrange: a current-version config carrying one legacy entry.
-    let config: Config = toml::from_str(&format!(
-        "version = {CURRENT_CONFIG_VERSION}\n[cache_pricing.\"openai-compat:grok-*\"]\nrm = 0.0\n"
-    ))
-    .expect("the raw table parses");
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-
-    // Act
-    let result = crate::server::build_router_from_config(Arc::new(config), secrets).await;
-
-    // Assert: `Router` is not `Debug`, so match the Result rather than
-    // calling `expect_err`.
-    let msg = match result {
-        Ok(_) => panic!("a non-empty [cache_pricing] table must fail bootstrap"),
-        Err(e) => e.to_string(),
-    };
-    assert!(msg.contains("[cache_pricing]"), "msg: {msg}");
-    assert!(msg.contains("[models.X.pricing]"), "msg: {msg}");
-}
-
 // ============ stream_response inversion: grace-gated commit (b') =======
 //
 // The four branches of the inverted `stream_response`

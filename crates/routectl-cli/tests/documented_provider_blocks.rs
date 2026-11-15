@@ -42,7 +42,6 @@ const ENTRY_SECTIONS: &[(&str, &[&str])] = &[
     ("pools", &["members"]),
     ("models", &["provider", "upstream"]),
     ("registry", &[]),
-    ("cache_pricing", &[]),
 ];
 
 /// Fenced ```toml blocks as `(1-based opening-fence line, body)` pairs, in

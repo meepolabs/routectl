@@ -1940,10 +1940,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `CONFIG_VERSION_REMEDIATION` (crate-root re-export) is the one remediation
   string (move the old file aside, run `routectl init`, see
   `docs/CONFIGURATION.md`) both refusals end with and doctor reads, so the
-  advice cannot drift; `validate_cache_pricing_retired` rejects a non-empty
-  `[cache_pricing]` at the current version as a hand-edited inconsistency, its
-  message pointing at `[models.X.pricing]` for the prices and telling the
-  operator to remove the table by hand.
+  advice cannot drift.
   `preflight_raw_config(raw_toml) -> Result<(), RawConfigPreflightError>`
   (`#[non_exhaustive]`, `Display` is the wrapped check's own message) is THE
   public raw-text driver every caller runs once: version first
@@ -2172,7 +2169,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   exact whitespace/case variant of an `essential_accept_set` member, and
   rejects `reasoning_replay` naming the lane-managed replay carve-out) and
   `validate_float_fields` (rejects a non-finite float leaf -- NaN/inf in a
-  `[registry]`/`[cache_pricing]` price or a non-positive/non-finite
+  `[registry]` price or a non-positive/non-finite
   `retry.backoff_multiplier`) and `validate_base_urls` (rejects an
   `openai-compat` entry with no/empty `base_url` -- it is now defaulted-empty
   in the schema but REQUIRED non-empty on the standard lane, skipped only when

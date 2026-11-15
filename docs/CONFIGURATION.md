@@ -60,7 +60,7 @@ overlays merge, what's reserved.
 - [Model prices (`[models.X.pricing]`)](#model-prices-modelsxpricing)
 - [Pricing registry](#pricing-registry-registrypatternpricing)
 - [Refreshing the price table (`routectl prices refresh`)](#refreshing-the-price-table-routectl-prices-refresh)
-- [Retired: `[cache_pricing]` and `routectl catalog`](#retired-cache_pricing-and-routectl-catalog)
+- [Retired: `routectl catalog`](#retired-routectl-catalog)
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
 - [Fidelity pre-flight opt-in (`[fidelity]`)](#fidelity-pre-flight-opt-in-fidelity)
 - [OpenAI chat-lane rule (`reasoning_dialect`)](#openai-chat-lane-rule-reasoning_dialect)
@@ -217,9 +217,6 @@ version = 5           # config schema version; see "Config schema version"
 [registry."<glob>"]   # per-upstream pricing for cost estimation.
                       # Optional; no defaults shipped.
 
-# A [cache_pricing] table (schema v1) is a hard startup error; set prices
-# under [models.X.pricing] instead. See "Retired: [cache_pricing]" below.
-
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting a first-party upstream.
                       # Optional; presence gates the feature on
@@ -230,9 +227,7 @@ version = 5           # config schema version; see "Config schema version"
 check` exactly as shipped, but it is NOT boot-ready: every credential in
 it is a REFERENCE, and none resolves until the named env var is set or
 the matching `routectl login` has run (an unresolved ref is a warning,
-never an error). Copy and edit; do not re-derive. Carrying a v1
-`[cache_pricing]` table: see
-[Retired: `[cache_pricing]`](#retired-cache_pricing-and-routectl-catalog).
+never an error). Copy and edit; do not re-derive.
 
 ## Config schema version (`version`)
 
@@ -289,8 +284,7 @@ it cannot load, which is why the old file has to move first. What each
 schema version retired, and where its replacement lives:
 
 - **v1 -> v2:** the `[cache_pricing]` table; set a model's prices under
-  `[models.X.pricing]` (see
-  [Retired: `[cache_pricing]`](#retired-cache_pricing-and-routectl-catalog)).
+  `[models.X.pricing]` (see [Retired config keys](#retired-config-keys)).
 - **v2 -> v3:** the raw-status retry allow/deny escape hatch; use
   per-class policy (see
   [Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)).
@@ -371,6 +365,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | Retired key | What replaces it |
 | --- | --- |
 | `bedrock` | nothing replaces it: client betas and body fields pass through, minus what the router withholds from the lane |
+| `cache_pricing` | set prices under `[models.X.pricing]` |
 | `fidelity.paid_probe_daily_caps` | paid capability probes no longer exist; nothing replaces it |
 | `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
@@ -3490,7 +3485,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-## Retired: `[cache_pricing]` and `routectl catalog`
+## Retired: `routectl catalog`
 
 Earlier releases kept prompt-cache economics and per-model limits in a
 separate catalog: a table baked into the binary plus a
@@ -3518,11 +3513,9 @@ model. `routectl doctor` names any leftover catalog file in the config
 folder (`catalog_overlay.json`, `catalog_overlay.json.lock`,
 `catalog_state.json`, `catalog_import_state.json`) so you can remove it.
 
-**`[cache_pricing]`.** Config schema v1's `[cache_pricing]` TOML table
-(and its `pricing_verifications.json` sidecar) is retired. A version 5
-file with a non-empty `[cache_pricing]` table is a hard startup error
-naming the table, not silently-ignored data; remove the table by hand.
-Nothing reads `pricing_verifications.json` any more.
+Config schema v1's `[cache_pricing]` table is in
+[Retired config keys](#retired-config-keys). Nothing reads its
+`pricing_verifications.json` sidecar any more.
 
 **`routectl catalog`.** Every subcommand (`list`, `verify`, `import`,
 `set`, `disable`, `export`) is gone. Running any of them prints a pointer

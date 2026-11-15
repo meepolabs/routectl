@@ -59,6 +59,38 @@ fn load_rejects_a_refused_version_and_leaves_it_byte_identical() {
     }
 }
 
+/// A `[cache_pricing]` table, empty or not, fails the startup and reload
+/// loader with the retired-key line naming `[models.X.pricing]`, on both
+/// the serve path and the `config check` path.
+#[test]
+#[serial_test::serial]
+fn load_refuses_a_cache_pricing_table_empty_or_not() {
+    let expected = "`cache_pricing` is retired: set prices under `[models.X.pricing]`; delete it";
+    for (name, table) in [
+        ("empty", "[cache_pricing]\n"),
+        (
+            "non-empty",
+            "[cache_pricing.\"openai-compat:grok-*\"]\nrm = 0.0\n",
+        ),
+    ] {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        let body = format!("version = {CURRENT_CONFIG_VERSION}\n{table}");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act
+        let serve_err = load_effective_config(&cfg_path).err();
+        let check_err = load_effective_config_unvalidated(&cfg_path).err();
+
+        // Assert
+        for err in [serve_err, check_err] {
+            assert_eq!(err.as_deref(), Some(expected), "{name}");
+        }
+    }
+}
+
 /// A current-version config loads unchanged: it passes the preflight,
 /// the load never merges the legacy sidecar or mutates the file, and the
 /// overlay -- untouched by this load -- stays as it was on disk.
@@ -91,7 +123,6 @@ fn load_leaves_a_current_version_config_unchanged() {
         loaded.config.version,
         routectl_router::CURRENT_CONFIG_VERSION
     );
-    assert!(loaded.config.cache_pricing.is_empty());
     let after = std::fs::read_to_string(&cfg_path).expect("read config after load");
     assert_eq!(
         after, body,

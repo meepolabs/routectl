@@ -1977,12 +1977,6 @@
       },
       "description": "Operator-facing `[cache]` block. Controls the dispatch-path\nauto-emission of a top-level Anthropic `cache_control` breakpoint.\nA missing block keeps the default: auto-emit enabled."
     },
-    "cache_pricing": {
-      "additionalProperties": true,
-      "default": {},
-      "description": "RETIRED `[cache_pricing]` table, kept as raw TOML. Prices live under\n`[models.X.pricing]`; this field is parsed only so a non-empty table,\nwhatever its entries hold, is refused by name\n([`crate::config::validate_cache_pricing_retired`]) instead of\nsurfacing as an unknown-key error. An empty or omitted table is the\nonly accepted form.",
-      "type": "object"
-    },
     "calibration": {
       "$ref": "#/$defs/CalibrationConfig",
       "default": {
