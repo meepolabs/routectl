@@ -318,12 +318,15 @@ mod tests {
             lane: "bedrock",
             service: "bedrock",
             url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/anthropic.claude-3-haiku/invoke",
-            headers: &[("content-type", "application/json")],
+            headers: &[
+                ("content-type", "application/json"),
+                ("accept", "application/json"),
+            ],
             body: r#"{"max_tokens":16}"#,
             authorization: "AWS4-HMAC-SHA256 \
                 Credential=AKIDEXAMPLE/20260102/us-west-2/bedrock/aws4_request, \
-                SignedHeaders=content-type;host;x-amz-date, \
-                Signature=50cafe0ef374ff8c125ec07f5e22b5cc3ab7b5a7bc534279d11f4acc70c4e806",
+                SignedHeaders=accept;content-type;host;x-amz-date, \
+                Signature=ddcee92fe6af7bd4b25ec5745e62d1f2079793059c29578e770f93d06481d71e",
         },
         KnownAnswer {
             lane: "bedrock-mantle",
