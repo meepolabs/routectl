@@ -470,29 +470,6 @@ pub(super) fn declare_cloak_tool_names(
     }
 }
 
-/// Declare the sensitive-word rewrites of the text-carrying fields on each
-/// surface that changed.
-pub(super) fn declare_cloak_obfuscation(
-    tap: Option<&WireTap>,
-    system_changed: bool,
-    messages_changed: bool,
-) {
-    if system_changed {
-        declare(tap, EditSite::Cloak, "/system/*/text", EditKind::Rewrite);
-    }
-    if messages_changed {
-        for pattern in [
-            "/messages/*/content",
-            "/messages/*/content/*/text",
-            "/messages/*/content/*/source/data",
-            "/messages/*/content/*/source/content",
-            "/messages/*/content/*/source/content/*/text",
-        ] {
-            declare(tap, EditSite::Cloak, pattern, EditKind::Rewrite);
-        }
-    }
-}
-
 /// Declare every `tools[]` position the tool sort moved an entry out of.
 pub(super) fn declare_cloak_tool_sort(
     tap: Option<&WireTap>,

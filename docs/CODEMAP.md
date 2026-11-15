@@ -1023,9 +1023,6 @@ license.
 - `src/anthropic_api/cloak_relocation_wire_tests.rs` -- serialized-wire
   contract of the client-system relocation: synthetic user turn, local
   refusals, carried image/document blocks, breakpoint cap/ordering
-- `src/anthropic_api/cloak_obfuscate_differential_tests.rs` -- the
-  sensitive-word matcher against a per-position reference scan over a seeded
-  corpus (expanding folds, shorter-word fallback, window-edge matches)
 - `src/anthropic_api/mod_cloak_refusal_tests.rs` -- a relocation refusal halts
   complete, stream, and count_tokens before token resolution
 - `src/anthropic_api/mod_scope_lane_tests.rs` -- the scope lane reaches the
@@ -1046,12 +1043,6 @@ license.
 - `src/anthropic_api/cloak/tool_sort.rs` -- all-or-nothing stable sort of
   `tools[]` by name on the non-CC egress, gated on
   `is_non_cc && CloakConfig::normalize_tools` (`sort_custom_tools_by_name` -> `ToolSortOutcome`)
-- `src/anthropic_api/cloak/obfuscate.rs` -- zero-width-space obfuscation of
-  configured sensitive words in system and message text
-  (`obfuscate_sensitive_words`, `SensitiveWordMatcher`: one `aho-corasick`
-  pass over case-folded text in fixed-size windows), plus the list's
-  count and folded-length bounds (`validate_sensitive_words`,
-  `MAX_SENSITIVE_WORDS`, `MAX_SENSITIVE_WORD_FOLDED_CHARS`)
 - `src/anthropic_api/wire_edits.rs` -- content-free declarations of the
   request-body edits the anthropic-api and Bedrock Invoke egresses make,
   onto the attempt's `WireTap` (`declare`, the cloak `CloakView` /
@@ -2105,9 +2096,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dialed, every method refuses a local `credential_unusable`
 - `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
   rejection of a non-canonical native `region` / `bedrock_mantle.region`
-- `src/factory/validate_cloak.rs` -- `validate_cloak_sensitive_words`:
-  config-load rejection of a `[providers.X.cloak] sensitive_words` list over
-  its count or folded-length bound
 - `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:
   config-load check of `[models]` and `[providers]` names that key runtime state
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation

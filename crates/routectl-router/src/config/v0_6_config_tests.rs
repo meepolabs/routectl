@@ -316,8 +316,8 @@ stream_first_byte_timeout_ms = 300000
 }
 
 /// A `[providers.X.cloak]` block with mode + strict_mode + tool_rename
-/// (array of tables) + sensitive_words parses into the entry's
-/// `CloakConfig`, and round-trips through serialize + re-parse.
+/// (array of tables) parses into the entry's `CloakConfig`, and round-trips
+/// through serialize + re-parse.
 #[test]
 fn anthropic_api_cloak_block_parses_and_round_trips() {
     use crate::config::ProviderEntry;
@@ -330,7 +330,6 @@ api_key_ref = "literal:sk-ant-test"
 [providers.anthropic.cloak]
 mode = "always"
 strict_mode = true
-sensitive_words = ["secret", "token"]
 
 [[providers.anthropic.cloak.tool_rename]]
 from = "foo"
@@ -345,7 +344,6 @@ to = "qux"
         ProviderEntry::AnthropicApi { cloak, .. } => {
             assert_eq!(cloak.mode, CloakMode::Always);
             assert!(cloak.strict_mode);
-            assert_eq!(cloak.sensitive_words, vec!["secret", "token"]);
             assert_eq!(cloak.tool_rename.len(), 2);
             assert_eq!(cloak.tool_rename[0].from, "foo");
             assert_eq!(cloak.tool_rename[0].to, "bar");
@@ -363,7 +361,7 @@ to = "qux"
 }
 
 /// Omitting the `[cloak]` block yields `CloakConfig::default()` (mode
-/// auto, no strict mode, empty tool_rename + sensitive_words).
+/// auto, no strict mode, empty tool_rename).
 #[test]
 fn anthropic_api_cloak_omitted_yields_default() {
     use crate::config::ProviderEntry;
@@ -380,7 +378,6 @@ api_key_ref = "literal:sk-ant-test"
             assert_eq!(cloak.mode, CloakMode::Auto);
             assert!(!cloak.strict_mode);
             assert!(cloak.tool_rename.is_empty());
-            assert!(cloak.sensitive_words.is_empty());
         }
         other => panic!("expected AnthropicApi entry; got {other:?}"),
     }

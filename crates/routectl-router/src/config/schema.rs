@@ -1211,10 +1211,9 @@ pub enum ProviderEntry {
         reduction_enabled: Option<bool>,
         /// Opt-in OAuth-cloak configuration. Omitting the `[cloak]`
         /// sub-table yields `CloakConfig::default()` (mode `auto`, no
-        /// strict mode, no tool renames, no sensitive words) -- identical
-        /// to the always-on `mcp_` normalization. TOML surface:
-        /// `[providers.X.cloak]` with `mode` / `strict_mode` /
-        /// `sensitive_words`, and tool renames as an array of tables
+        /// strict mode, no tool renames) -- identical to the always-on
+        /// `mcp_` normalization. TOML surface: `[providers.X.cloak]` with
+        /// `mode` / `strict_mode`, and tool renames as an array of tables
         /// `[[providers.X.cloak.tool_rename]] from=.. to=..`.
         #[serde(default)]
         cloak: CloakConfig,

@@ -630,3 +630,43 @@ fn a_hostile_entry_name_is_sanitized_and_capped() {
         .expect("a retired key under any entry name");
     assert_eq!(lookup, "`models.m???.knob` is retired: r; delete it");
 }
+
+/// The cloak table does not deny unknown fields, so the typed parse alone
+/// would take a leftover word list without a word; the table refuses it in
+/// every spelling TOML allows for the nested key.
+#[test]
+fn a_cloak_word_list_is_refused_in_every_spelling_the_typed_parse_accepts() {
+    let provider =
+        "[providers.sub]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n";
+    let rows = [
+        (
+            "sub-table",
+            format!("{provider}[providers.sub.cloak]\nsensitive_words = [\"{SENTINEL}\"]\n"),
+        ),
+        (
+            "inline table",
+            format!("{provider}cloak = {{ sensitive_words = [\"{SENTINEL}\"] }}\n"),
+        ),
+        (
+            "dotted key",
+            format!("{provider}cloak.sensitive_words = [\"{SENTINEL}\"]\n"),
+        ),
+    ];
+    let expected = "`providers.sub.cloak.sensitive_words` is retired: the sensitive-word \
+                    scanner is removed; nothing replaces it; delete it";
+
+    for (row, body) in rows {
+        // Arrange
+        let raw = format!("version = {CURRENT_CONFIG_VERSION}\n{body}");
+        assert!(
+            crate::parse_config(&raw).is_ok(),
+            "control `{row}`: the typed parse alone accepts the key"
+        );
+
+        // Act
+        let msg = refusal_message(&raw);
+
+        // Assert
+        assert_eq!(msg, expected, "row `{row}`");
+    }
+}

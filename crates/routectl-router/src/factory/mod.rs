@@ -6,7 +6,6 @@ mod inert_provider;
 #[cfg(feature = "openai-responses")]
 mod installation_id;
 mod validate;
-mod validate_cloak;
 #[cfg(feature = "bedrock")]
 mod validate_region;
 mod validate_state_keys;

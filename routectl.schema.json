@@ -277,20 +277,12 @@
       "type": "object"
     },
     "CloakConfig": {
-      "description": "Opt-in, empty-default configuration surface for the OAuth-egress cloak.\n`CloakConfig::default()` selects the standard cloak: mode `Auto`,\n`strict_mode` false (relocate the client system into the first user\nmessage rather than dropping it), no operator tool renames, no sensitive\nwords.\n\n`Debug` is hand-rolled (NOT derived) to print mode + strict_mode +\nCOUNTS only. The configured `tool_rename` pairs and `sensitive_words`\nare operator content and must never enter Debug output or logs -- a\nderived `Debug` would leak them through a future `dbg!(&cfg.cloak)` or\n`tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and\n`AnthropicApiConfig` both Debug-format this, so the impl is mandatory.",
+      "description": "Opt-in, empty-default configuration surface for the OAuth-egress cloak.\n`CloakConfig::default()` selects the standard cloak: mode `Auto`,\n`strict_mode` false (relocate the client system into the first user\nmessage rather than dropping it), no operator tool renames.\n\n`Debug` is hand-rolled (NOT derived) to print mode + strict_mode +\nCOUNTS only. The configured `tool_rename` pairs are operator content and\nmust never enter Debug output or logs -- a derived `Debug` would leak them\nthrough a future `dbg!(&cfg.cloak)` or `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and\n`AnthropicApiConfig` both Debug-format this, so the impl is mandatory.",
       "properties": {
         "mode": {
           "$ref": "#/$defs/CloakMode",
           "default": "auto",
           "description": "Cloak mode. Default `Auto` (original heuristic)."
-        },
-        "sensitive_words": {
-          "default": [],
-          "description": "Words to obfuscate (zero-width-space insertion) in system blocks\nand message text. Default empty (no obfuscation).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
         },
         "strict_mode": {
           "default": false,
@@ -323,7 +315,7 @@
         },
         {
           "const": "never",
-          "description": "Skip the cloak entirely: no billing strip, no identity, no\nmetadata, no tool-name normalization, no tool rename, no\nsensitive-word obfuscation. The body goes upstream untouched.",
+          "description": "Skip the cloak entirely: no billing strip, no identity, no\nmetadata, no tool-name normalization, no tool rename. The body goes\nupstream untouched.",
           "type": "string"
         }
       ]
@@ -846,11 +838,10 @@
               "$ref": "#/$defs/CloakConfig",
               "default": {
                 "mode": "auto",
-                "sensitive_words": [],
                 "strict_mode": false,
                 "tool_rename": []
               },
-              "description": "Opt-in OAuth-cloak configuration. Omitting the `[cloak]`\nsub-table yields `CloakConfig::default()` (mode `auto`, no\nstrict mode, no tool renames, no sensitive words) -- identical\nto the always-on `mcp_` normalization. TOML surface:\n`[providers.X.cloak]` with `mode` / `strict_mode` /\n`sensitive_words`, and tool renames as an array of tables\n`[[providers.X.cloak.tool_rename]] from=.. to=..`."
+              "description": "Opt-in OAuth-cloak configuration. Omitting the `[cloak]`\nsub-table yields `CloakConfig::default()` (mode `auto`, no\nstrict mode, no tool renames) -- identical to the always-on\n`mcp_` normalization. TOML surface: `[providers.X.cloak]` with\n`mode` / `strict_mode`, and tool renames as an array of tables\n`[[providers.X.cloak.tool_rename]] from=.. to=..`."
             },
             "context_management": {
               "default": false,

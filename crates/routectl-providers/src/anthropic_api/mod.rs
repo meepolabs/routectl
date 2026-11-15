@@ -114,10 +114,7 @@ fn stream_state_for(provider_id: &str, base_url: &str) -> SseState {
 #[cfg(feature = "bedrock")]
 pub use crate::mantle::MantleAuth;
 pub use client::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
-pub use cloak::{
-    CloakConfig, CloakMode, MAX_SENSITIVE_WORD_FOLDED_CHARS, MAX_SENSITIVE_WORDS,
-    SensitiveWordsBoundError, ToolRename, validate_sensitive_words,
-};
+pub use cloak::{CloakConfig, CloakMode, ToolRename};
 pub use context_management::CONTEXT_MANAGEMENT_BETA;
 /// The `max_tokens` this egress sends when neither the client nor the
 /// router-filled `routectl_internal.max_output_tokens` supplies one.

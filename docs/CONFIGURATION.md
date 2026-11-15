@@ -38,8 +38,7 @@ overlays merge, what's reserved.
   [mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane) -
   [mantle OpenAI lanes](#providersxbedrock_mantle----bedrock-mantle-openai-lanes)
 - anthropic-api flags: [context_management](#context_management-anthropic-api-provider-flag) -
-  [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential) -
-  [cloak sensitive_words](#cloak-sensitive_words-anthropic-api-provider-flag)
+  [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
 
 **Models and routing**
 - [Model routing (`[aliases]`)](#model-routing-aliases)
@@ -362,6 +361,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `providers.<name>.auto_emit_per_block_breakpoints` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.class_overrides` | per-class policy lives in `[retry.classes.*]`; a status keeps its built-in class |
+| `providers.<name>.cloak.sensitive_words` | the sensitive-word scanner is removed; nothing replaces it |
 | `providers.<name>.max_thinking_entry_bytes` | the thinking-cache entry cap is fixed at 1 MiB |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |
@@ -2708,70 +2708,6 @@ credential_source = "forwarded"
   proxy-side failure). See
   [REMOTE-CONTROL.md](REMOTE-CONTROL.md#pure-proxy-mode) for the
   full admission and failure-handling model.
-
-## cloak sensitive_words (anthropic-api provider flag)
-
-On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
-`[providers.X.cloak] sensitive_words` lists terms the cloak breaks up in
-system and message text by inserting a zero-width space after each match's
-first character. Text includes a document block's inline text (a `text`
-source's `data`, a `content` source's text); a base64, URL, or file document
-source is opaque and is not rewritten. A document block's `title` and
-`context` are not scanned. Matching is case-insensitive; entries
-shorter than two characters are ignored. Default empty (no rewrite).
-
-```toml
-[providers.anthropic-sub.cloak]
-sensitive_words = ["API", "proxy"]
-```
-
-The list is bounded, because the scan runs on every request against text
-the client controls (tool output, fetched pages, pasted files) up to the
-32 MiB ingress body limit:
-
-- at most **32 entries**;
-- each entry at most **32 characters after case folding** and trimming.
-  The count is of folded characters, not bytes: `"\u03A3"` (two UTF-8
-  bytes) counts as one, while a character whose lowercase form is two
-  characters counts as two.
-
-Derivation: the documented example above (the same two words a comparable
-proxy ships in its example config) and this repo's own config tests use at
-most two entries of at most six characters, and no measured deployment
-sets any. The bounds leave 16x headroom on count and 5x on length.
-
-The scan is one leftmost-longest pass over the case-folded text, so its
-cost grows with the text length. The one exception is a character whose
-lowercase form is two characters (U+0130): where a word's match would end
-or start inside one, the scan re-reads up to one word length from the next
-character, so text dense in such characters can cost up to the longest
-word's length per character. Measured on an AMD Ryzen 9 9900X, release
-build, 32 MiB of text:
-
-| list | text | time |
-|---|---|---|
-| `["API", "proxy"]` | all `a` | 0.42 s |
-| 32 words of 32 characters sharing a first letter | all `a` | 0.38 s |
-| `a` repeated 2 to 32 times (every position matches) | all `a` | 0.56 s |
-| 32 words nested as prefixes and suffixes of each other | mixed `a` / `b` | 0.52 s |
-| 15 words each ending inside U+0130's lowercase form | all U+0130 | 2.6 s |
-
-Reproduce with:
-
-```bash
-cargo test -p routectl-providers --release --lib -- --ignored --exact \
-  anthropic_api::cloak::obfuscate::tests::sensitive_word_scan_cost_at_the_bounds \
-  --nocapture
-```
-
-A list over either bound fails `config check`, `serve` startup, and hot
-reload (which logs the failure and keeps the previous config). The error
-names the provider and the bound only (`sensitive_words: at most 32
-entries`, or `each sensitive word must fold to at most 32 characters`) --
-never the word itself, which is operator content. A provider
-built directly as a library, bypassing config validation, refuses each
-cloaked request with a config error before egress instead of sending the
-terms unmarked.
 
 ## Log knobs (environment only)
 

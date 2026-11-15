@@ -483,25 +483,6 @@ fn the_operator_tool_rename_declares_its_rename() {
 }
 
 #[test]
-fn the_cloak_obfuscation_declares_the_rewritten_surfaces() {
-    let config = CloakConfig {
-        sensitive_words: vec!["secret".into()],
-        ..CloakConfig::default()
-    };
-    let firing = json!({"messages": [{"role": "user", "content": "a secret"}]});
-    let idle = json!({"messages": [{"role": "user", "content": "plain"}]});
-
-    let fired = cloak_edits(firing, false, &config);
-    let quiet = cloak_edits(idle, false, &config);
-
-    assert!(
-        fired.contains(&(EditKind::Rewrite, "/messages/*/content".to_string())),
-        "{fired:?}"
-    );
-    assert!(quiet.is_empty(), "{quiet:?}");
-}
-
-#[test]
 fn the_cloak_tool_sort_declares_each_moved_position() {
     let firing = json!({
         "tools": [{"name": "mcp__b"}, {"name": "mcp__a"}, {"name": "mcp__c"}],

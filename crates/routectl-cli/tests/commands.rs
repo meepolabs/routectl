@@ -2158,6 +2158,59 @@ fn config_set_refuses_the_retired_max_thinking_entry_bytes_with_the_loaders_line
     );
 }
 
+/// The sensitive-word scanner is gone; `config set` on the nested cloak key
+/// refuses with the loader's line and writes nothing, while a live key in the
+/// same cloak table writes.
+#[test]
+fn config_set_refuses_the_retired_cloak_sensitive_words_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = two_seat_pool_config(tmp.path());
+    let base = std::fs::read_to_string(&config_path).expect("read config");
+    let path = config_path.to_str().unwrap();
+    let set = |key: &str, value: &str| {
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "set", key, value])
+    };
+    let loader_line = routectl_router::preflight_raw_config(&base.replace(
+        "[providers.seat-b]\n",
+        "[providers.seat-a.cloak]\nsensitive_words = [\"x\"]\n[providers.seat-b]\n",
+    ))
+    .expect_err("the loader refuses a file carrying the key")
+    .to_string();
+
+    // Act
+    let (code, stdout, stderr) = set("providers.seat-a.cloak.sensitive_words", "[\"x\"]");
+
+    // Assert
+    assert_ne!(code, 0, "refused: {stdout} / {stderr}");
+    assert_eq!(
+        loader_line,
+        "`providers.seat-a.cloak.sensitive_words` is retired: the sensitive-word scanner is \
+         removed; nothing replaces it; delete it"
+    );
+    assert!(
+        stderr.contains(&loader_line),
+        "config set prints the loader's line: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read config"),
+        base,
+        "a refused edit must not write"
+    );
+
+    let (code, stdout, stderr) = set("providers.seat-a.cloak.strict_mode", "true");
+    assert_eq!(
+        code, 0,
+        "control: a live key in the same cloak table writes: {stdout} / {stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("strict_mode = true"),
+        "the control edit must land on disk"
+    );
+}
+
 // -- config check's secret-ref validation: read-only by construction, and
 // control-char-filtered at the one point it prints operator-written keys.
 

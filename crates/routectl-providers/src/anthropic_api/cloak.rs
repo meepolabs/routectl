@@ -30,18 +30,12 @@ use super::wire_edits;
 
 mod billing;
 mod identity;
-mod obfuscate;
 mod tool_rename;
 mod tool_sort;
 
 use billing::strip_billing_block;
 pub use identity::RelocationRefusal;
 use identity::{mint_metadata_user_id, relocate_client_system};
-use obfuscate::obfuscate_sensitive_words;
-pub use obfuscate::{
-    MAX_SENSITIVE_WORD_FOLDED_CHARS, MAX_SENSITIVE_WORDS, SensitiveWordsBoundError,
-    validate_sensitive_words,
-};
 use tool_rename::{apply_tool_rename, normalize_tool_names_to_mcp};
 use tool_sort::sort_custom_tools_by_name;
 
@@ -49,8 +43,6 @@ use tool_sort::sort_custom_tools_by_name;
 use billing::BILLING_PREFIX;
 #[cfg(test)]
 use identity::{INTERACTIVE_IDENTITY_LINE, SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN};
-#[cfg(test)]
-use obfuscate::ZERO_WIDTH_SPACE;
 
 /// Operator-facing cloak mode. Selects how aggressively the OAuth-egress
 /// cloak rewrites the outgoing body. `Auto` (default) preserves the
@@ -70,8 +62,8 @@ pub enum CloakMode {
     /// minted metadata `user_id` regardless of the session-id header.
     Always,
     /// Skip the cloak entirely: no billing strip, no identity, no
-    /// metadata, no tool-name normalization, no tool rename, no
-    /// sensitive-word obfuscation. The body goes upstream untouched.
+    /// metadata, no tool-name normalization, no tool rename. The body goes
+    /// upstream untouched.
     Never,
 }
 
@@ -91,14 +83,12 @@ pub struct ToolRename {
 /// Opt-in, empty-default configuration surface for the OAuth-egress cloak.
 /// `CloakConfig::default()` selects the standard cloak: mode `Auto`,
 /// `strict_mode` false (relocate the client system into the first user
-/// message rather than dropping it), no operator tool renames, no sensitive
-/// words.
+/// message rather than dropping it), no operator tool renames.
 ///
 /// `Debug` is hand-rolled (NOT derived) to print mode + strict_mode +
-/// COUNTS only. The configured `tool_rename` pairs and `sensitive_words`
-/// are operator content and must never enter Debug output or logs -- a
-/// derived `Debug` would leak them through a future `dbg!(&cfg.cloak)` or
-/// `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and
+/// COUNTS only. The configured `tool_rename` pairs are operator content and
+/// must never enter Debug output or logs -- a derived `Debug` would leak them
+/// through a future `dbg!(&cfg.cloak)` or `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and
 /// `AnthropicApiConfig` both Debug-format this, so the impl is mandatory.
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -119,9 +109,6 @@ pub struct CloakConfig {
     /// key must be the POST-normalization wire name (e.g. `mcp__read_file`,
     /// not the client's original `read_file`) or it will silently no-match.
     pub tool_rename: Vec<ToolRename>,
-    /// Words to obfuscate (zero-width-space insertion) in system blocks
-    /// and message text. Default empty (no obfuscation).
-    pub sensitive_words: Vec<String>,
     /// Tool-array canonicalization switch. NOT an operator-facing `[cloak]`
     /// key: it is `#[serde(skip)]` so it never appears in the config schema,
     /// and is stamped programmatically from the global `[cache]
@@ -142,7 +129,6 @@ impl Default for CloakConfig {
             mode: CloakMode::default(),
             strict_mode: false,
             tool_rename: Vec::new(),
-            sensitive_words: Vec::new(),
             normalize_tools: true,
         }
     }
@@ -150,14 +136,13 @@ impl Default for CloakConfig {
 
 impl std::fmt::Debug for CloakConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Counts/mode ONLY: the tool_rename from/to pairs and the
-        // sensitive_words strings are operator content and must never reach
-        // Debug output or logs (log-hygiene rule).
+        // Counts/mode ONLY: the tool_rename from/to pairs are operator
+        // content and must never reach Debug output or logs (log-hygiene
+        // rule).
         f.debug_struct("CloakConfig")
             .field("mode", &self.mode)
             .field("strict_mode", &self.strict_mode)
             .field("tool_rename_count", &self.tool_rename.len())
-            .field("sensitive_words_count", &self.sensitive_words.len())
             .field("normalize_tools", &self.normalize_tools)
             .finish()
     }
@@ -179,31 +164,20 @@ impl RelocationRefusal {
     }
 }
 
-/// Why the cloak refused a request before egress. Either way the body must
-/// not be sent.
+/// Why the cloak refused a request before egress. The body must not be
+/// sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloakRefusal {
     /// The client system has nowhere legal to land.
     Relocation(RelocationRefusal),
-    /// The configured `sensitive_words` list is outside its bounds, so the
-    /// terms cannot be marked. Config validation refuses such a list at
-    /// load; this arm is reached only by a caller that built the provider
-    /// without it.
-    SensitiveWords(SensitiveWordsBoundError),
 }
 
 impl CloakRefusal {
-    /// The refusal as the dispatch error the router routes on. A relocation
-    /// refusal is a local refusal; an out-of-bounds word list is a
-    /// provider misconfiguration, so it is a config error, which no retry or
-    /// fallback treats as the request's fault. Neither carries request or
-    /// configured-word content.
+    /// The refusal as the dispatch error the router routes on: a local
+    /// refusal carrying no request content.
     pub fn into_error(self, provider_id: &str) -> Error {
         match self {
             Self::Relocation(refusal) => refusal.into_error(provider_id),
-            Self::SensitiveWords(bound) => {
-                Error::Config(format!("provider `{provider_id}`: cloak {bound}"))
-            }
         }
     }
 }
@@ -339,19 +313,15 @@ impl CloakPolicyTally {
 /// (unless `strict_mode` drops it), and a metadata `user_id` is minted.
 ///
 /// Errors with [`CloakRefusal::Relocation`] when the relocation has nowhere
-/// legal to land (see `relocate_client_system`), and with
-/// [`CloakRefusal::SensitiveWords`] when `config.sensitive_words` is outside
-/// its bounds -- checked first, so that refusal leaves the body untouched.
-/// Either refusal is returned before any network I/O and the body must then
-/// not be sent; the canonical request is never touched, so every other
+/// legal to land (see `relocate_client_system`). The refusal is returned
+/// before any network I/O and the body must then not be sent; the canonical request is never touched, so every other
 /// target still builds from the original.
 ///
 /// Order is load-bearing and cache-safe: identity/billing transforms
 /// first, then the always-on tool-name normalization (every non-`mcp__`
 /// name to `mcp__`), then operator `tool_rename` over the SAME tool-name
-/// paths (recording reverse entries into the SAME map), then
-/// `sensitive_words` obfuscation over system and message text. With a
-/// default (empty) `config`, the output adds nothing beyond the base
+/// paths (recording reverse entries into the SAME map). With a default
+/// (empty) `config`, the output adds nothing beyond the base
 /// cloak transforms.
 pub fn cloak_oauth_egress(
     body: &mut Value,
@@ -360,7 +330,6 @@ pub fn cloak_oauth_egress(
     is_non_cc: bool,
     config: &CloakConfig,
 ) -> Result<CloakResult, CloakRefusal> {
-    validate_sensitive_words(&config.sensitive_words).map_err(CloakRefusal::SensitiveWords)?;
     let tap = wire_edits::tap_of(req);
     let mut tally = CloakPolicyTally::default();
     let client_system_blocks = match req.system.as_ref() {
@@ -398,9 +367,6 @@ pub fn cloak_oauth_egress(
         names_after.as_ref(),
         !tool_reverse.is_empty(),
     );
-    let obfuscated = obfuscate_sensitive_words(body, &config.sensitive_words)
-        .map_err(CloakRefusal::SensitiveWords)?;
-    wire_edits::declare_cloak_obfuscation(tap, obfuscated.system, obfuscated.messages);
     // Tool-array canonicalization: stable-sort `tools[]` by name so a non-CC
     // client that shuffles tool order request-to-request presents a stable
     // cache prefix. Gated on the SAME `is_non_cc` branch the identity rewrite

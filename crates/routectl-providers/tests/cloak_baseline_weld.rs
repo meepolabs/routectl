@@ -191,19 +191,6 @@ const TIER_ONE: &[TierOneRow] = &[
         ),
     },
     TierOneRow {
-        item: "obfuscate_sensitive_words",
-        file: "anthropic_api/cloak/obfuscate.rs",
-        role: Role::Transform,
-        gate: Gate::CloakPathSensitiveWords,
-        reason: "breaks the contiguity of operator-designated terms in system and message text \
-                 with a zero-width space, so upstream keyword scanning cannot match them",
-        known_loss: Some(
-            "privacy hardening only, never confidentiality: the characters still travel \
-             upstream, a term the folding does not match is left contiguous, and a base64, \
-             URL, or file document source is opaque and travels unmarked",
-        ),
-    },
-    TierOneRow {
         item: "sort_custom_tools_by_name",
         file: "anthropic_api/cloak/tool_sort.rs",
         role: Role::Transform,
@@ -222,7 +209,7 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::CloakPathAlways,
-        reason: "the orchestrator itself: calls the seven transforms in their load-bearing order \
+        reason: "the orchestrator itself: calls the six transforms in their load-bearing order \
                  and flushes the per-request policy tally once, writing no wire mutation of its \
                  own",
         known_loss: None,
@@ -278,28 +265,8 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::CloakPathAlways,
-        reason: "turns either cloak refusal into its dispatch error: a relocation becomes a \
-                 local refusal, an out-of-bounds word list becomes a config error; builds an \
-                 error and never touches the body",
-        known_loss: None,
-    },
-    TierOneRow {
-        item: "validate_sensitive_words",
-        file: "anthropic_api/cloak/obfuscate.rs",
-        role: Role::Support,
-        gate: Gate::CloakPathAlways,
-        reason: "checks the configured word list against its count and folded-length bounds, \
-                 shared by config validation and the orchestrator's pre-body check; reads config \
-                 only and never touches the body",
-        known_loss: None,
-    },
-    TierOneRow {
-        item: "SensitiveWordsBoundError::fmt",
-        file: "anthropic_api/cloak/obfuscate.rs",
-        role: Role::Support,
-        gate: Gate::ProviderConstruction,
-        reason: "renders a bound refusal as the exceeded bound only, so a configured \
-                 sensitive word cannot reach an error or a log through it",
+        reason: "turns a cloak refusal into its dispatch error: a relocation becomes a local \
+                 refusal; builds an error and never touches the body",
         known_loss: None,
     },
     TierOneRow {
@@ -307,8 +274,8 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::ProviderConstruction,
-        reason: "the empty-default operator configuration surface (mode Auto, no renames, no \
-                 sensitive words); a config constructor, not a transform",
+        reason: "the empty-default operator configuration surface (mode Auto, no strict mode, \
+                 no renames); a config constructor, not a transform",
         known_loss: None,
     },
     TierOneRow {
@@ -317,7 +284,7 @@ const TIER_ONE: &[TierOneRow] = &[
         role: Role::Support,
         gate: Gate::ProviderConstruction,
         reason: "the hand-rolled Debug that prints mode and COUNTS only, so operator-configured \
-                 renames and sensitive words cannot reach a log through a derived Debug",
+                 renames cannot reach a log through a derived Debug",
         known_loss: None,
     },
     TierOneRow {
@@ -354,9 +321,6 @@ enum Gate {
     /// The cloaked path, with a body effect only when the operator configured
     /// at least one tool rename.
     CloakPathOperatorRenames,
-    /// The cloaked path, with a body effect only when the operator configured
-    /// at least one sensitive word.
-    CloakPathSensitiveWords,
     /// Provider construction / config deserialization, not a per-request path.
     ProviderConstruction,
     /// The lane predicate: OauthBearer auth kind AND exactly the
@@ -398,7 +362,6 @@ impl Gate {
         Self::CloakPathNonCc,
         Self::CloakPathNonCcNormalizeTools,
         Self::CloakPathOperatorRenames,
-        Self::CloakPathSensitiveWords,
         Self::ProviderConstruction,
         Self::CloakLane,
         Self::CloakLaneNonCc,
@@ -777,7 +740,6 @@ fn the_derived_population_covers_the_orchestrator_and_every_leaf_file() {
     for leaf in [
         "billing.rs",
         "identity.rs",
-        "obfuscate.rs",
         "tool_rename.rs",
         "tool_sort.rs",
     ] {
@@ -878,10 +840,6 @@ fn the_known_real_transforms_are_all_enumerated_as_transforms() {
         ("strip_billing_block", "anthropic_api/cloak/billing.rs"),
         ("relocate_client_system", "anthropic_api/cloak/identity.rs"),
         (
-            "obfuscate_sensitive_words",
-            "anthropic_api/cloak/obfuscate.rs",
-        ),
-        (
             "sort_custom_tools_by_name",
             "anthropic_api/cloak/tool_sort.rs",
         ),
@@ -929,7 +887,7 @@ fn injected_error(source: &str) -> String {
 #[test]
 fn every_visibility_that_reaches_the_orchestrator_is_eligible_whatever_its_spelling() {
     // Eligibility is a question about module depth, not about the `pub(super)`
-    // spelling the seven live transforms happen to share. A weld keyed on that
+    // spelling the six live transforms happen to share. A weld keyed on that
     // spelling passes a `pub(crate) fn` added to a leaf file and wired into the
     // orchestrator, which is the same defect wearing a different qualifier.
     let items = injected_items(

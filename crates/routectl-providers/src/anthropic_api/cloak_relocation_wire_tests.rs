@@ -23,10 +23,7 @@ fn cloak_wire(body: &mut Value) -> Result<String, RelocationRefusal> {
         true,
         &CloakConfig::default(),
     )
-    .map_err(|refusal| match refusal {
-        CloakRefusal::Relocation(relocation) => relocation,
-        other => panic!("a default config refuses only relocations: {other:?}"),
-    })?;
+    .map_err(|CloakRefusal::Relocation(relocation)| relocation)?;
     Ok(serde_json::to_string(body).expect("serializes"))
 }
 
