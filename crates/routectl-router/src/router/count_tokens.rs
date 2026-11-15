@@ -306,7 +306,6 @@ impl SurfaceAdapter for CountAdapter {
             upstream_code = facts.upstream_code.unwrap_or(""),
             effective_class = class_label(&failure.cf.class),
             matched_by = matched_by_label(failure.cf.matched_by),
-            remapped = failure.remapped,
             debit = failure.debit,
             "count_tokens seat failed; resilience class policy applied",
         );

@@ -1,8 +1,8 @@
 //! Breaker accounting on a committed stream's tail: each of the three exits
 //! (natural end, first error frame, a drop after content) settles the
 //! breaker exactly once, on a closed breaker and on a half-open probe that
-//! first content already closed; and an error frame settles by its class
-//! after the target's remap, as a failure before content does. A settle
+//! first content already closed; and an error frame settles by its class,
+//! as a failure before content does. A settle
 //! that moves the circuit logs the same transition line the walk does.
 
 use std::collections::BTreeMap;
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use parking_lot::Mutex;
-use routectl_core::failure_class::{FailureClass, LastOutcome};
+use routectl_core::failure_class::LastOutcome;
 use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, Error, Result};
 use routectl_testkit::with_capture;
 
@@ -104,7 +104,6 @@ fn wrap(
     state: &Arc<Mutex<ProviderState>>,
     breaker: Breaker,
     items: Vec<Result<ChatChunk>>,
-    class_overrides: BTreeMap<u16, FailureClass>,
 ) -> futures::stream::BoxStream<'static, Result<ChatChunk>> {
     wrap_with_breaker_accounting(
         stream::iter(items).boxed(),
@@ -116,13 +115,12 @@ fn wrap(
         None,
         FirstChunkFeed::armed(Arc::new(QuotaStore::default()), None),
         matches!(breaker, Breaker::HalfOpenProbe),
-        class_overrides,
         MAX_HONORED_RETRY_AFTER,
     )
 }
 
 async fn run_exit(state: &Arc<Mutex<ProviderState>>, breaker: Breaker, exit: Exit) {
-    let mut wrapped = wrap(state, breaker, tail(exit), BTreeMap::new());
+    let mut wrapped = wrap(state, breaker, tail(exit));
     match exit {
         Exit::EndOfStream | Exit::FrameError => while wrapped.next().await.is_some() {},
         Exit::Cancel => {
@@ -198,7 +196,6 @@ struct FrameRow {
     name: &'static str,
     breaker: Breaker,
     frame: Error,
-    class_overrides: BTreeMap<u16, FailureClass>,
     failures: u32,
     last: LastOutcome,
     circuit: CircuitPhase,
@@ -211,7 +208,6 @@ fn frame_row(name: &'static str, breaker: Breaker, frame: Error) -> FrameRow {
         name,
         breaker,
         frame,
-        class_overrides: BTreeMap::new(),
         failures: 1,
         last: SEEDED,
         circuit: CircuitPhase::Closed,
@@ -283,14 +279,6 @@ async fn committed_frame_settles_by_class() {
             )
         },
         FrameRow {
-            class_overrides: BTreeMap::from([(503, FailureClass::BadRequest)]),
-            ..frame_row(
-                "closed / 503 remapped to bad-request records nothing",
-                Breaker::Closed,
-                Error::upstream("p", 503, "boom"),
-            )
-        },
-        FrameRow {
             circuit: CircuitPhase::Open,
             parked_for: Some(MAX_HONORED_RETRY_AFTER),
             ..frame_row(
@@ -311,7 +299,7 @@ async fn committed_frame_settles_by_class() {
         let items = vec![Ok(content("a")), Err(row.frame), Ok(content("b"))];
 
         let before = Instant::now();
-        let mut wrapped = wrap(&state, row.breaker, items, row.class_overrides);
+        let mut wrapped = wrap(&state, row.breaker, items);
         while wrapped.next().await.is_some() {}
         drop(wrapped);
         let after = Instant::now();
@@ -390,7 +378,7 @@ async fn a_committed_tail_logs_each_transition_it_settles() {
 
         // Act
         let ((), events) = with_capture(async {
-            let mut wrapped = wrap(&state, Breaker::Closed, items, BTreeMap::new());
+            let mut wrapped = wrap(&state, Breaker::Closed, items);
             while wrapped.next().await.is_some() {}
         })
         .await;

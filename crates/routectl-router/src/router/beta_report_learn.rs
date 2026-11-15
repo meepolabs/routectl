@@ -213,7 +213,6 @@ impl Router {
                     upstream_status: BETA_REJECTION_STATUS,
                     upstream_code: None,
                     upstream_param: None,
-                    remapped: false,
                     request_features,
                 },
                 dedupe,

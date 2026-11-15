@@ -244,8 +244,7 @@ jitter_ms                     = 50
 # Fallback/retry is decided per failure CLASS, not per raw status code.
 # Every 4xx/5xx falls back under the baked class defaults; to narrow or
 # widen a specific class, set `[retry.classes.<class>]` (e.g.
-# `[retry.classes.server-error] fallback = false`) or a per-provider
-# `[providers.X.class_overrides]` remap. See docs/CONFIGURATION.md.
+# `[retry.classes.server-error] fallback = false`). See docs/CONFIGURATION.md.
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 # retry_on_429 / retry_on_5xx / retry_on_network are deprecated (still

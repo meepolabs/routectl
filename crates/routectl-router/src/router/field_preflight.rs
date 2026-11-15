@@ -1035,11 +1035,9 @@ impl Router {
     /// payload, one repair was charged, and the caller must re-dispatch this
     /// same target. `None` means nothing was mutated or charged.
     ///
-    /// `named` must be resolved from the NATIVE class, never the
-    /// operator-remapped one, for the same reason the reactive arm reads it: a
-    /// `[class_overrides]` entry states how a status should be ROUTED, not what
-    /// the upstream said, so reading it would let an override turn a 429 into a
-    /// canary confirmation.
+    /// `named` must be resolved from the NATIVE class, for the same reason the
+    /// reactive arm reads it: what the upstream said decides, so a 429 never
+    /// becomes a canary confirmation.
     pub(super) fn canary_repaired_retry(
         &self,
         plan: &mut FieldPreflightPlan<'_>,

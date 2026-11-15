@@ -261,7 +261,7 @@ pub fn resolve_requested_capability(
 /// reachable for the rest of the request.
 ///
 /// A thin wrapper over [`resolve_requested_capability`], called with the
-/// class the classifier gave BEFORE any operator remap and the target's
+/// class the classifier gave and the target's
 /// provider kind. Every row added to the resolver therefore also narrows
 /// routing scope, and must be as exact as a learn row already has to be. It
 /// reads neither the `[capability]` switch nor whether the credential is

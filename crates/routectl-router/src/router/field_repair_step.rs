@@ -281,11 +281,10 @@ impl<'a> FieldRepairPlan<'a> {
     /// that field is none a pending step repaired. The upstream then read
     /// past each pending field to refuse another, so each was accepted.
     ///
-    /// An operator remap of the class is not read: it says how a status is
-    /// routed, not what the upstream refused. The field is compared by
-    /// identity, so a refused rewrite value (`thinking.type.<token>`) reads
-    /// as the field it rewrote. The caller still owes the check that the body
-    /// that went out carried the named path.
+    /// The field is compared by identity, so a refused rewrite value
+    /// (`thinking.type.<token>`) reads as the field it rewrote. The caller
+    /// still owes the check that the body that went out carried the named
+    /// path.
     pub(in crate::router) fn moved_on_by(
         &self,
         native_class: &FailureClass,

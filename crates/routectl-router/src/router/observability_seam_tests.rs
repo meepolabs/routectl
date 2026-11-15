@@ -155,11 +155,6 @@ async fn feature_unsupported_event_fires_on_complete_with_safe_fields() {
     assert_eq!(ev.field("matched_by"), Some("upstream_type"));
     assert_eq!(ev.field("surface"), Some("complete"));
     assert_eq!(ev.field("is_forwarded"), Some("false"));
-    assert_eq!(
-        ev.field("remapped"),
-        Some("false"),
-        "a real upstream lift is not an operator remap"
-    );
 
     assert_no_body_leak_in_seam(&events);
     assert_eq!(router.metrics.feature_unsupported_total(), 1);
@@ -204,7 +199,6 @@ async fn unknown_upstream_classification_warns_and_counts_on_complete() {
     assert_eq!(ev.level, tracing::Level::WARN);
     assert_eq!(ev.field("effective_class"), Some("unknown"));
     assert_eq!(ev.field("original_class"), Some("unknown"));
-    assert_eq!(ev.field("remapped"), Some("false"));
     assert_eq!(ev.field("matched_by"), Some("status"));
     assert_eq!(ev.field("status"), Some("Some(600)"));
     assert_eq!(ev.field("surface"), Some("complete"));
@@ -256,7 +250,6 @@ async fn generic_bad_request_emits_single_debug_decision() {
     assert_eq!(ev.level, tracing::Level::DEBUG);
     assert_eq!(ev.field("effective_class"), Some("bad_request"));
     assert_eq!(ev.field("original_class"), Some("bad_request"));
-    assert_eq!(ev.field("remapped"), Some("false"));
     assert_eq!(ev.field("matched_by"), Some("status"));
     assert_eq!(ev.field("surface"), Some("complete"));
     assert_eq!(ev.field("fallback"), Some("true"));

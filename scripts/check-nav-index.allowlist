@@ -44,7 +44,6 @@ crates/routectl-providers/tests/schema_smoke.rs
 crates/routectl-router/benches/dispatch_clone.rs
 crates/routectl-router/src/capability_detect.rs
 crates/routectl-router/src/config/tests.rs
-crates/routectl-router/src/router/remap_test_support.rs
 crates/routectl-router/src/router/tests.rs
 crates/routectl-router/src/test_secret.rs
 crates/routectl-router/tests/common/mod.rs

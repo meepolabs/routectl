@@ -640,32 +640,6 @@ async fn anthropic_refused_tool_type_absent_from_the_request_is_not_learned() {
     assert!(router.learned_capabilities.is_empty());
 }
 
-#[tokio::test]
-async fn operator_remapped_class_is_not_learned() {
-    // The operator remaps 400 to feature-unsupported: the class is now
-    // config-sourced (remapped == true, capability == the operator-remap
-    // token), so the learn path skips it -- a synthesized class is not
-    // an upstream self-report.
-    let toml = r#"
-[providers.p1]
-kind = "openai-compat"
-base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
-
-[providers.p1.class_overrides]
-400 = "feature-unsupported"
-"#;
-    let router = router_with(toml, self_identifying_provider());
-
-    let (dispatched, events) = Box::pin(with_capture(
-        router.complete_with_options(req_with_tool("web_search"), RouterOptions::default()),
-    ))
-    .await;
-
-    assert!(dispatched.meta.learned_capabilities.is_empty());
-    assert!(learn_warns(&events).is_empty());
-}
-
 /// A provider whose `complete` always succeeds with a minimal response,
 /// so a re-probe dispatched to it settles as a success.
 struct SuccessProvider {
@@ -1153,7 +1127,6 @@ fn f2_all_gates_pass_mints_a_phase_f2_negative() {
             "anthropic-api",
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1220,7 +1193,6 @@ fn learn_warn_renders_the_state_key_through_the_log_sanitizer() {
             "anthropic-api",
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1292,7 +1264,6 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
         "anthropic-api",
         &target,
         &req,
-        false,
         &mut dedupe,
         &mut meta,
         &mut guard,
@@ -1347,7 +1318,6 @@ fn a_reserved_refusal_removes_the_dedupe_key_so_a_released_retry_applies() {
         "anthropic-api",
         &target,
         &req,
-        false,
         &mut seed_dedupe,
         &mut seed_meta,
         &mut seed_guard,
@@ -1386,7 +1356,6 @@ fn a_reserved_refusal_removes_the_dedupe_key_so_a_released_retry_applies() {
         "anthropic-api",
         &target,
         &req,
-        false,
         &mut dedupe,
         &mut meta,
         &mut guard,
@@ -1423,7 +1392,6 @@ fn a_reserved_refusal_removes_the_dedupe_key_so_a_released_retry_applies() {
         "anthropic-api",
         &target,
         &req,
-        false,
         &mut dedupe,
         &mut meta,
         &mut guard,
@@ -1479,7 +1447,6 @@ fn an_exhausted_refusal_removes_the_dedupe_key_and_leaves_no_resident_row() {
         "anthropic-api",
         &target,
         &req,
-        false,
         &mut dedupe,
         &mut meta,
         &mut guard,
@@ -1547,7 +1514,6 @@ fn f2_candidate_with_same_chain_f1_is_suppressed_not_minted() {
                 "anthropic-api",
                 target,
                 &req,
-                false,
                 &mut dedupe,
                 &mut meta,
                 &mut guard,
@@ -1606,7 +1572,6 @@ fn f2_inferred_tier_never_mints_through_the_pipeline() {
             "anthropic-api",
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1645,7 +1610,6 @@ fn f2_transient_derived_class_never_mints_through_the_pipeline() {
             "anthropic-api",
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1684,7 +1648,6 @@ fn f1_mint_inserts_the_cross_lane_f1_seen_marker() {
             "anthropic-api",
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1811,7 +1774,6 @@ fn probe_settle_of_an_f1_negative_records_f1_seen() {
             "anthropic-api",
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1858,7 +1820,6 @@ fn probe_settle_of_an_f2_negative_does_not_record_f1_seen() {
             "anthropic-api",
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1902,7 +1863,6 @@ fn reverse_order_f2_then_f1_both_mint_self_healing() {
             "anthropic-api",
             &target_a,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -1938,7 +1898,6 @@ fn reverse_order_f2_then_f1_both_mint_self_healing() {
             "anthropic-api",
             &target_b,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard_b,
@@ -1982,7 +1941,6 @@ fn pending_inferred_f1_does_not_suppress_a_later_f2() {
             "anthropic-api",
             &target_a,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,
@@ -2023,7 +1981,6 @@ fn pending_inferred_f1_does_not_suppress_a_later_f2() {
             "anthropic-api",
             &target_b,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard_b,

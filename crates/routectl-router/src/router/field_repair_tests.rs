@@ -160,12 +160,6 @@ enum Answer {
     /// Reject with a status no field rejection can carry, so the repair arm
     /// must decline.
     UnrelatedError,
-    /// Reject with a 429. Paired with a `class_overrides` entry remapping 429
-    /// onto the bad-request class, this is the control for "an operator's
-    /// ROUTING preference must not become a repair trigger".
-    RateLimited,
-    /// Reject with a 503, the other remap control.
-    Unavailable,
     /// Reject with a caller-shaped 400 that names no field path, so the
     /// parser localizes nothing from it.
     UnlocalizedBadRequest,
@@ -219,16 +213,6 @@ impl MockSeat {
                 "field-mock",
                 503,
                 r#"{"error":{"type":"api_error","message":"upstream unavailable"}}"#,
-            )),
-            Answer::RateLimited => Err(Error::upstream(
-                "field-mock",
-                429,
-                r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#,
-            )),
-            Answer::Unavailable => Err(Error::upstream(
-                "field-mock",
-                503,
-                r#"{"error":{"type":"api_error","message":"unavailable"}}"#,
             )),
             Answer::UnlocalizedBadRequest => Err(Error::upstream(
                 "field-mock",
@@ -494,23 +478,6 @@ fn forwarded_seat(answer: Answer) -> (Router, Arc<Observed>, ChatRequest) {
         "sk-ant-oat01-FWD".into(),
     ));
     (router, observed.remove(0), req)
-}
-
-/// A one-seat chain whose provider REMAPS `status` onto the caller-shaped
-/// bad-request class -- the operator override that must not become a repair
-/// trigger. Built through the real config deserialize path so the
-/// `[providers.p0.class_overrides]` adapter is genuinely exercised.
-fn remapping_seat(status: u16, answer: Answer) -> (Router, Arc<Observed>) {
-    let toml_text = format!(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\n\
-         [providers.p0.class_overrides]\n{status} = \"bad-request\"\n"
-    );
-    let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    config
-        .aliases
-        .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-    let (router, mut observed, _mocks) = install(config, 1, answer);
-    (router, observed.remove(0))
 }
 
 /// A one-seat `anthropic-api` chain on a LOOPBACK base URL -- a local hop,
@@ -1668,126 +1635,6 @@ async fn a_bedrock_mantle_target_never_repairs_a_row_its_lane_view_omits() {
             "{surface}: and nothing may be minted for a row the lane view omits",
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// A remapped class is not a repair trigger
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn an_operator_remap_of_a_rate_limit_does_not_trigger_a_field_repair() {
-    // `[class_overrides]` expresses how the operator wants a status ROUTED; it
-    // is not a claim about what the upstream said. Reading the remapped class
-    // would let this override drop a field over a rate limit and then mint a
-    // permanent verdict from it.
-    let _injection = provisional::inject(REJECTED_PATH);
-    let (router, seen) = remapping_seat(429, Answer::RateLimited);
-
-    let dispatched = router
-        .complete_with_options(req_on(ALIAS), RouterOptions::new())
-        .await;
-
-    assert_eq!(
-        seen.calls(),
-        1,
-        "a remapped 429 must not repair: the upstream said rate limit, not field",
-    );
-    assert!(!verdict_resident(&router, "m0"), "and must mint nothing");
-    assert!(
-        dispatched.meta.field_repairs.is_empty(),
-        "and claim nothing"
-    );
-}
-
-#[tokio::test]
-async fn an_operator_remap_of_an_unavailable_upstream_does_not_trigger_a_field_repair() {
-    let _injection = provisional::inject(REJECTED_PATH);
-    let (router, seen) = remapping_seat(503, Answer::Unavailable);
-
-    let dispatched = router
-        .complete_with_options(req_on(ALIAS), RouterOptions::new())
-        .await;
-
-    assert_eq!(seen.calls(), 1, "a remapped 503 must not repair either");
-    assert!(!verdict_resident(&router, "m0"), "and must mint nothing");
-    assert!(dispatched.meta.field_repairs.is_empty());
-}
-
-#[tokio::test]
-async fn an_operator_remap_does_not_trigger_a_field_repair_on_any_walk() {
-    // Per-walk, because each arm reads its own class binding: a fix applied to
-    // one walk leaves the others live, and a single-walk test would report the
-    // class hazard as closed while two arms still had it.
-    let _injection = provisional::inject(REJECTED_PATH);
-    for surface in ["complete", "stream", "count_tokens"] {
-        let (router, seen) = remapping_seat(429, Answer::RateLimited);
-        match surface {
-            "complete" => {
-                let _ = router.complete(req_on(ALIAS)).await;
-            }
-            "stream" => {
-                let _ = router.stream(req_on(ALIAS)).await;
-            }
-            _ => {
-                let _ = router.count_tokens_with_meta(req_on(ALIAS)).await;
-            }
-        }
-        assert_eq!(
-            seen.calls(),
-            1,
-            "{surface}: a remapped 429 must not repair -- the upstream said rate limit, and an \
-             operator's ROUTING preference is not a claim about the envelope",
-        );
-        assert!(
-            !verdict_resident(&router, "m0"),
-            "{surface}: and must mint nothing",
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_native_bad_request_still_repairs_on_any_walk_under_the_same_overrides() {
-    // The per-walk positive control for the test above: same override table,
-    // but a NATIVE 400, and every walk repairs. Without this, an arm that read
-    // no class at all would satisfy the negatives.
-    let _injection = provisional::inject(REJECTED_PATH);
-    for surface in ["complete", "stream", "count_tokens"] {
-        let (router, seen) = remapping_seat(429, Answer::ServeRepaired);
-        match surface {
-            "complete" => {
-                let _ = router.complete(req_on(ALIAS)).await;
-            }
-            "stream" => {
-                let _ = router.stream(req_on(ALIAS)).await;
-            }
-            _ => {
-                let _ = router.count_tokens_with_meta(req_on(ALIAS)).await;
-            }
-        }
-        assert_eq!(
-            seen.repairs(),
-            1,
-            "{surface}: a native bad request repairs even with an unrelated remap configured",
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_genuine_native_bad_request_still_repairs_under_the_same_overrides() {
-    // The control that makes the two remap tests non-vacuous: with the SAME
-    // override table installed, a NATIVE 400 -- what the upstream actually
-    // returned -- still repairs. Without this, reading no class at all would
-    // satisfy them.
-    let _injection = provisional::inject(REJECTED_PATH);
-    let (router, seen) = remapping_seat(429, Answer::ServeRepaired);
-
-    let served = router.complete(req_on(ALIAS)).await;
-
-    assert!(
-        served.is_ok(),
-        "a native bad request repairs even with an unrelated remap configured: {served:?}",
-    );
-    assert_eq!(seen.repairs(), 1, "exactly one repair");
 }
 
 // ---------------------------------------------------------------------------

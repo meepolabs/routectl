@@ -789,7 +789,7 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ConfigFailureClass"
               },
-              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "description": "A map from a raw upstream status code to a config-facing failure\nclass, keyed by the numeric status. Parsed and validated only: routing\nnever reads it, so a status keeps its built-in class. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
               "type": "object"
             },
             "header_extras": {
@@ -939,7 +939,7 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ConfigFailureClass"
               },
-              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "description": "A map from a raw upstream status code to a config-facing failure\nclass, keyed by the numeric status. Parsed and validated only: routing\nnever reads it, so a status keeps its built-in class. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
               "type": "object"
             },
             "cloak": {
@@ -1130,7 +1130,7 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ConfigFailureClass"
               },
-              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "description": "A map from a raw upstream status code to a config-facing failure\nclass, keyed by the numeric status. Parsed and validated only: routing\nnever reads it, so a status keeps its built-in class. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
               "type": "object"
             },
             "codex_version": {
@@ -1269,7 +1269,7 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ConfigFailureClass"
               },
-              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "description": "A map from a raw upstream status code to a config-facing failure\nclass, keyed by the numeric status. Parsed and validated only: routing\nnever reads it, so a status keeps its built-in class. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
               "type": "object"
             },
             "creds": {
@@ -1411,7 +1411,7 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ConfigFailureClass"
               },
-              "description": "Operator remap of a raw upstream status code to a config-facing\nfailure class, keyed by the numeric status. Empty (the default)\nleaves the built-in status-to-class classification untouched. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
+              "description": "A map from a raw upstream status code to a config-facing failure\nclass, keyed by the numeric status. Parsed and validated only: routing\nnever reads it, so a status keeps its built-in class. The\ncustom (de)serializer routes the numeric keys through string form\nso the map survives serde's `flatten` buffering (see\n`class_policy::status_class_overrides`).",
               "type": "object"
             },
             "cloud_project_id": {

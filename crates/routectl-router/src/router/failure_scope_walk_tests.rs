@@ -31,7 +31,6 @@ use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINE
 use super::super::scripted_provider_test_support::{content_chunk, ok_response};
 use super::super::{Router, RouterOptions};
 use crate::capability_matcher::FORCED_TOOL_CHOICE_REJECTION;
-use crate::class_policy::ConfigFailureClass;
 use crate::config::{AliasValue, Config, PoolEntry, ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::CircuitPhase;
@@ -487,44 +486,6 @@ async fn a_generic_400_makes_two_calls_and_reaches_only_another_origin() {
     assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
     assert_eq!(chain.calls(), first_seat_then(PASSTHROUGH));
     assert_eq!(chain.debits(), vec![0; TARGETS], "a 400 never debits");
-}
-
-/// A native 400 never debits, whatever class a remap gives it: the request
-/// caused it. The remap below is one validation refuses, set on the runtime
-/// policy directly, so only the debit rule's own status check spares the
-/// seat.
-///
-/// Mutation check: drop the native 400/422 arm of `breaker_outcome` -> red
-/// (the seat takes a debit).
-#[tokio::test]
-async fn a_400_remapped_to_a_debiting_class_still_never_debits() {
-    let chain = chain_with(
-        &first_seat_failing(Failure::BadRequest),
-        3,
-        PoolB::OtherModel,
-        Lane::Anthropic,
-        |idx| ProviderRuntimePolicy {
-            class_overrides: if idx == 0 {
-                BTreeMap::from([(400, ConfigFailureClass::ServerError)])
-            } else {
-                BTreeMap::new()
-            },
-            ..quiet_breaker()
-        },
-    );
-
-    let dispatched = chain
-        .router
-        .complete_with_options(request(), RouterOptions::new())
-        .await;
-
-    assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
-    assert_eq!(
-        chain.calls(),
-        first_seat_then(PASSTHROUGH),
-        "the native 400 keeps its endpoint scope and is not retried"
-    );
-    assert_eq!(chain.debits(), vec![0; TARGETS]);
 }
 
 /// A recognized bare 429 is scoped to its endpoint and not retried: two

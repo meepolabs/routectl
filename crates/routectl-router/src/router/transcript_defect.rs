@@ -8,7 +8,7 @@
 //!   looks up each result's call by id and cannot emit a valid body without
 //!   the pair;
 //! - an upstream request-fault rejection (400 or 422) on a defective
-//!   transcript, however it classifies or remaps, teaches no learner:
+//!   transcript, however it classifies, teaches no learner:
 //!   routectl's own validator already explains it. Like any 400 or 422 it
 //!   is never retried and excludes the targets the failure decision scopes
 //!   it to, so the walk reaches only another endpoint (or another model,
@@ -70,8 +70,8 @@ pub(super) fn egress_pairing_refusal(
 /// [`REJECTION_STATUSES`], the list the field learner reads) answering a
 /// request whose transcript carries `defect`. Such a rejection is laid to the
 /// transcript, so no learner reads it. Decided on the status alone, before
-/// any classifier lift or operator remap, because neither changes what the
-/// upstream was sent. A local refusal is never one:
+/// any classifier lift, because it does not change what the upstream was
+/// sent. A local refusal is never one:
 /// it says nothing about what the upstream rejected.
 pub(super) fn is_transcript_rejection(err: &Error, defect: Option<ToolPairingDefect>) -> bool {
     defect.is_some()
@@ -80,9 +80,7 @@ pub(super) fn is_transcript_rejection(err: &Error, defect: Option<ToolPairingDef
 
 impl Router {
     /// Count a rejection laid to the transcript once per request per target
-    /// as one the field parser did not localize. An operator remap does not
-    /// exempt it: the remap says how the status routes, not what it was. The
-    /// other gates of [`Router::field_rejection_provider_kind`] still apply,
+    /// as one the field parser did not localize. The gates of [`Router::field_rejection_provider_kind`] still apply,
     /// so a forwarded-credential target, learning switched off, or an
     /// unknown provider kind counts nothing.
     pub(super) fn observe_transcript_rejection(
@@ -91,10 +89,7 @@ impl Router {
         target: &DispatchTarget,
         dedupe: &mut HashSet<LearnDedupeKey>,
     ) {
-        if self
-            .field_rejection_provider_kind(err, false, target)
-            .is_some()
-        {
+        if self.field_rejection_provider_kind(err, target).is_some() {
             self.count_parser_unlocalized(target, dedupe);
         }
     }

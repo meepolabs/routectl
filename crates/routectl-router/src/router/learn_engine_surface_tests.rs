@@ -181,7 +181,6 @@ fn reject_and_observe(
     learning.observe_generic(
         err,
         &cf,
-        false,
         target,
         req,
         &UntranslatedCapabilities::default(),

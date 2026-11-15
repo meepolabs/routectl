@@ -1,6 +1,6 @@
 //! Non-fatal config warnings.
 
-use super::validate::{class_token, is_health_status};
+use super::validate::class_token;
 use crate::class_policy::ConfigFailureClass;
 use crate::config::ProviderEntry;
 
@@ -65,12 +65,9 @@ pub(super) fn warn_context_management_needs_preserve(
 ///
 /// Three checks, each producing zero or more warning lines:
 ///
-///   - A `class_overrides` remap whose SOURCE status is a health signal
-///     (`is_health_status`: 408, 429, or any 500..=599). Since
-///     `validate_class_policy` already restricts the target to a
-///     terminal, non-retrying class, any such remap diverts a
-///     breaker-relevant status into a class the breaker does not debit --
-///     an outage-masking risk if the upstream is actually unhealthy.
+///   - Any `class_overrides` entry. The table still parses and validates,
+///     but routing never reads it: a status keeps its built-in class, so
+///     each entry is named as having no effect.
 ///
 ///   - An empty `[retry.classes.<c>]` block (both `retry` and `fallback`
 ///     leaves `None`). Parses fine and does nothing; almost always a
@@ -95,14 +92,12 @@ pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
 
     for (provider_name, entry) in &config.providers {
         for (status, target) in &entry.runtime().class_overrides {
-            if is_health_status(*status) {
-                warnings.push(format!(
-                    "[providers.{provider_name}.class_overrides] {status} = {}: remapping \
-                     a health status to a request-fault class disables breaker accounting \
-                     for it (outage-masking risk)",
-                    class_token(*target),
-                ));
-            }
+            warnings.push(format!(
+                "[providers.{provider_name}.class_overrides] {status} = {}: has no effect; \
+                 a status keeps its built-in class, and per-class policy lives in \
+                 [retry.classes.<class>]",
+                class_token(*target),
+            ));
         }
     }
 

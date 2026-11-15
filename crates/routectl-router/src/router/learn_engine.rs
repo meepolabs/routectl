@@ -183,11 +183,10 @@ impl RejectionSite {
 /// decides which proposal acts.
 pub(super) struct RejectionInput<'r> {
     pub(super) err: &'r Error,
-    /// The effective class, after any operator `[class_overrides]` remap.
+    /// The classified failure.
     pub(super) class: &'r ClassifiedFailure,
     /// What the upstream actually said. The path-keyed proposers read this,
-    /// never `class`: an override says how a status is ROUTED, and reading it
-    /// would let a remapped 429 drop a field and mint a verdict.
+    /// never `class`, so a field repair never keys on a routing class.
     pub(super) native_class: &'r FailureClass,
     pub(super) target: &'r DispatchTarget,
     /// Whether this target's attempt carried non-portable replay artifacts.
@@ -370,7 +369,7 @@ pub(super) enum FailureDecision {
 /// borrowed read-only.
 pub(super) struct Rejection<'r> {
     pub(super) err: &'r Error,
-    /// The effective class, after any operator `[class_overrides]` remap.
+    /// The classified failure.
     pub(super) class: &'r ClassifiedFailure,
     /// What the upstream actually said.
     pub(super) native_class: &'r FailureClass,
@@ -682,7 +681,6 @@ impl<'a> AttemptLearning<'a> {
         &mut self,
         err: &Error,
         cf: &ClassifiedFailure,
-        remapped: bool,
         target: &DispatchTarget,
         req: &ChatRequest,
         untranslated: &UntranslatedCapabilities,
@@ -697,13 +695,12 @@ impl<'a> AttemptLearning<'a> {
         if self.count_surface {
             self.pending_capability = None;
             self.router
-                .observe_unlocalized_field_rejection(err, cf, remapped, target, dedupe);
+                .observe_unlocalized_field_rejection(err, cf, target, dedupe);
             return;
         }
         self.router.observe_for_learning(
             err,
             cf,
-            remapped,
             target,
             req,
             untranslated,

@@ -531,11 +531,6 @@ fn refuse_test_row_unprocessable(req: &ChatRequest) -> Result<()> {
     Ok(())
 }
 
-/// An anthropic-api entry whose operator remap routes a 400 as a server
-/// error.
-const ANTHROPIC_400_AS_SERVER_ERROR: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
-     [providers.p0.class_overrides]\n400 = \"server-error\"\n";
-
 /// An openai-compat 400 refusing `web_search` as an unsupported parameter,
 /// which the classifier lifts out of `BadRequest`.
 fn refuse_web_search(_: &ChatRequest) -> Result<()> {
@@ -642,32 +637,6 @@ fn rejection_rows() -> Vec<RejectionRow> {
             second_calls: 1,
             field_repairs: 0,
             learned: vec!["web_search".into()],
-            unlocalized: None,
-            drift_signals: 0,
-        },
-    });
-    rows.push(RejectionRow {
-        name: "a 400 the operator remaps to a server error",
-        first_block: ANTHROPIC_400_AS_SERVER_ERROR,
-        answer: refuse_plainly,
-        carry: carry_nothing,
-        defective: Observed {
-            served: false,
-            first_calls: 1,
-            second_calls: 0,
-            field_repairs: 0,
-            learned: vec![],
-            unlocalized: Some(1),
-            drift_signals: 0,
-        },
-        // The scope reads the native 400, not the remap, so the second
-        // target on the same origin is excluded on either transcript.
-        paired: Observed {
-            served: false,
-            first_calls: 1,
-            second_calls: 0,
-            field_repairs: 0,
-            learned: vec![],
             unlocalized: None,
             drift_signals: 0,
         },
@@ -1020,11 +989,6 @@ async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_token_count_
         field_repair_row(
             "a field rejection the count repairs",
             ANTHROPIC,
-            carry_test_row,
-        ),
-        field_repair_row(
-            "a field rejection the operator remaps to a server error",
-            ANTHROPIC_400_AS_SERVER_ERROR,
             carry_test_row,
         ),
         field_repair_row(

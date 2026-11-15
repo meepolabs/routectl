@@ -307,16 +307,6 @@ pub(super) fn class_token(class: crate::class_policy::ConfigFailureClass) -> Str
         .to_string()
 }
 
-/// A status code the router's circuit breaker treats as a health signal:
-/// 408 and 429 (explicit named rows) plus the whole 500..=599 range.
-/// Distinct from "every 4xx/5xx is fallbackable" -- this is the narrower
-/// set the breaker accounting cares about, used by
-/// [`class_policy_warnings`] to flag a remap that would divert a health
-/// signal away from that accounting.
-pub(super) fn is_health_status(status: u16) -> bool {
-    status == 408 || status == 429 || (500..=599).contains(&status)
-}
-
 /// Validate the `[retry.classes]` overlay and every
 /// `[providers.X.class_overrides]` remap for HARD policy violations that
 /// the loader's serde layer cannot catch on its own (both are

@@ -75,26 +75,32 @@ mod class_policy_validation_tests {
     }
 
     #[test]
-    fn warns_when_a_health_status_source_is_remapped() {
-        // Arrange: 503 (a health signal) remapped to the allowed
-        // `feature-unsupported` target -- valid per `validate_class_policy`,
-        // but diverts a breaker-relevant status away from health accounting.
+    fn warns_that_each_class_override_has_no_effect() {
+        // Arrange: a health status and a request-fault status, both with
+        // targets validation accepts.
         let mut cfg = Config::default();
         cfg.providers.insert(
             "acme".to_string(),
-            provider_with_overrides(&[(503, ConfigFailureClass::FeatureUnsupported)]),
+            provider_with_overrides(&[
+                (400, ConfigFailureClass::BadRequest),
+                (503, ConfigFailureClass::FeatureUnsupported),
+            ]),
         );
 
         // Act
         let warnings = class_policy_warnings(&cfg);
 
         // Assert
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("acme") && w.contains("503") && w.contains("outage-masking")),
-            "warnings: {warnings:?}"
-        );
+        validate_class_policy(&cfg).expect("allowed targets still validate");
+        assert_eq!(warnings.len(), 2, "warnings: {warnings:?}");
+        for status in ["400", "503"] {
+            assert!(
+                warnings.iter().any(|w| w.contains("acme.class_overrides] ")
+                    && w.contains(&format!("] {status} = "))
+                    && w.contains("has no effect")),
+                "{status}: warnings: {warnings:?}"
+            );
+        }
     }
 
     #[test]
@@ -124,8 +130,7 @@ mod class_policy_validation_tests {
 
     #[test]
     fn clean_config_validates_ok_with_no_warnings() {
-        // Arrange: a well-formed, non-empty class policy plus a
-        // non-health-status, allowed-target remap.
+        // Arrange: a well-formed, non-empty class policy.
         let mut cfg = Config::default();
         cfg.retry.classes.insert(
             ConfigFailureClass::ServerError,
@@ -133,10 +138,6 @@ mod class_policy_validation_tests {
                 retry: Some(2),
                 fallback: Some(true),
             },
-        );
-        cfg.providers.insert(
-            "acme".to_string(),
-            provider_with_overrides(&[(400, ConfigFailureClass::BadRequest)]),
         );
 
         // Act + Assert

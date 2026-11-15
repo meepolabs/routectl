@@ -476,7 +476,6 @@ fn same_chain_f1_suppresses_a_later_f2_candidate() {
             KIND,
             &target,
             &req,
-            false,
             &mut dedupe,
             &mut meta,
             &mut guard,

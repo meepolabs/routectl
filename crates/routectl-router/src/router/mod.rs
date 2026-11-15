@@ -17,7 +17,7 @@ use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::{
     ChatChunk, ChatResponse, PrefixComponent, Provider, ReplayScheme, Result, ServedIdentity,
-    TokenCount, VolatileKind, failure_class::FailureClass,
+    TokenCount, VolatileKind,
 };
 
 use crate::config::{AliasValue, Config, HistoryReasoning, ReasoningDialect};
@@ -644,13 +644,7 @@ struct RouterMetrics {
     /// with the skip count, this is what makes the gate's safety margin
     /// answerable: skips that likely saved a doomed knock versus overflows
     /// the gate let through anyway.
-    ///
-    /// CAVEAT, do not gloss: `FailureClass::ContextWindow` is reachable both
-    /// natively from the classifier and via an operator class remap
-    /// (`apply_remap`), so this count mixes classifier-native rejections
-    /// with policy-remapped ones under one number -- the same interpretive
-    /// trap the skip counter carries for false skips. Bumped once per
-    /// dispatch error arm by the class-observability path.
+    /// Bumped once per dispatch error arm by the class-observability path.
     context_window_overflow_total: AtomicU64,
     /// Requests whose chain expansion walked a pool-backed model, counted once
     /// per pooled model per chain expansion (a chain naming two pools bumps
@@ -977,8 +971,7 @@ impl RouterMetrics {
 
     /// Bump the paired reactive-overflow count: a target cleared the
     /// proactive gate and still hit a `FailureClass::ContextWindow`
-    /// rejection. See [`context_window_overflow_total`](Self::context_window_overflow_total)
-    /// for the remap-mixing caveat.
+    /// rejection.
     fn incr_context_window_overflow(&self) {
         self.context_window_overflow_total
             .fetch_add(1, Ordering::Relaxed);
@@ -1140,9 +1133,7 @@ impl RouterMetrics {
         self.window_gate_skips_total.load(Ordering::Relaxed)
     }
 
-    /// Read the cumulative paired reactive-overflow count. See
-    /// [`context_window_overflow_total`](Self::context_window_overflow_total)
-    /// for the remap-mixing caveat.
+    /// Read the cumulative paired reactive-overflow count.
     fn context_window_overflow_total(&self) -> u64 {
         self.context_window_overflow_total.load(Ordering::Relaxed)
     }
@@ -2047,17 +2038,6 @@ struct DispatchTarget {
     /// requested alias; `Some(non-empty)` overrides it. Does not
     /// affect `DispatchMeta` accounting.
     reported_model: Option<String>,
-    /// Per-status failure-class remap for this target's provider, adapted
-    /// ONCE at chain expansion from the operator's
-    /// `[providers.X.class_overrides]` config table (`ConfigFailureClass`
-    /// -> canonical `FailureClass` via `ConfigFailureClass::to_failure_class`).
-    /// Consulted immediately after `classify` at each of the three dispatch
-    /// error arms and on a probe stream's frame error after content
-    /// (`apply_remap`): a status-key match replaces the
-    /// classifier's native class with the operator's override, keeping the
-    /// native `matched_by`. Empty (the default, and the value every
-    /// constructor starts with) leaves native classification untouched.
-    class_overrides: BTreeMap<u16, FailureClass>,
 }
 
 impl DispatchTarget {

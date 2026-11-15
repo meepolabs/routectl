@@ -1984,14 +1984,10 @@ impl Router {
     /// would either repair over an unrelated fault or decline a rejection it was
     /// built to handle.
     ///
-    /// The NATIVE class is the input, never the operator-remapped one. A
-    /// `[class_overrides]` entry expresses how the operator wants a status
-    /// ROUTED; it is not a claim about what the upstream said. Reading the
-    /// remapped class would let an override turn a 429 or a 503 into an
-    /// envelope-field repair -- dropping a field over a rate limit, and then
-    /// minting a permanent verdict from it -- so the repair decision reads what
-    /// the upstream actually returned and the routing decision keeps reading
-    /// the override.
+    /// The NATIVE class is the input: the repair decision reads what the
+    /// upstream actually returned, so a 429 or a 503 never becomes an
+    /// envelope-field repair that drops a field over a rate limit and then
+    /// mints a permanent verdict from it.
     ///
     /// Compared on the surface rather than the path string: the surface is what
     /// the drop acts on, and two rows sharing one surface would be the same

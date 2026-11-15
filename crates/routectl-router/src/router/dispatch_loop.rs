@@ -1,8 +1,8 @@
 //! The one dispatch walk every surface runs. [`Router::run_walk`] owns the
 //! lifecycle: chain resolution and probe admissions, the per-target guards
 //! and request shaping, the gate, the attempt loop with its per-attempt
-//! deadline, auth refresh, the learner's repair branch, classification and
-//! remap, then one failure decision ([`decide`]) applied as given (breaker
+//! deadline, auth refresh, the learner's repair branch, classification, then one
+//! failure decision ([`decide`]) applied as given (breaker
 //! outcome, same-target retry, request-scoped exclusions, walk or end),
 //! credential park, the last error, and `DispatchMeta` advancement. A
 //! [`SurfaceAdapter`] supplies what differs in type between surfaces: the
@@ -31,9 +31,7 @@ use super::beta_report_learn::install_beta_assembly;
 use super::cache_plan::{AutoCacheRequestPlan, apply_auto_cache_placement, cache_target_gates};
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::{UntranslatedCapabilities, install_translation_report};
-use super::class_observe::{
-    DispatchSurface, apply_remap, upstream_facts, upstream_status_for_remap,
-};
+use super::class_observe::{DispatchSurface, upstream_facts};
 use super::credential_park::{
     CREDENTIAL_PARKED_GATE_KIND, CREDENTIAL_UNUSABLE_GATE_KIND, log_gate_refusal,
     merge_gate_refusal, unusable_seat_error,
@@ -140,8 +138,6 @@ pub(super) struct FailureObservation<'a> {
     pub(super) err: &'a Error,
     pub(super) cf: &'a ClassifiedFailure,
     pub(super) original_class: &'a FailureClass,
-    pub(super) remapped: bool,
-    pub(super) remap_status: Option<u16>,
     pub(super) target: &'a DispatchTarget,
     pub(super) fallback: bool,
     pub(super) policy: &'a RetryPolicy,
@@ -237,8 +233,6 @@ pub(super) trait SurfaceAdapter: Send + Sync {
             failure.err,
             failure.cf,
             failure.original_class,
-            failure.remapped,
-            failure.remap_status,
             Self::SURFACE,
             failure.target.provider_name.as_str(),
             failure.target,
@@ -732,23 +726,12 @@ impl Router {
                             &e,
                             meta,
                         );
-                        // Read off the status before any lift or remap: see
+                        // Read off the status before any lift: see
                         // `is_transcript_rejection`.
                         let transcript_rejection =
                             is_transcript_rejection(&e, req.routectl_internal.transcript_defect);
-                        let native_cf = learning.classify(&e, target.provider_kind);
-                        let original_class = native_cf.class.clone();
-                        let remap_candidate_status = upstream_status_for_remap(&e);
-                        let (cf, remapped) = apply_remap(
-                            native_cf.clone(),
-                            remap_candidate_status,
-                            &target.class_overrides,
-                        );
-                        let remap_status = if remapped {
-                            remap_candidate_status
-                        } else {
-                            None
-                        };
+                        let cf = learning.classify(&e, target.provider_kind);
+                        let original_class = cf.class.clone();
                         // A forwarded-credential TARGET that drew
                         // an upstream 401/403/429 is TERMINAL -- bypass BOTH
                         // the on_auth_failure refresh-and-retry (below) AND
@@ -900,7 +883,7 @@ impl Router {
                         // body-free swap.
                         let native_capability_typed = target
                             .provider_kind
-                            .is_some_and(|kind| names_requested_capability(kind, &e, &native_cf));
+                            .is_some_and(|kind| names_requested_capability(kind, &e, &cf));
                         if let Some(body_free) =
                             replay_rejection_body_free(&e, &cf.class, provider_name)
                         {
@@ -956,8 +939,6 @@ impl Router {
                                 err: &e,
                                 cf: &cf,
                                 original_class: &original_class,
-                                remapped,
-                                remap_status,
                                 target,
                                 fallback: disposition.next == Next::Walk,
                                 policy: &policy,
@@ -970,7 +951,6 @@ impl Router {
                         learning.observe_generic(
                             &e,
                             &cf,
-                            remapped,
                             target,
                             &req,
                             &untranslated,

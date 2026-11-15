@@ -101,28 +101,20 @@ fn oauth_seat() -> Arc<AnthropicApiProvider> {
 }
 
 fn router_with(fallback: Arc<RecordingFallback>) -> Router {
-    router_with_policy(fallback, BTreeMap::new(), RetryPolicy::default())
+    router_with_policy(fallback, RetryPolicy::default())
 }
 
-/// `class_overrides` and `retry` go onto the oauth seat's provider entry and
-/// the router policy as given: built in code rather than loaded, so a remap
-/// target the loader would refuse still reaches the router, as it would for a
-/// library caller.
-fn router_with_policy(
-    fallback: Arc<RecordingFallback>,
-    class_overrides: BTreeMap<u16, ConfigFailureClass>,
-    retry: RetryPolicy,
-) -> Router {
+/// `retry` becomes the router policy as given.
+fn router_with_policy(fallback: Arc<RecordingFallback>, retry: RetryPolicy) -> Router {
     let fallback_entry =
         ProviderEntry::openai_compat("http://example.invalid", common::file_ref("k"));
-    router_with_entries(fallback, class_overrides, retry, fallback_entry)
+    router_with_entries(fallback, retry, fallback_entry)
 }
 
 /// As [`router_with_policy`], with the fallback seat's provider entry given:
 /// its kind decides whether the count-token walk treats it as capable.
 fn router_with_entries(
     fallback: Arc<RecordingFallback>,
-    class_overrides: BTreeMap<u16, ConfigFailureClass>,
     mut retry: RetryPolicy,
     fallback_entry: ProviderEntry,
 ) -> Router {
@@ -131,7 +123,6 @@ fn router_with_entries(
     if let ProviderEntry::AnthropicApi { runtime, .. } = &mut oauth {
         runtime.circuit_failures = Some(1);
         runtime.circuit_cooldown_ms = Some(60_000);
-        runtime.class_overrides = class_overrides;
     }
     config.providers.insert("p-oauth".into(), oauth);
     config.providers.insert("p-fallback".into(), fallback_entry);
@@ -256,13 +247,11 @@ async fn a_debiting_failure_on_the_same_seat_opens_its_breaker() {
 }
 
 #[tokio::test]
-async fn a_status_400_override_to_a_debiting_class_cannot_reach_the_refusal() {
-    // A remap of 400 into a retried, debiting class plus a bad-request retry
-    // cap: an Error carrying status 400 would take the server-error row (retry
-    // and debit at threshold one) and the operator's retry cap. The refusal
-    // must take neither, and must teach the capability registry nothing.
+async fn a_raised_bad_request_retry_cap_cannot_reach_the_refusal() {
+    // A bad-request retry cap and a raised 5xx cap: the refusal must take
+    // neither retry, must not debit at threshold one, and must teach the
+    // capability registry nothing.
     let fallback = fresh_fallback();
-    let overrides = BTreeMap::from([(400, ConfigFailureClass::ServerError)]);
     let mut retry = RetryPolicy::default();
     retry.retry_on_5xx = Some(3);
     retry.classes.insert(
@@ -272,7 +261,7 @@ async fn a_status_400_override_to_a_debiting_class_cannot_reach_the_refusal() {
             fallback: None,
         },
     );
-    let router = router_with_policy(Arc::clone(&fallback), overrides, retry);
+    let router = router_with_policy(Arc::clone(&fallback), retry);
     let caller = request(vec![message(Role::System, "turn rules")]);
 
     let Dispatched { meta, result } = router
@@ -288,7 +277,7 @@ async fn a_status_400_override_to_a_debiting_class_cannot_reach_the_refusal() {
     assert_eq!(
         oauth_circuit(&router),
         CircuitPhase::Closed,
-        "an override must not turn a local refusal into a breaker debit"
+        "a retry policy must not turn a local refusal into a breaker debit"
     );
     assert!(
         router.learned_capability_snapshot().is_empty(),
@@ -306,20 +295,10 @@ async fn a_status_400_override_to_a_debiting_class_cannot_reach_the_refusal() {
     );
 }
 
-/// A status-400 remap into a debiting class: anything the router saw as an
-/// upstream 400 would open the seat's breaker at threshold one.
-fn debiting_400_override() -> BTreeMap<u16, ConfigFailureClass> {
-    BTreeMap::from([(400, ConfigFailureClass::ServerError)])
-}
-
 #[tokio::test]
 async fn a_refused_relocation_on_the_stream_path_falls_back_with_the_pristine_request() {
     let fallback = fresh_fallback();
-    let router = router_with_policy(
-        Arc::clone(&fallback),
-        debiting_400_override(),
-        RetryPolicy::default(),
-    );
+    let router = router_with_policy(Arc::clone(&fallback), RetryPolicy::default());
     let caller = request(vec![message(Role::System, "turn rules")]);
 
     let dispatched = router
@@ -360,7 +339,6 @@ async fn a_refused_relocation_on_the_count_token_path_is_terminal_and_non_debiti
     let fallback = fresh_fallback();
     let router = router_with_entries(
         Arc::clone(&fallback),
-        debiting_400_override(),
         RetryPolicy::default(),
         ProviderEntry::anthropic_api(common::file_ref("k")),
     );

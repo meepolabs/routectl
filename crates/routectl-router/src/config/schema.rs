@@ -2839,9 +2839,9 @@ pub struct ProviderRuntimePolicy {
     /// claiming `[pools.X]` > `[retry]` > the shipped 5 min default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
-    /// Operator remap of a raw upstream status code to a config-facing
-    /// failure class, keyed by the numeric status. Empty (the default)
-    /// leaves the built-in status-to-class classification untouched. The
+    /// A map from a raw upstream status code to a config-facing failure
+    /// class, keyed by the numeric status. Parsed and validated only: routing
+    /// never reads it, so a status keeps its built-in class. The
     /// custom (de)serializer routes the numeric keys through string form
     /// so the map survives serde's `flatten` buffering (see
     /// `class_policy::status_class_overrides`).

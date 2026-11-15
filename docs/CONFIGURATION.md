@@ -1810,8 +1810,7 @@ This is the safest default for Cloudflare-fronted upstreams
 (opencode.ai, openrouter.ai, etc.), which surface upstream-origin
 failures through extended 5xx codes (520-527, 530). Operators with
 bespoke upstream behavior narrow or widen a specific class through
-`[retry.classes.<class>]` (a global per-class overlay) or a
-`[providers.X.class_overrides]` per-provider status remap -- the
+`[retry.classes.<class>]` (a global per-class overlay) -- the
 raw-status `retry_allowlist` / `retry_denylist` escape hatch was
 retired in config schema v3.
 
@@ -1894,15 +1893,13 @@ chain target it would hit the same way, for the rest of that request:
   request-wide count, and the walk does not dial that seat again.
 
 None of these is retried on the same target except the last, and a
-native 400 or 422 never debits the breaker whatever class a remap
-gives it. A
+native 400 or 422 never debits the breaker. A
 request whose targets were all excluded returns the last upstream
 error it received.
 
 To tune one class, set its `retry` (or `fallback`) leaf under
-`[retry.classes.<class>]`; this is the retry surface. A
-`[providers.X.class_overrides]` remap (next section) is an escape hatch
-for an upstream that reports a failure under the wrong status.
+`[retry.classes.<class>]`; this is the retry surface. A status always
+keeps its built-in class.
 
 Every upstream failure classifies into one of ten config-facing
 classes (`crates/routectl-router/src/class_policy.rs`). Each class
@@ -1930,12 +1927,7 @@ column is a fixed set (`RateLimited`, `ServerError`, `Timeout`,
 predicate (`crates/routectl-router/src/router/outcome_rule.rs`); no
 `[retry.classes]` leaf changes whether a class counts against a seat's
 health. Routing (retry cap, fallback) and health accounting are
-deliberately separate concerns. A `[providers.X.class_overrides]` remap
-is different: it runs BEFORE that fixed rule, so it changes which class
-a failure is settled as, and therefore whether it debits. Remapping a
-503 to `bad-request` stops that provider's 503s counting against its
-breaker, before content and after it alike; the load warns about any
-remap of a health status for exactly this reason.
+deliberately separate concerns.
 
 Every class above defaults to `fallback = true`.
 `[retry.classes.<class>]` overrides one or both leaves, sparsely. The
@@ -1997,60 +1989,27 @@ even empty, is rejected at config load (`validate_class_policy`,
 `crates/routectl-router/src/factory/validate.rs`). The baked row above already
 governs it; there is no override path for this class yet.
 
-#### `[providers.X.class_overrides]` -- remapping a raw status to a class
+#### `[providers.X.class_overrides]` -- no effect, pending removal
 
-Each `[providers.X]` table (flattened, not a `[providers.X.runtime]`
-sub-table -- see "Per-provider runtime gates" above) accepts an
-optional `class_overrides` map from a raw upstream HTTP status to one
-of the ten kebab class keys:
-
-```toml
-[providers.bedrock]
-kind   = "bedrock"
-region = "us-west-2"
-creds  = { kind = "default-chain" }
-
-[providers.bedrock.class_overrides]
-400 = "feature-unsupported"
-```
-
-The remap TARGET is restricted to four terminal, non-retrying classes
--- `bad-request`, `content-policy`, `context-window`,
-`feature-unsupported` -- rejected at load otherwise
-(`validate_class_policy`). A remap may only make behavior LESS
-aggressive: move a status into one of those four, never into a class
-the router retries or debits for health.
-
-The example above relabels a Bedrock 400 as `feature-unsupported`
-rather than the classifier's default `bad-request`. Both classes
-resolve to the identical baked row (0 retry, falls back, no breaker
-debit), so the remap changes nothing about routing -- a 400 was
-already non-debiting. What it buys is capability-aware telemetry: the
-relabeled failure carries the stable `operator-remap` capability token
-on the `routectl::feature_unsupported` observability event instead of
-surfacing as a generic bad-request, so capability gaps are
-distinguishable from caller-shaped 400s for dashboards and any future
-per-capability handling.
-
-The remap SOURCE has no such restriction, but remapping a breaker
-health-signal status (408, 429, or any `500..=599`) away from its
-native class is flagged by an advisory warning
-(`class_policy_warnings`, never fails the load) since it diverts a
-real health signal away from the breaker -- an outage-masking risk if
-the upstream is actually unhealthy.
+A `[providers.X]` table may still carry a `class_overrides` map from a
+raw upstream status to a class key. It still parses and validates (a
+target outside `bad-request`, `content-policy`, `context-window`,
+`feature-unsupported` is refused at load), but routing never reads it:
+a status keeps its built-in class for retry, fallback and breaker
+accounting. Each entry logs an advisory warning saying so. The key will
+be refused in a coming change; delete it, and set per-class policy
+under `[retry.classes.<class>]`.
 
 #### Precedence
 
 One failure decision governs retry and fallback for every status, in
 this order: the failure's scope (above) and the probe rule set what the
 request may still do; class policy (`resolved_class`, including any
-`[retry.classes]` overlay and any `class_overrides` remap) then only
-narrows it. A chain entry with no provider at all is walked past before
+`[retry.classes]` overlay) then only narrows it. A chain entry with no provider at all is walked past before
 any attempt, independent of class. (The
 raw-status `retry_allowlist` / `retry_denylist` escape hatch that
 formerly took precedence per code was retired in config schema v3 --
 pin a class terminal with `[retry.classes.<class>].fallback = false`
-or remap a specific status with `[providers.X.class_overrides]`
 instead.)
 
 ### Honoring upstream resets (`max_honored_retry_after_ms`)
@@ -2092,8 +2051,8 @@ seat's breaker, and it is the same on completions, streams and
   such as a 400 takes none).
 
 Once a stream has delivered content, an error frame arriving later is
-settled once, by the same rule as a failure before content and on the
-class after the provider's `class_overrides` remap: a debiting class
+settled once, by the same rule as a failure before content and on its
+built-in class: a debiting class
 (rate-limit, server error, timeout, network error, overload) takes the
 ordinary debit or parks on a large reset as above, a non-debiting class
 (auth, bad request, content policy, context window, unsupported

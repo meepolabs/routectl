@@ -5492,6 +5492,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   leaves that seat's breaker closed, also under a status-400 remap to a
   debiting class with a bad-request retry cap (one attempt, empty capability
   registry); a debiting control opens it
+- `tests/status_class_source.rs` -- a status's failure class comes from the
+  built-in table plus `[retry.classes]` only: a provider `class_overrides`
+  table changes no same-provider retry, fallback or committed-stream breaker
+  decision, each path with a positive control that does move it
 - `tests/cross_lane_sampling_strip.rs` -- cross-lane fallback hop onto the
   own-OAuth Anthropic seat: the first hop receives the caller's sampling
   verbatim and fails fallbackably, the OAuth hop ships a sampling-free body

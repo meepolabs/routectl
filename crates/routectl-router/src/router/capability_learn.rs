@@ -82,9 +82,9 @@ pub(super) enum LearnDedupeKey {
 ///
 /// `capability_key` is already normalized (via `normalize_capability_key`),
 /// so the writer and any future warm-rebuild replayer key off identical
-/// strings. `remapped` is always `false` by construction (the capture
-/// gate rejects a config-remapped class); it is carried so a replay can
-/// filter defensively. No request body, prompt, or upstream message text
+/// strings. `remapped` is always `false`: no class is remapped at dispatch,
+/// and the field stays so the ledger column and a replay of historical rows
+/// keep their shape. No request body, prompt, or upstream message text
 /// ever enters this struct -- only the classifier's structured facts.
 #[derive(Debug, Clone)]
 pub struct CapabilityLearnEvent {
@@ -122,8 +122,7 @@ pub struct CapabilityLearnEvent {
     /// The upstream request-fault status (400 or 422) that carried the
     /// rejection.
     pub upstream_status: u16,
-    /// Always `false` here (a remapped class never reaches capture);
-    /// persisted for defensive replay filtering.
+    /// Always `false`; persisted so historical ledger rows keep reading.
     pub remapped: bool,
     /// The request's derived feature set at capture time. Replay verifies
     /// the learned capability was actually in flight.
@@ -162,8 +161,6 @@ pub(super) struct LearnedMint<'a> {
     pub upstream_code: Option<&'a str>,
     /// The upstream's `error.param`, only when safe to log verbatim.
     pub upstream_param: Option<String>,
-    /// Whether a config class remap produced the class.
-    pub remapped: bool,
     /// The request's derived in-flight feature set.
     pub request_features: Vec<String>,
 }
@@ -765,8 +762,7 @@ impl Router {
     /// Every gate short-circuits, so a common (non-capability) failure
     /// pays only the cheap early checks. The full eligibility gate (all
     /// must hold): the kill switch is on; the upstream fault is a request
-    /// fault (400/422); the class was not operator-remapped; the target
-    /// does not dispatch on a forwarded credential; the resolver attributes the fault
+    /// fault (400/422); the target does not dispatch on a forwarded credential; the resolver attributes the fault
     /// to a canonical capability; that capability is not the
     /// operator-remap provenance token; and the capability is a member of
     /// the request's derived feature set
@@ -791,7 +787,6 @@ impl Router {
         &self,
         err: &Error,
         cf: &ClassifiedFailure,
-        remapped: bool,
         target: &DispatchTarget,
         req: &ChatRequest,
         untranslated: &UntranslatedCapabilities,
@@ -812,7 +807,7 @@ impl Router {
             return;
         };
         let upstream_status = *status;
-        if remapped || target.use_forwarded_credential {
+        if target.use_forwarded_credential {
             return;
         }
         let Some(provider_kind) = target.provider_kind else {
@@ -824,7 +819,7 @@ impl Router {
         // the resolver's `None` branch (where the two matcher-drift observers
         // sit) would under-count exactly the traffic where the parser is blind
         // while the matcher is not.
-        self.observe_unlocalized_field_rejection(err, cf, remapped, target, dedupe);
+        self.observe_unlocalized_field_rejection(err, cf, target, dedupe);
         let Some(resolved) = resolved else {
             self.observe_bedrock_validation_drift(provider_kind, err, target, dedupe);
             self.observe_feature_naming_drift(provider_kind, cf, target, req, dedupe);
@@ -842,7 +837,6 @@ impl Router {
             provider_kind,
             target,
             req,
-            remapped,
             dedupe,
             meta,
             probe_guard,
@@ -880,7 +874,6 @@ impl Router {
         provider_kind: &'static str,
         target: &DispatchTarget,
         req: &ChatRequest,
-        remapped: bool,
         dedupe: &mut HashSet<LearnDedupeKey>,
         meta: &mut DispatchMeta,
         probe_guard: &mut LearnedProbeGuard,
@@ -1003,7 +996,6 @@ impl Router {
                 upstream_status,
                 upstream_code,
                 upstream_param,
-                remapped,
                 request_features,
             },
             dedupe,
@@ -1082,7 +1074,6 @@ impl Router {
             upstream_status,
             upstream_code,
             upstream_param,
-            remapped,
             request_features,
         } = mint;
         // The generic mint never writes the field namespace: only the
@@ -1216,7 +1207,7 @@ impl Router {
                 signal_tier: tier,
                 observations,
                 upstream_status,
-                remapped,
+                remapped: false,
                 request_features,
                 phase,
                 source: EvidenceSource::Live,
@@ -1335,7 +1326,7 @@ impl Router {
     /// walk that reaches a field-eligible rejection without the learn path.
     ///
     /// The gates are the learn path's: the kill switch, a request-fault status
-    /// (400/422), an unremapped class, a target that does not dispatch on a
+    /// (400/422), a target that does not dispatch on a
     /// forwarded credential, and a known provider kind. A rejection failing any
     /// of them is not one this build could have attributed, so it says nothing
     /// about the parser either.
@@ -1343,11 +1334,10 @@ impl Router {
         &self,
         err: &Error,
         cf: &ClassifiedFailure,
-        remapped: bool,
         target: &DispatchTarget,
         dedupe: &mut HashSet<LearnDedupeKey>,
     ) {
-        let Some(provider_kind) = self.field_rejection_provider_kind(err, remapped, target) else {
+        let Some(provider_kind) = self.field_rejection_provider_kind(err, target) else {
             return;
         };
         self.observe_field_parser_blindness(provider_kind, cf, err, target, dedupe);
@@ -1359,10 +1349,9 @@ impl Router {
     pub(super) fn field_rejection_provider_kind(
         &self,
         err: &Error,
-        remapped: bool,
         target: &DispatchTarget,
     ) -> Option<&'static str> {
-        if !self.config.capability.enabled || remapped || target.use_forwarded_credential {
+        if !self.config.capability.enabled || target.use_forwarded_credential {
             return None;
         }
         if !matches!(
@@ -1409,10 +1398,6 @@ impl Router {
         target: &DispatchTarget,
         dedupe: &mut HashSet<LearnDedupeKey>,
     ) {
-        // The NATIVE class is not available here, so the remap is refused
-        // explicitly before this is reached -- see
-        // `observe_unlocalized_field_rejection`. What arrives is an unremapped
-        // class.
         match Self::unresolved_field_rejection(
             self.field_repair_table(),
             &cf.class,
@@ -1473,10 +1458,8 @@ pub(super) fn f2_evidence_is_mintable(tier: SignalTier, class: &FailureClass) ->
 
 /// True when `class` is a deterministic request fault an F2 feature-naming
 /// negative may be minted from: `BadRequest` or `FeatureUnsupported`. Every
-/// transient or server-side class -- anything a config class-override could
-/// derive a request fault from without the upstream self-reporting a feature
-/// rejection -- returns `false`, so a remapped transient can never plant an F2
-/// negative. A new `#[non_exhaustive]` `FailureClass` variant defaults to
+/// transient or server-side class returns `false`, so a transient can never
+/// plant an F2 negative. A new `#[non_exhaustive]` `FailureClass` variant defaults to
 /// rejected (the safe side) until it is explicitly admitted here.
 pub(super) const fn f2_class_is_deterministic(class: &FailureClass) -> bool {
     matches!(

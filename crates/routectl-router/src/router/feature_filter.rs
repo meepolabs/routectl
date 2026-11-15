@@ -571,10 +571,7 @@ fn map_resolutions(
 /// [`FailureClass::FeatureUnsupported`](routectl_core::failure_class::FailureClass::FeatureUnsupported).
 /// Carries only safe, structured dimensions -- NEVER a body, prompt, header,
 /// token, or the error's Display/Debug text. `capability` is the upstream token
-/// the classifier matched, already best-effort and non-sensitive. `remapped` is
-/// true when this FeatureUnsupported came from an operator status remap
-/// (carrying the `OPERATOR_REMAP_CAPABILITY` token) rather than a real
-/// upstream lift.
+/// the classifier matched, already best-effort and non-sensitive.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_feature_unsupported(
     provider: &str,
@@ -585,7 +582,6 @@ pub(super) fn emit_feature_unsupported(
     matched_by: MatchedBy,
     surface: DispatchSurface,
     is_forwarded: bool,
-    remapped: bool,
 ) {
     tracing::debug!(
         target: "routectl::feature_unsupported",
@@ -599,7 +595,6 @@ pub(super) fn emit_feature_unsupported(
         matched_by = matched_by_label(matched_by),
         surface = surface.as_str(),
         is_forwarded,
-        remapped,
         "upstream reported an unsupported capability",
     );
 }

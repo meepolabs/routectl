@@ -110,7 +110,6 @@ fn learn_on(router: &Router, target: &DispatchTarget, kind: &'static str) {
         kind,
         target,
         &req,
-        false,
         &mut HashSet::new(),
         &mut DispatchMeta::for_alias("m"),
         &mut LearnedProbeGuard::inert(),

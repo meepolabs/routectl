@@ -1,7 +1,7 @@
 //! Dispatch retry state machine. Walks the resolved fallback chain
 //! attempting each provider until one succeeds or all are exhausted,
 //! retrying within a provider per `RetryPolicy` with exponential
-//! backoff. Owns failure-class remap/fallback/retry decisions, breaker
+//! backoff. Owns failure-class fallback/retry decisions, breaker
 //! accounting, class-decision observability, the would-trim recording +
 //! K-floor, context-reduction + auto-cache injection, and forwarded-
 //! credential handling for both `complete` and `stream`.
@@ -297,7 +297,6 @@ impl SurfaceAdapter for StreamAdapter {
                     .map(crate::quota::key::seat_key_for_served_identity),
             ),
             is_probe,
-            target.class_overrides.clone(),
             policy.max_honored_retry_after(),
         )
     }
@@ -452,17 +451,13 @@ impl Router {
     /// class-decision event (DEBUG, or WARN on an Unknown-classified
     /// upstream outcome). Called from BOTH dispatch error arms with only
     /// safe, structured facts -- never the error body / Display string.
-    /// `cf` is the EFFECTIVE (post-remap) classification every other
-    /// consumer already acted on; `original_class` is the classifier's
-    /// pre-remap decision, carried through purely for provenance.
+    /// `cf` is the classification every other consumer already acted on.
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub(super) fn emit_class_observability(
         &self,
         err: &Error,
         cf: &ClassifiedFailure,
         original_class: &FailureClass,
-        remapped: bool,
-        remap_status: Option<u16>,
         surface: DispatchSurface,
         provider: &str,
         target: &DispatchTarget,
@@ -490,7 +485,6 @@ impl Router {
                     cf.matched_by,
                     surface,
                     is_forwarded,
-                    remapped,
                 );
             }
             FailureClass::Unknown if facts.status.is_some() => {
@@ -498,9 +492,7 @@ impl Router {
             }
             // The window gate runs during chain construction, strictly
             // before dispatch -- so every target reaching this arm cleared
-            // the gate. Paired with the gate's own skip counter; see the
-            // counter's doc comment for the remap-mixing caveat this arm
-            // is subject to.
+            // the gate. Paired with the gate's own skip counter.
             FailureClass::ContextWindow => {
                 self.metrics.incr_context_window_overflow();
             }
@@ -520,8 +512,6 @@ impl Router {
             debit,
             is_probe,
             is_forwarded,
-            remapped,
-            remap_status,
         });
     }
 
@@ -957,12 +947,12 @@ struct ClassDecisionObs<'a> {
     provider: &'a str,
     model: &'a str,
     surface: DispatchSurface,
-    /// The classifier's decision BEFORE any operator status remap.
+    /// The classifier's decision.
     original_class: &'a FailureClass,
     /// The class every downstream consumer (predicates, debit, this
-    /// event) actually acted on -- `original_class` unless a remap fired.
+    /// event) actually acted on.
     effective_class: &'a FailureClass,
-    /// How the NATIVE classification was decided; unaffected by a remap.
+    /// How the classification was decided.
     matched_by: MatchedBy,
     facts: UpstreamFacts<'a>,
     fallback: bool,
@@ -975,12 +965,6 @@ struct ClassDecisionObs<'a> {
     debit: bool,
     is_probe: bool,
     is_forwarded: bool,
-    /// Whether the operator's per-provider `class_overrides` replaced the
-    /// native class for this error.
-    remapped: bool,
-    /// The status key that matched an override, iff `remapped`. `None`
-    /// when `remapped` is false.
-    remap_status: Option<u16>,
 }
 
 /// Emit exactly one structured event per error-arm pass at the point the
@@ -1007,8 +991,6 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             debit = obs.debit,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
-            remapped = obs.remapped,
-            remap_status = ?obs.remap_status,
             "unknown failure classification on upstream outcome (fail-closed)",
         );
     } else {
@@ -1027,8 +1009,6 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             debit = obs.debit,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
-            remapped = obs.remapped,
-            remap_status = ?obs.remap_status,
             "router failure class decision",
         );
     }
@@ -1052,8 +1032,6 @@ use super::cache_plan::{
     CacheInjection, CacheTargetGates, apply_auto_cache_placement, place_front_marker,
 };
 #[cfg(test)]
-use super::class_observe::{apply_remap, upstream_status_for_remap};
-#[cfg(test)]
 use super::dispatch_loop::reduction_strategy_token;
 #[cfg(test)]
 use crate::config::CacheCapability;
@@ -1061,22 +1039,6 @@ use crate::config::CacheCapability;
 use crate::config::{AliasValue, Config};
 #[cfg(test)]
 use crate::resolved::ResolvedModel;
-
-#[cfg(test)]
-#[path = "remap_test_support.rs"]
-mod remap_test_support;
-
-#[cfg(test)]
-#[path = "remap_tests.rs"]
-mod remap_tests;
-
-#[cfg(test)]
-#[path = "provider_remap_tests.rs"]
-mod provider_remap_tests;
-
-#[cfg(all(test, feature = "bedrock"))]
-#[path = "bedrock_class_remap_tests.rs"]
-mod bedrock_class_remap_tests;
 
 #[cfg(test)]
 #[path = "content_commit_boundary_tests.rs"]

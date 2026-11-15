@@ -34,8 +34,8 @@ pub(super) enum BreakerOutcome {
 }
 
 /// The breaker outcome for `err`, classified as `class`, carrying
-/// `reset_hint`. A native 400 or 422 never debits, whatever class an
-/// operator remap gives it: the request, not the seat, caused it. A probe's
+/// `reset_hint`. A native 400 or 422 never debits, whatever its class: the
+/// request, not the seat, caused it. A probe's
 /// native 429 or 529 leaves the breaker alone whatever its class: a quota
 /// check hitting a rate limit or an overload is a transient upstream
 /// condition, not a provider fault. Otherwise a non-debiting class leaves the
@@ -62,8 +62,8 @@ pub(super) fn breaker_outcome(
     }
 }
 
-/// The HTTP status the upstream itself answered with, before any operator
-/// remap; `None` for a transport failure (status 0) or a local error.
+/// The HTTP status the upstream itself answered with; `None` for a transport
+/// failure (status 0) or a local error.
 pub(super) const fn native_status(err: &Error) -> Option<u16> {
     match err {
         Error::Upstream { status, .. } if *status != 0 => Some(*status),
@@ -151,12 +151,9 @@ pub const fn class_debits(class: &FailureClass) -> bool {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Failure<'a> {
     pub(super) err: &'a Error,
-    /// The class the classifier gave, before the target's operator remap.
-    /// The scope reads it, so a remap never changes how far a failure
-    /// reaches.
+    /// The class the classifier gave. The scope reads it.
     pub(super) native_class: &'a FailureClass,
-    /// The class after the target's operator remap. The retry cap and the
-    /// fallback switch read it.
+    /// The class the retry cap and the fallback switch read.
     pub(super) class: &'a FailureClass,
     /// The closed capability resolver named a capability in this failure,
     /// read with the target's provider kind against the native class. A

@@ -2,7 +2,6 @@
 //! guard that buffers content-free leading chunks until the first
 //! content-bearing one commits the provider.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,11 +9,10 @@ use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
     ChatChunk, ChatRequest, Error, OpaqueSseEvent, Provider, Result,
-    failure_class::{FailureClass, LastOutcome, classify},
+    failure_class::{LastOutcome, classify},
 };
 
 use super::breaker_transition;
-use super::class_observe::{apply_remap, upstream_status_for_remap};
 use super::outcome_rule::{BreakerOutcome, breaker_outcome, reset_hint_clamped_to};
 use super::precontent::{is_carriage_only, is_empty_reasoning_only, precontent_summary};
 
@@ -29,11 +27,10 @@ use super::precontent::{is_carriage_only, is_empty_reasoning_only, precontent_su
 ///   failure.
 ///
 /// An error frame settles by the same rule as a failure before content
-/// (`breaker_outcome`), on the class after the target's `class_overrides`
-/// remap: a debiting (health) class takes the threshold-gated debit, a
-/// non-debiting class (auth, bad request, content policy, context window,
-/// unsupported feature, ...) records nothing, a native 400/422 records
-/// nothing whatever class it is remapped to, and a non-probe frame whose
+/// (`breaker_outcome`), on the frame's class: a debiting (health) class takes
+/// the threshold-gated debit, a non-debiting class (auth, bad request, content
+/// policy, context window, unsupported feature, ...) records nothing, a native
+/// 400/422 records nothing whatever its class, and a non-probe frame whose
 /// Retry-After, clamped to `max_honored_retry_after`, exceeds the in-loop
 /// cap parks the breaker for that long. A probe stream (`is_probe`) keeps
 /// the probe exceptions: its 429/529 leaves the breaker untouched and it
@@ -64,7 +61,6 @@ pub(super) fn wrap_with_breaker_accounting(
     provider_kind: Option<&'static str>,
     quota_feed: crate::quota::feed::FirstChunkFeed,
     is_probe: bool,
-    class_overrides: BTreeMap<u16, FailureClass>,
     max_honored_retry_after: Duration,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     use futures::stream::StreamExt as _;
@@ -74,7 +70,6 @@ pub(super) fn wrap_with_breaker_accounting(
         ctx: FrameErrorContext {
             provider_kind,
             is_probe,
-            class_overrides,
             max_honored_retry_after,
         },
         settled: false,
@@ -112,7 +107,6 @@ enum TailExit<'a> {
 struct FrameErrorContext {
     provider_kind: Option<&'static str>,
     is_probe: bool,
-    class_overrides: BTreeMap<u16, FailureClass>,
     max_honored_retry_after: Duration,
 }
 
@@ -156,8 +150,7 @@ impl BreakerAccounting {
 
     fn settle_frame_error(&self, e: &Error) {
         let ctx = &self.ctx;
-        let native = classify(e, ctx.provider_kind);
-        let (cf, _) = apply_remap(native, upstream_status_for_remap(e), &ctx.class_overrides);
+        let cf = classify(e, ctx.provider_kind);
         let hint = reset_hint_clamped_to(e, ctx.max_honored_retry_after);
         match breaker_outcome(e, &cf.class, hint, ctx.is_probe) {
             BreakerOutcome::None => {}

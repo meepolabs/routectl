@@ -285,11 +285,10 @@ impl Router {
     /// where the model sat, preserving the operator's fallback order so a
     /// chain `[opus, sonnet]` becomes `[opus-seatA, opus-seatB, sonnet]`.
     ///
-    /// The post-loop pass also fills `provider_kind` and `class_overrides`
-    /// from the target's `[providers.X]` config entry, each only when the
-    /// constructor left it empty -- mirroring discipline so a seat target
-    /// that already carries its own seat-resolved `provider_kind` (see
-    /// `dispatch_target_for_seat`) is never overwritten.
+    /// The post-loop pass also fills `provider_kind` from the target's
+    /// `[providers.X]` config entry, only when the constructor left it empty,
+    /// so a seat target that already carries its own seat-resolved
+    /// `provider_kind` (see `dispatch_target_for_seat`) is never overwritten.
     pub(super) fn expand_chain_to_targets(
         &self,
         chain: Vec<Arc<ResolvedModel>>,
@@ -318,16 +317,6 @@ impl Router {
             target.use_forwarded_credential =
                 provider_entry.is_some_and(|entry| entry.forwarded_base_url().is_some());
             target.egress_kind = provider_entry.map(crate::config::ProviderEntry::egress_kind);
-            if target.class_overrides.is_empty()
-                && let Some(entry) = provider_entry
-            {
-                target.class_overrides = entry
-                    .runtime()
-                    .class_overrides
-                    .iter()
-                    .map(|(status, class)| (*status, class.to_failure_class()))
-                    .collect();
-            }
         }
         out
     }
@@ -606,7 +595,6 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         max_output_tokens: m.max_output_tokens,
         reported_model: m.reported_model.clone(),
         model: m,
-        class_overrides: BTreeMap::new(),
     }
 }
 
@@ -666,6 +654,5 @@ pub(super) fn dispatch_target_for_seat(
         max_output_tokens: m.max_output_tokens,
         reported_model: m.reported_model.clone(),
         model: m.clone(),
-        class_overrides: BTreeMap::new(),
     }
 }

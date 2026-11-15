@@ -4,6 +4,7 @@ use super::walk_state::{RequestWalk, WalkTarget};
 use super::*;
 use crate::config::{ProviderEntry, RetryPolicy};
 use routectl_core::capability::EvidenceSource;
+use routectl_core::failure_class::FailureClass;
 use std::collections::BTreeMap;
 
 /// Build a Router with one openai-compat provider `p1` carrying the given
@@ -256,8 +257,6 @@ fn emit_class_observability_logs_enforced_and_hard_retry_cap() {
             &err,
             &cf,
             &cf.class,
-            false,
-            None,
             DispatchSurface::Complete,
             "p1",
             &target,
@@ -2382,8 +2381,6 @@ fn emit_class_observability_bumps_context_window_overflow_on_context_window_clas
         &err,
         &cf,
         &cf.class,
-        false,
-        None,
         DispatchSurface::Complete,
         "p1",
         &target,

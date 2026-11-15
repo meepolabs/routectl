@@ -2309,7 +2309,7 @@ negative lapses and its re-probe succeeds.
 
 ### `count_tokens` (DEBUG)
 
-Emitted once when a `count_tokens` seat reaches its class/remap/debit
+Emitted once when a `count_tokens` seat reaches its class/debit
 settle point -- an upstream health error (rate-limit / server / timeout /
 network / overload). Most such errors end the count; an attempt whose
 `request_timeout_ms` expired walks on to the next capable seat and still
@@ -2328,15 +2328,14 @@ advances to the next capable seat) do NOT emit it. Safe dimensions only
 | `status` | integer | The upstream HTTP status, or `0` for a transport/non-upstream error. |
 | `upstream_type` | string | The upstream error `type` token, or empty. |
 | `upstream_code` | string | The upstream error `code` token, or empty. |
-| `effective_class` | string | The failure class after any operator remap (`rate_limited`, `server_error`, `timeout`, `network_error`, `overloaded`, `bad_request`, `unknown`, ...). |
+| `effective_class` | string | The failure class (`rate_limited`, `server_error`, `timeout`, `network_error`, `overloaded`, `bad_request`, `unknown`, ...). |
 | `matched_by` | string | How the native class was decided (`variant`, `status`, `upstream_type`). |
-| `remapped` | bool | `true` when an operator per-provider status remap replaced the native class. |
-| `debit` | bool | `true` when the class-based rule debited or parked the seat's circuit breaker: a threshold-gated debit for a debiting class, or a park when a non-probe request carried an upstream reset hint longer than 5 seconds. A probe's 429 or 529 is excluded whatever its hint and logs `false`, as does a non-debiting class; the slot is then released without a health debit. A native 400 or 422 logs `false` whatever class a remap gives it. |
+| `debit` | bool | `true` when the class-based rule debited or parked the seat's circuit breaker: a threshold-gated debit for a debiting class, or a park when a non-probe request carried an upstream reset hint longer than 5 seconds. A probe's 429 or 529 is excluded whatever its hint and logs `false`, as does a non-debiting class; the slot is then released without a health debit. A native 400 or 422 logs `false`. |
 
 ```
 DEBUG routectl_router::router::count_tokens event=count_tokens state_key=haiku
   provider=prov status=500 upstream_type= upstream_code=
-  effective_class=server_error matched_by=status remapped=false debit=true
+  effective_class=server_error matched_by=status debit=true
   "count_tokens seat failed; resilience class policy applied"
 ```
 
@@ -2621,7 +2620,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::router::dispatch_loop` | `fallback to next` (completions and streams on a fallbackable error; token counts only when the attempt's `request_timeout_ms` expired); fields `provider`, `model`, `state_key`, `error` | An upstream failed and the request moved on: investigate `provider` if it persists. |
 | WARN | `routectl_router::router::dispatch_loop` | `chain exhausted; no fallback target available; request will fail` (the same surfaces and fields as `fallback to next`, on the last target) | The request failed with no fallback left: check `provider` health, or add a fallback target. |
 | WARN | `routectl_router::router::dispatch_loop` | `forwarded-token upstream auth failure surfaced verbatim`, `forwarded target has no captured client bearer; refusing` (every surface) | The client's forwarded credential was rejected or absent: the client must re-authenticate, or fix the forwarded-credential config. |
-| WARN | `routectl_router::router::dispatch` | `unknown failure classification on upstream outcome (fail-closed)` | An upstream `status` / `upstream_type` is unclassified: add a `class_overrides` entry or file a bug. |
+| WARN | `routectl_router::router::dispatch` | `unknown failure classification on upstream outcome (fail-closed)` | An upstream `status` / `upstream_type` is unclassified: file a bug. |
 | WARN | `routectl_router::router` | `rejecting invalid alias glob pattern; entry ignored`, `refusing resolved model: its runtime state key is ambiguous` (boot / reload) | Fix the `[aliases]` glob, or rename the model or pool member so its state key is unique. |
 | WARN | `routectl_router::router` | `invalidation` event (reload) | No longer emitted: a catalog or overlay change evicts no learned capability. A line in an older log meant the non-field verdicts were evicted and re-learned. |
 | WARN | `routectl_router::router::count_tokens` | `alias chain has no count_tokens-capable provider` | Add a token-count-capable provider to the alias, or expect 501s. |
@@ -2734,7 +2733,7 @@ with no observation scope counts every counter once per normalize call.
 | Per-request cache breadcrumb (`cache=READ/PROMPT (PCT%)`) | `cache_read` and `input_tokens` on the INFO `request finished` line; `routectl_cli::handlers::usage_capture=debug` for the line. The auto-cache thrash WARN is unchanged. |
 | Capability tail demotion with a supported alternative left (`route_away`, `capability negative de-prioritized this target to the tail`) | `routectl_router::router::feature_filter=debug`. The tail-only arm (the request survives only on the demoted target) stays WARN. |
 | Upstream-reported unsupported capability (`upstream reported an unsupported capability`, target `routectl::feature_unsupported`) | `rc_feature_unsupported_total` on the metrics snapshot; `routectl::feature_unsupported=debug` for the line. A capability that is learned from it logs the `learn` WARN; the request's result is on `request finished`. |
-| Token-count seat failure (`count_tokens seat failed; resilience class policy applied`) | `outcome` / `http_status` on the `count_tokens` operation's `request finished` line; `routectl_router::router::count_tokens=debug` for the class, remap and debit. |
+| Token-count seat failure (`count_tokens seat failed; resilience class policy applied`) | `outcome` / `http_status` on the `count_tokens` operation's `request finished` line; `routectl_router::router::count_tokens=debug` for the class and debit. |
 | anthropic-api cloak decision (`anthropic-api cloak applied to outgoing body`) | `routectl_providers::anthropic_api=debug`. Client content the cloak refuses or loses still logs its WARN. |
 | Gemini content-filter finish on a 200 response (`gemini: prompt blocked on 200 surface`, `gemini: candidate blocked on 200 surface`) | The client receives `finish_reason` `content_filter`; `routectl_providers::gemini=debug` for the block reason. |
 | Opaque SSE block stop summary (`anthropic SSE: opaque block closed`) | `routectl_providers::anthropic_api::sse_opaque=debug`. Cap and index-mismatch WARNs are unchanged. |

@@ -18,7 +18,7 @@ use super::rejection_parser::{refused_member, rejected_beta_flags};
 use super::replay_repair::replay_rejection_body_free;
 
 /// Proposes the reasoning-replay strip when the attempt carried replay
-/// artifacts and the EFFECTIVE (remapped) class is the proven replay
+/// artifacts and the classified failure is the proven replay
 /// rejection.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ReplayProposer;

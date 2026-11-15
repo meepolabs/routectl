@@ -409,7 +409,7 @@ async fn count_tokens_rollback_on_mandatory_choice_emptied_tools() {
 
 /// An `anthropic-api`-kind provider whose `count_tokens` always fails
 /// with a fixed upstream health status, so the seat reaches the
-/// class/remap/debit settle point rather than returning a count.
+/// class/debit settle point rather than returning a count.
 struct HealthErrorProvider {
     status: u16,
 }
@@ -466,7 +466,7 @@ async fn count_tokens_class_path_emits_one_observability_event() {
     assert_eq!(
         emitted.len(),
         1,
-        "the class/remap/debit path emits exactly one count_tokens event",
+        "the class/debit path emits exactly one count_tokens event",
     );
     let ev = emitted[0];
     assert_eq!(ev.level, tracing::Level::DEBUG);
@@ -474,7 +474,6 @@ async fn count_tokens_class_path_emits_one_observability_event() {
     assert_eq!(ev.field("status"), Some("500"));
     assert_eq!(ev.field("effective_class"), Some("server_error"));
     assert_eq!(ev.field("debit"), Some("true"));
-    assert_eq!(ev.field("remapped"), Some("false"));
     assert!(
         !ev.fields.iter().any(|(k, _)| k == "body" || k == "prompt"),
         "the event carries no body or prompt",
@@ -483,7 +482,7 @@ async fn count_tokens_class_path_emits_one_observability_event() {
 
 #[tokio::test]
 async fn count_tokens_clean_passthrough_emits_no_class_event() {
-    // A successful count never reaches the class/remap/debit settle point,
+    // A successful count never reaches the class/debit settle point,
     // so no count_tokens observability event fires on the happy path.
     let cap = captured();
     let provider: Arc<dyn Provider> = Arc::new(ProbeProvider {

@@ -1,11 +1,10 @@
-//! The never-learn cases: health-status errors, operator-remapped
-//! classifications, and unresolvable rejections must each record no
-//! learned negative.
+//! The never-learn cases: health-status errors and unresolvable rejections
+//! must each record no learned negative.
 
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Leg 3: never-learn cases (health statuses, operator-remapped).
+// Leg 3: never-learn cases (health statuses).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -32,49 +31,6 @@ async fn health_status_errors_never_learn() {
         assert!(d.result.is_ok(), "status {status}: fall back to B");
         assert_eq!(d.meta.served_provider.as_deref(), Some("prov_b"));
     }
-}
-
-#[tokio::test]
-async fn remapped_classification_never_learns() {
-    // An operator remap of A's 400s to FeatureUnsupported sets `remapped =
-    // true`. The 400 body still carries a resolvable `/error/param`, so
-    // WITHOUT the remap guard the resolver would learn `web_search`; the
-    // `remapped` early return is the only thing that blocks it.
-    let a = upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
-    let b = upstream_server(vec![(200, ok_body())]).await;
-    let mut runtime_a = ProviderRuntimePolicy::default();
-    runtime_a
-        .class_overrides
-        .insert(400, ConfigFailureClass::FeatureUnsupported);
-    let router = build_router(
-        vec![
-            Upstream {
-                runtime: runtime_a,
-                ..Upstream::openai("m_a", "prov_a", &a.uri())
-            },
-            Upstream::openai("m_b", "prov_b", &b.uri()),
-        ],
-        "chain",
-        &["m_a", "m_b"],
-        48,
-    )
-    .await;
-
-    let d = complete(&router, "chain").await;
-    assert!(
-        d.meta.learned_capabilities.is_empty(),
-        "a remapped classification must not learn",
-    );
-    assert_eq!(hits(&a).await, 1, "A was still dialed (and remapped)");
-    assert!(d.result.is_ok(), "remapped still falls back to B");
-
-    let d2 = complete(&router, "chain").await;
-    assert!(d2.meta.learned_capabilities.is_empty());
-    assert_eq!(
-        hits(&a).await,
-        2,
-        "no learned negative means A is not de-prioritized",
-    );
 }
 
 #[tokio::test]

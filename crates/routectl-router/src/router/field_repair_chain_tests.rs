@@ -551,45 +551,35 @@ mod repair_chain {
         }
     }
 
-    /// Mutation check: read the remapped class instead of the native one in
-    /// `settle_field_moved_on` -> red on `remapped` (an operator routing
-    /// preference would decide what the upstream proved).
     #[tokio::test]
     async fn a_moved_on_refusal_of_a_field_with_no_row_commits_the_earlier_step() {
-        let remap = "[providers.p0.class_overrides]\n400 = \"server-error\"\n";
-        let rows = [("native", String::new()), ("remapped", remap.to_string())];
-        for (name, provider_extra) in rows {
-            let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
-                disabled_then(body, stop_refused)
-            });
-            let provider = format!("{ANTHROPIC_API_TOML}{provider_extra}");
-            let router = chain_router(&[(&provider, &seat)], &wire_checked(ONE_ATTEMPT));
+        let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
+            disabled_then(body, stop_refused)
+        });
+        let router = chain_router(&[(ANTHROPIC_API_TOML, &seat)], &wire_checked(ONE_ATTEMPT));
 
-            let dispatched = router
-                .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
-                .await;
+        let dispatched = router
+            .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
+            .await;
 
-            assert_eq!(seat.calls(), 2, "{name}");
-            let err = dispatched.result.as_ref().expect_err("the refusal");
-            assert_eq!(
-                err.parsed_body().and_then(|p| p.error_message()),
-                Some("stop_sequences: Extra inputs are not permitted"),
-                "{name}: the latest refusal reaches the client",
-            );
-            assert_eq!(
-                verdicts(&dispatched.meta),
-                vec![(
-                    thinking_disabled_key(),
-                    Some(VerdictValue::Shape("thinking.type.adaptive")),
-                )],
-                "{name}",
-            );
-            assert_eq!(
-                succeeded(&dispatched.meta),
-                vec![(THINKING_DISABLED_PATH, true, true)],
-                "{name}",
-            );
-        }
+        assert_eq!(seat.calls(), 2);
+        let err = dispatched.result.as_ref().expect_err("the refusal");
+        assert_eq!(
+            err.parsed_body().and_then(|p| p.error_message()),
+            Some("stop_sequences: Extra inputs are not permitted"),
+            "the latest refusal reaches the client",
+        );
+        assert_eq!(
+            verdicts(&dispatched.meta),
+            vec![(
+                thinking_disabled_key(),
+                Some(VerdictValue::Shape("thinking.type.adaptive")),
+            )],
+        );
+        assert_eq!(
+            succeeded(&dispatched.meta),
+            vec![(THINKING_DISABLED_PATH, true, true)],
+        );
     }
 
     /// Four refused parameters on seat 0, a 503 there, and seat 1 refusing
