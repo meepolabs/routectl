@@ -18,8 +18,9 @@ pub struct RetiredKey {
     pub replacement: &'static str,
 }
 
-/// Every retired key. No row's path may be a prefix of another's: the
-/// broader row already reports the narrower key.
+/// Every retired key. No two rows may name the same concrete key, counting
+/// `*` as any entry and a table as every key under it: that key would be
+/// reported twice.
 pub const RETIRED_KEYS: &[RetiredKey] = &[
     RetiredKey {
         path: &["bedrock"],

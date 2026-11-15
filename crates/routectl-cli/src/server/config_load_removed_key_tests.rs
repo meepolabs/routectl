@@ -94,12 +94,27 @@ fn cold_start_and_config_check_refuse_a_retired_key_with_the_drivers_wording() {
 
 /// A hot reload carrying three retired keys is declined across the real
 /// reload boundary: router A stays published with the config it was built
-/// from. The loader runs on `spawn_blocking` inside the reload, where the
-/// thread-local capture cannot see it, so its one WARN is captured by
-/// driving the same loader synchronously.
-#[tokio::test]
+/// from, and the reload's own loader emits one WARN naming all three keys.
+#[test]
 #[serial_test::serial]
-async fn a_hot_reload_carrying_three_retired_keys_keeps_the_running_router() {
+fn a_hot_reload_carrying_three_retired_keys_keeps_the_running_router() {
+    let ((), events) = routectl_testkit::block_on_with_capture(hot_reload_three_retired_keys());
+    let warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN && e.message == RELOAD_FAILED)
+        .collect();
+    let expected = driver_message(&with_three_retired_keys());
+    assert_eq!(warns.len(), 1, "{events:?}");
+    assert_eq!(warns[0].field("reasons"), Some("3"));
+    assert_eq!(
+        warns[0].field("error"),
+        Some(expected.lines().collect::<Vec<_>>().join("; ").as_str())
+    );
+}
+
+/// Drives the reload; the caller asserts the WARN it logged from the
+/// blocking pool.
+async fn hot_reload_three_retired_keys() {
     // Arrange
     let body = with_three_retired_keys();
     let expected = driver_message(&body);
@@ -127,10 +142,6 @@ async fn a_hot_reload_carrying_three_retired_keys_keeps_the_running_router() {
         &mut never_shutdown(),
     ))
     .await;
-    let mut loaded = None;
-    let events = routectl_testkit::capture_events(|| {
-        loaded = Some(read_parse_validate_config(&path));
-    });
 
     // Assert
     assert_eq!(result.err(), Some(ReloadFailure::ConfigLoadFailed));
@@ -142,20 +153,6 @@ async fn a_hot_reload_carrying_three_retired_keys_keeps_the_running_router() {
     assert!(
         Arc::ptr_eq(&after.config, &config),
         "the previous config must stay installed"
-    );
-    assert!(matches!(
-        loaded.expect("the loader ran"),
-        Err(ReloadFailure::ConfigLoadFailed)
-    ));
-    let warns: Vec<_> = events
-        .iter()
-        .filter(|e| e.level == tracing::Level::WARN && e.message == RELOAD_FAILED)
-        .collect();
-    assert_eq!(warns.len(), 1, "{events:?}");
-    assert_eq!(warns[0].field("reasons"), Some("3"));
-    assert_eq!(
-        warns[0].field("error"),
-        Some(expected.lines().collect::<Vec<_>>().join("; ").as_str())
     );
 
     drop(usage);

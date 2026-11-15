@@ -15,7 +15,11 @@
 //!   assertions that want to grep rendered output rather than inspect
 //!   structured fields).
 //!
-//! All three install the capture subscriber as the THREAD-LOCAL
+//! [`block_on_with_capture`] is the one exception to the rule below: it
+//! owns its runtime and also captures events emitted on that runtime's
+//! `spawn_blocking` pool.
+//!
+//! The three above install the capture subscriber as the THREAD-LOCAL
 //! default (`tracing::subscriber::set_default`) for the duration of
 //! the captured closure/future, then restore the prior default. None
 //! of them capture events emitted on a spawned thread or a spawned
@@ -24,6 +28,7 @@
 //! `current_thread` runtime (the `#[tokio::test]` default) so every
 //! await point in the captured future stays on this thread.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -218,10 +223,7 @@ fn install<S>(subscriber: S, keepalive: S) -> CaptureGuard
 where
     S: tracing::Subscriber + Send + Sync + 'static,
 {
-    CaptureGuard {
-        _keepalive: tracing::Dispatch::new(keepalive),
-        _default: tracing::subscriber::set_default(subscriber),
-    }
+    install_dispatch(tracing::Dispatch::new(subscriber), keepalive)
 }
 
 /// Run `f` with the capture subscriber installed as the thread-local
@@ -278,4 +280,51 @@ pub async fn capture_lines<F: Future>(fut: F) -> (F::Output, Vec<String>) {
     let out_lines = lines.lock().expect("capture mutex poisoned").clone();
     drop(guard);
     (out, out_lines)
+}
+
+thread_local! {
+    static POOL_DEFAULT: RefCell<Option<tracing::dispatcher::DefaultGuard>> =
+        const { RefCell::new(None) };
+}
+
+/// Drive `fut` to completion on a fresh `current_thread` runtime with the
+/// capture subscriber installed on the calling thread AND on every thread
+/// the runtime starts, so events a `spawn_blocking` closure emits are
+/// captured too. Builds its own runtime, so call it from a plain `#[test]`,
+/// never from inside a running runtime.
+pub fn block_on_with_capture<F: Future>(fut: F) -> (F::Output, Vec<CapturedEvent>) {
+    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let dispatch = tracing::Dispatch::new(CaptureSubscriber {
+        captured: Arc::clone(&captured),
+    });
+    let pool_dispatch = dispatch.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .on_thread_start(move || {
+            let guard = tracing::dispatcher::set_default(&pool_dispatch);
+            POOL_DEFAULT.with(|slot| *slot.borrow_mut() = Some(guard));
+        })
+        .on_thread_stop(|| {
+            POOL_DEFAULT.with(|slot| drop(slot.borrow_mut().take()));
+        })
+        .build()
+        .expect("build capture runtime");
+    let guard = install_dispatch(dispatch, CaptureSubscriber::default());
+    let out = runtime.block_on(fut);
+    // Dropping the runtime joins its pool threads, so every pool event is
+    // recorded before the buffer is read.
+    drop(runtime);
+    let events = captured.lock().expect("capture mutex poisoned").clone();
+    drop(guard);
+    (out, events)
+}
+
+fn install_dispatch<S>(dispatch: tracing::Dispatch, keepalive: S) -> CaptureGuard
+where
+    S: tracing::Subscriber + Send + Sync + 'static,
+{
+    CaptureGuard {
+        _keepalive: tracing::Dispatch::new(keepalive),
+        _default: tracing::dispatcher::set_default(&dispatch),
+    }
 }

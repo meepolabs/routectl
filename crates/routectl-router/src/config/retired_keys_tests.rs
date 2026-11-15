@@ -261,28 +261,100 @@ fn a_value_retired_row_hits_only_its_exact_string() {
     assert_eq!(retired_key_message_in(&table, "pools.p.mode"), None);
 }
 
-/// No row's path is a prefix of another's, counting `*` as matching any
-/// segment: the broader row would report the key, and the narrower row
-/// would report it a second time.
-#[test]
-fn no_row_path_is_a_prefix_of_another() {
-    for (i, a) in RETIRED_KEYS.iter().enumerate() {
-        for (j, b) in RETIRED_KEYS.iter().enumerate() {
-            if i == j || a.path.len() > b.path.len() {
-                continue;
-            }
-            let is_prefix = a
+/// Every pair of rows that can name the same concrete key: one path matches
+/// the other's leading segments (equal length or a prefix), counting `*` as
+/// matching any segment.
+fn overlapping_rows(table: &[RetiredKey]) -> Vec<(String, String)> {
+    let mut overlaps = Vec::new();
+    for (i, a) in table.iter().enumerate() {
+        for b in &table[i + 1..] {
+            let compatible = a
                 .path
                 .iter()
                 .zip(b.path)
                 .all(|(x, y)| x == y || *x == ANY_ENTRY || *y == ANY_ENTRY);
-            assert!(
-                !is_prefix,
-                "`{}` is a prefix of `{}`",
-                a.path.join("."),
-                b.path.join(".")
-            );
+            if compatible {
+                overlaps.push((a.path.join("."), b.path.join(".")));
+            }
         }
+    }
+    overlaps
+}
+
+/// No two rows can name the same key: the second would report it again,
+/// and `retired_key_message` would depend on row order.
+#[test]
+fn no_two_rows_can_name_the_same_key() {
+    assert_eq!(overlapping_rows(RETIRED_KEYS), Vec::new());
+}
+
+#[test]
+fn overlapping_rows_flags_every_way_two_paths_can_name_one_key() {
+    let row = |path: &'static [&'static str]| RetiredKey {
+        path,
+        refused_value: None,
+        replacement: "r",
+    };
+    let cases: [(&str, [RetiredKey; 2], bool); 7] = [
+        (
+            "identical paths",
+            [
+                row(&["providers", "fast", "x"]),
+                row(&["providers", "fast", "x"]),
+            ],
+            true,
+        ),
+        (
+            "equal length, wildcard against literal",
+            [
+                row(&["providers", ANY_ENTRY, "allowed_betas"]),
+                row(&["providers", "fast", "allowed_betas"]),
+            ],
+            true,
+        ),
+        (
+            "equal length, literal against wildcard",
+            [
+                row(&["providers", "fast", "allowed_betas"]),
+                row(&["providers", ANY_ENTRY, "allowed_betas"]),
+            ],
+            true,
+        ),
+        (
+            "literal prefix",
+            [row(&["bedrock"]), row(&["bedrock", "allowed_betas"])],
+            true,
+        ),
+        (
+            "prefix through a wildcard",
+            [
+                row(&["providers", ANY_ENTRY]),
+                row(&["providers", "fast", "x"]),
+            ],
+            true,
+        ),
+        (
+            "longer row first",
+            [
+                row(&["providers", "fast", "x"]),
+                row(&["providers", ANY_ENTRY]),
+            ],
+            true,
+        ),
+        (
+            "same shape, different leaf",
+            [
+                row(&["providers", ANY_ENTRY, "allowed_betas"]),
+                row(&["providers", ANY_ENTRY, "unsupported_features"]),
+            ],
+            false,
+        ),
+    ];
+
+    for (name, table, overlaps) in cases {
+        let found = overlapping_rows(&table);
+
+        assert_eq!(found.len(), usize::from(overlaps), "{name}: {found:?}");
     }
 }
 
