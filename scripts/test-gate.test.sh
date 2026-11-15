@@ -4,10 +4,13 @@
 # check informational. Runs no cargo and no cargo-public-api.
 #
 # Pins:
-#   - `test-gate.sh pre-push` runs the wire-watch self-test, then the
-#     workspace cargo test with HARNESS_ARGS; a failing self-test ends the
-#     gate with its exit code before cargo starts (checked on a scratch copy
-#     of the registry beside stub commands);
+#   - `test-gate.sh pre-push` runs the wire-watch self-test, then clippy on
+#     each reduced-feature lane, then the workspace cargo test with
+#     --no-fail-fast and HARNESS_ARGS; a failing step ends the gate with its
+#     exit code before the next starts, and a failing cargo test is the
+#     gate's exit code (checked on a scratch copy of the registry beside stub
+#     commands); its clippy lanes are exactly the reduced-feature `args:`
+#     rows of CI's debug-lanes matrix, in order;
 #   - `test-gate.sh --print public-api` is exactly the public-api.sh
 #     --check over every crate, and the subcommand refuses extra arguments;
 #   - public-api-report.sh always exits 0 and classifies a stub check's
@@ -61,11 +64,14 @@ else
 fi
 
 WIRE_WATCH_STEP="bash scripts/wire_watch/wire_watch.test.sh"
-PRE_PUSH_CARGO="cargo test --workspace --profile test-release -- --skip egress_replay_all --skip ingress_replay_all"
+PRE_PUSH_CARGO="cargo test --workspace --profile test-release --no-fail-fast -- --skip egress_replay_all --skip ingress_replay_all"
+# Welded to CI's matrix under "wiring" below.
+PRE_PUSH_CLIPPY="$(bash "$REGISTRY" --print pre-push | grep '^cargo clippy ')"
+PRE_PUSH_ALL="$(printf '%s\n' "$WIRE_WATCH_STEP" "$PRE_PUSH_CLIPPY" "$PRE_PUSH_CARGO --exact x")"
 
 got="$(bash "$REGISTRY" --print pre-push --exact x 2>&1)"
-if [[ "$got" == "$(printf '%s\n' "$WIRE_WATCH_STEP" "$PRE_PUSH_CARGO --exact x")" ]]; then
-    pass "--print pre-push is the wire-watch self-test, then cargo test with the harness args"
+if [[ -n "$PRE_PUSH_CLIPPY" && "$got" == "$PRE_PUSH_ALL" ]]; then
+    pass "--print pre-push is the wire-watch self-test, the clippy lanes, then cargo test with the harness args"
 else
     fail "--print pre-push printed '$got'"
 fi
@@ -80,22 +86,25 @@ cp "$REGISTRY" "$PRE_PUSH_ROOT/scripts/test-gate.sh"
 # shellcheck disable=SC2016 # the stub expands these when it runs
 printf '#!/bin/sh\necho "wire-watch $*" >>"%s"\nexit "${WIRE_WATCH_RC:-0}"\n' "$PRE_PUSH_LOG" \
     >"$PRE_PUSH_ROOT/scripts/wire_watch/wire_watch.test.sh"
-printf '#!/bin/sh\necho "cargo $*" >>"%s"\n' "$PRE_PUSH_LOG" >"$PRE_PUSH_ROOT/bin/cargo"
+# shellcheck disable=SC2016 # the stub expands these when it runs
+printf '#!/bin/sh\necho "cargo $*" >>"%s"\n[ "$1" = clippy ] && exit "${CLIPPY_RC:-0}"\nexit "${TEST_RC:-0}"\n' \
+    "$PRE_PUSH_LOG" >"$PRE_PUSH_ROOT/bin/cargo"
 chmod +x "$PRE_PUSH_ROOT/bin/cargo"
 
-# Runs the scratch pre-push gate with the wire-watch stub exiting $1 and
-# harness args "--exact x". Sets RC and RAN (the invocation log).
+# Runs the scratch pre-push gate with the wire-watch stub exiting $1, cargo
+# clippy exiting ${2:-0}, cargo test exiting ${3:-0}, and harness args
+# "--exact x". Sets RC and RAN (the invocation log).
 run_pre_push() {
     rm -f "$PRE_PUSH_LOG"
-    WIRE_WATCH_RC="$1" PATH="$PRE_PUSH_ROOT/bin:$PATH" \
+    WIRE_WATCH_RC="$1" CLIPPY_RC="${2:-0}" TEST_RC="${3:-0}" PATH="$PRE_PUSH_ROOT/bin:$PATH" \
         bash "$PRE_PUSH_ROOT/scripts/test-gate.sh" pre-push --exact x >/dev/null 2>&1
     RC=$?
     RAN="$(cat "$PRE_PUSH_LOG" 2>/dev/null)"
 }
 
 run_pre_push 0
-if [[ "$RC" -eq 0 && "$RAN" == "$(printf '%s\n' "wire-watch " "$PRE_PUSH_CARGO --exact x")" ]]; then
-    pass "pre-push runs the wire-watch self-test, then cargo test with the harness args"
+if [[ "$RC" -eq 0 && "$RAN" == "$(sed '1s/.*/wire-watch /' <<<"$PRE_PUSH_ALL")" ]]; then
+    pass "pre-push runs the wire-watch self-test, the clippy lanes, then cargo test with the harness args"
 else
     fail "pre-push with a passing self-test exited $RC and ran '$RAN'"
 fi
@@ -105,6 +114,20 @@ if [[ "$RC" -eq 3 && "$RAN" == "wire-watch " ]]; then
     pass "a failing wire-watch self-test ends pre-push with its exit code before cargo"
 else
     fail "pre-push with a self-test exiting 3 exited $RC and ran '$RAN'"
+fi
+
+run_pre_push 0 4
+if [[ "$RC" -eq 4 && "$RAN" == "$(printf '%s\n' "wire-watch " "$(head -n 1 <<<"$PRE_PUSH_CLIPPY")")" ]]; then
+    pass "a failing clippy lane ends pre-push with its exit code before the next step"
+else
+    fail "pre-push with clippy exiting 4 exited $RC and ran '$RAN'"
+fi
+
+run_pre_push 0 0 101
+if [[ "$RC" -eq 101 && "$(tail -n 1 <<<"$RAN")" == "$PRE_PUSH_CARGO --exact x" ]]; then
+    pass "a failing cargo test is the exit code of pre-push"
+else
+    fail "pre-push with cargo test exiting 101 exited $RC and ran '$RAN'"
 fi
 
 # --- public-api report wrapper ---------------------------------------------
@@ -399,6 +422,16 @@ precommit_has_no_public_api_hook() {
     ! grep -qE "^[[:space:]]*entry:.*($PUBLIC_API_RUN_RE)" "$1"
 }
 
+# Holds when the pre-push clippy lanes are exactly the `args:` rows of the
+# debug-lanes matrix in workflow $1 carrying --no-default-features, in
+# order; no such row fails closed.
+gate_lints_ci_reduced_lanes() {
+    local lanes
+    lanes="$(ci_job_block "$1" debug-lanes | sed -nE \
+        's/^            args: (.*--no-default-features.*)$/cargo clippy \1 --all-targets -- -D warnings/p')"
+    [[ -n "$lanes" && "$lanes" == "$PRE_PUSH_CLIPPY" ]]
+}
+
 # Holds when the scripts/ dir under root $1 exists and lacks the retired leg.
 retired_leg_absent() {
     [[ -d "$1/scripts" && ! -e "$1/scripts/$RETIRED_LEG.sh" ]]
@@ -473,6 +506,12 @@ assert_wiring "no pre-commit hook runs the public-API check" \
     '/^        entry: bash scripts\/test-gate\.test\.sh$/d' \
     's#^        entry: bash scripts/test-gate\.sh pre-push$#        entry: bash scripts/test-gate.sh public-api#' \
     's#^        entry: bash scripts/test-gate\.sh pre-push$#        entry: bash scripts/public-api.sh --check all#'
+
+assert_wiring "pre-push lints exactly the reduced-feature lanes CI's debug-lanes job lints" \
+    gate_lints_ci_reduced_lanes "$CI_WORKFLOW" \
+    's/^            args: -p routectl-auth --no-default-features$/&\n          - name: x\n            args: -p routectl-auth --no-default-features --features x/' \
+    '/^            args: -p routectl-providers --no-default-features --features gemini$/d' \
+    's/^  debug-lanes:$/  debug-lane:/'
 
 if retired_leg_absent "$REPO_ROOT"; then
     pass "wiring: the retired pre-push leg script is gone"

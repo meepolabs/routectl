@@ -16,12 +16,17 @@
 #   test-gate.sh [--print] <subcommand> [ARGS...]
 #   test-gate.sh pre-push [HARNESS_ARGS...]
 #       bash scripts/wire_watch/wire_watch.test.sh
-#       cargo test --workspace --profile test-release
+#       cargo clippy <LANE> --all-targets -- -D warnings   (each REDUCED_LANES)
+#       cargo test --workspace --profile test-release --no-fail-fast
 #         -- --skip egress_replay_all --skip ingress_replay_all
 #       The wire-watch self-test runs first: it is stdlib python with no
 #       build (well under a minute), and it holds the welds to the daemon's
 #       wire schema versions, so a schema bump without its weld update
-#       fails here before the workspace build starts. HARNESS_ARGS reach
+#       fails here before the workspace build starts. The clippy lanes are
+#       the reduced-feature lanes CI's debug-lanes job lints (CI also tests
+#       them; here they are linted only), run before the long workspace test
+#       because they fail sooner. --no-fail-fast runs every test binary and
+#       still exits non-zero if any failed. HARNESS_ARGS reach
 #       only the cargo test. The two skipped names are kept verbatim: those
 #       tests are report-only drivers over the local captured corpus and
 #       never gate.
@@ -65,6 +70,19 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # subcommand narrowing that gate extends rather than restates.
 WORKSPACE_ALL_FEATURES=(cargo test --workspace --all-features --profile test-release
     --offline --no-fail-fast)
+
+# The `args:` rows of ci.yml's debug-lanes matrix that carry
+# --no-default-features, in matrix order; scripts/test-gate.test.sh fails
+# when the two lists differ.
+REDUCED_LANES=(
+    "-p routectl-router --no-default-features"
+    "-p routectl-providers --no-default-features --features anthropic-api"
+    "-p routectl-providers --no-default-features --features openai-compat"
+    "-p routectl-providers --no-default-features --features gemini"
+    "-p routectl-providers --no-default-features --features openai-responses"
+    "-p routectl-providers --no-default-features --features bedrock"
+    "-p routectl-auth --no-default-features"
+)
 
 usage() {
     sed -n '/^# Usage:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -110,7 +128,11 @@ shift
 case "$subcommand" in
     pre-push)
         step bash scripts/wire_watch/wire_watch.test.sh
-        run cargo test --workspace --profile test-release \
+        for lane in "${REDUCED_LANES[@]}"; do
+            read -ra lane_args <<<"$lane"
+            step cargo clippy "${lane_args[@]}" --all-targets -- -D warnings
+        done
+        run cargo test --workspace --profile test-release --no-fail-fast \
             -- --skip egress_replay_all --skip ingress_replay_all "$@"
         ;;
     workspace-all-features)

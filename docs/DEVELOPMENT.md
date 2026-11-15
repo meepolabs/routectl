@@ -22,8 +22,8 @@ crates with feature gates also get reduced-feature legs. The exact gate
 commands live in [`scripts/test-gate.sh`](../scripts/test-gate.sh); run it
 with no
 arguments to list them (`bash scripts/test-gate.sh pre-push` reproduces
-the pre-push test leg: the wire-watch self-test, then the workspace
-`cargo test`; `bash scripts/test-gate.sh public-api` runs the
+the pre-push test leg: the wire-watch self-test, clippy on the
+reduced-feature lanes CI lints, then the workspace `cargo test`; `bash scripts/test-gate.sh public-api` runs the
 informational public-API baseline check on demand, which needs the tooling
 described under "Commit gate").
 
