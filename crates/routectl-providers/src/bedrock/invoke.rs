@@ -120,14 +120,12 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     );
     declare_anthropic_version(req);
 
-    // Merge the configured beta flags ahead of the client's, keeping only
-    // the first occurrence of each flag. Runs even with no configured
-    // flags, so a client list carrying a repeat is collapsed too. A flag
-    // in both lists keeps its configured position, and the withhold below
-    // spares every floor flag, so it is never removed.
-    let merged = merge_floor_and_client_betas(&cfg.anthropic_beta, obj.get("anthropic_beta"));
-    if !merged.is_empty() {
-        obj.insert("anthropic_beta".into(), Value::Array(merged));
+    // Keep only the first occurrence of each flag. The router has already
+    // unioned the operator's `header_extras` pins into the client list, and
+    // the withhold below spares every pinned flag, so it is never removed.
+    let deduped = dedup_betas(obj.get("anthropic_beta"));
+    if !deduped.is_empty() {
+        obj.insert("anthropic_beta".into(), Value::Array(deduped));
     }
 
     // Drop the request's withheld client flags (the router fills that set
@@ -356,7 +354,7 @@ fn withhold_client_betas(
         &cfg.id,
         obj,
         &req.routectl_internal.withheld_betas,
-        &operator_floor(cfg, req),
+        operator_floor(req),
     ) {
         crate::translation_drop_metrics::record_translation_drop(
             LANE,
@@ -746,22 +744,14 @@ fn is_cache_control_eligible_block_type(block_type: &str) -> bool {
     )
 }
 
-/// The configured `floor` flags, then each client flag from `client` (the
-/// body's `anthropic_beta` array, if any) not already present, so every flag
-/// appears once in floor-then-client order. Non-string client entries are
-/// kept verbatim so the upstream reports them rather than routectl dropping
-/// them silently.
-fn merge_floor_and_client_betas(floor: &[String], client: Option<&Value>) -> Vec<Value> {
-    let client = client
+/// Each entry of `betas` (the body's `anthropic_beta` array, if any) at its
+/// first occurrence, in order. Non-string entries are kept verbatim so the
+/// upstream reports them rather than routectl dropping them silently.
+fn dedup_betas(betas: Option<&Value>) -> Vec<Value> {
+    let betas = betas
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice);
-    crate::beta_withhold::merge_unique(
-        floor
-            .iter()
-            .map(|flag| Value::String(flag.clone()))
-            .chain(client.iter().cloned()),
-        Value::as_str,
-    )
+    crate::beta_withhold::merge_unique(betas.iter().cloned(), Value::as_str)
 }
 
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.
@@ -777,7 +767,7 @@ pub fn normalize_response(provider_id: &str, raw: Value) -> Result<ChatResponse>
 #[path = "invoke_orphan_tool_choice_tests.rs"]
 mod orphan_tool_choice_tests;
 
-// The floor and client beta lists merge with each flag sent once.
+// The body's beta list ships with each flag once.
 #[cfg(test)]
 #[path = "invoke_beta_merge_tests.rs"]
 mod beta_merge_tests;
@@ -809,7 +799,6 @@ mod tests {
             creds: BedrockCreds::BearerKey { key: "test".into() },
             user_agent: None,
             header_extras: Vec::new(),
-            anthropic_beta: vec!["context-1m-2025-08-07".into()],
             // `top_p` is a routectl-managed key the merge drops; `top_k`
             // is a long-tail Anthropic-only knob it forwards.
             additional_model_request_fields: Some(json!({"top_k": 40})),
@@ -840,7 +829,8 @@ mod tests {
     #[test]
     fn body_includes_bedrock_anthropic_version_and_beta_flags() {
         let cfg = fake_cfg();
-        let req = user_req();
+        let mut req = user_req();
+        req.anthropic_beta = vec!["context-1m-2025-08-07".into()];
         let body = normalize_request(&cfg, &req).unwrap();
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
         assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]),);
@@ -1413,10 +1403,6 @@ mod tests {
     fn structured_outputs_beta_survives_a_withheld_entry_naming_it() {
         let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
         let cfg = fake_cfg();
-        assert!(
-            !cfg.anthropic_beta.iter().any(|b| b == flag),
-            "precondition: the operator floor must not supply the flag"
-        );
 
         let mut req = user_req();
         req.anthropic_beta = vec![flag.into()];
@@ -1445,7 +1431,7 @@ mod tests {
     }
 
     /// Client flags that no operator list or withheld set names reach the
-    /// Invoke body verbatim and in order, after the operator floor.
+    /// Invoke body verbatim and in order.
     #[test]
     fn client_betas_outside_every_list_reach_the_invoke_body_verbatim() {
         // Arrange
@@ -1464,7 +1450,6 @@ mod tests {
         assert_eq!(
             body["anthropic_beta"],
             json!([
-                "context-1m-2025-08-07",
                 "oauth-2025-04-20",
                 "made-up-flag",
                 "interleaved-thinking-2025-05-14"

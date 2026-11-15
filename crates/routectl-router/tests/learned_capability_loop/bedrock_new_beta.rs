@@ -125,11 +125,26 @@ const fn shape_toml(shape: BedrockApiShape) -> &'static str {
     }
 }
 
-/// What the operator wrote beyond the bare lane.
+/// What the operator wrote beyond the bare lane: `anthropic-beta` pins in
+/// the provider's and the model's `header_extras`, and `unsupported` beta
+/// overrides.
 #[derive(Default)]
 struct Operator<'a> {
-    floor: &'a [&'a str],
+    provider_pins: &'a [&'a str],
+    model_pins: &'a [&'a str],
     unsupported: &'a [&'a str],
+}
+
+/// A `header_extras` table pinning `pins` under `anthropic-beta`, or nothing
+/// when there are none.
+fn pin_table(table: &str, pins: &[&str]) -> String {
+    if pins.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n[{table}.header_extras]\n\"anthropic-beta\" = \"{}\"\n",
+        pins.join(",")
+    )
 }
 
 /// A current-version config with one native Bedrock lane and no `[bedrock]`
@@ -150,12 +165,14 @@ fn lane_config(shape: BedrockApiShape, operator: &Operator<'_>) -> Config {
          region = \"{REGION}\"\n\
          api_shape = \"{shape}\"\n\
          creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\
-         anthropic_beta = [{floor}]\n\n\
+         {provider_pins}\n\
          [models.{NICKNAME}]\n\
          provider = \"{PROVIDER}\"\n\
-         upstream = \"{MODEL_ID}\"\n",
+         upstream = \"{MODEL_ID}\"\n\
+         {model_pins}",
         shape = shape_toml(shape),
-        floor = quoted(operator.floor),
+        provider_pins = pin_table(&format!("providers.{PROVIDER}"), operator.provider_pins),
+        model_pins = pin_table(&format!("models.{NICKNAME}"), operator.model_pins),
     );
     if !operator.unsupported.is_empty() {
         let keys: Vec<String> = operator
@@ -210,7 +227,6 @@ impl Lane {
             creds: creds.clone(),
             user_agent: None,
             header_extras: Vec::new(),
-            anthropic_beta: operator.floor.iter().map(|f| (*f).to_string()).collect(),
             additional_model_request_fields: None,
         };
         let resolved = auth::resolve(&creds, REGION).await.expect("resolve");
@@ -218,16 +234,20 @@ impl Lane {
             .expect("canonical region")
             .with_runtime_origin_for_tests(&server.uri());
 
-        let mut router = Router::new(Arc::new(lane_config(shape, operator)));
+        let config = lane_config(shape, operator);
+        let model_header_extras = config
+            .models
+            .get(NICKNAME)
+            .map(|entry| entry.header_extras.clone())
+            .unwrap_or_default();
+        let mut router = Router::new(Arc::new(config));
         let mut models = BTreeMap::new();
         models.insert(
             NICKNAME.to_string(),
-            Arc::new(ResolvedModel::new(
-                NICKNAME,
-                PROVIDER,
-                Arc::new(provider),
-                MODEL_ID,
-            )),
+            Arc::new(
+                ResolvedModel::new(NICKNAME, PROVIDER, Arc::new(provider), MODEL_ID)
+                    .with_header_extras(model_header_extras),
+            ),
         );
         router.install_resolved_models(models);
         Self {
@@ -394,7 +414,7 @@ async fn operator_unsupported_override_omits_the_flag_from_the_first_body() {
 async fn flag_in_floor_and_client_ships_once_on_invoke() {
     // Arrange
     let operator = Operator {
-        floor: &[ACCEPTED_BETA],
+        provider_pins: &[ACCEPTED_BETA],
         ..Operator::default()
     };
     let lane = Lane::start(BedrockApiShape::Invoke, &operator).await;
@@ -411,4 +431,77 @@ async fn flag_in_floor_and_client_ships_once_on_invoke() {
             status: 200
         }],
     );
+}
+
+/// A flag the mock upstream accepts and an operator override withholds.
+const OVERRIDDEN_BETA: &str = "zz-overridden-2099-01-01";
+
+#[tokio::test]
+async fn a_header_extras_pinned_beta_ships_even_where_the_router_withholds_it() {
+    struct Row {
+        name: &'static str,
+        provider_pins: &'static [&'static str],
+        model_pins: &'static [&'static str],
+        client: &'static [&'static str],
+        want: &'static [&'static str],
+    }
+    let rows = [
+        Row {
+            name: "unpinned (control): the override withholds the client's flag",
+            provider_pins: &[],
+            model_pins: &[],
+            client: &[ACCEPTED_BETA, OVERRIDDEN_BETA],
+            want: &[ACCEPTED_BETA],
+        },
+        Row {
+            name: "pinned in the provider's header_extras, client also sends it",
+            provider_pins: &[OVERRIDDEN_BETA],
+            model_pins: &[],
+            client: &[ACCEPTED_BETA, OVERRIDDEN_BETA],
+            want: &[ACCEPTED_BETA, OVERRIDDEN_BETA],
+        },
+        Row {
+            name: "pinned in the model's header_extras, client also sends it",
+            provider_pins: &[],
+            model_pins: &[OVERRIDDEN_BETA],
+            client: &[ACCEPTED_BETA, OVERRIDDEN_BETA],
+            want: &[ACCEPTED_BETA, OVERRIDDEN_BETA],
+        },
+        Row {
+            name: "pinned in the provider's header_extras, client omits it",
+            provider_pins: &[OVERRIDDEN_BETA],
+            model_pins: &[],
+            client: &[ACCEPTED_BETA],
+            want: &[ACCEPTED_BETA, OVERRIDDEN_BETA],
+        },
+    ];
+    let mut mismatches = Vec::new();
+    for shape in SHAPES {
+        for row in &rows {
+            // Arrange
+            let operator = Operator {
+                provider_pins: row.provider_pins,
+                model_pins: row.model_pins,
+                unsupported: &[OVERRIDDEN_BETA],
+            };
+            let lane = Lane::start(shape, &operator).await;
+
+            // Act
+            let dispatched = lane.send(row.client).await;
+
+            // Assert (collected, so one run reports every shape and row)
+            let want = vec![WireCall {
+                betas: betas(row.want),
+                status: 200,
+            }];
+            let got = lane.calls();
+            if dispatched.result.is_err() || got != want {
+                mismatches.push(format!(
+                    "{shape:?} / {}: got {got:?}, want {want:?}",
+                    row.name
+                ));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }

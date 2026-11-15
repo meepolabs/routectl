@@ -109,7 +109,7 @@ fn router_with_real_seed(extra: &str) -> Router {
          kind = \"bedrock\"\n\
          region = \"us-east-1\"\n\
          creds = {{ kind = \"default-chain\" }}\n\
-         anthropic_beta = [\"fx-pinned\"]\n\
+         header_extras = {{ \"anthropic-beta\" = \"fx-pinned\" }}\n\
          [providers.oc]\n\
          kind = \"openai-compat\"\n\
          base_url = \"https://example.test/v1\"\n\
@@ -1020,7 +1020,11 @@ async fn without_an_override_a_mixed_case_flag_is_forwarded_as_sent() {
     let seen = provider.seen.lock();
     assert_eq!(seen.len(), 1);
     assert!(seen[0].routectl_internal.withheld_betas.is_empty());
-    assert_eq!(seen[0].anthropic_beta, vec![MIXED_CASE_FLAG.to_string()]);
+    // The fixture's `header_extras` pin is unioned after the client's flag.
+    assert_eq!(
+        seen[0].anthropic_beta,
+        vec![MIXED_CASE_FLAG.to_string(), "fx-pinned".to_string()]
+    );
 }
 
 // --- the withheld set as the precedence seam decides it ---
@@ -1032,7 +1036,7 @@ const CONVERSE_ENTRY: &str = "[providers.cv]\n\
                               region = \"us-east-1\"\n\
                               creds = { kind = \"default-chain\" }\n\
                               api_shape = \"converse\"\n\
-                              anthropic_beta = [\"fx-converse-floor\"]\n";
+                              header_extras = { \"anthropic-beta\" = \"fx-converse-floor\" }\n";
 const CONVERSE_FLOOR: &str = "fx-converse-floor";
 const NON_CLAUDE: &str = "us.amazon.nova-2-lite-v1:0";
 

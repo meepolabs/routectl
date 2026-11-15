@@ -66,7 +66,6 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
             creds,
             user_agent: Some("routectl-live-test/0.4".into()),
             header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
         };
         let provider: ArcAlias<dyn routectl_core::Provider> = ArcAlias::new(

@@ -127,7 +127,7 @@ kind   = "bedrock"
 region = "us-west-2"
 creds  = { kind = "default-chain" }
 # api_shape = "invoke"            # default; use "converse" for vendor-neutral.
-# anthropic_beta = ["context-1m-2025-08-07"]   # account-scoped beta floor.
+# header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }   # beta floor, never withheld.
 
 # Gemini via the Cloud Code ("antigravity") surface. `routectl login
 # antigravity` mints the OAuth identity and OFFERS this entry, so the

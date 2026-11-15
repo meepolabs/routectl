@@ -463,9 +463,8 @@ fn bedrock_invoke_cfg() -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        // No configured betas or extra fields, so everything this test
+        // No configured extra fields, so everything this test
         // asserts comes from the translation under test.
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     }
 }

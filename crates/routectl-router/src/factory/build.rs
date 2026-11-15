@@ -570,7 +570,6 @@ async fn build_provider_inner(
             user_agent,
             header_extras,
             payload_extras: _,
-            anthropic_beta,
             cache_capability: _,
             reduction_enabled: _,
             runtime: _,
@@ -603,7 +602,6 @@ async fn build_provider_inner(
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
-                anthropic_beta: anthropic_beta.clone(),
                 additional_model_request_fields: overrides.additional_model_request_fields,
             };
             Ok(Arc::new(BedrockProvider::new(cfg, resolved)?))

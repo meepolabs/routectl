@@ -754,31 +754,28 @@ pub fn operator_pins_capability(
     }
 }
 
-/// Whether the operator floor pins the beta `flag`: the provider entry's
-/// `anthropic_beta` floor, or a provider or model `header_extras`
-/// `anthropic-beta` contribution. The floor walk under
+/// Whether the operator floor pins the beta `flag`: a provider or model
+/// `header_extras` `anthropic-beta` contribution. The floor walk under
 /// [`operator_pins_capability`]; a caller holding a capability key asks
 /// that instead. Asking with the flag itself is needed only for a flag
 /// outside the beta capability key grammar: the floor can still pin it,
-/// because floor entries are not checked against that grammar, but no
-/// capability key names it.
+/// because `header_extras` values are not checked against that grammar, but
+/// no capability key names it.
 pub fn operator_pins_flag(
     config: &Config,
     provider_entry: &str,
     model_header_extras: &BTreeMap<String, String>,
     flag: &str,
 ) -> bool {
-    let entry = config.providers.get(provider_entry);
-    entry
-        .map_or(&[][..], ProviderEntry::anthropic_beta_floor)
-        .iter()
-        .any(|pinned| pinned == flag)
-        || crate::beta_capability::operator_betas(
-            entry.map(ProviderEntry::header_extras),
-            model_header_extras,
-        )
-        .iter()
-        .any(|pinned| pinned == flag)
+    crate::beta_capability::operator_betas(
+        config
+            .providers
+            .get(provider_entry)
+            .map(ProviderEntry::header_extras),
+        model_header_extras,
+    )
+    .iter()
+    .any(|pinned| pinned == flag)
 }
 
 #[cfg(test)]

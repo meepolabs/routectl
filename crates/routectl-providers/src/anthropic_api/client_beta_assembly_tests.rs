@@ -113,7 +113,6 @@ fn bedrock_cfg(api_shape: BedrockApiShape) -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: owned(&[CONFIG_PIN]),
         additional_model_request_fields: None,
     }
 }
@@ -256,12 +255,12 @@ fn each_carrier_deposits_the_floor_and_body_implied_sets_it_ships() {
         ),
         (
             Lane::Invoke,
-            owned(&[CONFIG_PIN, OPERATOR_PIN]),
+            owned(&[OPERATOR_PIN]),
             owned(&[STRUCTURED_OUTPUTS_BETA]),
         ),
         (
             Lane::Converse,
-            owned(&[CONFIG_PIN, OPERATOR_PIN]),
+            owned(&[OPERATOR_PIN]),
             owned(&[DISPLAY_UPDATES_BETA, STRUCTURED_OUTPUTS_BETA]),
         ),
     ];

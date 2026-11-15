@@ -114,7 +114,6 @@ fn built_body(messages: Vec<Message>) -> Value {
         creds: crate::bedrock::BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     };
     let req = routectl_core::ChatRequest {

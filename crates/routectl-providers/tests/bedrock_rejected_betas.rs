@@ -1,7 +1,8 @@
 //! Bedrock egress withholds the client-lifted `anthropic_beta` flags the
 //! request's `routectl_internal.withheld_betas` names, on both carriers, while
-//! the operator's per-provider `anthropic_beta` floor still forwards them and
-//! every other client flag reaches the wire verbatim.
+//! the operator floor (`routectl_internal.operator_betas`, the flags pinned
+//! through `header_extras["anthropic-beta"]`) still forwards them and every
+//! other client flag reaches the wire verbatim.
 
 #![cfg(feature = "bedrock")]
 
@@ -41,15 +42,11 @@ fn invoke_drop_count() -> u64 {
     drop_count("bedrock-invoke")
 }
 
-fn provider(api_shape: BedrockApiShape, anthropic_beta: Vec<String>) -> BedrockProvider {
-    provider_for("anthropic.claude-opus-4-6-v1", api_shape, anthropic_beta)
+fn provider(api_shape: BedrockApiShape) -> BedrockProvider {
+    provider_for("anthropic.claude-opus-4-6-v1", api_shape)
 }
 
-fn provider_for(
-    model_id: &str,
-    api_shape: BedrockApiShape,
-    anthropic_beta: Vec<String>,
-) -> BedrockProvider {
+fn provider_for(model_id: &str, api_shape: BedrockApiShape) -> BedrockProvider {
     let cfg = BedrockConfig {
         id: "bedrock-rejected-betas-test".into(),
         region: "us-east-1".into(),
@@ -60,7 +57,6 @@ fn provider_for(
         },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta,
         additional_model_request_fields: None,
     };
     let resolved = ResolvedCreds::Bearer {
@@ -93,9 +89,19 @@ fn request_with_client_betas() -> ChatRequest {
 
 /// The `anthropic_beta` array exactly as it rides on the wire for this carrier.
 fn wire_betas(provider: &BedrockProvider, api_shape: BedrockApiShape) -> Value {
-    let body = provider
-        .normalize_request(&request_with_client_betas())
-        .expect("bedrock normalize");
+    wire_betas_with_pins(provider, api_shape, &[])
+}
+
+/// [`wire_betas`] with `pins` as the request's operator floor, the way the
+/// router fills it from `header_extras["anthropic-beta"]`.
+fn wire_betas_with_pins(
+    provider: &BedrockProvider,
+    api_shape: BedrockApiShape,
+    pins: &[&str],
+) -> Value {
+    let mut req = request_with_client_betas();
+    req.routectl_internal.operator_betas = pins.iter().map(|b| (*b).to_string()).collect();
+    let body = provider.normalize_request(&req).expect("bedrock normalize");
     match api_shape {
         BedrockApiShape::Invoke => body["anthropic_beta"].clone(),
         BedrockApiShape::Converse => body["additionalModelRequestFields"]["anthropic_beta"].clone(),
@@ -105,7 +111,7 @@ fn wire_betas(provider: &BedrockProvider, api_shape: BedrockApiShape) -> Value {
 
 fn assert_withheld_betas_are_dropped_and_the_rest_kept(api_shape: BedrockApiShape) {
     // Arrange
-    let provider = provider(api_shape, Vec::new());
+    let provider = provider(api_shape);
 
     // Act
     let betas = wire_betas(&provider, api_shape);
@@ -121,14 +127,13 @@ fn assert_withheld_betas_are_dropped_and_the_rest_kept(api_shape: BedrockApiShap
 fn assert_operator_floor_forwards_a_rejected_beta(api_shape: BedrockApiShape) {
     // Arrange
     let floor = WITHHELD_BETAS[1];
-    let provider = provider(api_shape, vec![floor.into()]);
+    let provider = provider(api_shape);
 
     // Act
-    let betas = wire_betas(&provider, api_shape);
+    let betas = wire_betas_with_pins(&provider, api_shape, &[floor]);
 
     // Assert: the floor flag rides; the other two withheld client flags are
-    // still withheld. Membership rather than exact order: the floor merge
-    // places a floor flag the client also sent in its floor position.
+    // still withheld.
     let shipped: Vec<&str> = betas
         .as_array()
         .expect("anthropic_beta array on the wire")
@@ -173,7 +178,7 @@ fn converse_operator_floor_forwards_a_bedrock_rejected_beta() {
 #[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 fn a_request_carrying_only_rejected_client_betas_ships_no_beta_field() {
     // Arrange
-    let provider = provider(BedrockApiShape::Invoke, Vec::new());
+    let provider = provider(BedrockApiShape::Invoke);
     let req = ChatRequest {
         anthropic_beta: WITHHELD_BETAS.iter().map(|b| (*b).to_string()).collect(),
         ..request_with_client_betas()
@@ -193,7 +198,7 @@ fn a_request_carrying_only_rejected_client_betas_ships_no_beta_field() {
 #[serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
 fn bedrock_rejected_beta_withhold_bumps_the_drop_counter_once() {
     // Arrange: three withheld flags in one request are one drop event.
-    let provider = provider(BedrockApiShape::Converse, Vec::new());
+    let provider = provider(BedrockApiShape::Converse);
     let before = converse_drop_count();
 
     // Act
@@ -211,7 +216,7 @@ fn bedrock_rejected_beta_withhold_bumps_the_drop_counter_once() {
 fn invoke_rejected_beta_withhold_bumps_the_drop_counter_once() {
     // Arrange: three withheld flags in one request are one drop event, on the
     // Invoke lane and not on Converse.
-    let provider = provider(BedrockApiShape::Invoke, Vec::new());
+    let provider = provider(BedrockApiShape::Invoke);
     let (invoke_before, converse_before) = (invoke_drop_count(), converse_drop_count());
 
     // Act
@@ -227,12 +232,11 @@ fn invoke_rejected_beta_withhold_bumps_the_drop_counter_once() {
 #[serial(bedrock_invoke_anthropic_beta_rejected_by_bedrock)]
 fn invoke_request_without_rejected_betas_counts_no_withhold() {
     // Arrange: the floor asserts all three, so nothing is withheld.
-    let floor: Vec<String> = WITHHELD_BETAS.iter().map(|b| (*b).to_string()).collect();
-    let provider = provider(BedrockApiShape::Invoke, floor);
+    let provider = provider(BedrockApiShape::Invoke);
     let before = invoke_drop_count();
 
     // Act
-    let _ = wire_betas(&provider, BedrockApiShape::Invoke);
+    let _ = wire_betas_with_pins(&provider, BedrockApiShape::Invoke, &WITHHELD_BETAS);
 
     // Assert
     assert_eq!(invoke_drop_count(), before);
@@ -242,21 +246,20 @@ fn invoke_request_without_rejected_betas_counts_no_withhold() {
 #[serial(bedrock_converse_anthropic_beta_rejected_by_bedrock)]
 fn converse_request_without_rejected_betas_counts_no_withhold() {
     // Arrange: the floor asserts all three, so nothing is withheld.
-    let floor: Vec<String> = WITHHELD_BETAS.iter().map(|b| (*b).to_string()).collect();
-    let provider = provider(BedrockApiShape::Converse, floor);
+    let provider = provider(BedrockApiShape::Converse);
     let before = converse_drop_count();
 
     // Act
-    let betas = wire_betas(&provider, BedrockApiShape::Converse);
+    let betas = wire_betas_with_pins(&provider, BedrockApiShape::Converse, &WITHHELD_BETAS);
 
     // Assert
     assert_eq!(
         betas,
         json!([
+            ACCEPTED_CLIENT_BETA,
             WITHHELD_BETAS[0],
             WITHHELD_BETAS[1],
-            WITHHELD_BETAS[2],
-            ACCEPTED_CLIENT_BETA
+            WITHHELD_BETAS[2]
         ])
     );
     assert_eq!(converse_drop_count(), before);
@@ -268,7 +271,7 @@ fn converse_request_without_rejected_betas_counts_no_withhold() {
 fn assert_header_extras_pinned_rejected_beta_is_forwarded(api_shape: BedrockApiShape) {
     // Arrange
     let pinned = WITHHELD_BETAS[1];
-    let provider = provider(api_shape, Vec::new());
+    let provider = provider(api_shape);
     let mut req = request_with_client_betas();
     req.routectl_internal.operator_betas = vec![pinned.into()];
 
@@ -299,7 +302,7 @@ fn converse_header_extras_pinned_rejected_beta_is_forwarded() {
 /// flag, including ones no list names, reaches the wire verbatim and in order.
 fn assert_request_without_a_withheld_set_ships_every_client_beta(api_shape: BedrockApiShape) {
     // Arrange
-    let provider = provider(api_shape, Vec::new());
+    let provider = provider(api_shape);
     let mut req = request_with_client_betas();
     req.routectl_internal.withheld_betas = std::sync::Arc::default();
     let before = drop_count(api_shape.provider_kind_str());
@@ -342,7 +345,7 @@ fn a_non_claude_converse_bag_with_every_client_beta_withheld_carries_none_and_co
     // Arrange: a non-Claude model refuses the bag key itself, so the router
     // withholds every client flag the request carries.
     let model_id = "us.amazon.nova-2-lite-v1:0";
-    let provider = provider_for(model_id, BedrockApiShape::Converse, Vec::new());
+    let provider = provider_for(model_id, BedrockApiShape::Converse);
     let mut req = request_with_client_betas();
     req.model = model_id.into();
     req.routectl_internal.withheld_betas = req.anthropic_beta.iter().cloned().collect();

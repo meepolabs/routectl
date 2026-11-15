@@ -425,11 +425,10 @@ impl Router {
     /// Whether an operator beta floor pins capability `feature` on this
     /// target, so the wire carries it whatever the router decides. A beta
     /// key is pinned when its flag is. A `Strip(BetaFlag)` capability's beta
-    /// token can be pinned by the provider `anthropic_beta` config (Bedrock,
-    /// re-added post-strip) or a provider/model `header_extras`
-    /// `anthropic-beta` contribution (Anthropic-API, re-added via
-    /// `operator_betas`). Either source makes the strip ineffective, so the
-    /// caller must route away instead. Non-beta strips (e.g. a tool-shape
+    /// token can be pinned by a provider/model `header_extras`
+    /// `anthropic-beta` contribution, which every Anthropic-vocabulary
+    /// egress keeps on the wire via `operator_betas`. That makes the strip
+    /// ineffective, so the caller must route away instead. Non-beta strips (e.g. a tool-shape
     /// strip) carry no beta token and are never pinned.
     pub(super) fn beta_pinned_for_target(&self, target: &DispatchTarget, feature: &str) -> bool {
         crate::capability_precedence::operator_pins_capability(

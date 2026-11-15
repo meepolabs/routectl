@@ -33,7 +33,6 @@ fn fake_cfg() -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     }
 }
@@ -435,17 +434,20 @@ fn client_anthropic_beta_outside_every_list_reaches_additional_fields_verbatim()
 }
 
 #[test]
-fn anthropic_beta_provider_config_floor_bypasses_filter_on_converse() {
-    // Arrange: the per-provider floor (`[providers.X] anthropic_beta`)
-    // applies to Converse identically to Invoke. Operator-asserted
-    // flags always ship, because the operator typed them into TOML.
-    let mut cfg = fake_cfg();
-    cfg.anthropic_beta = vec!["future-flag-2099".into()];
-    let req = ChatRequest {
+fn header_extras_pinned_beta_survives_its_withhold_on_converse() {
+    // Arrange: the router unions a `header_extras["anthropic-beta"]` pin into
+    // the request's betas and records it as the operator floor. Withholding
+    // the same flag must not remove it: the operator asserted it.
+    let cfg = fake_cfg();
+    let mut req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")].into(),
+        anthropic_beta: vec!["future-flag-2099".into()],
         ..Default::default()
     };
+    req.routectl_internal.operator_betas = vec!["future-flag-2099".into()];
+    req.routectl_internal.withheld_betas =
+        std::iter::once("future-flag-2099".to_string()).collect();
 
     let body = normalize_request(&cfg, &req).unwrap();
 

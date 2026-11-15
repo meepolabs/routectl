@@ -2044,7 +2044,6 @@ mod converse_front_only {
             user_agent: None,
             header_extras: BTreeMap::new(),
             payload_extras: None,
-            anthropic_beta: Vec::new(),
             cache_capability: None,
             reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
@@ -2183,7 +2182,6 @@ mod converse_front_only {
             creds: routectl_providers::bedrock::BedrockCreds::DefaultChain,
             user_agent: None,
             header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
         };
         let ttl_marker = |ttl: &str| serde_json::json!({"type": "ephemeral", "ttl": ttl});

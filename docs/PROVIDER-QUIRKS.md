@@ -257,8 +257,8 @@ routed lane until the upstream rejects that flag again there, or the
 lane's provider entry is removed or changes `kind`. To pin a
 decision, put the flag under `[capability.overrides.<provider>]`:
 `unsupported = ["beta:<flag>"]` never sends it, `force_supported`
-always does. The operator floor (provider `anthropic_beta` plus
-`header_extras`-pinned betas) is always sent, once each. Code that calls
+always does. The operator floor (betas pinned in provider or model
+`header_extras["anthropic-beta"]`) is always sent, once each. Code that calls
 the Bedrock provider directly, without the router, gets no seed and no
 beta repair.
 Two body fields never ship: `mcp_servers`, and a `tool_choice` left

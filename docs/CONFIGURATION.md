@@ -357,6 +357,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
 | `pools.<name>.seat_selection = "round-robin"` | use sticky-least-loaded |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
+| `providers.<name>.anthropic_beta` | pin the flag in header_extras "anthropic-beta" |
 | `providers.<name>.auto_emit_per_block_breakpoints` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.class_overrides` | per-class policy lives in `[retry.classes.*]`; a status keeps its built-in class |
@@ -666,7 +667,6 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `credential_source`            | `[providers.X]` AnthropicApi    | string, default `"own"`; `"forwarded"` requires empty `api_key_ref` + `base_url` pinned to `api.anthropic.com` (see "credential_source" below) |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
 | `runtime` (RPM, breaker, timeouts) | `[providers.X]`, `[pools.X]` | provider > pool; the two timeouts then fall back to `[retry]`          |
-| `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor, always sent and never withheld                            |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
 | `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
@@ -881,9 +881,8 @@ Every client flag reaches AWS except the ones the router decides that
 lane must not send, which the Bedrock egress drops. Per lane and flag,
 strongest first:
 
-1. **The operator floor sends.** The provider's
-   [`[providers.X] anthropic_beta`](#providersx-anthropic_beta----per-provider-bedrock-floor)
-   plus any flag pinned through provider or model
+1. **The operator floor sends.** Any flag
+   [pinned](#pinning-a-bedrock-beta-floor) through provider or model
    `header_extras["anthropic-beta"]` is always sent and never withheld.
 2. **A non-Anthropic model on Converse withholds every client flag.** On
    `api_shape = "converse"`, a model whose upstream id is provably not
@@ -1044,13 +1043,17 @@ Bedrock schema has not caught up with is answered with a 400 naming it
 (`Extra inputs are not permitted`); route requests that carry it
 elsewhere, or have the client stop sending it.
 
-### `[providers.X] anthropic_beta` -- per-provider Bedrock floor
+### Pinning a Bedrock beta floor
 
-A static `anthropic_beta` value that routectl always injects on
-requests destined for this Bedrock provider, regardless of what the
-caller sent. The floor is merged ahead of the client's flags, each flag
-appears once on the wire (a client flag repeating a floor flag is not
-sent twice), and no withholding or repair ever removes a floor flag.
+A flag in a Bedrock provider's or model's
+`header_extras["anthropic-beta"]` (comma-separated) is always sent on
+requests destined for that provider or model, regardless of what the
+caller sent. It rides where Bedrock reads betas: the top-level
+`anthropic_beta` array on `api_shape = "invoke"`, the
+`additionalModelRequestFields` bag on `"converse"`. The pin is unioned
+after the client's flags, each flag appears once on the wire (a client
+flag repeating a pinned flag is not sent twice), and no withholding or
+repair ever removes a pinned flag.
 
 Use this to guarantee a required beta flag is always present (for
 example, a model that requires `computer-use-2025-01-24` to operate
@@ -1058,10 +1061,10 @@ correctly).
 
 ```toml
 [providers.bedrock-computer]
-kind           = "bedrock"
-region         = "us-west-2"
-creds          = { kind = "default-chain" }
-anthropic_beta = ["computer-use-2025-01-24"]
+kind          = "bedrock"
+region        = "us-west-2"
+creds         = { kind = "default-chain" }
+header_extras = { "anthropic-beta" = "computer-use-2025-01-24" }
 ```
 
 ### Anthropic API: client betas pass through
@@ -4804,7 +4807,7 @@ Two structured panels render after the sections:
   that map to it (two nicknames on one upstream of one provider entry share
   a lane, and a pooled model has one lane per member entry). A learned lane
   the loaded config no longer maps is marked `(unrouted)`. Every cell merges
-  the signal layers -- an operator `anthropic_beta` / `anthropic-beta`
+  the signal layers -- an operator `header_extras` `anthropic-beta`
   wire pin, whether the lane can carry the flag at all, operator overrides,
   the learned ledger-replay registry, and the shipped beta seed -- through
   the same precedence resolution dispatch uses, so the panel cannot drift

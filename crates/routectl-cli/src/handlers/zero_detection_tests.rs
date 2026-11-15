@@ -2035,7 +2035,6 @@ async fn bedrock_router(shape: BedrockShape, model_id: &str, origin: &str) -> Ro
         creds: creds.clone(),
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     };
     let resolved = auth::resolve(&creds, BEDROCK_REGION)

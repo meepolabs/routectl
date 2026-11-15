@@ -17,7 +17,7 @@ const CLIENT_FLAG: &str = "fx-client";
 const BEDROCK_LANE: &str = "bed#anthropic.claude-test-v1:0";
 const CONVERSE_LANE: &str = "cv#us.amazon.nova-2-lite-v1:0";
 
-/// A Bedrock Messages entry whose `anthropic_beta` floor pins
+/// A Bedrock Messages entry whose `header_extras` floor pins
 /// [`PINNED_FLAG`], and a Converse entry serving a non-Claude model.
 fn bedrock_config(extra: &str) -> Config {
     toml::from_str(&format!(
@@ -26,7 +26,7 @@ fn bedrock_config(extra: &str) -> Config {
          kind = \"bedrock\"\n\
          region = \"us-east-1\"\n\
          creds = {{ kind = \"default-chain\" }}\n\
-         anthropic_beta = [\"{PINNED_FLAG}\"]\n\
+         header_extras = {{ \"anthropic-beta\" = \"{PINNED_FLAG}\" }}\n\
          [providers.cv]\n\
          kind = \"bedrock\"\n\
          region = \"us-east-1\"\n\

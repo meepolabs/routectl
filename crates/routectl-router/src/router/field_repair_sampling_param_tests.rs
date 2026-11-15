@@ -183,7 +183,6 @@ mod converse_temperature {
                     },
                     user_agent: None,
                     header_extras: Vec::new(),
-                    anthropic_beta: Vec::new(),
                     additional_model_request_fields: None,
                 },
                 retry,

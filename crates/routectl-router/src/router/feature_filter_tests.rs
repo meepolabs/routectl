@@ -1174,13 +1174,11 @@ fn beta_pinned_reads_provider_and_model_floors_and_ignores_non_beta_strips() {
 #[test]
 fn bedrock_provider_beta_floor_routes_away_never_strips() {
     // Bedrock analogue of `operator_pinned_beta_capability_routes_away_
-    // never_strips`: here the beta token is pinned by the Bedrock
-    // provider's `anthropic_beta` floor, not by header_extras. The
-    // invoke/converse adapters re-add that floor on the wire AFTER the
-    // canonical strip, so a BetaFlag strip of a floor-pinned token is a
-    // false success -> the target must route away instead of shipping the
-    // pinned flag. This pins the `anthropic_beta_floor` source of the
-    // guard, which is otherwise exercised only via header_extras.
+    // never_strips`: here the beta token is pinned by a Bedrock provider's
+    // `header_extras["anthropic-beta"]`. The invoke/converse adapters spare
+    // that floor on the wire AFTER the canonical strip, so a BetaFlag strip
+    // of a floor-pinned token is a false success -> the target must route
+    // away instead of shipping the pinned flag.
     use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
     let mut config = Config::default();
     config.providers.insert(
@@ -1190,9 +1188,11 @@ fn bedrock_provider_beta_floor_routes_away_never_strips() {
             api_shape: BedrockApiShapeConfig::Invoke,
             creds: BedrockCredsConfig::DefaultChain,
             user_agent: None,
-            header_extras: BTreeMap::new(),
+            header_extras: BTreeMap::from([(
+                "anthropic-beta".to_string(),
+                "context-management-2025-06-27".to_string(),
+            )]),
             payload_extras: None,
-            anthropic_beta: vec!["context-management-2025-06-27".to_string()],
             cache_capability: None,
             reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
@@ -1203,7 +1203,7 @@ fn bedrock_provider_beta_floor_routes_away_never_strips() {
 
     assert!(
         router.beta_pinned_for_target(&target, "context_management"),
-        "the Bedrock provider anthropic_beta floor pins the beta token",
+        "the Bedrock provider header_extras floor pins the beta token",
     );
 
     let base = Instant::now();
@@ -1851,7 +1851,6 @@ fn bedrock_target_threads_kind_so_dotted_capability_resolves_to_head() {
             user_agent: None,
             header_extras: BTreeMap::new(),
             payload_extras: None,
-            anthropic_beta: vec![],
             cache_capability: None,
             reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),

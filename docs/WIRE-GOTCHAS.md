@@ -795,10 +795,10 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   DEBUG (not WARN -- the SDK reliably sends a handful of rejected
   entries per request and WARN would flood `routectl-warn.log`).
 
-  Per-provider escape hatch -- `[providers.X] anthropic_beta = [...]`:
-  those flags are always sent, once each (operator-asserted). Together
-  with `header_extras`-pinned betas it always sends a seeded or
-  learned-rejected flag, and the beta repair never withholds it.
+  Escape hatch -- pin the flag in provider or model
+  `header_extras["anthropic-beta"]`: a pinned flag is always sent, once
+  (operator-asserted), even when it is seeded or learned-rejected, and
+  the beta repair never withholds it.
 
 - **`ValidationException` 400s are header-discriminated, not
   `__type`-bodied.** AWS docs show request-validation errors as a flat

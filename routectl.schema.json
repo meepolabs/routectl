@@ -1091,14 +1091,6 @@
           "additionalProperties": false,
           "description": "Native AWS Bedrock provider. Speaks SigV4 directly to\n`bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to\nswitch between vendor-specific InvokeModel (default) and\nvendor-neutral Converse.",
           "properties": {
-            "anthropic_beta": {
-              "default": [],
-              "description": "`anthropic_beta` flags forwarded on Anthropic-family models.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
             "api_shape": {
               "$ref": "#/$defs/BedrockApiShapeConfig",
               "default": "invoke",

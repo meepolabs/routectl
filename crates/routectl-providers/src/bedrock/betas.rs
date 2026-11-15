@@ -8,10 +8,9 @@
 //! Client flags reach the wire verbatim except for the request's
 //! `routectl_internal.withheld_betas` (the client flags the caller decided
 //! this lane must not send, filled by the router from its seed and learned
-//! beta verdicts). Flags in the operator floor are never withheld: the
-//! provider `anthropic_beta` config and every flag pinned through provider
-//! or model `header_extras["anthropic-beta"]`. A caller that leaves the
-//! withheld set empty withholds nothing. Each withheld drop logs at
+//! beta verdicts). Flags in the operator floor are never withheld: every
+//! flag pinned through provider or model `header_extras["anthropic-beta"]`.
+//! A caller that leaves the withheld set empty withholds nothing. Each withheld drop logs at
 //! `tracing::debug!` rather than WARN, since clients reliably ship a few
 //! such flags per request. When nothing survives, the field is removed so
 //! the upstream never sees `anthropic_beta: []`.
@@ -75,7 +74,7 @@ pub(super) fn union_and_deposit_betas(
     trace_final_betas(&cfg.id, shape, shipped);
     crate::beta_withhold::deposit_beta_assembly(
         req,
-        operator_floor(cfg, req),
+        operator_floor(req).to_vec(),
         implied.into_iter().map(str::to_string).collect(),
         |flag| shipped.is_some_and(|arr| arr.iter().any(|b| b.as_str() == Some(flag))),
     );
@@ -102,17 +101,11 @@ fn trace_final_betas(provider_id: &str, shape: BedrockApiShape, shipped: Option<
     );
 }
 
-/// The operator-asserted beta floor for `req` on this lane: the provider
-/// `anthropic_beta` config plus every flag pinned through provider or model
-/// `header_extras["anthropic-beta"]`. Never withheld or repaired.
-pub(super) fn operator_floor(cfg: &BedrockConfig, req: &ChatRequest) -> Vec<String> {
-    let mut floor = cfg.anthropic_beta.clone();
-    for flag in &req.routectl_internal.operator_betas {
-        if !floor.contains(flag) {
-            floor.push(flag.clone());
-        }
-    }
-    floor
+/// The operator-asserted beta floor for `req`: every flag pinned through
+/// provider or model `header_extras["anthropic-beta"]`. Never withheld or
+/// repaired.
+pub(super) fn operator_floor(req: &ChatRequest) -> &[String] {
+    &req.routectl_internal.operator_betas
 }
 
 /// Remove `withheld_betas` entries not in `floor_betas` (from

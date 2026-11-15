@@ -74,7 +74,7 @@ pub(super) fn build_additional_fields(
     // the client's format in place.
     insert_client_output_format(req, &mut bag, &mut foreign);
     let converted_format_keys = insert_response_format(req, &mut bag);
-    insert_anthropic_beta(cfg, req, &mut bag);
+    insert_anthropic_beta(req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
     let provider_actions = insert_provider_extras(cfg, req, &mut bag, fingerprint, &mut foreign);
     // Converse sends no ingress's wire shape, so carried members never ride
@@ -496,14 +496,13 @@ fn output_config_effort(req: &ChatRequest, thinking: Option<&WireThinking>) -> O
     req.reasoning.as_ref().and_then(|r| r.effort.clone())
 }
 
-/// Merge anthropic_beta from canonical (header-lifted by the Anthropic
-/// ingress) with any provider-config flags. Dedup; preserve first-seen
-/// order so config-asserted flags win on dup.
-fn insert_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
+/// The canonical `anthropic_beta` (header-lifted by the Anthropic ingress,
+/// with the operator's `header_extras` pins already unioned in by the
+/// router), each flag once at its first-seen position.
+fn insert_anthropic_beta(req: &ChatRequest, bag: &mut Map<String, Value>) {
     let betas = crate::beta_withhold::merge_unique(
-        cfg.anthropic_beta
+        req.anthropic_beta
             .iter()
-            .chain(req.anthropic_beta.iter())
             .map(|flag| Value::String(flag.clone())),
         Value::as_str,
     );
@@ -523,7 +522,7 @@ fn withhold_client_betas(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<S
         &cfg.id,
         bag,
         &req.routectl_internal.withheld_betas,
-        &operator_floor(cfg, req),
+        operator_floor(req),
     ) {
         crate::translation_drop_metrics::record_translation_drop(
             super::LANE,
@@ -876,7 +875,6 @@ mod tests {
             creds: BedrockCreds::BearerKey { key: "test".into() },
             user_agent: None,
             header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
         }
     }
@@ -1082,10 +1080,6 @@ mod tests {
         // directive on the request.
         let flag = routectl_core::identity::anthropic::STRUCTURED_OUTPUTS_BETA;
         let cfg = fake_cfg();
-        assert!(
-            !cfg.anthropic_beta.iter().any(|b| b == flag),
-            "precondition: the operator floor must not supply the flag"
-        );
 
         let mut req = req_with_thinking();
         req.anthropic_beta = vec![flag.into()];

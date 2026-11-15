@@ -1362,9 +1362,6 @@ pub enum ProviderEntry {
         /// Provider-level payload extras.
         #[serde(default)]
         payload_extras: Option<Value>,
-        /// `anthropic_beta` flags forwarded on Anthropic-family models.
-        #[serde(default)]
-        anthropic_beta: Vec<String>,
         /// Operator override for this entry's prompt-cache capability.
         /// `None` -> use the conservative per-kind default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1832,24 +1829,6 @@ impl ProviderEntry {
             Self::OpenaiResponses { header_extras, .. } => header_extras,
             #[cfg(feature = "gemini")]
             Self::Gemini { header_extras, .. } => header_extras,
-        }
-    }
-
-    /// Operator-configured `anthropic_beta` floor for this entry: the
-    /// betas the egress always sends, even when the router withholds
-    /// the same flag from client betas. Only the Bedrock variant carries
-    /// one today (the invoke/converse adapters re-add it on the wire
-    /// after the canonical request build); every other variant has no such floor
-    /// and returns an empty slice. Read by the dispatch-layer
-    /// operator-floor-pin guard so a capability whose beta token the
-    /// operator pins is never stripped (a stripped-then-re-added token
-    /// is a false success).
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn anthropic_beta_floor(&self) -> &[String] {
-        match self {
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { anthropic_beta, .. } => anthropic_beta,
-            _ => &[],
         }
     }
 
@@ -2372,7 +2351,6 @@ impl ProviderEntry {
                 region: _,
                 api_shape: _,
                 user_agent: _,
-                anthropic_beta: _,
                 cache_capability: _,
                 reduction_enabled: _,
                 runtime: _,

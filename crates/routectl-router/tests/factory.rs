@@ -436,11 +436,11 @@ kind = "bedrock"
 region = "us-west-2"
 api_shape = "invoke"
 user_agent = "claude-code/1.2.3"
-anthropic_beta = ["context-1m-2025-08-07", "prompt-caching-2024-07-31"]
 creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
 
 [providers.bedrock_anthropic.header_extras]
 "x-trace-id" = "abc"
+"anthropic-beta" = "context-1m-2025-08-07,prompt-caching-2024-07-31"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("bedrock_anthropic").expect("entry");
@@ -449,7 +449,6 @@ creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
                 region,
                 api_shape,
                 user_agent,
-                anthropic_beta,
                 header_extras,
                 creds,
                 ..
@@ -458,15 +457,12 @@ creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
                 assert_eq!(*api_shape, BedrockApiShapeConfig::Invoke);
                 assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
                 assert_eq!(
-                    anthropic_beta,
-                    &[
-                        "context-1m-2025-08-07".to_string(),
-                        "prompt-caching-2024-07-31".to_string(),
-                    ]
-                );
-                assert_eq!(
                     header_extras.get("x-trace-id").map(String::as_str),
                     Some("abc")
+                );
+                assert_eq!(
+                    header_extras.get("anthropic-beta").map(String::as_str),
+                    Some("context-1m-2025-08-07,prompt-caching-2024-07-31")
                 );
                 match creds {
                     BedrockCredsConfig::BearerKey { key_ref } => {

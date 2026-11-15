@@ -275,7 +275,6 @@ async fn open_bedrock(
         creds: creds.clone(),
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     };
     let resolved = auth::resolve(&creds, "us-east-1").await.expect("resolve");

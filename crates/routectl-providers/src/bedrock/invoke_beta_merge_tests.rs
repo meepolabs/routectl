@@ -1,13 +1,14 @@
-//! The Invoke body's `anthropic_beta` is the configured floor followed by
-//! the client's flags, each flag sent once. The fixture config carries no
-//! `additional_model_request_fields`, so nothing but the merge (and the
+//! The Invoke body's `anthropic_beta` ships each flag once at its first
+//! position. The router has already unioned the operator's `header_extras`
+//! pins into the client list; the fixture config carries no
+//! `additional_model_request_fields`, so nothing but the dedup (and the
 //! withhold) shapes the array.
 
 use serde_json::{Value, json};
 
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
 
-use super::{merge_floor_and_client_betas, normalize_request};
+use super::{dedup_betas, normalize_request};
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 
 const CONTEXT_1M: &str = "context-1m-2025-08-07";
@@ -15,7 +16,7 @@ const CLAUDE_CODE: &str = "claude-code-20250219";
 const INTERLEAVED: &str = "interleaved-thinking-2025-05-14";
 const EFFORT: &str = "effort-2025-11-24";
 
-fn cfg_with_floor(floor: &[&str]) -> BedrockConfig {
+fn cfg() -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:test".into(),
         region: "us-west-2".into(),
@@ -24,7 +25,6 @@ fn cfg_with_floor(floor: &[&str]) -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: floor.iter().map(|f| (*f).to_string()).collect(),
         additional_model_request_fields: None,
     }
 }
@@ -49,126 +49,97 @@ fn request_with_client_betas(client: &[&str]) -> ChatRequest {
     }
 }
 
-fn shipped_betas(cfg: &BedrockConfig, req: &ChatRequest) -> Value {
-    let body = normalize_request(cfg, req).expect("invoke body assembles");
+fn shipped_betas(req: &ChatRequest) -> Value {
+    let body = normalize_request(&cfg(), req).expect("invoke body assembles");
     body.get("anthropic_beta").cloned().unwrap_or(Value::Null)
 }
 
 #[test]
-fn a_flag_in_both_floor_and_client_ships_once_in_floor_position() {
+fn a_client_repeat_ships_once() {
     // Arrange
-    let cfg = cfg_with_floor(&[CONTEXT_1M, CLAUDE_CODE]);
-    let req = request_with_client_betas(&[INTERLEAVED, CONTEXT_1M]);
-
-    // Act
-    let betas = shipped_betas(&cfg, &req);
-
-    // Assert
-    assert_eq!(betas, json!([CONTEXT_1M, CLAUDE_CODE, INTERLEAVED]));
-}
-
-#[test]
-fn a_client_repeat_with_no_floor_ships_once() {
-    // Arrange
-    let cfg = cfg_with_floor(&[]);
     let req = request_with_client_betas(&[CONTEXT_1M, CONTEXT_1M]);
 
     // Act
-    let betas = shipped_betas(&cfg, &req);
+    let betas = shipped_betas(&req);
 
     // Assert
     assert_eq!(betas, json!([CONTEXT_1M]));
 }
 
 #[test]
-fn distinct_flags_keep_floor_order_then_client_order() {
+fn distinct_flags_keep_client_order() {
     // Arrange
-    let cfg = cfg_with_floor(&[CLAUDE_CODE, CONTEXT_1M]);
-    let req = request_with_client_betas(&[EFFORT, INTERLEAVED]);
+    let req = request_with_client_betas(&[CLAUDE_CODE, CONTEXT_1M, EFFORT, INTERLEAVED]);
 
     // Act
-    let betas = shipped_betas(&cfg, &req);
+    let betas = shipped_betas(&req);
 
     // Assert
     assert_eq!(betas, json!([CLAUDE_CODE, CONTEXT_1M, EFFORT, INTERLEAVED]));
 }
 
 #[test]
-fn withholding_a_floor_flag_the_client_also_sent_keeps_one_copy() {
-    // Arrange
-    let cfg = cfg_with_floor(&[CONTEXT_1M]);
-    let mut req = request_with_client_betas(&[CONTEXT_1M, INTERLEAVED]);
+fn withholding_a_pinned_flag_the_client_also_sent_keeps_one_copy() {
+    // Arrange: the router unions the pin into the client list, so the flag
+    // arrives twice and also names the floor.
+    let mut req = request_with_client_betas(&[CONTEXT_1M, INTERLEAVED, CONTEXT_1M]);
+    req.routectl_internal.operator_betas = vec![CONTEXT_1M.to_string()];
     req.routectl_internal.withheld_betas = [CONTEXT_1M, INTERLEAVED].map(String::from).into();
 
     // Act
-    let betas = shipped_betas(&cfg, &req);
+    let betas = shipped_betas(&req);
 
     // Assert
     assert_eq!(betas, json!([CONTEXT_1M]));
 }
 
-/// The merge on the body array itself, where a client entry can be any JSON
-/// value: a non-string entry is kept verbatim (a repeat included), string
-/// entries are compared as sent (no trim), and an empty string is a flag
-/// like any other.
+/// The dedup on the body array itself, where an entry can be any JSON value:
+/// a non-string entry is kept verbatim (a repeat included), string entries
+/// are compared as sent (no trim), and an empty string is a flag like any
+/// other.
 #[test]
-fn merge_keeps_non_string_entries_verbatim_and_compares_strings_as_sent() {
+fn dedup_keeps_non_string_entries_verbatim_and_compares_strings_as_sent() {
     struct Row {
         name: &'static str,
-        floor: &'static [&'static str],
-        client: Option<Value>,
+        betas: Option<Value>,
         want: Value,
     }
     let rows = [
         Row {
-            name: "no floor and no client array merges to nothing",
-            floor: &[],
-            client: None,
+            name: "no array dedups to nothing",
+            betas: None,
             want: json!([]),
         },
         Row {
-            name: "a client value that is not an array is ignored",
-            floor: &[CONTEXT_1M],
-            client: Some(json!(INTERLEAVED)),
-            want: json!([CONTEXT_1M]),
-        },
-        Row {
-            name: "a floor repeat ships once",
-            floor: &[CONTEXT_1M, CLAUDE_CODE, CONTEXT_1M],
-            client: Some(json!([])),
-            want: json!([CONTEXT_1M, CLAUDE_CODE]),
+            name: "a value that is not an array is ignored",
+            betas: Some(json!(INTERLEAVED)),
+            want: json!([]),
         },
         Row {
             name: "non-string entries keep their place, repeats included",
-            floor: &[CONTEXT_1M],
-            client: Some(json!([7, CONTEXT_1M, null, {"x": 1}, 7, INTERLEAVED])),
+            betas: Some(json!([CONTEXT_1M, 7, CONTEXT_1M, null, {"x": 1}, 7, INTERLEAVED])),
             want: json!([CONTEXT_1M, 7, null, {"x": 1}, 7, INTERLEAVED]),
         },
         Row {
             name: "a whitespace-padded flag is a distinct flag",
-            floor: &[CONTEXT_1M],
-            client: Some(json!([" context-1m-2025-08-07 ", CONTEXT_1M])),
+            betas: Some(json!([CONTEXT_1M, " context-1m-2025-08-07 ", CONTEXT_1M])),
             want: json!([CONTEXT_1M, " context-1m-2025-08-07 "]),
         },
         Row {
             name: "an empty string is kept once",
-            floor: &[],
-            client: Some(json!(["", INTERLEAVED, ""])),
+            betas: Some(json!(["", INTERLEAVED, ""])),
             want: json!(["", INTERLEAVED]),
         },
         Row {
-            name: "a client repeat with a flag between keeps the first position",
-            floor: &[],
-            client: Some(json!([EFFORT, INTERLEAVED, EFFORT])),
+            name: "a repeat with a flag between keeps the first position",
+            betas: Some(json!([EFFORT, INTERLEAVED, EFFORT])),
             want: json!([EFFORT, INTERLEAVED]),
         },
     ];
 
     for row in rows {
-        let floor: Vec<String> = row.floor.iter().map(|f| (*f).to_string()).collect();
+        let deduped = dedup_betas(row.betas.as_ref());
 
-        let merged = merge_floor_and_client_betas(&floor, row.client.as_ref());
-
-        assert_eq!(Value::Array(merged), row.want, "{}", row.name);
+        assert_eq!(Value::Array(deduped), row.want, "{}", row.name);
     }
 }

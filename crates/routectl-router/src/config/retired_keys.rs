@@ -110,6 +110,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
                       router withholds from the lane",
     },
     RetiredKey {
+        path: &["providers", ANY_ENTRY, "anthropic_beta"],
+        refused_value: None,
+        replacement: "pin the flag in header_extras \"anthropic-beta\"",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "auto_emit_per_block_breakpoints"],
         refused_value: None,
         replacement: "use the global [cache] auto_emit_top_level_breakpoint switch",

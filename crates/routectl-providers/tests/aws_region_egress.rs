@@ -166,7 +166,6 @@ fn native_provider(
             creds,
             user_agent: None,
             header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
         },
         resolved,

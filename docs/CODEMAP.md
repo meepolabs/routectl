@@ -1501,8 +1501,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   so the opener carries the same opening usage); `StreamCompletion` terminal
   `message_stop`; delegates the framing byte loop and DoS cap to `frame.rs`
 - `src/bedrock/invoke.rs` -- `normalize_request` / `normalize_response`,
-  `merge_floor_and_client_betas`: InvokeModel body assembly and response
-  mapping
+  `dedup_betas`: InvokeModel body assembly and response mapping
 - `src/bedrock/betas.rs` -- `withhold_betas`, `union_and_deposit_betas`:
   `anthropic_beta` handling shared by the Invoke body and the Converse bag;
   one TRACE per normalized attempt names the shipped set

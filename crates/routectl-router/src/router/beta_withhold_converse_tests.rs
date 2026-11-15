@@ -46,7 +46,8 @@ const CONVERSE_BLOCK: &str = "kind = \"bedrock\"\nregion = \"us-east-1\"\n\
 fn router() -> Router {
     let body = format!(
         "version = 3\n\
-         [providers.cv]\n{CONVERSE_BLOCK}anthropic_beta = [\"{FLOOR_BETA}\"]\n\
+         [providers.cv]\n{CONVERSE_BLOCK}\
+         [providers.cv.header_extras]\n\"anthropic-beta\" = \"{FLOOR_BETA}\"\n\
          [providers.cvbare]\n{CONVERSE_BLOCK}\
          [providers.inv]\n\
          kind = \"bedrock\"\nregion = \"us-east-1\"\n\
@@ -270,7 +271,8 @@ fn a_pinned_flag_outside_the_key_grammar_is_not_withheld_on_a_non_claude_convers
     );
     let body = format!(
         "version = 3\n\
-         [providers.cvdot]\n{CONVERSE_BLOCK}anthropic_beta = [\"{dotted}\"]\n\
+         [providers.cvdot]\n{CONVERSE_BLOCK}\
+         [providers.cvdot.header_extras]\n\"anthropic-beta\" = \"{dotted}\"\n\
          [providers.cvbare]\n{CONVERSE_BLOCK}\
          [capability]\nenabled = true\n\
          [aliases]\ndefault = \"m\"\n"
@@ -352,9 +354,9 @@ fn bearer() -> String {
     ["converse", "beta", "test", "key"].join("-")
 }
 
-/// The Converse bag a real Bedrock egress assembles from `req` for `model_id`
-/// with the operator floor `floor`.
-fn converse_bag(req: &ChatRequest, model_id: &str, floor: &[&str]) -> Value {
+/// The Converse bag a real Bedrock egress assembles from `req` for
+/// `model_id`; the operator floor rides on `req` as the router composed it.
+fn converse_bag(req: &ChatRequest, model_id: &str) -> Value {
     let cfg = BedrockConfig {
         id: "bedrock:cv".into(),
         region: "us-east-1".into(),
@@ -363,7 +365,6 @@ fn converse_bag(req: &ChatRequest, model_id: &str, floor: &[&str]) -> Value {
         creds: BedrockCreds::BearerKey { key: bearer() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: owned(floor),
         additional_model_request_fields: None,
     };
     let provider = BedrockProvider::new(cfg, ResolvedCreds::Bearer { key: bearer() })
@@ -398,7 +399,7 @@ async fn a_routed_non_claude_converse_bag_with_only_client_betas_carries_no_beta
     let attempt = routed_attempt("cvbare", upstream, &[CLIENT_BETA, OTHER_CLIENT_BETA]).await;
 
     // Act
-    let bag = converse_bag(&attempt, upstream, &[]);
+    let bag = converse_bag(&attempt, upstream);
 
     // Assert
     assert_eq!(
@@ -418,7 +419,7 @@ async fn a_routed_non_claude_converse_bag_still_ships_the_operator_floor() {
     let attempt = routed_attempt("cv", upstream, &[CLIENT_BETA]).await;
 
     // Act
-    let bag = converse_bag(&attempt, upstream, &[FLOOR_BETA]);
+    let bag = converse_bag(&attempt, upstream);
 
     // Assert
     assert_eq!(bag["anthropic_beta"], json!([FLOOR_BETA]));
@@ -430,7 +431,7 @@ async fn a_routed_profile_arn_converse_bag_forwards_client_betas() {
     let attempt = routed_attempt("cvbare", PROFILE_ARN, &[CLIENT_BETA]).await;
 
     // Act
-    let bag = converse_bag(&attempt, PROFILE_ARN, &[]);
+    let bag = converse_bag(&attempt, PROFILE_ARN);
 
     // Assert
     assert_eq!(bag["anthropic_beta"], json!([CLIENT_BETA]));

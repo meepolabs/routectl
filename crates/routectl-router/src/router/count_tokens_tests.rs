@@ -173,7 +173,6 @@ fn bedrock_entry() -> ProviderEntry {
         user_agent: None,
         header_extras: BTreeMap::new(),
         payload_extras: None,
-        anthropic_beta: vec![],
         cache_capability: None,
         reduction_enabled: None,
         runtime: ProviderRuntimePolicy::default(),

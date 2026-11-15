@@ -139,7 +139,6 @@ async fn bedrock_router_from(toml_src: &str, origin: &str) -> Router {
         creds: creds.clone(),
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     };
     let resolved = auth::resolve(&creds, REGION).await.expect("resolve");

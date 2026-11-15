@@ -202,7 +202,6 @@ mod build_resolved_models_tests {
             user_agent: None,
             header_extras: BTreeMap::new(),
             payload_extras: None,
-            anthropic_beta: Vec::new(),
             cache_capability: None,
             reduction_enabled: None,
             runtime: Default::default(),

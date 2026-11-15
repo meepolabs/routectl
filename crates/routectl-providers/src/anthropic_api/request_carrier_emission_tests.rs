@@ -103,7 +103,6 @@ fn invoke_body(req: &ChatRequest) -> Value {
         creds: BedrockCreds::BearerKey { key: "k".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     };
     crate::bedrock::invoke::normalize_request(&cfg, req).expect("invoke body")

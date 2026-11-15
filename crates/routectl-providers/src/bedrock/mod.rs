@@ -340,13 +340,6 @@ pub struct BedrockConfig {
     /// `extra_headers` in v0.6.0). The router merges per-model
     /// `header_extras` into this map at dispatch time.
     pub header_extras: Vec<(String, String)>,
-    /// Anthropic beta gates passed through to the model. For `Invoke`
-    /// shape, these go in the request body's top-level `anthropic_beta`
-    /// array; for `Converse`, they go in
-    /// `additionalModelRequestFields.anthropic_beta`. Per-provider
-    /// floor that is never withheld (operator asserts these by typing
-    /// them into TOML).
-    pub anthropic_beta: Vec<String>,
     /// Free-form fields merged into the request body. For `Invoke`,
     /// merged at the top level; for `Converse`, merged into
     /// `additionalModelRequestFields`.
@@ -1277,7 +1270,6 @@ mod tests {
             },
             user_agent: None,
             header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
         };
         let s = format!("{cfg:?}");
@@ -1302,7 +1294,6 @@ mod tests {
             creds,
             user_agent: None,
             header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
         }
     }

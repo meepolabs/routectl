@@ -56,7 +56,6 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
             creds,
             user_agent: Some("routectl-live-test/0.4".into()),
             header_extras: Vec::new(),
-            anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
         };
         let provider: ArcAlias<dyn routectl_core::Provider> = ArcAlias::new(

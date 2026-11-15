@@ -196,7 +196,7 @@ mod doctor_agreement {
     const CONVERSE_LANE: &str = "cv#us.amazon.nova-2-lite-v1:0";
     const KIND: &str = "bedrock";
 
-    /// A Bedrock Messages entry whose `anthropic_beta` floor pins
+    /// A Bedrock Messages entry whose `header_extras` floor pins
     /// [`PINNED_FLAG`] and whose nickname force-supports [`FEATURE`], and a
     /// Converse entry serving a non-Claude model. Neither upstream is in the
     /// catalog, so the doctor's priors hold no opinion the status surface
@@ -210,7 +210,7 @@ mod doctor_agreement {
              kind = \"bedrock\"\n\
              region = \"us-east-1\"\n\
              creds = {{ kind = \"default-chain\" }}\n\
-             anthropic_beta = [\"{PINNED_FLAG}\"]\n\
+             header_extras = {{ \"anthropic-beta\" = \"{PINNED_FLAG}\" }}\n\
              [providers.cv]\n\
              kind = \"bedrock\"\n\
              region = \"us-east-1\"\n\

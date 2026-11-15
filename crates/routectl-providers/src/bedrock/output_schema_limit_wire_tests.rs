@@ -97,7 +97,6 @@ async fn bedrock_provider(
         creds: creds.clone(),
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: operator_output_config
             .map(|output_config| json!({"output_config": output_config})),
     };

@@ -36,7 +36,6 @@ fn bedrock_cfg(api_shape: BedrockApiShape) -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     }
 }

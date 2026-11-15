@@ -22,7 +22,6 @@ fn cfg(shape: BedrockApiShape) -> BedrockConfig {
         creds: BedrockCreds::BearerKey { key: "k".into() },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     }
 }
@@ -491,10 +490,13 @@ const BETA_TRACE: &str = "bedrock final anthropic_beta set";
 #[test]
 fn final_beta_set_traced_once_per_request() {
     for shape in SHAPES {
-        let mut cfg = cfg(shape);
-        cfg.anthropic_beta = vec!["context-1m-2025-08-07".into()];
+        let cfg = cfg(shape);
         let mut req = request();
-        req.anthropic_beta = vec!["client-flag\u{1b}[31m".into(), "withheld-flag".into()];
+        req.anthropic_beta = vec![
+            "context-1m-2025-08-07".into(),
+            "client-flag\u{1b}[31m".into(),
+            "withheld-flag".into(),
+        ];
         req.routectl_internal.withheld_betas = Arc::from(vec!["withheld-flag".to_string()]);
 
         let events = routectl_testkit::capture_events(|| {

@@ -34,8 +34,7 @@ const OWN_OAUTH_LANE: &str =
 /// Flags compare in the override's canonical form (case-insensitive ASCII,
 /// [`beta_override_key`]), matching how the override itself is looked up.
 /// `force_supported` entries are not inspected -- sending the flag is what
-/// the egress does anyway. Bedrock's `anthropic_beta_floor()` is not
-/// consulted: it is empty for every non-Bedrock entry.
+/// the egress does anyway.
 pub(super) fn beta_floor_override_warnings(config: &Config) -> Vec<String> {
     config
         .capability

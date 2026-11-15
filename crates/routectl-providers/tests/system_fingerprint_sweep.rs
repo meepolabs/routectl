@@ -132,7 +132,6 @@ fn bedrock(shape: BedrockApiShape) -> BedrockProvider {
         },
         user_agent: None,
         header_extras: Vec::new(),
-        anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     };
     let resolved = ResolvedCreds::Bearer {

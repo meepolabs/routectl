@@ -196,8 +196,8 @@ struct StripPlan {
 /// for route-away keys, unknowns, and strip keys with no beta surface.
 /// The dispatch layer's operator-floor-pin guard reads this: a strip
 /// whose beta token an operator pins to the wire is re-added downstream
-/// (the Bedrock egress re-adds provider `anthropic_beta`; the
-/// Anthropic-API egress re-adds the `operator_betas` floor), so
+/// (the Bedrock egress spares and the Anthropic-API egress re-adds the
+/// `operator_betas` floor), so
 /// stripping such a token is a false success -- the feature must route
 /// away instead of stripping.
 pub fn strip_beta_tokens(feature_key: &str) -> &'static [&'static str] {
