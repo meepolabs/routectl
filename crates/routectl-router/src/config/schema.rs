@@ -374,21 +374,17 @@ const _: () = assert!(
 );
 
 /// Operator-facing `[usage]` config block. Controls the
-/// usage-accounting subsystem. Each field carries a default, so a
-/// config with no `[usage]` block deserializes to the same value as
-/// `UsageConfig::default()`.
+/// usage-accounting subsystem, which always records. Each field carries
+/// a default, so a config with no `[usage]` block deserializes to the
+/// same value as `UsageConfig::default()`.
 ///
-/// Reload semantics: `db_path` is restart-required (the writer opens
-/// the db at boot and holds the handle); `enabled` and
-/// `retention_days` hot-reload on the next config swap. See
-/// `collect_restart_required_changes` in the CLI server module for the
-/// classification.
+/// Reload semantics: both keys are restart-required (the writer opens
+/// the db at boot and holds the handle, and pruning runs only at
+/// startup). See `collect_restart_required_changes` in the CLI server
+/// module for the classification.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UsageConfig {
-    /// Master switch for the usage-accounting subsystem. Default on.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     /// SQLite database path for persisted usage rows. Defaults to
     /// `<config-dir>/routectl/usage.db` with the user config dir
     /// resolved from `XDG_CONFIG_HOME` or `HOME` -- no literal `~`
@@ -406,7 +402,6 @@ pub struct UsageConfig {
 impl Default for UsageConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             db_path: default_usage_db_path(),
             retention_days: default_retention_days(),
         }

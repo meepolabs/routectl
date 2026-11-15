@@ -493,12 +493,8 @@ impl Ledger {
     pub(super) fn new() -> Self {
         let dir = tempfile::tempdir().expect("ledger dir");
         let path = dir.path().join("usage.db");
-        let (usage, writer) = routectl_usage::UsageWriter::start(
-            path.clone(),
-            routectl_usage::CHANNEL_CAPACITY,
-            0,
-            true,
-        );
+        let (usage, writer) =
+            routectl_usage::UsageWriter::start(path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
         Self {
             usage,
             _writer: Mutex::new(writer),

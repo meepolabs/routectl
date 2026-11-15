@@ -34,7 +34,7 @@ use crate::server::test_support::drain_usage_writer_strict;
 fn dummy_handle() -> (UsageHandle, UsageWriter, std::path::PathBuf) {
     let dir = crate::test_usage_dir::usage_dir();
     let db_path = dir.join("usage.db");
-    let (handle, writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0);
     (handle, writer, dir)
 }
 
@@ -291,7 +291,7 @@ fn capture_over_a_readable_db() -> (
 ) {
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let req = routectl_core::ChatRequest {
         model: "m".to_string(),
         messages: vec![Message {
@@ -883,12 +883,8 @@ async fn drain_and_open(
 ) -> (rusqlite::Connection, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (handle, writer) = routectl_usage::UsageWriter::start(
-        db_path.clone(),
-        routectl_usage::CHANNEL_CAPACITY,
-        0,
-        true,
-    );
+    let (handle, writer) =
+        routectl_usage::UsageWriter::start(db_path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
     let draft = build_usage_draft(
         "anthropic",
         &minimal_request(),
@@ -1199,12 +1195,8 @@ async fn the_free_drain_persists_rows_for_a_surface_that_records_no_usage_row() 
     // Act -- the free function, with NO capture and no draft in sight.
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (handle, writer) = routectl_usage::UsageWriter::start(
-        db_path.clone(),
-        routectl_usage::CHANNEL_CAPACITY,
-        0,
-        true,
-    );
+    let (handle, writer) =
+        routectl_usage::UsageWriter::start(db_path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
     drain_capability_events(&handle, &meta, 3, 7);
     assert!(
         wait_capability_persisted(&handle, 1),
@@ -2439,7 +2431,7 @@ async fn a_real_dispatch_persists_the_strategy_tokens_and_epoch_code_it_produced
     // Arrange
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let router = capable_anthropic_router();
     let first = session_req(&["a", "b", "c"]);
@@ -2537,12 +2529,8 @@ fn observe_quota_maps_non_empty_extras_into_json_object() {
 async fn drain_and_count(meta: &routectl_router::DispatchMeta) -> i64 {
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (handle, writer) = routectl_usage::UsageWriter::start(
-        db_path.clone(),
-        routectl_usage::CHANNEL_CAPACITY,
-        0,
-        true,
-    );
+    let (handle, writer) =
+        routectl_usage::UsageWriter::start(db_path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
     let draft = build_usage_draft(
         "anthropic",
         &minimal_request(),

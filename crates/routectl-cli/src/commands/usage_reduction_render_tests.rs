@@ -82,20 +82,17 @@ fn render_detail_reduction_block_carries_the_drop_counter_validity_caveat() {
     // Act
     let out = render_report(&report);
 
-    // Assert: the block states it is counts-not-a-rate and names all four
-    // usage-channel drop counters an operator must check flat.
+    // Assert: the block states it is counts-not-a-rate and names all three
+    // usage-channel drop counters an operator must check flat, and no
+    // counter the service no longer keeps.
     assert!(out.contains("counts observed, not a rate"), "caveat: {out}");
-    for counter in [
-        "dropped_full",
-        "dropped_closed",
-        "dropped_disabled",
-        "write_errors",
-    ] {
+    for counter in ["dropped_full", "dropped_closed", "write_errors"] {
         assert!(
             out.contains(counter),
             "validity caveat must name {counter}: {out}"
         );
     }
+    assert!(!out.contains("dropped_disabled"), "caveat: {out}");
 }
 
 #[test]

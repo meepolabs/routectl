@@ -475,12 +475,7 @@ fn drain_through_production(usage: &UsageHandle, meta: &routectl_router::Dispatc
 #[serial_test::serial]
 async fn the_canary_cadence_clears_durably_and_the_next_request_forwards_unchanged() {
     let (config, _dir) = spanning_config();
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let seat = Arc::new(Seat::default());
     let router = router_with(&config, Arc::clone(&seat));
 
@@ -621,12 +616,7 @@ async fn persist_through_the_production_drain(
 /// that did not, which is why the oracle is a fresh rebuild. Returns the new writer
 /// handle the next phase dispatches against.
 fn assert_the_clear_survived_a_restart(config: &Arc<Config>) -> UsageHandle {
-    let (usage2, writer2) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage2, writer2) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let after_restart = resident_field_keys_after_restart(config, &usage2);
     assert!(
         !after_restart.contains(&field_key()),

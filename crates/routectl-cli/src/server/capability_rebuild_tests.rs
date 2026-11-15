@@ -67,7 +67,7 @@ fn warm_reporting_off_runtime(
 }
 
 fn writer_at(path: &std::path::Path) -> (UsageHandle, UsageWriter) {
-    UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 0, true)
+    UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 0)
 }
 
 /// Insert one non-tombstone capability event row directly, so the replay

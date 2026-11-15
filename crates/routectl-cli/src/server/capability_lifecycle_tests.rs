@@ -68,13 +68,13 @@ async fn default_router(tmp: &TempDir) -> Router {
 /// A real writer at `path`, enabled, with no retention prune. Returns the
 /// owning writer so the caller flushes it with `shutdown`.
 fn writer_at(path: &Path) -> (UsageHandle, UsageWriter) {
-    UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 0, true)
+    UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 0)
 }
 
 /// A real writer whose startup runs the retention prune with `days` of
 /// retention (the one-shot `prune_capability_events` fires on start).
 fn writer_with_retention(path: &Path, days: u32) -> (UsageHandle, UsageWriter) {
-    UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, days, true)
+    UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, days)
 }
 
 /// Current wall-clock epoch milliseconds; the basis the persisted `ts` column

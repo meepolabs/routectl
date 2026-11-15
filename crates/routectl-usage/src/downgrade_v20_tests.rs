@@ -118,7 +118,7 @@ fn a_seeded_v19_ledger_migrates_to_v20_with_null_walk_columns_on_old_rows() {
     let fresh_columns = requests_column_names(open(&fresh_path).expect("fresh").conn());
 
     // Act: the production writer opens (and migrates) the file, then writes.
-    let (handle, writer) = crate::writer::UsageWriter::start(path.clone(), 4, 0, true);
+    let (handle, writer) = crate::writer::UsageWriter::start(path.clone(), 4, 0);
     handle.try_send(crate::record::UsageRecord {
         request_id: "v20-row".to_string(),
         excluded_model: 3,

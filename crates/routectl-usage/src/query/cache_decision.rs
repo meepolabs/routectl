@@ -173,7 +173,7 @@ pub struct SuppressedSessionRow {
 ///
 /// VALIDITY: this is a FINDER, not a measurement. The rows it returns are
 /// the ones the ledger recorded; a window in which the service's usage
-/// channel dropped records (`dropped_full` / `dropped_disabled` /
+/// channel dropped records (`dropped_full` / `dropped_closed` /
 /// `write_errors` nonzero) under-reports both the triple list and each
 /// count by an unknown amount, so no rate, share, or cost conclusion may be
 /// drawn from it -- only "these sessions were seen suppressed".

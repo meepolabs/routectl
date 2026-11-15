@@ -140,7 +140,7 @@ fn a_v18_file_with_rows_migrates_to_v19_with_old_rows_null_and_new_rows_zero() {
     let fresh_columns = requests_column_names(open(&fresh_path).expect("fresh").conn());
 
     // Act: the production writer opens (and migrates) the file, then writes.
-    let (handle, writer) = crate::writer::UsageWriter::start(path.clone(), 4, 0, true);
+    let (handle, writer) = crate::writer::UsageWriter::start(path.clone(), 4, 0);
     handle.try_send(crate::record::UsageRecord {
         request_id: "v19-row".to_string(),
         skip_breaker_open: 2,

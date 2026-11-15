@@ -147,7 +147,7 @@ impl AppState {
     #[cfg(test)]
     pub fn for_test(router: Arc<ArcSwap<Router>>) -> Arc<Self> {
         let dir = crate::test_usage_dir::usage_dir();
-        let (usage, _writer) = UsageWriter::start(dir.join("usage.db"), CHANNEL_CAPACITY, 0, false);
+        let (usage, _writer) = UsageWriter::start(dir.join("usage.db"), CHANNEL_CAPACITY, 0);
         Self::for_test_with_usage(router, usage)
     }
 

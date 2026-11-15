@@ -178,7 +178,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 async fn a_dropped_caller_still_commits_the_clear_and_finalizes_memory() {
     let dir = TempDir::new().expect("tempdir");
     let ledger = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
     let capability = routectl_core::capability::WEB_SEARCH;
     let router = router_with_negative(capability);
     let (tracker, _ambiguous) = SettlementTracker::new();
@@ -253,7 +253,7 @@ async fn a_failed_commit_leaves_the_entry_acting_and_the_ledger_clean() {
 
     // A writer that is gone by the time the receipt resolves, so the outcome is a
     // non-commit rather than a commit.
-    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
     let reserved = reserve(&router, capability);
     let event = cleared_row(&router, &reserved);
     let claim = tracker.claim().expect("an open tracker admits a claim");
@@ -297,7 +297,7 @@ async fn a_failed_commit_leaves_the_entry_acting_and_the_ledger_clean() {
 async fn shutdown_waits_for_an_in_flight_settlement_before_the_writer_drains() {
     let dir = TempDir::new().expect("tempdir");
     let ledger = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
     let capability = routectl_core::capability::WEB_SEARCH;
     let router = router_with_negative(capability);
     let (tracker, _ambiguous) = SettlementTracker::new();

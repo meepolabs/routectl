@@ -36,7 +36,6 @@ impl Process {
             path.to_path_buf(),
             routectl_usage::CHANNEL_CAPACITY,
             0,
-            true,
         );
         let router = build(translated_config(upstream.base(), "glm-4.6")).await;
         router.publish_probe_incarnation();

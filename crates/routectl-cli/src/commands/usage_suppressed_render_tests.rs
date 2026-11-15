@@ -301,17 +301,13 @@ fn render_detail_finder_carries_the_drop_counter_validity_caveat() {
         block.contains("sessions seen, not a rate"),
         "caveat: {block}"
     );
-    for counter in [
-        "dropped_full",
-        "dropped_closed",
-        "dropped_disabled",
-        "write_errors",
-    ] {
+    for counter in ["dropped_full", "dropped_closed", "write_errors"] {
         assert!(
             block.contains(counter),
             "validity caveat must name {counter}: {block}"
         );
     }
+    assert!(!block.contains("dropped_disabled"), "caveat: {block}");
     assert!(!block.contains('%'), "no ratio in the block: {block}");
     assert!(!block.contains('$'), "no cost claim in the block: {block}");
 }

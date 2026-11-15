@@ -140,7 +140,7 @@ struct Posted {
 async fn post_count(double: CountDouble, body: &'static str) -> Posted {
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let state = AppState::for_test_with_usage(
         Arc::new(arc_swap::ArcSwap::from_pointee(router_with(double))),
         usage,
@@ -329,7 +329,7 @@ async fn a_count_row_keeps_no_session_id_while_an_inference_row_keeps_it() {
     const SESSION: &str = "count-row-session-5d1e";
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let state = AppState::for_test_with_usage(
         Arc::new(arc_swap::ArcSwap::from_pointee(router_with(
             CountDouble::counting(),
@@ -426,7 +426,7 @@ async fn a_count_aborted_mid_dispatch_writes_one_cancelled_row_at_its_last_targe
     };
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let state = AppState::for_test_with_usage(
         Arc::new(arc_swap::ArcSwap::from_pointee(router_with(double))),
         usage,

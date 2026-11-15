@@ -114,6 +114,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         refused_value: None,
         replacement: "the advisory trim uses fixed defaults",
     },
+    RetiredKey {
+        path: &["usage", "enabled"],
+        refused_value: None,
+        replacement: "usage recording is always on",
+    },
 ];
 
 /// One retired key found in a config: its concrete key path and the

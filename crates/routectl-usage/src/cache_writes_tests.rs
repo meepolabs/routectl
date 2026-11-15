@@ -171,7 +171,7 @@ fn persisted(conn: &Connection, request_id: &str) -> PersistedCacheWrites {
 
 fn write_through_the_writer(path: &Path, records: Vec<UsageRecord>) {
     let want = records.len() as u64;
-    let (handle, writer) = UsageWriter::start(path.to_path_buf(), 16, 0, true);
+    let (handle, writer) = UsageWriter::start(path.to_path_buf(), 16, 0);
     for record in records {
         handle.try_send(record);
     }

@@ -243,12 +243,7 @@ async fn value_sent_after_restart(config: &Arc<Config>, usage: &UsageHandle) -> 
 #[tokio::test]
 async fn a_rewrite_value_survives_a_revision_mismatch_boot_and_is_applied() {
     let (config, _dir) = config();
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let catalog = i64::from(Router::new(Arc::clone(&config)).catalog_version());
     let now = ledger_reader::epoch_ms_now();
     let rewrite = field_key(TEST_REWRITE_PATH);
@@ -303,12 +298,7 @@ async fn a_rewrite_value_survives_a_revision_mismatch_boot_and_is_applied() {
 #[tokio::test]
 async fn a_rewrite_value_survives_a_revision_reload_and_a_restart() {
     let (config, _dir) = config();
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let catalog = i64::from(Router::new(Arc::clone(&config)).catalog_version());
     let now = ledger_reader::epoch_ms_now();
     let rewrite = field_key(TEST_REWRITE_PATH);

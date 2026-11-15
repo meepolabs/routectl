@@ -75,7 +75,7 @@ impl CaptureRig {
     fn new() -> Self {
         let db_path = crate::test_usage_dir::usage_dir().join("usage.db");
         // retention_days=0 (no prune), enabled=true so try_send accepts.
-        let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
         Self {
             handle: Some(handle),
             writer: Some(writer),

@@ -21,7 +21,7 @@ const BYTES_PER_TOKEN_ESTIMATE: i64 = 4;
 ///
 /// VALIDITY: ratios and cost claims drawn from this summary hold only for
 /// windows in which the usage channel dropped nothing -- the service-side
-/// `dropped_full` / `dropped_disabled` / `write_errors` counters must be flat
+/// `dropped_full` / `dropped_closed` / `write_errors` counters must be flat
 /// across the window. A lossy window under-reports every counter here by an
 /// unknown amount, so it supports counts-seen statements only.
 ///

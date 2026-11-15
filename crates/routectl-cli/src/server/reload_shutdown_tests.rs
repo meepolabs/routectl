@@ -35,7 +35,7 @@ fn live_writer() -> (tempfile::TempDir, UsageHandle, UsageWriter) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("usage.db");
     drop(routectl_usage::open(&path).expect("migrating open"));
-    let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0);
     (dir, handle, writer)
 }
 

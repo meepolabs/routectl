@@ -14,17 +14,11 @@
 //! exists to prevent. And a caller that publishes a new router before the
 //! batch is durable cannot tell the difference.
 //!
-//! Hence two departures from the crate's best-effort posture, both scoped to
-//! this one operation:
-//!
-//! - **It is acknowledged.** The caller learns, within a bounded wait,
-//!   whether the rows committed -- and every non-commit is a NAMED outcome
-//!   ([`BatchCommit`]), never an ambiguous silence, so a caller can hold its
-//!   old state rather than proceed on an unpersisted boundary.
-//! - **It bypasses the `usage.enabled` gate.** That gate is an operator's
-//!   telemetry preference; honoring it here would let disabling capture
-//!   destroy routing state, which no operator setting that word means to do.
-//!   Ordinary request and capability writes stay gated.
+//! Hence one departure from the crate's best-effort posture, scoped to this
+//! one operation: **it is acknowledged.** The caller learns, within a bounded
+//! wait, whether the rows committed -- and every non-commit is a NAMED outcome
+//! ([`BatchCommit`]), never an ambiguous silence, so a caller can hold its old
+//! state rather than proceed on an unpersisted boundary.
 //!
 //! It rides the EXISTING writer channel and the EXISTING single SQLite
 //! connection: the writer thread already serializes every write, so routing
@@ -123,9 +117,6 @@ impl BatchReceipt {
 impl UsageHandle {
     /// Admit `events` to the writer as ONE acknowledged transaction, without
     /// blocking, returning the receipt to await later.
-    ///
-    /// Deliberately bypasses the `usage.enabled` gate: this is a
-    /// correctness-control write, not telemetry (see the module docs).
     ///
     /// Non-blocking by contract, because the caller runs this while holding the
     /// registry guard: the boundary snapshot and this submission must be one
@@ -261,15 +252,11 @@ pub fn handle_over_channel(
 /// then observe -- and a refusal nobody can read is a refusal a test cannot
 /// distinguish from an acceptance.
 #[doc(hidden)]
-pub fn handle_over_channel_with(
+pub const fn handle_over_channel_with(
     sender: tokio::sync::mpsc::Sender<crate::writer::WriterMessage>,
     counters: std::sync::Arc<crate::handle::UsageCounters>,
 ) -> UsageHandle {
-    UsageHandle::new(
-        sender,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        counters,
-    )
+    UsageHandle::new(sender, counters)
 }
 
 #[doc(hidden)]
@@ -278,7 +265,6 @@ pub fn handle_with_closed_channel() -> UsageHandle {
     drop(rx);
     UsageHandle::new(
         tx,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         std::sync::Arc::new(crate::handle::UsageCounters::default()),
     )
 }

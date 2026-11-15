@@ -64,7 +64,7 @@ async fn refusals_persisted(stream: bool) -> (StatusCode, Vec<Option<i64>>) {
     ));
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let state = AppState::for_test_with_usage(swap, usage);
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -147,7 +147,7 @@ async fn responses_drops_persisted(body: Bytes) -> Vec<Option<i64>> {
     ));
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let state = AppState::for_test_with_usage(swap, usage);
     let mut headers = HeaderMap::new();
     headers.insert(

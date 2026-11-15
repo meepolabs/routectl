@@ -50,7 +50,7 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
     // enabled=false: the admission-rejection path never writes a usage row,
     // but the handle must be constructible. Drop the owning writer; the
     // handle stays usable (accepts-and-drops once the channel closes).
-    let (usage, _writer) = UsageWriter::start(dir.path().join("usage.db"), 128, 0, false);
+    let (usage, _writer) = UsageWriter::start(dir.path().join("usage.db"), 128, 0);
     let state = Arc::new(AppState {
         router: Arc::new(ArcSwap::from_pointee(router)),
         usage,

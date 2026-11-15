@@ -100,7 +100,7 @@ async fn rows_after_aborting_mid_dispatch(stream: bool) -> Vec<CancelRow> {
     ));
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let state = AppState::for_test_with_usage(Arc::clone(&swap), usage.clone());
     let body =
         Bytes::from(serde_json::to_vec(&Dialect::Anthropic.request_body(stream)).expect("json"));

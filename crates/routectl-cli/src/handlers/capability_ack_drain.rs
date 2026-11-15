@@ -158,8 +158,7 @@ pub(crate) fn acknowledge_field_confirmations(
                 },
                 receipt,
             ),
-            // Refused at admission (a saturated channel, capture disabled, a closed
-            // writer): nothing was queued, so nothing can become durable and the
+            // Refused at admission (a saturated channel or a closed writer): nothing was queued, so nothing can become durable and the
             // claim releases on drop.
             Err(refusal) => {
                 drop(claim);

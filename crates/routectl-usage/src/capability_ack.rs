@@ -18,17 +18,10 @@
 //!
 //! It is not the boundary batch ([`crate::capability_batch`]). That one
 //! ESTABLISHES a replay boundary, raises per-key purge floors, commits several
-//! rows in one transaction, and deliberately bypasses the `usage.enabled` gate
-//! because a telemetry preference must not destroy routing state. This carries
+//! rows in one transaction. This carries
 //! ONE ordinary event that establishes nothing, so it passes the same
 //! boundary-generation check and the same per-key purge floor a best-effort event
 //! passes -- through the writer's one shared body, not a copy of it.
-//!
-//! It does honour the `usage.enabled` gate at admission, and that is deliberate
-//! too: an operator who turned capture off gets no new rows, so no verdict may
-//! become pre-flight eligible on the strength of a row that was never written.
-//! The refusal is reported rather than silent, so the router declines to advance
-//! eligibility instead of assuming it.
 
 use crate::capability_event::CapabilityEvent;
 use crate::handle::UsageHandle;
@@ -39,15 +32,15 @@ use crate::writer::{CapabilityEventWrite, EventStamp};
 ///
 /// CRATE-INTERNAL and deliberately not re-exported: it is constructed only inside
 /// [`UsageHandle::admit_acknowledged_capability_event`], which is what applies the
-/// enabled gate and the refusal accounting. A downstream caller able to build one
-/// could put it on the channel directly and bypass both -- and the accounting is
-/// what capability-persistence health reads.
+/// refusal accounting. A downstream caller able to build one could put it on the
+/// channel directly and bypass it -- and the accounting is what
+/// capability-persistence health reads.
 #[expect(
     clippy::redundant_pub_crate,
     reason = "this module is private, so pub(crate) reads as redundant -- but \
               `writer::WriterCommand` names this type in its own variant, so the \
               visibility is load-bearing; `pub` would publish the payload a caller \
-              could use to bypass the admission's enabled gate and accounting"
+              could use to bypass the admission's accounting"
 )]
 pub(crate) struct AcknowledgedCapabilityEvent {
     /// The row to append.
@@ -96,24 +89,16 @@ impl UsageHandle {
     /// without waiting for anything.
     ///
     /// `Err(CapabilityEventWrite::WriteFailed)` when the event was never queued at
-    /// all -- a closed channel, a full channel, or capture disabled. All three are
+    /// all -- a closed channel or a full channel. Both are
     /// one answer here because the caller's action is identical for each: it is not
     /// known to be durable, so no verdict may become pre-flight eligible on it.
-    /// Each is separately visible on its own counter.
+    /// Each is visible on its own counter.
     pub fn admit_acknowledged_capability_event(
         &self,
         event: CapabilityEvent,
         generation: u64,
         incarnation: u64,
     ) -> Result<CapabilityEventReceipt, CapabilityEventWrite> {
-        // THE ENABLED GATE, honoured here unlike the boundary batch: an operator
-        // who turned capture off gets no new rows, so nothing may be treated as
-        // durable. Reported rather than silently dropped, so the caller declines
-        // to advance eligibility instead of assuming it.
-        if !self.is_enabled() {
-            self.counters().incr_dropped_disabled();
-            return Err(CapabilityEventWrite::WriteFailed);
-        }
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<CapabilityEventWrite>();
         let command = AcknowledgedCapabilityEvent {
             event,

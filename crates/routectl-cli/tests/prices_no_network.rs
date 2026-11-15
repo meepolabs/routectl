@@ -95,8 +95,6 @@ fn hermetic_home(port: u16, upstream: &str) -> (tempfile::TempDir, PathBuf) {
              [server]\n\
              host = \"127.0.0.1\"\n\
              port = {port}\n\
-             [usage]\n\
-             enabled = true\n\
              [providers.local]\n\
              kind = \"openai-compat\"\n\
              base_url = \"{upstream}/v1\"\n\

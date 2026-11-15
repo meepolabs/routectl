@@ -121,7 +121,7 @@ fn live_writer() -> (TempDir, UsageHandle, UsageWriter) {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
     drop(routectl_usage::open(&path).expect("migrating open"));
-    let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0);
     (dir, handle, writer)
 }
 
@@ -264,9 +264,7 @@ async fn a_stale_incarnation_advance_does_nothing_even_though_its_row_commits() 
 #[tokio::test]
 async fn a_failed_write_advances_nothing() {
     // The durability half on this path: the row cannot land, so nothing may advance.
-    // Capture disabled is the production state that produces it -- the acknowledged
-    // admission refuses, so there is no receipt at all. Driven here through a receipt
-    // whose writer is GONE, which is the other shape: the sender drops without
+    // Driven here through a receipt whose writer is GONE: the sender drops without
     // answering and `await_outcome` resolves to a write failure.
     //
     // Mutation check: drop the `is_durable()` guard in `advance_owned` -> red here.

@@ -367,9 +367,7 @@ fn write_config(dir: &Path, port: u16) -> PathBuf {
             "version = {CURRENT_CONFIG_VERSION}\n\
              [server]\n\
              host = \"127.0.0.1\"\n\
-             port = {port}\n\
-             [usage]\n\
-             enabled = true\n"
+             port = {port}\n"
         ),
     )
     .expect("write config");

@@ -64,7 +64,7 @@ async fn a_committed_event_reports_durable_and_is_on_disk() {
     // on a writer that acknowledged without inserting, which is precisely the
     // false-durability the acknowledgment exists to rule out.
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
     let receipt = handle
         .admit_acknowledged_capability_event(
@@ -98,7 +98,7 @@ async fn an_event_older_than_the_committed_boundary_reports_superseded_and_write
     // Mutation check: skip the boundary check on the acknowledged path (a second
     // copy of the persist body without it) -> red here on both assertions.
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     // Commit a boundary at generation 5, which is what raises the bar.
     // The ASYNC admission, not the blocking one: this test runs on a tokio
     // worker, and the blocking variant must not be called from one.
@@ -151,7 +151,7 @@ async fn an_event_superseded_by_a_purge_reports_so_and_writes_nothing() {
     // learn it -- otherwise the verdict the operator was told was removed would
     // become pre-flight eligible again.
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let key = wire_shape_key("thinking.enabled.display");
     // A `cleared` row committed at incarnation 4 raises that key's purge floor.
     let mut cleared = negative("nick", &key);
@@ -258,7 +258,7 @@ async fn a_committed_single_clear_raises_the_purge_floor() {
 
     for (name, follow_up, incarnation, expected, verdicts) in rows {
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let first = handle
             .admit_acknowledged_capability_event(clear("nick", &key), 1, 4)
             .expect("admitted")
@@ -294,7 +294,7 @@ async fn a_failed_write_reports_write_failed() {
     // runs degraded with no connection. Chosen over a deleted file because SQLite
     // would simply recreate that one.
     std::fs::create_dir(&dir_as_db).expect("create the blocking directory");
-    let (handle, writer) = UsageWriter::start(dir_as_db.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(dir_as_db.clone(), CHANNEL_CAPACITY, 0);
 
     let receipt = handle
         .admit_acknowledged_capability_event(negative("nick", &wire_shape_key("a.b")), 1, 1)
@@ -323,11 +323,7 @@ fn a_full_channel_refuses_at_admission_without_blocking() {
     let capacity = 1usize;
     let (tx, _rx) = tokio::sync::mpsc::channel::<crate::writer::WriterMessage>(capacity);
     let counters = Arc::new(crate::handle::UsageCounters::default());
-    let handle = UsageHandle::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        Arc::clone(&counters),
-    );
+    let handle = UsageHandle::new(tx, Arc::clone(&counters));
 
     // Fill the one slot, then refuse.
     let _first = handle
@@ -349,43 +345,13 @@ fn a_full_channel_refuses_at_admission_without_blocking() {
     );
 }
 
-#[test]
-fn capture_disabled_refuses_rather_than_silently_dropping() {
-    // The enabled gate IS honoured here, unlike the boundary batch's deliberate
-    // bypass. The asymmetry is the point: the batch protects routing state an
-    // operator's telemetry preference must not destroy, while this one only ever
-    // ADDS a row -- and an operator who turned capture off wrote no row, so no
-    // verdict may become pre-flight eligible on the strength of one.
-    //
-    // Mutation check: drop the enabled check from
-    // `admit_acknowledged_capability_event` -> red here.
-    let (tx, _rx) = tokio::sync::mpsc::channel::<crate::writer::WriterMessage>(4);
-    let counters = Arc::new(crate::handle::UsageCounters::default());
-    let handle = UsageHandle::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        Arc::clone(&counters),
-    );
-    assert!(!handle.is_enabled(), "premise: capture is off");
-
-    let refused =
-        handle.admit_acknowledged_capability_event(negative("nick", &wire_shape_key("a.b")), 1, 1);
-
-    assert_eq!(
-        refused.err(),
-        Some(CapabilityEventWrite::WriteFailed),
-        "with capture off nothing is written, so nothing may be reported durable",
-    );
-    assert_eq!(counters.dropped_disabled(), 1);
-}
-
 #[tokio::test]
 async fn an_abandoned_receipt_leaves_the_writer_unblocked() {
     // Shutdown shape: a caller that drops its receipt (its own budget expired, or
     // the process is tearing down) must not wedge the writer. The row may still
     // land; nothing is published on the strength of it.
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
     let receipt = handle
         .admit_acknowledged_capability_event(negative("nick", &wire_shape_key("a.b")), 1, 1)

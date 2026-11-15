@@ -415,7 +415,6 @@ async fn failed_config_reload_keeps_previous_activation() {
         crate::test_usage_dir::usage_dir().join("usage.db"),
         CHANNEL_CAPACITY,
         0,
-        false,
     );
 
     // Drive the coordinator (not the handler) so the config-reload

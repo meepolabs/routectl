@@ -283,73 +283,17 @@ async fn credentials_reload_rebuild_failure_keeps_previous_router() {
     );
 }
 
-// ---- Usage writer: boot, hot-reload enabled-gate, shutdown drain ----
+// ---- Usage writer: boot, hot-reload, shutdown drain ----
 
-/// Minimal on-disk config text with the usage block's `enabled` set
-/// to `enabled` and `db_path` pointed at `db_path`, so a config
-/// reload picks up an isolated DB and a flippable gate.
+/// Minimal on-disk config text with the usage block's `db_path` pointed
+/// at `db_path`, so a config reload picks up an isolated DB.
 #[cfg(test)]
-fn usage_config_text(enabled: bool, db_path: &std::path::Path) -> String {
+fn usage_config_text(db_path: &std::path::Path) -> String {
     format!(
         "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
-             [usage]\nenabled = {enabled}\ndb_path = \"{}\"\nretention_days = 0\n",
+             [usage]\ndb_path = \"{}\"\nretention_days = 0\n",
         db_path.display()
     )
-}
-
-/// A config reload that flips `usage.enabled` true -> false must flip
-/// the live gate WITHOUT rebuilding the writer: the same `UsageHandle`
-/// the daemon holds reports `is_enabled() == false` after the reload,
-/// and the Router Arc is swapped (proving the reload ran).
-#[tokio::test]
-async fn config_reload_flips_usage_enabled_gate_live() {
-    // Arrange: a temp DB + a config file starting enabled=true, and a
-    // writer/handle pair the daemon would own across the reload.
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("usage.db");
-    let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, usage_config_text(false, &db_path)).unwrap();
-
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let mut start_config = Config::default();
-    start_config.usage.db_path = db_path.clone();
-    start_config.usage.enabled = true;
-    let start_config = Arc::new(start_config);
-    let (usage, writer) = build_usage_writer(&start_config);
-    assert!(usage.is_enabled(), "writer must start enabled");
-
-    let router = build_router_from_config(start_config.clone(), secrets.clone())
-        .await
-        .expect("initial router build");
-    let swap = Arc::new(ArcSwap::from_pointee(router));
-    let before_router = swap.load_full();
-
-    // Act: reload the on-disk config (enabled=false).
-    let new_config = handle_config_reload(
-        Some(&cfg_path),
-        &start_config,
-        secrets,
-        &swap,
-        &usage,
-        &mut never_shutdown(),
-    )
-    .await
-    .expect("config reload must apply")
-    .expect("a successful reload returns its config");
-
-    // Assert: gate flipped live (same handle), router swapped.
-    assert!(!new_config.usage.enabled);
-    assert!(
-        !usage.is_enabled(),
-        "reload must flip the live usage gate to disabled"
-    );
-    let after_router = swap.load_full();
-    assert!(
-        !Arc::ptr_eq(&before_router, &after_router),
-        "config reload must swap the router"
-    );
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
 }
 
 /// A leftover `catalog_overlay.json` in the config folder is not read: a
@@ -723,17 +667,16 @@ fn tombstone_count(path: &std::path::Path) -> i64 {
 #[tokio::test]
 #[serial_test::serial]
 async fn config_reload_without_revision_change_enqueues_no_tombstone() {
-    // Arrange: usage enabled at a temp DB, and an initial router.
+    // Arrange: usage at a temp DB, and an initial router.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let db_path = dir.path().join("usage.db");
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, usage_config_text(true, &db_path)).unwrap();
+    std::fs::write(&cfg_path, usage_config_text(&db_path)).unwrap();
 
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
     let mut start_config = Config::default();
     start_config.usage.db_path = db_path.clone();
-    start_config.usage.enabled = true;
     let start_config = Arc::new(start_config);
     let (usage, writer) = build_usage_writer(&start_config);
 

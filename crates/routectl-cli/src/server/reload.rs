@@ -728,13 +728,6 @@ pub(super) async fn handle_config_reload(
         "config",
     );
 
-    // Flip the usage capture gate live. `db_path` and `retention_days` are
-    // restart-required (the writer holds the DB handle opened at boot, and
-    // pruning runs only at startup, so a changed value takes effect at the
-    // next daemon start -- both surface in the restart-required warning
-    // below). Only `enabled` flips at runtime.
-    usage.set_enabled(new_config.usage.enabled);
-
     // Stamp the replay boundary at the post-reload revision so negatives
     // learned during the post-reload session sort after this tombstone and
     // replay on the next boot. The revision-changed case already committed its

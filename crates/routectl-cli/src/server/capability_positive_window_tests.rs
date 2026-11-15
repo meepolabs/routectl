@@ -193,7 +193,7 @@ async fn one_day_of_verified_traffic(router: &Router, handle: &UsageHandle) {
 
 /// Run the blocking startup warm off the runtime thread against `ledger`.
 async fn warm(ledger: &Path, router: &Router, scratch: &Path) {
-    let (handle, writer) = UsageWriter::start(scratch.to_path_buf(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(scratch.to_path_buf(), CHANNEL_CAPACITY, 0);
     std::thread::scope(|scope| {
         scope
             .spawn(|| warm_capability_registry_from_ledger(ledger, router, &handle))
@@ -219,7 +219,7 @@ async fn a_month_of_positive_traffic_writes_one_row_and_keeps_older_negatives() 
     let live = router();
     let (cat, overlay) = revision_of(&live);
     let ledger = tmp.path().join("usage.db");
-    let (handle, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
     let ts = now_ms();
     handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
     handle.try_send_capability_event_in_generation(broken(ts, WEB_SEARCH, cat, overlay), 1);

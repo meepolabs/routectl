@@ -358,9 +358,7 @@ async fn serve_inner(
     // capability warm enqueues its fail-closed tombstone through, then it
     // goes onto AppState (outside the ArcSwap, so a Router hot-swap never
     // disturbs it) while the owning `UsageWriter` stays in this scope as the
-    // shutdown handle. Started unconditionally -- even when
-    // `usage.enabled == false` -- so the runtime gate can flip live on reload
-    // without a restart.
+    // shutdown handle.
     let (usage_handle, usage_writer) = build_usage_writer(&config);
 
     // One-shot warm of the learned-capability registry from the usage ledger,
@@ -728,16 +726,14 @@ async fn start_mitm_proxy(
     ))
 }
 
-/// Construct the usage writer from `config.usage`. Always starts the
-/// writer (even when disabled) so the runtime enabled-gate can flip
-/// without a restart; construction never hard-fails (a DB open error
-/// degrades the writer to a no-op drain loop internally).
+/// Construct the usage writer from `config.usage`. Construction never
+/// hard-fails (a DB open error degrades the writer to a no-op drain loop
+/// internally).
 pub(super) fn build_usage_writer(config: &Config) -> (UsageHandle, UsageWriter) {
     UsageWriter::start(
         config.usage.db_path.clone(),
         CHANNEL_CAPACITY,
         config.usage.retention_days,
-        config.usage.enabled,
     )
 }
 

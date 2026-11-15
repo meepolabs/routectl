@@ -358,8 +358,8 @@ async fn drain_deadline_does_not_fire_before_signal() {
 
 /// Boot wiring: the writer/handle are constructed before the ArcSwap
 /// and a Router hot-swap must NOT disturb the usage handle. We hold a
-/// handle, swap the Router under it, and assert the handle's gate and
-/// counters object survive the swap unchanged (handler call sites keep
+/// handle, swap the Router under it, and assert the handle's counters
+/// object survives the swap unchanged (handler call sites keep
 /// a stable usage handle across any number of Router rebuilds).
 #[tokio::test]
 async fn router_hot_swap_does_not_disturb_usage_handle() {
@@ -376,7 +376,6 @@ async fn router_hot_swap_does_not_disturb_usage_handle() {
         .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(r1));
     let counters_ptr = Arc::as_ptr(usage.counters());
-    usage.set_enabled(true);
 
     // Act: swap a freshly-built Router under the same handle.
     let r2 = build_router_from_config(config.clone(), secrets)
@@ -384,9 +383,8 @@ async fn router_hot_swap_does_not_disturb_usage_handle() {
         .unwrap();
     swap.store(Arc::new(r2));
 
-    // Assert: the handle's gate and shared counters are untouched by
-    // the Router swap (same counters allocation, gate value preserved).
-    assert!(usage.is_enabled(), "router swap must not flip the gate");
+    // Assert: the handle's shared counters are untouched by the Router
+    // swap (same counters allocation).
     assert_eq!(
         counters_ptr,
         Arc::as_ptr(usage.counters()),
@@ -407,7 +405,6 @@ async fn drain_usage_writer_flushes_queued_rows() {
     let db_path = dir.path().join("usage.db");
     let mut config = Config::default();
     config.usage.db_path = db_path.clone();
-    config.usage.enabled = true;
     config.usage.retention_days = 0;
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
@@ -479,7 +476,6 @@ async fn drain_usage_writer_completes_with_concurrent_handle() {
     let db_path = dir.path().join("usage.db");
     let mut config = Config::default();
     config.usage.db_path = db_path.clone();
-    config.usage.enabled = true;
     config.usage.retention_days = 0;
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);

@@ -33,7 +33,7 @@ fn refuses_while_the_daemon_writer_holds_the_db() {
     // its whole lifetime.
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
-    let (handle, writer) = routectl_usage::UsageWriter::start(path.clone(), 8, 0, true);
+    let (handle, writer) = routectl_usage::UsageWriter::start(path.clone(), 8, 0);
     let opened = std::time::Instant::now();
     while !path.exists() && opened.elapsed() < std::time::Duration::from_secs(10) {
         std::thread::yield_now();

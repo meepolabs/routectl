@@ -402,7 +402,7 @@ async fn the_warm_migrates_before_reading_and_the_writer_still_attaches() {
     // Act: start the real writer against the SAME file the warm just
     // migrated, push one row through it, then warm again as a fresh boot
     // would.
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     drop(handle);
     drain_usage_writer_strict(writer).await;
     let db = open(&path).expect("reopen after writer");

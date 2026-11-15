@@ -51,7 +51,7 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
 /// `usage.db_path` (the writer holds a handle opened at boot) and
 /// `usage.retention_days` (pruning runs only at startup, so a changed
 /// value takes effect only on the next daemon start) are
-/// restart-required too; `usage.enabled` alone flips live. A `[mitm]` edit
+/// restart-required too. A `[mitm]` edit
 /// is restart-required because the front-proxy listener is spawned once at
 /// boot.
 pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
@@ -268,16 +268,6 @@ mod tests {
         next.usage.db_path = std::path::PathBuf::from("/tmp/other-usage.db");
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(changes.contains(&"usage.db_path"), "got {changes:?}");
-
-        // usage.enabled change -> hot-reload, NOT restart-required.
-        prev = Config::default();
-        next = prev.clone();
-        next.usage.enabled = !prev.usage.enabled;
-        let changes = collect_restart_required_changes(&prev, &next);
-        assert!(
-            !changes.contains(&"usage.enabled") && changes.is_empty(),
-            "enabled must hot-reload; got {changes:?}"
-        );
 
         // usage.retention_days change -> restart-required (pruning is
         // startup-only, so a changed value takes effect only at the next

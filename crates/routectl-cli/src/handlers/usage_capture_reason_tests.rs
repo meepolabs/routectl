@@ -9,7 +9,7 @@ use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 
 fn capture() -> (UsageCapture, UsageWriter) {
     let db_path = crate::test_usage_dir::usage_dir().join("usage.db");
-    let (handle, writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0);
     let req = ChatRequest {
         model: "m".to_string(),
         ..Default::default()
@@ -102,7 +102,7 @@ fn the_reason_stamp_keeps_the_existing_extra_keys() {
 #[test]
 fn a_capability_refusal_persists_gate_blocked_with_its_class_and_lanes() {
     let db_path = crate::test_usage_dir::usage_dir().join("usage.db");
-    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let req = ChatRequest {
         model: "m".to_string(),
         ..Default::default()

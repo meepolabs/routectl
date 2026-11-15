@@ -187,7 +187,7 @@ version = 5           # config schema version; see "Config schema version"
 [window_gate]         # proactive context-window gate switch
                       # (enabled). Optional; default off.
 
-[usage]               # usage-accounting subsystem: enabled, db_path,
+[usage]               # usage-accounting subsystem: db_path,
                       # retention_days. Optional.
 
 [wire_check]          # live wire-check sampling (first_n, sample_one_in,
@@ -358,6 +358,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
 | `server.allow_disable_fallbacks` | the x-routectl-disable-fallbacks header is always honored |
 | `trim` | the advisory trim uses fixed defaults |
+| `usage.enabled` | usage recording is always on |
 
 ## Editor autocomplete (JSON Schema)
 
@@ -2910,23 +2911,20 @@ resolved`) so operators can confirm the effective value once.
 
 The optional `[usage]` block controls the usage-accounting subsystem,
 which persists one row per request (token counts, cost) to a local
-SQLite database. A missing block keeps every default below.
+SQLite database. Recording is always on; nothing turns it off. A missing
+block keeps every default below.
 
 ```toml
 [usage]
-enabled = true                          # master switch; default true
 db_path = "/home/you/.config/routectl/usage.db"  # default resolved path
 retention_days = 90                     # prune rows older than this; default 90
 ```
 
 | Knob             | Default                          | Reload    |
 |------------------|----------------------------------|-----------|
-| `enabled`        | `true`                           | hot       |
 | `db_path`        | `<config-dir>/routectl/usage.db` | restart   |
 | `retention_days` | `90`                             | hot       |
 
-- `enabled` -- master switch for the subsystem. Hot-reloads on the
-  next config swap; no restart needed to turn accounting on or off.
 - `db_path` -- the SQLite database file. The default resolves the user
   config dir from `XDG_CONFIG_HOME` (else `$HOME/.config`), so no
   literal `~` ever reaches SQLite; each variable is used only when it is
@@ -3520,7 +3518,7 @@ routectl config show --effective
 ```sh
 routectl config set server.port 8788
 routectl config set retry.classes.server-error.retry 4
-routectl config set usage.enabled true
+routectl config set usage.retention_days 30
 ```
 
 The value's scalar type is inferred: `true`/`false` become a boolean,
@@ -4534,8 +4532,8 @@ gap rows and dropped rows: every count on it is then a minimum.
 
 The `--detail` reduction and k-suppressed-session blocks end with a
 `validity:` note: they report counts seen, and a ratio or cost claim needs
-the running service's usage-channel `dropped_full`, `dropped_closed`,
-`dropped_disabled` and `write_errors` counters flat across the window.
+the running service's usage-channel `dropped_full`, `dropped_closed`
+and `write_errors` counters flat across the window.
 
 `--detail` also ends the output with one `cache-ignore:` block, the same
 report the daemon logs and `routectl doctor` shows in its `cache`

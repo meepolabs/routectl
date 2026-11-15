@@ -20,7 +20,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -225,17 +224,9 @@ impl UsageWriter {
     /// open fails -- construction never hard-fails), runs the one-shot
     /// startup retention prune, spawns the dedicated consumer thread, and
     /// returns the `Clone` [`UsageHandle`] for callers plus this shutdown
-    /// handle. The writer thread is always spawned, even when
-    /// `initial_enabled` is false -- the gate is checked per-record on the
-    /// producer side so it can be flipped at runtime.
-    pub fn start(
-        db_path: PathBuf,
-        capacity: usize,
-        retention_days: u32,
-        initial_enabled: bool,
-    ) -> (UsageHandle, Self) {
+    /// handle.
+    pub fn start(db_path: PathBuf, capacity: usize, retention_days: u32) -> (UsageHandle, Self) {
         let counters = Arc::new(UsageCounters::default());
-        let enabled = Arc::new(AtomicBool::new(initial_enabled));
         let (tx, rx) = mpsc::channel::<WriterMessage>(capacity.max(1));
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
 
@@ -256,11 +247,11 @@ impl UsageWriter {
                     error = %err,
                     "usage writer thread spawn failed -- running degraded (records will be dropped)"
                 );
-                return Self::degraded(tx, enabled, counters);
+                return Self::degraded(tx, counters);
             }
         };
 
-        let handle = UsageHandle::new(tx.clone(), enabled, Arc::clone(&counters));
+        let handle = UsageHandle::new(tx.clone(), Arc::clone(&counters));
         let writer = Self {
             queue_view: Some(tx.downgrade()),
             sender: Some(tx),
@@ -281,10 +272,9 @@ impl UsageWriter {
     /// thread to drain or join.
     fn degraded(
         sender: mpsc::Sender<WriterMessage>,
-        enabled: Arc<AtomicBool>,
         counters: Arc<UsageCounters>,
     ) -> (UsageHandle, Self) {
-        let handle = UsageHandle::new(sender, enabled, Arc::clone(&counters));
+        let handle = UsageHandle::new(sender, Arc::clone(&counters));
         let writer = Self {
             sender: None,
             queue_view: None,
@@ -549,7 +539,7 @@ pub enum CapabilityEventWrite {
     /// removed.
     SupersededByPurge,
     /// The durable write was attempted and did not land, or could not be
-    /// submitted at all (no connection, a saturated channel, capture disabled).
+    /// submitted at all (no connection, a saturated channel, a closed channel).
     ///
     /// The four collapse into one variant because a consumer's action is identical
     /// for each -- the row is not known to be durable -- and each remains
@@ -865,9 +855,7 @@ impl WriterState {
     /// The only non-best-effort write in this crate: the batch carries a
     /// replay-boundary tombstone plus the entries that must survive past it,
     /// so all-or-nothing is a correctness requirement (a committed tombstone
-    /// with dropped survivors evicts live routing state). The enabled gate is
-    /// deliberately NOT consulted -- it was already bypassed on the producer
-    /// side, because a telemetry preference must not destroy routing state.
+    /// with dropped survivors evicts live routing state).
     ///
     /// A dropped ack receiver (the caller's budget expired) is ignored: the
     /// writer never blocks on a caller that left, and the rows it committed
@@ -1339,7 +1327,7 @@ mod tests {
         }
 
         // Act
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         drop(handle);
         writer.shutdown();
 
@@ -1367,7 +1355,7 @@ mod tests {
         // write-stopped legacy gap and `resolved_class` is the last bound
         // column, so distinct values in both catch a placeholder shift.
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let mut rec = record("rt-1");
         rec.outcome = Outcome::Timeout;
         rec.stream = true;
@@ -1412,7 +1400,7 @@ mod tests {
     async fn insert_leaves_write_stopped_legacy_columns_null() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
         // Act
         handle.try_send(record("ws-1"));
@@ -1447,7 +1435,7 @@ mod tests {
     async fn try_send_round_trips_every_v8_attribution_column() {
         // Arrange: every v8 column carries a non-NULL value.
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let mut rec = record("rt-v8");
         rec.would_trim_dedup_tokens = Some(1_200);
         rec.would_trim_supersession_tokens = Some(800);
@@ -1501,7 +1489,7 @@ mod tests {
     async fn try_send_round_trips_resolved_class() {
         // Arrange: a row carrying the v12 resolved_class token.
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let mut rec = record("rt-v12");
         rec.outcome = Outcome::UpstreamError;
         rec.resolved_class = Some("rate-limited".to_string());
@@ -1528,7 +1516,7 @@ mod tests {
         // Arrange: the pair binds at the two LAST column positions, so
         // distinct values catch a placeholder shift at the tail.
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let mut rec = record("rt-calib");
         rec.calib_estimated_tokens = Some(48_120);
         rec.calib_prompt_tokens = Some(51_003);
@@ -1561,7 +1549,7 @@ mod tests {
     async fn try_send_writes_reduction_decision_and_leaves_reduction_strategy_null() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let mut rec = record("rt-v15");
         rec.reduction_decision = Some("applied".to_string());
         rec.reduction_strings_compressed = Some(11);
@@ -1627,7 +1615,7 @@ mod tests {
     async fn try_send_writes_cache_decisions_without_shifting_earlier_columns() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let mut rec = record("rt-v16");
         rec.input_tokens = Some(7_101);
         rec.would_trim_shadow_misfire = Some(1);
@@ -1757,7 +1745,7 @@ mod tests {
             ),
         ];
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
         // Act
         for (request_id, set, _) in &cases {
@@ -1852,7 +1840,7 @@ mod tests {
             ),
         ];
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
         // Act
         for (request_id, set, _) in &cases {
@@ -1938,7 +1926,7 @@ mod tests {
             ),
         ];
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
         // Act
         for (request_id, set, _) in &cases {
@@ -1975,7 +1963,7 @@ mod tests {
     async fn duplicate_request_id_persists_one_row() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
         // Act
         handle.try_send(record("dup"));
@@ -1991,33 +1979,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_gate_drops_without_overflow_count() {
-        // Arrange
-        let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, false);
-
-        // Act: disabled -> dropped at the gate.
-        handle.try_send(record("gated"));
-        // Flip on at runtime; subsequent records write with no restart.
-        handle.set_enabled(true);
-        handle.try_send(record("live"));
-        assert!(wait_persisted(handle.counters(), 1), "live not persisted");
-        writer.shutdown();
-
-        // Assert
-        assert_eq!(handle.counters().dropped_disabled(), 1);
-        assert_eq!(handle.counters().dropped_full(), 0);
-        assert_eq!(row_count(&path), 1);
-    }
-
-    #[tokio::test]
     async fn unopenable_db_degrades_but_handle_still_accepts() {
         // Arrange: point at a path whose parent is a file, so open fails.
         let dir = TempDir::new().expect("tempdir");
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").expect("write blocker");
         let bad_path = blocker.join("usage.db");
-        let (handle, writer) = UsageWriter::start(bad_path, CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(bad_path, CHANNEL_CAPACITY, 0);
 
         // Act: try_send must not panic or error even with no DB.
         handle.try_send(record("degraded"));
@@ -2040,7 +2008,7 @@ mod tests {
     async fn shutdown_drains_queued_rows() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
         // Act: enqueue many, then shut down and let the bounded drain run.
         let n = 200;
@@ -2059,7 +2027,7 @@ mod tests {
     async fn drop_without_shutdown_is_non_blocking() {
         // Arrange: a live writer with rows queued behind it.
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0);
         for i in 0..100 {
             handle.try_send(record(&format!("drop-{i}")));
         }
@@ -2082,7 +2050,7 @@ mod tests {
     async fn shutdown_then_drop_does_not_double_join() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0);
         handle.try_send(record("once"));
         assert!(wait_persisted(handle.counters(), 1), "row not persisted");
 
@@ -2101,8 +2069,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<WriterMessage>(2);
         drop(rx);
         let counters = Arc::new(UsageCounters::default());
-        let enabled = Arc::new(AtomicBool::new(true));
-        let (handle, writer) = UsageWriter::degraded(tx, enabled, counters);
+        let (handle, writer) = UsageWriter::degraded(tx, counters);
 
         // Act: try_send accepts-and-drops (channel closed, not full);
         // shutdown returns immediately with no thread to join.
@@ -2139,7 +2106,7 @@ mod tests {
         }
 
         // Act: 30-day retention prunes "old" at startup.
-        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 30, true);
+        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 30);
         writer.shutdown();
 
         // Assert
@@ -2171,7 +2138,7 @@ mod tests {
         }
 
         // Act
-        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 30, true);
+        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 30);
         writer.shutdown();
 
         // Assert: only the in-window row survives.
@@ -2204,7 +2171,7 @@ mod tests {
         }
 
         // Act
-        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         writer.shutdown();
 
         // Assert: retention=0 means no prune.
@@ -2253,7 +2220,7 @@ mod tests {
     async fn capability_event_round_trips_through_the_shared_writer() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
         // Act
         handle.try_send_capability_event_in_generation(capability_event("web_search"), 1);
@@ -2293,8 +2260,7 @@ mod tests {
         let capacity = 2usize;
         let (tx, _rx) = mpsc::channel::<WriterMessage>(capacity);
         let counters = Arc::new(UsageCounters::default());
-        let enabled = Arc::new(AtomicBool::new(true));
-        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters));
+        let handle = UsageHandle::new(tx, Arc::clone(&counters));
 
         // Act: send well past capacity, timing the loop to prove the enqueue
         // never blocks.
@@ -2317,27 +2283,5 @@ mod tests {
             counters.capability_events_dropped_full(),
             (sends - capacity) as u64
         );
-    }
-
-    #[tokio::test]
-    async fn disabled_gate_drops_capability_events() {
-        // Arrange
-        let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, false);
-
-        // Act: disabled -> dropped at the gate (counted as a disabled-drop,
-        // not a capability-event overflow).
-        handle.try_send_capability_event_in_generation(capability_event("gated"), 1);
-        // Snapshot the counters and drop the handle's sender clone before
-        // draining, or shutdown blocks on the deadline.
-        let counters = Arc::clone(handle.counters());
-        drop(handle);
-        writer.shutdown();
-
-        // Assert
-        assert_eq!(counters.dropped_disabled(), 1);
-        assert_eq!(counters.capability_events_dropped_full(), 0);
-        assert_eq!(counters.capability_events_persisted(), 0);
-        assert_eq!(capability_event_row_count(&path), 0);
     }
 }

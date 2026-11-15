@@ -3,13 +3,12 @@
 //! `UsageHandle` is the only surface request handlers touch. It is
 //! `Clone` (cheap -- a few `Arc`s and a bounded `Sender`), and its sole
 //! hot-path method, [`UsageHandle::try_send`], never blocks, never
-//! awaits, and never panics. When usage is disabled the record is dropped
-//! at the gate; when the bounded channel is full or closed the record is
-//! dropped and the counter for that cause is bumped. Either way the caller
-//! returns immediately.
+//! awaits, and never panics. When the bounded channel is full or closed the
+//! record is dropped and the counter for that cause is bumped. Either way the
+//! caller returns immediately.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::mpsc::Sender;
 
@@ -32,7 +31,6 @@ pub struct UsageCounters {
     /// later persisted as gap rows: a closed channel has no writer left to
     /// persist anything.
     dropped_closed: AtomicU64,
-    dropped_disabled: AtomicU64,
     persisted: AtomicU64,
     write_errors: AtomicU64,
     prune_errors: AtomicU64,
@@ -84,11 +82,6 @@ impl UsageCounters {
     /// Records dropped because the channel was closed (writer gone).
     pub fn dropped_closed(&self) -> u64 {
         self.dropped_closed.load(Ordering::Relaxed)
-    }
-
-    /// Records dropped at the enabled gate (intentional, not overflow).
-    pub fn dropped_disabled(&self) -> u64 {
-        self.dropped_disabled.load(Ordering::Relaxed)
     }
 
     /// Rows successfully persisted by the consumer thread.
@@ -148,10 +141,6 @@ impl UsageCounters {
         self.dropped_closed.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub(crate) fn incr_dropped_disabled(&self) {
-        self.dropped_disabled.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub(crate) fn incr_persisted(&self) {
         self.persisted.fetch_add(1, Ordering::Relaxed);
     }
@@ -197,44 +186,28 @@ const DROP_WARN_INTERVAL: u64 = 1024;
 
 /// The cheap, `Clone` producer handle wired into request handlers.
 ///
-/// Holds the bounded `Sender`, the runtime-flippable `enabled` flag, and
-/// the shared counters. Cloning is cheap; clone freely into per-request
+/// Holds the bounded `Sender` and the shared counters. Cloning is cheap; clone freely into per-request
 /// state.
 #[derive(Clone)]
 pub struct UsageHandle {
     sender: Sender<WriterMessage>,
-    enabled: Arc<AtomicBool>,
     counters: Arc<UsageCounters>,
 }
 
 impl UsageHandle {
-    pub(crate) const fn new(
-        sender: Sender<WriterMessage>,
-        enabled: Arc<AtomicBool>,
-        counters: Arc<UsageCounters>,
-    ) -> Self {
-        Self {
-            sender,
-            enabled,
-            counters,
-        }
+    pub(crate) const fn new(sender: Sender<WriterMessage>, counters: Arc<UsageCounters>) -> Self {
+        Self { sender, counters }
     }
 
     /// Hand a record to the writer without ever blocking, awaiting, or
     /// panicking.
     ///
-    /// Returns immediately in every case. When usage is disabled the
-    /// record is dropped at the gate (counted as a disabled-drop, not an
-    /// overflow). When the bounded channel is full the record is dropped
-    /// and the full counter is bumped; when it is already closed the record
+    /// Returns immediately in every case. When the bounded channel is full
+    /// the record is dropped and the full counter is bumped; when it is already closed the record
     /// is dropped and the closed counter is bumped. Each cause has its own
     /// rate-limited WARN. Safe to call from any context, including a `Drop`
     /// impl.
     pub fn try_send(&self, record: UsageRecord) {
-        if !self.is_enabled() {
-            self.counters.incr_dropped_disabled();
-            return;
-        }
         match self
             .sender
             .try_send(WriterMessage::request(Box::new(record)))
@@ -248,11 +221,10 @@ impl UsageHandle {
     }
 
     /// Hand a capability event to the writer without ever blocking,
-    /// awaiting, or panicking. Mirrors [`UsageHandle::try_send`]: the same
-    /// enabled gate applies (a capability event is a usage write), and a
-    /// full or closed channel drops the event with its own counter and
-    /// rate-limited WARN. Routing never depends on this landing -- it is
-    /// best-effort; the warm-rebuild replayer tolerates the gap.
+    /// awaiting, or panicking. Mirrors [`UsageHandle::try_send`]: a full or
+    /// closed channel drops the event with its own counter and rate-limited
+    /// WARN. Routing never depends on this landing -- it is best-effort; the
+    /// warm-rebuild replayer tolerates the gap.
     /// Hand a capability event to the writer, stamped with the registry
     /// generation that produced it.
     ///
@@ -262,8 +234,8 @@ impl UsageHandle {
     /// a real observation. Requiring the argument makes the caller state which
     /// generation the event belongs to.
     ///
-    /// Best effort like every usage write (the enabled gate applies; a full or
-    /// closed channel drops with a counter).
+    /// Best effort like every usage write (a full or closed channel drops with
+    /// a counter).
     /// The generation is transient sequencing: the writer drops the event if a
     /// boundary batch has since committed at a NEWER generation, because such
     /// an event predates that boundary and would otherwise be replayed after
@@ -284,10 +256,6 @@ impl UsageHandle {
         generation: u64,
         incarnation: u64,
     ) {
-        if !self.is_enabled() {
-            self.counters.incr_dropped_disabled();
-            return;
-        }
         match self.sender.try_send(WriterMessage::capability_event(
             event,
             crate::writer::EventStamp {
@@ -303,22 +271,11 @@ impl UsageHandle {
         }
     }
 
-    /// Whether usage capture is currently enabled (runtime-flippable).
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
-    }
-
     /// The producer end of the writer channel. Crate-internal so the
     /// acknowledged capability batch can send its own message variant
     /// without duplicating the handle's construction.
     pub(crate) const fn sender(&self) -> &Sender<WriterMessage> {
         &self.sender
-    }
-
-    /// Flip the runtime enabled gate. The daemon calls this on hot-reload;
-    /// no restart of the writer task is needed.
-    pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Read-only view of the shared health counters.

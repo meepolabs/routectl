@@ -200,12 +200,7 @@ async fn every_verdict_survives_a_boundary_and_two_restarts() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // A pre-reload session learned both classes at revision 1.
     let before = seeded_router_with_both_classes(&config, 1, &usage);
@@ -266,12 +261,7 @@ async fn a_restated_survivor_keeps_its_original_observation_age() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let survivor = before
@@ -331,12 +321,7 @@ async fn a_reload_with_no_survivors_still_commits_the_boundary() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let reloaded = Router::new(config.clone());
 
@@ -402,12 +387,7 @@ async fn a_write_failure_commits_no_row_and_reports_a_failed_boundary() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // Seed FIRST, then arm the trigger: arming it earlier would abort the
     // seeding itself and the test would exercise an empty ledger.
@@ -477,12 +457,7 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // Arrange: a pre-reload session whose wire-shape verdict carries an
     // evidence class.
@@ -573,12 +548,7 @@ async fn a_verified_row_on_a_field_key_is_not_resident_after_a_cold_rebuild() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // Arrange: one `verified` row on the field key and the same row on the
     // catalog key the live thinking detector emits, behind a current boundary.
@@ -646,31 +616,22 @@ fn ledger_capability_rows_full(path: &std::path::Path) -> Vec<FullRow> {
 }
 
 /// A boot that fails closed on a stale boundary must make its OWN boundary
-/// durable before the daemon serves, even with usage capture disabled.
+/// durable before the daemon serves.
 ///
-/// The startup tombstone was best-effort and gated on `usage.enabled`. With
-/// capture off, a boot behind a stale-revision tombstone therefore wrote no
-/// boundary at all -- and then a same-revision reload (which moves no boundary,
-/// so it writes none either) could ENABLE capture, after which verdicts
-/// persisted behind the stale tombstone. Those rows sit before the boundary a
-/// later boot reads from, so they are invisible forever: the daemon appears to
-/// be learning while nothing it learns can survive a restart.
+/// A boot behind a stale-revision tombstone that wrote no boundary of its own
+/// would leave a same-revision reload (which moves no boundary, so it writes
+/// none either) persisting verdicts behind the stale tombstone. Those rows sit
+/// before the boundary a later boot reads from, so they are invisible forever:
+/// the daemon appears to be learning while nothing it learns can survive a
+/// restart.
 ///
 /// The sequence below is that exact path, end to end on a real ledger.
 #[tokio::test]
-async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_disabled() {
+async fn a_stale_boundary_boot_makes_its_own_boundary_durable() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
-    // Capture DISABLED for the boot, as the operator left it.
-    config.usage.enabled = false;
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
-    assert!(!usage.is_enabled());
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let catalog = i64::from(Router::new(config.clone()).catalog_version());
     let now = ledger_reader::epoch_ms_now();
@@ -684,7 +645,7 @@ async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_d
     assert_eq!(seeded, routectl_usage::BatchCommit::Committed { rows: 1 });
 
     // Act, phase one: boot. The boundary is stale against the frozen stamp,
-    // so the warm restates past its own -- durably, despite capture being off.
+    // so the warm restates past its own -- durably.
     let booted = restart_from_ledger(&config, &usage);
     assert!(
         resident_keys(&booted).is_empty(),
@@ -697,10 +658,9 @@ async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_d
         "the boot must have appended its OWN boundary at the frozen stamp",
     );
 
-    // Act, phase two: a same-revision reload enables capture. It moves no
-    // boundary (the revision did not change), so the boot's tombstone above is
-    // the one this session's verdicts must land after.
-    usage.set_enabled(true);
+    // Act, phase two: this session learns a verdict at the same revision. No
+    // reload moved the boundary, so the boot's tombstone above is the one this
+    // session's verdicts must land after.
     let verdict = broken(now - 1_000, &field_key(), 0, catalog);
     let persisted = commit_off_runtime(&usage, vec![verdict], 1);
     assert_eq!(
@@ -820,12 +780,7 @@ async fn a_refused_admission_leaves_the_live_state_pointer_identical() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // A live session with both classes resident.
     let before = seeded_router_with_both_classes(&config, 1, &usage);
@@ -876,12 +831,7 @@ async fn the_startup_warm_runs_off_the_tokio_worker() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // A sibling task that ticks while the warm is in flight.
     let ticks = Arc::new(AtomicU32::new(0));
@@ -944,12 +894,7 @@ async fn a_delayed_pre_boundary_event_is_dropped_while_a_post_admission_field_ev
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let catalog = i64::from(Router::new(config.clone()).catalog_version());
     let now = ledger_reader::epoch_ms_now();
 
@@ -1017,12 +962,7 @@ async fn a_write_failure_runs_no_boundary_transition() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     // Arm the failure AFTER seeding, so the batch is admitted and then fails.
@@ -1101,12 +1041,7 @@ async fn a_committed_boundary_applies_the_reloads_tuning() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut capability = config.capability.clone();
@@ -1151,12 +1086,7 @@ async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
@@ -1244,12 +1174,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let catalog = i64::from(Router::new(config.clone()).catalog_version());
     let now = ledger_reader::epoch_ms_now();
 
@@ -1335,12 +1260,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
     drain_usage_writer_strict(writer).await;
 
     // (6) Two consecutive restarts: the negative must stay ABSENT.
-    let (usage2, writer2) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage2, writer2) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let first = restart_from_ledger(&config, &usage2);
     assert!(
         !resident_keys(&first).contains(&field_key()),
@@ -1418,12 +1338,7 @@ async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // Arrange: one PENDING inferred wire-shape negative (one observation) and one
     // CORROBORATED one (two), both catalog-independent so both survive.
@@ -1510,12 +1425,7 @@ async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart()
     // A one-hour inferred window, so the third observation below is far outside it.
     config.capability.inferred_window_hours = 1;
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     // Arrange: corroborate inside the window, then reconfirm 6h later.
     let key = field_key();
@@ -1610,12 +1520,7 @@ async fn the_committed_ledger_generation_equals_the_registry_generation() {
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
@@ -1700,12 +1605,7 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
@@ -1820,12 +1720,7 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
@@ -1996,12 +1891,7 @@ async fn an_old_kind_write_between_carry_over_and_cut_is_not_restated_as_the_new
     let _dir = isolate_usage_db(&mut base);
     let config = Arc::new(base);
     let flipped = Arc::new(kind_flipped_config(&config));
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
+    let (usage, writer) = UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0);
     let before = seeded_router_with_both_classes(&config, 1, &usage);
 
     let mut reloaded = Router::new(flipped.clone());

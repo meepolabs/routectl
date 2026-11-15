@@ -183,7 +183,7 @@ fn boot(config: &Arc<Config>, seat: Arc<BetaSeat>) -> Router {
 }
 
 fn start_writer(config: &Config) -> (UsageHandle, UsageWriter) {
-    UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0, true)
+    UsageWriter::start(config.usage.db_path.clone(), CHANNEL_CAPACITY, 0)
 }
 
 /// Stop the writer so every queued row is on disk. The handle goes first: a

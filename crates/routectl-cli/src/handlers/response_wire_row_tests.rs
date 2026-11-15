@@ -60,7 +60,7 @@ impl Ledger {
     fn start() -> Self {
         let dir = tempfile::tempdir().expect("usage tempdir");
         let db_path = dir.path().join("usage.db");
-        let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
         Self {
             handle: Some(handle),
             writer: Some(writer),

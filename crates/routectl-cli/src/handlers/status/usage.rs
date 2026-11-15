@@ -1594,7 +1594,6 @@ mod tests {
             blocker.join("usage.db"),
             routectl_usage::CHANNEL_CAPACITY,
             0,
-            true,
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         while usage.counters().write_errors() == 0 && Instant::now() < deadline {

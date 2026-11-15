@@ -18,7 +18,7 @@ fn a_writer_that_failed_a_write_reports_degraded() {
     let blocker = dir.path().join("blocker");
     std::fs::write(&blocker, b"not a directory").expect("plant the blocker");
     let broken = blocker.join("usage.db");
-    let (handle, writer) = UsageWriter::start(broken, CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(broken, CHANNEL_CAPACITY, 0);
     // The open runs on the writer's spawned thread; a busy schedule can push the
     // failure past 50ms.
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -49,7 +49,7 @@ fn a_healthy_writer_reports_not_degraded() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
     drop(routectl_usage::open(&path).expect("migrating open"));
-    let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0);
 
     let view = UsageHealthView::new(std::sync::Arc::clone(handle.counters()));
 

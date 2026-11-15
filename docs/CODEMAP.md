@@ -5736,11 +5736,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   than a copy of it. A committed single `cleared` event raises its key's purge
   floor exactly as a batch clear does, before the acknowledgement is sent, so a
   delayed negative at the cleared incarnation is refused; a repeated clear AT
-  the floor is admitted (durable), an older one is not. It DOES honour the
-  `usage.enabled` gate (the batch
-  deliberately bypasses it): an operator who turned capture off wrote no row, so
-  no verdict may become eligible on the strength of one, and the refusal is
-  REPORTED rather than silent. A refused admission is CLASSIFIED by the channel's
+  the floor is admitted (durable), an older one is not. A refused admission is CLASSIFIED by the channel's
   own reason through `UsageHandle::note_capability_refusal` -- the ONE shared
   classifier every capability-write class uses -- so a full channel lands on
   `capability_events_dropped_full` and a closed one on
@@ -5759,8 +5755,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   submit while holding the registry guard) plus `BatchReceipt::await_outcome`
   (async, no timeout), and the synchronous
   `commit_capability_events_blocking(events, generation)` for callers off the
-  runtime. All DELIBERATELY bypass the `usage.enabled` gate (a telemetry
-  preference must not destroy routing state). Admission is bounded (a full
+  runtime. Admission is bounded (a full
   channel is refused without queueing) and a refusal is now COUNTED through the
   shared `note_capability_refusal` classifier -- previously it incremented nothing,
   which was the hole: this is the path a purge, a canary's durable clear, and the
@@ -5801,8 +5796,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never
   blocks/awaits/panics -- safe from `Drop`), `try_send_capability_event` (the
   same best-effort discipline for a unified-ledger
-  `CapabilityEvent`), runtime-flippable `enabled` gate, shared lock-free
-  `UsageCounters` (enqueued / dropped_full / dropped_closed / dropped_disabled / persisted /
+  `CapabilityEvent`), shared lock-free
+  `UsageCounters` (enqueued / dropped_full / dropped_closed / persisted /
   write_errors / prune_errors plus the capability-event trio capability_events_enqueued /
   capability_events_dropped_full / capability_events_persisted)
 - `src/ledger_gap.rs` -- `GapTracker`: the writer thread's record of
@@ -5911,7 +5906,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   never persisted, so `reduction_bytes_saved` stays the single source of
   truth. VALIDITY: ratios and cost claims off this summary hold only for
   windows the usage channel dropped nothing in (service-side `dropped_full` /
-  `dropped_disabled` / `write_errors` flat); a nonzero `strings_rejected`
+  `dropped_closed` / `write_errors` flat); a nonzero `strings_rejected`
   signals a minifier defect, not traffic headroom
 - `src/query/cache_ignore.rs` -- per-lane cache-ignore evidence over a window;
   exports `cache_ignore_lanes` + `CacheIgnoreRule` / `CacheIgnoreLane` /
@@ -6253,12 +6248,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cases to their `WarmOutcome` and logs each at its warranted level (debug for a cold ledger / absent tombstone, WARN
   only for a genuinely unreadable ledger) and
   `commit_fresh_tombstone` commits exactly one fresh tombstone stamped this
-  boot's revision through the ACKNOWLEDGED batch path -- not best-effort and
-  not gated on `usage.enabled`, because a boot that left a stale-revision
-  tombstone in place would have every verdict this session learns land before
-  the boundary a later boot reads from, and the gate cannot be consulted since
-  a later same-revision reload can enable capture while moving no boundary of
-  its own. A failure logs at ERROR; boot never fails on the usage subsystem. `emit_rebuild_log` reports
+  boot's revision through the ACKNOWLEDGED batch path -- not best-effort,
+  because a boot that left a stale-revision tombstone in place would have every
+  verdict this session learns land before the boundary a later boot reads from,
+  and a same-revision reload moves no boundary of its own. A failure logs at ERROR; boot never fails on the usage subsystem. `emit_rebuild_log` reports
   the per-verdict tally plus the skip tallies (`skipped_unknown` for an
   unrecognized token, `skipped_revision` for a revision eviction,
   `skipped_vocab` for an unmappable vocabulary version, `skipped_lane`,

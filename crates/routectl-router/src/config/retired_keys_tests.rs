@@ -482,10 +482,8 @@ fn live_keys_and_the_shipped_examples_produce_no_hits() {
             "[cache]\nauto_emit_top_level_breakpoint = true\n",
         ),
         ("capability enabled", "[capability]\nenabled = true\n"),
-        (
-            "usage db path and retention",
-            "[usage]\ndb_path = \"/tmp/u.db\"\nretention_days = 30\n",
-        ),
+        ("usage db path", "[usage]\ndb_path = \"/tmp/u.db\"\n"),
+        ("usage retention", "[usage]\nretention_days = 30\n"),
         (
             "fill-first pool",
             "[pools.p]\nmembers = [\"a\", \"b\"]\nseat_selection = \"fill-first\"\n",

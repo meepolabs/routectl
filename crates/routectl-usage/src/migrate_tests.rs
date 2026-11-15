@@ -490,7 +490,7 @@ fn a_seeded_v20_ledger_migrates_to_v21_with_null_cache_write_columns_on_old_rows
 
     // Act: the production writer opens (and migrates) the file on its own
     // thread, then writes a row carrying a split.
-    let (handle, writer) = UsageWriter::start(path.clone(), 4, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), 4, 0);
     handle.try_send(UsageRecord {
         request_id: "v21-row".to_string(),
         cache_write_tokens: Some(30),

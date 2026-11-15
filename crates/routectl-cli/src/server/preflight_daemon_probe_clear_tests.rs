@@ -241,7 +241,6 @@ async fn seed_recheck_negative_before_boot(config: &Arc<Config>) {
         config.usage.db_path.clone(),
         routectl_usage::CHANNEL_CAPACITY,
         0,
-        true,
     );
     let now = crate::server::ledger_reader::epoch_ms_now();
     let catalog = i64::from(Router::new(Arc::clone(config)).catalog_version());

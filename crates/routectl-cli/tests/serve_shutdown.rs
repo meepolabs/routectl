@@ -175,9 +175,7 @@ fn hermetic_home(port: u16) -> (tempfile::TempDir, std::path::PathBuf) {
             "version = {CURRENT}\n\
              [server]\n\
              host = \"127.0.0.1\"\n\
-             port = {port}\n\
-             [usage]\n\
-             enabled = true\n"
+             port = {port}\n"
         ),
     )
     .expect("write config");

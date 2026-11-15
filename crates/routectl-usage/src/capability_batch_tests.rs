@@ -61,7 +61,7 @@ fn ledger_rows(path: &PathBuf) -> Vec<(i64, String, String)> {
 fn committed_batch_lands_every_row_in_append_order() {
     // Arrange
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let batch = vec![
         CapabilityEvent::tombstone(900, 8, 1),
         negative("nick", &wire_shape_key("thinking.enabled.display")),
@@ -86,50 +86,12 @@ fn committed_batch_lands_every_row_in_append_order() {
     writer.shutdown();
 }
 
-/// A correctness-control write must NOT be silenced by the operator's usage
-/// capture setting: the boundary batch is what keeps a verdict from being
-/// evicted, so honoring `usage.enabled` here would make a telemetry
-/// preference silently destroy routing state. Ordinary request usage stays
-/// gated, which the sibling assertion below pins.
-#[test]
-fn batch_commits_while_usage_capture_is_disabled() {
-    // Arrange: capture starts disabled.
-    let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, false);
-    assert!(!handle.is_enabled());
-
-    // Act
-    let outcome =
-        handle.commit_capability_events_blocking(vec![CapabilityEvent::tombstone(900, 8, 1)], 1);
-
-    // Assert: the control write committed even though capture is off.
-    assert_eq!(outcome, BatchCommit::Committed { rows: 1 });
-    assert_eq!(ledger_rows(&path).len(), 1);
-
-    // Assert the gate still applies to a best-effort capability event, so
-    // the bypass is scoped to the acknowledged batch and did not widen.
-    let before = handle.counters().dropped_disabled();
-    handle.try_send_capability_event_in_generation(negative("nick", "web_search"), 1);
-    assert_eq!(
-        handle.counters().dropped_disabled(),
-        before + 1,
-        "an ordinary capability event is still dropped at the disabled gate",
-    );
-
-    // Drop the handle's sender BEFORE shutdown: `shutdown` waits for the
-    // consumer's recv loop to end, which only happens once EVERY sender is
-    // gone. A live handle makes it pay the full drain deadline and then
-    // detach the thread.
-    drop(handle);
-    writer.shutdown();
-}
-
 /// An empty batch is a no-op that still reports success: the caller has
 /// nothing to preserve, which is not a failure.
 #[test]
 fn empty_batch_commits_zero_rows() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
     let outcome = handle.commit_capability_events_blocking(Vec::new(), 1);
 
@@ -157,11 +119,7 @@ fn closed_writer_reports_unavailable_rather_than_committed() {
     // Arrange: a channel whose consumer is already gone.
     let (tx, rx) = tokio::sync::mpsc::channel::<crate::writer::WriterMessage>(4);
     drop(rx);
-    let handle = UsageHandle::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        Arc::new(UsageCounters::default()),
-    );
+    let handle = UsageHandle::new(tx, Arc::new(UsageCounters::default()));
 
     // Act
     let outcome =
@@ -190,11 +148,7 @@ fn full_channel_reports_channel_full() {
         },
     ))
     .expect("the empty slot accepts one message");
-    let handle = UsageHandle::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        Arc::new(UsageCounters::default()),
-    );
+    let handle = UsageHandle::new(tx, Arc::new(UsageCounters::default()));
 
     // Act: no free slot, so admission itself must fail -- and it must fail
     // WITHOUT blocking, which is what keeps a wedged writer from stalling a
@@ -224,7 +178,7 @@ fn sqlite_failure_reports_write_failed_and_commits_nothing() {
             )
             .expect("install trigger");
     }
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
     // Act
     let outcome = handle.commit_capability_events_blocking(
@@ -272,7 +226,7 @@ fn an_admitted_batch_resolves_to_an_outcome_that_agrees_with_the_ledger() {
     // Arrange: writer up, plus a second connection holding an EXCLUSIVE write
     // transaction so the writer's transaction must contend for the lock.
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     // Let the writer finish opening before the blocker takes the write lock.
     assert_eq!(
         handle.commit_capability_events_blocking(Vec::new(), 1),
@@ -347,7 +301,7 @@ fn an_admitted_batch_resolves_to_an_outcome_that_agrees_with_the_ledger() {
 #[tokio::test]
 async fn admission_returns_a_receipt_without_blocking_and_the_wait_is_separate() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
     // Act: admit (non-blocking) then await the receipt.
     let receipt = handle
@@ -370,11 +324,7 @@ async fn admission_reports_refusal_without_a_receipt() {
     // A channel whose single slot is already taken and whose consumer is gone.
     let (tx, rx) = tokio::sync::mpsc::channel::<crate::writer::WriterMessage>(1);
     drop(rx);
-    let handle = UsageHandle::new(
-        tx,
-        Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        Arc::new(UsageCounters::default()),
-    );
+    let handle = UsageHandle::new(tx, Arc::new(UsageCounters::default()));
 
     let refused = handle
         .admit_capability_batch(vec![CapabilityEvent::tombstone(900, 8, 1)], 1)
@@ -388,7 +338,7 @@ async fn admission_reports_refusal_without_a_receipt() {
 #[tokio::test]
 async fn a_dropped_receipt_leaves_the_writer_healthy() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
     let receipt = handle
         .admit_capability_batch(vec![CapabilityEvent::tombstone(900, 8, 1)], 1)
@@ -419,7 +369,7 @@ async fn a_dropped_receipt_leaves_the_writer_healthy() {
 #[tokio::test]
 async fn an_event_older_than_the_committed_generation_is_rejected() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
 
     // A boundary batch commits at generation 5.
     let committed = handle
@@ -464,7 +414,7 @@ async fn an_event_older_than_the_committed_generation_is_rejected() {
 #[test]
 fn an_event_queued_before_a_purge_is_dropped_after_the_clear_commits() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let key = wire_shape_key("thinking.enabled.display");
 
     // The purge's clear commits, carrying the incarnation it captured.
@@ -505,7 +455,7 @@ fn an_event_queued_before_a_purge_is_dropped_after_the_clear_commits() {
 #[test]
 fn an_event_at_exactly_the_cleared_incarnation_is_superseded() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let key = wire_shape_key("thinking.enabled.display");
 
     let cleared = CapabilityEvent {
@@ -551,7 +501,7 @@ fn a_post_purge_relearn_with_a_greater_incarnation_is_accepted() {
 
     for (name, cleared_at, relearned_at) in rows {
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         let key = wire_shape_key("thinking.enabled.display");
 
         let cleared = CapabilityEvent {
@@ -582,7 +532,7 @@ fn a_post_purge_relearn_with_a_greater_incarnation_is_accepted() {
         );
 
         // Restart: a fresh writer over the same file, then the boot read.
-        let (restarted, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (restarted, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
         drop(restarted);
         writer.shutdown();
         let db = crate::open(&path).expect("reopen the ledger");
@@ -607,7 +557,7 @@ fn a_post_purge_relearn_with_a_greater_incarnation_is_accepted() {
 #[test]
 fn a_purge_floor_does_not_suppress_a_different_key() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let purged = wire_shape_key("thinking.enabled.display");
     let other = wire_shape_key("thinking.budget_tokens");
 
@@ -637,7 +587,7 @@ fn a_purge_floor_does_not_suppress_a_different_key() {
 #[test]
 fn a_purge_floor_is_keyed_on_both_halves_of_the_registry_key() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let key = wire_shape_key("thinking.enabled.display");
 
     let cleared = CapabilityEvent {
@@ -687,7 +637,7 @@ fn under_kind(kind: &str, event: CapabilityEvent) -> CapabilityEvent {
 fn a_purge_floor_on_one_provider_kind_does_not_suppress_another_kind() {
     // Arrange
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let key = wire_shape_key("thinking.enabled.display");
     let cleared_b = CapabilityEvent {
         verdict: "cleared".to_string(),
@@ -733,7 +683,7 @@ fn a_purge_floor_on_one_provider_kind_does_not_suppress_another_kind() {
 #[test]
 fn a_boundary_batch_raises_no_per_key_floor() {
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let key = wire_shape_key("thinking.enabled.display");
 
     // A boundary batch: a tombstone plus a restated survivor on this key.
@@ -774,7 +724,7 @@ fn a_boundary_batch_raises_no_per_key_floor() {
 fn a_purge_floor_survives_more_purges_than_the_former_cache_held() {
     const FORMER_CAPACITY: usize = 1024;
     let (_dir, path) = temp_path();
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     let first = wire_shape_key("thinking.enabled.display");
 
     // The FIRST key is purged at incarnation 7.

@@ -11,7 +11,7 @@
 //! A re-check probe that saw the upstream accept a field submits a `cleared` row
 //! here, and the router removes the negative only if this answers `true`. So the
 //! answer is `true` for one outcome alone, `CapabilityEventWrite::is_durable()`.
-//! A refused admission (capture disabled, a full or closed channel), a write that
+//! A refused admission (a full or closed channel), a write that
 //! failed, and a row a boundary or purge superseded all answer `false`: the
 //! negative keeps acting and the probe job stays retryable.
 //!

@@ -118,9 +118,9 @@ mod tests {
 
         assert_eq!(
             value
-                .pointer("/$defs/UsageConfig/properties/enabled/description")
+                .pointer("/$defs/UsageConfig/properties/retention_days/description")
                 .and_then(serde_json::Value::as_str),
-            Some("Master switch for the usage-accounting subsystem. Default on."),
+            Some("Rows older than this many days are pruned on daemon startup.\nDefault 90."),
         );
         assert_eq!(
             value

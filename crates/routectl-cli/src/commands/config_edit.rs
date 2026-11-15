@@ -527,6 +527,11 @@ default = \"gpt\"
                 "models.gpt.effort_levels",
                 "[models.gpt]\neffort_levels = 1\n",
             ),
+            (
+                "a retired key beside live ones",
+                "usage.enabled",
+                "[usage]\nenabled = 1\n",
+            ),
         ];
 
         for (row, dotted, carried) in rows {

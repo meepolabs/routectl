@@ -629,12 +629,8 @@ mod tests {
 
         // Act: start the real writer against the SAME file the warm just
         // migrated and enqueue a real record through it.
-        let (handle, writer) = routectl_usage::UsageWriter::start(
-            path.clone(),
-            routectl_usage::CHANNEL_CAPACITY,
-            0,
-            true,
-        );
+        let (handle, writer) =
+            routectl_usage::UsageWriter::start(path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
         handle.try_send(reuse_draft("post-writer", "s1", "anthropic-api", "opus"));
         assert!(
             wait_persisted(&handle, 1),
@@ -714,12 +710,8 @@ mod tests {
         draft.outcome = routectl_usage::Outcome::Ok;
 
         let (_dir, path) = temp_db_path();
-        let (handle, writer) = routectl_usage::UsageWriter::start(
-            path.clone(),
-            routectl_usage::CHANNEL_CAPACITY,
-            0,
-            true,
-        );
+        let (handle, writer) =
+            routectl_usage::UsageWriter::start(path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
         handle.try_send(draft);
         // Drop the producer handle BEFORE shutdown: `UsageWriter::shutdown`
         // waits for the channel to CLOSE (all senders dropped) to detect
@@ -788,12 +780,8 @@ mod tests {
         draft.outcome = routectl_usage::Outcome::Ok;
 
         let (_dir, path) = temp_db_path();
-        let (handle, writer) = routectl_usage::UsageWriter::start(
-            path.clone(),
-            routectl_usage::CHANNEL_CAPACITY,
-            0,
-            true,
-        );
+        let (handle, writer) =
+            routectl_usage::UsageWriter::start(path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
         handle.try_send(draft);
         // Drop the producer handle BEFORE shutdown so the channel-close
         // drain signal can fire (see the metadata-derived test above).
@@ -859,12 +847,8 @@ mod tests {
         draft.outcome = routectl_usage::Outcome::Ok;
 
         let (_dir, path) = temp_db_path();
-        let (handle, writer) = routectl_usage::UsageWriter::start(
-            path.clone(),
-            routectl_usage::CHANNEL_CAPACITY,
-            0,
-            true,
-        );
+        let (handle, writer) =
+            routectl_usage::UsageWriter::start(path.clone(), routectl_usage::CHANNEL_CAPACITY, 0);
         handle.try_send(draft);
         drop(handle);
         writer.shutdown();

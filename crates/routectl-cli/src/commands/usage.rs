@@ -1434,7 +1434,7 @@ fn render_shadow_misfire(report: &WindowReport) -> String {
 /// proportional conclusion from a window.
 const REDUCTION_VALIDITY_NOTE: &str = "  validity: counts observed, not a rate -- \
 a ratio or cost claim needs the service's usage-channel dropped_full / \
-dropped_closed / dropped_disabled / write_errors counters flat across the window\n";
+dropped_closed / write_errors counters flat across the window\n";
 
 /// The lossless-minifier outcome block: the per-decision request histogram,
 /// the summed raw effect counters, the read-time-derived token estimate, and
@@ -1520,13 +1520,13 @@ fn format_suppression_ts(ts_ms: i64) -> String {
     )
 }
 
-/// The K-suppression finder's validity caveat. Same shape and the same four
+/// The K-suppression finder's validity caveat. Same shape and the same three
 /// counters as [`REDUCTION_VALIDITY_NOTE`]: the finder reports what the ledger
 /// recorded, and a window the usage channel dropped records in under-reports
 /// both the triple list and each count by an unknown amount.
 const SUPPRESSED_SESSIONS_VALIDITY_NOTE: &str = "  validity: sessions seen, not a rate -- \
 a ratio or cost claim needs the service's usage-channel dropped_full / \
-dropped_closed / dropped_disabled / write_errors counters flat across the window\n";
+dropped_closed / write_errors counters flat across the window\n";
 
 /// The session-reference scope caveat, printed alongside the finder rows so
 /// an operator does not try to match a reference against a serve log or a

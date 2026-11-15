@@ -61,7 +61,7 @@ const V21_TAIL: [&str; 2] = ["cache_write_tokens INTEGER", "cache_write_lifetime
 /// cache-write total and split.
 fn fresh_with_a_cache_write(path: &std::path::Path) {
     fresh_with_rows(path);
-    let (handle, writer) = UsageWriter::start(path.to_path_buf(), 4, 0, true);
+    let (handle, writer) = UsageWriter::start(path.to_path_buf(), 4, 0);
     handle.try_send(UsageRecord {
         request_id: "v21-row".to_string(),
         cache_write_tokens: Some(2523),

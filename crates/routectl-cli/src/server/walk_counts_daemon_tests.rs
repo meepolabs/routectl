@@ -119,7 +119,7 @@ fn walk_column_count(db_path: &std::path::Path) -> i64 {
 async fn seed_v19_ledger(db_path: &std::path::Path) {
     let path = db_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let (handle, writer) = UsageWriter::start(path.clone(), 4, 0, true);
+        let (handle, writer) = UsageWriter::start(path.clone(), 4, 0);
         let now = chrono::Local::now().timestamp_millis();
         handle.try_send(UsageRecord {
             request_id: SEEDED_ID.to_string(),

@@ -225,66 +225,176 @@ async fn an_unacknowledged_verdict_preflights_the_next_request_once_its_write_is
 /// indistinguishable from a correct one while the writer is healthy -- both advance.
 /// Only a write that does NOT land separates them.
 ///
-/// # Why capture-disabled is the failure used here
+/// # Why an unopenable ledger is the failure used here
 ///
-/// It is a real production state, reached by one operator setting, and the
-/// acknowledged admission refuses it by design (an operator who turned capture off
-/// wrote no row, so no verdict may become eligible on the strength of one).
+/// It is a real production state: the writer cannot open its database at boot, runs
+/// degraded with no connection, and answers every acknowledged write it is handed
+/// with a failure. The event IS admitted, so the refusal comes from the writer's own
+/// outcome rather than from admission.
 ///
-/// The obvious alternative does not work, and the reason is worth recording: making
-/// the ledger FILE unwritable after boot does not fail the writer's inserts at all.
-/// SQLite holds the open descriptor, so a removed or replaced file leaves the writer
-/// happily appending to the original inode -- measured, and it made an earlier
-/// version of this test report a rewrite while claiming the write had failed. A
-/// filesystem trick that the writer does not observe is not a failure injection.
+/// Making the ledger FILE unwritable after boot does not work instead: SQLite holds
+/// the open descriptor, so a removed or replaced file leaves the writer happily
+/// appending to the original inode -- measured, and it made an earlier version of
+/// this test report a rewrite while claiming the write had failed.
+///
+/// The degraded writer also suspends pre-flight through the health read, so the
+/// request alone cannot attribute the refusal to the acknowledgment. The verdict's
+/// confirmation count can: it is read from the live registry and moves only through
+/// the acknowledgment.
 ///
 /// Mutation checks, each turning THIS test red:
-///   - acknowledge before awaiting the write's outcome -> the advance happens and
-///     the request below is rewritten;
-///   - drop the `is_durable()` guard in `capability_ack_drain` -> same;
-///   - drop the enabled check from `admit_acknowledged_capability_event` -> the row
-///     is queued and the advance follows.
+///   - acknowledge before awaiting the write's outcome -> the count advances;
+///   - drop the `is_durable()` guard in `advance_owned` -> same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unwritten_event_advances_nothing_and_the_next_request_still_carries_the_field() {
-    let (config, dir) = daemon_config();
-    let db_path = config.usage.db_path.clone();
+    let (config, dir) = unopenable_ledger_config();
     let recorder = Arc::new(Recorder::default());
     let router = router_with(&config, Arc::clone(&recorder));
     plant_unacknowledged_verdict(&router);
     let daemon = spawn_daemon(config, dir, router).await;
-
-    // Capture OFF: the acknowledged admission refuses, so no row is written and
-    // nothing can be reported durable.
-    daemon.usage().set_enabled(false);
-    assert!(
-        !daemon.usage().is_enabled(),
-        "premise: capture must be off, or the write would land",
-    );
+    await_write_error(&daemon).await;
 
     let live = daemon.live_router();
     let mut meta = routectl_router::DispatchMeta::for_alias(ALIAS);
     meta.learned_capabilities.push(earned_learn_event(&live, 1));
+    let errors_before = daemon.usage().counters().write_errors();
     advance_through_the_daemon(&daemon, &live, &meta).await;
 
-    // PREMISE: nothing was written. Asserted against the ledger FILE, so the test
-    // is about an absent row rather than about an outcome value.
     assert!(
-        field_ledger_rows(&db_path).is_empty(),
-        "premise: no row for this identity landed, which is what makes the refusal \
-         below about the acknowledgment rather than about the incarnation",
+        daemon.usage().counters().write_errors() > errors_before,
+        "premise: the writer was handed the event and failed to persist it",
+    );
+    assert_eq!(
+        resident_confirmations(&daemon.live_router()),
+        vec![0],
+        "a write that did not land advances nothing: the resident verdict still \
+         counts zero acknowledged confirmations",
     );
 
-    // The request after the refused write: still carries the field. The write was
-    // not acknowledged, so no confirmation was recorded and pre-flight has no
-    // grounds to act.
     let after = post_inference(&daemon, &body_with_field()).await;
     assert_eq!(after, reqwest::StatusCode::OK, "the request still serves");
     assert_eq!(
         recorder.carried_per_attempt(),
         vec![true],
-        "a write that did not land advances nothing: the request carries the field \
-         exactly as it did before, and the lane is still fully served by reactive \
-         forward-and-repair",
+        "the request carries the field exactly as it did before, and the lane is \
+         still fully served by reactive forward-and-repair",
+    );
+
+    daemon.shutdown().await;
+}
+
+/// A config whose usage ledger sits under a regular FILE, so the writer's open fails
+/// at boot and every write it is handed fails after.
+fn unopenable_ledger_config() -> (Arc<Config>, tempfile::TempDir) {
+    let (config, dir) = daemon_config();
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("plant the blocker file");
+    let mut config = Config::clone(&config);
+    config.usage.db_path = blocker.join("usage.db");
+    (Arc::new(config), dir)
+}
+
+/// Wait until the daemon's writer has recorded a write error. The open runs on the
+/// writer's own thread, so its failure is not assumed visible the instant boot ends.
+async fn await_write_error(daemon: &Daemon) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while daemon.usage().counters().write_errors() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "premise: an unopenable ledger records a write error",
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The acknowledged confirmation count of every resident verdict for this test's
+/// identity, from the live registry.
+fn resident_confirmations(router: &Router) -> Vec<u32> {
+    router
+        .fidelity_snapshot()
+        .verdicts
+        .iter()
+        .filter(|row| row.state_key == STATE_KEY)
+        .map(|row| row.confirmations)
+        .collect()
+}
+
+/// Usage recording has no off switch, so an unopenable ledger is the one way the
+/// daemon runs without it, and it must still serve. Across the REAL writer start: the
+/// failed open counts a write error, the doctor panel reports the writer degraded,
+/// and capability pre-flight stands down while the request is served unrewritten.
+///
+/// The healthy control is the same planted verdict on a daemon whose ledger opens:
+/// that request IS pre-flighted, so the unrewritten request below is the degraded
+/// writer's doing rather than a fixture that could never rewrite.
+///
+/// The failed open and the boot tombstone's failed commit both count, so removing
+/// one count alone leaves this green; the open alone is pinned by
+/// `a_real_write_failure_turns_the_read_unhealthy`.
+///
+/// Mutation checks, each turning THIS test red:
+///   - count nothing on a writer with no connection (the failed open in
+///     `WriterState::open` and `record_failure`) -> the health read answers
+///     durable and the request is rewritten;
+///   - drop the `write_errors` term from `UsageCapabilityHealth` -> same;
+///   - report zero from `UsageHealthView::capability_writes` or `ledger_health` ->
+///     the doctor shows no write error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unopenable_ledger_keeps_serving_reports_degraded_and_suspends_preflight() {
+    // Arrange: the healthy control first.
+    let (healthy_config, healthy_dir) = daemon_config();
+    let healthy_recorder = Arc::new(Recorder::default());
+    let healthy_router = router_with(&healthy_config, Arc::clone(&healthy_recorder));
+    plant_acting_field_verdict_for_tests(&healthy_router, STATE_KEY, FIELD_PATH, 1);
+    let healthy = spawn_daemon(healthy_config, healthy_dir, healthy_router).await;
+    let control = post_inference(&healthy, &body_with_field()).await;
+    assert_eq!(control, reqwest::StatusCode::OK);
+    assert_eq!(
+        healthy_recorder.carried_per_attempt(),
+        vec![false],
+        "premise: on a writer whose ledger opens, this verdict pre-flights",
+    );
+    healthy.shutdown().await;
+
+    let (config, dir) = unopenable_ledger_config();
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    let config_path = write_config_file(config_dir.path());
+    let recorder = Arc::new(Recorder::default());
+    let router = router_with(&config, Arc::clone(&recorder));
+    plant_acting_field_verdict_for_tests(&router, STATE_KEY, FIELD_PATH, 1);
+
+    // Act
+    let daemon = spawn_daemon_full(
+        config,
+        dir,
+        router,
+        crate::handlers::status::test_hooks::StatusTestHooks::default(),
+        Some(config_path),
+    )
+    .await;
+    await_write_error(&daemon).await;
+    let status = post_inference(&daemon, &body_with_field()).await;
+    let doctor = get_status(&daemon, "/status/doctor").await;
+
+    // Assert
+    assert_eq!(status, reqwest::StatusCode::OK, "the daemon serves");
+    assert_eq!(
+        recorder.carried_per_attempt(),
+        vec![true],
+        "pre-flight stands down: the request dispatched the client's own bytes",
+    );
+    assert!(
+        !daemon.live_router().capability_writes_durable_for_tests(),
+        "the live router reads the writer as not durable",
+    );
+    let data = available_data(&doctor);
+    assert!(
+        data["ledger_health"]["write_errors"].as_u64() >= Some(1),
+        "the doctor reports the failed open as a write error: {data}",
+    );
+    assert!(
+        data["capability_writes"]["write_errors"].as_u64() >= Some(1),
+        "and capability persistence as degraded: {data}",
     );
 
     daemon.shutdown().await;

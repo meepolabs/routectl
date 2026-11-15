@@ -268,7 +268,7 @@ async fn persisted_with_user_agent(ua: &str) -> (tempfile::TempDir, std::path::P
     let (router, _seen) = capturing_router();
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let state =
         AppState::for_test_with_usage(Arc::new(arc_swap::ArcSwap::from_pointee(router)), usage);
     let mut headers = user_agent(ua);

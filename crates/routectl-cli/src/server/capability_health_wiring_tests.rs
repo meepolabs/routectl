@@ -112,7 +112,7 @@ async fn a_real_write_failure_turns_the_read_unhealthy() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let blocked = dir.path().join("usage.db");
     std::fs::create_dir(&blocked).expect("create the blocking directory");
-    let (handle, writer) = UsageWriter::start(blocked.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(blocked.clone(), CHANNEL_CAPACITY, 0);
     // AWAITED, not assumed: the open runs on the writer's own thread, so the failure
     // it records is not visible the instant `start` returns. A test that read the
     // counter immediately would race the thread and pass or fail by scheduling.

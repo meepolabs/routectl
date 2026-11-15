@@ -320,19 +320,13 @@ fn restate_survivors_past_new_boundary(
 /// Commit exactly one fresh tombstone stamped this boot's revision, through
 /// the ACKNOWLEDGED batch path.
 ///
-/// Not best-effort, and not subject to `usage.enabled`. Two reasons, both
-/// correctness rather than fidelity:
-///
-/// - The reader trusts only rows after the newest tombstone. If this boot
-///   leaves a STALE-revision tombstone in place, every verdict this session
-///   learns lands before that boundary and is invisible to every later boot --
-///   the daemon appears to learn while nothing it learns can survive a
-///   restart.
-/// - The gate cannot be consulted, because it is not fixed for the session: a
-///   later same-revision reload can enable capture, and a same-revision reload
-///   moves no boundary and so writes none of its own. A boot that skipped this
-///   write because capture happened to be off at the time would leave that
-///   session persisting rows behind a stale boundary.
+/// Not best-effort, for correctness rather than fidelity: the reader trusts
+/// only rows after the newest tombstone. If this boot leaves a STALE-revision
+/// tombstone in place, every verdict this session learns lands before that
+/// boundary and is invisible to every later boot -- the daemon appears to
+/// learn while nothing it learns can survive a restart. A same-revision
+/// reload moves no boundary and so writes none of its own, so this write is
+/// the session's only boundary.
 ///
 /// A failure is logged at ERROR rather than propagated: boot never fails on
 /// the usage subsystem. The consequence is bounded and named -- this session's

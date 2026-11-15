@@ -34,7 +34,7 @@ mod writer;
 // awaits it; `AcknowledgedCapabilityEvent` is deliberately NOT re-exported -- it is
 // the writer message's payload, constructed only inside the admission, and
 // publishing it would invite a downstream producer to build one and bypass the
-// admission's enabled gate and accounting.
+// admission's accounting.
 pub use cache_writes::{CacheWriteColumns, cache_write_columns};
 pub use capability_ack::CapabilityEventReceipt;
 pub use capability_batch::{

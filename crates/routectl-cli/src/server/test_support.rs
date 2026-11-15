@@ -119,11 +119,10 @@ pub(super) async fn begin_writer_drain(writer: UsageWriter) -> WriterDrain {
 pub(super) async fn live_usage_writer() -> (tempfile::TempDir, PathBuf, UsageHandle, UsageWriter) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
-    let (settle_handle, settle_writer) =
-        UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (settle_handle, settle_writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     drop(settle_handle);
     drain_usage_writer_strict(settle_writer).await;
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     (dir, path, handle, writer)
 }
 
@@ -135,7 +134,7 @@ async fn drain_usage_writer_strict_persists_a_queued_row_before_returning() {
     // and the only producer handle released so the channel can close.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("usage.db");
-    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0);
     handle.try_send(routectl_usage::UsageRecord {
         request_id: "drained-row".to_string(),
         outcome: routectl_usage::Outcome::Ok,
@@ -166,8 +165,7 @@ async fn drain_usage_writer_strict_persists_a_queued_row_before_returning() {
 async fn drain_usage_writer_strict_fails_when_a_retained_handle_times_the_drain_out() {
     // Arrange: the producer handle is held across the drain.
     let dir = tempfile::tempdir().expect("tempdir");
-    let (handle, writer) =
-        UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0);
     let writer = writer.with_drain_deadline(Duration::from_millis(50));
 
     // Act

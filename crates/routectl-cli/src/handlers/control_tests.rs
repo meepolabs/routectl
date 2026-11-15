@@ -141,7 +141,7 @@ impl Fixture {
         let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
         // A real writer is started and immediately shut down so the fixture owns
         // one, but the handle the route uses is the genuinely-closed one.
-        let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+        let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
         Self::with_usage(routectl_usage::handle_with_closed_channel(), writer, ledger)
     }
 
@@ -156,7 +156,7 @@ impl Fixture {
         tokio::sync::mpsc::Receiver<routectl_usage::WriterMessage>,
     ) {
         let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
-        let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+        let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
         let (tx, rx) = tokio::sync::mpsc::channel::<routectl_usage::WriterMessage>(capacity);
         (
             Self::with_usage(routectl_usage::handle_over_channel(tx), writer, ledger),
@@ -172,7 +172,7 @@ impl Fixture {
     /// whether or not the route persisted anything.
     fn new() -> Self {
         let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
-        let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+        let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
         Self::with_usage(usage, writer, ledger)
     }
 
@@ -226,7 +226,7 @@ impl Fixture {
     fn with_unwritable_ledger() -> Self {
         let ledger = crate::test_usage_dir::usage_dir().join("not-a-db");
         std::fs::create_dir(&ledger).expect("create the blocking directory");
-        let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+        let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
         Self::with_usage(usage, writer, ledger)
     }
 
@@ -2202,7 +2202,7 @@ fn bedrock_router() -> Router {
 
 fn bedrock_fixture() -> Fixture {
     let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
-    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+    let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
     Fixture::with_router(bedrock_router(), usage, writer, ledger)
 }
 
@@ -2394,7 +2394,7 @@ async fn a_seed_lift_that_cannot_commit_refuses_and_records_no_marker() {
     let rows: [(&str, RefusingFixture); 3] = [
         ("unavailable writer", || {
             let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
-            let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+            let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
             let usage = routectl_usage::handle_with_closed_channel();
             (
                 Fixture::with_router(bedrock_router(), usage, writer, ledger),
@@ -2403,7 +2403,7 @@ async fn a_seed_lift_that_cannot_commit_refuses_and_records_no_marker() {
         }),
         ("full channel", || {
             let ledger = crate::test_usage_dir::usage_dir().join("usage.db");
-            let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+            let (_live, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
             let (tx, rx) = tokio::sync::mpsc::channel::<routectl_usage::WriterMessage>(1);
             std::mem::forget(rx);
             let usage = routectl_usage::handle_over_channel(tx);
@@ -2415,7 +2415,7 @@ async fn a_seed_lift_that_cannot_commit_refuses_and_records_no_marker() {
         ("write failure", || {
             let ledger = crate::test_usage_dir::usage_dir().join("not-a-db");
             std::fs::create_dir(&ledger).expect("create the blocking directory");
-            let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0, true);
+            let (usage, writer) = UsageWriter::start(ledger.clone(), CHANNEL_CAPACITY, 0);
             (
                 Fixture::with_router(bedrock_router(), usage, writer, ledger),
                 None,

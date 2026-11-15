@@ -35,7 +35,7 @@ fn wait_persisted(handle: &UsageHandle, want: u64) {
 /// A writer whose consumer is parked in `blocking_recv`: its database is open
 /// and one row is on disk, so nothing is left queued.
 fn writer_with_an_empty_queue(path: &Path) -> (UsageHandle, UsageWriter, Option<Connection>) {
-    let (handle, writer) = UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 0);
     handle.try_send(row("before-shutdown"));
     wait_persisted(&handle, 1);
     (handle, writer, None)
@@ -49,7 +49,7 @@ fn writer_with_queued_rows(path: &Path) -> (UsageHandle, UsageWriter, Option<Con
     let lock = Connection::open(path).expect("lock connection");
     lock.execute_batch("BEGIN IMMEDIATE")
         .expect("take the write lock");
-    let (handle, writer) = UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 1, true);
+    let (handle, writer) = UsageWriter::start(path.to_path_buf(), CHANNEL_CAPACITY, 1);
     for i in 0..QUEUED_ROWS {
         handle.try_send(row(&format!("queued-{i}")));
     }

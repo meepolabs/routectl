@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
@@ -24,7 +23,7 @@ fn record(request_id: &str) -> UsageRecord {
 }
 
 fn handle_over(tx: mpsc::Sender<WriterMessage>, counters: &Arc<UsageCounters>) -> UsageHandle {
-    UsageHandle::new(tx, Arc::new(AtomicBool::new(true)), Arc::clone(counters))
+    UsageHandle::new(tx, Arc::clone(counters))
 }
 
 /// Send `n` records from another thread and fail if the loop does not finish
@@ -195,7 +194,7 @@ fn gap_row_survives_a_writer_restart_on_the_same_file() {
     );
 
     // Act: a second writer opens the same file, writes a row, stops.
-    let (handle, writer) = UsageWriter::start(path.clone(), 4, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), 4, 0);
     handle.try_send(record("after-restart"));
     assert!(wait_until(|| writer.counters().persisted() == 1));
     drop(handle);

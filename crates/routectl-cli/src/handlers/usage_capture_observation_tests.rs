@@ -42,7 +42,7 @@ struct Rig {
 fn rig() -> Rig {
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
-    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0);
     let slot = RequestObservation::new();
     let draft = build_usage_draft(
         "anthropic",

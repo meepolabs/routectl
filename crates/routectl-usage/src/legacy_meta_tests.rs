@@ -68,7 +68,7 @@ fn a_legacy_meta_row_does_not_block_open_write_or_read() {
 
     // Act: every open mode, then a write through the production writer.
     open(&path).expect("migrating open");
-    let (handle, writer) = UsageWriter::start(path.clone(), 4, 0, true);
+    let (handle, writer) = UsageWriter::start(path.clone(), 4, 0);
     handle.try_send(UsageRecord {
         ts_start: 1_000,
         request_id: "after-legacy-row".to_string(),

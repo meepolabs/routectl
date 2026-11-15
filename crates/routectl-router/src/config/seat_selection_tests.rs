@@ -144,7 +144,6 @@ host = "127.0.0.1"
     let cfg: Config = toml::from_str(toml_text).expect("parse without usage block");
 
     // Assert
-    assert!(cfg.usage.enabled, "enabled must default true");
     assert_eq!(cfg.usage.retention_days, 90);
     let db = cfg.usage.db_path.to_string_lossy();
     assert!(
@@ -163,7 +162,6 @@ fn usage_block_explicit_overrides_defaults() {
     // Arrange
     let toml_text = r#"
 [usage]
-enabled = false
 db_path = "/var/lib/routectl/usage.db"
 retention_days = 7
 "#;
@@ -171,7 +169,6 @@ retention_days = 7
     let cfg: Config = toml::from_str(toml_text).expect("parse explicit usage block");
 
     // Assert
-    assert!(!cfg.usage.enabled);
     assert_eq!(
         cfg.usage.db_path,
         std::path::PathBuf::from("/var/lib/routectl/usage.db")

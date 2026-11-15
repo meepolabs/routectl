@@ -114,8 +114,8 @@ pub struct Config {
 
     /// Operator-facing `[usage]` block. Controls the usage-accounting
     /// subsystem (per-request token/cost rows persisted to a local
-    /// SQLite db). A missing block keeps all defaults: enabled, a db
-    /// under the user config dir, 90-day retention.
+    /// SQLite db). A missing block keeps all defaults: a db under the
+    /// user config dir, 90-day retention.
     #[serde(default)]
     pub usage: UsageConfig,
 
