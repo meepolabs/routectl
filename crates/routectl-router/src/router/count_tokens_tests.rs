@@ -117,7 +117,6 @@ fn anthropic_api_entry() -> ProviderEntry {
         user_agent: None,
         forward_client_headers: vec![],
         context_management: false,
-        max_thinking_entry_bytes: None,
         cache_capability: None,
         reduction_enabled: None,
         cloak: routectl_providers::anthropic_api::CloakConfig::default(),

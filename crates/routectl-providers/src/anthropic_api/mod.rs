@@ -427,7 +427,7 @@ impl Provider for AnthropicApiProvider {
                     &self.cfg.id,
                     &tool_use_id,
                     thinking,
-                    self.cfg.max_thinking_entry_bytes,
+                    context_management::DEFAULT_MAX_THINKING_ENTRY_BYTES,
                     context_management::THINKING_CACHE_TTL,
                     "complete",
                 );
@@ -592,7 +592,6 @@ impl Provider for AnthropicApiProvider {
         // entry injects thinking no client conversation produced and evicts one
         // that a real conversation still needs.
         let context_management_enabled = self.cfg.context_management && is_client_traffic(&req);
-        let max_thinking_entry_bytes = self.cfg.max_thinking_entry_bytes;
         let thinking_cache_for_stream = Arc::clone(&self.thinking_cache);
         // Per-request tool-name reverse map (renamed upstream name ->
         // original client name) from the cloak forward pass. Empty / None
@@ -715,7 +714,7 @@ impl Provider for AnthropicApiProvider {
                         &provider_id,
                         &tool_use_id,
                         thinking,
-                        max_thinking_entry_bytes,
+                        context_management::DEFAULT_MAX_THINKING_ENTRY_BYTES,
                         context_management::THINKING_CACHE_TTL,
                         "stream",
                     );
@@ -1161,6 +1160,10 @@ pub(crate) mod request_drop_counter_tests;
 #[cfg(test)]
 #[path = "mod_background_isolation_tests.rs"]
 mod background_isolation_tests;
+
+#[cfg(test)]
+#[path = "mod_thinking_cap_tests.rs"]
+mod thinking_cap_tests;
 
 #[cfg(test)]
 #[path = "sse_usage_source_tests.rs"]

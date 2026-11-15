@@ -136,6 +136,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
                       built-in class",
     },
     RetiredKey {
+        path: &["providers", ANY_ENTRY, "max_thinking_entry_bytes"],
+        refused_value: None,
+        replacement: "the thinking-cache entry cap is fixed at 1 MiB",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "unsupported_features"],
         refused_value: None,
         replacement: "use `[capability.overrides.<provider>] unsupported`",

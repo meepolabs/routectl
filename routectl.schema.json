@@ -882,15 +882,6 @@
               "const": "anthropic-api",
               "type": "string"
             },
-            "max_thinking_entry_bytes": {
-              "description": "Per-entry byte cap on the thinking cache used by the\n`context_management` emulation path. Bounds: `>= 1024` (1\nKiB) and `<= 4 * 1024 * 1024` (4 MiB). When unset the\nruntime falls back to the\n`DEFAULT_MAX_THINKING_ENTRY_BYTES` baseline (1 MiB).\nOperators on memory-constrained hosts tune this down; the\nLRU's worst-case footprint is `THINKING_CACHE_CAP * cap`\n(10000 * 1 MiB ~ 10 GiB at the default).\n\nSetting `0` is treated as unset; a startup WARN is emitted and\nthe default applies.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
             "payload_extras": {
               "default": null,
               "description": "Provider-level payload extras. Deep-merged with per-model\nentries at dispatch time."

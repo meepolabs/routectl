@@ -46,8 +46,6 @@ pub type ThinkingCache = lru::LruCache<ThinkingCacheKey, ThinkingCacheEntry>;
 /// thinking-cache LRU will hold before evicting the oldest entry on
 /// the next write. `THINKING_CACHE_CAP * DEFAULT_MAX_THINKING_ENTRY_BYTES`
 /// is the LRU's worst-case memory footprint (`10_000 * 1 MiB ~ 10 GiB`).
-/// Operators sizing memory on memory-constrained hosts should tune the
-/// per-provider `max_thinking_entry_bytes` knob down.
 pub const THINKING_CACHE_CAP: usize = 10_000;
 
 /// TTL on entries in the thinking cache used by the `context_management`
@@ -56,7 +54,7 @@ pub const THINKING_CACHE_CAP: usize = 10_000;
 /// maximum agentic session length before context rotation.
 pub const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_hours(1);
 
-/// Default per-entry byte cap on the thinking cache. The cap is applied
+/// Per-entry byte cap on the thinking cache. The cap is applied
 /// at write time -- entries whose serialized JSON byte length exceeds
 /// this value are rejected (NOT truncated) so the rest of the pipeline's
 /// cache-miss recovery (request.rs strip-thinking-on-miss) handles them
@@ -66,13 +64,10 @@ pub const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_ho
 /// thinking blocks; rejecting and letting the strip-on-miss path land
 /// the request without thinking is the behaviour-preserving choice.
 ///
-/// Default for the per-provider `max_thinking_entry_bytes` knob. 1 MiB
-/// gives ~3x headroom over the realistic worst case for Opus 4.6/4.7/4.8
-/// reasoning turns at full 65k thinking-token budgets (~328 KB at
-/// ~5 bytes/token). Operators on memory-constrained hosts can tune
-/// down via `[providers.X].max_thinking_entry_bytes`. The LRU's
-/// worst-case footprint is `THINKING_CACHE_CAP * cap` (10_000 * 1 MiB
-/// ~ 10 GiB at the default).
+/// 1 MiB gives ~3x headroom over the realistic worst case for Opus
+/// 4.6/4.7/4.8 reasoning turns at full 65k thinking-token budgets
+/// (~328 KB at ~5 bytes/token). The LRU's worst-case footprint is
+/// `THINKING_CACHE_CAP * cap` (10_000 * 1 MiB ~ 10 GiB).
 pub const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 1024 * 1024;
 
 /// Store a thinking observation into the cache under `(provider_id, tool_use_id)`.
@@ -84,7 +79,7 @@ pub const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 1024 * 1024;
 /// (text + signature + data). On rejection the LRU is NOT touched and
 /// a structured WARN is emitted so operators can grep for oversized
 /// inputs. `path` tags the call site ("complete" / "stream") in the
-/// log. `ttl` is the operator-configured TTL applied to this entry's
+/// log. `ttl` is the TTL applied to this entry's
 /// `expires_at`.
 pub fn snapshot_to_cache(
     cache: &std::sync::RwLock<ThinkingCache>,

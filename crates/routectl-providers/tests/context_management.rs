@@ -53,7 +53,6 @@ fn make_provider(base_url: &str, context_management: bool) -> AnthropicApiProvid
         user_agent: None,
         forward_client_headers: Vec::new(),
         context_management,
-        max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,

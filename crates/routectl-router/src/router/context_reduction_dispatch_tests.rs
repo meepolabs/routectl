@@ -178,7 +178,6 @@ fn anthropic_entry_reduction_off() -> ProviderEntry {
         user_agent: None,
         forward_client_headers: Vec::new(),
         context_management: false,
-        max_thinking_entry_bytes: None,
         cache_capability: None,
         reduction_enabled: Some(false),
         cloak: routectl_providers::anthropic_api::CloakConfig::default(),

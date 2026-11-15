@@ -147,29 +147,23 @@ fn a_provider_kind_code_default_applies_only_to_entries_of_that_kind() {
 kind = "anthropic-api"
 api_key_ref = "env://K"
 
-[providers.claude-small]
-kind = "anthropic-api"
-api_key_ref = "env://K"
-max_thinking_entry_bytes = 4096
-
-[providers.compat]
-kind = "openai-compat"
-base_url = "https://compat.example/v1"
+[providers.codex]
+kind = "openai-responses"
 api_key_ref = "env://K"
 "#;
 
     let lines = lines_for(raw);
 
-    let thinking: Vec<&String> = lines
+    let pinned: Vec<&String> = lines
         .iter()
-        .filter(|l| l.contains("max_thinking_entry_bytes"))
+        .filter(|l| l.contains("codex_version"))
         .collect();
     assert_eq!(
-        thinking,
-        [
-            "  providers.claude.max_thinking_entry_bytes=1048576(default)",
-            "  providers.claude-small.max_thinking_entry_bytes=4096(file)",
-        ],
+        pinned,
+        [&format!(
+            "  providers.codex.codex_version=\"{}\"(default)",
+            routectl_core::identity::codex::PINNED_CODEX_VERSION
+        )],
         "lines:\n{lines:#?}"
     );
 }

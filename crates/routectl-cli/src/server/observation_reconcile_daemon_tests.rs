@@ -397,7 +397,6 @@ fn repairable_lane(upstream: &MockServer, usage_db: &std::path::Path) -> (Config
         user_agent: None,
         forward_client_headers: Vec::new(),
         context_management: false,
-        max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,

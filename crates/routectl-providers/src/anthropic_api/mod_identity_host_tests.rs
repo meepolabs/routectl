@@ -53,7 +53,6 @@ fn cfg(
         user_agent,
         forward_client_headers: Vec::new(),
         context_management: false,
-        max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         session_id: Some("session-stable-123".into()),
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,

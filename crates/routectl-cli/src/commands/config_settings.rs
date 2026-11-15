@@ -96,18 +96,6 @@ pub const CODE_DEFAULTS: &[CodeDefault] = &[
         },
     },
     CodeDefault {
-        scope: DefaultScope::ProviderKind("anthropic-api"),
-        key: "max_thinking_entry_bytes",
-        resolve: |cx| {
-            if cx.is_set {
-                return Resolution::File;
-            }
-            Resolution::Default(usize_value(
-                routectl_providers::anthropic_api::AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
-            ))
-        },
-    },
-    CodeDefault {
         scope: DefaultScope::ProviderKind("openai-responses"),
         key: "codex_version",
         resolve: codex_version_resolution,
@@ -133,10 +121,6 @@ fn codex_version_resolution(cx: &ResolveCx<'_>) -> Resolution {
             routectl_core::identity::codex::PINNED_CODEX_VERSION.to_string(),
         )),
     }
-}
-
-fn usize_value(n: usize) -> Value {
-    Value::Integer(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
 /// One printed setting: its key path, value and source.

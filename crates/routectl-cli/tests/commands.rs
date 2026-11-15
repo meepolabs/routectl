@@ -2105,6 +2105,59 @@ fn config_set_refuses_the_retired_model_additional_request_fields_with_the_loade
     );
 }
 
+/// The thinking-cache entry cap is fixed; `config set` on the retired
+/// per-provider key refuses with the loader's line and writes nothing, while
+/// a live key on the same provider writes.
+#[test]
+fn config_set_refuses_the_retired_max_thinking_entry_bytes_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = two_seat_pool_config(tmp.path());
+    let base = std::fs::read_to_string(&config_path).expect("read config");
+    let path = config_path.to_str().unwrap();
+    let set = |key: &str, value: &str| {
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "set", key, value])
+    };
+    let loader_line = routectl_router::preflight_raw_config(&base.replace(
+        "[providers.seat-b]\n",
+        "max_thinking_entry_bytes = 524288\n[providers.seat-b]\n",
+    ))
+    .expect_err("the loader refuses a file carrying the key")
+    .to_string();
+
+    // Act
+    let (code, stdout, stderr) = set("providers.seat-a.max_thinking_entry_bytes", "524288");
+
+    // Assert
+    assert_ne!(code, 0, "refused: {stdout} / {stderr}");
+    assert_eq!(
+        loader_line,
+        "`providers.seat-a.max_thinking_entry_bytes` is retired: the thinking-cache entry \
+         cap is fixed at 1 MiB; delete it"
+    );
+    assert!(
+        stderr.contains(&loader_line),
+        "config set prints the loader's line: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read config"),
+        base,
+        "a refused edit must not write"
+    );
+
+    let (code, stdout, stderr) = set("providers.seat-a.context_management", "true");
+    assert_eq!(
+        code, 0,
+        "control: a live key on the same provider writes: {stdout} / {stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("context_management = true"),
+        "the control edit must land on disk"
+    );
+}
+
 // -- config check's secret-ref validation: read-only by construction, and
 // control-char-filtered at the one point it prints operator-written keys.
 

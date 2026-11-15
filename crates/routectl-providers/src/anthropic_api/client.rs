@@ -80,11 +80,6 @@ pub struct AnthropicApiConfig {
     /// not honor the beta natively. Default false: routectl forwards the body
     /// verbatim and the real Anthropic server handles the beta itself.
     pub context_management: bool,
-    /// Per-entry byte cap on the thinking cache used by the
-    /// `context_management` emulation path. Resolved from the optional
-    /// `[providers.X].max_thinking_entry_bytes` TOML knob; falls back
-    /// to `DEFAULT_MAX_THINKING_ENTRY_BYTES` (1 MiB) when unset.
-    pub max_thinking_entry_bytes: usize,
     /// Stable per-credential Claude Code session id, stamped as the
     /// `x-claude-code-session-id` header on the OauthBearer
     /// api.anthropic.com surface. `Some` only when the provider's
@@ -138,7 +133,6 @@ impl std::fmt::Debug for AnthropicApiConfig {
                 &format!("[{} entries]", self.forward_client_headers.len()),
             )
             .field("context_management", &self.context_management)
-            .field("max_thinking_entry_bytes", &self.max_thinking_entry_bytes)
             // Presence only: the session_id ties requests to one logical
             // session; treat as sensitive so its value never enters logs.
             .field("session_id", &self.session_id.is_some())
@@ -162,18 +156,6 @@ impl std::fmt::Debug for AnthropicApiConfig {
 }
 
 impl AnthropicApiConfig {
-    /// Default per-entry byte cap on the thinking cache used by the
-    /// `context_management` emulation path. Falls back to this value
-    /// when the per-provider `max_thinking_entry_bytes` knob is unset.
-    /// Entries whose serialized JSON byte length exceeds the resolved
-    /// cap are rejected at write time and a structured WARN is emitted.
-    /// The strip-on-miss recovery in `request.rs` handles the next turn
-    /// the same way it would for a TTL eviction. 1 MiB gives ~3x
-    /// headroom over realistic worst-case Opus 4.6/4.7/4.8 reasoning
-    /// turns at full thinking-token budgets.
-    pub const MAX_THINKING_ENTRY_BYTES: usize =
-        context_management::DEFAULT_MAX_THINKING_ENTRY_BYTES;
-
     /// Construct with a static API-key string. The token is wrapped
     /// in `StaticToken` so the provider's resolution call site is
     /// uniform across static and managed sources. Existing callers
@@ -196,7 +178,6 @@ impl AnthropicApiConfig {
             user_agent: None,
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: Self::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
             use_forwarded_bearer: false,
@@ -373,7 +354,7 @@ impl AnthropicApiProvider {
             provider_id,
             tool_use_id,
             thinking,
-            self.cfg.max_thinking_entry_bytes,
+            context_management::DEFAULT_MAX_THINKING_ENTRY_BYTES,
             context_management::THINKING_CACHE_TTL,
             "test-seed",
         );

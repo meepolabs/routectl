@@ -1197,19 +1197,6 @@ pub enum ProviderEntry {
         /// itself.
         #[serde(default)]
         context_management: bool,
-        /// Per-entry byte cap on the thinking cache used by the
-        /// `context_management` emulation path. Bounds: `>= 1024` (1
-        /// KiB) and `<= 4 * 1024 * 1024` (4 MiB). When unset the
-        /// runtime falls back to the
-        /// `DEFAULT_MAX_THINKING_ENTRY_BYTES` baseline (1 MiB).
-        /// Operators on memory-constrained hosts tune this down; the
-        /// LRU's worst-case footprint is `THINKING_CACHE_CAP * cap`
-        /// (10000 * 1 MiB ~ 10 GiB at the default).
-        ///
-        /// Setting `0` is treated as unset; a startup WARN is emitted and
-        /// the default applies.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_thinking_entry_bytes: Option<u32>,
         /// Operator override for this entry's prompt-cache capability.
         /// `None` -> use the conservative per-kind default. Useful when a
         /// non-Anthropic upstream behind this anthropic-api-shaped
@@ -2021,7 +2008,6 @@ impl ProviderEntry {
             user_agent: None,
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: None,
             cache_capability: None,
             reduction_enabled: None,
             cloak: CloakConfig::default(),
@@ -2255,25 +2241,6 @@ impl ProviderEntry {
         self
     }
 
-    /// Set the AnthropicApi variant's `max_thinking_entry_bytes` knob
-    /// (per-entry byte cap on the `context_management` emulation
-    /// thinking cache). `None` falls through to
-    /// `AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES` at provider
-    /// build time. Panics on other variants -- the field is
-    /// AnthropicApi-only.
-    pub fn with_max_thinking_entry_bytes(mut self, bytes: Option<u32>) -> Self {
-        match &mut self {
-            Self::AnthropicApi {
-                max_thinking_entry_bytes,
-                ..
-            } => *max_thinking_entry_bytes = bytes,
-            _ => {
-                panic!("ProviderEntry::with_max_thinking_entry_bytes only applies to anthropic-api")
-            }
-        }
-        self
-    }
-
     /// Redact every credential-bearing value in this entry, in place, so the
     /// entry is safe to serialize into diagnostics: key refs that are not
     /// `env://` / `file://` / `oauth://` pointers become sentinels (including
@@ -2318,7 +2285,6 @@ impl ProviderEntry {
                 user_agent: _,
                 forward_client_headers: _,
                 context_management: _,
-                max_thinking_entry_bytes: _,
                 cache_capability: _,
                 reduction_enabled: _,
                 cloak: _,

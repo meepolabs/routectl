@@ -275,7 +275,6 @@ async fn build_provider_inner(
             user_agent,
             forward_client_headers,
             context_management,
-            max_thinking_entry_bytes,
             cache_capability: _,
             reduction_enabled: _,
             cloak,
@@ -323,10 +322,6 @@ async fn build_provider_inner(
                     user_agent: user_agent.clone(),
                     forward_client_headers: forward_client_headers.clone(),
                     context_management: *context_management,
-                    max_thinking_entry_bytes: resolve_max_thinking_entry_bytes(
-                        name,
-                        *max_thinking_entry_bytes,
-                    ),
                     session_id: None,
                     cloak: cloak_with_normalize(cloak, opts.normalize_tools),
                     use_forwarded_bearer: false,
@@ -403,10 +398,6 @@ async fn build_provider_inner(
                 user_agent: user_agent.clone(),
                 forward_client_headers: forward_client_headers.clone(),
                 context_management: *context_management,
-                max_thinking_entry_bytes: resolve_max_thinking_entry_bytes(
-                    name,
-                    *max_thinking_entry_bytes,
-                ),
                 session_id,
                 cloak: cloak_with_normalize(cloak, opts.normalize_tools),
                 use_forwarded_bearer: is_forwarded,
@@ -720,72 +711,6 @@ const fn map_bedrock_api_shape(s: BedrockApiShapeConfig) -> BedrockApiShape {
         BedrockApiShapeConfig::Invoke => BedrockApiShape::Invoke,
         BedrockApiShapeConfig::Converse => BedrockApiShape::Converse,
     }
-}
-
-/// Bounds for `[providers.X].max_thinking_entry_bytes` (anthropic-api).
-const MIN_THINKING_ENTRY_BYTES: u32 = 1024;
-
-const MAX_THINKING_ENTRY_BYTES_CEILING: u32 = 4 * 1024 * 1024;
-
-/// Test-only re-export so other modules' tests can drive the resolver
-/// without making the helper itself `pub`.
-#[cfg(test)]
-pub fn resolve_max_thinking_entry_bytes_for_test(
-    provider_name: &str,
-    configured: Option<u32>,
-) -> usize {
-    resolve_max_thinking_entry_bytes(provider_name, configured)
-}
-
-/// Resolve the operator-supplied `max_thinking_entry_bytes` knob into
-/// the runtime value carried on `AnthropicApiConfig`. None or 0 falls
-/// through to the hardcoded default (1 MiB). Out-of-range values are
-/// clamped to the documented bounds (1 KiB to 4 MiB) with a startup
-/// WARN so the operator sees the override they actually got.
-fn resolve_max_thinking_entry_bytes(provider_name: &str, configured: Option<u32>) -> usize {
-    // Soft-fail clamp + WARN (rather than the file's usual hard-fail
-    // Err(Error::Config(...))) is intentional: routectl targets local
-    // single-user installs where a typo on a memory cap should not
-    // prevent the daemon from coming up. The default is generous enough
-    // that a clamped value is still functional. If the local-only
-    // assumption ever changes, switch this to hard-fail to match
-    // siblings.
-    use routectl_providers::anthropic_api::AnthropicApiConfig;
-    let default = AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES;
-    let Some(v) = configured else {
-        return default;
-    };
-    // Operator-written `[providers.X]` table key, rendered by all three
-    // arms below (field plus message body) on an otherwise healthy build.
-    let provider_safe = routectl_core::sanitize_for_log(provider_name);
-    if v == 0 {
-        // Operator wrote `0`; treat as "unset" rather than letting a
-        // zero cap silently disable the cache.
-        tracing::warn!(
-            provider = %provider_safe,
-            "[providers.{provider_safe}] max_thinking_entry_bytes = 0 is not a valid cap (would disable the cache); falling back to the default ({default})"
-        );
-        return default;
-    }
-    if v < MIN_THINKING_ENTRY_BYTES {
-        tracing::warn!(
-            provider = %provider_safe,
-            configured = v,
-            min = MIN_THINKING_ENTRY_BYTES,
-            "max_thinking_entry_bytes below minimum; clamping up"
-        );
-        return MIN_THINKING_ENTRY_BYTES as usize;
-    }
-    if v > MAX_THINKING_ENTRY_BYTES_CEILING {
-        tracing::warn!(
-            provider = %provider_safe,
-            configured = v,
-            max = MAX_THINKING_ENTRY_BYTES_CEILING,
-            "max_thinking_entry_bytes above ceiling; clamping down"
-        );
-        return MAX_THINKING_ENTRY_BYTES_CEILING as usize;
-    }
-    v as usize
 }
 
 #[cfg(any(feature = "bedrock", feature = "openai-responses"))]

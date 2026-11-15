@@ -362,6 +362,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `providers.<name>.auto_emit_per_block_breakpoints` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.class_overrides` | per-class policy lives in `[retry.classes.*]`; a status keeps its built-in class |
+| `providers.<name>.max_thinking_entry_bytes` | the thinking-cache entry cap is fixed at 1 MiB |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |
 | `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
@@ -2651,46 +2652,23 @@ auth_kind          = "oauth-bearer"
 context_management = true
 ```
 
-### `max_thinking_entry_bytes` (per-entry cap on the thinking cache)
+### Thinking-cache bounds
 
 When `context_management = true`, routectl caches thinking blocks observed
 in upstream responses for re-injection on the next turn (see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) "context_management beta emulation").
-The cache bounds entry-count via an LRU; `max_thinking_entry_bytes` bounds
-the per-entry serialized JSON size so a misbehaving upstream cannot push
-the cache memory footprint to the LRU-cap times the largest single
-response size.
+Each cached entry is capped at 1 MiB of serialized JSON, ~3x headroom over
+realistic worst-case Opus 4.6/4.7/4.8 reasoning turns at full 65k
+thinking-token budgets (~328 KB at ~5 bytes/token). The cap is fixed; no
+key changes it. An entry over the cap is not cached and a structured WARN
+is logged; the next turn's cache-miss recovery strips the `thinking` body
+key just as it does for a TTL eviction, so the request still completes
+without a 400.
 
-Default: 1 MiB per entry. The default gives ~3x headroom over realistic
-worst-case Opus 4.6/4.7/4.8 reasoning turns at full 65k thinking-token
-budgets (~328 KB at ~5 bytes/token). Override per provider when memory
-pressure dictates a tighter cap, or when an upstream legitimately
-produces larger thinking turns. Entries whose serialized bytes exceed
-the cap are rejected at write time with a structured WARN; the next
-turn's cache-miss recovery strips the `thinking` body key just as it
-does for a TTL eviction, so the request still completes without a 400.
-
-Bounds: `>= 1024` (1 KiB) and `<= 4 MiB` (4 194 304 bytes). Values
-outside the range are clamped at provider build time with a startup
-WARN -- a configured `0` falls back to the 1 MiB default (a zero cap
-silently disables the cache, which is never the intent), and any
-value above 4 MiB clamps to the ceiling.
-
-The cache LRU itself is bounded at `THINKING_CACHE_CAP = 10000`
-entries; the worst-case memory footprint is `THINKING_CACHE_CAP * cap`
-(10000 * 1 MiB ~ 10 GiB at the default). Operators on memory-
-constrained hosts should tune this knob down. The TTL is sliding
-(every hit refreshes `expires_at`); idle entries die after the
-hardcoded 60-minute window.
-
-```toml
-[providers.deepseek-anthropic]
-kind                      = "anthropic-api"
-base_url                  = "https://api.deepseek.com/anthropic"
-api_key_ref               = "env://DS_KEY"
-context_management        = true
-max_thinking_entry_bytes  = 524288   # tighten or raise from the 1 MiB default
-```
+The cache LRU holds at most `THINKING_CACHE_CAP = 10000` entries, so its
+worst-case memory footprint is 10000 * 1 MiB ~ 10 GiB. The TTL is sliding
+(every hit refreshes `expires_at`); idle entries die after the hardcoded
+60-minute window.
 
 ## credential_source (anthropic-api provider flag) -- forwarded credential
 
@@ -3375,8 +3353,7 @@ Five sections are printed:
   `base_url` prints only its origin. An array prints as one row. A key
   that has no value until you set one is not printed unless its default
   is a fixed value in code: `[retry] max_honored_retry_after_ms`, and
-  on each entry of the matching kind `max_thinking_entry_bytes`
-  (`anthropic-api`) and `codex_version` (`openai-responses`). The five
+  on each `openai-responses` entry `codex_version`. The five
   tiered tuning keys an entry leaves unset resolve in **resolved
   tuning** below; the rest of these keys mean off, or that the value
   comes from another table or section (for example a model's prices
