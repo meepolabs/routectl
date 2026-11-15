@@ -659,8 +659,8 @@ fn default_usage_db_path() -> PathBuf {
 /// the upstream untouched. Used ONLY by `ProviderEntry::AnthropicApi`
 /// (the forwarded-provider credential, pinned to `api.anthropic.com` by
 /// `validate_provider_credential_sources`) -- the legacy `[mitm]
-/// credential_source` field this enum also backed is removed; see
-/// `preflight_legacy_mitm_credential_source`.
+/// credential_source` field this enum also backed is retired; see
+/// `RETIRED_KEYS`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -684,10 +684,9 @@ pub enum CredentialSource {
 ///
 /// Transport-only (the original shape): this block carries no credential
 /// knob. Which credential a forwarded egress uses is a per-provider
-/// choice (`ProviderEntry::AnthropicApi.credential_source`) -- see
-/// `preflight_legacy_mitm_credential_source` for the pre-parse check
-/// that catches a config still carrying the removed `[mitm]
-/// credential_source` key and names the replacement.
+/// choice (`ProviderEntry::AnthropicApi.credential_source`); the retired
+/// `[mitm] credential_source` key is refused by the pre-parse retired-key
+/// table (`RETIRED_KEYS`), which names the replacement.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MitmConfig {

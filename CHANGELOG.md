@@ -435,6 +435,10 @@ list with more narrative.
 
 ### Changed
 
+- **Retired config keys are reported all at once, each naming its replacement.** A config carrying retired keys is refused with one message listing every one of them, sorted by key path, one line each: `` `<key path>` is retired: <what replaces it>; delete it ``. Previously the first kind of retired key found was the only one reported, and the keys retired in config version 5 said only to remove them by hand. The `[mitm] credential_source` refusal is now one line naming the same provider-block replacement. `config set` on any retired key, or on a path under a retired table such as `bedrock.allowed_betas`, prints the same line. docs/CONFIGURATION.md gains a "Retired config keys" table. Values are still never shown.
+
+- **Internal:** the routectl-router raw-config refusals are one type. `RawConfigPreflightError` keeps `Version` and gains `RetiredKeys(RetiredKeysError)`; the `LegacyMitmCredentialSource`, `RetiredCapabilityKeys`, `RemovedPaidProbeCaps` and `RetiredModelKnobs` variants and their error types are removed. `retired_model_knob_message` is replaced by `retired_key_message`, which covers every retired key. No change for `routectl` binary users beyond the wording above.
+
 - **The Responses ingress refuses `conversation` and `background: true`.** A request with a non-null `conversation`, or with `background: true`, now gets an HTTP 400 (`invalid_request_error`), as `previous_response_id` already did: routectl keeps no server-side state to resolve or hold. The message names the refused member. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 - **A chat-compat upstream's unmodeled response members no longer reach Anthropic or Responses clients.** Members such as usage `service_tier` from an openai-compat upstream now reach Chat Completions clients only, and an Anthropic upstream's reach Anthropic clients only.

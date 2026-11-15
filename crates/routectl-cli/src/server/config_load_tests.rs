@@ -833,14 +833,13 @@ fn retired_key_rows() -> Vec<(&'static str, String)> {
 
 fn assert_names_retired_path(path: &str, err: &str) {
     assert!(
-        err.contains(&format!("`{path}` was retired in config version 5")),
+        err.contains(&format!("`{path}` is retired: ")),
         "the error must name `{path}`: {err}"
     );
     assert!(
-        err.contains(&format!(
-            "`{path}` was retired in config version 5; remove it by hand"
-        )),
-        "the error must say to remove the key by hand: {err}"
+        err.lines()
+            .any(|line| line.starts_with(&format!("`{path}` ")) && line.ends_with("; delete it")),
+        "the error must say to delete the key: {err}"
     );
     assert!(
         !err.contains("migrate"),
@@ -967,7 +966,7 @@ fn a_previous_version_file_with_a_retired_key_names_the_version_refusal() {
         CURRENT_CONFIG_VERSION - 1
     );
     assert!(names_version_refusal(&err, &opening), "err: {err}");
-    assert!(!err.contains("was retired"), "err: {err}");
+    assert!(!err.contains("is retired"), "err: {err}");
 }
 
 /// A leftover `catalog_overlay.json` in the config folder is not read: cold

@@ -8,11 +8,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 mod pool;
+mod retired_keys;
 mod schema;
 pub mod tuning;
 mod validate;
 
 pub use pool::PoolEntry;
+pub use retired_keys::{RetiredKeysError, retired_key_message};
 #[cfg(feature = "bedrock")]
 pub(crate) use schema::default_anthropic_base;
 #[cfg(feature = "gemini")]
@@ -34,9 +36,7 @@ pub use tuning::{BreakerThreshold, Resolved, ResolvedTuning, TuningSource, resol
 use validate::default_config_version;
 pub use validate::{
     CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,
-    LegacyMitmCredentialSourceError, RawConfigPreflightError, RemovedPaidProbeCapsError,
-    RetiredCapabilityKeysError, RetiredModelKnobsError, VersionTooNewError,
-    preflight_config_version, preflight_raw_config, retired_model_knob_message,
+    RawConfigPreflightError, VersionTooNewError, preflight_config_version, preflight_raw_config,
     validate_cache_pricing_retired,
 };
 pub(crate) use validate::{

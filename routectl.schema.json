@@ -403,7 +403,7 @@
       ]
     },
     "CredentialSource": {
-      "description": "Which credential a provider egress authenticates with. `own` (the\ndefault) preserves prior behavior byte-for-byte: the egress\nauthenticates with routectl's own managed credential. `forwarded`\ninstead relays the client's inbound credential straight through to\nthe upstream untouched. Used ONLY by `ProviderEntry::AnthropicApi`\n(the forwarded-provider credential, pinned to `api.anthropic.com` by\n`validate_provider_credential_sources`) -- the legacy `[mitm]\ncredential_source` field this enum also backed is removed; see\n`preflight_legacy_mitm_credential_source`.",
+      "description": "Which credential a provider egress authenticates with. `own` (the\ndefault) preserves prior behavior byte-for-byte: the egress\nauthenticates with routectl's own managed credential. `forwarded`\ninstead relays the client's inbound credential straight through to\nthe upstream untouched. Used ONLY by `ProviderEntry::AnthropicApi`\n(the forwarded-provider credential, pinned to `api.anthropic.com` by\n`validate_provider_credential_sources`) -- the legacy `[mitm]\ncredential_source` field this enum also backed is retired; see\n`RETIRED_KEYS`.",
       "oneOf": [
         {
           "const": "own",
@@ -499,7 +499,7 @@
     },
     "MitmConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts a first-party upstream\n(e.g. Claude Code talking to `api.anthropic.com`) so routectl can\nobserve and translate the decrypted traffic. Presence of the\n`[mitm]` block gates the feature on, matching the `[server.auth]`\nconvention -- `Config::mitm == None` keeps zero proxy startup and\nzero behavior change.\n\nTransport-only (the original shape): this block carries no credential\nknob. Which credential a forwarded egress uses is a per-provider\nchoice (`ProviderEntry::AnthropicApi.credential_source`) -- see\n`preflight_legacy_mitm_credential_source` for the pre-parse check\nthat catches a config still carrying the removed `[mitm]\ncredential_source` key and names the replacement.",
+      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts a first-party upstream\n(e.g. Claude Code talking to `api.anthropic.com`) so routectl can\nobserve and translate the decrypted traffic. Presence of the\n`[mitm]` block gates the feature on, matching the `[server.auth]`\nconvention -- `Config::mitm == None` keeps zero proxy startup and\nzero behavior change.\n\nTransport-only (the original shape): this block carries no credential\nknob. Which credential a forwarded egress uses is a per-provider\nchoice (`ProviderEntry::AnthropicApi.credential_source`); the retired\n`[mitm] credential_source` key is refused by the pre-parse retired-key\ntable (`RETIRED_KEYS`), which names the replacement.",
       "properties": {
         "cert_dir": {
           "default": "~/.config/routectl/mitm-certs",

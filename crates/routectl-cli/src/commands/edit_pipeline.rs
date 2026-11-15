@@ -214,30 +214,25 @@ mod tests {
         let at = |version: u32, body: &str| format!("version = {version}\n{body}");
         let current = CURRENT_CONFIG_VERSION;
         type ClassMatcher = fn(&Refusal) -> bool;
-        let rows: [(&str, String, ClassMatcher); 6] = [
+        let rows: [(&str, String, ClassMatcher); 4] = [
             ("too old", at(current - 1, ""), |e| {
                 matches!(e, Refusal::Version(_))
             }),
             ("too new", at(current + 1, ""), |e| {
                 matches!(e, Refusal::Version(_))
             }),
-            (
-                "legacy mitm credential_source",
-                at(current, "[mitm]\ncredential_source = \"forwarded\"\n"),
-                |e| matches!(e, Refusal::LegacyMitmCredentialSource(_)),
-            ),
-            ("retired capability key", at(current, "[bedrock]\n"), |e| {
-                matches!(e, Refusal::RetiredCapabilityKeys(_))
+            ("retired table", at(current, "[bedrock]\n"), |e| {
+                matches!(e, Refusal::RetiredKeys(_))
             }),
             (
-                "paid probe caps",
-                at(current, "[fidelity.paid_probe_daily_caps]\nx = 1\n"),
-                |e| matches!(e, Refusal::RemovedPaidProbeCaps(_)),
-            ),
-            (
-                "removed model key",
-                at(current, "[models.m]\neffort_levels = []\n"),
-                |e| matches!(e, Refusal::RetiredModelKnobs(_)),
+                "several retired keys",
+                at(
+                    current,
+                    "[mitm]\ncredential_source = \"forwarded\"\n\
+                     [fidelity.paid_probe_daily_caps]\nx = 1\n\
+                     [models.m]\neffort_levels = []\n",
+                ),
+                |e| matches!(e, Refusal::RetiredKeys(_)),
             ),
         ];
 
@@ -252,22 +247,28 @@ mod tests {
         }
     }
 
+    /// Every retired key in the file is named in the one refusal, not only
+    /// the first.
     #[test]
-    fn preflight_refuses_paid_probe_daily_caps_by_name() {
+    fn preflight_names_every_retired_key_at_once() {
         let clean = format!(
             "version = {}\n[server]\nhost = \"127.0.0.1\"\n",
             routectl_router::CURRENT_CONFIG_VERSION
         );
-        preflight(&clean).expect("control: the file without the key passes");
+        preflight(&clean).expect("control: the file without the keys passes");
 
-        let err = preflight(&format!("{clean}[fidelity.paid_probe_daily_caps]\nx = 1\n"))
-            .expect_err("the removed key must be refused");
+        let err = preflight(&format!(
+            "{clean}[fidelity.paid_probe_daily_caps]\nx = 1\n[bedrock]\n"
+        ))
+        .expect_err("the retired keys must be refused");
 
+        let shown = err.to_string();
+        assert!(shown.contains("`bedrock` is retired: "), "{shown}");
         assert!(
-            err.to_string()
-                .contains("paid probes were removed; delete this key"),
-            "err: {err}"
+            shown.contains("`fidelity.paid_probe_daily_caps` is retired: "),
+            "{shown}"
         );
+        assert_eq!(shown.lines().count(), 2, "{shown}");
     }
 
     fn doc_of(text: &str) -> DocumentMut {

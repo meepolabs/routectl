@@ -6,9 +6,9 @@
 //!
 //! The reload table is a safety test, not attribution: it proves a refused
 //! candidate never replaces the published router, whichever layer refuses it.
-//! Several rows (the legacy mitm key, the retired keys, the paid probe caps)
-//! are still refused without the driver by the typed `deny_unknown_fields`
-//! deserialize, so the load sentinel, not this table, pins the driver call.
+//! The retired-key rows are still refused without the driver by the typed
+//! `deny_unknown_fields` deserialize, so the load sentinel, not this table,
+//! pins the driver call.
 
 use std::sync::Arc;
 
@@ -38,7 +38,7 @@ fn clean_config() -> String {
 }
 
 /// One fixture per raw refusal class, with the driver variant it must map to.
-fn refusal_rows() -> [(&'static str, String, ClassMatcher); 7] {
+fn refusal_rows() -> [(&'static str, String, ClassMatcher); 5] {
     let current = CURRENT_CONFIG_VERSION;
     [
         (
@@ -52,25 +52,18 @@ fn refusal_rows() -> [(&'static str, String, ClassMatcher); 7] {
         ("too new", at_version(current + 1, ""), |e| {
             matches!(e, Refusal::Version(_))
         }),
+        ("one retired key", at_version(current, "[bedrock]\n"), |e| {
+            matches!(e, Refusal::RetiredKeys(_))
+        }),
         (
-            "legacy mitm credential_source",
-            at_version(current, "[mitm]\ncredential_source = \"forwarded\"\n"),
-            |e| matches!(e, Refusal::LegacyMitmCredentialSource(_)),
-        ),
-        (
-            "retired capability key",
-            at_version(current, "[bedrock]\n"),
-            |e| matches!(e, Refusal::RetiredCapabilityKeys(_)),
-        ),
-        (
-            "paid probe caps",
-            at_version(current, "[fidelity.paid_probe_daily_caps]\nfast = 5\n"),
-            |e| matches!(e, Refusal::RemovedPaidProbeCaps(_)),
-        ),
-        (
-            "removed model key",
-            at_version(current, "[models.m]\neffort_levels = [\"low\"]\n"),
-            |e| matches!(e, Refusal::RetiredModelKnobs(_)),
+            "several retired keys",
+            at_version(
+                current,
+                "[mitm]\ncredential_source = \"forwarded\"\n\
+                 [fidelity.paid_probe_daily_caps]\nfast = 5\n\
+                 [models.m]\neffort_levels = [\"low\"]\n",
+            ),
+            |e| matches!(e, Refusal::RetiredKeys(_)),
         ),
     ]
 }

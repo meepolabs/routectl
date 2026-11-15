@@ -1110,8 +1110,7 @@ mod tests {
         let err = load_existing(&path).expect_err("a retired key must be refused");
 
         assert!(
-            err.to_string()
-                .contains("`bedrock` was retired in config version 5"),
+            err.to_string().contains("`bedrock` is retired: "),
             "err: {err}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), retired);

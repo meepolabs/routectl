@@ -1946,26 +1946,29 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   operator to remove the table by hand.
   `preflight_raw_config(raw_toml) -> Result<(), RawConfigPreflightError>`
   (`#[non_exhaustive]`, `Display` is the wrapped check's own message) is THE
-  public raw-text driver every caller runs once, first refusal wins, in a
-  fixed order: version, then the removed `[mitm] credential_source` key
-  (`LegacyMitmCredentialSourceError`, naming the provider-block replacement),
-  then each key retired in `CAPABILITY_KEYS_RETIRED_IN` (5: `bedrock`, provider
-  `allowed_betas` / `unsupported_features`, model `unsupported_features`) by
-  dotted path only, never values, each told to remove it by hand
-  (`RetiredCapabilityKeysError`), then the
-  removed `[fidelity] paid_probe_daily_caps` key, naming no successor
-  (`RemovedPaidProbeCapsError`), then the removed per-model keys in
-  `RETIRED_MODEL_KNOBS` (`effort_levels`, `max_thinking_budget`,
-  `supports_adaptive_thinking`), ONE `RetiredModelKnobsError`
-  holding every `models.<nick>.<key>` path sorted, one line each naming its
-  replacement and ending "delete the key", with no version or migrate
-  wording (`RawConfigPreflightError::RetiredModelKnobs`). The four
-  non-version checks are crate-internal; only `preflight_config_version`
-  stays public beside the driver. Unparseable TOML passes every check so the
-  typed deserialize reports the real syntax error. Callers: the shared loader
-  (`parse_config_only`) and the CLI edit pipeline (`preflight` and the
-  candidate `gate`). `retired_model_knob_message` words one retired
-  `models.<nick>.<key>` path the way the preflight does
+  public raw-text driver every caller runs once: version first
+  (`RawConfigPreflightError::Version`), then the retired-key table in
+  `retired_keys.rs` (`RawConfigPreflightError::RetiredKeys`), so an older or
+  versionless file is told about its version rather than its keys.
+  Unparseable TOML passes both so the typed deserialize reports the real
+  syntax error. `message_safe_key` sanitizes and caps (256 chars) an
+  operator-written key before any message renders it. Callers: the shared
+  loader (`parse_config_only`) and the CLI edit pipeline (`preflight` and the
+  candidate `gate`)
+- `src/config/retired_keys.rs` -- the ONE retired config-key table and its
+  raw-text pass. `RETIRED_KEYS: &[RetiredKey]` (`path` of literal segments
+  or `"*"` for any one entry name, `refused_value` for a value-only
+  retirement on a live key, `replacement` text); no row path may prefix
+  another. `preflight_retired_keys(raw, table)` parses once, expands `*` over
+  sorted entry names, collects every hit from every row and returns ONE
+  `RetiredKeysError` whose `Display` is one line per key sorted by path,
+  `` `<path>` is retired: <replacement>; delete it ``, never a value.
+  `retired_key_message(dotted_path)` gives `config set` the same line for a
+  retired key or any path beneath one (value-only rows never match). The
+  sidecar builds its per-row and dense fixtures from the docs/CONFIGURATION.md
+  "Retired config keys" table and asserts it lists exactly the rows, so a new
+  row plus its doc line is covered by the table-driven, dense, prefix,
+  schema-weld and edit-parity tests with no new test code
 - `src/config_error.rs` -- the single production `Config` parse funnel
   `parse_config(text) -> Result<Config, String>` (re-exported from the crate
   root; consumed by `serve`/hot-reload load and every CLI config load) plus
@@ -8008,8 +8011,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (bool/int/float/else string -- the re-parse gate backstops mistypes);
   in-memory candidate gate (`edit_pipeline::gate`: raw preflight on the
   candidate, `parse_config` + `collect_config_validation`, full
-  diagnostic rendering, any failure writes nothing); a retired per-model key
-  path is refused with the preflight's wording (`retired_model_knob_message`); high-consequence confirm
+  diagnostic rendering, any failure writes nothing); a retired key path is
+  refused with the preflight's wording (`retired_key_message`); high-consequence confirm
   BEFORE the lock (`collect_high_consequence_changes`, `--yes` bypass); then
   `edit_config_toml` (lock + revision check + atomic write). unset removes the
   key and recursively prunes now-empty parent tables (empty == absent);

@@ -1728,7 +1728,7 @@ to stderr one reason per line.
 
 ```
 config reload failed; keeping previous config path=... \
-  error=`models.gpt.effort_levels` is no longer a model setting: ...; `models.gpt.max_thinking_budget` is no longer a model setting: ... reasons=2
+  error=`models.gpt.effort_levels` is retired: ...; delete it; `models.gpt.max_thinking_budget` is retired: ...; delete it reasons=2
 ```
 
 A credentials reload that rebuilds the router logs `credentials reload

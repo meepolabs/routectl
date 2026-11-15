@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use super::retired_keys::{RETIRED_KEYS, RetiredKeysError, preflight_retired_keys};
 use crate::config::{Config, PricingConfig};
 
 /// Current config schema version this build writes and fully understands.
@@ -264,100 +265,6 @@ pub fn cache_write_map_problems(pricing: &PricingConfig, prefix: &str) -> Vec<St
     lines
 }
 
-/// The exact `[providers.X]` replacement block named in
-/// [`LegacyMitmCredentialSourceError`] and the CHANGELOG: a forwarded
-/// credential is now a provider-level choice, not a `[mitm]`-level one.
-const LEGACY_MITM_CREDENTIAL_SOURCE_REPLACEMENT_BLOCK: &str = "[providers.anthropic-forwarded]\n\
-     kind = \"anthropic-api\"\n\
-     base_url = \"https://api.anthropic.com\"\n\
-     credential_source = \"forwarded\"";
-
-/// Refusal carried by [`RawConfigPreflightError::LegacyMitmCredentialSource`]:
-/// the config still carries the removed `[mitm] credential_source` key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "config carries the removed `[mitm] credential_source` key -- a forwarded credential is \
-     now a per-provider choice, not a `[mitm]`-level one. Replace it with a provider block:\n\n\
-     {LEGACY_MITM_CREDENTIAL_SOURCE_REPLACEMENT_BLOCK}\n\n\
-     (no `api_key_ref` line -- a forwarded provider has no configured credential of its own)"
-)]
-pub struct LegacyMitmCredentialSourceError;
-
-/// Read the `[mitm]` table off the RAW TOML text, before `Config`'s full
-/// (`#[serde(deny_unknown_fields)]`) deserialize runs, and check for the
-/// removed `credential_source` key. Without this preflight, an old
-/// config carrying that key still fails at load (`deny_unknown_fields`
-/// rejects it), but with serde's generic "unknown field" message, which
-/// does not tell the operator what replaces it. This preflight exists
-/// only to make that ONE failure actionable. TOML that does not parse,
-/// and a config without the legacy key, fall through untouched; when the
-/// legacy key is present, its actionable refusal is reported first, ahead
-/// of any other unknown field or typed error in the same file.
-///
-/// Same pattern as [`preflight_config_version`]. [`preflight_raw_config`]
-/// runs it directly after the version check.
-pub fn preflight_legacy_mitm_credential_source(
-    raw_toml: &str,
-) -> Result<(), LegacyMitmCredentialSourceError> {
-    let carries_legacy_key = toml::from_str::<toml::Value>(raw_toml)
-        .ok()
-        .and_then(|v| v.get("mitm").and_then(toml::Value::as_table).cloned())
-        .is_some_and(|mitm| mitm.contains_key("credential_source"));
-
-    if carries_legacy_key {
-        return Err(LegacyMitmCredentialSourceError);
-    }
-    Ok(())
-}
-
-/// Refusal carried by [`RawConfigPreflightError::RemovedPaidProbeCaps`]: the
-/// config still carries the removed `[fidelity] paid_probe_daily_caps` key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "config carries `[fidelity] paid_probe_daily_caps`: paid probes were removed; delete this key"
-)]
-pub struct RemovedPaidProbeCapsError;
-
-/// Read the `[fidelity]` table off the RAW TOML text and refuse the removed
-/// `paid_probe_daily_caps` key by name, ahead of the typed deserialize whose
-/// generic "unknown field" error would not say the key has no replacement.
-/// Not part of [`preflight_retired_capability_keys`]: that list names the
-/// schema version that retired each key, and this key was removed without a
-/// version bump. TOML that does not parse falls through as `Ok` so the typed
-/// deserialize reports the real syntax error.
-pub fn preflight_removed_paid_probe_caps(raw_toml: &str) -> Result<(), RemovedPaidProbeCapsError> {
-    let carries_removed_key = toml::from_str::<toml::Value>(raw_toml)
-        .ok()
-        .and_then(|v| v.get("fidelity").and_then(toml::Value::as_table).cloned())
-        .is_some_and(|fidelity| fidelity.contains_key("paid_probe_daily_caps"));
-
-    if carries_removed_key {
-        return Err(RemovedPaidProbeCapsError);
-    }
-    Ok(())
-}
-
-/// The retired per-target capability list, on a provider or a model entry.
-const RETIRED_UNSUPPORTED_FEATURES_KEY: &str = "unsupported_features";
-
-/// The retired per-provider beta-flag egress allowlist.
-const RETIRED_PROVIDER_ALLOWLIST_KEY: &str = "allowed_betas";
-
-/// The retired top-level Bedrock egress-allowlist table.
-const RETIRED_BEDROCK_TABLE: &str = "bedrock";
-
-/// Refusal carried by [`RawConfigPreflightError::RetiredCapabilityKeys`]: the
-/// config still carries one or more capability keys a past schema version
-/// retired. Holds the dotted key paths only -- never the values, which an
-/// operator may have pasted anything into.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{}", render_retired_paths(.paths))]
-pub struct RetiredCapabilityKeysError {
-    /// Dotted key paths of every retired key found, in document order:
-    /// `bedrock`, then each provider, then each model, by name.
-    pub paths: Vec<String>,
-}
-
 /// Character ceiling for one operator-written key rendered into an error
 /// message by [`message_safe_key`].
 const MAX_MESSAGE_KEY_CHARS: usize = 256;
@@ -370,184 +277,11 @@ pub fn message_safe_key(key: &str) -> String {
     routectl_core::sanitize_for_log_with_cap(key, MAX_MESSAGE_KEY_CHARS)
 }
 
-/// The config version the keys refused by
-/// [`preflight_retired_capability_keys`] were retired in. Pinned apart from
-/// [`CURRENT_CONFIG_VERSION`] so the retirement version stays fixed after a
-/// later schema bump.
-const CAPABILITY_KEYS_RETIRED_IN: u32 = 5;
-
-fn render_retired_paths(paths: &[String]) -> String {
-    paths
-        .iter()
-        .map(|path| {
-            let path = message_safe_key(path);
-            format!(
-                "`{path}` was retired in config version {CAPABILITY_KEYS_RETIRED_IN}; remove it \
-                 by hand"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Read the RAW TOML text, before `Config`'s full deserialize runs, and
-/// collect every key retired in [`CAPABILITY_KEYS_RETIRED_IN`]: the
-/// top-level `bedrock` table, `providers.<name>.allowed_betas`,
-/// `providers.<name>.unsupported_features`, and
-/// `models.<nick>.unsupported_features`. A file at the retirement version or
-/// later carrying them was hand-edited back, so the message names the key to
-/// remove.
+/// A refusal from [`preflight_raw_config`]. `Display` is the wrapped
+/// check's own message, unchanged, so every caller surfaces the same wording.
 ///
-/// Same pattern as [`preflight_legacy_mitm_credential_source`]: TOML that
-/// does not parse falls through as `Ok` so the typed deserialize reports
-/// the real syntax error. [`preflight_raw_config`] runs it only after
-/// [`preflight_config_version`] has passed, so a file at the preceding
-/// version is told its version is refused rather than to delete keys by hand.
-pub fn preflight_retired_capability_keys(raw_toml: &str) -> Result<(), RetiredCapabilityKeysError> {
-    let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
-        return Ok(());
-    };
-
-    let mut paths = Vec::new();
-    if value.get(RETIRED_BEDROCK_TABLE).is_some() {
-        paths.push(RETIRED_BEDROCK_TABLE.to_string());
-    }
-    paths.extend(retired_entry_keys(
-        &value,
-        "providers",
-        &[
-            RETIRED_PROVIDER_ALLOWLIST_KEY,
-            RETIRED_UNSUPPORTED_FEATURES_KEY,
-        ],
-    ));
-    paths.extend(retired_entry_keys(
-        &value,
-        "models",
-        &[RETIRED_UNSUPPORTED_FEATURES_KEY],
-    ));
-
-    if paths.is_empty() {
-        Ok(())
-    } else {
-        Err(RetiredCapabilityKeysError { paths })
-    }
-}
-
-/// `<section>.<name>.<key>` for every entry of the `section` table that
-/// carries one of `keys`, ordered by entry name then by `keys` order.
-fn retired_entry_keys(value: &toml::Value, section: &str, keys: &[&str]) -> Vec<String> {
-    let Some(entries) = value.get(section).and_then(toml::Value::as_table) else {
-        return Vec::new();
-    };
-    let mut names: Vec<&String> = entries.keys().collect();
-    names.sort();
-    names
-        .into_iter()
-        .filter_map(|name| {
-            let entry = entries.get(name)?.as_table()?;
-            Some(
-                keys.iter()
-                    .filter(|key| entry.contains_key(**key))
-                    .map(move |key| format!("{section}.{name}.{key}")),
-            )
-        })
-        .flatten()
-        .collect()
-}
-
-/// Each removed per-model key with what now decides the behavior it used to
-/// set. Sorted by key, which is also the order a model's paths render in.
-const RETIRED_MODEL_KNOBS: [(&str, &str); 3] = [
-    (
-        "effort_levels",
-        "refused effort levels are learned per lane",
-    ),
-    (
-        "max_thinking_budget",
-        "client thinking budgets are forwarded",
-    ),
-    (
-        "supports_adaptive_thinking",
-        "client thinking is forwarded; effort alone adds no thinking",
-    ),
-];
-
-/// Refusal carried by [`RawConfigPreflightError::RetiredModelKnobs`]: one or
-/// more `[models.<nick>]` entries still carry a removed per-model key. Holds
-/// the dotted key paths only -- never the values.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{}", render_retired_model_knobs(.paths))]
-pub struct RetiredModelKnobsError {
-    /// Dotted `models.<nick>.<key>` path of every removed key found, sorted.
-    pub paths: Vec<String>,
-}
-
-fn render_retired_model_knobs(paths: &[String]) -> String {
-    paths
-        .iter()
-        .map(|path| {
-            let replacement = RETIRED_MODEL_KNOBS
-                .iter()
-                .find(|(knob, _)| path.rsplit('.').next() == Some(*knob))
-                .map_or("", |(_, replacement)| *replacement);
-            retired_model_knob_line(path, replacement)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn retired_model_knob_line(path: &str, replacement: &str) -> String {
-    let path = message_safe_key(path);
-    format!("`{path}` is no longer a model setting: {replacement}; delete the key")
-}
-
-/// The refusal line for a dotted `models.<nick>.<key>` path whose key is a
-/// removed per-model setting, worded exactly as the raw-config preflight
-/// words it, so an editing command names what now decides the behavior
-/// instead of a generic unknown-key error. `None` for any other path.
-pub fn retired_model_knob_message(dotted_path: &str) -> Option<String> {
-    let mut segments = dotted_path.split('.');
-    let (Some("models"), Some(nick), Some(key), None) = (
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-    ) else {
-        return None;
-    };
-    if nick.is_empty() {
-        return None;
-    }
-    let (_, replacement) = RETIRED_MODEL_KNOBS.iter().find(|(knob, _)| *knob == key)?;
-    Some(retired_model_knob_line(dotted_path, replacement))
-}
-
-/// Read the RAW TOML text and collect every removed per-model key (see
-/// [`RETIRED_MODEL_KNOBS`]) into ONE refusal, so an operator sees every line
-/// to delete at once rather than serde's generic "unknown field" for the
-/// first. These keys were removed without a schema version bump, so the
-/// message names no version. TOML that does not parse falls through as `Ok` so
-/// the typed deserialize reports the real syntax error.
-pub fn preflight_retired_model_knobs(raw_toml: &str) -> Result<(), RetiredModelKnobsError> {
-    let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
-        return Ok(());
-    };
-    let knobs = RETIRED_MODEL_KNOBS.map(|(knob, _)| knob);
-    let mut paths = retired_entry_keys(&value, "models", &knobs);
-    paths.sort();
-    if paths.is_empty() {
-        Ok(())
-    } else {
-        Err(RetiredModelKnobsError { paths })
-    }
-}
-
-/// A refusal from [`preflight_raw_config`]: the first raw-text check that
-/// rejected the config. `Display` is the wrapped check's own message,
-/// unchanged, so every caller surfaces the same wording.
-///
-/// New refusal variants may be added as further keys are refused by name, so
-/// a `match` outside this crate needs a wildcard arm.
+/// New refusal variants may be added, so a `match` outside this crate needs
+/// a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RawConfigPreflightError {
@@ -555,42 +289,22 @@ pub enum RawConfigPreflightError {
     #[error(transparent)]
     Version(ConfigVersionError),
 
-    /// The config carries the removed `[mitm] credential_source` key.
+    /// The config carries one or more retired keys.
     #[error(transparent)]
-    LegacyMitmCredentialSource(LegacyMitmCredentialSourceError),
-
-    /// The config carries keys retired in an earlier schema version.
-    #[error(transparent)]
-    RetiredCapabilityKeys(RetiredCapabilityKeysError),
-
-    /// The config carries the removed `[fidelity] paid_probe_daily_caps` key.
-    #[error(transparent)]
-    RemovedPaidProbeCaps(RemovedPaidProbeCapsError),
-
-    /// A `[models.<nick>]` entry carries a removed per-model key.
-    #[error(transparent)]
-    RetiredModelKnobs(RetiredModelKnobsError),
+    RetiredKeys(RetiredKeysError),
 }
 
-/// Run every raw-text config check, before `Config`'s typed deserialize, in
-/// a fixed order: [`preflight_config_version`], then the removed
-/// `[mitm] credential_source` key, then the retired capability keys, then
-/// the removed `[fidelity] paid_probe_daily_caps` key, then the removed
-/// per-model keys. The first refusal is returned and the later checks do not
-/// run. Version comes first so an older or versionless file is told its
-/// version is refused rather than to delete keys by hand.
+/// Run every raw-text config check, before `Config`'s typed deserialize:
+/// [`preflight_config_version`], then the retired-key table, which reports
+/// every retired key in one refusal. Version comes first so an older or
+/// versionless file is told its version is refused rather than to delete
+/// keys by hand.
 ///
 /// TOML that does not parse passes every check, so the typed deserialize
 /// reports the real syntax error.
 pub fn preflight_raw_config(raw: &str) -> Result<(), RawConfigPreflightError> {
     preflight_config_version(raw).map_err(RawConfigPreflightError::Version)?;
-    preflight_legacy_mitm_credential_source(raw)
-        .map_err(RawConfigPreflightError::LegacyMitmCredentialSource)?;
-    preflight_retired_capability_keys(raw)
-        .map_err(RawConfigPreflightError::RetiredCapabilityKeys)?;
-    preflight_removed_paid_probe_caps(raw)
-        .map_err(RawConfigPreflightError::RemovedPaidProbeCaps)?;
-    preflight_retired_model_knobs(raw).map_err(RawConfigPreflightError::RetiredModelKnobs)?;
+    preflight_retired_keys(raw, RETIRED_KEYS).map_err(RawConfigPreflightError::RetiredKeys)?;
     Ok(())
 }
 

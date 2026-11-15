@@ -40,7 +40,7 @@ use std::path::Path;
 
 use routectl_core::{Error, Result};
 use routectl_router::{
-    EditOutcome, PathError, PathShape, edit_config_toml, parse_config, retired_model_knob_message,
+    EditOutcome, PathError, PathShape, edit_config_toml, parse_config, retired_key_message,
     validate_config_path,
 };
 use toml_edit::{DocumentMut, Item, Table};
@@ -190,10 +190,10 @@ pub fn run(config_path: &Path, dotted_path: &str, kind: EditKind, yes: bool) -> 
 
 /// Map a schema path-validation failure to a user error, giving array
 /// targets the hand-edit-only message this version's scope calls for, and a
-/// removed per-model key the preflight's wording that names its replacement.
+/// retired key the preflight's wording that names its replacement.
 fn render_path_error(dotted_path: &str, err: PathError) -> Error {
     if matches!(err, PathError::UnknownSegment { .. })
-        && let Some(message) = retired_model_knob_message(dotted_path)
+        && let Some(message) = retired_key_message(dotted_path)
     {
         return Error::Config(message);
     }
@@ -495,41 +495,52 @@ default = \"gpt\"
         );
     }
 
-    /// A removed per-model key is refused with the line the loader prints
-    /// for it, naming what now decides the behavior. An unknown key that was
-    /// never a model setting keeps the generic unknown-key text and its
-    /// siblings.
+    /// `config set` on a retired key, or on a path under a retired table,
+    /// prints exactly the line the loader and the edit gate print for a file
+    /// carrying that key. An unknown key that was never a config setting
+    /// keeps the generic unknown-key text and its siblings.
     #[test]
-    fn a_removed_model_key_names_its_replacement() {
+    fn a_retired_key_is_refused_with_the_loaders_wording() {
         let rows = [
             (
-                "effort_levels",
-                "refused effort levels are learned per lane",
+                "a path under a retired table",
+                "bedrock.allowed_betas",
+                "[bedrock]\nallowed_betas = 1\n",
             ),
             (
-                "max_thinking_budget",
-                "client thinking budgets are forwarded",
+                "a retired provider key",
+                "providers.fast.allowed_betas",
+                "[providers.fast]\nallowed_betas = 1\n",
             ),
             (
-                "supports_adaptive_thinking",
-                "client thinking is forwarded; effort alone adds no thinking",
+                "a retired model key",
+                "models.gpt.effort_levels",
+                "[models.gpt]\neffort_levels = 1\n",
             ),
         ];
 
-        for (knob, replacement) in rows {
+        for (row, dotted, carried) in rows {
+            // Arrange
+            let candidate = format!("version = {CURRENT_CONFIG_VERSION}\n{carried}");
+            let loader_message = routectl_router::preflight_raw_config(&candidate)
+                .expect_err(&format!("row `{row}`: the loader refuses the key"))
+                .to_string();
             let dir = tempfile::tempdir().unwrap();
             let path = write_config(dir.path(), &current_base());
 
-            let err = set(&path, &format!("models.gpt.{knob}"), "1")
-                .expect_err(&format!("{knob}: a removed key must be refused"));
+            // Act
+            let err = set(&path, dotted, "1").expect_err(&format!("row `{row}`: refused"));
 
+            // Assert
             assert_eq!(
                 err.to_string(),
-                format!(
-                    "config: `models.gpt.{knob}` is no longer a model setting: {replacement}; \
-                     delete the key"
-                ),
-                "{knob}"
+                format!("config: {loader_message}"),
+                "row `{row}`"
+            );
+            assert_eq!(
+                gate(&candidate).map(|_| ()),
+                Err(vec![loader_message]),
+                "row `{row}`: the gate refuses with the loader's message"
             );
         }
 
@@ -624,7 +635,7 @@ default = \"gpt\"
 
         assert!(
             err.to_string()
-                .contains("`models.gpt.unsupported_features` was retired in config version 5"),
+                .contains("`models.gpt.unsupported_features` is retired: "),
             "err: {err}"
         );
         assert_eq!(

@@ -338,7 +338,8 @@ fn each_unwritable_skip_prints_its_whole_line() {
         (
             "retired capability key",
             format!("{}[bedrock]\n", base()),
-            "config: `bedrock` was retired in config version 5; remove it by hand. Nothing was \
+            "config: `bedrock` is retired: nothing replaces it: client betas and body fields \
+             pass through, minus what the router withholds from the lane; delete it. Nothing was \
              written."
                 .to_string(),
         ),

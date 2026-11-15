@@ -20,6 +20,7 @@ overlays merge, what's reserved.
 - [Getting started: provider + model + alias](#getting-started-provider--model--alias)
 - [Top-level shape](#top-level-shape)
 - [Config schema version (`version`)](#config-schema-version-version)
+- [Retired config keys](#retired-config-keys)
 - [Editor autocomplete (JSON Schema)](#editor-autocomplete-json-schema)
 - [Listener auth + routing](#listener-auth--routing)
 - [Validating config](#validating-config)
@@ -344,10 +345,40 @@ When carrying an older file's lists over by hand:
 
   A body-field list has no successor; leave it out.
 
-A version 5 file that still carries a retired key (`[bedrock]`,
-`allowed_betas`, `allowed_body_fields`, or `unsupported_features`) is
-refused at load with a message naming the key's path; remove the key by
-hand.
+A version 5 file that still carries one of these keys is refused at load;
+see [Retired config keys](#retired-config-keys) for the message and the
+full list.
+
+## Retired config keys
+
+A config that still carries a retired key is refused at load, hot reload
+(the running router keeps serving), `config check`, `doctor` and every
+config edit, before the typed parse. One refusal lists every retired key
+in the file, sorted by key path, one line each:
+
+```text
+`models.gpt.effort_levels` is retired: refused effort levels are learned per lane; delete it
+```
+
+Only the key path is shown, never its value. `config set` on a retired
+key, or on a path under a retired table, prints the same line. Delete the
+keys by hand; nothing converts them. A key is written as its dotted path:
+`bedrock` is the whole `[bedrock]` table, and `<name>` stands for any
+entry name, so `models.<name>.effort_levels` is `effort_levels` in any
+`[models.X]` block. A key retired only for one value is written with
+that value (`` `<path> = "<value>"` ``); any other value stays valid.
+
+| Retired key | What replaces it |
+| --- | --- |
+| `bedrock` | nothing replaces it: client betas and body fields pass through, minus what the router withholds from the lane |
+| `fidelity.paid_probe_daily_caps` | paid capability probes no longer exist; nothing replaces it |
+| `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
+| `models.<name>.effort_levels` | refused effort levels are learned per lane |
+| `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
+| `models.<name>.supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking |
+| `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
+| `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
+| `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 
 ## Editor autocomplete (JSON Schema)
 
@@ -2428,8 +2459,8 @@ how that decision is named.
 are no longer `[models.X]` keys. A config that still
 carries any of them is refused at load, reload and every config edit,
 with one message listing every `models.<nick>.<key>` path (values are
-never echoed), what now decides that behavior, and "delete the key".
-Delete the lines by hand.
+never echoed) and what now decides that behavior (see
+[Retired config keys](#retired-config-keys)). Delete the lines by hand.
 
 | Removed key                  | What decides it now                                                           |
 |------------------------------|-------------------------------------------------------------------------------|
