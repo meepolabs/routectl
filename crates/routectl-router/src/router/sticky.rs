@@ -166,14 +166,7 @@ impl Router {
             )
         };
         self.record_quota_placement(decision, nickname);
-        ordered.unwrap_or_else(|| {
-            crate::seat_pool::seat_order_for_request(
-                model.rotation_key(),
-                seats.len(),
-                crate::config::SeatSelection::StickyLeastLoaded,
-                &self.round_robin,
-            )
-        })
+        ordered.unwrap_or_else(|| crate::seat_pool::fill_first_order(seats.len()))
     }
 
     /// Resolve the sticky least-loaded seat walk order for `key` over a

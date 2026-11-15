@@ -222,17 +222,16 @@ impl ResolvedModel {
     /// This model's shared-state namespace: the POOL name for a pool-backed
     /// model, its own nickname for a standalone provider-backed one.
     ///
-    /// THE one derivation for both per-pool namespaces -- the round-robin
-    /// rotation cursor and the sticky pin key -- so the two cannot disagree
-    /// about which models share a lane. Pool-backed is read off `seats`
-    /// rather than off the config's `[pools]` table: `seats` is `Some` for
-    /// exactly the models the factory compiled from a pool, and for those
-    /// `provider_name` IS the pool name the operator wrote.
+    /// THE one derivation of the per-pool sticky pin namespace, so every
+    /// model of one pool agrees about which lane it shares. Pool-backed is
+    /// read off `seats` rather than off the config's `[pools]` table: `seats`
+    /// is `Some` for exactly the models the factory compiled from a pool, and
+    /// for those `provider_name` IS the pool name the operator wrote.
     ///
-    /// Two models naming one pool therefore share one cursor and one pin per
-    /// session, while two pools in one chain stay independent. Validation
-    /// rejects a pool name colliding with a model nickname, so the two bases
-    /// cannot resolve to the same key.
+    /// Two models naming one pool therefore share one pin per session, while
+    /// two pools in one chain stay independent. Validation rejects a pool
+    /// name colliding with a model nickname, so the two bases cannot resolve
+    /// to the same key.
     ///
     /// The breaker / RPM / capability lane key is deliberately NOT derived
     /// from this: it stays per-model (see

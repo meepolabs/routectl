@@ -76,10 +76,19 @@ fn pooled_router_with_members(
     selection: SeatSelection,
     members: &[&str],
 ) -> (Router, Vec<Arc<AtomicUsize>>) {
+    let pool = PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect())
+        .with_seat_selection(selection);
+    pooled_router_over(pool)
+}
+
+/// Build a pooled `opus` model over `pool`, one seat per member, under the
+/// pool name [`POOL`].
+fn pooled_router_over(pool: PoolEntry) -> (Router, Vec<Arc<AtomicUsize>>) {
+    let members: Vec<&str> = pool.members.iter().map(String::as_str).collect();
     let mut counters = Vec::new();
     let mut seats: Vec<SeatTarget> = Vec::new();
     let mut providers = BTreeMap::new();
-    for member in members {
+    for member in &members {
         let counter = Arc::new(AtomicUsize::new(0));
         counters.push(counter.clone());
         let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
@@ -103,11 +112,7 @@ fn pooled_router_with_members(
     let default_provider = seats[0].provider.clone().expect("seat 0 is built");
 
     let mut pools = BTreeMap::new();
-    pools.insert(
-        "anthropic-pool".to_string(),
-        PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect())
-            .with_seat_selection(selection),
-    );
+    pools.insert(POOL.to_string(), pool);
     let cfg = Arc::new(Config {
         providers,
         pools,
@@ -115,13 +120,8 @@ fn pooled_router_with_members(
     });
 
     let mut router = Router::new(cfg);
-    let model = ResolvedModel::new(
-        "opus",
-        "anthropic-pool",
-        default_provider,
-        "claude-opus-4-7",
-    )
-    .with_seats(Arc::from(seats));
+    let model = ResolvedModel::new("opus", POOL, default_provider, "claude-opus-4-7")
+        .with_seats(Arc::from(seats));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert("opus".to_string(), Arc::new(model));
     router.install_resolved_models(models);
@@ -348,29 +348,6 @@ async fn fill_first_walks_seats_in_fixed_order() {
 }
 
 #[tokio::test]
-async fn round_robin_rotates_start_seat_per_request() {
-    // RoundRobin: the starting seat advances by one per request and
-    // wraps modulo the seat count.
-    let (router, _counters) = pooled_router(SeatSelection::RoundRobin);
-    assert_eq!(
-        chain_state_keys(&router),
-        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
-    );
-    assert_eq!(
-        chain_state_keys(&router),
-        vec!["opus#anthropic-b", "opus#anthropic-c", "opus#anthropic-a"]
-    );
-    assert_eq!(
-        chain_state_keys(&router),
-        vec!["opus#anthropic-c", "opus#anthropic-a", "opus#anthropic-b"]
-    );
-    assert_eq!(
-        chain_state_keys(&router),
-        vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
-    );
-}
-
-#[tokio::test]
 async fn parked_seat_is_skipped_and_sibling_serves() {
     // Full dispatch: park the first member's seat, then a request must fall
     // to the next member and that member's provider serves.
@@ -469,6 +446,33 @@ async fn sticky_pins_on_miss_then_stays_on_session() {
     // Every seat still appears (the order is a hint, not a filter).
     assert_eq!(first.len(), 3);
     assert_eq!(second.len(), 3);
+}
+
+/// A pool block that omits `seat_selection` is sticky least-loaded: a keyed
+/// conversation is pinned to the seat it was born on and comes back to it,
+/// where a fill-first pool would mint no pin at all.
+#[tokio::test]
+async fn a_two_member_pool_without_seat_selection_pins_a_keyed_conversation() {
+    // Arrange
+    let config: Config = toml::from_str(&format!(
+        "[pools.{POOL}]\nmembers = [\"anthropic-a\", \"anthropic-b\"]\n"
+    ))
+    .expect("a pool omitting seat_selection parses");
+    let pool = config.pools.get(POOL).expect("the pool").clone();
+    let (router, _counters) = pooled_router_over(pool);
+
+    // Act
+    let first = chain_state_keys_for(&router, Some("S"));
+    let second = chain_state_keys_for(&router, Some("S"));
+
+    // Assert
+    let home = pinned_member(&router, "S").expect("the conversation is pinned");
+    assert_eq!(first[0], opus_state_key(&home), "{first:?}");
+    assert_eq!(
+        second[0], first[0],
+        "the follow-up returns to its home seat"
+    );
+    assert_eq!(first.len(), 2, "both members stay in the walk: {first:?}");
 }
 
 #[test]
@@ -1019,175 +1023,6 @@ fn dispatch_on_an_empty_pool_refuses_credential_unusable_never_unknown_alias() {
         router.metrics.pool_totals().unavailable,
         1,
         "the defensive empty-pool path must be observable"
-    );
-}
-
-// ---- per-pool shared rotation + reload carry-over ----
-
-/// Two RoundRobin models on ONE pool, sharing one compiled seat set -- the
-/// rotation counterpart of `one_pool_two_models_router`.
-fn one_pool_two_round_robin_models_router() -> Router {
-    const MEMBERS: [&str; 2] = ["anthropic-a", "anthropic-b"];
-
-    let mut providers = BTreeMap::new();
-    for member in MEMBERS {
-        providers.insert(
-            member.to_string(),
-            ProviderEntry::anthropic_api(format!("oauth://{member}")),
-        );
-    }
-    let mut pools = BTreeMap::new();
-    pools.insert(
-        "shared-pool".to_string(),
-        PoolEntry::new(MEMBERS.iter().map(|m| (*m).to_string()).collect())
-            .with_seat_selection(SeatSelection::RoundRobin),
-    );
-    let config = Config {
-        providers,
-        pools,
-        ..Config::default()
-    };
-
-    let seats: Arc<[SeatTarget]> = Arc::from(
-        MEMBERS
-            .iter()
-            .map(|member| {
-                let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
-                    id: (*member).to_string(),
-                    calls: Arc::new(AtomicUsize::new(0)),
-                });
-                SeatTarget::new((*member).to_string(), provider, None, false)
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut router = Router::new(Arc::new(config));
-    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    for (nickname, wire) in [("opusRr", "claude-opus"), ("sonnetRr", "claude-sonnet")] {
-        let model = ResolvedModel::new(
-            nickname,
-            "shared-pool",
-            seats[0].provider.clone().expect("seat 0 is built"),
-            wire,
-        )
-        .with_seats(Arc::clone(&seats));
-        models.insert(nickname.to_string(), Arc::new(model));
-    }
-    router.install_resolved_models(models);
-    router
-}
-
-/// The member each model's first dispatch target names, for a chain resolved
-/// without a session key.
-fn lead_member(router: &Router, alias: &str) -> String {
-    router
-        .dispatch_chain(alias, None)
-        .expect("chain resolves")
-        .swap_remove(0)
-        .provider_name
-}
-
-#[tokio::test]
-async fn two_models_on_one_pool_share_one_rotation_cursor() {
-    // THE rotation-sharing contract: one cursor per POOL, so two models naming
-    // it interleave across the pool's accounts instead of each rotating
-    // independently. Keyed per-model both models would read their own cursor
-    // and each start at seat 0 -- so both first requests would name
-    // anthropic-a, and the shared advance below would not be observable.
-    let router = one_pool_two_round_robin_models_router();
-
-    // Act: alternate models, one request each, over a two-member pool.
-    let first = lead_member(&router, "opusRr");
-    let second = lead_member(&router, "sonnetRr");
-    let third = lead_member(&router, "opusRr");
-    let fourth = lead_member(&router, "sonnetRr");
-
-    // Assert: the SECOND model's request sees the cursor the FIRST advanced,
-    // so consecutive requests never repeat an account while one is free.
-    assert_eq!(
-        first, "anthropic-a",
-        "the first request of a fresh pool leads with the first member"
-    );
-    assert_eq!(
-        second, "anthropic-b",
-        "a sibling model on the same pool must observe the shared advance, \
-         not restart the rotation at seat 0"
-    );
-    assert_eq!(third, "anthropic-a", "the shared cursor wraps");
-    assert_eq!(fourth, "anthropic-b");
-}
-
-#[tokio::test]
-async fn a_same_name_pool_keeps_its_rotation_cursor_across_a_reload() {
-    // The cursor is carried, not reset: a reload mid-rotation must not send the
-    // next request back to seat 0, which would double-serve one account.
-    let before = one_pool_two_round_robin_models_router();
-    assert_eq!(lead_member(&before, "opusRr"), "anthropic-a");
-
-    // Rebuild the same config and carry over, exactly as the coordinator does.
-    let mut after = one_pool_two_round_robin_models_router();
-    after.carry_over_pool_state_from(&before);
-
-    // The next request continues the rotation rather than repeating seat 0.
-    assert_eq!(
-        lead_member(&after, "opusRr"),
-        "anthropic-b",
-        "a surviving pool's cursor must continue across a reload, not reset"
-    );
-}
-
-#[tokio::test]
-async fn a_renamed_pool_starts_a_fresh_rotation_cursor() {
-    // A rename is a NEW pool: no heuristic state transfer. The fresh map simply
-    // has no key for the old name, so the cursor starts at seat 0.
-    let before = one_pool_two_round_robin_models_router();
-    assert_eq!(lead_member(&before, "opusRr"), "anthropic-a");
-
-    // Rebuild with the pool renamed; the models now name `renamed-pool`.
-    let mut after = one_pool_two_round_robin_models_router();
-    {
-        let mut config = (*after.config).clone();
-        let pool = config.pools.remove("shared-pool").expect("pool exists");
-        config.pools.insert("renamed-pool".to_string(), pool);
-        let mut models = BTreeMap::new();
-        for (nickname, model) in &after.resolved_models {
-            let seats = model.seats.clone().expect("pooled");
-            let rebuilt = ResolvedModel::new(
-                nickname,
-                "renamed-pool",
-                model.provider.clone(),
-                model.upstream.clone(),
-            )
-            .with_seats(seats);
-            models.insert(nickname.clone(), Arc::new(rebuilt));
-        }
-        after = Router::new(Arc::new(config));
-        after.install_resolved_models(models);
-    }
-    after.carry_over_pool_state_from(&before);
-
-    assert_eq!(
-        lead_member(&after, "opusRr"),
-        "anthropic-a",
-        "a renamed pool is a new pool: its rotation starts fresh"
-    );
-}
-
-#[test]
-fn cursor_carry_over_builds_a_fresh_map_without_historical_pool_names() {
-    // The keyspace bound: carry-over writes into THIS router's fresh map, so a
-    // run of reloads over renamed pools cannot accumulate every name the
-    // process ever saw.
-    let before = one_pool_two_round_robin_models_router();
-    assert_eq!(before.round_robin.keys(), vec!["shared-pool"]);
-
-    // A router that declares NO pool carries nothing forward.
-    let mut after = Router::new(Arc::new(Config::default()));
-    after.carry_over_pool_state_from(&before);
-
-    assert!(
-        after.round_robin.keys().is_empty(),
-        "a pool absent from the new config must not survive the carry-over"
     );
 }
 

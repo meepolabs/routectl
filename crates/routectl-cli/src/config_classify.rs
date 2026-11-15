@@ -392,7 +392,7 @@ mod tests {
         next.pools.insert(
             "anthropic".into(),
             PoolEntry::new(vec!["anthropic-default".into()])
-                .with_seat_selection(SeatSelection::RoundRobin),
+                .with_seat_selection(SeatSelection::FillFirst),
         );
         assert!(
             collect_high_consequence_changes(&prev, &next).is_empty(),

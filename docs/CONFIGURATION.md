@@ -352,6 +352,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
 | `models.<name>.supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking |
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
+| `pools.<name>.seat_selection = "round-robin"` | use sticky-least-loaded |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |
@@ -2320,12 +2321,10 @@ two subscription accounts actually spread new conversations instead of
 tying on available RPM (which is unlimited on a subscription seat) and
 falling through to the anti-herd rotation.
 
-`sticky-least-loaded` is the only strategy this applies to. A pool left on
-the `fill-first` default, or set to `round-robin`, places exactly as it
-always has -- neither reads a seat's budget. `fill-first` in particular is
-unchanged *deliberately*: draining one seat is what that setting asks for. Adopting quota-aware
-placement is therefore an explicit
-`seat_selection = "sticky-least-loaded"` on the pool.
+`sticky-least-loaded`, the default, is the only strategy this applies to.
+A pool set to `fill-first` places exactly as it always has and never reads
+a seat's budget, *deliberately*: draining one seat is what that setting
+asks for. A pool that omits `seat_selection` gets quota-aware placement.
 
 Nothing here can move an established conversation. Placement is
 consulted for a birth pick only, so a soft cap never evicts or migrates a
@@ -2370,7 +2369,7 @@ and every case above that falls back (no fresh reading, a lapsed one, an
 uncurated provider, a partially observed pool) resolves through the
 unchanged capacity ranking. Conversation pins and the one-time migration
 off an unhealthy seat are never affected. A pool that should not place
-by budget at all stays on `fill-first` or `round-robin`.
+by budget at all sets `seat_selection = "fill-first"`.
 
 **No tuning knobs.** The per-provider budget thresholds, the long-window
 guard and the freshness bounds are constants grounded in captured
@@ -5430,7 +5429,7 @@ auth_kind   = "oauth-bearer"
 
 [pools.anthropic]
 members            = ["anthropic-default", "anthropic-seat-b"]
-seat_selection     = "round-robin"   # "fill-first" (default) / "round-robin" / "sticky-least-loaded"
+seat_selection     = "sticky-least-loaded"   # the default; or "fill-first"
 accepts_new_logins = false           # the ONLY thing that grows a pool
 
 [models.anthropic-sonnet]
@@ -5576,20 +5575,16 @@ changed seat and does not rebuild.
 resolves to more than one usable member; with one member there is nothing
 to choose between and every strategy behaves identically:
 
-- `fill-first` (default) -- drain one seat before advancing to the
-  next. A single-member pool (the common case) keeps today's
-  behavior with no config. The drain IS this strategy's contract, not a
+- `fill-first` -- drain one seat before advancing to the
+  next. The drain IS this strategy's contract, not a
   rough edge on it: holding one seat keeps that seat's prompt cache warm,
   and running it down until the upstream refuses is the price of the
   locality. Quota-aware placement deliberately does NOT apply here --
   choosing `fill-first` is choosing that trade, and overriding it would
   override a stated preference. An operator who wants budget-aware
-  spreading sets `sticky-least-loaded` instead.
-- `round-robin` -- rotate across seats to spread load, advancing the
-  start seat once per request. Quota-aware placement does not apply here
-  either.
-- `sticky-least-loaded` -- the ONLY strategy quota-aware placement and
-  the session-affinity layer apply to. Pin each conversation to one seat
+  spreading leaves the key out.
+- `sticky-least-loaded` (default) -- the ONLY strategy quota-aware
+  placement and the session-affinity layer apply to. Pin each conversation to one seat
   so its warm prompt cache is preserved, while balancing NEW conversations
   across seats by available capacity. A conversation's first request
   picks the least-loaded healthy seat (preferring seats with a closed
@@ -5623,8 +5618,7 @@ to choose between and every strategy behaves identically:
   NULL for every row written by this version onward).
 
 These strategies are applied at dispatch time -- `fill-first` always
-starts from seat 0 (fixed priority order), `round-robin` advances the
-start seat per request (spreading load across the pool), and
+starts from seat 0 (fixed priority order), and
 `sticky-least-loaded` leads with the conversation's home seat (the rest
 of the pool follows in fill-first order as fallback). Seat selection is
 a best-effort ordering hint: the per-seat rate-limit gate and the

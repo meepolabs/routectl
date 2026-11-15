@@ -1169,7 +1169,7 @@ fn config_check_reports_a_named_pool_with_its_members_and_strategy() {
              auth_kind = \"oauth-bearer\"\n\
              [pools.anthropic]\n\
              members = [\"anthropic-default\", \"anthropic-seat-b\"]\n\
-             seat_selection = \"round-robin\"\n\
+             seat_selection = \"fill-first\"\n\
              accepts_new_logins = true\n"
         ),
     )
@@ -1184,7 +1184,7 @@ fn config_check_reports_a_named_pool_with_its_members_and_strategy() {
         stdout.contains(
             "pool `anthropic` has 2 members \
              (anthropic-default=default, anthropic-seat-b=seat-b); \
-             seat_selection round-robin; accepts new logins: yes"
+             seat_selection fill-first; accepts new logins: yes"
         ),
         "expected the pool line, got: {stdout}"
     );
@@ -1635,6 +1635,88 @@ fn config_unset_declines_a_high_consequence_removal_on_a_silent_stdin() {
         std::fs::read(&config_path).expect("read config"),
         before,
         "a declined removal must not write"
+    );
+}
+
+/// A two-seat pool config with no `seat_selection` line.
+fn two_seat_pool_config(dir: &std::path::Path) -> std::path::PathBuf {
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {CURRENT}\n\
+             [providers.seat-a]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic\"\n\
+             [providers.seat-b]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#b\"\n\
+             [pools.team]\n\
+             members = [\"seat-a\", \"seat-b\"]\n"
+        ),
+    )
+    .expect("write config");
+    config_path
+}
+
+/// `seat_selection` stays a live key, so `config set` passes the path check
+/// and reaches the shared gate with the edited candidate; the gate refuses a
+/// retired value with the loader's own line and writes nothing, while a live
+/// value on the same key writes.
+#[test]
+fn config_set_refuses_a_retired_seat_selection_value_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = two_seat_pool_config(tmp.path());
+    let path = config_path.to_str().unwrap();
+    let before = std::fs::read(&config_path).expect("read config");
+    let candidate = format!(
+        "{}seat_selection = \"round-robin\"\n",
+        String::from_utf8(before.clone()).expect("utf-8 config")
+    );
+    let loader_line = routectl_router::preflight_raw_config(&candidate)
+        .expect_err("the loader refuses the candidate")
+        .to_string();
+    let set = |value: &str| {
+        run_routectl_with_xdg(
+            tmp.path(),
+            &[
+                "--config",
+                path,
+                "config",
+                "set",
+                "pools.team.seat_selection",
+                value,
+            ],
+        )
+    };
+
+    // Act
+    let (code, stdout, stderr) = set("round-robin");
+
+    // Assert
+    assert_ne!(code, 0, "refused: {stdout} / {stderr}");
+    assert_eq!(
+        loader_line,
+        "`pools.team.seat_selection` is retired: use sticky-least-loaded; delete it"
+    );
+    assert!(
+        stderr.contains(&format!("  - {loader_line}\n")),
+        "the gate prints the loader's line: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&config_path).expect("read config"),
+        before,
+        "a refused edit must not write"
+    );
+
+    let (code, stdout, stderr) = set("fill-first");
+    assert_eq!(code, 0, "control: a live value writes: {stdout} / {stderr}");
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("seat_selection = \"fill-first\""),
+        "the control edit must land on disk"
     );
 }
 

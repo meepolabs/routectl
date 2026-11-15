@@ -1,6 +1,6 @@
-//! Pin the `seat_selection` pool knob: a default, an explicit
-//! `round-robin`, and a rejected unknown value. The field lives on the
-//! `pools.<name>` block, not on a provider entry.
+//! Pin the `seat_selection` pool knob: a default, each explicit value, and a
+//! rejected unknown value. The field lives on the `pools.<name>` block, not
+//! on a provider entry.
 use crate::config::{Config, PoolEntry, SeatSelection};
 
 fn pool_of<'a>(cfg: &'a Config, name: &str) -> &'a PoolEntry {
@@ -8,7 +8,7 @@ fn pool_of<'a>(cfg: &'a Config, name: &str) -> &'a PoolEntry {
 }
 
 #[test]
-fn seat_selection_defaults_to_fill_first() {
+fn seat_selection_defaults_to_sticky_least_loaded() {
     // Arrange: a pool block omitting seat_selection.
     let toml_text = r#"
 [providers.anthropic]
@@ -23,24 +23,53 @@ members = ["anthropic"]
     // Assert
     assert_eq!(
         pool_of(&cfg, "anthropic-pool").seat_selection,
-        SeatSelection::FillFirst
+        SeatSelection::StickyLeastLoaded
     );
 }
 
 #[test]
-fn seat_selection_parses_round_robin() {
+fn seat_selection_parses_each_live_value() {
+    for (token, expected) in [
+        ("fill-first", SeatSelection::FillFirst),
+        ("sticky-least-loaded", SeatSelection::StickyLeastLoaded),
+    ] {
+        // Arrange
+        let toml_text = format!(
+            "[pools.anthropic-pool]\nmembers = [\"anthropic\"]\nseat_selection = \"{token}\"\n"
+        );
+        // Act
+        let cfg: Config = toml::from_str(&toml_text).expect("parse");
+        // Assert
+        assert_eq!(
+            pool_of(&cfg, "anthropic-pool").seat_selection,
+            expected,
+            "{token}"
+        );
+    }
+}
+
+/// The default is one fact with three readers: a pool block omitting the
+/// key, a programmatically built pool, and a standalone provider, which has
+/// no pool to take a strategy from.
+#[test]
+fn every_default_reader_agrees_on_sticky_least_loaded() {
     // Arrange
-    let toml_text = r#"
-[pools.anthropic-pool]
-members = ["anthropic"]
-seat_selection = "round-robin"
-"#;
-    // Act
-    let cfg: Config = toml::from_str(toml_text).expect("parse");
-    // Assert
+    let cfg: Config = toml::from_str(
+        "[providers.solo]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic\"\n",
+    )
+    .expect("parse");
+
+    // Act / Assert
+    assert_eq!(SeatSelection::default(), SeatSelection::StickyLeastLoaded);
     assert_eq!(
-        pool_of(&cfg, "anthropic-pool").seat_selection,
-        SeatSelection::RoundRobin
+        PoolEntry::new(vec!["a".into()]).seat_selection,
+        SeatSelection::StickyLeastLoaded
+    );
+    assert_eq!(
+        cfg.seat_selection_for("solo"),
+        SeatSelection::StickyLeastLoaded
     );
 }
 
@@ -61,13 +90,13 @@ seat_selection = "bogus"
     );
 }
 
-/// `PoolEntry::default()` carries `FillFirst`, so a programmatically-built
-/// pool matches the TOML-omitted default.
+/// `PoolEntry::default()` carries `StickyLeastLoaded`, so a
+/// programmatically-built pool matches the TOML-omitted default.
 #[test]
-fn pool_entry_default_is_fill_first() {
+fn pool_entry_default_is_sticky_least_loaded() {
     assert_eq!(
         PoolEntry::default().seat_selection,
-        SeatSelection::FillFirst
+        SeatSelection::StickyLeastLoaded
     );
     assert!(!PoolEntry::default().accepts_new_logins);
 }
@@ -97,7 +126,7 @@ fn accepts_new_logins_defaults_to_false_and_parses_true() {
 /// deserialize error, not an empty pool.
 #[test]
 fn pool_block_requires_members() {
-    let result = toml::from_str::<Config>("[pools.p]\nseat_selection = \"round-robin\"\n");
+    let result = toml::from_str::<Config>("[pools.p]\nseat_selection = \"fill-first\"\n");
     assert!(
         result.is_err(),
         "a pool without members must reject; got Ok"
@@ -122,7 +151,7 @@ fn provider_entry_no_longer_accepts_seat_selection() {
         "[providers.anthropic]\n\
          kind = \"anthropic-api\"\n\
          api_key_ref = \"literal:sk-ant-test\"\n\
-         seat_selection = \"round-robin\"\n",
+         seat_selection = \"fill-first\"\n",
     );
     assert!(
         result.is_err(),

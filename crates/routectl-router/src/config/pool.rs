@@ -29,13 +29,12 @@ pub struct PoolEntry {
     pub members: Vec<String>,
 
     /// How dispatch picks among this pool's members for one request.
-    /// `fill-first` (the default) drains one member before moving to the
-    /// next; `round-robin` spreads load across members, advancing the
-    /// start member per request; `sticky-least-loaded` pins each
-    /// conversation to one member for prompt-cache affinity while
-    /// balancing new conversations across members by load, and is the only
-    /// strategy quota-aware placement applies to. Applied per request
-    /// whenever the pool resolves to more than one usable member.
+    /// `sticky-least-loaded` (the default) pins each conversation to one
+    /// member for prompt-cache affinity while balancing new conversations
+    /// across members by load, and is the only strategy quota-aware
+    /// placement applies to; `fill-first` drains one member before moving
+    /// to the next. Applied per request whenever the pool resolves to more
+    /// than one usable member.
     #[serde(default)]
     pub seat_selection: SeatSelection,
 
@@ -81,7 +80,7 @@ pub struct PoolEntry {
 
 impl PoolEntry {
     /// Construct a pool from its member list, taking the default
-    /// strategy (`fill-first`) and a pinned membership list. Use this for
+    /// strategy (`sticky-least-loaded`) and a pinned membership list. Use this for
     /// explicit construction from outside the crate (the struct is
     /// `#[non_exhaustive]`, so struct-literal syntax is unavailable there).
     pub fn new(members: Vec<String>) -> Self {
@@ -168,8 +167,8 @@ impl Config {
     /// The strategy is a property of a SET of accounts, so it lives on the
     /// pool block. `name` may be a pool (its own strategy applies) or a
     /// provider entry: a provider claimed by a pool inherits that pool's
-    /// strategy, and a standalone provider takes the `fill-first` default
-    /// -- it has one credential, so there is nothing to select between.
+    /// strategy, and a standalone provider takes the default -- it has one
+    /// credential, so there is nothing to select between.
     ///
     /// Validation rejects both a name held by a provider and a pool and a
     /// provider claimed by two pools, so the walk below has at most one

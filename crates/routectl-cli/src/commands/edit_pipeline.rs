@@ -346,7 +346,7 @@ mod tests {
             "version = 4\n\
              [pools.anthropic]\n\
              members = [\"a\"]\n\
-             seat_selection = \"round-robin\" # spread the load\n\
+             seat_selection = \"fill-first\" # drain one seat at a time\n\
              accepts_new_logins = false\n",
         );
 
@@ -357,7 +357,7 @@ mod tests {
         let out = doc.to_string();
         assert!(out.contains(r#"members = ["a", "b"]"#), "{out}");
         assert!(
-            out.contains("seat_selection = \"round-robin\" # spread the load"),
+            out.contains("seat_selection = \"fill-first\" # drain one seat at a time"),
             "{out}"
         );
         assert!(out.contains("accepts_new_logins = false"), "{out}");

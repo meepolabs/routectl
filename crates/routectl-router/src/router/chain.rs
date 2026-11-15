@@ -107,8 +107,8 @@ impl Router {
     /// `resolve_nickname` reintroduces that leak.
     ///
     /// Never goes through `dispatch_chain`: that increments pool-dispatch
-    /// metrics and rotates round-robin state, and a discovery read must not
-    /// perturb routing.
+    /// metrics and mints sticky pins, and a discovery read must not perturb
+    /// routing.
     #[must_use]
     pub fn context_window_for(
         &self,
@@ -133,8 +133,7 @@ impl Router {
     /// First-target resolution behind [`Self::context_window_for`]:
     /// exact-then-glob alias match, else a direct `[models]` nickname, both
     /// read off the INSTALLED resolved-model table (never `dispatch_chain`,
-    /// which would perturb pool round-robin state and metrics on a discovery
-    /// read).
+    /// which would perturb pool pins and metrics on a discovery read).
     fn first_chain_target(&self, model: &str) -> Option<Arc<ResolvedModel>> {
         match self.resolve_v6_alias(model) {
             Ok(Some(chain)) => chain.into_iter().next(),
@@ -279,11 +278,10 @@ impl Router {
     /// Expand a resolved-model chain into the per-request dispatch-target
     /// chain. A non-pooled model (`seats == None`) maps to exactly one
     /// target keyed by nickname -- byte-for-byte the pre-pool path. A
-    /// pooled model maps to one target per seat, in the order
-    /// `seat_pool::seat_order_for_request` returns for the target's
-    /// in-force `seat_selection` (FillFirst: fixed default-first order;
-    /// RoundRobin: per-request rotated start). The expanded seat targets
-    /// slot inline
+    /// pooled model maps to one target per seat, in the order the target's
+    /// in-force `seat_selection` resolves (FillFirst: fixed default-first
+    /// order; StickyLeastLoaded: the conversation's home seat first). The
+    /// expanded seat targets slot inline
     /// where the model sat, preserving the operator's fallback order so a
     /// chain `[opus, sonnet]` becomes `[opus-seatA, opus-seatB, sonnet]`.
     ///
@@ -359,12 +357,10 @@ impl Router {
         self.count_pool_degradation(m, seats);
         let selection = self.config.seat_selection_for(&m.provider_name);
 
-        // Sticky least-loaded only engages with a real session key on a
-        // multi-seat pool. Every OTHER case (FillFirst, RoundRobin, or
-        // keyless / single-seat StickyLeastLoaded) routes through the
-        // existing `seat_order_for_request` path UNCHANGED, so keyless
-        // StickyLeastLoaded stays byte-for-byte fill-first -- and therefore
-        // mints no pin and consults no quota, since it makes no pick at all.
+        // Sticky least-loaded only engages on a multi-seat pool. Every OTHER
+        // case (FillFirst, or single-seat StickyLeastLoaded) walks the fixed
+        // fill-first order, minting no pin and consulting no quota, since it
+        // makes no pick at all.
         let order: Vec<usize> = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
                 let pin_key = sticky_pin_key(key, m.rotation_key());
@@ -379,12 +375,7 @@ impl Router {
             (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => {
                 self.keyless_seat_order(seats, m)
             }
-            _ => crate::seat_pool::seat_order_for_request(
-                m.rotation_key(),
-                seats.len(),
-                selection,
-                &self.round_robin,
-            ),
+            _ => crate::seat_pool::fill_first_order(seats.len()),
         };
         for idx in order {
             let seat = &seats[idx];

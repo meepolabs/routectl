@@ -224,10 +224,16 @@ async fn a_fresh_daemon_starts_cold() {
 
 #[tokio::test]
 async fn a_seat_rotation_within_one_pool_keeps_the_anchor() {
-    // Arrange: a two-seat round-robin pool over one upstream model; openers
-    // omitted so the fast path shows the selected opening.
+    // Arrange: a two-seat fill-first pool over one upstream model whose first
+    // seat fails turn two before any content, so turn two moves to the second
+    // seat; openers omitted so the fast path shows the selected opening.
     const ACTUAL: InputUsage = InputUsage::plain(8_888);
     let upstream = Upstream::start().await;
+    upstream.mount(
+        "/seat-a/v1/messages",
+        "Now list its dependencies.",
+        Script::sse(anthropic_start(None) + &anthropic_overloaded()),
+    );
     for prefix in ["/seat-a", "/seat-b"] {
         upstream.mount(
             &format!("{prefix}/v1/messages"),
@@ -246,7 +252,7 @@ async fn a_seat_rotation_within_one_pool_keeps_the_anchor() {
     pooled.pools.insert(
         "pool".to_string(),
         routectl_router::config::PoolEntry::new(vec!["seat-a".into(), "seat-b".into()])
-            .with_seat_selection(routectl_router::config::SeatSelection::RoundRobin),
+            .with_seat_selection(routectl_router::config::SeatSelection::FillFirst),
     );
     let state = daemon(build(pooled).await);
     let first = body(&turn_one());
@@ -256,8 +262,9 @@ async fn a_seat_rotation_within_one_pool_keeps_the_anchor() {
     anthropic_turn(&state, &first).await;
     let rotated = anthropic_turn(&state, &second).await;
 
-    // Assert: premise -- the two turns landed on different seats.
-    assert_eq!(upstream.hits("/seat-a/v1/messages"), 1);
+    // Assert: premise -- turn one served on the first seat, turn two on the
+    // second after the first refused it.
+    assert_eq!(upstream.hits("/seat-a/v1/messages"), 2);
     assert_eq!(upstream.hits("/seat-b/v1/messages"), 1);
     assert_eq!(
         rotated.opening_input(),

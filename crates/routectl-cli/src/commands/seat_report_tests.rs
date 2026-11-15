@@ -151,7 +151,7 @@ fn pinned_ref_on_a_standalone_entry_pins_one_seat_with_no_strategy() {
 #[test]
 fn a_pool_member_row_names_its_pool_and_the_pools_strategy() {
     // Arrange
-    let config = config_with_ref("oauth://anthropic", Some("round-robin"));
+    let config = config_with_ref("oauth://anthropic", Some("fill-first"));
     let stored = keys(&["anthropic"]);
 
     // Act
@@ -162,7 +162,7 @@ fn a_pool_member_row_names_its_pool_and_the_pools_strategy() {
     assert_eq!(
         describe_row(&row),
         "ref oauth://anthropic pins the default seat; \
-         member of pool `anthropic-pool` with seat_selection round-robin"
+         member of pool `anthropic-pool` with seat_selection fill-first"
     );
 }
 
@@ -171,7 +171,7 @@ fn a_pool_member_row_names_its_pool_and_the_pools_strategy() {
 #[test]
 fn a_healthy_pool_renders_members_strategy_and_growth_marker() {
     // Arrange
-    let config = pooled_config("round-robin", true);
+    let config = pooled_config("fill-first", true);
     let stored = keys(&["anthropic", "anthropic#work"]);
 
     // Act
@@ -184,7 +184,7 @@ fn a_healthy_pool_renders_members_strategy_and_growth_marker() {
     assert_eq!(
         describe_pool(&row),
         "pool `anthropic` has 2 members (anthropic-default=default, anthropic-work=work); \
-         seat_selection round-robin; accepts new logins: yes"
+         seat_selection fill-first; accepts new logins: yes"
     );
 }
 
@@ -204,7 +204,7 @@ fn a_pool_missing_one_members_credential_names_that_member() {
     assert_eq!(
         describe_pool(&row),
         "pool `anthropic` has 2 members (anthropic-default=default, anthropic-work=work); \
-         seat_selection fill-first (default); accepts new logins: no; \
+         seat_selection fill-first; accepts new logins: no; \
          no stored credential for anthropic-work"
     );
 }
@@ -281,24 +281,21 @@ fn non_oauth_refs_emit_no_row() {
 #[test]
 fn selection_label_names_every_strategy() {
     // Arrange / Act / Assert
-    assert_eq!(
-        selection_label(SeatSelection::FillFirst),
-        "fill-first (default)"
-    );
-    assert_eq!(selection_label(SeatSelection::RoundRobin), "round-robin");
+    assert_eq!(selection_label(SeatSelection::FillFirst), "fill-first");
     assert_eq!(
         selection_label(SeatSelection::StickyLeastLoaded),
-        "sticky-least-loaded"
+        "sticky-least-loaded (default)"
     );
 }
 
-/// `fill-first` renders its `(default)` marker whether or not the operator
-/// wrote the token: `#[serde(default)]` on a non-Option field makes unset and
-/// explicit indistinguishable post-parse, and they behave identically.
+/// `sticky-least-loaded` renders its `(default)` marker whether or not the
+/// operator wrote the token: `#[serde(default)]` on a non-Option field makes
+/// unset and explicit indistinguishable post-parse, and they behave
+/// identically.
 #[test]
-fn fill_first_renders_the_default_marker_when_written_explicitly() {
+fn sticky_least_loaded_renders_the_default_marker_when_written_explicitly() {
     // Arrange
-    let explicit = config_with_ref("oauth://anthropic", Some("fill-first"));
+    let explicit = config_with_ref("oauth://anthropic", Some("sticky-least-loaded"));
     let stored = keys(&["anthropic"]);
 
     // Act
@@ -306,7 +303,7 @@ fn fill_first_renders_the_default_marker_when_written_explicitly() {
 
     // Assert
     assert!(
-        sentence.ends_with("with seat_selection fill-first (default)"),
+        sentence.ends_with("with seat_selection sticky-least-loaded (default)"),
         "{sentence}"
     );
 }
@@ -466,7 +463,7 @@ fn hostile_labels_and_entry_names_render_on_one_safe_line() {
 #[test]
 fn a_delimiter_bearing_member_name_cannot_forge_a_second_selection_clause() {
     // Arrange
-    let forgery = "a); seat_selection round-robin (b";
+    let forgery = "a); seat_selection fill-first (b";
     let config: Config = toml::from_str(&format!(
         "version = 3\n\
          [providers.\"{forgery}\"]\n\
@@ -487,7 +484,7 @@ fn a_delimiter_bearing_member_name_cannot_forge_a_second_selection_clause() {
         "exactly one strategy clause may render: {sentence}"
     );
     assert!(
-        sentence.contains("; seat_selection fill-first (default);"),
+        sentence.contains("; seat_selection sticky-least-loaded (default);"),
         "the real clause is the configured one: {sentence}"
     );
 }

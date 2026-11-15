@@ -3084,7 +3084,7 @@ mod pool_validation_tests {
             "{OAUTH_ACCOUNTS}\
              [pools.anthropic]\n\
              members = [\"anthropic-default\", \"anthropic-work\"]\n\
-             seat_selection = \"round-robin\"\n\
+             seat_selection = \"fill-first\"\n\
              accepts_new_logins = true\n"
         ));
 

@@ -656,8 +656,8 @@
         },
         "seat_selection": {
           "$ref": "#/$defs/SeatSelection",
-          "default": "fill-first",
-          "description": "How dispatch picks among this pool's members for one request.\n`fill-first` (the default) drains one member before moving to the\nnext; `round-robin` spreads load across members, advancing the\nstart member per request; `sticky-least-loaded` pins each\nconversation to one member for prompt-cache affinity while\nbalancing new conversations across members by load, and is the only\nstrategy quota-aware placement applies to. Applied per request\nwhenever the pool resolves to more than one usable member."
+          "default": "sticky-least-loaded",
+          "description": "How dispatch picks among this pool's members for one request.\n`sticky-least-loaded` (the default) pins each conversation to one\nmember for prompt-cache affinity while balancing new conversations\nacross members by load, and is the only strategy quota-aware\nplacement applies to; `fill-first` drains one member before moving\nto the next. Applied per request whenever the pool resolves to more\nthan one usable member."
         },
         "stream_first_byte_timeout_ms": {
           "description": "Per-attempt first-content timeout for streams through this pool's\nmembers. Precedence: `[models.X]` > member provider > this pool >\n`[retry] stream_first_byte_timeout_ms` > the 5 min default.",
@@ -1655,16 +1655,11 @@
       "type": "object"
     },
     "SeatSelection": {
-      "description": "Seat-selection strategy for a set of interchangeable accounts, set on\nthe `pools.<name>` block that groups them. Default is `fill-first` so a\nsingle-member pool (the common case) keeps its current behavior with no\nconfig.\n\nSubscription-quota-aware placement and the session-affinity layer reach\n`sticky-least-loaded` ONLY. The other two variants keep their own contracts\nunchanged: neither pins a session nor reads a seat's remaining budget.",
+      "description": "Seat-selection strategy for a set of interchangeable accounts, set on\nthe `pools.<name>` block that groups them. Default is\n`sticky-least-loaded`: a pool that omits the key keeps each conversation\non one account for prompt-cache affinity and spreads new conversations\nby load. A single-member pool behaves identically under either strategy.\n\nSubscription-quota-aware placement and the session-affinity layer reach\n`sticky-least-loaded` ONLY. `fill-first` keeps its own contract: it\nneither pins a session nor reads a seat's remaining budget.",
       "oneOf": [
         {
           "const": "fill-first",
           "description": "Drain one seat fully before advancing to the next.\n\nThe drain IS the contract, not a shortcoming of it: holding one seat\nkeeps its prompt cache warm, and running that seat down until the\nupstream refuses is the price of that locality. An operator wanting\nbudget-aware spreading picks `sticky-least-loaded` instead.",
-          "type": "string"
-        },
-        {
-          "const": "round-robin",
-          "description": "Rotate across seats to spread load. The starting seat advances once per\nREQUEST, so consecutive requests of one conversation land on different\nseats.",
           "type": "string"
         },
         {

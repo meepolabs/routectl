@@ -223,20 +223,6 @@ pub struct Router {
     /// patterns (e.g. `claude-opus-*`) on lookup miss; longest prefix
     /// wins.
     alias_glob_index: PrefixIndex<AliasValue>,
-    /// Per-pool round-robin cursors for OAuth credential pools whose
-    /// `seat_selection` is `RoundRobin`. One `AtomicUsize` per POOL, so two
-    /// models naming one pool advance the SAME cursor and their traffic
-    /// interleaves across the pool's accounts. Advanced once per request to
-    /// rotate the starting seat. `FillFirst` pools and non-pooled models have
-    /// no entry here.
-    ///
-    /// Carried across a hot-reload for the pools the new config still declares
-    /// (see `carry_over_pool_state_from`): each cursor sits behind its own
-    /// `Arc`, so a request still holding the outgoing Router advances the same
-    /// atomic the incoming one reads and no seat is handed out twice across
-    /// the swap. A pool the new config dropped -- including a RENAMED one,
-    /// which is a new pool -- has no key in the fresh map and starts at seat 0.
-    round_robin: crate::seat_pool::RoundRobinCursors,
     /// Bounded LRU map of pin lookup key -> pinned pool MEMBER, for
     /// `StickyLeastLoaded` selection. Keyed per session per POOL, so a session
     /// stays on one account across every model of that pool. These pins MUST
@@ -463,8 +449,8 @@ pub struct Router {
     beta_seed: &'static [&'static str],
     /// Lock-free router-side observability counters. Carried over on a
     /// hot-reload rebuild by `carry_over_metrics_from`, which shares this
-    /// `Arc` rather than resetting it: unlike `round_robin`, these counters
-    /// back an operator-facing snapshot, so a reload that silently zeroed
+    /// `Arc` rather than resetting it: these counters back an
+    /// operator-facing snapshot, so a reload that silently zeroed
     /// them would make a diffed rate compute garbage with no indication why.
     metrics: Arc<RouterMetrics>,
     /// Live wire-check sampler, counters and findings ring. Shared on a
@@ -506,7 +492,7 @@ pub struct Router {
     /// per-session set grows with sessions and would need the bounded-store
     /// machinery `shadow_store` carries, which is disproportionate for a
     /// warn-only diagnostic. Reset on a Router rebuild (re-warns once after a
-    /// hot-reload), benign like the `round_robin` reset.
+    /// hot-reload), which is benign.
     volatile_prefix_warned: Mutex<HashSet<(PrefixComponent, VolatileKind)>>,
     /// Edge-trigger dedup for the `cache_prefix_rewritten_in_epoch` advisory
     /// WARN. A single latch, not a keyed set: the detector has one component,
@@ -2220,7 +2206,6 @@ impl Router {
             credential_accounts: Arc::default(),
             resolved_models: BTreeMap::new(),
             alias_glob_index,
-            round_robin: Default::default(),
             sticky_pins: Default::default(),
             k_session_store,
             k_estimator,
@@ -2356,15 +2341,6 @@ impl Router {
                         Some(&seat.provider_name),
                         m.stream_first_byte_timeout_ms,
                     );
-                }
-                // Round-robin pools rotate the starting seat per request;
-                // register a cursor only for that selection mode, keyed by the
-                // POOL so every model naming it advances one cursor.
-                if matches!(
-                    self.config.seat_selection_for(&m.provider_name),
-                    crate::config::SeatSelection::RoundRobin
-                ) {
-                    self.round_robin.register(m.rotation_key());
                 }
             }
             self.claim_state_slot(
@@ -2593,35 +2569,26 @@ impl Router {
         survivors
     }
 
-    /// Carry the previous Router's per-pool rotation and affinity state into
-    /// this freshly-built Router during a hot-reload, and reconcile the pins
-    /// against the new pool membership.
+    /// Reconcile the previous Router's per-pool affinity state against this
+    /// freshly-built Router's pool membership during a hot-reload.
     ///
     /// Call AFTER `carry_over_sticky_from` (the pins this reconciles are the
     /// shared ones) and after `carry_over_metrics_from` (the re-pick count
     /// must land on the shared counter storage, not on a value this Router is
     /// about to discard).
     ///
-    /// Two pieces of state, both per pool:
-    ///
-    /// - the round-robin cursors, adopted into this Router's FRESH map for the
-    ///   pools it declares. Building forward rather than mutating the previous
-    ///   map is what bounds the keyspace to the current config: mutating in
-    ///   place would let a run of reloads over renamed pools accumulate every
-    ///   pool name the process ever saw.
-    /// - the sticky pins, re-picked once for any member that left a pool still
-    ///   serving. A surviving member's pin is never touched, so a membership
-    ///   change costs a cold miss only to the sessions whose own account went
-    ///   away. Each move is counted, because a burst of them is the operator's
-    ///   only signal that a credential change scattered live conversations.
+    /// The sticky pins are re-picked once for any member that left a pool
+    /// still serving. A surviving member's pin is never touched, so a
+    /// membership change costs a cold miss only to the sessions whose own
+    /// account went away. Each move is counted, because a burst of them is the
+    /// operator's only signal that a credential change scattered live
+    /// conversations.
     ///
     /// Quota admission needs nothing here: its keyspace is the account
     /// identity set, re-declared by `carry_over_quota_from` through
     /// `admit_seats`. Lock discipline is unchanged with it -- this call takes
     /// only the pin map's own lock and never holds it across a quota lock.
     pub fn carry_over_pool_state_from(&mut self, previous: &Self) {
-        self.round_robin.carry_over_from(&previous.round_robin);
-
         let survivors = self.retired_member_survivors(previous);
         if survivors.is_empty() {
             return;

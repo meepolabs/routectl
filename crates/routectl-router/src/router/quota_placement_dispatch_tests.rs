@@ -640,10 +640,9 @@ fn engagement_of(selection: SeatSelection, keyed: bool) -> Engagement {
 /// THE SETTLED SCOPE, stated per variant so widening it cannot pass silently.
 ///
 /// Quota-aware placement and the affinity layer reach `StickyLeastLoaded` and
-/// nothing else. `FillFirst` and `RoundRobin` keep their own contracts:
-/// `FillFirst` drains one seat before advancing, which is the price of the cache
-/// locality an operator asked for by writing it, and `RoundRobin` spreads per
-/// request. Extending either to mint a pin or to read a budget is a
+/// nothing else. `FillFirst` keeps its own contract: it drains one seat before
+/// advancing, which is the price of the cache locality an operator asked for by
+/// writing it. Extending it to mint a pin or to read a budget is a
 /// product-visible contract change, and must fail here rather than land quietly.
 ///
 /// Keyless `StickyLeastLoaded` mints no pin because there is no key to pin
@@ -662,22 +661,6 @@ fn only_sticky_least_loaded_mints_pins_and_reads_quota() {
         ),
         (
             SeatSelection::FillFirst,
-            false,
-            Engagement {
-                mints_pin: false,
-                consults_quota: false,
-            },
-        ),
-        (
-            SeatSelection::RoundRobin,
-            true,
-            Engagement {
-                mints_pin: false,
-                consults_quota: false,
-            },
-        ),
-        (
-            SeatSelection::RoundRobin,
             false,
             Engagement {
                 mints_pin: false,
@@ -730,46 +713,4 @@ fn fill_first_stays_at_seat_zero_with_a_reading_that_would_move_a_sticky_pool() 
             ]
         );
     }
-}
-
-#[test]
-fn round_robin_still_advances_per_request_with_quota_readings_present() {
-    // RoundRobin's contract is a per-REQUEST advance, not a per-session one, so
-    // repeated requests under one session key must keep rotating -- and a
-    // below-cap reading must not reorder the walk.
-    let router = pooled_router_with_selection(SeatSelection::RoundRobin);
-    seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
-
-    assert_eq!(
-        chain_order(&router, "S"),
-        [
-            "opus#anthropic-default",
-            "opus#anthropic-seat-b",
-            "opus#anthropic-seat-c"
-        ]
-    );
-    assert_eq!(
-        chain_order(&router, "S"),
-        [
-            "opus#anthropic-seat-b",
-            "opus#anthropic-seat-c",
-            "opus#anthropic-default"
-        ]
-    );
-    assert_eq!(
-        chain_order(&router, "S"),
-        [
-            "opus#anthropic-seat-c",
-            "opus#anthropic-default",
-            "opus#anthropic-seat-b"
-        ]
-    );
-    assert_eq!(
-        chain_order(&router, "S"),
-        [
-            "opus#anthropic-default",
-            "opus#anthropic-seat-b",
-            "opus#anthropic-seat-c"
-        ]
-    );
 }

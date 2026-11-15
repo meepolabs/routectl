@@ -4528,8 +4528,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `check_state_key_name`), `seat_identity`, `credential_account` (the park's
   account key: the OAuth seat identity, else the `[providers]` entry name
   behind the separator, `None` for a forwarded credential) with
-  `is_entry_account`, and the round-robin and sticky least-loaded seat
-  selection
+  `is_entry_account`, the fixed fill-first walk (`fill_first_order`) and
+  the sticky least-loaded seat selection
 - `src/state_key.rs` -- `StateKey`, the learned-store lane (provider entry,
   upstream): one constructor and one first-`#` parser over the serialized
   `provider_entry#upstream` ledger `lane_key`; no `Display`, only the

@@ -2,9 +2,9 @@
 //! opening token count: the Router's publication generation, the lane the
 //! request's route would try first, and that lane's calibrated estimate.
 //!
-//! Nothing here dispatches, and nothing here moves routing state: no
-//! round-robin cursor, sticky pin, quota reading, pool counter, breaker or
-//! RPM bucket is read through a path that writes it.
+//! Nothing here dispatches, and nothing here moves routing state: no sticky
+//! pin, quota reading, pool counter, breaker or RPM bucket is read through a
+//! path that writes it.
 
 use std::sync::Arc;
 use std::time::SystemTime;

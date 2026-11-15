@@ -2899,13 +2899,14 @@ pub struct ProviderRuntimePolicy {
 }
 
 /// Seat-selection strategy for a set of interchangeable accounts, set on
-/// the `pools.<name>` block that groups them. Default is `fill-first` so a
-/// single-member pool (the common case) keeps its current behavior with no
-/// config.
+/// the `pools.<name>` block that groups them. Default is
+/// `sticky-least-loaded`: a pool that omits the key keeps each conversation
+/// on one account for prompt-cache affinity and spreads new conversations
+/// by load. A single-member pool behaves identically under either strategy.
 ///
 /// Subscription-quota-aware placement and the session-affinity layer reach
-/// `sticky-least-loaded` ONLY. The other two variants keep their own contracts
-/// unchanged: neither pins a session nor reads a seat's remaining budget.
+/// `sticky-least-loaded` ONLY. `fill-first` keeps its own contract: it
+/// neither pins a session nor reads a seat's remaining budget.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -2917,12 +2918,7 @@ pub enum SeatSelection {
     /// keeps its prompt cache warm, and running that seat down until the
     /// upstream refuses is the price of that locality. An operator wanting
     /// budget-aware spreading picks `sticky-least-loaded` instead.
-    #[default]
     FillFirst,
-    /// Rotate across seats to spread load. The starting seat advances once per
-    /// REQUEST, so consecutive requests of one conversation land on different
-    /// seats.
-    RoundRobin,
     /// Pin each conversation to one seat for prompt-cache affinity, and
     /// balance NEW conversations across seats by load. The contract: a
     /// conversation's first request picks the least-loaded healthy seat at
@@ -2937,6 +2933,7 @@ pub enum SeatSelection {
     /// The ONLY variant subscription-quota-aware placement applies to: a birth
     /// (and a keyless request, which mints no pin) ranks candidates by
     /// remaining short-window budget when the evidence suffices.
+    #[default]
     StickyLeastLoaded,
 }
 

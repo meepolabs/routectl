@@ -84,6 +84,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "use `[capability.overrides.\"<provider>:<nickname>\"] unsupported`",
     },
     RetiredKey {
+        path: &["pools", ANY_ENTRY, "seat_selection"],
+        refused_value: Some("round-robin"),
+        replacement: "use sticky-least-loaded",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "allowed_betas"],
         refused_value: None,
         replacement: "nothing replaces it: client betas pass through, minus the flags the \

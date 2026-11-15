@@ -2034,7 +2034,7 @@ fn config_with_a_named_pool() -> Config {
          api_key_ref = \"oauth://anthropic#work\"\n\
          [pools.anthropic-pool]\n\
          members = [\"anthropic\", \"anthropic-work\"]\n\
-         seat_selection = \"round-robin\"\n\
+         seat_selection = \"fill-first\"\n\
          accepts_new_logins = true\n",
     )
     .expect("pooled fixture parses")
@@ -2120,7 +2120,7 @@ fn a_named_pool_renders_one_finding_with_members_strategy_and_growth_marker() {
     assert_eq!(
         pool.detail,
         "pool `anthropic-pool` has 2 members (anthropic=default, anthropic-work=work); \
-         seat_selection round-robin; accepts new logins: yes"
+         seat_selection fill-first; accepts new logins: yes"
     );
 }
 
@@ -2240,7 +2240,7 @@ fn seat_pool_findings_stay_pass_with_unknown_presence_when_the_store_is_unreadab
          api_key_ref = \"oauth://anthropic#work\"\n\
          [pools.anthropic-pool]\n\
          members = [\"anthropic\"]\n\
-         seat_selection = \"round-robin\"\n",
+         seat_selection = \"fill-first\"\n",
     )
     .expect("fixture config parses");
     let mut context = ctx(
@@ -2261,7 +2261,7 @@ fn seat_pool_findings_stay_pass_with_unknown_presence_when_the_store_is_unreadab
     }
     let pool = find(&pools, "pools", "anthropic-pool");
     assert!(
-        pool.detail.contains("seat_selection round-robin"),
+        pool.detail.contains("seat_selection fill-first"),
         "an unknown presence answer must still render the configured strategy: {pool:?}"
     );
     assert!(

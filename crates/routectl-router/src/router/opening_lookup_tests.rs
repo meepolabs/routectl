@@ -121,14 +121,6 @@ fn pooled_router(selection: SeatSelection) -> Router {
     router
 }
 
-fn lead_member(router: &Router) -> String {
-    router
-        .dispatch_chain("opus", None)
-        .expect("chain resolves")
-        .swap_remove(0)
-        .provider_name
-}
-
 fn feed_lane(router: &Router, kind: &str, upstream: &str, ts: SystemTime) {
     for i in 0..9 {
         router.record_calibration_sample(
@@ -310,26 +302,6 @@ fn a_pool_mixing_forwarded_and_own_seats_has_no_lane() {
     router.config = Arc::new(config);
 
     assert_eq!(router.opening_lane("opus"), None);
-}
-
-#[test]
-fn the_opening_lane_lookup_does_not_advance_seat_rotation() {
-    // Arrange
-    let router = pooled_router(SeatSelection::RoundRobin);
-
-    // Act: many lookups, then one real chain resolution.
-    for _ in 0..5 {
-        let _ = router.opening_lane("opus");
-    }
-    let first_dispatch_lead = lead_member(&router);
-    let second_dispatch_lead = lead_member(&router);
-
-    // Assert: the first real dispatch still starts at the first seat.
-    assert_eq!(first_dispatch_lead, "seat-a");
-    assert_eq!(
-        second_dispatch_lead, "seat-b",
-        "positive control: a real chain resolution does rotate"
-    );
 }
 
 #[test]

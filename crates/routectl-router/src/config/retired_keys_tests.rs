@@ -1,5 +1,7 @@
 use super::*;
-use crate::config::{CURRENT_CONFIG_VERSION, RawConfigPreflightError, preflight_raw_config};
+use crate::config::{
+    CURRENT_CONFIG_VERSION, Config, RawConfigPreflightError, preflight_raw_config,
+};
 use crate::config_path::{PathError, validate_config_path};
 
 /// A value no key path or replacement text contains; it must never reach a
@@ -502,6 +504,58 @@ fn live_keys_and_the_shipped_examples_produce_no_hits() {
     for (row, raw) in rows {
         assert_accepted(row, raw);
     }
+}
+
+/// The refused `seat_selection` literal is named by key path only: the line
+/// carries neither the refused value nor any other value text from the file,
+/// and the live values on the same key pass.
+#[test]
+fn round_robin_seat_selection_is_refused_by_key_path_alone() {
+    // Arrange
+    let pool = |selection: &str| {
+        format!(
+            "version = {CURRENT_CONFIG_VERSION}\n\
+             [pools.team]\n\
+             members = [\"{SENTINEL}\"]\n\
+             seat_selection = \"{selection}\"\n"
+        )
+    };
+
+    // Act
+    let msg = refusal_message(&pool("round-robin"));
+
+    // Assert
+    assert_eq!(
+        msg,
+        "`pools.team.seat_selection` is retired: use sticky-least-loaded; delete it"
+    );
+    assert!(!msg.contains("round-robin"), "{msg}");
+    assert!(!msg.contains(SENTINEL), "{msg}");
+    for live in ["fill-first", "sticky-least-loaded"] {
+        assert_eq!(preflight_raw_config(&pool(live)), Ok(()), "{live}");
+    }
+}
+
+/// A file that sets no retired key, or any other key, loads with every
+/// setting at its built-in default: retiring keys moved no other default.
+#[test]
+fn a_file_omitting_every_retired_key_keeps_the_built_in_defaults() {
+    // Arrange
+    let raw = format!("version = {CURRENT_CONFIG_VERSION}\n");
+    let built_in = Config {
+        version: CURRENT_CONFIG_VERSION,
+        ..Config::default()
+    };
+
+    // Act
+    preflight_raw_config(&raw).expect("no retired key to refuse");
+    let parsed = crate::parse_config(&raw).expect("a version-only file parses");
+
+    // Assert
+    assert_eq!(
+        serde_json::to_value(&parsed).expect("parsed config serializes"),
+        serde_json::to_value(&built_in).expect("built-in config serializes"),
+    );
 }
 
 /// A typo passes the table and still gets the typed unknown-field error; an

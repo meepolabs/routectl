@@ -871,8 +871,8 @@ fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
 /// but whose provider then fails to build is visible only here.
 ///
 /// Members are walked in declaration order, and the resulting seat order is
-/// the operator's declared order -- the strategy layer
-/// (`seat_order_for_request`) rotates over it per request.
+/// the operator's declared order -- the order `fill_first_order` walks and
+/// the sticky selection falls back to.
 async fn compile_pool(
     pool_name: &str,
     pool: &PoolEntry,

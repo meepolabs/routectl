@@ -357,14 +357,13 @@ pub(crate) fn seat_pool_lines(pools: &[PoolRow], rows: &[SeatPoolRow]) -> Vec<St
 }
 
 /// Operator-facing name of a seat-selection strategy. Presentation, not a
-/// `Display` impl on the router config type: `fill-first (default)` is a CLI
-/// wording choice, and the config token is indistinguishable from an explicit
-/// setting post-parse.
+/// `Display` impl on the router config type: `sticky-least-loaded (default)`
+/// is a CLI wording choice, and the config token is indistinguishable from an
+/// explicit setting post-parse.
 pub(crate) const fn selection_label(selection: SeatSelection) -> &'static str {
     match selection {
-        SeatSelection::FillFirst => "fill-first (default)",
-        SeatSelection::RoundRobin => "round-robin",
-        SeatSelection::StickyLeastLoaded => "sticky-least-loaded",
+        SeatSelection::FillFirst => "fill-first",
+        SeatSelection::StickyLeastLoaded => "sticky-least-loaded (default)",
     }
 }
 
@@ -452,7 +451,7 @@ fn plural(count: usize, noun: &str) -> String {
 /// Beyond the control-byte/ANSI filtering the shared sanitizer performs, every
 /// character this module's own grammar carries meaning with (`( ) , ; : =` and
 /// the backtick) is neutralized: a label such as `a); seat_selection
-/// round-robin (b` would otherwise close the member list and forge a
+/// fill-first (b` would otherwise close the member list and forge a
 /// syntactically perfect second strategy clause, a `ghost=default`-shaped one
 /// would forge a member of the listing, a backtick would close the quoting a
 /// caller wraps the value in, and a `:`-bearing config entry key would forge a

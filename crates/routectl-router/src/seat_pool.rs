@@ -6,16 +6,14 @@
 //! per usable member, computed ONCE per pool and shared by every model naming
 //! it.
 //!
-//! At request time the router asks [`seat_order_for_request`] for the order
-//! in which to walk those seats. The seats then slot into the existing
+//! At request time the router decides the order in which to walk those
+//! seats ([`fill_first_order`], or the sticky least-loaded selection below). The seats then slot into the existing
 //! fallback chain as ordinary dispatch hops -- the per-target circuit
 //! breaker, retry caps, probe fast-fail, and the `Retry-After` park all key
 //! off the per-seat, per-model state key, so seat rotation and cooling are
 //! delivered by machinery that already exists. This module owns only the
-//! dispatch-order glue and the round-robin counter, keeping it out of the
-//! oversized `router.rs`.
+//! dispatch-order glue, keeping it out of the oversized `router.rs`.
 
-use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +23,6 @@ use parking_lot::Mutex;
 use routectl_auth::{SecretRef, SecretScheme};
 use routectl_core::Provider;
 
-use crate::config::SeatSelection;
 use crate::quota::placement::{QuotaDecision, SeatQuota};
 use crate::runtime_state::{CapacitySnapshot, CircuitPhase};
 
@@ -247,74 +244,6 @@ pub fn is_entry_account(account: &str) -> bool {
     account.starts_with(SEAT_KEY_SEPARATOR)
 }
 
-/// Per-pool round-robin cursor set. Holds one `AtomicUsize` per rotation
-/// namespace -- the POOL name for a pool-backed model, so two models on one
-/// pool advance ONE cursor and their traffic interleaves across the pool's
-/// accounts instead of each model rotating the accounts independently.
-/// `RoundRobin` selection advances the cursor by one per request via
-/// `fetch_add`. Lives on the `Router` alongside `state`.
-///
-/// Each cursor sits behind its own `Arc` so a hot-reload can carry the
-/// SURVIVING pools' cursors onto the replacement Router (see
-/// `Router::carry_over_pool_state_from`) while a request still holding the
-/// outgoing Router advances the same atomic. A pool the new config no longer
-/// declares -- including a RENAMED one, which is a new pool -- simply has no
-/// key in the fresh map and its cursor is dropped with the old Router.
-/// `FillFirst` pools need no cursor and are never inserted here.
-#[derive(Debug, Default)]
-pub struct RoundRobinCursors {
-    cursors: BTreeMap<String, Arc<AtomicUsize>>,
-}
-
-impl RoundRobinCursors {
-    /// Register a round-robin cursor for one rotation namespace (a pool
-    /// name). Idempotent: re-registering keeps the existing cursor, which is
-    /// what lets every model naming one pool register the same key. Call at
-    /// install time for each pooled model whose `seat_selection` is
-    /// `RoundRobin`.
-    pub fn register(&mut self, rotation_key: &str) {
-        self.cursors
-            .entry(rotation_key.to_string())
-            .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
-    }
-
-    /// Return the starting offset for this request and advance the cursor.
-    /// `None` when no cursor is registered for `rotation_key` (the pool is
-    /// `FillFirst`, or the target is not pooled) -- callers treat that as
-    /// "start at seat 0, fixed order".
-    fn next_start(&self, rotation_key: &str) -> Option<usize> {
-        self.cursors
-            .get(rotation_key)
-            .map(|c| c.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Adopt `previous`'s cursor for every rotation namespace THIS set
-    /// already registered, sharing each `Arc` rather than copying its value.
-    ///
-    /// Writes into the fresh map rather than mutating the previous one: the
-    /// keys are exactly the pools the new config declares, so a run of
-    /// reloads over renamed pools cannot accumulate historical pool names,
-    /// and a pool absent from the new config is dropped rather than carried.
-    /// Sharing the atomic (not its value) is what keeps a request still
-    /// holding the outgoing Router rotating the same cursor the incoming one
-    /// reads, so the seat it starts from is never handed out twice across the
-    /// swap.
-    pub(crate) fn carry_over_from(&mut self, previous: &Self) {
-        for (key, cursor) in &previous.cursors {
-            if let Some(slot) = self.cursors.get_mut(key) {
-                *slot = Arc::clone(cursor);
-            }
-        }
-    }
-
-    /// The rotation namespaces holding a cursor. Test read surface only:
-    /// production asks for a start offset, never for the key set.
-    #[cfg(test)]
-    pub(crate) fn keys(&self) -> Vec<&str> {
-        self.cursors.keys().map(String::as_str).collect()
-    }
-}
-
 /// Pinned-seat record for one inbound conversation: which pool MEMBER
 /// (account) the session is pinned to, plus a one-time overflow-repin marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -507,46 +436,16 @@ pub fn keyless_quota_order(
     Some(order)
 }
 
-/// Resolve the per-request seat walk order for a pooled model.
-///
-/// `FillFirst` (or any non-pooled model, where `cursors` has no entry):
-/// returns the fixed seat order as built -- default seat first, then sorted
-/// labels -- so the chain walk drains one seat until it cools/parks before
-/// falling to the next, maximizing prompt-cache locality.
-///
-/// `RoundRobin`: rotates the STARTING seat by one per request (the cursor's
-/// `fetch_add` modulo seat count), then walks the remaining seats in order.
-/// The relative order after the start offset is preserved so cooled seats
-/// still fall through predictably.
+/// The fixed seat walk order for a pooled model: default seat first, then
+/// sorted labels, as built. `FillFirst` always walks it, so the chain drains
+/// one seat until it cools/parks before falling to the next, maximizing
+/// prompt-cache locality; `StickyLeastLoaded` walks it whenever it makes no
+/// pick (no session key, a single seat, or a declined quota partition).
 ///
 /// Returns indices into the model's seat slice; the caller maps them back
-/// to [`SeatTarget`]s. An empty or single-element seat set yields the
-/// trivial order with no cursor traffic.
-///
-/// `rotation_key` is the POOL name for a pool-backed model (so two models on
-/// one pool advance one cursor and interleave across its accounts) and the
-/// model nickname for a standalone provider-backed one -- see
-/// `Router::rotation_key_for`.
-pub fn seat_order_for_request(
-    rotation_key: &str,
-    seat_count: usize,
-    selection: SeatSelection,
-    cursors: &RoundRobinCursors,
-) -> Vec<usize> {
-    if seat_count <= 1 {
-        return (0..seat_count).collect();
-    }
-    let start = match selection {
-        SeatSelection::RoundRobin => cursors.next_start(rotation_key).unwrap_or(0) % seat_count,
-        SeatSelection::FillFirst => 0,
-        // Keyless / single-seat StickyLeastLoaded resolves here and walks the
-        // fixed fill-first order (start seat 0). The keyed sticky-least-loaded
-        // ordering lives in `Router::sticky_seat_order`, which needs the
-        // inbound session key and per-seat capacity that this pure fn does not
-        // receive.
-        SeatSelection::StickyLeastLoaded => 0,
-    };
-    (0..seat_count).map(|i| (start + i) % seat_count).collect()
+/// to [`SeatTarget`]s.
+pub fn fill_first_order(seat_count: usize) -> Vec<usize> {
+    (0..seat_count).collect()
 }
 
 /// Build a walk order with `home` first, then every other seat in ascending
@@ -1059,68 +958,10 @@ mod tests {
     }
 
     #[test]
-    fn fill_first_order_is_fixed_zero_start() {
-        // Arrange
-        let cursors = RoundRobinCursors::default();
-
-        // Act: three FillFirst calls.
-        let a = seat_order_for_request("opus", 3, SeatSelection::FillFirst, &cursors);
-        let b = seat_order_for_request("opus", 3, SeatSelection::FillFirst, &cursors);
-
-        // Assert: stable, default-first order across requests.
-        assert_eq!(a, vec![0, 1, 2]);
-        assert_eq!(b, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn round_robin_advances_start_seat_per_request() {
-        // Arrange
-        let mut cursors = RoundRobinCursors::default();
-        cursors.register("opus");
-
-        // Act: four requests over a 3-seat pool.
-        let r0 = seat_order_for_request("opus", 3, SeatSelection::RoundRobin, &cursors);
-        let r1 = seat_order_for_request("opus", 3, SeatSelection::RoundRobin, &cursors);
-        let r2 = seat_order_for_request("opus", 3, SeatSelection::RoundRobin, &cursors);
-        let r3 = seat_order_for_request("opus", 3, SeatSelection::RoundRobin, &cursors);
-
-        // Assert: the starting seat advances by one each request and wraps.
-        assert_eq!(r0, vec![0, 1, 2]);
-        assert_eq!(r1, vec![1, 2, 0]);
-        assert_eq!(r2, vec![2, 0, 1]);
-        assert_eq!(r3, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn round_robin_without_registered_cursor_falls_back_to_fixed() {
-        // A RoundRobin model with no registered cursor (defensive) walks
-        // the fixed order rather than panicking.
-        let cursors = RoundRobinCursors::default();
-        let order = seat_order_for_request("opus", 3, SeatSelection::RoundRobin, &cursors);
-        assert_eq!(order, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn single_seat_order_is_trivial() {
-        let cursors = RoundRobinCursors::default();
-        assert_eq!(
-            seat_order_for_request("opus", 1, SeatSelection::RoundRobin, &cursors),
-            vec![0]
-        );
-        assert_eq!(
-            seat_order_for_request("opus", 0, SeatSelection::FillFirst, &cursors),
-            Vec::<usize>::new()
-        );
-    }
-
-    #[test]
-    fn stickyleastloaded_keyless_order_matches_fillfirst() {
-        // Keyless / single-seat StickyLeastLoaded resolves through this pure
-        // fn and walks the fixed fill-first order; the keyed sticky ordering
-        // lives in Router::sticky_seat_order.
-        let cursors = RoundRobinCursors::default();
-        let order = seat_order_for_request("m", 3, SeatSelection::StickyLeastLoaded, &cursors);
-        assert_eq!(order, vec![0, 1, 2]);
+    fn fill_first_order_walks_the_seats_as_built() {
+        for (seat_count, expected) in [(0, vec![]), (1, vec![0]), (3, vec![0, 1, 2])] {
+            assert_eq!(fill_first_order(seat_count), expected, "{seat_count} seats");
+        }
     }
 
     fn pin(member: &str) -> SeatPin {

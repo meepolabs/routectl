@@ -101,9 +101,8 @@ header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 [pools.anthropic]
 members            = ["anthropic-default", "anthropic-work"]
 accepts_new_logins = true
-# seat_selection   = "sticky-least-loaded"   # "fill-first" (default) /
-#                                            # "round-robin" /
-#                                            # "sticky-least-loaded"
+# seat_selection   = "fill-first"   # "sticky-least-loaded" (default) /
+#                                   # "fill-first"
 
 # OpenAI Responses API via ChatGPT subscription bearer JWT (Codex),
 # default seat. `routectl login codex` mints it and offers this shape.

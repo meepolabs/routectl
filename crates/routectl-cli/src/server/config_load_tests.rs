@@ -537,7 +537,7 @@ fn accepted_pool_config() -> String {
         "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
          [pools.anthropic]\n\
          members = [\"anthropic-default\", \"anthropic-work\"]\n\
-         seat_selection = \"round-robin\"\n\
+         seat_selection = \"fill-first\"\n\
          accepts_new_logins = true\n"
     )
 }
@@ -658,7 +658,7 @@ fn previous_version_config_with_retired_key() -> String {
          [providers.anthropic-managed]\n\
          kind = \"anthropic-api\"\n\
          api_key_ref = \"oauth://anthropic\"\n\
-         seat_selection = \"round-robin\"\n",
+         seat_selection = \"fill-first\"\n",
         CURRENT_CONFIG_VERSION - 1
     )
 }
