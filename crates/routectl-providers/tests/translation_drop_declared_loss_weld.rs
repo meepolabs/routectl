@@ -152,10 +152,10 @@ const LOG_MACROS: &[&str] = &["warn", "debug"];
 const CALLER_ATTRIBUTED_HELPERS: &[(&str, &str, &str)] = &[
     (
         "openai_compat/wire_lift/mod.rs",
-        "reject_or_drop_unrepresentable",
-        "formats the strict-reject-or-warn-and-drop log for four lift arms; each caller carries \
-         its own marker naming the class and the pinning test, and no single class fits a helper \
-         serving all four",
+        "drop_unrepresentable",
+        "formats the warn-and-drop log for four lift arms; each caller carries its own marker \
+         naming the class and the pinning test, and no single class fits a helper serving all \
+         four",
     ),
     (
         "openai_responses/messages.rs",
@@ -196,7 +196,7 @@ const CALLER_ATTRIBUTED_HELPERS: &[(&str, &str, &str)] = &[
 ///   symbol emits no counter beside its log, and a caller of it is itself
 ///   unmarked;
 /// - a request-side loss or fidelity risk this lane declares ONLY through its
-///   WARN (and a strict-mode rejection), with no counter yet. These are
+///   WARN, with no counter yet. These are
 ///   uncounted, not accepted: each entry is the record of that gap until the
 ///   arm gains a counter and a marker.
 const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
@@ -453,11 +453,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("openai_compat/request.rs", "merge_extras", 2),
     ("openai_compat/request.rs", "project_system", 2),
     ("openai_compat/request.rs", "select_client_extras", 2),
-    (
-        "openai_compat/wire_lift/mod.rs",
-        "reject_or_drop_unrepresentable",
-        1,
-    ),
+    ("openai_compat/wire_lift/mod.rs", "drop_unrepresentable", 1),
     (
         "openai_compat/wire_lift/response_format.rs",
         "translate_format",

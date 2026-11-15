@@ -52,7 +52,6 @@ fn openai_compat(req: &ChatRequest) {
         ReasoningDialect::OpenAi,
         HistoryReasoning::Auto,
         None,
-        false,
     );
 }
 

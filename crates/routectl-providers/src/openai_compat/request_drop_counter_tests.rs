@@ -33,7 +33,6 @@ fn wire_and_delta(
         ReasoningDialect::Passthrough,
         HistoryReasoning::Auto,
         payload_extras,
-        false,
     )
     .expect("lenient normalize must succeed");
     let after = read();
@@ -186,7 +185,6 @@ fn lenient_messages(req: &ChatRequest, name: &str) -> Vec<serde_json::Value> {
         ReasoningDialect::Passthrough,
         HistoryReasoning::Auto,
         None,
-        false,
     )
     .unwrap_or_else(|e| panic!("{name}: the transcript must forward, got {e}"));
     body["messages"].as_array().unwrap().clone()
@@ -265,28 +263,6 @@ fn tool_result_blocks_with_absent_or_non_string_id_reach_the_openai_compat_body(
         // Assert
         assert_eq!(messages[1], expected, "{name}");
     }
-}
-
-#[test]
-fn strict_mode_rejects_a_breakpoint_and_counts_nothing() {
-    // Arrange
-    let mut req = simple_req("m");
-    req.cache_control = Some(routectl_core::CacheControl::ephemeral_5m());
-    let before = compat_drop_count("cache_control_unsupported");
-
-    // Act
-    let result = normalize(
-        "test",
-        &req,
-        ReasoningDialect::Passthrough,
-        HistoryReasoning::Auto,
-        None,
-        true,
-    );
-
-    // Assert -- nothing was dropped, because nothing was sent.
-    assert!(matches!(result, Err(Error::Validation(..))), "{result:?}");
-    assert_eq!(compat_drop_count("cache_control_unsupported"), before);
 }
 
 // ---------------------------------------------------------------------------

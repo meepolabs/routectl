@@ -134,7 +134,6 @@ mod closed_table_presence {
             ReasoningDialect::OpenAi,
             HistoryReasoning::default(),
             None,
-            false,
         )
         .expect("the chat body assembles")
     }

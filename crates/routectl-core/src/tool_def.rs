@@ -21,8 +21,7 @@
 //!   built-in tools (`bash_*`, `code_execution_*`, `web_search_*`),
 //!   server-side tools, and future shapes pass through verbatim. The
 //!   Anthropic and Bedrock-Invoke egresses re-emit this Value as-is;
-//!   OpenAI-compat egress drops with a `tracing::warn!` (or rejects
-//!   under `strict_translation`).
+//!   OpenAI-compat egress drops with a `tracing::warn!`.
 //!
 //! Discrimination on the wire: the `type` field decides. Absent or
 //! `"custom"` -> `Custom`. Anything else -> `Other`. This avoids
@@ -50,8 +49,7 @@ pub enum ToolDef {
     /// built-in tools, server-side tools, future wire shapes).
     /// Preserved verbatim through Anthropic / Bedrock-Invoke egresses
     /// (except an OpenAI Responses hosted-MCP tool, which they withhold);
-    /// OpenAI-compat egresses drop with a warn (or reject under
-    /// `strict_translation`).
+    /// OpenAI-compat egresses drop with a warn.
     Other(Value),
 }
 

@@ -1705,7 +1705,7 @@
         },
         "strict_translation": {
           "default": false,
-          "description": "When true, lossy translation seams (e.g. cache_control on a\ncanonical -> OpenAI-compat egress) return a 400 instead of\nemitting a `tracing::warn!`. Default false (warn-and-drop)\npreserves dev ergonomics; flip to true for production CI.",
+          "description": "When true, a learned capability strip that would remove part of\na request refuses that target with a 400 instead of stripping and\ndispatching. Default false. Egress translation losses always warn,\ndrop and count, whatever this is set to.",
           "type": "boolean"
         }
       },

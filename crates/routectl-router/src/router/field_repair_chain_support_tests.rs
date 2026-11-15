@@ -93,7 +93,6 @@ impl ChainSeat {
                 ReasoningDialect::OpenAi,
                 HistoryReasoning::default(),
                 None,
-                false,
             ),
             #[cfg(feature = "openai-responses")]
             Egress::OpenAiResponses(auth_kind) => responses_body(auth_kind, req),

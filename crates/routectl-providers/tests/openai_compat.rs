@@ -955,14 +955,133 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
 }
 
 // ---------------------------------------------------------------------------
-// strict_translation: lossy seam policy
+// Lossy seams: warn, drop, count, forward
 // ---------------------------------------------------------------------------
 
+/// The sentinel payload of the document block the acceptance test sends.
+const DROPPED_DOCUMENT_DATA: &str = "RFJPUFBFRC1ET0NVTUVOVA==";
+/// The sentinel text of the representable sibling block.
+const KEPT_TEXT: &str = "kept-text-sentinel";
+
+fn document_block_drop_count() -> u64 {
+    routectl_providers::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == "openai-compat" && e.drop_class == "document_block_unrepresentable")
+        .map_or(0, |e| e.drop_count)
+}
+
+fn request_with_text_and_document() -> routectl_core::ChatRequest {
+    use routectl_core::{ChatRequest, KnownContentPart, content_part::ContentPart};
+    ChatRequest {
+        model: "gpt-4o".into(),
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(KnownContentPart::Text {
+                    text: KEPT_TEXT.into(),
+                    citations: None,
+                    cache_control: None,
+                    extras: serde_json::Map::new(),
+                }),
+                ContentPart::Known(KnownContentPart::Document {
+                    source: json!({
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": DROPPED_DOCUMENT_DATA
+                    }),
+                    title: None,
+                    citations: None,
+                    cache_control: None,
+                    extras: serde_json::Map::new(),
+                }),
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            extras: serde_json::Map::new(),
+        }]
+        .into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn an_unrepresentable_block_is_forwarded_without_it_warned_once_and_counted() {
+    // Arrange
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-drop-001",
+            "model": "gpt-4o",
+            "created": 1_700_000_000_i64,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+    let before = document_block_drop_count();
+
+    // Act
+    let (result, events) =
+        routectl_testkit::with_capture(provider.complete(request_with_text_and_document())).await;
+    let after = document_block_drop_count();
+
+    // Assert -- the request was served, not refused.
+    let resp = result.expect("a lossy seam must forward, never refuse");
+    assert_eq!(resp.id, "chatcmpl-drop-001");
+
+    // Assert -- the forwarded body lacks the document and keeps the text.
+    let received = server.received_requests().await.expect("recording on");
+    assert_eq!(
+        received.len(),
+        1,
+        "exactly one request reached the upstream"
+    );
+    let forwarded = String::from_utf8(received[0].body.clone()).expect("utf-8 body");
+    assert!(
+        forwarded.contains(KEPT_TEXT),
+        "the representable text block must reach the upstream: {forwarded}"
+    );
+    assert!(
+        !forwarded.contains(DROPPED_DOCUMENT_DATA) && !forwarded.contains("\"document\""),
+        "the document block must not reach the upstream: {forwarded}"
+    );
+
+    // Assert -- one WARN names the dropped shape.
+    let drop_warns: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.level == tracing::Level::WARN
+                && e.message == "openai-compat egress: dropping unrepresentable shape"
+        })
+        .collect();
+    assert_eq!(
+        drop_warns.len(),
+        1,
+        "one WARN per dropped block: {events:?}"
+    );
+    assert_eq!(
+        drop_warns[0].field("what"),
+        Some("document content block (no OpenAI equivalent)")
+    );
+
+    // Assert -- the drop counter moved once for the request.
+    assert_eq!(after - before, 1, "the drop must be counted once");
+}
+
 #[test]
-fn strict_translation_off_warns_and_allows_request() {
-    // Default mode: cache_control on a user text block is silently dropped
-    // (warn-only), and the request body still serializes. Pin that the
-    // request reaches the upstream wire shape without erroring.
+fn a_canonical_cache_control_is_dropped_and_the_request_is_allowed() {
+    // cache_control on a user text block is dropped, and the request body
+    // still serializes. Pin that the request reaches the upstream wire
+    // shape without erroring.
     use routectl_core::{
         ChatRequest, KnownContentPart, cache_control::CacheControl, content_part::ContentPart,
     };
@@ -995,59 +1114,10 @@ fn strict_translation_off_warns_and_allows_request() {
     };
     let body = provider
         .normalize_request(&req)
-        .expect("default warns, returns Ok");
+        .expect("a lossy seam drops the field and returns Ok");
     assert!(
         body.get("cache_control").is_none(),
         "wire body must not carry cache_control on the openai-compat seam"
-    );
-}
-
-#[test]
-fn strict_translation_on_rejects_canonical_only_fields() {
-    // Strict mode: same lossy seam returns an Error::Validation that
-    // names the offending fields. Wired through OpenAiCompatConfig from
-    // [server] strict_translation at provider build time.
-    use routectl_core::{ChatRequest, cache_control::CacheControl};
-    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        strict_translation: true,
-        ..OpenAiCompatConfig::new("openai-compat:strict", "http://localhost", "k")
-    });
-    let req = ChatRequest {
-        model: "gpt-4o".into(),
-        messages: vec![Message {
-            refusal: None,
-            role: Role::User,
-            content: MessageContent::Text("hi".into()),
-            reasoning: None,
-            reasoning_details: vec![],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-            extras: serde_json::Map::new(),
-        }]
-        .into(),
-        cache_control: Some(CacheControl::ephemeral_5m()),
-        anthropic_beta: vec!["context-1m-2025-08-07".into()],
-        ..Default::default()
-    };
-    let err = provider
-        .normalize_request(&req)
-        .expect_err("strict_translation must reject canonical-only fields");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("strict_translation"),
-        "expected strict_translation marker in error: {msg}"
-    );
-    assert!(
-        msg.contains("cache_control") && msg.contains("anthropic_beta"),
-        "expected both dropped fields named in error: {msg}"
-    );
-    // The strict-translation rejection is client-facing (HTTP 400), so it
-    // must name the offending feature -- never the internal egress/provider
-    // id, which would leak routing topology to a remote caller.
-    assert!(
-        !msg.contains("openai-compat:strict"),
-        "strict_translation error must not echo the provider id: {msg}"
     );
 }
 

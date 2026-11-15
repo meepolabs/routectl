@@ -536,7 +536,6 @@ mod openai_compat_sampling {
                 ReasoningDialect::OpenAi,
                 HistoryReasoning::default(),
                 None,
-                false,
             )?;
             if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
                 tap.deposit(serde_json::to_vec(&body).expect("serialize").into());

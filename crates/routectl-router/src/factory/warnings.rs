@@ -187,7 +187,7 @@ fn retry_on_deprecation_warnings(retry: &crate::config::RetryPolicy) -> Vec<Stri
 ///
 /// Covers Bedrock `api_shape = "invoke"` (no front-marker path; its egress
 /// lowers the TOP-LEVEL marker itself), `openai-compat` (the egress DROPS a
-/// per-block marker, and 400s under `strict_translation`), and the
+/// per-block marker), and the
 /// server-side-caching kinds `openai-responses` / `gemini`. Silent on
 /// `anthropic-api` and Bedrock Converse, where the knob is live.
 pub fn per_block_breakpoint_warnings(config: &crate::config::Config) -> Vec<String> {

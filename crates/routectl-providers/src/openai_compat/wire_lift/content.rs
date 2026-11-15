@@ -12,8 +12,7 @@
 //!     -> {"type":"image_url", "image_url":{"url":"..."}}
 //!
 //!   {"type":"document", ...}
-//!     -> warn + drop (no OpenAI chat-completions equivalent;
-//!        strict_translation rejects with 400)
+//!     -> warn + drop (no OpenAI chat-completions equivalent)
 //!
 //! Other block types (text, tool_use, tool_result, image_url,
 //! thinking, redacted_thinking, forward-compat Other) pass through
@@ -27,7 +26,7 @@ use serde_json::{Map, Value};
 use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, Result};
 
-use super::reject_or_drop_unrepresentable;
+use super::drop_unrepresentable;
 
 /// Per-request record of which content-block drop classes fired, so the
 /// process-wide counters are bumped once per REQUEST rather than once
@@ -42,9 +41,7 @@ struct ContentDropTally {
 impl ContentDropTally {
     /// Bump the `(openai-compat, class)` counters for whatever fired.
     /// Called exactly once per request from `lift`, which `lift_all`
-    /// itself runs exactly once. Only the lenient path reaches here --
-    /// strict mode returns `Err` from the drop arm, so nothing was lost
-    /// and nothing is counted.
+    /// itself runs exactly once.
     fn flush(&self) {
         if self.document {
             crate::translation_drop_metrics::record_translation_drop(
@@ -61,31 +58,23 @@ impl ContentDropTally {
     }
 }
 
-/// Flushes the drop tally on BOTH arms of the fallible body below.
-///
-/// The split exists only for that: a `?` inside `lift_tallied` would otherwise
-/// skip the flush, so a request that dropped content and THEN failed
-/// translation would never reach the numerator -- while `request::normalize`
-/// has already bumped this lane's denominator ahead of its first fallible
-/// step. The rate would then read low for exactly the requests that went
-/// worst. Mirrors `gemini::request::translate`/`build_body`.
-pub fn lift(id: &str, obj: &mut Map<String, Value>, req: &ChatRequest, strict: bool) -> Result<()> {
+/// Rewrite every message's content blocks, then bump the per-request drop
+/// counters once for whatever classes fired.
+pub fn lift(id: &str, obj: &mut Map<String, Value>, req: &ChatRequest) -> Result<()> {
     let mut tally = ContentDropTally::default();
-    let out = lift_tallied(id, obj, req, strict, &mut tally);
+    rewrite_messages(id, obj, req, &mut tally);
     tally.flush();
-    out
+    Ok(())
 }
 
-fn lift_tallied(
+fn rewrite_messages(
     id: &str,
     obj: &mut Map<String, Value>,
     req: &ChatRequest,
-    strict: bool,
     tally: &mut ContentDropTally,
-) -> Result<()> {
-    let messages = match obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        Some(m) => m,
-        None => return Ok(()),
+) {
+    let Some(messages) = obj.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
     };
     for (msg_idx, msg) in messages.iter_mut().enumerate() {
         // TRANSLATION-DROP: structural -- a non-object messages entry has no
@@ -104,7 +93,7 @@ fn lift_tallied(
         let Some(parts) = content_val.as_array_mut() else {
             continue;
         };
-        rewrite_parts(id, msg_idx, parts, strict, tally)?;
+        rewrite_parts(id, msg_idx, parts, tally);
         // Strip Anthropic-only per-block `cache_control` from every
         // surviving part. The block-level warn path in
         // `request::check_dropped_anthropic_fields` was informational
@@ -128,16 +117,9 @@ fn lift_tallied(
             }
         }
     }
-    Ok(())
 }
 
-fn rewrite_parts(
-    id: &str,
-    msg_idx: usize,
-    parts: &mut Vec<Value>,
-    strict: bool,
-    tally: &mut ContentDropTally,
-) -> Result<()> {
+fn rewrite_parts(id: &str, msg_idx: usize, parts: &mut Vec<Value>, tally: &mut ContentDropTally) {
     // Build a new vec; drop document blocks; rewrite image blocks.
     let original = std::mem::take(parts);
     for part in original {
@@ -157,12 +139,11 @@ fn rewrite_parts(
                 // TRANSLATION-DROP: lane=openai-compat class=image_source_unrepresentable test=unsupported_image_source_drops_and_warns
                 None => {
                     tally.image_source = true;
-                    reject_or_drop_unrepresentable(
+                    drop_unrepresentable(
                         id,
-                        strict,
                         &format!("message {msg_idx}"),
                         "image block with unsupported source shape (expected base64 or url)",
-                    )?;
+                    );
                 }
             },
             // Cross-dialect translation lane: an Anthropic-shape `document`
@@ -176,19 +157,17 @@ fn rewrite_parts(
             // TRANSLATION-DROP: lane=openai-compat class=document_block_unrepresentable test=document_block_drops_and_warns
             PartKind::Document => {
                 tally.document = true;
-                reject_or_drop_unrepresentable(
+                drop_unrepresentable(
                     id,
-                    strict,
                     &format!("message {msg_idx}"),
                     "document content block (no OpenAI equivalent)",
-                )?;
+                );
             }
             PartKind::Other => {
                 parts.push(part);
             }
         }
     }
-    Ok(())
 }
 
 enum PartKind {
@@ -212,8 +191,8 @@ fn part_kind(part: &Value) -> PartKind {
 }
 
 /// Translate a single Anthropic-shape image block to OpenAI-shape.
-/// Returns `None` if the source shape is unrecognized (caller decides
-/// strict-vs-warn).
+/// Returns `None` if the source shape is unrecognized (the caller drops
+/// it).
 ///
 /// Every `?` and the `_` arm below funnel into ONE caller-side outcome:
 /// `rewrite_parts`'s `None` arm, which is where the warn, the counter,
@@ -263,11 +242,11 @@ mod tests {
         }
     }
 
-    fn run(messages: Value, strict: bool) -> Result<Map<String, Value>> {
+    fn run(messages: Value) -> Result<Map<String, Value>> {
         let req = empty_req();
         let mut obj = Map::new();
         obj.insert("messages".into(), messages);
-        lift("test", &mut obj, &req, strict)?;
+        lift("test", &mut obj, &req)?;
         Ok(obj)
     }
 
@@ -290,7 +269,7 @@ mod tests {
         }]);
 
         // Act
-        let obj = run(messages, false).unwrap();
+        let obj = run(messages).unwrap();
 
         // Assert
         let parts = obj["messages"][0]["content"].as_array().unwrap();
@@ -317,7 +296,7 @@ mod tests {
         }]);
 
         // Act
-        let obj = run(messages, false).unwrap();
+        let obj = run(messages).unwrap();
 
         // Assert
         let parts = obj["messages"][0]["content"].as_array().unwrap();
@@ -337,7 +316,7 @@ mod tests {
         }]);
 
         // Act
-        let obj = run(messages, false).unwrap();
+        let obj = run(messages).unwrap();
 
         // Assert -- document dropped, text remains
         let parts = obj["messages"][0]["content"].as_array().unwrap();
@@ -360,7 +339,7 @@ mod tests {
     /// shape that actually rode to the upstream nested inside some other
     /// key's payload.
     fn emitted_wire(messages: Value) -> String {
-        let obj = run(messages, false).expect("lenient lift must succeed");
+        let obj = run(messages).expect("lenient lift must succeed");
         serde_json::to_string(&Value::Object(obj)).expect("wire body serializes")
     }
 
@@ -534,7 +513,7 @@ mod tests {
 
         // Act
         let before = drop_count("document_block_unrepresentable");
-        run(messages, false).unwrap();
+        run(messages).unwrap();
         let after = drop_count("document_block_unrepresentable");
 
         // Assert
@@ -546,64 +525,12 @@ mod tests {
     }
 
     #[test]
-    fn a_drop_before_a_translation_error_is_still_counted() {
-        // The drop happens, THEN strict mode rejects a later block in the same
-        // request. The counter must still move: `request::normalize` bumps this
-        // lane's denominator before its first fallible step, so a numerator
-        // that skipped failed requests would make the drop rate read LOW for
-        // exactly the requests that went worst. This is why `lift` flushes the
-        // tally outside its fallible body.
-        let messages = json!([{
-            "role": "user",
-            "content": [
-                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "QQ=="}}
-            ]
-        }]);
-
-        let before = drop_count("document_block_unrepresentable");
-        let res = run(messages, true);
-        let after = drop_count("document_block_unrepresentable");
-
-        assert!(res.is_err(), "strict mode must reject the document block");
-        assert_eq!(
-            after - before,
-            1,
-            "a drop on a request that then failed must still be counted"
-        );
-    }
-
-    #[test]
-    fn document_block_strict_returns_err() {
-        // Arrange
-        let messages = json!([{
-            "role": "user",
-            "content": [
-                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "AA=="}}
-            ]
-        }]);
-
-        // Act
-        let res = run(messages, true);
-
-        // Assert
-        assert!(res.is_err(), "strict mode must reject document blocks");
-        let err = res.unwrap_err();
-        assert_eq!(
-            err.refusal_reason(),
-            Some(routectl_core::RefusalReason::StrictTranslation)
-        );
-        let msg = format!("{err}");
-        assert!(msg.contains("strict_translation"));
-        assert!(msg.contains("document"));
-    }
-
-    #[test]
     fn string_content_is_no_op() {
         // Arrange -- legacy string content shape; lift must not touch it.
         let messages = json!([{"role": "user", "content": "plain string"}]);
 
         // Act
-        let obj = run(messages, false).unwrap();
+        let obj = run(messages).unwrap();
 
         // Assert
         assert_eq!(obj["messages"][0]["content"], "plain string");
@@ -621,7 +548,7 @@ mod tests {
         }]);
 
         // Act
-        let obj = run(messages, false).unwrap();
+        let obj = run(messages).unwrap();
 
         // Assert -- tool_use untouched (the tool_use lift handles it later)
         let parts = obj["messages"][0]["content"].as_array().unwrap();
@@ -636,7 +563,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(obj.get("messages").is_none());

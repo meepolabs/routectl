@@ -1434,7 +1434,7 @@ fn per_block_wire_support_is_limited_to_anthropic_and_converse() {
     assert!(
         !ProviderEntry::openai_compat("https://example.invalid/v1", "literal:k")
             .supports_per_block_breakpoints(),
-        "the openai-compat egress DROPS a per-block marker (and 400s under strict_translation)",
+        "the openai-compat egress DROPS a per-block marker",
     );
 
     #[cfg(feature = "gemini")]

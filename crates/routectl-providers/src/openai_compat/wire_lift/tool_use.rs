@@ -31,12 +31,7 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, Error, RefusalReason, Result};
 
-pub fn lift(
-    id: &str,
-    obj: &mut Map<String, Value>,
-    _req: &ChatRequest,
-    _strict: bool,
-) -> Result<()> {
+pub fn lift(id: &str, obj: &mut Map<String, Value>, _req: &ChatRequest) -> Result<()> {
     let messages = match obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(m) => m,
         None => return Ok(()),
@@ -186,7 +181,7 @@ mod tests {
         let req = empty_req();
         let mut obj = Map::new();
         obj.insert("messages".into(), messages);
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
         obj
     }
 
@@ -340,7 +335,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(obj.get("messages").is_none());

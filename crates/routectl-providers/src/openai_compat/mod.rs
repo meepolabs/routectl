@@ -107,16 +107,6 @@ pub struct OpenAiCompatConfig {
     pub history_reasoning: HistoryReasoning,
     /// Override the User-Agent on outbound requests. `None` keeps reqwest's default.
     pub user_agent: Option<String>,
-    /// When `true`, requests carrying canonical-only fields (`cache_control`,
-    /// `anthropic_beta`, non-function `ToolDef::Other`, `ContentPart::Other`,
-    /// `SystemContent::Blocks` with cache_control, etc.) are rejected with
-    /// `Error::Validation`. When `false`, each is warned about and then
-    /// handled by kind: fields the wire cannot carry (cache_control markers,
-    /// `anthropic_beta`, Anthropic builtin tools) are dropped, while an opaque
-    /// `ContentPart::Other` block is forwarded verbatim for the upstream to
-    /// interpret. Set from `[server] strict_translation` at provider build
-    /// time.
-    pub strict_translation: bool,
     /// Bedrock mantle authentication. `Some` selects the mantle lane: the
     /// request body is SigV4/bearer-signed under the `bedrock-mantle`
     /// scope, the first-party `Authorization: Bearer <token>` insert is
@@ -158,7 +148,6 @@ impl OpenAiCompatConfig {
             reasoning_dialect: ReasoningDialect::default(),
             history_reasoning: HistoryReasoning::default(),
             user_agent: None,
-            strict_translation: false,
             #[cfg(feature = "bedrock")]
             mantle: None,
         }
@@ -387,7 +376,6 @@ impl Provider for OpenAiCompatProvider {
             dialect,
             history,
             self.cfg.payload_extras.as_ref(),
-            self.cfg.strict_translation,
         )?;
         #[cfg(feature = "bedrock")]
         self.refuse_unforwardable_mantle_media(&body)?;

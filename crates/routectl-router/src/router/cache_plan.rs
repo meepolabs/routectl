@@ -280,8 +280,8 @@ pub(super) fn apply_auto_cache_placement(
     } else if !gates.front_supported {
         // An explicit opt-in on a kind whose egress cannot carry a
         // per-block marker is INERT, not honored: emitting here would ship
-        // a marker the wire drops (openai-compat WARNs and 400s under
-        // strict_translation) while recording a false `auto_emitted`.
+        // a marker the wire drops (openai-compat WARNs and drops it) while
+        // recording a false `auto_emitted`.
         CacheInjection::SkippedNoCapability
     } else if plan.volatile_high_veto {
         CacheInjection::SkippedVolatileHigh

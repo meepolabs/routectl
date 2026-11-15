@@ -12,11 +12,9 @@ use futures::stream::{BoxStream, StreamExt};
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::wire_check::{IngressDialect, IngressWire};
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, ContentPart, Error, Message,
-    MessageContent, Provider, RefusalReason, RequestObservation, RequestProvenance, Result, Role,
-    TokenCount, ToolDef,
+    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, RefusalReason,
+    RequestObservation, RequestProvenance, Result, TokenCount, ToolDef,
 };
-use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use serde_json::{Value, json};
 
 use crate::config::{AliasValue, Config, CredentialSource, ProviderEntry};
@@ -328,56 +326,6 @@ async fn two_egress_refusals_with_different_reasons_on_one_lane_are_two_keys() {
     }
 }
 
-/// An openai-compat egress with `strict_translation` on. Its base URL is
-/// never dialed: the strict check refuses before any request is built.
-fn strict_openai_compat() -> OpenAiCompatProvider {
-    OpenAiCompatProvider::new(OpenAiCompatConfig {
-        strict_translation: true,
-        ..OpenAiCompatConfig::new(PROVIDER, "https://openai-compat.invalid/v1", "k")
-    })
-}
-
-/// A chat-ingress request carrying a content block the openai-compat wire
-/// has no slot for.
-fn chat_request_with_an_unmodeled_block() -> ChatRequest {
-    let part: ContentPart = serde_json::from_value(json!({"type": "future_widget_block"}))
-        .expect("an unknown block type deserializes");
-    let mut req = request_from(IngressDialect::Chat);
-    req.messages = vec![Message {
-        role: Role::User,
-        content: MessageContent::Parts(vec![part]),
-        tool_call_id: None,
-        refusal: None,
-        reasoning: None,
-        reasoning_details: vec![],
-        name: None,
-        tool_calls: None,
-        extras: serde_json::Map::new(),
-    }]
-    .into();
-    req
-}
-
-#[tokio::test]
-async fn a_provider_raised_strict_validation_counts_once_as_strict_translation() {
-    for surface in SURFACES {
-        let router = router_over(
-            ProviderEntry::openai_compat("https://openai-compat.invalid/v1", "literal:k"),
-            Arc::new(strict_openai_compat()),
-            true,
-        );
-
-        let err = dispatch_err(&router, surface, chat_request_with_an_unmodeled_block()).await;
-
-        assert!(matches!(err, Error::Validation(..)), "{surface:?}: {err:?}");
-        assert_eq!(
-            refusals(&router),
-            [("chat->openai-compat", "strict-translation", 1)],
-            "{surface:?}"
-        );
-    }
-}
-
 #[tokio::test]
 async fn an_egress_refusal_without_an_ingress_body_has_no_lane_and_is_not_counted() {
     let router = failing_router(egress_local_refusal);
@@ -459,9 +407,9 @@ async fn a_tool_pairing_refusal_on_gemini_carries_its_reason_and_counts_once() {
         let upstream = Arc::new(AnsweringProvider::default());
         let router = router_over(ProviderEntry::gemini("literal:k"), upstream.clone(), false);
         let mut req = anthropic_request();
-        req.messages = vec![Message {
-            role: Role::Tool,
-            content: MessageContent::Text("r".into()),
+        req.messages = vec![routectl_core::Message {
+            role: routectl_core::Role::Tool,
+            content: routectl_core::MessageContent::Text("r".into()),
             tool_call_id: Some("call_missing".into()),
             refusal: None,
             reasoning: None,

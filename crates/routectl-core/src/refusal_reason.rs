@@ -96,12 +96,9 @@ pub enum RefusalReason {
     /// mandates one (`validate_post_strip`).
     /// Scope: egress. Class: `BadRequest`.
     Unrepresentable,
-    /// The operator enabled the strict loss check and translation to the
-    /// target would lose part of the request: the capability strip
-    /// (`StripInterceptor`), the openai-compat canonical-field check
-    /// (`check_dropped_anthropic_fields`) and the openai-compat lift
-    /// (`reject_or_drop_unrepresentable`). Scope: egress. Class:
-    /// `BadRequest`.
+    /// The operator enabled the strict loss check and the capability strip
+    /// (`StripInterceptor`) would remove part of the request. Scope:
+    /// egress. Class: `BadRequest`.
     StrictTranslation,
     /// The target forwards the caller's bearer credential and the request
     /// carries none, so there is nothing to authenticate with. Raised by the

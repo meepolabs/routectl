@@ -105,9 +105,8 @@ pub async fn build_router_from_config(
 
     let mut router = Router::new(config.clone());
 
-    let opts = routectl_router::BuildOptions::new()
-        .with_strict_translation(config.server.strict_translation)
-        .with_normalize_tools(config.cache.normalize_tools);
+    let opts =
+        routectl_router::BuildOptions::new().with_normalize_tools(config.cache.normalize_tools);
 
     // v0.6.0: walk `[models]` once, building one provider per unique
     // non-Bedrock provider entry (cached) and one provider per Bedrock

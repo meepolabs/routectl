@@ -15,7 +15,6 @@ fn forced_body_and_delta(req: &ChatRequest, config_extras: Option<&Value>) -> (V
         ReasoningDialect::Passthrough,
         HistoryReasoning::Auto,
         config_extras,
-        false,
     )
     .expect("lenient normalize must succeed");
     force_stream_include_usage("test", &mut body, req, config_extras);

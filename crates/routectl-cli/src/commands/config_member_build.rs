@@ -149,7 +149,6 @@ impl SecretStore for OfflineCheckStore {
 /// report for the same config.
 pub async fn member_build_errors(config: &Config, secrets: Arc<dyn SecretStore>) -> Vec<String> {
     let opts = BuildOptions::new()
-        .with_strict_translation(config.server.strict_translation)
         .with_normalize_tools(config.cache.normalize_tools)
         .with_mint_installation_id(false);
     routectl_router::pool_member_refusals(config, secrets, opts)

@@ -25,7 +25,7 @@ fn run(messages: Value) -> Map<String, Value> {
     let req = empty_req();
     let mut obj = Map::new();
     obj.insert("messages".into(), messages);
-    lift("test", &mut obj, &req, false).unwrap();
+    lift("test", &mut obj, &req).unwrap();
     obj
 }
 
@@ -35,7 +35,7 @@ fn run_result(messages: Value) -> routectl_core::Result<Map<String, Value>> {
     let req = empty_req();
     let mut obj = Map::new();
     obj.insert("messages".into(), messages);
-    lift("test", &mut obj, &req, false)?;
+    lift("test", &mut obj, &req)?;
     Ok(obj)
 }
 
@@ -768,19 +768,10 @@ fn no_messages_is_no_op() {
     let mut obj = Map::new();
 
     // Act
-    lift("test", &mut obj, &req, false).unwrap();
+    lift("test", &mut obj, &req).unwrap();
 
     // Assert
     assert!(obj.get("messages").is_none());
-}
-
-/// Strict variant of `run_result` for the strict-mode error paths.
-fn run_result_strict(messages: Value) -> routectl_core::Result<Map<String, Value>> {
-    let req = empty_req();
-    let mut obj = Map::new();
-    obj.insert("messages".into(), messages);
-    lift("test", &mut obj, &req, true)?;
-    Ok(obj)
 }
 
 /// cache_control on an inner tool_result block (kept in array
@@ -865,33 +856,6 @@ fn inner_image_url_missing_url_dropped_lenient() {
     assert_eq!(content[0]["type"], "image_url");
 }
 
-/// Strict mode rejects the unrepresentable inner image.
-#[test]
-fn inner_image_unknown_source_strict_errors() {
-    // Arrange
-    let messages = json!([
-        {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "t1", "content": [
-                {"type": "image", "source": {"type": "weird_unknown_source"}},
-                {"type": "image", "source": {
-                    "type": "base64", "media_type": "image/png", "data": "ZZ=="
-                }}
-            ]}
-        ]}
-    ]);
-
-    // Act
-    let res = run_result_strict(messages);
-
-    // Assert
-    assert!(
-        res.is_err(),
-        "strict mode must reject unknown inner image source"
-    );
-    let msg = format!("{}", res.unwrap_err());
-    assert!(msg.contains("strict_translation"));
-}
-
 /// A nested document block inside a tool_result is dropped
 /// in lenient mode -- it must not reach the wire.
 #[test]
@@ -918,33 +882,6 @@ fn inner_document_block_dropped_lenient() {
     let content = obj["messages"][1]["content"].as_array().unwrap();
     assert_eq!(content.len(), 1, "document block must be dropped");
     assert_eq!(content[0]["type"], "image_url");
-}
-
-/// Strict mode rejects a nested document block.
-#[test]
-fn inner_document_block_strict_errors() {
-    // Arrange
-    let messages = json!([
-        {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "t1", "content": [
-                {"type": "document", "source": {
-                    "type": "base64", "media_type": "application/pdf", "data": "AA=="
-                }},
-                {"type": "image", "source": {
-                    "type": "base64", "media_type": "image/png", "data": "ZZ=="
-                }}
-            ]}
-        ]}
-    ]);
-
-    // Act
-    let res = run_result_strict(messages);
-
-    // Assert
-    assert!(res.is_err(), "strict mode must reject inner document block");
-    let msg = format!("{}", res.unwrap_err());
-    assert!(msg.contains("strict_translation"));
-    assert!(msg.contains("document"));
 }
 
 /// is_error with string content prefixes "Error: ".
@@ -1088,7 +1025,7 @@ fn emitted_wire(messages: Value) -> (String, Vec<routectl_testkit::CapturedEvent
     let mut obj = Map::new();
     obj.insert("messages".into(), messages);
     let events = routectl_testkit::capture_events(|| {
-        lift("test", &mut obj, &req, false).expect("lenient lift must succeed");
+        lift("test", &mut obj, &req).expect("lenient lift must succeed");
     });
     let wire = serde_json::to_string(&Value::Object(obj)).expect("wire body serializes");
     (wire, events)

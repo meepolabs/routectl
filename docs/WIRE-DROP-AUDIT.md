@@ -130,8 +130,8 @@ rg -n 'continue' \
   crates/routectl-providers/src/gemini/ \
   crates/routectl-providers/src/openai_responses/
 
-# the shared reject-or-drop helper's call sites (openai_compat only)
-rg -n 'reject_or_drop_unrepresentable\(' \
+# the shared drop helper's call sites (openai_compat only)
+rg -n 'drop_unrepresentable\(' \
   crates/routectl-providers/src/openai_compat/wire_lift/
 
 # whether a drop site's WARN is verified via real tracing capture

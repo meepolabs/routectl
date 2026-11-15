@@ -34,12 +34,7 @@ use tracing::warn;
 
 use routectl_core::{ChatRequest, Result};
 
-pub fn lift(
-    id: &str,
-    obj: &mut Map<String, Value>,
-    req: &ChatRequest,
-    _strict: bool,
-) -> Result<()> {
+pub fn lift(id: &str, obj: &mut Map<String, Value>, req: &ChatRequest) -> Result<()> {
     // If response_format is already set, caller wins.
     if obj.contains_key("response_format") {
         // Still strip a stray output_config to keep the wire clean.
@@ -206,7 +201,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         let rf = &obj["response_format"];
@@ -239,7 +234,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(
@@ -266,7 +261,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(
@@ -293,7 +288,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(
@@ -320,7 +315,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert -- the supplied name is carried through verbatim.
         assert_eq!(
@@ -339,7 +334,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert_eq!(obj["response_format"], json!({"type": "json_object"}));
@@ -360,7 +355,7 @@ mod tests {
         );
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert -- the original is untouched
         assert_eq!(obj["response_format"]["marker"], "caller-wins");
@@ -373,7 +368,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(obj.get("response_format").is_none());
@@ -389,7 +384,7 @@ mod tests {
         let mut obj = Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(obj.get("response_format").is_none());
@@ -414,7 +409,7 @@ mod tests {
         let mut obj = Map::new();
         obj.insert("model".into(), json!("marker_model_survives"));
         let events = routectl_testkit::capture_events(|| {
-            lift("test", &mut obj, &req, false).expect("lenient lift must succeed");
+            lift("test", &mut obj, &req).expect("lenient lift must succeed");
         });
         let wire = serde_json::to_string(&Value::Object(obj)).expect("wire body serializes");
         (wire, events)
@@ -570,7 +565,7 @@ mod tests {
         );
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert!(

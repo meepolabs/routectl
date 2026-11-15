@@ -11,14 +11,9 @@ use serde_json::Value;
 use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, CustomTool, Result, ToolDef};
 
-use super::reject_or_drop_unrepresentable;
+use super::drop_unrepresentable;
 
-pub fn lift(
-    id: &str,
-    obj: &mut serde_json::Map<String, Value>,
-    req: &ChatRequest,
-    strict: bool,
-) -> Result<()> {
+pub fn lift(id: &str, obj: &mut serde_json::Map<String, Value>, req: &ChatRequest) -> Result<()> {
     let tools = match req.tools.as_ref() {
         Some(t) if !t.is_empty() => t,
         _ => {
@@ -64,12 +59,11 @@ pub fn lift(
                         .and_then(|n| n.as_str())
                         .unwrap_or("");
                     dropped_non_custom = true;
-                    reject_or_drop_unrepresentable(
+                    drop_unrepresentable(
                         id,
-                        strict,
                         &format!("tool `{tool_name}`"),
                         &format!("Anthropic builtin / non-custom tool `{builtin}`"),
-                    )?;
+                    );
                     declare_tool_removed(req, index);
                     // Do not push -- tool is dropped.
                 }
@@ -85,7 +79,7 @@ pub fn lift(
 
     // One counted drop event per REQUEST, at this lift's single exit: a
     // request declaring three builtins is one loss an operator acts on,
-    // not three. Strict mode never arrives -- the arm above returned Err.
+    // not three.
     if dropped_non_custom {
         crate::translation_drop_metrics::record_translation_drop(
             super::super::LANE,
@@ -150,13 +144,10 @@ mod tests {
         }
     }
 
-    fn run(
-        tools: Option<Vec<ToolDef>>,
-        strict: bool,
-    ) -> (serde_json::Map<String, Value>, Result<()>) {
+    fn run(tools: Option<Vec<ToolDef>>) -> (serde_json::Map<String, Value>, Result<()>) {
         let req = make_req(tools);
         let mut obj = serde_json::Map::new();
-        let result = lift("test", &mut obj, &req, strict);
+        let result = lift("test", &mut obj, &req);
         (obj, result)
     }
 
@@ -175,7 +166,7 @@ mod tests {
         });
 
         // Act
-        let (obj, res) = run(Some(vec![tool]), false);
+        let (obj, res) = run(Some(vec![tool]));
         res.unwrap();
 
         // Assert
@@ -209,7 +200,7 @@ mod tests {
         });
 
         // Act
-        let (obj, res) = run(Some(vec![tool]), false);
+        let (obj, res) = run(Some(vec![tool]));
         res.unwrap();
 
         // Assert
@@ -230,7 +221,7 @@ mod tests {
         let tool = ToolDef::Other(v.clone());
 
         // Act
-        let (obj, res) = run(Some(vec![tool]), false);
+        let (obj, res) = run(Some(vec![tool]));
         res.unwrap();
 
         // Assert -- byte-identical passthrough
@@ -238,12 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn other_with_anthropic_builtin_warns_and_drops_non_strict() {
+    fn other_with_anthropic_builtin_warns_and_drops() {
         // Arrange -- Anthropic builtin tool, not representable on OpenAI wire.
         let tool = ToolDef::Other(json!({"type": "web_search_20250305", "name": "web_search"}));
 
         // Act
-        let (obj, res) = run(Some(vec![tool]), false);
+        let (obj, res) = run(Some(vec![tool]));
         res.unwrap();
 
         // Assert -- tool is dropped, key removed
@@ -265,7 +256,7 @@ mod tests {
         let req = make_req(Some(tools));
         let mut obj = serde_json::Map::new();
         let events = routectl_testkit::capture_events(|| {
-            lift("test", &mut obj, &req, false).expect("lenient lift must succeed");
+            lift("test", &mut obj, &req).expect("lenient lift must succeed");
         });
         let wire = serde_json::to_string(&Value::Object(obj)).expect("wire body serializes");
         (wire, events)
@@ -367,7 +358,7 @@ mod tests {
 
         // Act
         let before = drop_count("non_custom_tool_unrepresentable");
-        let (_obj, res) = run(Some(tools), false);
+        let (_obj, res) = run(Some(tools));
         res.unwrap();
         let after = drop_count("non_custom_tool_unrepresentable");
 
@@ -380,26 +371,9 @@ mod tests {
     }
 
     #[test]
-    fn other_with_anthropic_builtin_strict_returns_err() {
-        // Arrange
-        let tool = ToolDef::Other(json!({"type": "web_search_20250305", "name": "web_search"}));
-
-        // Act
-        let (_obj, res) = run(Some(vec![tool]), true);
-
-        // Assert
-        assert!(res.is_err(), "strict mode must reject builtin tools");
-        let msg = format!("{}", res.unwrap_err());
-        assert!(
-            msg.contains("strict_translation"),
-            "error must mention strict_translation"
-        );
-    }
-
-    #[test]
     fn empty_tools_removes_key() {
         // Arrange -- explicitly empty tools vec
-        let (obj, res) = run(Some(vec![]), false);
+        let (obj, res) = run(Some(vec![]));
         res.unwrap();
 
         // Assert
@@ -409,7 +383,7 @@ mod tests {
     #[test]
     fn no_tools_removes_key() {
         // Arrange
-        let (obj, res) = run(None, false);
+        let (obj, res) = run(None);
         res.unwrap();
 
         // Assert
@@ -432,7 +406,7 @@ mod tests {
         });
 
         // Act
-        let (obj, res) = run(Some(vec![tool]), false);
+        let (obj, res) = run(Some(vec![tool]));
         res.unwrap();
 
         // Assert -- function object has no cache_control field

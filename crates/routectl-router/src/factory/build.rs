@@ -49,15 +49,9 @@ pub async fn build_provider(
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BuildOptions {
-    /// When `true`, providers reject requests carrying canonical-only
-    /// fields they cannot represent on the wire (e.g. an OpenAI-compat
-    /// egress receiving an Anthropic `cache_control` block). Default
-    /// `false` -- warn-and-drop. Set from `[server] strict_translation`.
-    pub strict_translation: bool,
     /// Anthropic-cloak tool-array canonicalization switch, sourced from
     /// `[cache] normalize_tools`. Threaded into each anthropic provider's
-    /// `CloakConfig` at build time (the same global-to-provider channel
-    /// `strict_translation` uses). Default `true`.
+    /// `CloakConfig` at build time. Default `true`.
     pub normalize_tools: bool,
     /// Whether a ChatGPT-OAuth openai-responses build may create (or
     /// replace a corrupt) `<config-dir>/installation_id`. `false` adopts an
@@ -69,7 +63,6 @@ pub struct BuildOptions {
 impl Default for BuildOptions {
     fn default() -> Self {
         Self {
-            strict_translation: false,
             normalize_tools: true,
             mint_installation_id: true,
         }
@@ -80,12 +73,6 @@ impl BuildOptions {
     /// Build options with every field at its default.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Set the strict-translation posture.
-    pub const fn with_strict_translation(mut self, strict: bool) -> Self {
-        self.strict_translation = strict;
-        self
     }
 
     /// Set the anthropic-cloak tool-array canonicalization switch.
@@ -257,7 +244,6 @@ async fn build_provider_inner(
                     reasoning_dialect: Default::default(),
                     history_reasoning: Default::default(),
                     user_agent: user_agent.clone(),
-                    strict_translation: opts.strict_translation,
                     mantle: Some(MantleAuth {
                         region: m.region.clone(),
                         creds: resolved,
@@ -288,7 +274,6 @@ async fn build_provider_inner(
                 reasoning_dialect: Default::default(),
                 history_reasoning: Default::default(),
                 user_agent: user_agent.clone(),
-                strict_translation: opts.strict_translation,
                 #[cfg(feature = "bedrock")]
                 mantle: None,
             };

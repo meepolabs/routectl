@@ -41,7 +41,7 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, Result};
 
-use super::reject_or_drop_unrepresentable;
+use super::drop_unrepresentable;
 
 /// Per-request record of which inner-block drop classes fired, so the
 /// process-wide counters bump once per REQUEST rather than once per
@@ -56,8 +56,7 @@ struct ToolResultDropTally {
 impl ToolResultDropTally {
     /// Bump the `(openai-compat, class)` counters for whatever fired.
     /// Called exactly once per request from `lift`, which `lift_all` runs
-    /// exactly once. Only the lenient path reaches here -- strict mode
-    /// returns `Err` from the drop arm, so nothing lost is nothing counted.
+    /// exactly once.
     fn flush(&self) {
         if self.document {
             crate::translation_drop_metrics::record_translation_drop(
@@ -74,38 +73,27 @@ impl ToolResultDropTally {
     }
 }
 
-/// Flushes the drop tally on BOTH arms of the fallible body below.
-///
-/// The split exists only for that: a `?` inside `lift_tallied` would otherwise
-/// skip the flush, so a request that dropped content and THEN failed
-/// translation would never reach the numerator -- while `request::normalize`
-/// has already bumped this lane's denominator ahead of its first fallible
-/// step. The rate would then read low for exactly the requests that went
-/// worst. Mirrors `gemini::request::translate`/`build_body`.
-pub fn lift(id: &str, obj: &mut Map<String, Value>, req: &ChatRequest, strict: bool) -> Result<()> {
+/// Split every user message carrying tool results into `role:"tool"`
+/// messages, then bump the per-request drop counters once for whatever
+/// classes fired.
+pub fn lift(id: &str, obj: &mut Map<String, Value>, _req: &ChatRequest) -> Result<()> {
     let mut tally = ToolResultDropTally::default();
-    let out = lift_tallied(id, obj, req, strict, &mut tally);
+    rewrite_messages(id, obj, &mut tally);
     tally.flush();
-    out
+    Ok(())
 }
 
-fn lift_tallied(
-    id: &str,
-    obj: &mut Map<String, Value>,
-    _req: &ChatRequest,
-    strict: bool,
-    tally: &mut ToolResultDropTally,
-) -> Result<()> {
+fn rewrite_messages(id: &str, obj: &mut Map<String, Value>, tally: &mut ToolResultDropTally) {
     let messages = match obj.remove("messages") {
         Some(Value::Array(arr)) => arr,
         // TRANSLATION-DROP: structural -- a non-array messages value is put back
         // verbatim; this lift only reshapes an array of messages.
         Some(other) => {
             obj.insert("messages".into(), other);
-            return Ok(());
+            return;
         }
         // TRANSLATION-DROP: structural -- no messages key means nothing to reshape.
-        None => return Ok(()),
+        None => return,
     };
 
     let mut rewritten: Vec<Value> = Vec::with_capacity(messages.len());
@@ -115,16 +103,14 @@ fn lift_tallied(
         let run_continues = messages.peek().is_some_and(opens_with_tool_result);
         let mut ctx = RewriteCtx {
             id,
-            strict,
             run_continues,
             hoisted_images: &mut hoisted_images,
             tally,
         };
-        rewrite_message(msg, &mut ctx, &mut rewritten)?;
+        rewrite_message(msg, &mut ctx, &mut rewritten);
     }
     debug_assert!(hoisted_images.is_empty());
     obj.insert("messages".into(), Value::Array(rewritten));
-    Ok(())
 }
 
 /// Per-message state for `rewrite_message`. `hoisted_images` outlives one
@@ -132,7 +118,6 @@ fn lift_tallied(
 /// one run, so its images wait until `run_continues` is false.
 struct RewriteCtx<'a> {
     id: &'a str,
-    strict: bool,
     run_continues: bool,
     hoisted_images: &'a mut Vec<Value>,
     tally: &'a mut ToolResultDropTally,
@@ -150,7 +135,7 @@ fn opens_with_tool_result(msg: &Value) -> bool {
             .is_some_and(part_is_tool_result)
 }
 
-fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) -> Result<()> {
+fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) {
     let role_is_user = msg
         .as_object()
         .and_then(|o| o.get("role"))
@@ -158,7 +143,7 @@ fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) -
         == Some("user");
     if !role_is_user {
         out.push(msg);
-        return Ok(());
+        return;
     }
     // Only act when content is an array carrying at least one tool_result.
     // Check on a BORROW first so messages with no tool_result pay no clone.
@@ -169,7 +154,7 @@ fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) -
         .is_some_and(|parts| parts.iter().any(part_is_tool_result));
     if !has_tool_result {
         out.push(msg);
-        return Ok(());
+        return;
     }
     // A tool_result is present: take ownership of the parts now.
     // TRANSLATION-DROP: structural -- the else arm cannot be reached (the borrow
@@ -178,7 +163,7 @@ fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) -
         parts.clone()
     } else {
         out.push(msg);
-        return Ok(());
+        return;
     };
 
     // Split the user message into a sequence of (user-text-chunk, tool-msg)
@@ -188,7 +173,7 @@ fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) -
     for part in parts {
         if part_is_tool_result(&part) {
             flush_user_chunk(&msg, &mut pending_user_chunk, out);
-            if let Some(lifted) = build_tool_message(ctx.id, &part, ctx.strict, ctx.tally)? {
+            if let Some(lifted) = build_tool_message(ctx.id, &part, ctx.tally) {
                 out.push(lifted.message);
                 ctx.hoisted_images.extend(lifted.images);
             }
@@ -201,7 +186,6 @@ fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) -
         pending_user_chunk.append(ctx.hoisted_images);
     }
     flush_user_chunk(&msg, &mut pending_user_chunk, out);
-    Ok(())
 }
 
 /// The keys a split user chunk copies from the user message it came from.
@@ -259,15 +243,11 @@ struct LiftedToolResult {
 fn build_tool_message(
     id: &str,
     part: &Value,
-    strict: bool,
     tally: &mut ToolResultDropTally,
-) -> Result<Option<LiftedToolResult>> {
+) -> Option<LiftedToolResult> {
     // TRANSLATION-DROP: structural -- `part_is_tool_result` already proved this is
     // an object, so this arm is unreachable defensive coding, not a drop.
-    let obj = match part.as_object() {
-        Some(o) => o,
-        None => return Ok(None),
-    };
+    let obj = part.as_object()?;
     // The id rides verbatim, absent or not a string included: nothing on
     // this egress pairs a tool message with its call, so only the upstream
     // can object to it.
@@ -280,7 +260,7 @@ fn build_tool_message(
         .get("content")
         .cloned()
         .unwrap_or(Value::String(String::new()));
-    let (content, images) = translate_tool_result_content(id, content, strict, tally)?;
+    let (content, images) = translate_tool_result_content(id, content, tally);
     let content = if is_error {
         mark_error_content(content)
     } else {
@@ -292,10 +272,10 @@ fn build_tool_message(
         tool_msg.insert("tool_call_id".into(), tool_use_id);
     }
     tool_msg.insert("content".into(), content);
-    Ok(Some(LiftedToolResult {
+    Some(LiftedToolResult {
         message: Value::Object(tool_msg),
         images,
-    }))
+    })
 }
 
 /// Prefix a tool_result payload with an `Error:` marker so the upstream
@@ -328,8 +308,8 @@ fn mark_error_content(content: Value) -> Value {
 /// - Array -> each block lifted first: Anthropic image shapes become
 ///   image_url (mirrors the `content` lift, which doesn't recurse into
 ///   tool_result) and every image_url block is hoisted out; unrepresentable
-///   blocks (document, unknown image source) are dropped (lenient) or
-///   rejected (strict) via `reject_or_drop_unrepresentable`. The blocks
+///   blocks (document, unknown image source) are dropped with a warn via
+///   `drop_unrepresentable`. The blocks
 ///   kept on the tool message then decide its content, whether or not an
 ///   image was hoisted:
 ///   - none kept -> `""`
@@ -346,16 +326,15 @@ fn mark_error_content(content: Value) -> Value {
 fn translate_tool_result_content(
     id: &str,
     content: Value,
-    strict: bool,
     tally: &mut ToolResultDropTally,
-) -> Result<(Value, Vec<Value>)> {
+) -> (Value, Vec<Value>) {
     match content {
-        Value::String(_) => Ok((content, Vec::new())),
+        Value::String(_) => (content, Vec::new()),
         Value::Array(arr) => {
             let mut kept: Vec<Value> = Vec::with_capacity(arr.len());
             let mut images: Vec<Value> = Vec::new();
             for block in arr {
-                let Some(out) = lift_inner_block(id, block, strict, tally)? else {
+                let Some(out) = lift_inner_block(id, block, tally) else {
                     continue;
                 };
                 // TRANSLATION-DROP: structural -- a lifted image is relocated, not
@@ -368,13 +347,13 @@ fn translate_tool_result_content(
                 }
             }
             if !kept.iter().all(is_text_block) {
-                return Ok((Value::Array(kept), images));
+                return (Value::Array(kept), images);
             }
-            Ok((join_text_blocks(&kept), images))
+            (join_text_blocks(&kept), images)
         }
         // Object or scalar: encode as string for OpenAI's wire (which
         // expects string content on tool messages outside of multimodal).
-        other => Ok((Value::String(other.to_string()), Vec::new())),
+        other => (Value::String(other.to_string()), Vec::new()),
     }
 }
 
@@ -402,23 +381,17 @@ fn is_image_url_block(part: &Value) -> bool {
 }
 
 /// Lift one inner tool_result content block to OpenAI wire shape.
-/// Returns `Ok(None)` when the block is dropped (lenient mode) and
-/// `Err` when strict mode rejects an unrepresentable shape. Recognized
+/// Returns `None` when an unrepresentable block is dropped. Recognized
 /// base64 / url image blocks lift to `image_url`; all other recognized
 /// blocks pass through with Anthropic-only `cache_control` stripped.
-fn lift_inner_block(
-    id: &str,
-    block: Value,
-    strict: bool,
-    tally: &mut ToolResultDropTally,
-) -> Result<Option<Value>> {
+fn lift_inner_block(id: &str, block: Value, tally: &mut ToolResultDropTally) -> Option<Value> {
     // TRANSLATION-DROP: structural -- a non-object or untagged inner block rides
     // through verbatim; nothing is lost.
     let Some(obj) = block.as_object() else {
-        return Ok(Some(block));
+        return Some(block);
     };
     let Some(t) = obj.get("type").and_then(|v| v.as_str()) else {
-        return Ok(Some(block));
+        return Some(block);
     };
     // Cross-dialect translation lane: an Anthropic-shape `document` block
     // nested inside a tool result. Drop rather than forward -- OpenAI tool
@@ -430,25 +403,24 @@ fn lift_inner_block(
     // TRANSLATION-DROP: lane=openai-compat class=tool_result_document_unrepresentable test=inner_document_block_drops_and_warns
     if t == "document" {
         tally.document = true;
-        reject_or_drop_unrepresentable(
+        drop_unrepresentable(
             id,
-            strict,
             "tool_result block",
             "document content block (no OpenAI equivalent)",
-        )?;
-        return Ok(None);
+        );
+        return None;
     }
     // TRANSLATION-DROP: structural -- a non-image recognized block rides through
     // with only the Anthropic-only cache_control marker stripped, which the
     // top-level content lift's own strip site owns.
     if t != "image" {
-        return Ok(Some(strip_cache_control(block)));
+        return Some(strip_cache_control(block));
     }
     // TRANSLATION-DROP: structural -- an image block with no `source` object at
     // all is not an image this egress can be said to have translated; it rides
     // through for the upstream to reject, matching pre-existing behavior.
     let Some(source) = obj.get("source").and_then(|v| v.as_object()) else {
-        return Ok(Some(strip_cache_control(block)));
+        return Some(strip_cache_control(block));
     };
     let url = match source.get("type").and_then(|v| v.as_str()) {
         Some("base64") => {
@@ -470,13 +442,12 @@ fn lift_inner_block(
                 u.to_string()
             } else {
                 tally.image_source = true;
-                reject_or_drop_unrepresentable(
+                drop_unrepresentable(
                     id,
-                    strict,
                     "tool_result block",
                     "image block with url source missing `url`",
-                )?;
-                return Ok(None);
+                );
+                return None;
             }
         }
         // Cross-dialect translation lane: a nested image block whose `source`
@@ -489,19 +460,18 @@ fn lift_inner_block(
         // TRANSLATION-DROP: lane=openai-compat class=tool_result_image_source_unrepresentable test=inner_image_unknown_source_drops_and_warns
         _ => {
             tally.image_source = true;
-            reject_or_drop_unrepresentable(
+            drop_unrepresentable(
                 id,
-                strict,
                 "tool_result block",
                 "image block with unsupported source shape (expected base64 or url)",
-            )?;
-            return Ok(None);
+            );
+            return None;
         }
     };
-    Ok(Some(serde_json::json!({
+    Some(serde_json::json!({
         "type": "image_url",
         "image_url": {"url": url}
-    })))
+    }))
 }
 
 /// Strip the Anthropic-only `cache_control` field from a content block,

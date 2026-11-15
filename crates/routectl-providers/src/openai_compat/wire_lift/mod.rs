@@ -46,43 +46,26 @@ mod tools;
 use serde_json::Map;
 use tracing::warn;
 
-use routectl_core::{ChatRequest, Error, RefusalReason, Result};
+use routectl_core::{ChatRequest, Result};
 
-/// Reject (strict) or warn-and-drop (lenient) a canonical-only shape
-/// that has no OpenAI-compat wire representation.
+/// Warn about a canonical-only shape that has no OpenAI-compat wire
+/// representation, ahead of the caller dropping it.
 ///
 /// `context` names the lift site (e.g. "message 2 image block"); `what`
-/// names the unrepresentable shape (e.g. "document content block"). In
-/// strict mode the two compose into a `strict_translation` validation
-/// error; in lenient mode they feed a structured warn before the caller
-/// drops the offending shape.
-pub fn reject_or_drop_unrepresentable(
-    id: &str,
-    strict: bool,
-    context: &str,
-    what: &str,
-) -> Result<()> {
-    if strict {
-        return Err(Error::Validation(
-            format!(
-                "strict_translation: {context}: {what} \
-             cannot be represented on the OpenAI-compat wire"
-            ),
-            RefusalReason::StrictTranslation,
-        ));
-    }
+/// names the unrepresentable shape (e.g. "document content block"). The
+/// caller owns the drop itself and the per-request counter.
+pub fn drop_unrepresentable(id: &str, context: &str, what: &str) {
     warn!(
         provider = id,
         context = context,
         what = what,
         "openai-compat egress: dropping unrepresentable shape"
     );
-    Ok(())
 }
 
 /// Uniform lift-function pointer type. Every sub-module's `lift` must
 /// match this shape so it can be stored in `LIFT_STEPS`.
-type LiftFn = fn(&str, &mut Map<String, serde_json::Value>, &ChatRequest, bool) -> Result<()>;
+type LiftFn = fn(&str, &mut Map<String, serde_json::Value>, &ChatRequest) -> Result<()>;
 
 /// Single source of truth for dispatch order. `lift_all` iterates this
 /// slice; the order test introspects the same slice so a reorder in
@@ -120,10 +103,9 @@ pub fn lift_all(
     id: &str,
     obj: &mut Map<String, serde_json::Value>,
     req: &ChatRequest,
-    strict: bool,
 ) -> Result<()> {
     for (_name, lift_fn) in LIFT_STEPS {
-        lift_fn(id, obj, req, strict)?;
+        lift_fn(id, obj, req)?;
     }
     Ok(())
 }
@@ -197,7 +179,7 @@ mod order_test {
         .unwrap();
 
         // Act
-        let result = lift_all("test", &mut obj, &req, false);
+        let result = lift_all("test", &mut obj, &req);
 
         // Assert
         assert!(result.is_ok(), "lift_all failed on minimal req: {result:?}");
@@ -269,7 +251,7 @@ mod order_test {
             .clone();
 
         // Act
-        lift_all("test", &mut obj, &req, false).unwrap();
+        lift_all("test", &mut obj, &req).unwrap();
 
         // Assert: messages array is present and has two entries.
         let msgs = obj["messages"].as_array().expect("messages must be array");
@@ -327,7 +309,7 @@ mod order_test {
         .unwrap();
 
         // Act
-        lift_all("test", &mut obj, &req, false).unwrap();
+        lift_all("test", &mut obj, &req).unwrap();
 
         // Assert -- tools step populated obj["tools"] before tool_choice::lift
         // ran, so the forcing choice was NOT dropped by the forcing-choice guard.

@@ -395,7 +395,7 @@ schema version it was generated against. The schema does NOT pin the
 [server]
 host = "127.0.0.1"
 port = 8787
-strict_translation = false      # set true for production CI
+strict_translation = false      # true: 400 instead of a learned capability strip
 max_body_bytes = 33554432       # 32 MiB default; larger bodies are rejected with HTTP 413
 
 [server.auth]
@@ -3738,8 +3738,7 @@ and INERT: no marker is placed, and the recorded decision is
 `auto_skipped:no_capability` rather than `auto_emitted`, so the decision
 ledger never claims a marker that never shipped. This is deliberate
 fail-closed behavior -- on `openai-compat` an emitted per-block marker
-would be dropped with a WARN, and under `[server] strict_translation`
-would fail the whole request with a 400.
+would be dropped with a WARN.
 
 ```toml
 # Opt a Bedrock Converse provider in to front-marker emission.

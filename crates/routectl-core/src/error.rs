@@ -157,9 +157,8 @@ pub enum Error {
     /// Request rejected because a body failed a static invariant.
     /// Produced both by ingress adapters (e.g. cache_control
     /// 4-breakpoint cap, TTL ordering) and by egress translation in
-    /// `routectl-providers` (e.g. an openai-compat wire-lift that hits
-    /// an untranslatable canonical-only shape under
-    /// `strict_translation`). HTTP handlers surface this as 400 Bad
+    /// `routectl-providers` (e.g. a tool_use block the openai-compat
+    /// lift cannot carry). HTTP handlers surface this as 400 Bad
     /// Request. The [`RefusalReason`] is operator vocabulary and never
     /// reaches the client text.
     #[error("validation: {0}")]

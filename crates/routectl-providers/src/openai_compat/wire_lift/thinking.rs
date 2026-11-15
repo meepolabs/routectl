@@ -43,12 +43,7 @@ use routectl_core::{ChatRequest, Result};
 
 use crate::skipped_format::ANTHROPIC_FORMAT;
 
-pub fn lift(
-    _id: &str,
-    obj: &mut Map<String, Value>,
-    _req: &ChatRequest,
-    _strict: bool,
-) -> Result<()> {
+pub fn lift(_id: &str, obj: &mut Map<String, Value>, _req: &ChatRequest) -> Result<()> {
     let Some(messages) = obj.get_mut("messages").and_then(|v| v.as_array_mut()) else {
         return Ok(());
     };
@@ -205,7 +200,7 @@ mod tests {
             .as_object()
             .unwrap()
             .clone();
-        lift("test", &mut obj, &empty_req(), false).unwrap();
+        lift("test", &mut obj, &empty_req()).unwrap();
         obj
     }
 

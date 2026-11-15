@@ -24,14 +24,9 @@ use tracing::warn;
 use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, Result};
 
-use super::reject_or_drop_unrepresentable;
+use super::drop_unrepresentable;
 
-pub fn lift(
-    id: &str,
-    obj: &mut serde_json::Map<String, Value>,
-    req: &ChatRequest,
-    strict: bool,
-) -> Result<()> {
+pub fn lift(id: &str, obj: &mut serde_json::Map<String, Value>, req: &ChatRequest) -> Result<()> {
     let tc = if let Some(v) = req.tool_choice.as_ref() {
         v
     } else {
@@ -55,8 +50,8 @@ pub fn lift(
     // OpenAI hosts 400 on `tool_choice:"required"` (or a named function)
     // when `tools` is empty or absent. `tools` is read from the WIRE
     // (`obj["tools"]`), which is the post-tools-lift state because the
-    // tools step runs before tool_choice in LIFT_STEPS. In lenient mode
-    // we drop the forcing tool_choice and warn; strict rejects.
+    // tools step runs before tool_choice in LIFT_STEPS. We drop the
+    // forcing tool_choice and warn.
     //
     // Cross-dialect translation lane: a canonical forcing selector whose
     // tools were themselves dropped upstream in this same lift pass (the
@@ -70,12 +65,11 @@ pub fn lift(
     let mut dropped_forcing = false;
     if wire_tools_empty(obj) && tool_choice_is_forcing(obj.get("tool_choice")) {
         dropped_forcing = true;
-        reject_or_drop_unrepresentable(
+        drop_unrepresentable(
             id,
-            strict,
             "tool_choice",
             "forcing tool_choice with no tools to force",
-        )?;
+        );
         obj.remove("tool_choice");
         declare_tool_choice_removed(req);
     }
@@ -83,8 +77,7 @@ pub fn lift(
     // Bump the per-request counters at the lift's single exit rather than
     // at each arm: one request loses at most one tool_choice, but keeping
     // both classes' increments here makes the once-per-request property
-    // structural rather than incidental. Strict mode never arrives (the
-    // drop arms returned Err), so nothing lost is nothing counted.
+    // structural rather than incidental.
     if dropped_shape {
         crate::translation_drop_metrics::record_translation_drop(
             super::super::LANE,
@@ -270,7 +263,7 @@ mod tests {
     fn run(tc: Option<Value>) -> Option<Value> {
         let req = make_req(tc);
         let mut obj = serde_json::Map::new();
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
         obj.get("tool_choice").cloned()
     }
 
@@ -284,17 +277,8 @@ mod tests {
             "tools".into(),
             json!([{"type": "function", "function": {"name": "f"}}]),
         );
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
         obj.get("tool_choice").cloned()
-    }
-
-    /// Strict variant that seeds empty wire tools and surfaces the Result.
-    fn run_strict_empty_tools(tc: Option<Value>) -> Result<Option<Value>> {
-        let req = make_req(tc);
-        let mut obj = serde_json::Map::new();
-        obj.insert("tools".into(), json!([]));
-        lift("test", &mut obj, &req, true)?;
-        Ok(obj.get("tool_choice").cloned())
     }
 
     #[test]
@@ -318,7 +302,7 @@ mod tests {
             "tools".into(),
             json!([{"type": "function", "function": {"name": "f"}}]),
         );
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         assert_eq!(
             obj.get("tool_choice"),
@@ -344,7 +328,7 @@ mod tests {
         );
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert -- passthrough verbatim and the guard did not fire.
         assert_eq!(obj.get("tool_choice"), Some(&tc));
@@ -364,7 +348,7 @@ mod tests {
         );
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
         let result = obj.get("tool_choice").cloned().unwrap();
 
         // Assert
@@ -391,7 +375,7 @@ mod tests {
         );
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert_eq!(obj.get("tool_choice"), Some(&json!("required")));
@@ -436,7 +420,7 @@ mod tests {
             json!([{"type": "function", "function": {"name": "surviving_sibling_tool"}}]),
         );
         let events = routectl_testkit::capture_events(|| {
-            lift("test", &mut obj, &req, false).expect("lenient lift must succeed");
+            lift("test", &mut obj, &req).expect("lenient lift must succeed");
         });
         let wire = serde_json::to_string(&Value::Object(obj)).expect("wire body serializes");
         (wire, events)
@@ -561,7 +545,7 @@ mod tests {
         // Act
         let before = drop_count("forcing_tool_choice_without_tools");
         let events = routectl_testkit::capture_events(|| {
-            lift("test", &mut obj, &req, false).expect("lenient lift must succeed");
+            lift("test", &mut obj, &req).expect("lenient lift must succeed");
         });
         let after = drop_count("forcing_tool_choice_without_tools");
         let wire = serde_json::to_string(&Value::Object(obj)).expect("wire body serializes");
@@ -632,28 +616,13 @@ mod tests {
         obj.insert("tools".into(), json!([]));
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert -- tool_choice removed (cannot force with no tools).
         assert!(
             obj.get("tool_choice").is_none(),
             "forcing tool_choice with empty tools must be dropped"
         );
-    }
-
-    /// The same forcing-without-tools case errors under strict.
-    #[test]
-    fn forcing_tool_choice_without_tools_strict_errors() {
-        // Act
-        let res = run_strict_empty_tools(Some(json!({"type": "any"})));
-
-        // Assert
-        assert!(
-            res.is_err(),
-            "strict mode must reject forcing tc without tools"
-        );
-        let msg = format!("{}", res.unwrap_err());
-        assert!(msg.contains("strict_translation"));
     }
 
     /// "auto" is not forcing -- it survives even with no tools.
@@ -664,7 +633,7 @@ mod tests {
         let mut obj = serde_json::Map::new();
 
         // Act
-        lift("test", &mut obj, &req, false).unwrap();
+        lift("test", &mut obj, &req).unwrap();
 
         // Assert
         assert_eq!(obj.get("tool_choice"), Some(&json!("auto")));

@@ -144,7 +144,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -171,7 +170,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -201,7 +199,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -228,7 +225,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -255,7 +251,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -276,7 +271,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -308,7 +302,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -338,7 +331,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -375,7 +367,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -406,7 +397,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -440,7 +430,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -478,7 +467,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -514,7 +502,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -551,7 +538,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -606,7 +592,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Preserve,
             None,
-            false,
         )
         .unwrap();
         body["messages"]

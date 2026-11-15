@@ -954,10 +954,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub auth: Option<ServerAuth>,
 
-    /// When true, lossy translation seams (e.g. cache_control on a
-    /// canonical -> OpenAI-compat egress) return a 400 instead of
-    /// emitting a `tracing::warn!`. Default false (warn-and-drop)
-    /// preserves dev ergonomics; flip to true for production CI.
+    /// When true, a learned capability strip that would remove part of
+    /// a request refuses that target with a 400 instead of stripping and
+    /// dispatching. Default false. Egress translation losses always warn,
+    /// drop and count, whatever this is set to.
     #[serde(default)]
     pub strict_translation: bool,
 
@@ -2105,8 +2105,7 @@ impl ProviderEntry {
     ///   egress lowers the TOP-LEVEL marker to per-block itself, so an
     ///   additionally-placed front marker is redundant at best.
     /// - `openai-compat` -- the egress DROPS a per-block marker with a
-    ///   WARN, and under `[server] strict_translation` rejects the whole
-    ///   request with a 400.
+    ///   WARN.
     /// - `openai-responses` / `gemini` -- no per-block breakpoint surface
     ///   (both cache server-side automatically).
     ///

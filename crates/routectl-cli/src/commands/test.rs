@@ -31,14 +31,8 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     }
 
     // Same BuildOptions path as `serve` so a `routectl test` run
-    // exercises exactly the production translation contract. Without
-    // this, `[server] strict_translation = true` was honored by
-    // serve but silently ignored by test, masking real ingress
-    // misconfigurations from operators using the test command for
-    // pre-production validation.
-    let opts = BuildOptions::new()
-        .with_strict_translation(config.server.strict_translation)
-        .with_normalize_tools(config.cache.normalize_tools);
+    // exercises exactly the production translation contract.
+    let opts = BuildOptions::new().with_normalize_tools(config.cache.normalize_tools);
 
     // v0.6.0: build per-model resolved providers from the `[models]`
     // table once. Failures only become fatal when the requested

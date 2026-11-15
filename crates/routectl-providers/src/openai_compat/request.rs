@@ -22,9 +22,7 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap};
-use routectl_core::{
-    ChatRequest, Error, Message, RefusalReason, Result, ToolDef, sanitize_for_log,
-};
+use routectl_core::{ChatRequest, Error, Message, Result, ToolDef, sanitize_for_log};
 
 use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
@@ -77,7 +75,6 @@ pub fn normalize(
     dialect: ReasoningDialect,
     history_reasoning: HistoryReasoning,
     payload_extras: Option<&Value>,
-    strict_translation: bool,
 ) -> Result<Value> {
     let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The one point every openai-compat egress request passes exactly
@@ -102,11 +99,10 @@ pub fn normalize(
 
     // Seams the OpenAI-compat wire can't represent: Anthropic-only
     // fields dropped from the body, plus unmodeled content blocks that
-    // are forwarded verbatim. Default mode warns + continues; strict
-    // mode 400s on either, having dropped nothing. The lenient tally is
-    // flushed here, ahead of every later fallible step, so a request that
-    // dropped a field and then failed translation still counts.
-    check_dropped_anthropic_fields(id, req, strict_translation)?.flush();
+    // are forwarded verbatim. The tally is flushed here, ahead of every
+    // later fallible step, so a request that dropped a field and then
+    // failed translation still counts.
+    check_dropped_anthropic_fields(id, req).flush();
 
     let mut body = serde_json::to_value(req)
         .map_err(|e| Error::Internal(format!("provider `{id}`: serialize request: {e}")))?;
@@ -171,7 +167,7 @@ pub fn normalize(
     // `reasoning_content` (deepseek/vllm) or keep as typed details
     // (openrouter). Running history_reasoning before wire_lift would
     // make both modes blind to anything cc echoed as content blocks.
-    super::wire_lift::lift_all(id, obj, req, strict_translation)?;
+    super::wire_lift::lift_all(id, obj, req)?;
 
     match history_reasoning {
         HistoryReasoning::Auto => {
@@ -373,8 +369,7 @@ fn apply_system_projection(
 /// Per-request record of the canonical fields this lane's wire has no slot
 /// for. A FLAG per class rather than a count: the `(lane, class)` counters are
 /// per REQUEST, so four cache breakpoints dropped from four surfaces of one
-/// request are one drop event. Strict mode rejects instead of dropping, so its
-/// tally is discarded with the error and nothing is counted.
+/// request are one drop event.
 #[must_use = "a canonical-field drop counts nothing until the tally is flushed"]
 #[derive(Debug, Default)]
 struct CanonicalFieldDropTally {
@@ -703,25 +698,12 @@ fn declare_member(tap: Option<&WireTap>, site: EditSite, key: &str, kind: EditKi
 ///   tools, or content blocks; `anthropic_beta`) that are dropped
 ///   from the outbound body.
 /// - `ContentPart::Other` blocks routectl does not model. These are
-///   NOT dropped: default mode forwards them verbatim for the
-///   upstream to accept or reject.
+///   NOT dropped: they are forwarded verbatim for the upstream to
+///   accept or reject.
 ///
-/// Default mode logs and returns the request's drop tally for the caller to
-/// flush once; strict mode collects both kinds of finding and returns an
-/// `Error::Validation` (HTTP 400) so the operator sees them before the
-/// upstream does.
-fn check_dropped_anthropic_fields(
-    id: &str,
-    req: &ChatRequest,
-    strict: bool,
-) -> Result<CanonicalFieldDropTally> {
-    let mut findings: Vec<String> = Vec::new();
+/// Returns the request's drop tally for the caller to flush once.
+fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest) -> CanonicalFieldDropTally {
     let mut tally = CanonicalFieldDropTally::default();
-    let mut record = |msg: String| {
-        if strict {
-            findings.push(msg);
-        }
-    };
 
     // The four cache-breakpoint arms share one class: no surface of this
     // wire carries a breakpoint, so each is the same loss, counted once per
@@ -733,7 +715,6 @@ fn check_dropped_anthropic_fields(
             provider = id,
             "openai-compat egress: top-level cache_control dropped (prompt caching not supported)",
         );
-        record("top-level cache_control".into());
     }
     // TRANSLATION-DROP: lane=openai-compat class=anthropic_beta_unsupported test=anthropic_beta_flags_are_absent_from_the_openai_compat_wire_and_counted
     if !req.anthropic_beta.is_empty() {
@@ -743,7 +724,6 @@ fn check_dropped_anthropic_fields(
             beta_flags = ?req.anthropic_beta,
             "openai-compat egress: anthropic_beta flags dropped (Anthropic-only)",
         );
-        record(format!("anthropic_beta {:?}", req.anthropic_beta));
     }
     if let Some(routectl_core::SystemContent::Blocks(blocks)) = &req.system {
         let any_cc = blocks.iter().any(|b| b.cache_control.is_some());
@@ -754,7 +734,6 @@ fn check_dropped_anthropic_fields(
                 provider = id,
                 "openai-compat egress: per-block cache_control on system dropped",
             );
-            record("per-block cache_control on system".into());
         }
     }
     if let Some(tools) = &req.tools {
@@ -783,7 +762,6 @@ fn check_dropped_anthropic_fields(
                     tool = %sanitize_for_log(&c.name),
                     "openai-compat egress: tool cache_control dropped (Anthropic-only)",
                 );
-                record(format!("tool `{}` cache_control", c.name));
             }
         }
     }
@@ -798,7 +776,6 @@ fn check_dropped_anthropic_fields(
                             block_type = %sanitize_for_log(type_tag),
                             "openai-compat egress: forward-compat content block is unmodeled",
                         );
-                        record(format!("forward-compat block `{type_tag}` on message {i}"));
                     }
                     routectl_core::ContentPart::Known(k) => {
                         // TRANSLATION-DROP: lane=openai-compat class=cache_control_unsupported test=a_message_part_cache_control_is_absent_from_the_openai_compat_wire_and_counted
@@ -810,28 +787,13 @@ fn check_dropped_anthropic_fields(
                                 block_type = k.type_tag(),
                                 "openai-compat egress: per-block cache_control dropped",
                             );
-                            record(format!(
-                                "per-block cache_control on message {i} ({})",
-                                k.type_tag()
-                            ));
                         }
                     }
                 }
             }
         }
     }
-
-    if strict && !findings.is_empty() {
-        return Err(Error::Validation(
-            format!(
-                "strict_translation: {} canonical-only field(s) cannot be carried by the openai-compat egress: {}",
-                findings.len(),
-                findings.join("; ")
-            ),
-            RefusalReason::StrictTranslation,
-        ));
-    }
-    Ok(tally)
+    tally
 }
 
 /// True when the canonical request carries assistant reasoning that
@@ -914,7 +876,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         // temperature preserved for ids outside the modern chat shape
@@ -941,7 +902,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(
@@ -960,7 +920,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(body.get("temperature").is_none());
@@ -981,7 +940,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(
@@ -1005,7 +963,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert_eq!(body["max_completion_tokens"], 512, "got: {body}");
@@ -1023,7 +980,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert_eq!(body["max_completion_tokens"], 512, "got: {body}");
@@ -1045,7 +1001,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert_eq!(body["max_tokens"], 512);
@@ -1068,7 +1023,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert_eq!(body["reasoning_effort"], "high");
@@ -1093,7 +1047,6 @@ mod tests {
             ReasoningDialect::OpenRouter,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         let reasoning = body
@@ -1134,7 +1087,6 @@ mod tests {
             ReasoningDialect::OpenRouter,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -1166,7 +1118,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(
@@ -1186,7 +1137,6 @@ mod tests {
             ReasoningDialect::OpenRouter,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(
@@ -1204,7 +1154,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(body.get("temperature").is_none());
@@ -1233,7 +1182,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         let msgs = body["messages"].as_array().unwrap();
@@ -1272,7 +1220,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Preserve,
             None,
-            false,
         )
         .unwrap();
         let assistant = body["messages"]
@@ -1317,7 +1264,6 @@ mod tests {
             ReasoningDialect::OpenRouter, // default = passthrough/no-op
             HistoryReasoning::Strip,
             None,
-            false,
         )
         .unwrap();
         let assistant = body["messages"]
@@ -1355,7 +1301,6 @@ mod tests {
             ReasoningDialect::OpenRouter,
             HistoryReasoning::Preserve,
             None,
-            false,
         )
         .unwrap();
         let assistant = body["messages"]
@@ -1383,7 +1328,6 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
@@ -1399,7 +1343,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert_eq!(body["custom_key"], "custom_val");
@@ -1422,7 +1365,6 @@ mod tests {
             ReasoningDialect::OpenRouter,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         // The reasoning remainder is dropped, not smuggled onto the wire.
@@ -1442,7 +1384,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(body.get("reasoning").is_none());
@@ -1482,7 +1423,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         // Canonical fields preserved from the request, NOT overridden.
@@ -1532,7 +1472,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             Some(&defaults),
-            false,
         )
         .unwrap();
         // Canonical fields preserved from the request, NOT overridden.
@@ -1562,7 +1501,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(
@@ -1589,7 +1527,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             Some(&json!({"system": "INJECTED via default_extras"})),
-            false,
         )
         .unwrap();
         assert!(
@@ -1616,7 +1553,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             Some(&defaults),
-            false,
         )
         .unwrap();
         assert_eq!(body["key"], "from_request");
@@ -1638,7 +1574,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(
@@ -1681,7 +1616,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(body.get("system").is_none());
@@ -1703,7 +1637,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         assert!(body.get("system").is_none());
@@ -1741,7 +1674,6 @@ mod tests {
                 ReasoningDialect::Passthrough,
                 HistoryReasoning::Auto,
                 None,
-                false,
             )
             .unwrap();
 
@@ -1790,7 +1722,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -1878,7 +1809,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         let messages = body["messages"].as_array().unwrap();
@@ -1908,7 +1838,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         let messages = body["messages"].as_array().unwrap();
@@ -1947,7 +1876,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
         let messages = body["messages"].as_array().unwrap();
@@ -1999,7 +1927,6 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .expect("lenient normalize must succeed")
     }
@@ -2086,9 +2013,8 @@ mod tests {
         assert_eq!(after, before, "nothing was stripped, so nothing is counted");
     }
 
-    /// A request carrying one Anthropic-shape document block: the content
-    /// lift drops it (creating a row on this lane) and strict mode rejects
-    /// it, so one fixture drives both of `normalize`'s arms.
+    /// A request carrying one Anthropic-shape document block, which the
+    /// content lift drops (creating a row on this lane).
     fn req_with_dropped_document() -> ChatRequest {
         let mut req = simple_req("m");
         push_msg(
@@ -2120,51 +2046,23 @@ mod tests {
         req
     }
 
-    /// `normalize` bumps this lane's request-volume denominator on BOTH the
-    /// Ok and the Err arm. Without the Err arm, strict-rejected requests
-    /// vanish from the denominator and every drop rate on the lane reads
-    /// high. Each arm must count exactly once; the at-most-one-call-site half
-    /// is welded by the census test.
+    /// `normalize` bumps this lane's request-volume denominator exactly once
+    /// for a request that drops content; the at-most-one-call-site half is
+    /// welded by the census test.
     #[test]
-    fn normalize_counts_the_request_on_both_arms() {
+    fn normalize_counts_a_request_that_drops_content_once() {
         // Arrange
         let req = req_with_dropped_document();
 
-        // Act + Assert -- the lenient arm returns Ok and is counted.
+        // Act
         let before = lane_seen_count();
-        normalize(
-            "test",
-            &req,
-            ReasoningDialect::Passthrough,
-            HistoryReasoning::Auto,
-            None,
-            false,
-        )
-        .expect("lenient normalize must succeed");
-        assert_eq!(
-            lane_seen_count() - before,
-            1,
-            "the Ok arm must count the request in the lane denominator once"
-        );
+        lenient_normalize(&req);
 
-        // Act + Assert -- the strict arm returns Err and is still counted.
-        let before = lane_seen_count();
-        let res = normalize(
-            "test",
-            &req,
-            ReasoningDialect::Passthrough,
-            HistoryReasoning::Auto,
-            None,
-            true,
-        );
-        assert!(
-            res.is_err(),
-            "strict mode must reject the unrepresentable document block"
-        );
+        // Assert
         assert_eq!(
             lane_seen_count() - before,
             1,
-            "the Err arm must count the request in the lane denominator once too"
+            "the request must count in the lane denominator once"
         );
     }
 
@@ -2250,35 +2148,6 @@ mod tests {
             })],
             "the unknown block must reach the wire with its type and extras intact"
         );
-    }
-
-    #[test]
-    fn strict_mode_rejects_an_unknown_content_block() {
-        // Arrange
-        let req = req_with_unknown_block();
-
-        // Act
-        let res = normalize(
-            "test",
-            &req,
-            ReasoningDialect::Passthrough,
-            HistoryReasoning::Auto,
-            None,
-            true,
-        );
-
-        // Assert
-        assert_eq!(
-            res.as_ref().err().and_then(Error::refusal_reason),
-            Some(routectl_core::RefusalReason::StrictTranslation)
-        );
-        match res {
-            Err(Error::Validation(msg, _)) => assert!(
-                msg.contains("forward-compat block `future_widget_block` on message 1"),
-                "the rejection must name the unknown block, got: {msg}"
-            ),
-            other => panic!("strict mode must reject the unknown block, got {other:?}"),
-        }
     }
 
     include!("request_system_tests.rs");

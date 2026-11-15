@@ -44,7 +44,7 @@ version = 5
 [server]
 host = "127.0.0.1"
 port = 8787
-# strict_translation = true     # production CI: 400 on lossy seams.
+# strict_translation = true     # 400 instead of a learned capability strip.
 # unsafe_public via CLI flag    # bind non-loopback only with --unsafe-public.
 
 # Listener auth -- enable when binding non-loopback. Tokens are

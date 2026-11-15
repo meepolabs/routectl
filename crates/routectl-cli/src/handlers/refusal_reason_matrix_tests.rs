@@ -23,6 +23,7 @@ use std::sync::Arc;
 use axum::body::{Bytes, to_bytes};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use routectl_core::StaticToken;
+use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
 use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth as bedrock_auth,
@@ -58,11 +59,12 @@ enum Ingress {
 #[derive(Clone, Copy)]
 enum Target {
     /// A provider entry built through the production factory, aimed at the
-    /// mock upstream; `strict` sets `[server] strict_translation`.
-    Built {
-        entry: fn(&str) -> ProviderEntry,
-        strict: bool,
-    },
+    /// mock upstream.
+    Built(fn(&str) -> ProviderEntry),
+    /// An anthropic-api entry built like `Built`, under `[server]
+    /// strict_translation`, whose lane carries an acting learned negative
+    /// for the advisor tool, so a request declaring it would be stripped.
+    StrictStripSeat,
     /// An own-OAuth anthropic-api seat on api.anthropic.com, the lane the
     /// identity cloak runs on. Installed directly: an OAuth secret ref
     /// needs a stored login the factory would resolve.
@@ -79,10 +81,7 @@ struct Row {
 }
 
 const fn built(entry: fn(&str) -> ProviderEntry) -> Target {
-    Target::Built {
-        entry,
-        strict: false,
-    }
+    Target::Built(entry)
 }
 
 fn anthropic_api(base: &str) -> ProviderEntry {
@@ -245,18 +244,12 @@ fn rows() -> Vec<Row> {
         Row {
             reason: "strict-translation",
             ingress: Ingress::Anthropic,
-            target: Target::Built {
-                entry: openai_compat,
-                strict: true,
-            },
+            target: Target::StrictStripSeat,
             body: json_body(&json!({
-                "model": ALIAS, "max_tokens": 16,
-                "messages": [{"role": "user", "content": [
-                    {"type": "document", "source": {"type": "text", "media_type": "text/plain",
-                                                    "data": "d"}}
-                ]}]
+                "model": ALIAS, "max_tokens": 16, "messages": [user("q")],
+                "tools": [{"type": "advisor_20260301", "name": "advisor"}]
             })),
-            lane: "anthropic->openai-compat",
+            lane: "anthropic->anthropic-api",
         },
         Row {
             reason: "forwarded-bearer-missing",
@@ -306,13 +299,11 @@ fn single_target_config(entry: ProviderEntry, strict: bool) -> Config {
 
 async fn router_for(target: Target, base: &str) -> Router {
     match target {
-        Target::Built { entry, strict } => {
-            let config = single_target_config(entry(base), strict);
-            let secrets: Arc<dyn routectl_auth::SecretStore> =
-                Arc::new(routectl_auth::MemoryStore::new());
-            crate::server::build_router_from_config(Arc::new(config), secrets)
-                .await
-                .expect("build router")
+        Target::Built(entry) => built_router(single_target_config(entry(base), false)).await,
+        Target::StrictStripSeat => {
+            let router = built_router(single_target_config(anthropic_api(base), true)).await;
+            plant_advisor_negative(&router);
+            router
         }
         Target::CloakSeat => {
             let entry = ProviderEntry::anthropic_api(crate::test_secret::file_ref("k"))
@@ -329,6 +320,37 @@ async fn router_for(target: Target, base: &str) -> Router {
             router
         }
     }
+}
+
+async fn built_router(config: Config) -> Router {
+    let secrets: Arc<dyn routectl_auth::SecretStore> = Arc::new(routectl_auth::MemoryStore::new());
+    crate::server::build_router_from_config(Arc::new(config), secrets)
+        .await
+        .expect("build router")
+}
+
+/// Plant an acting learned negative for the advisor tool on the single
+/// target's lane.
+fn plant_advisor_negative(router: &Router) {
+    let state_key = format!("{PROVIDER}#{UPSTREAM}");
+    let outcome = router.observe_learned_capability(
+        routectl_router::LearnKey {
+            state_key: &state_key,
+            feature_key_raw: "advisor",
+            provider_kind: "anthropic-api",
+        },
+        routectl_router::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
+        std::time::Instant::now(),
+    );
+    assert!(
+        matches!(outcome, routectl_router::GenerationOutcome::Applied { .. }),
+        "premise: the advisor negative is stored, got {outcome:?}",
+    );
 }
 
 fn headers() -> HeaderMap {

@@ -105,7 +105,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -131,7 +130,6 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 

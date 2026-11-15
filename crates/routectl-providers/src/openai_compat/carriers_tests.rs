@@ -70,7 +70,6 @@ fn wire(req: &ChatRequest) -> Value {
         ReasoningDialect::OpenAi,
         HistoryReasoning::Auto,
         None,
-        false,
     )
     .expect("normalize")
 }
@@ -182,7 +181,6 @@ fn a_reasoning_content_carrier_never_shadows_the_dialect_rename() {
         ReasoningDialect::DeepSeek,
         HistoryReasoning::Preserve,
         None,
-        false,
     )
     .expect("normalize");
 

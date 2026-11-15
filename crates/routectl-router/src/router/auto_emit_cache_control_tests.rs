@@ -1846,8 +1846,7 @@ fn entry_from_toml(toml_text: &str) -> ProviderEntry {
 #[tokio::test]
 async fn opted_in_openai_compat_gets_no_front_marker_on_the_wire() {
     // Acceptance (fail-closed): the openai-compat egress DROPS a per-block
-    // marker with a WARN and, under `strict_translation`, rejects the whole
-    // request. An explicit opt-in must therefore be inert -- no front
+    // marker with a WARN. An explicit opt-in must therefore be inert -- no front
     // marker, and the recorded decision must not claim `auto_emitted`.
     let entry = entry_from_toml(
         r#"
@@ -1894,8 +1893,7 @@ auto_emit_per_block_breakpoints = true
 fn front_marker_never_ships_to_an_opted_in_openai_compat_egress() {
     // The consequences the skip prevents, pinned at the EGRESS itself so
     // the fail-closed rule stays tied to real wire behavior rather than to
-    // our model of it: in default mode the marker is DROPPED (silently
-    // wasted), and under `strict_translation` the request 400s outright.
+    // our model of it: the marker is DROPPED (silently wasted).
     use routectl_providers::openai_compat::request::normalize;
     use routectl_providers::openai_compat::{HistoryReasoning, ReasoningDialect};
 
@@ -1905,34 +1903,19 @@ fn front_marker_never_ships_to_an_opted_in_openai_compat_egress() {
     };
     blocks[1].cache_control = Some(CacheControl::ephemeral_5m());
 
-    // Default mode: accepted, but the marker does not survive.
+    // Accepted, but the marker does not survive.
     let body = normalize(
         "p",
         &marked,
         ReasoningDialect::default(),
         HistoryReasoning::default(),
         None,
-        false,
     )
-    .expect("default mode drops the marker rather than failing");
+    .expect("the egress drops the marker rather than failing");
     let rendered = serde_json::to_string(&body).expect("serialize body");
     assert!(
         !rendered.contains("cache_control"),
         "the openai-compat wire carries no per-block marker: {rendered}",
-    );
-
-    // Strict mode: the same marker is a hard 400.
-    let strict = normalize(
-        "p",
-        &marked,
-        ReasoningDialect::default(),
-        HistoryReasoning::default(),
-        None,
-        true,
-    );
-    assert!(
-        strict.is_err(),
-        "under strict_translation a per-block marker rejects the whole request",
     );
 }
 

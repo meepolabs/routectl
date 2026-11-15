@@ -1138,11 +1138,11 @@ license.
   Anthropic-shape body fields to OpenAI-compat wire shape. Every drop arm in
   this directory carries a `TRANSLATION-DROP:` verdict marker (see
   `src/translation_drop_metrics.rs`, and `tests/translation_drop_census.rs` for
-  the grammar those markers are parsed against); `content.rs` and
-  `tool_result.rs` each own a per-request drop tally flushed OUTSIDE their
-  fallible body, so a
-  request that drops content and then fails translation still reaches the
-  counter. The lane's single request-volume denominator is bumped in
+  the grammar those markers are parsed against). Every lossy seam warns
+  through `drop_unrepresentable`, drops the shape and counts it; none
+  refuses the request. `content.rs` and `tool_result.rs` each own a
+  per-request drop tally flushed once per lift. The lane's single
+  request-volume denominator is bumped in
   `openai_compat/request.rs::normalize`, ahead of its first fallible step
 - `src/openai_compat/wire_lift/content.rs` -- image content blocks (Anthropic
   base64 source and url source shapes -> `image_url`), drops documents and
@@ -2065,7 +2065,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   crate-facing surface (`build_provider`, `build_provider_with_options`,
   `build_resolved_models`, `build_resolved_models_reported`,
   `pool_member_refusals`, `ResolvedModelBuild`,
-  `BuildOptions` (`strict_translation`, `normalize_tools`,
+  `BuildOptions` (`normalize_tools`,
   `mint_installation_id`; `config check` builds with minting off), the
   `validate_*` family,
   `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,

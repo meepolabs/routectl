@@ -163,7 +163,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -190,7 +189,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -220,7 +218,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -247,7 +244,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -274,7 +270,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -295,7 +290,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -326,7 +320,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -357,7 +350,6 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
         )
         .unwrap();
 
@@ -406,7 +398,7 @@ mod tests {
     }
 
     fn wire_messages(req: &ChatRequest, mode: HistoryReasoning) -> Vec<serde_json::Value> {
-        let body = normalize("test", req, ReasoningDialect::DeepSeek, mode, None, false).unwrap();
+        let body = normalize("test", req, ReasoningDialect::DeepSeek, mode, None).unwrap();
         body["messages"].as_array().expect("messages array").clone()
     }
 
