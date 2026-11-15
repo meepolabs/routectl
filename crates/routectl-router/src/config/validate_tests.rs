@@ -679,3 +679,61 @@ mod cache_write_map_tests {
         );
     }
 }
+
+mod server_body_limit_tests {
+    use super::validate_server_body_limit;
+    use crate::config::Config;
+    use crate::factory::collect_config_validation;
+
+    fn parsed(server_body: &str) -> Config {
+        toml::from_str(&format!("[server]\n{server_body}")).expect("parses")
+    }
+
+    /// A zero cap is refused with the remediation; a positive cap and an
+    /// omitted key (which takes the 32 MiB schema default) pass.
+    #[test]
+    fn a_zero_body_limit_is_refused_and_any_positive_value_passes() {
+        let rows: [(&str, &str, u32, bool); 3] = [
+            ("zero", "max_body_bytes = 0\n", 0, true),
+            ("one byte", "max_body_bytes = 1\n", 1, false),
+            ("omitted", "", 33_554_432, false),
+        ];
+
+        for (name, body, expected_value, refused) in rows {
+            let config = parsed(body);
+
+            let result = validate_server_body_limit(&config);
+
+            assert_eq!(config.server.max_body_bytes, expected_value, "{name}");
+            if refused {
+                assert_eq!(
+                    result.expect_err(name),
+                    "`server.max_body_bytes` is 0; omit it for the 32 MiB default or set a \
+                     positive byte count",
+                    "{name}"
+                );
+            } else {
+                assert_eq!(result, Ok(()), "{name}");
+            }
+        }
+    }
+
+    /// The refusal reaches every config-validation surface through the one
+    /// ordered suite.
+    #[test]
+    fn the_shared_validation_suite_carries_the_zero_body_limit_refusal() {
+        let refused = collect_config_validation(&parsed("max_body_bytes = 0\n")).errors;
+        let accepted = collect_config_validation(&parsed("max_body_bytes = 1\n")).errors;
+
+        assert!(
+            refused
+                .iter()
+                .any(|e| e.starts_with("`server.max_body_bytes` is 0")),
+            "{refused:?}"
+        );
+        assert!(
+            !accepted.iter().any(|e| e.contains("max_body_bytes")),
+            "{accepted:?}"
+        );
+    }
+}

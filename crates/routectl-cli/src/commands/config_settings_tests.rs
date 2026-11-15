@@ -110,7 +110,6 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "retry.max_honored_retry_after_ms",
         "retry.probe_max_tokens",
         "seat_quota.enabled",
-        "server.allow_disable_fallbacks",
         "server.max_body_bytes",
         "trim.clear_at_least_tokens",
         "trim.keep_recent_messages",
@@ -141,10 +140,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (21, 26));
+    assert_eq!((file.len(), default.len()), (21, 25));
     assert_eq!(
         lines.len(),
-        47,
+        46,
         "every line is tagged file or default, once"
     );
 }

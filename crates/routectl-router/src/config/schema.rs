@@ -1252,15 +1252,6 @@ pub struct ServerConfig {
     #[serde(default)]
     pub strict_translation: bool,
 
-    /// When true (default), the `x-routectl-disable-fallbacks` request
-    /// header lets a client pin a request to a single provider with
-    /// no fallback chain. Useful for tests, dev probing, and
-    /// per-request triage. Set to `false` for hardened multi-tenant
-    /// deployments where authenticated clients should not be able to
-    /// disable the gateway's HA story or probe per-provider health.
-    #[serde(default = "default_allow_disable_fallbacks")]
-    pub allow_disable_fallbacks: bool,
-
     /// Maximum incoming JSON body size for `/v1/chat/completions` and
     /// `/v1/messages`, in bytes. Defaults to 32 MiB -- comfortably above
     /// the largest legitimate Anthropic Messages request (long system
@@ -1275,10 +1266,6 @@ pub struct ServerConfig {
     pub max_body_bytes: u32,
 }
 
-const fn default_allow_disable_fallbacks() -> bool {
-    true
-}
-
 const fn default_max_body_bytes() -> u32 {
     32 * 1024 * 1024
 }
@@ -1290,7 +1277,6 @@ impl Default for ServerConfig {
             port: default_port(),
             auth: None,
             strict_translation: false,
-            allow_disable_fallbacks: default_allow_disable_fallbacks(),
             max_body_bytes: default_max_body_bytes(),
         }
     }

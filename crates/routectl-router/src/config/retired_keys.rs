@@ -77,6 +77,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         refused_value: None,
         replacement: "use `[capability.overrides.<provider>] unsupported`",
     },
+    RetiredKey {
+        path: &["server", "allow_disable_fallbacks"],
+        refused_value: None,
+        replacement: "the x-routectl-disable-fallbacks header is always honored",
+    },
 ];
 
 /// One retired key found in a config: its concrete key path and the

@@ -154,15 +154,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     state.cc_pin_drift.observe_headers(&headers);
 
     let mut opts = RouterOptions::new();
-    // Gate `x-routectl-disable-fallbacks` behind the server-side
-    // `[server] allow_disable_fallbacks` knob (default true). When the
-    // operator turns it off (hardened multi-tenant deployments), the
-    // header is silently ignored regardless of client intent so a
-    // malicious client cannot disable HA fallbacks or probe per-
-    // provider health.
-    if router.config.server.allow_disable_fallbacks {
-        opts.disable_fallbacks = header_truthy(&headers, DISABLE_FALLBACKS_HEADER);
-    }
+    opts.disable_fallbacks = header_truthy(&headers, DISABLE_FALLBACKS_HEADER);
 
     // Trace-level ingress request headers (direction 1: client ->
     // routectl). Opt-in via ROUTECTL_TRACE_HEADERS. Single call site

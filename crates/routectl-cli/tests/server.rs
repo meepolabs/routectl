@@ -595,6 +595,61 @@ async fn fallback_to_second_provider_on_503() {
     );
 }
 
+/// With no `[server]` key set, `x-routectl-disable-fallbacks: 1` pins the
+/// request to the first chain entry: its 503 reaches the client and the
+/// second provider is never called. The same request without the header
+/// falls back (positive control that the chain would otherwise walk on).
+#[tokio::test]
+async fn disable_fallbacks_header_pins_the_request_with_no_config_key() {
+    let failing = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
+        .mount(&failing)
+        .await;
+    let working = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(chat_response_body("gpt-4o", "fallback answer")),
+        )
+        .mount(&working)
+        .await;
+    let config = two_provider_config(&failing.uri(), &working.uri());
+    let base = helpers::spawn_test_server(config).await;
+    let client = reqwest::Client::new();
+    let send = |pinned: bool| {
+        let mut req = client
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&json!({
+                "model": "multi",
+                "messages": [{"role": "user", "content": "hi"}]
+            }));
+        if pinned {
+            req = req.header("x-routectl-disable-fallbacks", "1");
+        }
+        req.send()
+    };
+
+    let pinned = send(true).await.unwrap();
+    let pinned_status = pinned.status();
+    let working_calls_after_pinned = working.received_requests().await.unwrap().len();
+    let unpinned = send(false).await.unwrap();
+
+    assert_ne!(pinned_status, 200, "the pinned request must not fall back");
+    assert_eq!(
+        working_calls_after_pinned, 0,
+        "the second provider was called"
+    );
+    assert_eq!(
+        unpinned.status(),
+        200,
+        "control: without the header it falls back"
+    );
+    assert_eq!(working.received_requests().await.unwrap().len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Error envelope: unknown alias -> 404
 // ---------------------------------------------------------------------------

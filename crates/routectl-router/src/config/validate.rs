@@ -162,6 +162,21 @@ pub fn validate_model_token_limits(config: &Config) -> Result<(), String> {
     }
 }
 
+/// Refuse `[server] max_body_bytes = 0`. A zero cap would reject every
+/// request body, so it is never a usable value; omitting the key keeps the
+/// schema default.
+pub fn validate_server_body_limit(config: &Config) -> Result<(), String> {
+    if config.server.max_body_bytes == 0 {
+        Err(
+            "`server.max_body_bytes` is 0; omit it for the 32 MiB default or set a \
+             positive byte count"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 /// Refuse a `[models.X.pricing]` value that is not finite or is negative,
 /// and a `cache_write_per_mtok` key that is not a cache lifetime, naming
 /// every offending dotted key on its own line. A price feeds cost

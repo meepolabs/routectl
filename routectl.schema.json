@@ -1793,11 +1793,6 @@
       "additionalProperties": false,
       "description": "Listener bind config: host, port, auth, and request-size / translation\nposture for the HTTP server.",
       "properties": {
-        "allow_disable_fallbacks": {
-          "default": true,
-          "description": "When true (default), the `x-routectl-disable-fallbacks` request\nheader lets a client pin a request to a single provider with\nno fallback chain. Useful for tests, dev probing, and\nper-request triage. Set to `false` for hardened multi-tenant\ndeployments where authenticated clients should not be able to\ndisable the gateway's HA story or probe per-provider health.",
-          "type": "boolean"
-        },
         "auth": {
           "anyOf": [
             {
@@ -2080,7 +2075,6 @@
     "server": {
       "$ref": "#/$defs/ServerConfig",
       "default": {
-        "allow_disable_fallbacks": true,
         "auth": null,
         "host": "127.0.0.1",
         "max_body_bytes": 33554432,

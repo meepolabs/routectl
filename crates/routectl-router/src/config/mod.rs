@@ -40,6 +40,7 @@ pub use validate::{
 };
 pub(crate) use validate::{
     cache_write_map_problems, validate_model_pricing, validate_model_token_limits,
+    validate_server_body_limit,
 };
 
 /// The parsed `config.toml`: server bind, providers, aliases, models, and

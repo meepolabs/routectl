@@ -100,7 +100,6 @@ fn anthropic_proxy_config(
         port: 0,
         auth: auth_tokens.map(|tokens| ServerAuth { tokens }),
         strict_translation: false,
-        allow_disable_fallbacks: true,
         ..Default::default()
     };
 
@@ -1843,7 +1842,6 @@ fn openai_compat_proxy_config(upstream_base: &str) -> Arc<Config> {
         port: 0,
         auth: None,
         strict_translation: false,
-        allow_disable_fallbacks: true,
         ..Default::default()
     };
     Arc::new(Config {
@@ -2586,7 +2584,6 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
             port: 0,
             auth: None,
             strict_translation: false,
-            allow_disable_fallbacks: true,
             ..Default::default()
         },
         providers,
@@ -2617,7 +2614,6 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
             port: 0,
             auth: None,
             strict_translation: false,
-            allow_disable_fallbacks: true,
             ..Default::default()
         },
         providers,
@@ -3441,7 +3437,6 @@ async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
             port: 0,
             auth: None,
             strict_translation: false,
-            allow_disable_fallbacks: true,
             ..Default::default()
         },
         providers,
@@ -3534,7 +3529,6 @@ async fn per_model_non_beta_header_extras_reaches_wire() {
             port: 0,
             auth: None,
             strict_translation: false,
-            allow_disable_fallbacks: true,
             ..Default::default()
         },
         providers,

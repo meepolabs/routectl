@@ -439,6 +439,8 @@ list with more narrative.
 
 - **An empty `[cache_pricing]` table is now refused too.** `[cache_pricing]` joins the retired config keys: any `[cache_pricing]` table, including an empty one that used to load, is refused with `` `cache_pricing` is retired: set prices under `[models.X.pricing]`; delete it ``, so one rule covers every retired table. Delete the table; prices live under `[models.X.pricing]`.
 
+- **`[server] max_body_bytes = 0` is now refused.** A zero used to fall back silently to the 32 MiB default; it is now a config error at load, hot reload, `config check` and every config edit: `` `server.max_body_bytes` is 0; omit it for the 32 MiB default or set a positive byte count ``. Omitting the key still gives 32 MiB.
+
 - **Internal:** the routectl-router raw-config refusals are one type. `RawConfigPreflightError` keeps `Version` and gains `RetiredKeys(RetiredKeysError)`; the `LegacyMitmCredentialSource`, `RetiredCapabilityKeys`, `RemovedPaidProbeCaps` and `RetiredModelKnobs` variants and their error types are removed. `retired_model_knob_message` is replaced by `retired_key_message`, which covers every retired key. No change for `routectl` binary users beyond the wording above.
 
 - **The Responses ingress refuses `conversation` and `background: true`.** A request with a non-null `conversation`, or with `background: true`, now gets an HTTP 400 (`invalid_request_error`), as `previous_response_id` already did: routectl keeps no server-side state to resolve or hold. The message names the refused member. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
@@ -820,6 +822,7 @@ list with more narrative.
 
 ### Removed
 
+- **`[server] allow_disable_fallbacks`.** The `x-routectl-disable-fallbacks` request header is now always honored: a request carrying it is pinned to the first provider in its chain with no fallback, and no config key turns that off. A config that still sets the key is refused with `` `server.allow_disable_fallbacks` is retired: the x-routectl-disable-fallbacks header is always honored; delete it ``. Library callers: `ServerConfig::allow_disable_fallbacks` (routectl-router) is gone.
 - **Internal: `Config::cache_pricing` and `validate_cache_pricing_retired` (routectl-router).** The retired-key table now refuses `[cache_pricing]` before the typed parse, so the config struct no longer carries the table and the separate validator is gone; the generated `routectl.schema.json` no longer lists `cache_pricing`. No change for `routectl` binary users beyond the refusal above.
 - **Breaking for library callers: `TranslationPolicyActionSnapshotEntry::action_rate` (routectl-providers).** It had no reader; derive any rate from the snapshot's counts. No change for `routectl` binary users.
 - **`RecordedLearnedEntry::value` (routectl-router).** A recorded entry carries a field verdict's stored value in one place, `RecordedLearnedEntry::entry.value` (`LearnedRegistryEntry::value`); library callers read it there.

@@ -1128,9 +1128,8 @@ pub(super) const NON_OBSERVING_ROUTES: &[&str] = &[
     "/status/query",
 ];
 
-/// `max_body_bytes` MUST already be the resolved effective value
-/// (zero -> default mapped by `compute_max_body_bytes`). Private to
-/// this module; the only call site is `serve_on_listener`.
+/// `max_body_bytes` is the effective value from `compute_max_body_bytes`.
+/// Private to this module; the only call site is `serve_on_listener`.
 ///
 /// Every path registered below is classified by `PUBLIC_ROUTES` or
 /// `AUTH_GATED_ROUTES`; adding a route without classifying it fails a

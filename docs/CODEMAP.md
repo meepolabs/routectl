@@ -6518,8 +6518,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ReloadFailure::ConfigLoadFailed` (its WARN joins a multi-line loader error
   onto one line, with a `reasons` count);
   `warn_if_config_world_readable` (unix) WARNs on group/world-readable configs
-  carrying secrets; `compute_max_body_bytes` maps the zero-means-default
-  body-limit knob
+  carrying secrets; `compute_max_body_bytes` converts the body-limit knob
+  (zero is refused upstream by `validate_server_body_limit`)
 - `src/server/auth.rs` -- listener middleware enforcing `[server.auth].tokens`
   via constant-time comparison
 - `src/server/file_watch.rs` -- `notify-debouncer-full` fs-watch task; watches

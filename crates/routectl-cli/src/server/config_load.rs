@@ -7,23 +7,11 @@ use routectl_router::Config;
 
 use super::reload_failure::ReloadFailure;
 
-/// Maximum incoming JSON body size for `/v1/chat/completions` and
-/// `/v1/messages`. Operator-configurable via `[server] max_body_bytes`
-/// (default 32 MiB; see `routectl_router::ServerConfig`). Used by
-/// `compute_max_body_bytes` as the fallback when the operator-supplied
-/// value is zero.
-const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
-
-/// Compute the effective `DefaultBodyLimit` value. Mirrors the legacy
-/// behavior: zero in the config means fall through to the library
-/// default; a non-zero value is honored.
+/// The effective `DefaultBodyLimit` value: the operator's
+/// `[server] max_body_bytes`, or the schema default when the key is omitted.
+/// A zero is refused by the shared validator suite before this runs.
 pub(super) fn compute_max_body_bytes(config: &Config) -> usize {
-    let raw = usize::try_from(config.server.max_body_bytes).unwrap_or(usize::MAX);
-    if raw == 0 {
-        DEFAULT_MAX_BODY_BYTES
-    } else {
-        raw
-    }
+    usize::try_from(config.server.max_body_bytes).unwrap_or(usize::MAX)
 }
 
 /// SINGLE shared config loader: preflight the schema `version`, parse

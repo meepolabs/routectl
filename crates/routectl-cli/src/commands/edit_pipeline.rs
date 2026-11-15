@@ -271,6 +271,29 @@ mod tests {
         assert_eq!(shown.lines().count(), 2, "{shown}");
     }
 
+    /// The edit gate refuses a candidate setting `[server] max_body_bytes =
+    /// 0` with the shared validator's line, and accepts `1`.
+    #[test]
+    fn gate_refuses_a_zero_body_limit_and_accepts_one_byte() {
+        let candidate = |value: u32| {
+            format!(
+                "version = {}\n[server]\nmax_body_bytes = {value}\n",
+                routectl_router::CURRENT_CONFIG_VERSION
+            )
+        };
+
+        let refused = gate(&candidate(0)).expect_err("zero must be refused");
+        let accepted = gate(&candidate(1)).expect("one byte must pass the gate");
+
+        assert!(
+            refused
+                .iter()
+                .any(|e| e.contains("`server.max_body_bytes` is 0; omit it for the 32 MiB default")),
+            "{refused:?}"
+        );
+        assert_eq!(accepted.server.max_body_bytes, 1);
+    }
+
     fn doc_of(text: &str) -> DocumentMut {
         text.parse::<DocumentMut>().unwrap()
     }

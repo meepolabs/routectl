@@ -113,7 +113,6 @@ fn base_server_config() -> ServerConfig {
         port: 1,
         auth: None,
         strict_translation: false,
-        allow_disable_fallbacks: true,
         ..Default::default()
     }
 }

@@ -69,7 +69,6 @@ mock-model = "target"
         port: 0,
         auth: None,
         strict_translation: false,
-        allow_disable_fallbacks: true,
         ..Default::default()
     };
     common::isolate_usage_db(Arc::new(cfg))

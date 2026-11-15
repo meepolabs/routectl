@@ -348,7 +348,6 @@ async fn zero_arg_responses_lane() -> (MockServer, Arc<Config>) {
             port: 0,
             auth: None,
             strict_translation: false,
-            allow_disable_fallbacks: true,
             ..Default::default()
         },
         providers,

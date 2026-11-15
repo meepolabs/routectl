@@ -1822,6 +1822,9 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = crate::config::validate_model_token_limits(config) {
         errors.push(e);
     }
+    if let Err(e) = crate::config::validate_server_body_limit(config) {
+        errors.push(e);
+    }
     if let Err(e) = crate::config::validate_model_pricing(config) {
         errors.push(e);
     }

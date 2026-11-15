@@ -91,6 +91,44 @@ fn load_refuses_a_cache_pricing_table_empty_or_not() {
     }
 }
 
+/// `[server] max_body_bytes = 0` fails the serve and reload loader with the
+/// validator's line; `1` loads as written and an omitted key loads the
+/// 32 MiB schema default, which is the limit the listener installs.
+#[test]
+#[serial_test::serial]
+fn load_refuses_a_zero_body_limit_and_keeps_positive_and_default_values() {
+    let rows: [(&str, &str, Result<usize, &str>); 3] = [
+        (
+            "zero",
+            "max_body_bytes = 0\n",
+            Err(
+                "config: `server.max_body_bytes` is 0; omit it for the 32 MiB default or \
+                 set a positive byte count",
+            ),
+        ),
+        ("one byte", "max_body_bytes = 1\n", Ok(1)),
+        ("omitted", "", Ok(33_554_432)),
+    ];
+    for (name, line, expected) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        let body = format!("version = {CURRENT_CONFIG_VERSION}\n[server]\n{line}");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+        // Act
+        let loaded = load_effective_config(&cfg_path).map(|l| compute_max_body_bytes(&l.config));
+
+        // Assert
+        assert_eq!(
+            loaded.as_ref().map_err(String::as_str),
+            expected.as_ref().map_err(|e| *e),
+            "{name}"
+        );
+    }
+}
+
 /// A current-version config loads unchanged: it passes the preflight,
 /// the load never merges the legacy sidecar or mutates the file, and the
 /// overlay -- untouched by this load -- stays as it was on disk.

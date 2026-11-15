@@ -374,6 +374,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
+| `server.allow_disable_fallbacks` | the x-routectl-disable-fallbacks header is always honored |
 
 ## Editor autocomplete (JSON Schema)
 
@@ -408,7 +409,6 @@ host = "127.0.0.1"
 port = 8787
 strict_translation = false      # set true for production CI
 max_body_bytes = 33554432       # 32 MiB default; larger bodies are rejected with HTTP 413
-allow_disable_fallbacks = true  # set false for hardened multi-tenant deployments
 
 [server.auth]
 tokens = ["env://ROUTECTL_LISTENER_TOKEN", "file:///etc/routectl/listener-token"]
@@ -543,28 +543,20 @@ envelope. The pre-v0.8 hardcoded ceiling was 4 MiB, which was too tight
 for live-traffic sessions carrying large multi-turn or multimodal
 payloads. Changing this knob takes effect only after a restart (the
 `DefaultBodyLimit` layer is wired at server startup, not per-reload).
+A value of `0` is refused at load; omit the key for the 32 MiB default.
 
 ```toml
 [server]
 max_body_bytes = 67108864   # 64 MiB -- raise for multimodal or long-history sessions
 ```
 
-**`allow_disable_fallbacks`** (bool, default true)
+**`x-routectl-disable-fallbacks` request header**
 
-When true (default), a client may send the request header
-`x-routectl-disable-fallbacks: 1` (also accepts `true` or `yes`) to
-pin a single request to the first provider in the alias chain with no
-fallback. This is useful for testing and per-provider triage. When set
-to false, the header is silently ignored so authenticated clients cannot
-bypass the gateway HA story or probe per-provider health. Set this to
-false for hardened multi-tenant deployments where listener auth is
-configured via `[server.auth].tokens`. The `x-routectl-alias` header
-(model routing) is not affected by this knob.
-
-```toml
-[server]
-allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass header
-```
+A client may send `x-routectl-disable-fallbacks: 1` (also accepts `true`
+or `yes`) to pin a single request to the first provider in the alias
+chain with no fallback. This is useful for testing and per-provider
+triage. The header is always honored; no config key turns it off. The
+`x-routectl-alias` header (model routing) is separate.
 
 ## Model routing (`[aliases]`)
 
@@ -685,7 +677,6 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `runtime` (RPM, breaker, timeouts) | `[providers.X]`, `[pools.X]` | provider > pool; the two timeouts then fall back to `[retry]`          |
 | `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor, always sent and never withheld                            |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
-| `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
 | `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
 | `k_gated_emission`             | `[cache]` global                | bool, default **false**; when true, withholds auto-emitted markers on a session whose measured reuse sits below the marker's break-even (see `[cache]`) |

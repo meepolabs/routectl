@@ -31,7 +31,6 @@ fn config_with(server_url: &str) -> Config {
             port: 8787,
             auth: None,
             strict_translation: false,
-            allow_disable_fallbacks: true,
             ..Default::default()
         },
         providers,
