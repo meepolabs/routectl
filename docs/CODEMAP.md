@@ -2640,7 +2640,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   terminal park), the skip tally (`tally_gate_skip`: a gate refusal on a
   target not yet attempted, and every placeholder seat, count one skip under
   its `EligibilityReason`), the learner repair
-  branch, classify and remap, the one `outcome_rule::decide` call (its
+  branch, classify, the one `outcome_rule::decide` call (its
   `Disposition` settles the breaker, then `after_breaker` and `record_on` the
   request's `walk_state::RequestWalk`), credential park, the per-target
   `RequestWalk::admits` check (an excluded target is passed over before it is
@@ -2692,10 +2692,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `dispatch_loop`. `policy_for` resolves the retry policy; each adapter's
   `deadline` reads the target's stamped `ResolvedTuning`. Failure-class
   routing in the walk threads
-  `routectl_core::failure_class::classify` through every error arm:
-  `class_observe::apply_remap(native, status, overrides)` (status via
-  `upstream_status_for_remap`) applies the target's `class_overrides` keeping
-  the native `matched_by`, then `outcome_rule::decide` returns the breaker
+  `routectl_core::failure_class::classify` through every error arm (the
+  native class is the routed class; nothing remaps it), then
+  `outcome_rule::decide` returns the breaker
   outcome, same-target retry, request-scoped exclusions and chain hop in one
   `Disposition`. Class-decision
   observability: `emit_class_observability` emits one `emit_class_decision`
@@ -2764,8 +2763,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `log_forwarded_auth_terminal` surface a 401/403/429 on a forwarded
   credential verbatim (no refresh, no fallback). The pure
   classification/observability labels (`DispatchSurface`,
-  `UpstreamFacts`/`upstream_facts`, `class_label`, `matched_by_label`) and
-  the class remap live in `class_observe` and are imported from there. The
+  `UpstreamFacts`/`upstream_facts`, `class_label`, `matched_by_label`) live
+  in `class_observe` and are imported from there. The
   reasoning-replay strip-repair branch lives in the walk: a fixed one-shot
   correctness arm (bounded additive, never nested across fallback) that on a
   classified replay rejection admits via `replay_repair`, swaps to the
@@ -2931,10 +2930,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rewrite: an acting verdict refuses the slot and the request dispatches
   unchanged. `rejected_field` (through the learning engine's
   `FieldRowProposer`, on all three walks) is
-  the arm's repair condition and reads the
-  NATIVE failure class, never the operator-remapped one -- a
-  `[class_overrides]` entry states how a status is ROUTED, so reading it would
-  let an override turn a 429 or 503 into a field repair.
+  the arm's repair condition and reads the classifier's failure class.
   `Router::rejection_names_field_surface` is its surface-filtered form, kept
   for the probe re-check's `probe_failure_class`.
   The repair itself is `FieldRepairPlan::apply_named` (all or nothing; the
@@ -3146,8 +3142,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   reactive `FieldRepairPlan::apply_named`, and it draws the request's shared
   `RepairBudget` like every other repair (`check_or_mark_refusal` before the drop, `draw`
   after it). Its `named` is
-  the field-row proposal the learning engine resolved from the NATIVE failure
-  class, never the operator-remapped one, through the same `rejected_field`
+  the field-row proposal the learning engine resolved from the classified
+  failure class, through the same `rejected_field`
   the reactive `FieldRepairPlan::apply_named` consumes, so "did the
   upstream name this mutation" has one implementation rather than two answers.
   It applies the transform through `field_repair`'s own `FieldSurface::drop_from`,
@@ -3278,8 +3274,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
   only numeric status and structured classifier tokens, never
   body/prompt/header/Display text), `class_label` (fail-closed low-cardinality
-  `FailureClass` token), `matched_by_label`, and the per-provider class
-  remap (`upstream_status_for_remap`, `apply_remap`), plus
+  `FailureClass` token), `matched_by_label`, plus
   `is_capability_error` (the count_tokens capability signal). All
   `pub(super)`, imported by `dispatch_loop`, `dispatch`, `stream_commit`,
   `count_tokens`, and `feature_filter`; the shared leaf keeps
@@ -3383,8 +3378,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   operator pin and count-surface rows in
   `src/router/learn_beta_repair_tests.rs`
 - `src/router/learn_proposers.rs` -- the four thin `Proposer`s the engine
-  arbitrates: `ReplayProposer` (`is_replay_rejection_class` on the remapped
-  class, replay carried), `FieldRowProposer` (`rejected_field` on the native
+  arbitrates: `ReplayProposer` (`is_replay_rejection_class` on the classified
+  class, replay carried), `FieldRowProposer` (`rejected_field` on the same
   class), `BetaProposer` (`rejected_beta_flags`; every named flag must be in
   the client's `anthropic_beta`, not already withheld, and outside the
   attempt's recorded beta floor and body-implied set),
@@ -4062,7 +4057,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/capability_learn.rs` -- learned-capability observation, expiry,
   and snapshot: `CapabilityLearnEvent` (the ledger event),
   `observe_for_learning` (the 400/422 capture gate: kill switch + status +
-  remapped/forwarded + resolve, then delegates), `commit_learned_observation`
+  forwarded-credential + resolve, then delegates; the event's `remapped`
+  field is always `false`, kept for the ledger shape), `commit_learned_observation`
   (the resolved-capability mint pipeline split out of it --
   request-membership, force_supported mask, probe-settle, per-request dedupe,
   the mint + phase-carrying learn WARN + `CapabilityLearnEvent` ride-along,
@@ -4152,7 +4148,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `MAX_PRECONTENT_CARRIAGE_CHUNKS`; its overflow and closed-before-content
   errors append `precontent::precontent_summary` of the buffered kinds) and
   `wrap_with_breaker_accounting` over a `BreakerSlot` (settles a post-content
-  error frame once through the shared remap + `breaker_outcome` rule, logging
+  error frame once through the shared `classify` + `breaker_outcome` rule, logging
   any `breaker_transition`; also the STREAMING quota seam, offering each Ok
   chunk to the armed `quota::feed::FirstChunkFeed`)
 - `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
@@ -4375,8 +4371,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `egress_pairing_refusal` (only a Gemini target refuses locally,
   `tool-pairing`, and the walk moves on), `is_transcript_rejection` (an
   upstream request-fault rejection on a defective transcript, any status in
-  `rejection_parser::REJECTION_STATUSES` (400, 422), read before any lift or
-  remap:
+  `rejection_parser::REJECTION_STATUSES` (400, 422), read before any lift:
   `AttemptLearning` consults no learner on any of the three walks; like any
   400/422 it is never retried and `outcome_rule::decide` excludes its scope,
   so the walk reaches only another endpoint or model), and
@@ -5460,9 +5455,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the cwd); an absolute `XDG_CONFIG_HOME` is the positive control
 - `tests/cloak_relocation_refusal_fallback.rs` -- a cloak relocation refusal
   on the own-OAuth seat falls back with the pristine canonical request and
-  leaves that seat's breaker closed, also under a status-400 remap to a
-  debiting class with a bad-request retry cap (one attempt, empty capability
-  registry); a debiting control opens it
+  leaves that seat's breaker closed, also under a raised `[retry.classes]`
+  bad-request retry cap (one attempt, empty capability registry); a debiting
+  control opens it
 - `tests/status_class_source.rs` -- a status's failure class comes from the
   built-in table plus `[retry.classes]` only: same-provider retry, fallback
   and the committed-stream breaker settle by the built-in class, each path
@@ -7789,7 +7784,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `handlers/models.rs` (`proxy::forward` + `proxy::metrics`); the whole task
   is spawned only when `Config::mitm.is_some()`
 - `src/proxy/ca.rs` -- local CA + leaf certificate lifecycle for the
-  configured MITM host. `load_or_create(cert_dir, mitm_host) -> TlsAcceptor`
+  pinned MITM host. `load_or_create(cert_dir, mitm_host) -> TlsAcceptor`
   generates/loads a long-lived local CA (aws-lc-rs backend, matching the
   workspace rustls provider) plus a matching leaf meant for operator install
   via `NODE_EXTRA_CA_CERTS`; `regenerate` re-mints, `ca_cert_path` locates the
@@ -8937,12 +8932,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   gather behind a runtime handle, so a read wired into only one of them would pass
   a health-only test), the runtime purity contract (twenty polls leave the learned
   set and every target's gate state byte-identical, each poll's availability
-  asserted so a run of shed polls cannot satisfy it vacuously), and the cap-zero
-  lane -- PAIRED against a nonzero cap, without which a daemon refusing to start
-  on any `[fidelity]` cap would satisfy the cap-zero case by failing the same way
-  for a different reason. The unknown-provider cap refusal carries its own paired
-  positive for the same reason. Never touches the live daemon's port or the real
-  `~/.config` ledger
+  asserted so a run of shed polls cannot satisfy it vacuously), and a fresh
+  daemon's learned set reported as an empty array rather than an absent field.
+  Never touches the live daemon's port or the real `~/.config` ledger
 - `tests/test_env_isolation.rs` -- pins the workspace `.cargo/config.toml`
   test sandbox: cargo sets `XDG_CONFIG_HOME` to `<workspace>/target/test-xdg`,
   and the default usage-db path resolves under it, never under the real
@@ -9220,8 +9212,11 @@ Dev-dependency crate: shared test doubles and harnesses every other crate's
 
 - `src/lib.rs` -- crate root; the in-process `tracing` capture double
   (`CapturedEvent` + `capture_events` / `with_capture` / `capture_lines`,
-  thread-local subscriber for the captured closure's own thread only) plus the
-  `ScopedEnv` re-export. Carries `#![warn(missing_docs)]`
+  thread-local subscriber for the captured closure's own thread only), and
+  `block_on_with_capture`, which drives a future on its own `current_thread`
+  runtime with the capture installed on every runtime thread too, so
+  `spawn_blocking` events are captured (call from a plain `#[test]`); plus the
+  `ScopedEnv` / `secret_file_ref` re-exports. Carries `#![warn(missing_docs)]`
 - `src/scoped_env.rs` -- `ScopedEnv`, a restore-on-drop guard over one
   environment variable; std-only, and its `#[serial_test::serial]` requirement
   at call sites is a caller contract the guard cannot enforce
