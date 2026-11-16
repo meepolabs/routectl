@@ -161,7 +161,7 @@ version = 5           # config schema version; see "Config schema version"
 [providers.X]         # transport + auth: how to reach an upstream
 [providers.Y]         # one block per upstream (multiple Y allowed)
 
-[pools.X]             # a group of same-kind provider entries (OAuth
+[pools.X]             # a group of interchangeable provider entries (OAuth
                       # accounts) dispatch spreads across: members,
                       # seat_selection, accepts_new_logins, plus the
                       # five tuning keys its members inherit (see
@@ -5130,7 +5130,7 @@ accounts is what `[pools.<name>]` is for, and each account gets its own
 [Version 4 makes pools explicit](#version-4-makes-pools-explicit).
 
 **The pool block.** A pool lists the provider entries (accounts) it
-groups, all of the same provider kind:
+groups. The members must be interchangeable seats of one upstream:
 
 ```toml
 [providers.anthropic-default]
@@ -5157,10 +5157,30 @@ upstream = "claude-sonnet-4-6"
 
 | Key | Meaning |
 |---|---|
-| `members` | `[providers]` table keys, required and non-empty, at most 32. Every member must exist, all must share one provider kind, and a provider entry belongs to at most one pool. This release's members are OAuth accounts. |
+| `members` | `[providers]` table keys, required and non-empty, at most 32. Every member must exist, all must share format, destination, auth, OAuth vendor and cloak settings (see "What pool members share" below), and a provider entry belongs to at most one pool. This release's members are OAuth accounts. |
 | `seat_selection` | How dispatch picks among the members for one request. Documented per strategy below. Set on the POOL, because the strategy is a property of the SET, not of one transport. |
 | `accepts_new_logins` | Whether a future `routectl login` for this family may propose joining the new account to this pool. `false` (the default) pins the membership list, so only an explicit config edit grows it. There is no wildcard member token. |
 | `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`, `stream_first_byte_timeout_ms` | Tuning every member inherits. See "Pool tuning keys" below. |
+
+**What pool members share.** Every member must agree with the pool's
+first member on:
+
+- `format`;
+- the destination: the `base_url`, compared after parsing (scheme and host
+  case and a default port do not matter) and without trailing `/`, or
+  for a `cloud` entry the cloud and its region;
+- `auth`;
+- the OAuth vendor of `credential` (`oauth://anthropic` and
+  `oauth://anthropic#seat-b` share the vendor `anthropic`; the label is
+  per seat);
+- `cloak_mode` and `cloak_strict_mode`, where an unset key equals its
+  default (`auto` and `false`).
+
+A member that differs gets one error per differing setting, naming the
+pool, the two members and the setting, never its value. Per-seat
+tuning (`rpm_limit`, `circuit_failures`, `circuit_cooldown_ms`,
+`request_timeout_ms`, `stream_first_byte_timeout_ms`) may differ. For
+ordered fallback across different upstreams, use an alias chain.
 
 **Pool tuning keys.** A pool accepts the five runtime-gate keys of
 [Per-provider runtime gates](#per-provider-runtime-gates), with the same
@@ -5198,7 +5218,7 @@ circuit_failures = 5        # ...except seat-b, whose own value wins
 
 A pool name must not collide with a `[providers]` key or a `[models]`
 nickname -- `config check`, the `serve` gate, and the hot-reload gate all
-reject that, along with a mixed-kind pool, an unknown member, a member
+reject that, along with members that do not share the settings below, an unknown member, a member
 claimed by two pools, and an empty member list. They also reject a pool
 member with no credential reference or one that does not parse (every
 member must authenticate with an `oauth://` reference), and a member

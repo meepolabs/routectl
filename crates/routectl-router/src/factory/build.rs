@@ -1432,13 +1432,7 @@ async fn anthropic_cloud_config(
 /// the cloak only through this build-time stamp, so the single operator
 /// control stays under `[cache]`.
 fn entry_cloak(entry: &ProviderEntry, normalize_tools: bool) -> CloakConfig {
-    let mut cloak = CloakConfig::default();
-    if let Some(mode) = entry.cloak_mode {
-        cloak.mode = mode;
-    }
-    if let Some(strict) = entry.cloak_strict_mode {
-        cloak.strict_mode = strict;
-    }
+    let mut cloak = entry.effective_cloak();
     cloak.normalize_tools = normalize_tools;
     cloak
 }

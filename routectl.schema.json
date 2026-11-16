@@ -362,7 +362,7 @@
     },
     "PoolEntry": {
       "additionalProperties": false,
-      "description": "One `[pools.<name>]` entry: the member provider entries plus the policy\nthat picks among them.\n\nMembers are `[providers.X]` table keys, all of the same provider kind.\nValidation rejects a mixed-kind pool, an unknown member, a member\nclaimed by two pools, an empty member list, and a pool name that\ncollides with a provider entry or a model nickname.",
+      "description": "One `[pools.<name>]` entry: the member provider entries plus the policy\nthat picks among them.\n\nMembers are `[providers.X]` table keys that agree on format,\ndestination, auth, OAuth vendor and cloak settings. Validation rejects\nmembers that disagree on any of those, an unknown member, a member\nclaimed by two pools, an empty member list, and a pool name that\ncollides with a provider entry or a model nickname.",
       "properties": {
         "accepts_new_logins": {
           "default": false,
@@ -388,7 +388,7 @@
           ]
         },
         "members": {
-          "description": "Provider entry names that make up this pool. Required and\nnon-empty: an empty pool serves nothing, which is a silent\nno-serve rather than a configuration an operator meant to write.\nEvery member must name an existing `[providers.X]` entry of the\nsame kind, and a provider entry belongs to at most one pool.",
+          "description": "Provider entry names that make up this pool. Required and\nnon-empty: an empty pool serves nothing, which is a silent\nno-serve rather than a configuration an operator meant to write.\nEvery member must name an existing `[providers.X]` entry, all must\nagree on format, destination, auth, OAuth vendor and cloak settings,\nand a provider entry belongs to at most one pool.",
           "items": {
             "type": "string"
           },
@@ -956,7 +956,7 @@
         "$ref": "#/$defs/PoolEntry"
       },
       "default": {},
-      "description": "Pool definitions keyed by operator-facing name: each groups\nsame-kind `[providers.X]` entries (accounts) under one\nseat-selection strategy. A `[models.X] provider` value may name a\nprovider entry OR a pool -- one namespace, so a name matching both\nis a validation error. A provider entry belongs to at most one\npool.",
+      "description": "Pool definitions keyed by operator-facing name: each groups\ninterchangeable `[providers.X]` entries (accounts) under one\nseat-selection strategy. A `[models.X] provider` value may name a\nprovider entry OR a pool -- one namespace, so a name matching both\nis a validation error. A provider entry belongs to at most one\npool.",
       "type": "object"
     },
     "providers": {

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 mod pool;
+mod pool_key;
 pub(crate) mod provider_descriptor;
 mod retired_keys;
 mod schema;
@@ -15,6 +16,7 @@ pub mod tuning;
 mod validate;
 
 pub use pool::PoolEntry;
+pub(crate) use pool_key::{PoolKey, PoolKeyField};
 pub use provider_descriptor::{Auth, Format};
 pub use retired_keys::{RetiredKeysError, retired_key_message};
 pub(crate) use schema::DEFAULT_ANTHROPIC_VERSION;
@@ -72,7 +74,7 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderEntry>,
 
     /// Pool definitions keyed by operator-facing name: each groups
-    /// same-kind `[providers.X]` entries (accounts) under one
+    /// interchangeable `[providers.X]` entries (accounts) under one
     /// seat-selection strategy. A `[models.X] provider` value may name a
     /// provider entry OR a pool -- one namespace, so a name matching both
     /// is a validation error. A provider entry belongs to at most one

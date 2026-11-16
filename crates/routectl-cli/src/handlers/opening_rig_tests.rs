@@ -142,12 +142,23 @@ impl Upstream {
     }
 }
 
+/// Request header naming the pool seat that sent a request. Pool members
+/// share one destination, so the upstream tells seats apart by this header
+/// and files the request under `<seat><path>`, as if each seat had its own
+/// path prefix.
+const SEAT_HEADER: &str = "x-test-seat";
+
 async fn serve_script(
     axum::extract::State(scripts): axum::extract::State<Arc<Mutex<Scripts>>>,
     uri: Uri,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let path = uri.path().to_string();
+    let seat = headers
+        .get(SEAT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let path = format!("{seat}{}", uri.path());
     let text = String::from_utf8_lossy(&body).into_owned();
     let script = {
         let mut scripts = scripts.lock();
@@ -414,9 +425,15 @@ impl routectl_auth::SecretStore for TestSecrets {
     }
 }
 
-/// An OAuth-authenticated Anthropic seat at `prefix`.
+/// An OAuth-authenticated Anthropic seat labeled `name` on `base`, whose
+/// requests the upstream files under `prefix` (see [`SEAT_HEADER`]).
 pub(super) fn oauth_seat(base: &str, prefix: &str, name: &str) -> ProviderEntry {
-    ProviderEntry::anthropic_api(format!("oauth://{name}")).with_base_url(format!("{base}{prefix}"))
+    ProviderEntry::anthropic_api(format!("oauth://pool-seat#{name}"))
+        .with_base_url(base)
+        .with_header_extras(BTreeMap::from([(
+            SEAT_HEADER.to_string(),
+            prefix.to_string(),
+        )]))
 }
 
 /// A daemon state over `router`, published once so a later republication

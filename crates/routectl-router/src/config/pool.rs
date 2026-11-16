@@ -1,5 +1,5 @@
-//! The `[pools.<name>]` config block: a set of same-kind provider entries
-//! (accounts) sharing one seat-selection strategy.
+//! The `[pools.<name>]` config block: a set of interchangeable provider
+//! entries (accounts) sharing one seat-selection strategy.
 //!
 //! A pool is the operator-facing multi-account shape: `[models.X] provider`
 //! may name a provider entry OR a pool, and the pool owns the strategy that
@@ -13,8 +13,9 @@ use super::{Config, ProviderEntry, SeatSelection};
 /// One `[pools.<name>]` entry: the member provider entries plus the policy
 /// that picks among them.
 ///
-/// Members are `[providers.X]` table keys, all of the same provider kind.
-/// Validation rejects a mixed-kind pool, an unknown member, a member
+/// Members are `[providers.X]` table keys that agree on format,
+/// destination, auth, OAuth vendor and cloak settings. Validation rejects
+/// members that disagree on any of those, an unknown member, a member
 /// claimed by two pools, an empty member list, and a pool name that
 /// collides with a provider entry or a model nickname.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -24,8 +25,9 @@ pub struct PoolEntry {
     /// Provider entry names that make up this pool. Required and
     /// non-empty: an empty pool serves nothing, which is a silent
     /// no-serve rather than a configuration an operator meant to write.
-    /// Every member must name an existing `[providers.X]` entry of the
-    /// same kind, and a provider entry belongs to at most one pool.
+    /// Every member must name an existing `[providers.X]` entry, all must
+    /// agree on format, destination, auth, OAuth vendor and cloak settings,
+    /// and a provider entry belongs to at most one pool.
     pub members: Vec<String>,
 
     /// How dispatch picks among this pool's members for one request.
@@ -192,11 +194,11 @@ impl Config {
     /// pool-backed model -- and a missed entry matches no price-table row and
     /// no per-kind cache rules, silently blanking that model's pricing. A pool
     /// therefore answers with a MEMBER: `validate_pools` rejects a pool whose
-    /// members disagree on `kind_str()`, so the first resolvable member stands
-    /// for the whole pool, and a usage row served through the pool bills under
-    /// that member's key. Provider entries are consulted first, which is
-    /// unambiguous because the same validator rejects a name held by both a
-    /// provider entry and a pool.
+    /// members disagree on `format` (which fixes `kind_str()`), so the first
+    /// resolvable member stands for the whole pool, and a usage row served
+    /// through the pool bills under that member's key. Provider entries are
+    /// consulted first, which is unambiguous because the same validator
+    /// rejects a name held by both a provider entry and a pool.
     #[must_use]
     pub fn provider_entry_for_target(&self, name: &str) -> Option<(&str, &ProviderEntry)> {
         if let Some((key, entry)) = self.providers.get_key_value(name) {

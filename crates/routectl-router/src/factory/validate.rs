@@ -3,7 +3,7 @@
 use super::build::ipv4_compatible_embedded;
 use super::plan::plan_provider;
 use crate::config::provider_descriptor::{Format, vendor_containment, vendor_row};
-use crate::config::{Config, PoolEntry, ProviderEntry};
+use crate::config::{Config, PoolEntry, PoolKey, PoolKeyField, ProviderEntry};
 use routectl_core::Result;
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
 #[cfg(feature = "openai-responses")]
@@ -691,9 +691,11 @@ pub const MAX_POOL_MEMBERS: usize = 32;
 /// Rejection classes, each with its own message:
 ///
 ///   - a pool naming a provider entry that does not exist,
-///   - a pool mixing provider kinds (members must be interchangeable
-///     accounts of one upstream shape, which is what keeps pools and alias
-///     chains from becoming two overlapping fallback mechanisms),
+///   - a member that differs from the pool's first member on format,
+///     destination, auth, OAuth vendor or cloak settings, one error per
+///     differing setting (members must be interchangeable seats of
+///     one upstream, which is what keeps pools and alias chains from
+///     becoming two overlapping fallback mechanisms),
 ///   - a member claimed by two pools (a provider entry belongs to at most
 ///     one pool),
 ///   - a member authenticating with an API key rather than an OAuth seat,
@@ -744,7 +746,7 @@ pub fn validate_pools(config: &Config) -> Result<()> {
             ));
         }
 
-        let mut pool_kind: Option<(&str, &str)> = None;
+        let mut pool_key: Option<(&str, PoolKey)> = None;
         for member in &pool.members {
             if let Some(previous) = claimed_by.insert(member.as_str(), pool_name.as_str())
                 && previous != pool_name.as_str()
@@ -761,18 +763,15 @@ pub fn validate_pools(config: &Config) -> Result<()> {
                 ));
                 continue;
             };
-            let kind = entry.kind_str();
-            match pool_kind {
-                None => pool_kind = Some((member.as_str(), kind)),
-                Some((first_member, first_kind)) if first_kind != kind => {
-                    errors.push(format!(
-                        "pool `{pool_name}`: member `{member}` is kind `{kind}` but member \
-                         `{first_member}` is kind `{first_kind}`; a pool groups interchangeable \
-                         accounts of ONE provider kind -- use an alias chain for ordered \
-                         fallback across kinds"
-                    ));
-                }
-                Some(_) => {}
+            let key = PoolKey::of(entry);
+            match &pool_key {
+                None => pool_key = Some((member.as_str(), key)),
+                Some((first_member, first_key)) => errors.extend(
+                    first_key
+                        .differing_fields(&key)
+                        .into_iter()
+                        .map(|field| pool_mismatch_message(pool_name, first_member, member, field)),
+                ),
             }
             if !member_authenticates_with_oauth(entry) {
                 errors.push(format!(
@@ -789,6 +788,28 @@ pub fn validate_pools(config: &Config) -> Result<()> {
     } else {
         Err(Error::Config(errors.join("\n")))
     }
+}
+
+/// One line naming a pool, two of its members and the one setting they
+/// disagree on. Only the names and the field are rendered, never either
+/// member's value: a base URL, region or credential reference does not
+/// belong in a refusal that reaches operator stdout and the reload WARN.
+fn pool_mismatch_message(
+    pool_name: &str,
+    first_member: &str,
+    member: &str,
+    field: PoolKeyField,
+) -> String {
+    format!(
+        "pool `{}`: member `{}` differs from member `{}` on {}; every member of a pool must \
+         share format, destination, auth, OAuth vendor and cloak settings (only per-seat \
+         tuning may differ) -- use an alias chain for ordered fallback across different \
+         upstreams",
+        routectl_core::sanitize_for_log(pool_name),
+        routectl_core::sanitize_for_log(member),
+        routectl_core::sanitize_for_log(first_member),
+        field.as_str(),
+    )
 }
 
 /// Whether a provider entry authenticates against a routectl-managed OAuth

@@ -2201,7 +2201,7 @@ fn config_set_refuses_the_retired_cloak_sensitive_words_with_the_loaders_line() 
         "a refused edit must not write"
     );
 
-    let (code, stdout, stderr) = set("providers.seat-a.cloak_strict_mode", "true");
+    let (code, stdout, stderr) = set("providers.seat-a.cloak_strict_mode", "false");
     assert_eq!(
         code, 0,
         "control: the live cloak key on the same entry writes: {stdout} / {stderr}"
@@ -2209,7 +2209,7 @@ fn config_set_refuses_the_retired_cloak_sensitive_words_with_the_loaders_line() 
     assert!(
         std::fs::read_to_string(&config_path)
             .expect("read config")
-            .contains("cloak_strict_mode = true"),
+            .contains("cloak_strict_mode = false"),
         "the control edit must land on disk"
     );
 }
@@ -2257,7 +2257,7 @@ fn config_set_refuses_the_retired_cloak_tool_rename_with_the_loaders_line() {
         "a refused edit must not write"
     );
 
-    let (code, stdout, stderr) = set("providers.seat-a.cloak_strict_mode", "true");
+    let (code, stdout, stderr) = set("providers.seat-a.cloak_strict_mode", "false");
     assert_eq!(
         code, 0,
         "control: the live cloak key on the same entry writes: {stdout} / {stderr}"
@@ -2265,7 +2265,7 @@ fn config_set_refuses_the_retired_cloak_tool_rename_with_the_loaders_line() {
     assert!(
         std::fs::read_to_string(&config_path)
             .expect("read config")
-            .contains("cloak_strict_mode = true"),
+            .contains("cloak_strict_mode = false"),
         "the control edit must land on disk"
     );
 }

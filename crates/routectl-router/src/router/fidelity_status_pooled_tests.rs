@@ -70,8 +70,9 @@ fn prefix_key() -> String {
 /// Parsed from toml rather than hand-mutated so the provider entries are shaped as
 /// an operator's would be -- a hand-built variant can carry a combination config
 /// validation refuses, which is the kind of fixture that proves a resolution
-/// against a state no deployment reaches. The member credentials are `oauth://`
-/// refs because `validate_pools` requires it of every pool member this release, and
+/// against a state no deployment reaches. The member credentials are labeled seats
+/// of one `oauth://` vendor because `validate_pools` requires every pool member this
+/// release to be an OAuth seat and every member of a pool to share its vendor, and
 /// [`assert_pool_config_is_valid`] is what holds the whole fixture to that standard
 /// rather than leaving it to the comment.
 fn pooled_config() -> Config {
@@ -79,10 +80,10 @@ fn pooled_config() -> Config {
     let toml_text = format!(
         "\n[providers.{MEMBER}]\nformat = \"anthropic-messages\"\n\
          base_url = \"https://api.anthropic.com\"\n\
-         credential = \"oauth://{MEMBER}\"\nauth = \"x-api-key\"\n\
+         credential = \"oauth://pool-seat#{MEMBER}\"\nauth = \"x-api-key\"\n\
          \n[providers.{OTHER_MEMBER}]\nformat = \"anthropic-messages\"\n\
          base_url = \"https://api.anthropic.com\"\n\
-         credential = \"oauth://{OTHER_MEMBER}\"\nauth = \"x-api-key\"\n"
+         credential = \"oauth://pool-seat#{OTHER_MEMBER}\"\nauth = \"x-api-key\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.pools.insert(

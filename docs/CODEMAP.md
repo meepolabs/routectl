@@ -1810,6 +1810,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   resolution of a `[models.X] provider` value to its `[providers]` entry (or a
   pool's first resolvable member) and its kind, read by the price-table and
   model-facts paths
+- `src/config/pool_key.rs` -- `PoolKey`, what every member of one pool must
+  share (format, normalized destination, auth, OAuth vendor, effective
+  `cloak_mode` / `cloak_strict_mode`), its `differing_fields` comparison read
+  by `validate_pools`, and `ProviderEntry::effective_cloak`, the one
+  resolution of an entry's cloak settings that the build path also reads
 - `src/config/provider_descriptor.rs` -- the provider descriptor: the public
   `Format` enum and two const tables. `FORMAT_ROWS` gives per format the stored
   family token and, per carrier (base URL or AWS), the `EgressKind` and accepted

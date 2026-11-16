@@ -2300,9 +2300,9 @@ mod pool_validation_tests {
             ),
             expect: &[
                 "codex-default",
-                "openai-responses",
-                "anthropic-api",
-                "ONE provider kind",
+                "anthropic-default",
+                "`format`",
+                "must share",
             ],
         });
         cases
