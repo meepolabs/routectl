@@ -183,7 +183,8 @@ async fn build_provider_inner(
     #[cfg(feature = "bedrock")] bedrock_model_id: Option<String>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    let _plan = plan_provider(name, entry)?;
+    #[cfg_attr(not(feature = "openai-responses"), allow(unused_variables))]
+    let plan = plan_provider(name, entry)?;
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,
@@ -498,15 +499,17 @@ async fn build_provider_inner(
             let auth = resolve_token_source(&secrets, api_key_ref).await?;
             let account_id =
                 resolve_responses_account_id(&secrets, api_key_ref, account_id_ref, name).await?;
-            // Resolve the stable per-credential codex session id for the
-            // ChatgptOauth surface only. `api_key_ref` already carries the
-            // seat label, so `peek_session_id` resolves THIS seat's value
-            // with no extra fallback. ApiKey / BedrockMantle (and a
-            // non-oauth ref) get None. The ref already parsed cleanly
-            // inside `resolve_token_source` above, so a parse error here
-            // is unreachable; treat it as "no session id" rather than fail
-            // the build.
-            let session_id = if *auth_kind == OpenaiResponsesAuthKind::ChatgptOauth {
+            // The codex session and installation ids are part of the codex
+            // client identity, so only a provider the plan grants that
+            // identity reads (or mints) them. `api_key_ref` already carries
+            // the seat label, so `peek_session_id` resolves THIS seat's
+            // value. The ref already parsed cleanly inside
+            // `resolve_token_source` above, so a parse error here is
+            // unreachable; treat it as "no session id" rather than fail the
+            // build. An installation-id read/write failure yields None + a
+            // WARN, never a build failure.
+            let client_identity = plan.client_identity;
+            let session_id = if client_identity {
                 match SecretRef::parse(api_key_ref) {
                     Ok(sr) => secrets.peek_session_id(&sr).await,
                     Err(_) => None,
@@ -514,12 +517,7 @@ async fn build_provider_inner(
             } else {
                 None
             };
-            // Resolve the persistent per-installation id for the
-            // ChatgptOauth surface only (adopt an existing file, mint one
-            // otherwise when the options allow it; a read/write failure
-            // yields None + a WARN, never a build failure). ApiKey /
-            // BedrockMantle get None.
-            let installation_id = if *auth_kind == OpenaiResponsesAuthKind::ChatgptOauth {
+            let installation_id = if client_identity {
                 super::installation_id::resolve_installation_id(opts.mint_installation_id)
             } else {
                 None
@@ -540,6 +538,7 @@ async fn build_provider_inner(
             cfg.user_agent = user_agent.clone();
             cfg.session_id = session_id;
             cfg.installation_id = installation_id;
+            cfg.client_identity = client_identity;
             Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
         }
         #[cfg(feature = "bedrock")]

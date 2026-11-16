@@ -47,10 +47,11 @@
 //! preserves that behavior to avoid the upstream rejecting the request
 //! for a policy mismatch.
 //!
-//! ChatGPT-OAuth `client_metadata`: the resolved per-installation id is
-//! stamped into the body's `client_metadata` object under
-//! `x-codex-installation-id`, matching where codex carries it on the
-//! streaming `/responses` call. Operator-supplied values win.
+//! Codex client identity `client_metadata`: on a provider presenting the
+//! codex client identity, the resolved per-installation id is stamped into
+//! the body's `client_metadata` object under `x-codex-installation-id`,
+//! matching where codex carries it on the streaming `/responses` call. The
+//! resolved id wins over any request-carried value.
 
 use std::fmt::Write as _;
 
@@ -598,9 +599,8 @@ const INSTALLATION_ID_METADATA_KEY: &str = "x-codex-installation-id";
 /// Stamp the resolved per-installation id into the request body's
 /// `client_metadata` object, creating that object when absent.
 ///
-/// Gated to `ChatgptOauth`: the codex backend is the only surface that
-/// reads this key, and the ApiKey / BedrockMantle lanes must carry no
-/// codex fingerprint at all.
+/// Gated on `client_identity`: the id is part of the codex client
+/// identity, which only a provider presenting that identity may carry.
 ///
 /// Must run AFTER `merge_provider_extras`, and the RESOLVED id wins
 /// unconditionally over whatever `client_metadata` carries at that point.
@@ -613,11 +613,11 @@ const INSTALLATION_ID_METADATA_KEY: &str = "x-codex-installation-id";
 /// `client_metadata` is replaced rather than left in place.
 pub(super) fn apply_installation_id(
     request: &mut ResponsesRequest,
-    auth_kind: AuthKind,
+    client_identity: bool,
     installation_id: Option<&str>,
     tap: Option<&WireTap>,
 ) {
-    if !auth_kind.is_codex_lane() {
+    if !client_identity {
         return;
     }
     let Some(iid) = installation_id else {

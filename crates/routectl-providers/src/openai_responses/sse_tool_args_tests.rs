@@ -999,6 +999,7 @@ mod through_the_provider {
             user_agent: None,
             session_id: None,
             installation_id: None,
+            client_identity: false,
             #[cfg(feature = "bedrock")]
             mantle: None,
         })

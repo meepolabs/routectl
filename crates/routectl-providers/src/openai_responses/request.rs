@@ -147,7 +147,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     // object; the resolved id wins over any request-carried value.
     extras::apply_installation_id(
         &mut request,
-        cfg.auth_kind,
+        cfg.client_identity,
         cfg.installation_id.as_deref(),
         tap,
     );

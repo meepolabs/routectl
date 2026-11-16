@@ -126,6 +126,7 @@ async fn openai_responses_provider(base_url: String, mantle: bool) -> Box<dyn Pr
         user_agent: None,
         session_id: None,
         installation_id: None,
+        client_identity: false,
         mantle: if mantle {
             Some(mantle_auth().await)
         } else {

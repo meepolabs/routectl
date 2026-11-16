@@ -28,6 +28,7 @@ fn config(base_url: &str, auth_kind: AuthKind) -> OpenAiResponsesConfig {
         user_agent: None,
         session_id: None,
         installation_id: None,
+        client_identity: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     }
@@ -389,6 +390,7 @@ fn provider_for(row: &SiteRow, with_installation_id: bool) -> OpenAiResponsesPro
     let mut cfg = config("http://127.0.0.1:9", row.lane);
     if with_installation_id {
         cfg.installation_id = row.installation_id.map(str::to_string);
+        cfg.client_identity = cfg.installation_id.is_some();
     }
     OpenAiResponsesProvider::new(cfg)
 }
@@ -466,6 +468,7 @@ fn the_api_key_lane_forwards_max_output_tokens_without_a_gate_declaration() {
 fn an_installation_id_lands_beside_client_metadata_keys_as_a_masked_add() {
     let mut cfg = config("http://127.0.0.1:9", AuthKind::ChatgptOauth);
     cfg.installation_id = Some("iid-1".into());
+    cfg.client_identity = true;
     let req = ChatRequest {
         provider_extras: Some(json!({"client_metadata": {"team": "a"}})),
         ..request()

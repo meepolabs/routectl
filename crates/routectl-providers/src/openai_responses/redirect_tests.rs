@@ -26,6 +26,7 @@ fn make_provider(base_url: &str) -> OpenAiResponsesProvider {
         user_agent: None,
         session_id: None,
         installation_id: None,
+        client_identity: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };

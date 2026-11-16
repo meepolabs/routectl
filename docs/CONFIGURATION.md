@@ -5516,6 +5516,13 @@ api_key_ref   = "oauth://codex"
 - **Default is the pinned version.** Omit the knob and routectl uses its
   baked-in default (the codex CLI version this build was cut against). The
   knob is only for tracking a version newer than the pin.
+- **Only the managed codex login presents it.** The codex identity (the
+  `User-Agent` default, `originator`, residency, `version`, session,
+  installation, thread, request and window ids) is sent only by a provider
+  whose `api_key_ref` is `oauth://codex[#label]` on `chatgpt.com`. An
+  `api-key` entry, a Bedrock Mantle entry, or a `chatgpt-oauth` entry with
+  an `env://` / `file://` token sends none of it; set `user_agent` or
+  `header_extras` there if the upstream needs them.
 - **One derivation point.** The value flows into every codex fingerprint
   surface together -- the outbound `User-Agent`, the `version` identity
   header, and the OAuth token-refresh `User-Agent` -- so they can never

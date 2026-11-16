@@ -4,9 +4,10 @@
 //!
 //!   - `chatgpt-oauth` (default): ChatGPT subscription surface
 //!     at `https://chatgpt.com/backend-api/codex`. Uses
-//!     Authorization: Bearer `<jwt>` + ChatGPT-Account-Id + originator
-//!     headers (codex parity). Fully wired: `complete()` + `stream()`
-//!     both ship.
+//!     Authorization: Bearer `<jwt>` + ChatGPT-Account-Id. The codex
+//!     client identity headers ride only a provider whose config sets
+//!     `client_identity`. Fully wired: `complete()` + `stream()` both
+//!     ship.
 //!   - `api-key`: standard OpenAI surface at
 //!     `https://api.openai.com/v1`. Uses Authorization: Bearer
 //!     <api_key> only; `OpenAI-Organization` / `OpenAI-Project` can
@@ -133,8 +134,9 @@ pub enum AuthKind {
 }
 
 impl AuthKind {
-    /// True for the ChatGPT-subscription codex surface, whose wire shape
-    /// omits `max_output_tokens` and carries the codex identity headers.
+    /// True for the ChatGPT-subscription codex surface, whose wire dialect
+    /// omits `max_output_tokens`. It says nothing about the codex client
+    /// identity, which the config's `client_identity` decides.
     #[must_use]
     pub(crate) const fn is_codex_lane(self) -> bool {
         matches!(self, Self::ChatgptOauth)
@@ -817,6 +819,10 @@ mod auth_wiring_tests;
 #[cfg(test)]
 #[path = "header_merge_tests.rs"]
 mod header_merge_tests;
+
+#[cfg(test)]
+#[path = "client_identity_wire_tests.rs"]
+mod client_identity_wire_tests;
 
 #[cfg(test)]
 #[path = "lane_mapping_tests.rs"]

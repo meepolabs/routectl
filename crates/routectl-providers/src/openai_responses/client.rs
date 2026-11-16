@@ -42,26 +42,29 @@ pub struct OpenAiResponsesConfig {
     /// (`authorization`, `host`, `content-type`, ...) are rejected
     /// at apply-time to keep the auth contract intact.
     pub header_extras: Vec<(String, String)>,
-    /// Override the User-Agent. `None` -> codex CLI's UA shape
-    /// (`codex_cli_rs/<X.Y.Z> (...) <terminal>`) so the chatgpt.com
-    /// backend sees a consistent codex client identity.
+    /// Override the User-Agent. An operator value is always sent. With
+    /// `None`, a provider presenting the codex client identity sends
+    /// codex CLI's UA shape (`codex_cli_rs/<X.Y.Z> (...) <terminal>`);
+    /// any other provider sends no User-Agent of its own.
     pub user_agent: Option<String>,
     /// Stable per-credential codex session id, stamped as the
-    /// `session-id` header on the ChatgptOauth surface. `Some` only when
-    /// the provider's `oauth://codex` credential carries a session_id
-    /// minted at login; resolved once at build time via
-    /// `SecretStore::peek_session_id`. `None` for ApiKey / BedrockMantle
-    /// providers or a credential that has none -- in every such case
-    /// `build_headers` stamps no `session-id` header.
+    /// `session-id` header when `client_identity` is set. Resolved once
+    /// at build time via `SecretStore::peek_session_id`; `None` when the
+    /// credential carries none, in which case no `session-id` is stamped.
     pub session_id: Option<String>,
     /// Persistent per-installation id (UUIDv4), stamped as the
-    /// `x-codex-installation-id` header on the ChatgptOauth surface.
-    /// `Some` when the factory resolved (adopted or minted) the id from
-    /// the config-dir file; `None` for ApiKey / BedrockMantle providers
-    /// or when the file could not be read/created -- in every such case
-    /// `build_headers` stamps no `x-codex-installation-id` header. Value
-    /// never logged.
+    /// `x-codex-installation-id` header and into the body's
+    /// `client_metadata` when `client_identity` is set. `None` when the
+    /// factory could not read or create the id file, in which case
+    /// neither stamp is made. Value never logged.
     pub installation_id: Option<String>,
+    /// Whether this provider presents the codex CLI client identity: the
+    /// codex User-Agent default, the `originator` / residency / `version`
+    /// headers, the session, installation, thread, request and window ids.
+    /// The caller decides it; the provider never infers it from
+    /// `auth_kind` or the host, which select only the wire dialect.
+    /// Default `false`, and always `false` on the Bedrock mantle lane.
+    pub client_identity: bool,
     /// Bedrock mantle authentication. `Some` selects the mantle lane
     /// (SigV4/bearer signing under the `bedrock-mantle` scope, no bearer
     /// `Authorization` from the provider, a no-redirect client, and no
@@ -92,7 +95,8 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("session_id", &self.session_id.is_some())
             // Presence only: the installation-id is a stable machine
             // fingerprint; keep its value out of logs.
-            .field("installation_id", &self.installation_id.is_some());
+            .field("installation_id", &self.installation_id.is_some())
+            .field("client_identity", &self.client_identity);
         // Mantle lane presence + its own redacting Debug (region + auth
         // shape only, never credential material).
         #[cfg(feature = "bedrock")]
@@ -123,6 +127,7 @@ impl OpenAiResponsesConfig {
             user_agent: None,
             session_id: None,
             installation_id: None,
+            client_identity: false,
             #[cfg(feature = "bedrock")]
             mantle: None,
         }
@@ -159,22 +164,21 @@ impl OpenAiResponsesProvider {
     ///
     /// A config carrying a `mantle` block is a Bedrock Mantle provider
     /// whatever its `auth_kind` says: `auth_kind` is set to `BedrockMantle`
-    /// here, so the request translation's Mantle withholds and the signing
-    /// transport can never disagree about the lane.
+    /// and `client_identity` cleared here, so the request translation's
+    /// Mantle withholds and the signing transport can never disagree about
+    /// the lane, and no codex identity rides an AWS-signed request.
     #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
     pub fn new(mut cfg: OpenAiResponsesConfig) -> Self {
         #[cfg(feature = "bedrock")]
         if cfg.mantle.is_some() {
             cfg.auth_kind = AuthKind::BedrockMantle;
+            cfg.client_identity = false;
         }
-        // Always pass an explicit UA string so the client-level default
-        // header carries the codex-derived value. Operator-supplied
-        // `cfg.user_agent` wins; otherwise fall back to the codex CLI
-        // UA shape from auth::default_user_agent.
         let ua = cfg
             .user_agent
             .clone()
-            .unwrap_or_else(auth::default_user_agent);
+            .or_else(|| cfg.client_identity.then(auth::default_user_agent));
+        let ua = ua.as_deref();
 
         // Mantle lane: a signed POST must never be auto-followed across a
         // 3xx -- replaying the SigV4 signature against a redirected host
@@ -185,7 +189,7 @@ impl OpenAiResponsesProvider {
         // no-redirect posture (cookie-backed or not) -- see http_client.rs.
         #[cfg(feature = "bedrock")]
         if cfg.mantle.is_some() {
-            let client = crate::http_client::build_no_redirect(Some(&ua), &cfg.base_url)
+            let client = crate::http_client::build_no_redirect(ua, &cfg.base_url)
                 .expect("reqwest no-redirect client build failed (TLS init?); fatal at startup");
             return Self {
                 cfg,
@@ -210,17 +214,16 @@ impl OpenAiResponsesProvider {
             Some(path) => {
                 let jar = cookies::load_jar(path);
                 let client = crate::http_client::build_with_cookie_provider(
-                    Some(&ua),
+                    ua,
                     &cfg.base_url,
                     Arc::clone(&jar),
                 );
                 (client, Some(jar))
             }
             None => {
-                let client = crate::http_client::build_no_redirect(Some(&ua), &cfg.base_url)
-                    .expect(
-                        "reqwest no-redirect client build failed (TLS init?); fatal at startup",
-                    );
+                let client = crate::http_client::build_no_redirect(ua, &cfg.base_url).expect(
+                    "reqwest no-redirect client build failed (TLS init?); fatal at startup",
+                );
                 (client, None)
             }
         };
@@ -296,17 +299,15 @@ impl OpenAiResponsesProvider {
         // entry. reqwest's `RequestBuilder::header()` APPENDS on
         // collision; `HeaderMap::insert` replaces. The insertion order
         // encodes the override precedence (later wins):
-        //   1. compiled codex identity defaults (ChatgptOauth only)
+        //   1. compiled codex identity defaults (client identity only)
         //   2. operator header_extras (overrides matching defaults)
         //   3. per-request / per-provider UUIDs (always win)
         let mut header_map = reqwest::header::HeaderMap::new();
 
-        // Compiled codex identity defaults. Fire by default on the
-        // ChatgptOauth path so a zero-config operator (auth_kind +
-        // api_key_ref only) still emits a full codex fingerprint. The
-        // header_extras loop below OVERRIDES any matching key. ApiKey /
-        // BedrockMantle get no defaults (no codex fingerprint).
-        if self.cfg.auth_kind.is_codex_lane() {
+        // Compiled codex identity defaults, sent only when the provider
+        // presents the codex client identity. The header_extras loop below
+        // OVERRIDES any matching key.
+        if self.cfg.client_identity {
             for (k, v) in routectl_core::identity::codex::default_identity_headers() {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
@@ -342,14 +343,14 @@ impl OpenAiResponsesProvider {
         );
         crate::http_client::apply_header_extras(&mut header_map, &source, &self.cfg.id, &[]);
 
-        // On the ChatgptOauth path, inject the per-request and
+        // With the codex client identity, inject the per-request and
         // per-provider codex identity headers. These OVERRIDE any
         // same-named header_extras entry (HeaderMap::insert replaces):
         //   - thread-id / x-client-request-id: one fresh UUIDv4 per
         //     request, shared between the two. Codex pairs them.
         //   - x-codex-window-id: the per-provider UUID from
         //     `self.window_id`, stable across requests on this instance.
-        if self.cfg.auth_kind.is_codex_lane() {
+        if self.cfg.client_identity {
             let thread_id = uuid::Uuid::new_v4().to_string();
             crate::http_client::insert_header(
                 &mut header_map,

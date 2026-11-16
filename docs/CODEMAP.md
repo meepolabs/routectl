@@ -1618,6 +1618,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   built directly with a host-altering region is refused at construction, and
   each mantle lane present in the feature set sends nothing (no connection,
   auth header, or body) and fails with a config error
+- `tests/codex_identity_fingerprint_coherence.rs` -- single-test binary: with
+  a configured codex identity installed, a provider presenting the codex
+  client identity sends that version in its User-Agent and `version` header,
+  and its User-Agent equals the refresh client's `codex_user_agent()`
 - `tests/bedrock_default_chain_resolve.rs` -- isolated binary pinning
   `bedrock::auth::resolve(DefaultChain)` under a scrubbed `AWS_*` env with IMDS
   off: no credential source -> `Error::Auth`, env creds -> SigV4 with those
@@ -5449,6 +5453,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   -> changed-reload -> same-value re-install: boot INFO fires once, a refused
   re-install with a different value WARNs pending-restart (no false INFO), and
   a same-value no-op stays silent
+- `tests/codex_identity_contained_build.rs` -- serial binary pinning that the
+  factory gives the codex session and installation ids only to a managed
+  codex login on chatgpt.com: it mints the installation id once and adopts it
+  on the next build, while the env-bearer chatgpt, api-key and mantle lanes
+  read no session id, create no id file and stamp none in the body
 - `tests/codex_identity_refused_entry.rs` -- single-test binary pinning that a
   direct build the provider plan refuses leaves the process-global codex
   identity unset, so the next accepted entry installs its own version

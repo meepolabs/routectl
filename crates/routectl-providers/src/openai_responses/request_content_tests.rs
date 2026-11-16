@@ -776,6 +776,7 @@ fn provider_extras_client_metadata_forwards() {
 fn cfg_with_installation_id(installation_id: &str) -> OpenAiResponsesConfig {
     let mut c = cfg();
     c.installation_id = Some(installation_id.into());
+    c.client_identity = true;
     c
 }
 

@@ -192,6 +192,7 @@ async fn responses_provider(terminated: bool) -> (MockServer, OpenAiResponsesPro
         user_agent: None,
         session_id: None,
         installation_id: None,
+        client_identity: false,
         mantle: None,
     });
     (server, provider)

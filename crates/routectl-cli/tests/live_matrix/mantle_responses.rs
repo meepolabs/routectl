@@ -64,6 +64,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
         user_agent: Some("routectl-live-test/0.4".into()),
         session_id: None,
         installation_id: None,
+        client_identity: false,
         mantle: Some(MantleAuth {
             region: region.clone(),
             creds: resolved,

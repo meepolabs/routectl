@@ -246,6 +246,8 @@ fn refused_entries(lane: &VendorLane, r: &str) -> Vec<(String, ProviderEntry)> {
         v.push(("mantle carrier".to_string(), mantle_chat(r)));
         v.push(("native bedrock creds".to_string(), native_bedrock(r)));
     }
+    #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
+    v.push(("responses mantle carrier".to_string(), mantle_responses(r)));
     v
 }
 
