@@ -10,7 +10,7 @@ use routectl_core::{
 };
 use serde_json::{Value, json};
 
-use super::super::cloak::{ClaudeCodeIdentity, CloakConfig, ToolRename, cloak_oauth_egress};
+use super::super::cloak::{ClaudeCodeIdentity, CloakConfig, cloak_oauth_egress};
 use super::super::request;
 
 fn tapped(mut req: ChatRequest) -> (ChatRequest, WireTap) {
@@ -461,25 +461,6 @@ fn the_cloak_tool_rename_declares_each_renamed_name() {
         ])
     );
     assert!(quiet.is_empty(), "{quiet:?}");
-}
-
-#[test]
-fn the_operator_tool_rename_declares_its_rename() {
-    let config = CloakConfig {
-        tool_rename: vec![ToolRename {
-            from: "mcp__a".into(),
-            to: "mcp__b".into(),
-        }],
-        ..CloakConfig::default()
-    };
-    let body = json!({"tools": [{"name": "mcp__a"}], "messages": [user_turn()]});
-
-    let edits = cloak_edits(body, false, &config);
-
-    assert!(
-        edits.contains(&(EditKind::Rewrite, "/tools/0/name".to_string())),
-        "{edits:?}"
-    );
 }
 
 #[test]

@@ -45,14 +45,6 @@ fn cloak_mode_schema_renders() {
     ));
 }
 
-#[cfg(feature = "anthropic-api")]
-#[test]
-fn tool_rename_schema_renders() {
-    assert_renders(schemars::schema_for!(
-        routectl_providers::anthropic_api::ToolRename
-    ));
-}
-
 #[cfg(feature = "openai-responses")]
 #[test]
 fn openai_responses_auth_kind_schema_renders() {

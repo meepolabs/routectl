@@ -1,10 +1,9 @@
-//! Normalizes tool names to the mcp__ prefix and applies operator renames.
+//! Normalizes tool names to the mcp__ prefix and records the per-request
+//! reverse map that restores the client's names on the response.
 
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-
-use super::ToolRename;
 
 /// The single-underscore `mcp_` prefix: a non-Claude-Code tool name shape
 /// that, alongside any other non-`mcp__` name, trips the Anthropic
@@ -44,70 +43,11 @@ const MCP_DOUBLE_PREFIX: &str = "mcp__";
 ///   (`.tool_name`)
 pub(super) fn normalize_tool_names_to_mcp(body: &mut Value) -> HashMap<String, String> {
     let mut reverse: HashMap<String, String> = HashMap::new();
-    rename_tool_names_with(body, &mut reverse, &renamed_to_mcp);
-    reverse
-}
-
-/// Apply an operator-configured `tool_rename` map over the SAME tool-name
-/// JSON paths the tool-name normalization walks, recording reverse entries
-/// into the SAME `reverse` map so renamed names also restore on the
-/// response. Runs AFTER `normalize_tool_names_to_mcp`, so a `from` targeting
-/// a post-normalization name (e.g. `mcp__x`) matches the already-normalized
-/// wire name. An empty map is a no-op. Each rename honors the same
-/// collision guard and builtin-skip as the normalization pass.
-///
-/// First-from-wins on duplicate `from` keys; an entry with an empty `from`
-/// is skipped. The reverse map records first-seen per renamed name,
-/// consistent with `rename_name_field`.
-pub(super) fn apply_tool_rename(
-    body: &mut Value,
-    renames: &[ToolRename],
-    reverse: &mut HashMap<String, String>,
-) {
-    if renames.is_empty() {
-        return;
-    }
-    let mut map: HashMap<String, String> = HashMap::new();
-    for r in renames {
-        if r.from.is_empty() {
-            continue;
-        }
-        map.entry(r.from.clone()).or_insert_with(|| r.to.clone());
-    }
-    if map.is_empty() {
-        return;
-    }
-    let renamer = move |name: &str| -> Option<String> {
-        match map.get(name) {
-            Some(to) if to != name => Some(to.clone()),
-            _ => None,
-        }
-    };
-    rename_tool_names_with(body, reverse, &renamer);
-}
-
-/// Walk every tool-name JSON path and apply `renamer` (returning the new
-/// name or `None` to leave the field untouched), recording reverse entries.
-/// Shared by the tool-name normalization and the operator `tool_rename` pass
-/// so both touch exactly the same surfaces and obey the same collision guard.
-///
-/// Paths walked (serde_json `Value`, by path not typed enum, so unknown
-/// forward-compat block types are still handled correctly):
-/// - `tools[].name`
-/// - `tool_choice.name` (when `tool_choice.type == "tool"`)
-/// - `messages[].content[]` entries of type `tool_use` (`.name`)
-/// - `messages[].content[]` entries of type `tool_reference` (`.tool_name`)
-/// - nested `tool_result.content[]` entries of type `tool_reference`
-///   (`.tool_name`)
-fn rename_tool_names_with(
-    body: &mut Value,
-    reverse: &mut HashMap<String, String>,
-    renamer: &dyn Fn(&str) -> Option<String>,
-) {
     let existing = collect_existing_tool_names(body);
-    rename_tools_array(body, &existing, reverse, renamer);
-    rename_tool_choice(body, &existing, reverse, renamer);
-    rename_message_tool_refs(body, &existing, reverse, renamer);
+    rename_tools_array(body, &existing, &mut reverse);
+    rename_tool_choice(body, &existing, &mut reverse);
+    rename_message_tool_refs(body, &existing, &mut reverse);
+    reverse
 }
 
 /// Compute the canonical `mcp__` form of a tool name, or `None` if it
@@ -156,12 +96,11 @@ fn rename_name_field(
     field: &str,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
-    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let Some(original) = obj.get(field).and_then(Value::as_str).map(str::to_string) else {
         return;
     };
-    let Some(renamed) = renamer(&original) else {
+    let Some(renamed) = renamed_to_mcp(&original) else {
         return;
     };
     if existing.contains(&renamed) {
@@ -177,8 +116,7 @@ fn rename_name_field(
     // First-seen is sufficient: the prefix-only mcp normalization maps a
     // given original to exactly one renamed form, and the collision guard
     // above skips a rename whose target already exists among tool names, so
-    // distinct originals do not silently share one renamed form; for the
-    // operator tool_rename pass first-seen is the documented contract.
+    // distinct originals do not silently share one renamed form.
     reverse.entry(renamed).or_insert(original);
 }
 
@@ -188,7 +126,6 @@ fn rename_tools_array(
     body: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
-    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
@@ -197,7 +134,7 @@ fn rename_tools_array(
         if tool_is_builtin(tool) {
             continue;
         }
-        rename_name_field(tool, "name", existing, reverse, renamer);
+        rename_name_field(tool, "name", existing, reverse);
     }
 }
 
@@ -215,7 +152,6 @@ fn rename_tool_choice(
     body: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
-    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let is_tool_choice = body
         .get("tool_choice")
@@ -226,7 +162,7 @@ fn rename_tool_choice(
         return;
     }
     if let Some(tc) = body.get_mut("tool_choice") {
-        rename_name_field(tc, "name", existing, reverse, renamer);
+        rename_name_field(tc, "name", existing, reverse);
     }
 }
 
@@ -237,7 +173,6 @@ fn rename_message_tool_refs(
     body: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
-    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
@@ -247,7 +182,7 @@ fn rename_message_tool_refs(
             continue;
         };
         for part in content.iter_mut() {
-            rename_content_part(part, existing, reverse, renamer);
+            rename_content_part(part, existing, reverse);
         }
     }
 }
@@ -259,18 +194,17 @@ fn rename_content_part(
     part: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
-    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     match part.get("type").and_then(Value::as_str) {
-        Some("tool_use") => rename_name_field(part, "name", existing, reverse, renamer),
-        Some("tool_reference") => rename_name_field(part, "tool_name", existing, reverse, renamer),
+        Some("tool_use") => rename_name_field(part, "name", existing, reverse),
+        Some("tool_reference") => rename_name_field(part, "tool_name", existing, reverse),
         Some("tool_result") => {
             let Some(nested) = part.get_mut("content").and_then(Value::as_array_mut) else {
                 return;
             };
             for nested_part in nested.iter_mut() {
                 if nested_part.get("type").and_then(Value::as_str) == Some("tool_reference") {
-                    rename_name_field(nested_part, "tool_name", existing, reverse, renamer);
+                    rename_name_field(nested_part, "tool_name", existing, reverse);
                 }
             }
         }

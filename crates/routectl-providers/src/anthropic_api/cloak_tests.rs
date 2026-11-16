@@ -1094,14 +1094,13 @@ fn normalize_is_deterministic_same_input_byte_identical() {
 // -- CloakConfig defaults ----------------------------------------------
 
 #[test]
-fn cloak_config_default_is_auto_false_empty() {
+fn cloak_config_default_is_auto_and_not_strict() {
     // Arrange / Act
     let cfg = CloakConfig::default();
 
     // Assert
     assert_eq!(cfg.mode, CloakMode::Auto);
     assert!(!cfg.strict_mode);
-    assert!(cfg.tool_rename.is_empty());
 }
 
 #[test]
@@ -1215,110 +1214,6 @@ fn default_config_byte_identical_to_base_transforms_genuine_cc() {
     // and NO metadata was minted.
     assert_ne!(via_config["system"][0]["text"], INTERACTIVE_IDENTITY_LINE);
     assert!(via_config.get("metadata").is_none());
-}
-
-// -- tool_rename --------------------------------------------------------
-
-#[test]
-fn tool_rename_applies_to_tools_and_tool_use_and_records_reverse() {
-    // Arrange: an operator rename across tools + tool_use. Because the
-    // tool-name normalization runs FIRST, a bare `foo` is already
-    // `mcp__foo` on the wire by the time the operator pass runs, so the
-    // rename keys on the normalized name `mcp__foo`.
-    let id = identity();
-    let req = ChatRequest::default();
-    let mut body = json!({
-        "tools": [{"name": "foo"}],
-        "messages": [{
-            "role": "assistant",
-            "content": [{"type": "tool_use", "id": "t1", "name": "foo", "input": {}}]
-        }]
-    });
-    let cfg = CloakConfig {
-        tool_rename: vec![ToolRename {
-            from: "mcp__foo".into(),
-            to: "bar".into(),
-        }],
-        ..CloakConfig::default()
-    };
-
-    // Act
-    let result = cloak_oauth_egress(&mut body, &req, &id, false, &cfg).expect("cloak applies");
-
-    // Assert: forward rename applied on both surfaces.
-    assert_eq!(body["tools"][0]["name"], "bar");
-    assert_eq!(body["messages"][0]["content"][0]["name"], "bar");
-    // Both reverse hops recorded: the normalization mcp__foo->foo and the
-    // operator rename bar->mcp__foo.
-    assert_eq!(
-        result.tool_reverse.get("mcp__foo").map(String::as_str),
-        Some("foo")
-    );
-    assert_eq!(
-        result.tool_reverse.get("bar").map(String::as_str),
-        Some("mcp__foo")
-    );
-}
-
-/// Ordering: tool-name normalization runs FIRST, then operator
-/// tool_rename. A rename targeting the post-normalization name `mcp__x`
-/// must match (because the wire name is already `mcp__x` by the time the
-/// operator pass runs). A rename keyed on the pre-normalization `mcp_x`
-/// must NOT match (the normalization pass already changed it).
-#[test]
-fn tool_rename_runs_after_tool_name_normalization() {
-    let id = identity();
-    let req = ChatRequest::default();
-
-    // (a) rename keyed on the normalized name mcp__x -> renamed.
-    let mut body_a = json!({"tools": [{"name": "mcp_x"}]});
-    let cfg_a = CloakConfig {
-        tool_rename: vec![ToolRename {
-            from: "mcp__x".into(),
-            to: "renamed".into(),
-        }],
-        ..CloakConfig::default()
-    };
-    let res_a = cloak_oauth_egress(&mut body_a, &req, &id, false, &cfg_a).expect("cloak applies");
-    assert_eq!(
-        body_a["tools"][0]["name"], "renamed",
-        "rename keyed on the normalized name must match"
-    );
-    // Both reverse hops are recorded: mcp__x->mcp_x (from the
-    // normalization pass) and renamed->mcp__x (from the operator pass).
-    assert_eq!(
-        res_a.tool_reverse.get("mcp__x").map(String::as_str),
-        Some("mcp_x")
-    );
-    assert_eq!(
-        res_a.tool_reverse.get("renamed").map(String::as_str),
-        Some("mcp__x")
-    );
-
-    // (b) rename keyed on the PRE-normalization name mcp_x must NOT match
-    // (the normalization pass already rewrote it to mcp__x first).
-    let mut body_b = json!({"tools": [{"name": "mcp_x"}]});
-    let cfg_b = CloakConfig {
-        tool_rename: vec![ToolRename {
-            from: "mcp_x".into(),
-            to: "should_not_apply".into(),
-        }],
-        ..CloakConfig::default()
-    };
-    cloak_oauth_egress(&mut body_b, &req, &id, false, &cfg_b).expect("cloak applies");
-    assert_eq!(
-        body_b["tools"][0]["name"], "mcp__x",
-        "rename keyed on the pre-normalization name must NOT match"
-    );
-}
-
-#[test]
-fn tool_rename_empty_is_noop() {
-    let mut body = json!({"tools": [{"name": "foo"}]});
-    let mut reverse: HashMap<String, String> = HashMap::new();
-    apply_tool_rename(&mut body, &[], &mut reverse);
-    assert_eq!(body["tools"][0]["name"], "foo");
-    assert!(reverse.is_empty());
 }
 
 // -- tool-array canonicalization (normalize_tools) ---------------------

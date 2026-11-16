@@ -670,3 +670,47 @@ fn a_cloak_word_list_is_refused_in_every_spelling_the_typed_parse_accepts() {
         assert_eq!(msg, expected, "row `{row}`");
     }
 }
+
+/// The cloak table does not deny unknown fields, so the typed parse alone
+/// would take leftover rename pairs without a word; the table refuses them in
+/// every spelling TOML allows for the nested key, the array-of-tables form
+/// included.
+#[test]
+fn cloak_tool_renames_are_refused_in_every_spelling_the_typed_parse_accepts() {
+    let provider =
+        "[providers.sub]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n";
+    let pair = format!("from = \"{SENTINEL}\"\nto = \"y\"\n");
+    let rows = [
+        (
+            "array of tables",
+            format!("{provider}[[providers.sub.cloak.tool_rename]]\n{pair}"),
+        ),
+        (
+            "inline table",
+            format!(
+                "{provider}cloak = {{ tool_rename = [{{ from = \"{SENTINEL}\", to = \"y\" }}] }}\n"
+            ),
+        ),
+        (
+            "dotted key",
+            format!("{provider}cloak.tool_rename = [{{ from = \"{SENTINEL}\", to = \"y\" }}]\n"),
+        ),
+    ];
+    let expected = "`providers.sub.cloak.tool_rename` is retired: tool names are normalized \
+                    to mcp__ only; delete it";
+
+    for (row, body) in rows {
+        // Arrange
+        let raw = format!("version = {CURRENT_CONFIG_VERSION}\n{body}");
+        assert!(
+            crate::parse_config(&raw).is_ok(),
+            "control `{row}`: the typed parse alone accepts the key"
+        );
+
+        // Act
+        let msg = refusal_message(&raw);
+
+        // Assert
+        assert_eq!(msg, expected, "row `{row}`");
+    }
+}

@@ -36,7 +36,7 @@ mod tool_sort;
 use billing::strip_billing_block;
 pub use identity::RelocationRefusal;
 use identity::{mint_metadata_user_id, relocate_client_system};
-use tool_rename::{apply_tool_rename, normalize_tool_names_to_mcp};
+use tool_rename::normalize_tool_names_to_mcp;
 use tool_sort::sort_custom_tools_by_name;
 
 #[cfg(test)]
@@ -62,35 +62,16 @@ pub enum CloakMode {
     /// minted metadata `user_id` regardless of the session-id header.
     Always,
     /// Skip the cloak entirely: no billing strip, no identity, no
-    /// metadata, no tool-name normalization, no tool rename. The body goes
-    /// upstream untouched.
+    /// metadata, no tool-name normalization. The body goes upstream
+    /// untouched.
     Never,
-}
-
-/// A single operator-configured tool-name rename. Applied AFTER the
-/// always-on tool-name `mcp__` normalization, over the same tool-name JSON
-/// paths, recording reverse entries so renamed names restore on the
-/// response.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ToolRename {
-    /// The tool name as the client sends it (the rename source).
-    pub from: String,
-    /// The tool name routectl rewrites it to on the wire (the rename
-    /// target).
-    pub to: String,
 }
 
 /// Opt-in, empty-default configuration surface for the OAuth-egress cloak.
 /// `CloakConfig::default()` selects the standard cloak: mode `Auto`,
 /// `strict_mode` false (relocate the client system into the first user
-/// message rather than dropping it), no operator tool renames.
-///
-/// `Debug` is hand-rolled (NOT derived) to print mode + strict_mode +
-/// COUNTS only. The configured `tool_rename` pairs are operator content and
-/// must never enter Debug output or logs -- a derived `Debug` would leak them
-/// through a future `dbg!(&cfg.cloak)` or `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and
-/// `AnthropicApiConfig` both Debug-format this, so the impl is mandatory.
-#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
+/// message rather than dropping it).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CloakConfig {
     /// Cloak mode. Default `Auto` (original heuristic).
@@ -103,12 +84,6 @@ pub struct CloakConfig {
     /// reminder). Egress-only: the response never echoes `system`, so there
     /// is no reverse map for this transform.
     pub strict_mode: bool,
-    /// Operator tool renames, applied after the tool-name normalization.
-    /// Default empty (no renames). IMPORTANT: because normalization runs
-    /// first and prefixes every non-`mcp__` tool with `mcp__`, the `from`
-    /// key must be the POST-normalization wire name (e.g. `mcp__read_file`,
-    /// not the client's original `read_file`) or it will silently no-match.
-    pub tool_rename: Vec<ToolRename>,
     /// Tool-array canonicalization switch. NOT an operator-facing `[cloak]`
     /// key: it is `#[serde(skip)]` so it never appears in the config schema,
     /// and is stamped programmatically from the global `[cache]
@@ -128,23 +103,8 @@ impl Default for CloakConfig {
         Self {
             mode: CloakMode::default(),
             strict_mode: false,
-            tool_rename: Vec::new(),
             normalize_tools: true,
         }
-    }
-}
-
-impl std::fmt::Debug for CloakConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Counts/mode ONLY: the tool_rename from/to pairs are operator
-        // content and must never reach Debug output or logs (log-hygiene
-        // rule).
-        f.debug_struct("CloakConfig")
-            .field("mode", &self.mode)
-            .field("strict_mode", &self.strict_mode)
-            .field("tool_rename_count", &self.tool_rename.len())
-            .field("normalize_tools", &self.normalize_tools)
-            .finish()
     }
 }
 
@@ -314,15 +274,13 @@ impl CloakPolicyTally {
 ///
 /// Errors with [`CloakRefusal::Relocation`] when the relocation has nowhere
 /// legal to land (see `relocate_client_system`). The refusal is returned
-/// before any network I/O and the body must then not be sent; the canonical request is never touched, so every other
-/// target still builds from the original.
+/// before any network I/O and the body must then not be sent; the canonical
+/// request is never touched, so every other target still builds from the
+/// original.
 ///
 /// Order is load-bearing and cache-safe: identity/billing transforms
 /// first, then the always-on tool-name normalization (every non-`mcp__`
-/// name to `mcp__`), then operator `tool_rename` over the SAME tool-name
-/// paths (recording reverse entries into the SAME map). With a default
-/// (empty) `config`, the output adds nothing beyond the base
-/// cloak transforms.
+/// name to `mcp__`, recording the reverse map), then the tool sort.
 pub fn cloak_oauth_egress(
     body: &mut Value,
     req: &ChatRequest,
@@ -358,8 +316,7 @@ pub fn cloak_oauth_egress(
         wire_edits::declare_cloak_user_id(tap, before.as_ref(), body);
     }
     let names_before = wire_edits::ToolNames::capture(tap, body);
-    let mut tool_reverse = normalize_tool_names_to_mcp(body);
-    apply_tool_rename(body, &config.tool_rename, &mut tool_reverse);
+    let tool_reverse = normalize_tool_names_to_mcp(body);
     let names_after = wire_edits::ToolNames::capture(tap, body);
     wire_edits::declare_cloak_tool_names(
         tap,

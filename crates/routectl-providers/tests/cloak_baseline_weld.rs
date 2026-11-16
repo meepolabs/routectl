@@ -177,20 +177,6 @@ const TIER_ONE: &[TierOneRow] = &[
         known_loss: None,
     },
     TierOneRow {
-        item: "apply_tool_rename",
-        file: "anthropic_api/cloak/tool_rename.rs",
-        role: Role::Transform,
-        gate: Gate::CloakPathOperatorRenames,
-        reason: "applies the operator's configured renames over the same tool-name paths AFTER \
-                 normalization, recording into the same reverse map, so the `from` key is the \
-                 post-normalization wire name",
-        known_loss: Some(
-            "a rename whose target collides with an existing tool name is skipped with a WARN \
-             rather than applied, so the operator's configured rename silently does not happen \
-             for that name",
-        ),
-    },
-    TierOneRow {
         item: "sort_custom_tools_by_name",
         file: "anthropic_api/cloak/tool_sort.rs",
         role: Role::Transform,
@@ -209,7 +195,7 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::CloakPathAlways,
-        reason: "the orchestrator itself: calls the six transforms in their load-bearing order \
+        reason: "the orchestrator itself: calls the five transforms in their load-bearing order \
                  and flushes the per-request policy tally once, writing no wire mutation of its \
                  own",
         known_loss: None,
@@ -274,17 +260,8 @@ const TIER_ONE: &[TierOneRow] = &[
         file: CLOAK_ROOT,
         role: Role::Support,
         gate: Gate::ProviderConstruction,
-        reason: "the empty-default operator configuration surface (mode Auto, no strict mode, \
-                 no renames); a config constructor, not a transform",
-        known_loss: None,
-    },
-    TierOneRow {
-        item: "CloakConfig::fmt",
-        file: CLOAK_ROOT,
-        role: Role::Support,
-        gate: Gate::ProviderConstruction,
-        reason: "the hand-rolled Debug that prints mode and COUNTS only, so operator-configured \
-                 renames cannot reach a log through a derived Debug",
+        reason: "the empty-default operator configuration surface (mode Auto, no strict mode); \
+                 a config constructor, not a transform",
         known_loss: None,
     },
     TierOneRow {
@@ -318,9 +295,6 @@ enum Gate {
     /// The cloaked path AND the non-CC arm AND the operator's tool-canonicalization
     /// switch left on.
     CloakPathNonCcNormalizeTools,
-    /// The cloaked path, with a body effect only when the operator configured
-    /// at least one tool rename.
-    CloakPathOperatorRenames,
     /// Provider construction / config deserialization, not a per-request path.
     ProviderConstruction,
     /// The lane predicate: OauthBearer auth kind AND exactly the
@@ -361,7 +335,6 @@ impl Gate {
         Self::CloakPathAlways,
         Self::CloakPathNonCc,
         Self::CloakPathNonCcNormalizeTools,
-        Self::CloakPathOperatorRenames,
         Self::ProviderConstruction,
         Self::CloakLane,
         Self::CloakLaneNonCc,
@@ -887,7 +860,7 @@ fn injected_error(source: &str) -> String {
 #[test]
 fn every_visibility_that_reaches_the_orchestrator_is_eligible_whatever_its_spelling() {
     // Eligibility is a question about module depth, not about the `pub(super)`
-    // spelling the six live transforms happen to share. A weld keyed on that
+    // spelling the five live transforms happen to share. A weld keyed on that
     // spelling passes a `pub(crate) fn` added to a leaf file and wired into the
     // orchestrator, which is the same defect wearing a different qualifier.
     let items = injected_items(

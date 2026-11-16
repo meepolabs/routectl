@@ -1015,7 +1015,7 @@ license.
   once-per-flip overage state machine (`classify_overage_transition`); wired
   into the egress complete/stream dir-3 sites
 - `src/anthropic_api/cloak.rs` -- OauthBearer-egress cloak root: shared
-  config/types (`CloakMode`, `ToolRename`, `CloakConfig`, `CloakResult`,
+  config/types (`CloakMode`, `CloakConfig`, `CloakResult`,
   `ClaudeCodeIdentity`), the `cloak_oauth_egress` orchestrator, `CloakPolicyTally`
 - `src/anthropic_api/cloak_policy_counter_tests.rs` -- the cloak's telemetry
   pinning set: one counter-delta-plus-log test per policy class, with the
@@ -1038,8 +1038,8 @@ license.
   `metadata.user_id` (`relocate_client_system` -> `RelocationOutcome` /
   `RelocationRefusal`, `mint_metadata_user_id`)
 - `src/anthropic_api/cloak/tool_rename.rs` -- tool-name `mcp__` normalization
-  and operator `tool_rename` over the same tool-name paths, recording the
-  per-request reverse map (`normalize_tool_names_to_mcp`, `apply_tool_rename`)
+  over every tool-name path, recording the per-request reverse map
+  (`normalize_tool_names_to_mcp`)
 - `src/anthropic_api/cloak/tool_sort.rs` -- all-or-nothing stable sort of
   `tools[]` by name on the non-CC egress, gated on
   `is_non_cc && CloakConfig::normalize_tools` (`sort_custom_tools_by_name` -> `ToolSortOutcome`)

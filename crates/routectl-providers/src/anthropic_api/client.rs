@@ -90,10 +90,9 @@ pub struct AnthropicApiConfig {
     /// such case `build_headers` stamps no session-id header.
     pub session_id: Option<String>,
     /// Opt-in OAuth-cloak configuration. `CloakConfig::default()` (mode
-    /// `auto`, no strict mode, no tool renames) leaves the egress behavior
-    /// identical to the always-on `mcp_` normalization -- zero config change
-    /// for existing operators. Threaded into `cloak_body` to gate the mode
-    /// and feed the tool-rename pass.
+    /// `auto`, no strict mode) leaves the egress behavior identical to the
+    /// always-on `mcp_` normalization -- zero config change for existing
+    /// operators. Threaded into `cloak_body` to gate the mode.
     pub cloak: CloakConfig,
     /// True only for a provider entry configured
     /// `credential_source = "forwarded"` (set by the factory from
@@ -135,12 +134,8 @@ impl std::fmt::Debug for AnthropicApiConfig {
             // Presence only: the session_id ties requests to one logical
             // session; treat as sensitive so its value never enters logs.
             .field("session_id", &self.session_id.is_some())
-            // Cloak surface: counts/mode ONLY -- the configured tool-rename
-            // pairs are operator content and must never enter Debug output or
-            // logs.
             .field("cloak_mode", &self.cloak.mode)
             .field("cloak_strict_mode", &self.cloak.strict_mode)
-            .field("cloak_tool_rename_count", &self.cloak.tool_rename.len())
             .field("use_forwarded_bearer", &self.use_forwarded_bearer);
         // Mantle lane presence + its own redacting Debug (region + auth
         // shape only, never credential material).

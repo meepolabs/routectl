@@ -315,8 +315,7 @@ stream_first_byte_timeout_ms = 300000
     assert_eq!(m.stream_first_byte_timeout_ms, Some(300_000));
 }
 
-/// A `[providers.X.cloak]` block with mode + strict_mode + tool_rename
-/// (array of tables) parses into the entry's `CloakConfig`, and round-trips
+/// A `[providers.X.cloak]` block with mode + strict_mode parses into the entry's `CloakConfig`, and round-trips
 /// through serialize + re-parse.
 #[test]
 fn anthropic_api_cloak_block_parses_and_round_trips() {
@@ -330,25 +329,12 @@ api_key_ref = "literal:sk-ant-test"
 [providers.anthropic.cloak]
 mode = "always"
 strict_mode = true
-
-[[providers.anthropic.cloak.tool_rename]]
-from = "foo"
-to = "bar"
-
-[[providers.anthropic.cloak.tool_rename]]
-from = "baz"
-to = "qux"
 "#;
     let cfg_in: Config = toml::from_str(toml_text).expect("parse cloak block");
     let assert_cloak = |entry: &ProviderEntry| match entry {
         ProviderEntry::AnthropicApi { cloak, .. } => {
             assert_eq!(cloak.mode, CloakMode::Always);
             assert!(cloak.strict_mode);
-            assert_eq!(cloak.tool_rename.len(), 2);
-            assert_eq!(cloak.tool_rename[0].from, "foo");
-            assert_eq!(cloak.tool_rename[0].to, "bar");
-            assert_eq!(cloak.tool_rename[1].from, "baz");
-            assert_eq!(cloak.tool_rename[1].to, "qux");
         }
         other => panic!("expected AnthropicApi entry; got {other:?}"),
     };
@@ -361,7 +347,7 @@ to = "qux"
 }
 
 /// Omitting the `[cloak]` block yields `CloakConfig::default()` (mode
-/// auto, no strict mode, empty tool_rename).
+/// auto, no strict mode).
 #[test]
 fn anthropic_api_cloak_omitted_yields_default() {
     use crate::config::ProviderEntry;
@@ -377,7 +363,6 @@ api_key_ref = "literal:sk-ant-test"
         ProviderEntry::AnthropicApi { cloak, .. } => {
             assert_eq!(cloak.mode, CloakMode::Auto);
             assert!(!cloak.strict_mode);
-            assert!(cloak.tool_rename.is_empty());
         }
         other => panic!("expected AnthropicApi entry; got {other:?}"),
     }

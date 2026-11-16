@@ -362,6 +362,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.class_overrides` | per-class policy lives in `[retry.classes.*]`; a status keeps its built-in class |
 | `providers.<name>.cloak.sensitive_words` | the sensitive-word scanner is removed; nothing replaces it |
+| `providers.<name>.cloak.tool_rename` | tool names are normalized to mcp__ only |
 | `providers.<name>.max_thinking_entry_bytes` | the thinking-cache entry cap is fixed at 1 MiB |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |

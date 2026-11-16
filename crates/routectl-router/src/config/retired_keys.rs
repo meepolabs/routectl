@@ -141,6 +141,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "the sensitive-word scanner is removed; nothing replaces it",
     },
     RetiredKey {
+        path: &["providers", ANY_ENTRY, "cloak", "tool_rename"],
+        refused_value: None,
+        replacement: "tool names are normalized to mcp__ only",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "max_thinking_entry_bytes"],
         refused_value: None,
         replacement: "the thinking-cache entry cap is fixed at 1 MiB",

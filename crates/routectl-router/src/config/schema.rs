@@ -1211,10 +1211,9 @@ pub enum ProviderEntry {
         reduction_enabled: Option<bool>,
         /// Opt-in OAuth-cloak configuration. Omitting the `[cloak]`
         /// sub-table yields `CloakConfig::default()` (mode `auto`, no
-        /// strict mode, no tool renames) -- identical to the always-on
-        /// `mcp_` normalization. TOML surface: `[providers.X.cloak]` with
-        /// `mode` / `strict_mode`, and tool renames as an array of tables
-        /// `[[providers.X.cloak.tool_rename]] from=.. to=..`.
+        /// strict mode) -- identical to the always-on `mcp_`
+        /// normalization. TOML surface: `[providers.X.cloak]` with
+        /// `mode` / `strict_mode`.
         #[serde(default)]
         cloak: CloakConfig,
         /// Opt-in AWS Bedrock mantle lane. Present -> this provider

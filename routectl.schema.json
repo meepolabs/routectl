@@ -277,7 +277,7 @@
       "type": "object"
     },
     "CloakConfig": {
-      "description": "Opt-in, empty-default configuration surface for the OAuth-egress cloak.\n`CloakConfig::default()` selects the standard cloak: mode `Auto`,\n`strict_mode` false (relocate the client system into the first user\nmessage rather than dropping it), no operator tool renames.\n\n`Debug` is hand-rolled (NOT derived) to print mode + strict_mode +\nCOUNTS only. The configured `tool_rename` pairs are operator content and\nmust never enter Debug output or logs -- a derived `Debug` would leak them\nthrough a future `dbg!(&cfg.cloak)` or `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and\n`AnthropicApiConfig` both Debug-format this, so the impl is mandatory.",
+      "description": "Opt-in, empty-default configuration surface for the OAuth-egress cloak.\n`CloakConfig::default()` selects the standard cloak: mode `Auto`,\n`strict_mode` false (relocate the client system into the first user\nmessage rather than dropping it).",
       "properties": {
         "mode": {
           "$ref": "#/$defs/CloakMode",
@@ -288,14 +288,6 @@
           "default": false,
           "description": "How the non-CC client's real `system` content is handled after the\n`system` field is reduced to the identity line only. Default false:\nrelocate the client system verbatim into the first user message as a\n`<system-reminder>` block (client behavior preserved). When true:\ndrop the client system entirely (identity-only `system`, no\nreminder). Egress-only: the response never echoes `system`, so there\nis no reverse map for this transform.",
           "type": "boolean"
-        },
-        "tool_rename": {
-          "default": [],
-          "description": "Operator tool renames, applied after the tool-name normalization.\nDefault empty (no renames). IMPORTANT: because normalization runs\nfirst and prefixes every non-`mcp__` tool with `mcp__`, the `from`\nkey must be the POST-normalization wire name (e.g. `mcp__read_file`,\nnot the client's original `read_file`) or it will silently no-match.",
-          "items": {
-            "$ref": "#/$defs/ToolRename"
-          },
-          "type": "array"
         }
       },
       "type": "object"
@@ -315,7 +307,7 @@
         },
         {
           "const": "never",
-          "description": "Skip the cloak entirely: no billing strip, no identity, no\nmetadata, no tool-name normalization, no tool rename. The body goes\nupstream untouched.",
+          "description": "Skip the cloak entirely: no billing strip, no identity, no\nmetadata, no tool-name normalization. The body goes upstream\nuntouched.",
           "type": "string"
         }
       ]
@@ -838,10 +830,9 @@
               "$ref": "#/$defs/CloakConfig",
               "default": {
                 "mode": "auto",
-                "strict_mode": false,
-                "tool_rename": []
+                "strict_mode": false
               },
-              "description": "Opt-in OAuth-cloak configuration. Omitting the `[cloak]`\nsub-table yields `CloakConfig::default()` (mode `auto`, no\nstrict mode, no tool renames) -- identical to the always-on\n`mcp_` normalization. TOML surface: `[providers.X.cloak]` with\n`mode` / `strict_mode`, and tool renames as an array of tables\n`[[providers.X.cloak.tool_rename]] from=.. to=..`."
+              "description": "Opt-in OAuth-cloak configuration. Omitting the `[cloak]`\nsub-table yields `CloakConfig::default()` (mode `auto`, no\nstrict mode) -- identical to the always-on `mcp_`\nnormalization. TOML surface: `[providers.X.cloak]` with\n`mode` / `strict_mode`."
             },
             "context_management": {
               "default": false,
@@ -1515,24 +1506,6 @@
           "type": "integer"
         }
       },
-      "type": "object"
-    },
-    "ToolRename": {
-      "description": "A single operator-configured tool-name rename. Applied AFTER the\nalways-on tool-name `mcp__` normalization, over the same tool-name JSON\npaths, recording reverse entries so renamed names restore on the\nresponse.",
-      "properties": {
-        "from": {
-          "description": "The tool name as the client sends it (the rename source).",
-          "type": "string"
-        },
-        "to": {
-          "description": "The tool name routectl rewrites it to on the wire (the rename\ntarget).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "from",
-        "to"
-      ],
       "type": "object"
     },
     "UsageConfig": {
