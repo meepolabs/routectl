@@ -19,7 +19,7 @@ release cut. Highlights, roughly in dependency order:
   taxonomy (`rate-limited`, `auth`, `bad-request`, ...) with
   `[retry.classes.<class>]` per-class retry/fallback overrides.
 - **Model prices** -- per-field price precedence
-  (`[models.X.pricing]`, `[registry]`, the `routectl prices refresh`
+  (`[models.X.pricing]`, the `routectl prices refresh`
   table, the shipped table); window and output ceiling from
   `[models.X]`; per-kind cache rules. The earlier cache-economics
   catalog and its `routectl catalog` command are removed.
