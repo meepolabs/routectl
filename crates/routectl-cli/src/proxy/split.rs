@@ -17,8 +17,8 @@ use http::{HeaderName, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 
 use super::forward::{ForwardBody, ForwardRequest, empty_response, forward};
+use super::listener::MitmCtx;
 use super::metrics::{Leg, PathClass};
-use super::mitm::MitmCtx;
 
 /// The single source of truth for which request paths this MITM proxy
 /// classifies as Anthropic-dialect inference traffic. Every path here
@@ -140,7 +140,7 @@ where
     let reqwest_body = into_reqwest_body(body);
 
     if is_anthropic_inference_path(&path) {
-        headers.insert(MITM_PROXIED_HEADER_NAME, ctx.seam_nonce.header_value());
+        headers.insert(MITM_PROXIED_HEADER_NAME, ctx.seam_nonce().header_value());
         let forward_req = ForwardRequest {
             method: method.clone(),
             raw_path_and_query,
@@ -148,9 +148,9 @@ where
             body: reqwest_body,
         };
         let response = forward(
-            &ctx.forward_state,
-            &ctx.metrics,
-            &ctx.reinject_base,
+            ctx.forward_state(),
+            ctx.metrics(),
+            ctx.reinject_base(),
             forward_req,
             Leg::Inference,
             PathClass::Inference,
@@ -180,8 +180,8 @@ where
     let path_class = if is_known_control_plane_path(&path) {
         PathClass::ControlPlane
     } else {
-        ctx.warn_once.warn_once(method.as_str(), &path);
-        ctx.metrics.incr_unknown_forwarded_paths();
+        ctx.warn_once().warn_once(method.as_str(), &path);
+        ctx.metrics().incr_unknown_forwarded_paths();
         PathClass::Unknown
     };
 
@@ -192,9 +192,9 @@ where
         body: reqwest_body,
     };
     forward(
-        &ctx.forward_state,
-        &ctx.metrics,
-        &ctx.upstream_origin,
+        ctx.forward_state(),
+        ctx.metrics(),
+        ctx.upstream_origin(),
         forward_req,
         Leg::ControlPlane,
         path_class,
@@ -204,17 +204,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
     use http_body_util::Full;
     use reqwest::Url;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::proxy::forward::ForwardState;
-    use crate::proxy::metrics::{ProxyMetrics, ResultClass, WarnOnce};
+    use crate::proxy::metrics::ResultClass;
 
     #[test]
     fn anthropic_inference_paths_excludes_direct_client_dialects() {
@@ -243,17 +239,6 @@ mod tests {
         Full::new(Bytes::from_static(bytes))
     }
 
-    fn test_ctx(reinject_base: Url, upstream_origin: Url) -> MitmCtx {
-        MitmCtx {
-            forward_state: ForwardState::new(8, Duration::from_secs(30)).unwrap(),
-            metrics: Arc::new(ProxyMetrics::new()),
-            warn_once: Arc::new(WarnOnce::new()),
-            upstream_origin,
-            reinject_base,
-            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
-        }
-    }
-
     #[tokio::test]
     async fn const_inference_path_reinjects_over_loopback_and_sets_marker_header() {
         let reinject_server = MockServer::start().await;
@@ -267,7 +252,7 @@ mod tests {
         // The real Anthropic origin must never see this request.
         let upstream_server = MockServer::start().await;
 
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -286,13 +271,13 @@ mod tests {
         // is handed, and records that same leg -- so the metric pins
         // which client carried the credential-bearing re-inject.
         assert_eq!(
-            ctx.metrics
+            ctx.metrics()
                 .request_count(Leg::Inference, ResultClass::Success, PathClass::Inference),
             1,
             "the re-inject must be dispatched on the inference leg"
         );
         assert_eq!(
-            ctx.metrics.requests_total(),
+            ctx.metrics().requests_total(),
             1,
             "the re-inject must be recorded exactly once and on no other leg"
         );
@@ -306,7 +291,7 @@ mod tests {
             .expect("one request recorded");
         assert_eq!(
             last_request.headers.get("x-routectl-mitm-proxied").unwrap(),
-            &ctx.seam_nonce.header_value(),
+            &ctx.seam_nonce().header_value(),
             "the reinject leg must stamp the process's own seam nonce, not a fixed literal"
         );
         assert_eq!(
@@ -335,7 +320,7 @@ mod tests {
             .await;
         let upstream_server = MockServer::start().await;
 
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -368,7 +353,7 @@ mod tests {
             .mount(&upstream_server)
             .await;
 
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -382,7 +367,7 @@ mod tests {
 
         let response = handle_request(&ctx, req).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(ctx.metrics.unknown_forwarded_paths_total(), 0);
+        assert_eq!(ctx.metrics().unknown_forwarded_paths_total(), 0);
 
         let last_request = upstream_server
             .received_requests()
@@ -415,7 +400,7 @@ mod tests {
             .mount(&upstream_server)
             .await;
 
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -427,7 +412,7 @@ mod tests {
             .unwrap();
         let response = handle_request(&ctx, first).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(ctx.metrics.unknown_forwarded_paths_total(), 1);
+        assert_eq!(ctx.metrics().unknown_forwarded_paths_total(), 1);
 
         let second = Request::builder()
             .method("GET")
@@ -437,7 +422,7 @@ mod tests {
         let response = handle_request(&ctx, second).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            ctx.metrics.unknown_forwarded_paths_total(),
+            ctx.metrics().unknown_forwarded_paths_total(),
             2,
             "the metric bumps on every unknown-path request, independent of warn_once dedup"
         );
@@ -453,7 +438,7 @@ mod tests {
             .mount(&upstream_server)
             .await;
 
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -504,7 +489,7 @@ mod tests {
             .mount(&upstream_server)
             .await;
 
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );

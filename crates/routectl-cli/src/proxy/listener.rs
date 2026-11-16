@@ -37,7 +37,8 @@ use tokio_rustls::TlsAcceptor;
 use super::ca;
 use super::forward::{DEFAULT_MAX_CONCURRENT_STREAMS, ForwardState, STREAM_IDLE_WINDOW};
 use super::metrics::{Leg, PathClass, ProxyMetrics, ResultClass, WarnOnce};
-use super::mitm::{MitmCtx, handle_mitm_connection};
+use super::mitm::handle_mitm_connection;
+use super::pin::{MITM_HOST, MITM_UPSTREAM_ORIGIN};
 
 /// Upper bound on the size of a CONNECT request's request-line + header
 /// block this listener will buffer while looking for the terminating
@@ -240,7 +241,7 @@ async fn run_blind_tunnel(
 /// Handles one accepted TCP connection end-to-end: acquires a connection
 /// slot, reads the CONNECT request (bounded by [`CONNECT_READ_TIMEOUT`]),
 /// then either hands the raw stream to [`handle_mitm_connection`] (target
-/// host matches `mitm_host`, case-insensitively -- DNS hostnames are not
+/// host matches the context's MITM host, case-insensitively -- DNS hostnames are not
 /// case-sensitive, and a client is free to send
 /// `CONNECT API.Anthropic.COM:443`) or dials the blind-tunnel target
 /// BEFORE answering the CONNECT at all. Dialing first (rather than
@@ -264,7 +265,6 @@ async fn handle_connection(
     peer: SocketAddr,
     acceptor: TlsAcceptor,
     ctx: Arc<MitmCtx>,
-    mitm_host: Arc<str>,
     connection_semaphore: Arc<Semaphore>,
 ) {
     let permit = match connection_semaphore.acquire_owned().await {
@@ -324,7 +324,7 @@ async fn handle_connection(
         }
     };
 
-    if target.host.eq_ignore_ascii_case(&mitm_host) {
+    if target.host.eq_ignore_ascii_case(ctx.mitm_host()) {
         if let Err(error) = respond_connect_established(&mut stream).await {
             tracing::debug!(
                 target: "routectl_cli::proxy::listener",
@@ -388,7 +388,6 @@ async fn run_listener(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     ctx: Arc<MitmCtx>,
-    mitm_host: Arc<str>,
     mut shutdown: watch::Receiver<()>,
 ) {
     let connection_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
@@ -416,14 +415,12 @@ async fn run_listener(
                     Ok((stream, peer)) => {
                         let acceptor = acceptor.clone();
                         let ctx = Arc::clone(&ctx);
-                        let mitm_host = Arc::clone(&mitm_host);
                         let connection_semaphore = Arc::clone(&connection_semaphore);
                         tokio::spawn(handle_connection(
                             stream,
                             peer,
                             acceptor,
                             ctx,
-                            mitm_host,
                             connection_semaphore,
                         ));
                     }
@@ -441,26 +438,169 @@ async fn run_listener(
 }
 
 /// The inputs [`build_and_bind`] needs: the operator's `[mitm]` bind port
-/// and cert dir, the pinned host/origin pair (production builds this only
-/// through `proxy::pin::listener_config`; tests may point it at a
-/// loopback double), plus `reinject_port` (the MAIN routectl listener's bound
-/// port, resolved at runtime by the caller -- never a config value,
-/// since the main listener's port is only known once it is actually
-/// bound). Deliberately plain data rather than `routectl_router::MitmConfig`
-/// itself: the `proxy` module imports nothing from outside its own
-/// tree except the config crate's plain types it is handed, keeping the
-/// coupling to exactly the fields this module uses.
+/// and cert dir, the pinned host/origin pair, plus `reinject_port` (the MAIN
+/// routectl listener's bound port, resolved at runtime by the caller --
+/// never a config value, since the main listener's port is only known once
+/// it is actually bound). Deliberately plain data rather than
+/// `routectl_router::MitmConfig` itself: the `proxy` module imports nothing
+/// from outside its own tree except the config crate's plain types it is
+/// handed, keeping the coupling to exactly the fields this module uses.
+///
+/// The fields are private to this module so the host and origin can only
+/// come from [`MITM_HOST`] / [`MITM_UPSTREAM_ORIGIN`]: the proxy forwards the
+/// client's full-scope token to the origin.
 pub struct ProxyListenerConfig {
-    pub listen_port: u16,
-    pub cert_dir: PathBuf,
-    pub mitm_host: String,
-    pub upstream_origin: String,
-    pub reinject_port: u16,
+    listen_port: u16,
+    cert_dir: PathBuf,
+    mitm_host: &'static str,
+    upstream_origin: String,
+    reinject_port: u16,
     /// The SAME `Arc<MitmSeamNonce>` the server bootstrap put on `AppState`
     /// -- threaded through so the reinject leg stamps the exact value the
     /// ingress admission/capture gates compare against. Generated ONCE per
     /// process, never here.
-    pub seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
+    seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
+}
+
+impl ProxyListenerConfig {
+    /// The listener inputs with host and origin taken from the pinned pair.
+    pub(crate) fn pinned(
+        listen_port: u16,
+        cert_dir: PathBuf,
+        reinject_port: u16,
+        seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
+    ) -> Self {
+        Self {
+            listen_port,
+            cert_dir,
+            mitm_host: MITM_HOST,
+            upstream_origin: MITM_UPSTREAM_ORIGIN.to_string(),
+            reinject_port,
+            seam_nonce,
+        }
+    }
+
+    /// The pinned host with `upstream_origin` in place of the pinned origin,
+    /// for a test that needs a loopback double or an unparseable origin.
+    #[cfg(test)]
+    pub(crate) fn with_origin_for_tests(
+        listen_port: u16,
+        cert_dir: PathBuf,
+        upstream_origin: &str,
+        reinject_port: u16,
+    ) -> Self {
+        Self {
+            upstream_origin: upstream_origin.to_string(),
+            ..Self::pinned(
+                listen_port,
+                cert_dir,
+                reinject_port,
+                Arc::new(crate::ingress::MitmSeamNonce::generate()),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn mitm_host(&self) -> &str {
+        self.mitm_host
+    }
+
+    #[cfg(test)]
+    pub(crate) fn upstream_origin(&self) -> &str {
+        &self.upstream_origin
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn listen_port(&self) -> u16 {
+        self.listen_port
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cert_dir(&self) -> &std::path::Path {
+        &self.cert_dir
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn reinject_port(&self) -> u16 {
+        self.reinject_port
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn seam_nonce(&self) -> &Arc<crate::ingress::MitmSeamNonce> {
+        &self.seam_nonce
+    }
+}
+
+/// Shared, per-connection-reusable state for the MITM proxy: the CONNECT
+/// authority it decrypts, the forwarding machinery both split legs reuse
+/// ([`ForwardState`]), the observability counters and warn-dedup helper,
+/// the two fixed destinations a request can be dispatched to --
+/// `upstream_origin` (the real Anthropic origin, for the
+/// catch-all/control-plane leg) and `reinject_base` (routectl's own
+/// loopback listener, for the inference leg's re-inject) -- and the seam
+/// nonce. Built once by [`build_and_bind`] from a [`ProxyListenerConfig`]
+/// and shared across every accepted connection behind an `Arc`; the fields
+/// are private to this module for the same reason as the config's.
+pub struct MitmCtx {
+    mitm_host: &'static str,
+    forward_state: ForwardState,
+    metrics: Arc<ProxyMetrics>,
+    warn_once: Arc<WarnOnce>,
+    upstream_origin: Url,
+    reinject_base: Url,
+    /// The per-process value `split::handle_request` stamps onto the seam
+    /// header on the reinject leg -- the SAME `Arc` the server bootstrap put
+    /// on `AppState`, so the proxy stamper and the ingress checkers agree on
+    /// the exact value without either side re-generating or persisting it.
+    seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
+}
+
+impl MitmCtx {
+    /// The CONNECT authority decrypted instead of blind-tunnelled.
+    pub(crate) const fn mitm_host(&self) -> &'static str {
+        self.mitm_host
+    }
+
+    pub(crate) const fn forward_state(&self) -> &ForwardState {
+        &self.forward_state
+    }
+
+    pub(crate) const fn metrics(&self) -> &Arc<ProxyMetrics> {
+        &self.metrics
+    }
+
+    pub(crate) fn warn_once(&self) -> &WarnOnce {
+        &self.warn_once
+    }
+
+    /// Where every forwarded (non-reinjected) request goes.
+    pub(crate) const fn upstream_origin(&self) -> &Url {
+        &self.upstream_origin
+    }
+
+    /// routectl's own loopback listener, for the inference re-inject.
+    pub(crate) const fn reinject_base(&self) -> &Url {
+        &self.reinject_base
+    }
+
+    pub(crate) fn seam_nonce(&self) -> &crate::ingress::MitmSeamNonce {
+        &self.seam_nonce
+    }
+
+    /// A context on the pinned host whose two destinations are `reinject_base`
+    /// and `upstream_origin`, typically loopback doubles.
+    #[cfg(test)]
+    pub(crate) fn for_tests(reinject_base: Url, upstream_origin: Url) -> Arc<Self> {
+        Arc::new(Self {
+            mitm_host: MITM_HOST,
+            forward_state: ForwardState::new(8, Duration::from_secs(30)).unwrap(),
+            metrics: Arc::new(ProxyMetrics::new()),
+            warn_once: Arc::new(WarnOnce::new()),
+            upstream_origin,
+            reinject_base,
+            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
+        })
+    }
 }
 
 /// Failure to start the MITM proxy listener. Every variant is a
@@ -491,7 +631,7 @@ pub enum ProxyStartError {
 pub async fn build_and_bind(
     config: ProxyListenerConfig,
 ) -> Result<(TcpListener, TlsAcceptor, Arc<MitmCtx>), ProxyStartError> {
-    let acceptor = ca::load_or_create(&config.cert_dir, &config.mitm_host)?;
+    let acceptor = ca::load_or_create(&config.cert_dir, config.mitm_host)?;
 
     let forward_state = ForwardState::new(DEFAULT_MAX_CONCURRENT_STREAMS, STREAM_IDLE_WINDOW)?;
     let metrics = Arc::new(ProxyMetrics::new());
@@ -507,6 +647,7 @@ pub async fn build_and_bind(
         .expect("a loopback origin with a valid port always parses as a URL");
 
     let ctx = Arc::new(MitmCtx {
+        mitm_host: config.mitm_host,
         forward_state,
         metrics,
         warn_once,
@@ -534,16 +675,9 @@ pub fn spawn(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     ctx: Arc<MitmCtx>,
-    mitm_host: String,
     shutdown: watch::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run_listener(
-        listener,
-        acceptor,
-        ctx,
-        Arc::from(mitm_host),
-        shutdown,
-    ))
+    tokio::spawn(run_listener(listener, acceptor, ctx, shutdown))
 }
 
 #[cfg(test)]
@@ -741,17 +875,6 @@ mod tests {
         );
     }
 
-    fn test_ctx(reinject_base: Url, upstream_origin: Url) -> Arc<MitmCtx> {
-        Arc::new(MitmCtx {
-            forward_state: ForwardState::new(8, Duration::from_secs(30)).unwrap(),
-            metrics: Arc::new(ProxyMetrics::new()),
-            warn_once: Arc::new(WarnOnce::new()),
-            upstream_origin,
-            reinject_base,
-            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
-        })
-    }
-
     /// Drives [`run_listener`] directly (no cert/TLS involved) against a
     /// blind-tunnel target: a CONNECT to a host that is NOT `mitm_host`
     /// must relay raw bytes end-to-end via `copy_bidirectional`, proving
@@ -771,7 +894,7 @@ mod tests {
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
         let reinject_server = MockServer::start().await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -779,13 +902,7 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let (_shutdown_tx, shutdown_rx) = watch::channel(());
-        tokio::spawn(run_listener(
-            proxy_listener,
-            acceptor,
-            ctx,
-            Arc::from("api.anthropic.com"),
-            shutdown_rx,
-        ));
+        tokio::spawn(run_listener(proxy_listener, acceptor, ctx, shutdown_rx));
 
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
         client
@@ -831,7 +948,7 @@ mod tests {
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
         let reinject_server = MockServer::start().await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -840,13 +957,7 @@ mod tests {
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let metrics = Arc::clone(&ctx.metrics);
         let (_shutdown_tx, shutdown_rx) = watch::channel(());
-        tokio::spawn(run_listener(
-            proxy_listener,
-            acceptor,
-            ctx,
-            Arc::from("api.anthropic.com"),
-            shutdown_rx,
-        ));
+        tokio::spawn(run_listener(proxy_listener, acceptor, ctx, shutdown_rx));
 
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
         client
@@ -907,7 +1018,7 @@ mod tests {
             .mount(&reinject_server)
             .await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -915,13 +1026,7 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let (_shutdown_tx, shutdown_rx) = watch::channel(());
-        tokio::spawn(run_listener(
-            proxy_listener,
-            acceptor,
-            ctx,
-            Arc::from(HOST),
-            shutdown_rx,
-        ));
+        tokio::spawn(run_listener(proxy_listener, acceptor, ctx, shutdown_rx));
 
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
         client
@@ -982,7 +1087,7 @@ mod tests {
             .mount(&reinject_server)
             .await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -990,13 +1095,7 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let (_shutdown_tx, shutdown_rx) = watch::channel(());
-        tokio::spawn(run_listener(
-            proxy_listener,
-            acceptor,
-            ctx,
-            Arc::from(HOST),
-            shutdown_rx,
-        ));
+        tokio::spawn(run_listener(proxy_listener, acceptor, ctx, shutdown_rx));
 
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
         client
@@ -1054,7 +1153,7 @@ mod tests {
             )
             .mount(&upstream_server)
             .await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -1062,13 +1161,7 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let (_shutdown_tx, shutdown_rx) = watch::channel(());
-        tokio::spawn(run_listener(
-            proxy_listener,
-            acceptor,
-            ctx,
-            Arc::from(HOST),
-            shutdown_rx,
-        ));
+        tokio::spawn(run_listener(proxy_listener, acceptor, ctx, shutdown_rx));
 
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
         client
@@ -1140,20 +1233,14 @@ mod tests {
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
         let reinject_server = MockServer::start().await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
 
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (shutdown_tx, shutdown_rx) = watch::channel(());
-        let handle = tokio::spawn(run_listener(
-            proxy_listener,
-            acceptor,
-            ctx,
-            Arc::from("api.anthropic.com"),
-            shutdown_rx,
-        ));
+        let handle = tokio::spawn(run_listener(proxy_listener, acceptor, ctx, shutdown_rx));
 
         shutdown_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), handle)
@@ -1168,7 +1255,7 @@ mod tests {
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
         let reinject_server = MockServer::start().await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -1189,7 +1276,6 @@ mod tests {
             proxy_listener,
             acceptor,
             ctx,
-            Arc::from("api.anthropic.com"),
             shutdown_rx,
         ))
         .await;
@@ -1222,7 +1308,7 @@ mod tests {
         // sends no traffic at all, and a mock server's own background
         // tasks would keep the runtime busy enough to interfere with the
         // paused clock's auto-advance.
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse("http://127.0.0.1:9").unwrap(),
             Url::parse("http://127.0.0.1:9").unwrap(),
         );
@@ -1244,13 +1330,7 @@ mod tests {
         // ends -- it must outlast exactly one snapshot interval.
         let (outcome, events) = routectl_testkit::with_capture(tokio::time::timeout(
             METRICS_SNAPSHOT_INTERVAL + Duration::from_secs(1),
-            run_listener(
-                proxy_listener,
-                acceptor,
-                ctx,
-                Arc::from("api.anthropic.com"),
-                shutdown_rx,
-            ),
+            run_listener(proxy_listener, acceptor, ctx, shutdown_rx),
         ))
         .await;
         assert!(
@@ -1289,7 +1369,7 @@ mod tests {
         let acceptor = ca::load_or_create(dir.path(), "api.anthropic.com").unwrap();
         let reinject_server = MockServer::start().await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -1297,13 +1377,7 @@ mod tests {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
         let (_shutdown_tx, shutdown_rx) = watch::channel(());
-        tokio::spawn(run_listener(
-            proxy_listener,
-            acceptor,
-            ctx,
-            Arc::from("api.anthropic.com"),
-            shutdown_rx,
-        ));
+        tokio::spawn(run_listener(proxy_listener, acceptor, ctx, shutdown_rx));
 
         let mut stalled = TcpStream::connect(proxy_addr).await.unwrap();
         stalled.write_all(b"CONNECT api.anthropic").await.unwrap();
@@ -1326,14 +1400,12 @@ mod tests {
     #[tokio::test]
     async fn build_and_bind_rejects_an_unparseable_upstream_origin() {
         let dir = tempfile::tempdir().unwrap();
-        let config = ProxyListenerConfig {
-            listen_port: 0,
-            cert_dir: dir.path().to_path_buf(),
-            mitm_host: "api.anthropic.com".to_string(),
-            upstream_origin: "not a url".to_string(),
-            reinject_port: 9100,
-            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
-        };
+        let config = ProxyListenerConfig::with_origin_for_tests(
+            0,
+            dir.path().to_path_buf(),
+            "not a url",
+            9100,
+        );
 
         let result = build_and_bind(config).await;
         match result {
@@ -1345,14 +1417,12 @@ mod tests {
     #[tokio::test]
     async fn build_and_bind_binds_an_ephemeral_loopback_port() {
         let dir = tempfile::tempdir().unwrap();
-        let config = ProxyListenerConfig {
-            listen_port: 0,
-            cert_dir: dir.path().to_path_buf(),
-            mitm_host: "api.anthropic.com".to_string(),
-            upstream_origin: "https://api.anthropic.com".to_string(),
-            reinject_port: 9100,
-            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
-        };
+        let config = ProxyListenerConfig::pinned(
+            0,
+            dir.path().to_path_buf(),
+            9100,
+            Arc::new(crate::ingress::MitmSeamNonce::generate()),
+        );
 
         let (listener, _acceptor, _ctx) = build_and_bind(config).await.unwrap();
         let addr = listener.local_addr().unwrap();

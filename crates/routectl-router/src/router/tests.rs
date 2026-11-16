@@ -2071,6 +2071,26 @@ fn carry_over_metrics_from_hands_the_wire_check_params_to_the_rebuild() {
 }
 
 #[test]
+fn the_sample_rate_setter_moves_only_the_rate() {
+    let defaults = crate::wire_check_state::WireCheckParams::default();
+    let rate = std::num::NonZeroU32::new(7).expect("non-zero literal");
+    assert_ne!(
+        defaults.sample_one_in, rate,
+        "control: the rate differs from the default"
+    );
+
+    let router = Router::new(Arc::new(Config::default())).with_wire_check_sample_one_in(rate);
+
+    assert_eq!(
+        router.wire_check_params,
+        crate::wire_check_state::WireCheckParams {
+            sample_one_in: rate,
+            ..defaults
+        }
+    );
+}
+
+#[test]
 fn log_snapshot_carries_the_wire_check_counters() {
     use routectl_core::wire_check::{EgressKind, IngressDialect, Lane, Leg, PathClass, WirePath};
 

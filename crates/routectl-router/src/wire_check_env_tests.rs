@@ -9,13 +9,6 @@ fn env_with(var: &'static str, value: Option<&'static str>) -> impl Fn(&str) -> 
     move |asked| value.filter(|_| asked == var).map(str::to_string)
 }
 
-fn sampling_one_in(sample_one_in: u32) -> WireCheckParams {
-    WireCheckParams {
-        sample_one_in: std::num::NonZeroU32::new(sample_one_in).expect("non-zero row"),
-        ..WireCheckParams::default()
-    }
-}
-
 #[test]
 fn the_variable_keeps_its_name() {
     assert_eq!(SAMPLE_ONE_IN_ENV, "ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN");
@@ -66,7 +59,7 @@ fn a_positive_integer_sets_the_rate_and_unset_keeps_the_default() {
         let resolved = resolve_wire_check_params(&env);
 
         let expected = ResolvedWireCheckParams {
-            params: sampling_one_in(sample_one_in),
+            sample_one_in: std::num::NonZeroU32::new(sample_one_in).expect("non-zero row"),
             source,
         };
         assert_eq!(resolved, Ok(expected), "row `{row}`");

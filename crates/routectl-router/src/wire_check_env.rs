@@ -10,8 +10,6 @@
 
 use std::num::NonZeroU32;
 
-use crate::wire_check_state::WireCheckParams;
-
 /// Env var that sets the wire check's 1-in-M rate past first-N.
 pub const SAMPLE_ONE_IN_ENV: &str = "ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN";
 
@@ -35,12 +33,13 @@ impl SampleRateSource {
     }
 }
 
-/// The sampling params a daemon runs on, with the layer that set the rate.
+/// The 1-in-M sample rate a daemon runs on, with the layer that set it.
+/// First-N and the status window are not resolved: they stay at their consts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedWireCheckParams {
-    /// What the router samples by.
-    pub params: WireCheckParams,
-    /// Who set [`WireCheckParams::sample_one_in`].
+    /// After first-N, one successful attempt in this many is checked.
+    pub sample_one_in: NonZeroU32,
+    /// Who set [`Self::sample_one_in`].
     pub source: SampleRateSource,
 }
 
@@ -48,7 +47,7 @@ impl ResolvedWireCheckParams {
     /// Log the resolved rate and its source once, at INFO.
     pub fn log_status(&self) {
         tracing::info!(
-            sample_one_in = self.params.sample_one_in.get(),
+            sample_one_in = self.sample_one_in.get(),
             source = self.source.as_str(),
             default = crate::wire_check_state::DEFAULT_SAMPLE_ONE_IN.get(),
             "ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN resolved (frozen for the rest of this process)"
@@ -65,8 +64,8 @@ impl ResolvedWireCheckParams {
 )]
 pub struct SampleRateEnvError;
 
-/// Resolve the wire-check params from the environment: the defaults, with
-/// `sample_one_in` taken from [`SAMPLE_ONE_IN_ENV`] when it is set. The value
+/// Resolve the wire-check sample rate from the environment: the default, or
+/// [`SAMPLE_ONE_IN_ENV`] when it is set. The value
 /// is trimmed, like the log knobs'; a set value that is empty, zero,
 /// negative, not a number or past `u32::MAX` is refused rather than ignored,
 /// so a typo cannot silently fall back to sampling. `env` looks up one
@@ -81,7 +80,7 @@ pub fn resolve_wire_check_params(
 ) -> Result<ResolvedWireCheckParams, SampleRateEnvError> {
     let Some(raw) = env(SAMPLE_ONE_IN_ENV) else {
         return Ok(ResolvedWireCheckParams {
-            params: WireCheckParams::default(),
+            sample_one_in: crate::wire_check_state::DEFAULT_SAMPLE_ONE_IN,
             source: SampleRateSource::Default,
         });
     };
@@ -90,10 +89,7 @@ pub fn resolve_wire_check_params(
         .parse::<NonZeroU32>()
         .map_err(|_| SampleRateEnvError)?;
     Ok(ResolvedWireCheckParams {
-        params: WireCheckParams {
-            sample_one_in,
-            ..WireCheckParams::default()
-        },
+        sample_one_in,
         source: SampleRateSource::Env,
     })
 }

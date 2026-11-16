@@ -460,8 +460,8 @@ pub struct Router {
     /// window on every config swap.
     wire_check: Arc<crate::wire_check_state::WireCheckState>,
     /// Sampling counts and status window the wire check runs on: the consts
-    /// until `with_wire_check_params` sets the boot-resolved values, which
-    /// `carry_over_metrics_from` hands to every rebuild.
+    /// until `with_wire_check_sample_one_in` sets the boot-resolved rate,
+    /// which `carry_over_metrics_from` hands to every rebuild.
     wire_check_params: crate::wire_check_state::WireCheckParams,
     /// Warn-once dedup for `routectl_edit_rejected`, keyed by lane, path
     /// pattern and attribution. Reset on a Router rebuild, which re-warns once.
@@ -3184,8 +3184,20 @@ impl Router {
         self.wire_check_params
     }
 
+    /// This router, checking one successful attempt in `sample_one_in` after
+    /// first-N. First-N and the status window stay at their consts.
+    #[must_use]
+    pub const fn with_wire_check_sample_one_in(
+        mut self,
+        sample_one_in: std::num::NonZeroU32,
+    ) -> Self {
+        self.wire_check_params.sample_one_in = sample_one_in;
+        self
+    }
+
     /// This router, sampling wire checks and reporting the status window per
     /// `params` instead of the built-in consts.
+    #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
     pub const fn with_wire_check_params(
         mut self,

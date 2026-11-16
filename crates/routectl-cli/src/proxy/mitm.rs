@@ -18,17 +18,16 @@ use std::time::Duration;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use reqwest::Url;
 use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_rustls::TlsAcceptor;
 
-use super::forward::ForwardState;
-use super::metrics::{ProxyMetrics, WarnOnce};
+use super::listener::MitmCtx;
+use super::metrics::ProxyMetrics;
 use super::split;
 
 /// Every Nth cumulative TLS handshake failure (process lifetime, shared
-/// across every MITM connection via `ctx.metrics`) also gets a loud
+/// across every MITM connection via `ctx.metrics()`) also gets a loud
 /// `tracing::error!` on top of the routine per-failure `tracing::warn!`.
 /// A single client hiccup (a stale cached leaf, one dropped packet) is
 /// a warn; a run of failures crossing this threshold is the signal an
@@ -46,27 +45,6 @@ const TLS_HANDSHAKE_FAILURE_LOUD_EVERY: u64 = 10;
 /// CONNECT request, pre-200) and `CONNECT_TIMEOUT` -- the values being
 /// equal is coincidental, so this is a local const, not an alias.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Shared, per-connection-reusable state for the MITM proxy: the
-/// forwarding machinery both split legs reuse ([`ForwardState`]), the
-/// observability counters and warn-dedup helper, the two fixed
-/// destinations a request can be dispatched to -- `upstream_origin`
-/// (the real Anthropic origin, for the catch-all/control-plane leg) and
-/// `reinject_base` (routectl's own loopback listener, for the inference
-/// leg's re-inject) -- and the seam nonce. Built once by the caller
-/// and shared across every accepted connection behind an `Arc`.
-pub struct MitmCtx {
-    pub forward_state: ForwardState,
-    pub metrics: Arc<ProxyMetrics>,
-    pub warn_once: Arc<WarnOnce>,
-    pub upstream_origin: Url,
-    pub reinject_base: Url,
-    /// The per-process value `split::handle_request` stamps onto the seam
-    /// header on the reinject leg -- the SAME `Arc` the server bootstrap put
-    /// on `AppState`, so the proxy stamper and the ingress checkers agree on
-    /// the exact value without either side re-generating or persisting it.
-    pub seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
-}
 
 /// Terminates TLS on `tcp` with `acceptor`, then serves HTTP/1.1 over
 /// the decrypted stream, classifying and splitting every request via
@@ -98,11 +76,11 @@ pub async fn handle_mitm_connection(
     let tls_stream = match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
-            record_handshake_failure(&ctx.metrics, peer, &error);
+            record_handshake_failure(ctx.metrics(), peer, &error);
             return;
         }
         Err(_elapsed) => {
-            ctx.metrics.incr_tls_handshake_timeouts();
+            ctx.metrics().incr_tls_handshake_timeouts();
             tracing::warn!(
                 target: "routectl_cli::proxy::mitm",
                 peer = ?peer,
@@ -115,7 +93,7 @@ pub async fn handle_mitm_connection(
             // one the dedicated timeout counter distinguishes for
             // slowloris detection.
             record_handshake_failure(
-                &ctx.metrics,
+                ctx.metrics(),
                 peer,
                 &std::io::Error::from(std::io::ErrorKind::TimedOut),
             );
@@ -188,22 +166,12 @@ mod tests {
 
     use rustls_pki_types::pem::PemObject;
 
+    use reqwest::Url;
+
     use super::*;
     use crate::proxy::ca::load_or_create;
-    use crate::proxy::metrics::{ProxyMetrics, WarnOnce};
 
     const HOST: &str = "api.anthropic.com";
-
-    fn test_ctx(reinject_base: Url, upstream_origin: Url) -> Arc<MitmCtx> {
-        Arc::new(MitmCtx {
-            forward_state: ForwardState::new(8, Duration::from_secs(30)).unwrap(),
-            metrics: Arc::new(ProxyMetrics::new()),
-            warn_once: Arc::new(WarnOnce::new()),
-            upstream_origin,
-            reinject_base,
-            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
-        })
-    }
 
     #[tokio::test]
     async fn handshake_failure_on_a_non_tls_connection_increments_the_counter_and_returns() {
@@ -211,7 +179,7 @@ mod tests {
         let acceptor = load_or_create(dir.path(), HOST).unwrap();
         let reinject_server = MockServer::start().await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -238,7 +206,7 @@ mod tests {
         let _ = client.read(&mut buf).await;
 
         server_task.await.unwrap();
-        assert_eq!(ctx.metrics.tls_handshake_failures_total(), 1);
+        assert_eq!(ctx.metrics().tls_handshake_failures_total(), 1);
     }
 
     #[tokio::test]
@@ -254,7 +222,7 @@ mod tests {
             .mount(&reinject_server)
             .await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -323,7 +291,7 @@ mod tests {
         let acceptor = load_or_create(dir.path(), HOST).unwrap();
         let reinject_server = MockServer::start().await;
         let upstream_server = MockServer::start().await;
-        let ctx = test_ctx(
+        let ctx = MitmCtx::for_tests(
             Url::parse(&reinject_server.uri()).unwrap(),
             Url::parse(&upstream_server.uri()).unwrap(),
         );
@@ -357,8 +325,8 @@ mod tests {
             .expect("handle_mitm_connection must return once the handshake times out")
             .unwrap();
 
-        assert_eq!(ctx.metrics.tls_handshake_timeouts_total(), 1);
-        assert_eq!(ctx.metrics.tls_handshake_failures_total(), 1);
+        assert_eq!(ctx.metrics().tls_handshake_timeouts_total(), 1);
+        assert_eq!(ctx.metrics().tls_handshake_failures_total(), 1);
         assert_eq!(
             sem.available_permits(),
             1,

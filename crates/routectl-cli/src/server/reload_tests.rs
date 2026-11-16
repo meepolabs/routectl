@@ -375,11 +375,11 @@ async fn a_config_reload_keeps_the_boot_wire_check_params_and_never_rereads_the_
         (var == routectl_router::wire_check_env::SAMPLE_ONE_IN_ENV).then(|| "3".to_string())
     })
     .expect("a positive rate resolves")
-    .params;
+    .sample_one_in;
     let router = build_router_from_config(initial_config.clone(), secrets.clone())
         .await
         .expect("initial router build")
-        .with_wire_check_params(boot);
+        .with_wire_check_sample_one_in(boot);
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let before = swap.load_full();
     let _changed = ScopedEnv::set(routectl_router::wire_check_env::SAMPLE_ONE_IN_ENV, "7");
@@ -407,7 +407,10 @@ async fn a_config_reload_keeps_the_boot_wire_check_params_and_never_rereads_the_
         "the reload published a new router"
     );
     assert_eq!(after.wire_check_params_for_tests().sample_one_in.get(), 3);
-    assert_eq!(after.wire_check_params_for_tests(), boot);
+    assert_eq!(
+        after.wire_check_params_for_tests(),
+        before.wire_check_params_for_tests()
+    );
     drop(usage);
     drain_usage_writer_strict(writer).await;
 }

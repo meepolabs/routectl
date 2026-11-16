@@ -3,9 +3,9 @@
 //! client's full-scope claude.ai token, which must never reach a
 //! non-Anthropic egress, so no config file can name another one.
 //!
-//! [`listener_config`] is the only production constructor of
-//! [`ProxyListenerConfig`]; the server's source scan in `serve_tests.rs`
-//! fails on a struct literal anywhere else in `src/`.
+//! [`listener_config`] is the only production way to build a
+//! [`ProxyListenerConfig`]: its fields are private to the listener module,
+//! whose one production constructor reads the pair below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,14 +29,7 @@ pub fn listener_config(
     reinject_port: u16,
     seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
 ) -> ProxyListenerConfig {
-    ProxyListenerConfig {
-        listen_port,
-        cert_dir,
-        mitm_host: MITM_HOST.to_string(),
-        upstream_origin: MITM_UPSTREAM_ORIGIN.to_string(),
-        reinject_port,
-        seam_nonce,
-    }
+    ProxyListenerConfig::pinned(listen_port, cert_dir, reinject_port, seam_nonce)
 }
 
 #[cfg(test)]
@@ -68,11 +61,11 @@ mod tests {
 
         let config = listener_config(9443, PathBuf::from("/tmp/certs"), 9100, Arc::clone(&nonce));
 
-        assert_eq!(config.mitm_host, "api.anthropic.com");
-        assert_eq!(config.upstream_origin, "https://api.anthropic.com");
-        assert_eq!(config.listen_port, 9443);
-        assert_eq!(config.cert_dir, PathBuf::from("/tmp/certs"));
-        assert_eq!(config.reinject_port, 9100);
-        assert!(Arc::ptr_eq(&config.seam_nonce, &nonce));
+        assert_eq!(config.mitm_host(), "api.anthropic.com");
+        assert_eq!(config.upstream_origin(), "https://api.anthropic.com");
+        assert_eq!(config.listen_port(), 9443);
+        assert_eq!(config.cert_dir(), PathBuf::from("/tmp/certs"));
+        assert_eq!(config.reinject_port(), 9100);
+        assert!(Arc::ptr_eq(config.seam_nonce(), &nonce));
     }
 }

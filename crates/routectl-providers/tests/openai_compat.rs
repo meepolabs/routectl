@@ -1009,6 +1009,7 @@ fn request_with_text_and_document() -> routectl_core::ChatRequest {
 }
 
 #[tokio::test]
+#[serial_test::serial(translation_drop_globals)]
 async fn an_unrepresentable_block_is_forwarded_without_it_warned_once_and_counted() {
     // Arrange
     let server = MockServer::start().await;

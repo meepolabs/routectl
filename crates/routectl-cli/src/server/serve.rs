@@ -289,7 +289,7 @@ async fn serve_inner(
         let _ = _seams;
         build_router_from_config(config.clone(), secrets.clone()).await?
     };
-    let router = router.with_wire_check_params(wire_check.params);
+    let router = router.with_wire_check_sample_one_in(wire_check.sample_one_in);
     log_advisory_warnings(&config);
     router.log_placeholder_seats();
 
@@ -707,7 +707,6 @@ async fn start_mitm_proxy(
     seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
 ) -> std::result::Result<tokio::task::JoinHandle<()>, crate::proxy::listener::ProxyStartError> {
     let proxy_config = mitm_listener_config(mitm, reinject_port, seam_nonce);
-    let mitm_host = proxy_config.mitm_host.clone();
     let (listener, acceptor, ctx) = crate::proxy::listener::build_and_bind(proxy_config).await?;
     let listen_addr = listener
         .local_addr()
@@ -715,11 +714,11 @@ async fn start_mitm_proxy(
         .unwrap_or_default();
     tracing::info!(
         addr = %listen_addr,
-        mitm_host = %mitm_host,
+        mitm_host = %ctx.mitm_host(),
         "MITM front-proxy listening",
     );
     Ok(crate::proxy::listener::spawn(
-        listener, acceptor, ctx, mitm_host, shutdown,
+        listener, acceptor, ctx, shutdown,
     ))
 }
 

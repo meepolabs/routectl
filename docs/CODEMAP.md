@@ -4502,8 +4502,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (a positive `u32` replaces the 1-in-100 rate; any other set value is
   `SampleRateEnvError`, which never renders the value), returning
   `ResolvedWireCheckParams` with its `SampleRateSource` and the startup INFO
-  `log_status`; `serve` resolves it once and `Router::with_wire_check_params`
-  applies it, carried across reloads by `carry_over_metrics_from`
+  `log_status`; `serve` resolves it once and
+  `Router::with_wire_check_sample_one_in` applies the rate (the full-params
+  setter is test-only), carried across reloads by `carry_over_metrics_from`
 - `src/wire_check_state.rs` -- `WireCheckState`, the live wire check's
   process-lifetime state shared by `Arc` across hot reloads: the sampler
   (`admit`: first `first_n` per (lane, client version), at most 8 versions
@@ -7803,14 +7804,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/proxy/listener.rs` -- the CONNECT front-listener assembly point: binds
   a loopback TCP port, speaks the HTTP `CONNECT` tunneling protocol a client
   configures via `HTTPS_PROXY`, and dispatches each accepted connection to
-  either `mitm::handle_mitm_connection` (the configured `mitm_host`) or an
+  either `mitm::handle_mitm_connection` (the pinned MITM host) or an
   opaque `tokio::io::copy_bidirectional` blind tunnel (every other host --
   since `HTTPS_PROXY` is process-global, a client's telemetry / Sentry / other
   outbound HTTPS must pass through untouched, never terminating TLS).
   `build_and_bind` binds the socket + constructs the shared `MitmCtx` /
   `TlsAcceptor` once at startup; `spawn` runs the accept loop;
-  `ProxyListenerConfig` is the inputs, `ProxyStartError` the bind/startup
-  errors. The feature-enabled gate lives in `server::serve_on_listener` (keyed
+  `ProxyListenerConfig` is the inputs (fields private here; its one
+  production constructor `pinned` reads the pin), `MitmCtx` the shared
+  per-proxy context built once behind an `Arc` (fields private here, read
+  through `pub(crate)` accessors): the pinned host, `forward_state`,
+  `metrics`, `warn_once`, `upstream_origin` (real Anthropic origin),
+  `reinject_base` (routectl's own loopback listener), and the `seam_nonce`
+  (the SAME `Arc<ingress::MitmSeamNonce>` on `AppState`, so the proxy
+  stamper and the ingress checkers agree without re-generating it);
+  `ProxyStartError` the bind/startup errors. The feature-enabled gate lives in `server::serve_on_listener` (keyed
   on `Config::mitm.is_some()`), not here
 - `src/proxy/metrics.rs` -- lock-free observability primitives for the proxy.
   routectl has no metrics backend or exporter, so this stands none up (no
@@ -7835,18 +7843,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `service_fn`), and hands each request to `split::handle_request`. Fails
   closed (a handshake or connection-level error is logged and the connection
   dropped, never a plaintext fallback); the `permit` concurrency slot is held
-  only so dropping it releases the slot panic-safely alongside `tcp`.
-  `MitmCtx` is the shared per-proxy context built once by the listener behind
-  an `Arc`: `forward_state`, `metrics`, `warn_once`, `upstream_origin` (real
-  Anthropic origin), `reinject_base` (routectl's own loopback listener),
-  and the `seam_nonce` (the
-  SAME `Arc<ingress::MitmSeamNonce>` on `AppState`, so the proxy stamper and
-  the ingress checkers agree without re-generating it)
+  only so dropping it releases the slot panic-safely alongside `tcp`
 - `src/proxy/pin.rs` -- the one host (`MITM_HOST`) and upstream origin
   (`MITM_UPSTREAM_ORIGIN`) the proxy terminates and forwards to, fixed in code
   so no config can name another; `listener_config` is the only production
-  constructor of `ProxyListenerConfig` (a `serve_tests.rs` source scan fails
-  on any other literal in `src/`)
+  way to build a `ProxyListenerConfig` (its fields are private to
+  `listener.rs`, whose `pinned` constructor reads this pair)
 - `src/proxy/split.rs` -- request classification + split-leg dispatch.
   `handle_request(ctx, req)` (generic over `B: http_body::Body` so tests drive
   a synthetic body without a real TLS / HTTP1 connection; production

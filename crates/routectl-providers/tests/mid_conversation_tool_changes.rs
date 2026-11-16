@@ -167,6 +167,7 @@ fn invoke_system_part_drops() -> u64 {
 /// dropped, and the drop is counted once. The rest of the history keeps its
 /// order, with no in-band system turn.
 #[test]
+#[serial_test::serial(translation_drop_globals)]
 fn the_tool_change_turn_is_a_loss_on_bedrock_invoke() {
     // Arrange
     let req = request_with_tool_change_turn();
