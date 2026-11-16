@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::body::{Bytes, to_bytes};
 use axum::http::{HeaderMap, HeaderValue, header};
-use routectl_router::wire_check_state::{CheckOutcome, WireCheckSnapshot};
+use routectl_router::wire_check_state::{CheckOutcome, WireCheckParams, WireCheckSnapshot};
 use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, Router};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -267,20 +267,21 @@ pub(super) async fn router(
 ) -> Router {
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
-    let mut config = Config {
+    let config = Config {
         providers: BTreeMap::from([("p".to_string(), dialect.provider(base))]),
         models: BTreeMap::from([("m".to_string(), ModelEntry::new("p", "upstream"))]),
         aliases: BTreeMap::from([("a".to_string(), AliasValue::Single("m".to_string()))]),
         retry,
         ..Default::default()
     };
-    config.wire_check.first_n = first_n;
-    config.wire_check.sample_one_in =
-        std::num::NonZeroU32::new(sample_one_in).expect("nonzero sample");
     let secrets: Arc<dyn routectl_auth::SecretStore> = Arc::new(routectl_auth::MemoryStore::new());
     crate::server::build_router_from_config(Arc::new(config), secrets)
         .await
         .expect("build router")
+        .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(
+            first_n,
+            sample_one_in,
+        ))
 }
 
 /// What the client-facing renderer does to the response in a test run.
@@ -1750,17 +1751,13 @@ mod codex_lane_mixed_output {
             .with_openai_responses_auth_kind(AuthKind::ChatgptOauth)
             .with_account_id_ref(crate::test_secret::file_ref("acct-synthetic"))
             .with_openai_responses_base_url(base);
-        let mut config = Config {
+        let config = Config {
             providers: BTreeMap::from([("p".to_string(), entry)]),
             models: BTreeMap::from([("m".to_string(), ModelEntry::new("p", "upstream"))]),
             aliases: BTreeMap::from([("a".to_string(), AliasValue::Single("m".to_string()))]),
             retry,
             ..Default::default()
         };
-        let (first_n, sample_one_in) = CHECK_EVERY;
-        config.wire_check.first_n = first_n;
-        config.wire_check.sample_one_in =
-            std::num::NonZeroU32::new(sample_one_in).expect("nonzero sample");
         let token = Arc::new(StaticToken::new("synthetic-bearer")) as Arc<dyn TokenSource>;
         let mut cfg = OpenAiResponsesConfig::new_with_auth("openai-responses:p", token);
         cfg.account_id = Some("acct-synthetic".into());
@@ -1770,7 +1767,10 @@ mod codex_lane_mixed_output {
             inner: OpenAiResponsesProvider::new(cfg),
             slots: Arc::clone(slots),
         };
-        let mut router = Router::new(Arc::new(config));
+        let (first_n, sample_one_in) = CHECK_EVERY;
+        let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(
+            WireCheckParams::sampling_for_tests(first_n, sample_one_in),
+        );
         router.install_resolved_models(BTreeMap::from([(
             "m".to_string(),
             Arc::new(ResolvedModel::new("m", "p", Arc::new(provider), "upstream")),

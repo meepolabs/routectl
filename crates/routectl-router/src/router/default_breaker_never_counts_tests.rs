@@ -20,6 +20,7 @@ use super::scripted_provider_test_support::{Answer, ScriptedProvider};
 use crate::config::{Config, TuningSource, resolve_tuning};
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
+use crate::wire_check_state::WireCheckParams;
 
 const ALIAS: &str = "a";
 const NICKNAME: &str = "m0";
@@ -28,7 +29,6 @@ const PROVIDER: &str = "p0";
 fn config() -> Config {
     let toml_text = format!(
         "version = 5\n[retry]\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [wire_check]\nfirst_n = 0\nsample_one_in = 1000\n\
          [providers.{PROVIDER}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
          [aliases]\n{ALIAS} = [\"{NICKNAME}\"]\n"
     );
@@ -44,7 +44,8 @@ fn config() -> Config {
 }
 
 fn router(provider: Arc<dyn Provider>) -> Router {
-    let mut router = Router::new(Arc::new(config()));
+    let mut router = Router::new(Arc::new(config()))
+        .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(0, 1000));
     let model = ResolvedModel::new(NICKNAME, PROVIDER, provider, "upstream");
     router.install_resolved_models(BTreeMap::from([(NICKNAME.to_string(), Arc::new(model))]));
     router

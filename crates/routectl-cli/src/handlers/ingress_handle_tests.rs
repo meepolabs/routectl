@@ -3043,7 +3043,7 @@ async fn dispatched_chat_stream(
 
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
-    let mut config = Config {
+    let config = Config {
         providers: BTreeMap::from([(
             "p".to_string(),
             ProviderEntry::openai_compat(upstream.uri(), crate::test_secret::file_ref("k")),
@@ -3053,10 +3053,16 @@ async fn dispatched_chat_stream(
         retry,
         ..Default::default()
     };
-    config.wire_check.first_n = first_n;
-    config.wire_check.sample_one_in =
-        std::num::NonZeroU32::new(sample_one_in).expect("nonzero sample");
-    let router = Arc::new(build_test_router(Arc::new(config)).await);
+    let router = Arc::new(
+        build_test_router(Arc::new(config))
+            .await
+            .with_wire_check_params_for_tests(
+                routectl_router::wire_check_state::WireCheckParams::sampling_for_tests(
+                    first_n,
+                    sample_one_in,
+                ),
+            ),
+    );
 
     let mut headers = HeaderMap::new();
     headers.insert(

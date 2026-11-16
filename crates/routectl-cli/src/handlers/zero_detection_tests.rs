@@ -27,7 +27,7 @@ use routectl_core::wire_check::Leg;
 use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth,
 };
-use routectl_router::wire_check_state::{CheckOutcome, WireCheckSnapshot};
+use routectl_router::wire_check_state::{CheckOutcome, WireCheckParams, WireCheckSnapshot};
 use routectl_router::{
     AliasValue, CURRENT_CONFIG_VERSION, Config, ModelEntry, ProviderEntry, ResolvedModel,
     RetryPolicy, Router, parse_config,
@@ -1977,18 +1977,18 @@ async fn router_for(case: &Case, base: &str) -> Router {
     };
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
-    let mut config = Config {
+    let config = Config {
         providers: BTreeMap::from([(PROVIDER.to_string(), provider(base))]),
         models: BTreeMap::from([(NICKNAME.to_string(), (case.model)())]),
         aliases: BTreeMap::from([(ALIAS.to_string(), AliasValue::Single(NICKNAME.to_string()))]),
         retry,
         ..Default::default()
     };
-    check_every_request(&mut config);
     let secrets: Arc<dyn routectl_auth::SecretStore> = Arc::new(routectl_auth::MemoryStore::new());
-    crate::server::build_router_from_config(Arc::new(config), secrets)
+    let router = crate::server::build_router_from_config(Arc::new(config), secrets)
         .await
-        .expect("build router")
+        .expect("build router");
+    check_every_request(router)
 }
 
 const BEDROCK_REGION: &str = "us-east-1";
@@ -2024,8 +2024,7 @@ async fn bedrock_router(shape: BedrockShape, model_id: &str, origin: &str) -> Ro
          max_attempts = 1\n",
         key_ref = crate::test_secret::file_ref(&bedrock_key()),
     );
-    let mut config = parse_config(&text).expect("valid bedrock test config");
-    check_every_request(&mut config);
+    let config = parse_config(&text).expect("valid bedrock test config");
     let creds = BedrockCreds::BearerKey { key: bedrock_key() };
     let cfg = BedrockConfig {
         id: format!("bedrock:{PROVIDER}"),
@@ -2042,7 +2041,7 @@ async fn bedrock_router(shape: BedrockShape, model_id: &str, origin: &str) -> Ro
     let provider = BedrockProvider::new(cfg, resolved)
         .expect("canonical region")
         .with_runtime_origin_for_tests(origin);
-    let mut router = Router::new(Arc::new(config));
+    let mut router = check_every_request(Router::new(Arc::new(config)));
     router.install_resolved_models(BTreeMap::from([(
         NICKNAME.to_string(),
         Arc::new(ResolvedModel::new(
@@ -2085,8 +2084,7 @@ fn responses_mantle_router(origin: &str) -> Router {
          max_attempts = 1\n",
         key_ref = crate::test_secret::file_ref(&mantle_key()),
     );
-    let mut config = parse_config(&text).expect("valid mantle test config");
-    check_every_request(&mut config);
+    let config = parse_config(&text).expect("valid mantle test config");
     let mut cfg = OpenAiResponsesConfig::new_with_auth(
         PROVIDER,
         Arc::new(routectl_core::StaticToken::new(String::new())),
@@ -2097,7 +2095,7 @@ fn responses_mantle_router(origin: &str) -> Router {
         region: BEDROCK_REGION.into(),
         creds: ResolvedCreds::Bearer { key: mantle_key() },
     });
-    let mut router = Router::new(Arc::new(config));
+    let mut router = check_every_request(Router::new(Arc::new(config)));
     router.install_resolved_models(BTreeMap::from([(
         NICKNAME.to_string(),
         Arc::new(ResolvedModel::new(
@@ -2124,14 +2122,13 @@ fn responses_chatgpt_oauth_router(base: &str) -> Router {
         .with_openai_responses_base_url(base);
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
-    let mut config = Config {
+    let config = Config {
         providers: BTreeMap::from([(PROVIDER.to_string(), entry)]),
         models: BTreeMap::from([(NICKNAME.to_string(), plain_model())]),
         aliases: BTreeMap::from([(ALIAS.to_string(), AliasValue::Single(NICKNAME.to_string()))]),
         retry,
         ..Default::default()
     };
-    check_every_request(&mut config);
     let mut cfg = OpenAiResponsesConfig::new_with_auth(
         PROVIDER,
         Arc::new(routectl_core::StaticToken::new("synthetic-bearer")),
@@ -2139,7 +2136,7 @@ fn responses_chatgpt_oauth_router(base: &str) -> Router {
     cfg.account_id = Some("acct-synthetic".into());
     cfg.base_url = base.to_string();
     cfg.auth_kind = AuthKind::ChatgptOauth;
-    let mut router = Router::new(Arc::new(config));
+    let mut router = check_every_request(Router::new(Arc::new(config)));
     router.install_resolved_models(BTreeMap::from([(
         NICKNAME.to_string(),
         Arc::new(ResolvedModel::new(
@@ -2152,9 +2149,8 @@ fn responses_chatgpt_oauth_router(base: &str) -> Router {
     router
 }
 
-fn check_every_request(config: &mut Config) {
-    config.wire_check.first_n = u32::MAX;
-    config.wire_check.sample_one_in = std::num::NonZeroU32::MIN;
+const fn check_every_request(router: Router) -> Router {
+    router.with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(u32::MAX, 1))
 }
 
 /// One finding the walk saw, with the case that produced it.

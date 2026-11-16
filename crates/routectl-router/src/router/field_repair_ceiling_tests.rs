@@ -429,8 +429,7 @@ mod converse_ceiling {
     const NAMED_LIMIT: u32 = 8192;
     const CLIENT_MAX_TOKENS: u32 = 64_000;
 
-    const CONVERSE_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
-         [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+    const CONVERSE_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
          creds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
 
@@ -599,7 +598,8 @@ mod converse_ceiling {
         config
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(names.clone()));
-        let mut router = Router::new(Arc::new(config));
+        let mut router = Router::new(Arc::new(config))
+            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(
             names
                 .iter()

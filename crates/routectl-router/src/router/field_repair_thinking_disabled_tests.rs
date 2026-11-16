@@ -231,7 +231,10 @@ async fn the_committed_adaptive_rewrite_preflights_a_disabled_request_with_no_re
             anthropic_disabled_rejection,
             AfterRefusal::Serve,
         ));
-        let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+        let router = thinking_chain(
+            &[(ANTHROPIC_API_TOML, Arc::clone(&seat))],
+            WireCheckParams::default(),
+        );
         let first = router
             .complete_with_options(disabled_req(effort), RouterOptions::new())
             .await;
@@ -515,7 +518,10 @@ async fn a_forced_tool_choice_declines_the_adaptive_repair_and_learns_nothing() 
         anthropic_disabled_rejection,
         AfterRefusal::Serve,
     ));
-    let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+    let router = thinking_chain(
+        &[(ANTHROPIC_API_TOML, Arc::clone(&seat))],
+        WireCheckParams::default(),
+    );
 
     let dispatched = router
         .complete_with_options(
@@ -560,7 +566,10 @@ async fn an_auto_tool_choice_repairs_disabled_to_adaptive_and_commits() {
         anthropic_disabled_rejection,
         AfterRefusal::Serve,
     ));
-    let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+    let router = thinking_chain(
+        &[(ANTHROPIC_API_TOML, Arc::clone(&seat))],
+        WireCheckParams::default(),
+    );
 
     let dispatched = router
         .complete_with_options(
@@ -630,7 +639,7 @@ mod bedrock_thinking_off {
             "invoke"
         };
         format!(
-            "{WIRE_CHECK_EVERY}\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\n\
+            "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\n\
              jitter_ms = 0\n\n[providers.p0]\nkind = \"bedrock\"\nregion = \"{REGION}\"\n\
              creds = {{ kind = \"default-chain\" }}\napi_shape = \"{api_shape}\"\n"
         )
@@ -728,7 +737,8 @@ mod bedrock_thinking_off {
             config
                 .aliases
                 .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-            let mut router = Router::new(Arc::new(config));
+            let mut router =
+                Router::new(Arc::new(config)).with_wire_check_params_for_tests(WIRE_CHECK_EVERY);
             router.install_resolved_models(BTreeMap::from([(
                 "m0".to_string(),
                 Arc::new(ResolvedModel::new(

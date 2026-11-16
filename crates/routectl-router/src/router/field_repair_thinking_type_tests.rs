@@ -190,11 +190,11 @@ const ANTHROPIC_API_TOML: &str = "kind = \"anthropic-api\"\napi_key_ref = \"lite
 const BEDROCK_TOML: &str =
     "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n";
 
-/// A router over one seat per `(provider_toml, seat)`, in chain order, with
-/// `extra_toml` appended to the config, and durable capability writes assumed
+/// A router over one seat per `(provider_toml, seat)`, in chain order,
+/// sampling wire checks per `params`, and durable capability writes assumed
 /// so a committed verdict can act on the next request.
-fn thinking_chain(seats: &[(&str, Arc<ThinkingTypeSeat>)], extra_toml: &str) -> Router {
-    let mut toml_text = String::from(extra_toml);
+fn thinking_chain(seats: &[(&str, Arc<ThinkingTypeSeat>)], params: WireCheckParams) -> Router {
+    let mut toml_text = String::new();
     for (idx, (provider_toml, _)) in seats.iter().enumerate() {
         toml_text.push_str(&format!("\n[providers.p{idx}]\n{provider_toml}"));
     }
@@ -206,7 +206,7 @@ fn thinking_chain(seats: &[(&str, Arc<ThinkingTypeSeat>)], extra_toml: &str) -> 
         ALIAS.to_string(),
         AliasValue::Chain((0..seats.len()).map(|idx| format!("m{idx}")).collect()),
     );
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(params);
     router.install_resolved_models(
         seats
             .iter()
@@ -426,7 +426,10 @@ fn an_adaptive_rewrite_without_a_positive_effort_is_incomplete() {
 #[tokio::test]
 async fn a_positive_client_effort_outside_the_canonical_one_stays_as_sent() {
     let seat = refusing_seat(anthropic_enabled_rejection, AfterRefusal::Serve);
-    let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+    let router = thinking_chain(
+        &[(ANTHROPIC_API_TOML, Arc::clone(&seat))],
+        WireCheckParams::default(),
+    );
     let mut req = cross_dialect_enabled_req();
     req.provider_extras = Some(json!({"output_config": {"effort": "high"}}));
     assert_eq!(
@@ -503,7 +506,10 @@ async fn an_enabled_rejection_retries_once_with_adaptive_thinking_and_commits() 
 
     for (name, req, effort) in rows {
         let seat = refusing_seat(anthropic_enabled_rejection, AfterRefusal::Serve);
-        let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+        let router = thinking_chain(
+            &[(ANTHROPIC_API_TOML, Arc::clone(&seat))],
+            WireCheckParams::default(),
+        );
 
         let dispatched = router
             .complete_with_options(req(), RouterOptions::new())
@@ -545,7 +551,10 @@ async fn an_enabled_rejection_retries_once_with_adaptive_thinking_and_commits() 
 #[tokio::test]
 async fn the_captured_bedrock_rejection_repairs_a_bedrock_lane() {
     let seat = refusing_seat(bedrock_enabled_rejection, AfterRefusal::Serve);
-    let router = thinking_chain(&[(BEDROCK_TOML, Arc::clone(&seat))], "");
+    let router = thinking_chain(
+        &[(BEDROCK_TOML, Arc::clone(&seat))],
+        WireCheckParams::default(),
+    );
 
     let dispatched = router
         .complete_with_options(anthropic_enabled_req(), RouterOptions::new())
@@ -567,7 +576,10 @@ async fn the_captured_bedrock_rejection_repairs_a_bedrock_lane() {
 #[tokio::test]
 async fn the_committed_rewrite_preflights_the_next_request_with_no_rejection() {
     let seat = refusing_seat(anthropic_enabled_rejection, AfterRefusal::Serve);
-    let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+    let router = thinking_chain(
+        &[(ANTHROPIC_API_TOML, Arc::clone(&seat))],
+        WireCheckParams::default(),
+    );
     let first = router
         .complete_with_options(anthropic_enabled_req(), RouterOptions::new())
         .await;
@@ -789,7 +801,7 @@ async fn a_failed_repaired_retry_leaves_the_fallback_the_original_type() {
             (ANTHROPIC_API_TOML, Arc::clone(&primary)),
             (ANTHROPIC_API_TOML, Arc::clone(&fallback)),
         ],
-        "",
+        WireCheckParams::default(),
     );
 
     let dispatched = router
@@ -843,7 +855,7 @@ fn wire_checked_enabled_req() -> ChatRequest {
     req
 }
 
-const WIRE_CHECK_EVERY: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n";
+const WIRE_CHECK_EVERY: WireCheckParams = WireCheckParams::sampling_for_tests(8, 1);
 
 /// Mutation checks: stop declaring the dropped thinking members -> red
 /// (`/thinking/budget_tokens` is an undeclared loss); declare the type
@@ -1140,7 +1152,10 @@ async fn an_accepted_thinking_type_clears_the_verdict_that_rewrote_it() {
     let seat = Arc::new(ThinkingTypeSeat::responding(
         enabled_once_then_adaptive_later,
     ));
-    let router = thinking_chain(&[(BEDROCK_TOML, Arc::clone(&seat))], "");
+    let router = thinking_chain(
+        &[(BEDROCK_TOML, Arc::clone(&seat))],
+        WireCheckParams::default(),
+    );
     let enabled_key = thinking_type_key();
     let resident_type_keys = |router: &Router| {
         let mut keys: Vec<String> = router
@@ -1227,7 +1242,10 @@ fn enabled_once(body: &serde_json::Value, position: usize) -> Option<Error> {
 #[tokio::test]
 async fn an_unrepaired_success_at_a_thinking_type_clears_its_verdict() {
     let seat = Arc::new(ThinkingTypeSeat::responding(enabled_once));
-    let router = thinking_chain(&[(BEDROCK_TOML, Arc::clone(&seat))], "");
+    let router = thinking_chain(
+        &[(BEDROCK_TOML, Arc::clone(&seat))],
+        WireCheckParams::default(),
+    );
     let taught = router
         .complete_with_options(anthropic_enabled_req(), RouterOptions::new())
         .await;

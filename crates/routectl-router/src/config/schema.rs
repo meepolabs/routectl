@@ -278,17 +278,15 @@ pub struct WireCheckConfig {
 }
 
 const fn default_wire_check_first_n() -> u32 {
-    8
+    crate::wire_check_state::DEFAULT_FIRST_N
 }
 
 const fn default_wire_check_sample_one_in() -> NonZeroU32 {
-    const DEFAULT: NonZeroU32 = NonZeroU32::new(100).expect("non-zero literal");
-    DEFAULT
+    crate::wire_check_state::DEFAULT_SAMPLE_ONE_IN
 }
 
 const fn default_wire_check_window_secs() -> NonZeroU64 {
-    const DEFAULT: NonZeroU64 = NonZeroU64::new(86_400).expect("non-zero literal");
-    DEFAULT
+    crate::wire_check_state::DEFAULT_WINDOW_SECS
 }
 
 impl Default for WireCheckConfig {

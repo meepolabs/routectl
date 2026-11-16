@@ -13,6 +13,7 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use futures::stream::BoxStream;
 use routectl_core::wire_check::{EgressKind, IngressDialect, Lane, Leg, PathClass, WirePath};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
+use routectl_router::wire_check_state::WireCheckParams;
 use routectl_router::{AliasValue, Config, ProviderEntry, ResolvedModel, Router};
 use serde_json::{Value, json};
 
@@ -169,11 +170,9 @@ fn building_the_panel_changes_neither_the_wire_check_sampler_nor_its_counters() 
     let (_app, status) = status_over(&swap);
     let router = swap.load();
     let wire_check = router.wire_check_state_for_tests();
-    let config: Config =
-        toml::from_str("version = 5\n[wire_check]\nfirst_n = 2\nsample_one_in = 1000\n")
-            .expect("wire_check config parses");
+    let params = WireCheckParams::sampling_for_tests(2, 1000);
     let lane = Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi);
-    assert!(wire_check.admit(lane, None, &config.wire_check));
+    assert!(wire_check.admit(lane, None, &params));
     wire_check.record_local_refusal(lane, routectl_core::RefusalReason::CloakRelocation);
     let before = router.wire_check_snapshot();
 
@@ -183,8 +182,8 @@ fn building_the_panel_changes_neither_the_wire_check_sampler_nor_its_counters() 
 
     assert_eq!(router.wire_check_snapshot(), before);
     assert!(
-        wire_check.admit(lane, None, &config.wire_check),
+        wire_check.admit(lane, None, &params),
         "the second success is still inside first_n, so no read advanced the sampler"
     );
-    assert!(!wire_check.admit(lane, None, &config.wire_check));
+    assert!(!wire_check.admit(lane, None, &params));
 }

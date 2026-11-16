@@ -459,6 +459,9 @@ pub struct Router {
     /// sampler's per-(lane, version) counts must not restart their first-N
     /// window on every config swap.
     wire_check: Arc<crate::wire_check_state::WireCheckState>,
+    /// Sampling counts and status window the wire check runs on, derived
+    /// from `config.wire_check` at construction.
+    wire_check_params: crate::wire_check_state::WireCheckParams,
     /// Warn-once dedup for `routectl_edit_rejected`, keyed by lane, path
     /// pattern and attribution. Reset on a Router rebuild, which re-warns once.
     edit_rejected_warned: learn_revert::EditRejectedWarned,
@@ -2153,6 +2156,7 @@ impl Router {
             .values()
             .any(|entry| entry.forwarded_base_url().is_some());
         let override_registry = crate::override_registry::OverrideRegistry::build(&config);
+        let wire_check_params = wire_check::params_from_config(&config.wire_check);
         Self {
             config,
             providers: Default::default(),
@@ -2190,6 +2194,7 @@ impl Router {
             pool_reports: Vec::new(),
             metrics: Arc::new(RouterMetrics::default()),
             wire_check: Arc::default(),
+            wire_check_params,
             edit_rejected_warned: learn_revert::edit_rejected_warned(),
             #[cfg(any(test, feature = "test-utils"))]
             wire_tap_drop: None,
@@ -3157,7 +3162,7 @@ impl Router {
     /// status window this router's config sets. Reads only: no counter is
     /// reset and the sampler is not advanced.
     pub fn wire_check_snapshot(&self) -> crate::wire_check_state::WireCheckSnapshot {
-        self.wire_check.snapshot(&self.config.wire_check)
+        self.wire_check.snapshot(&self.wire_check_params)
     }
 
     /// The live wire-check state itself, so a test outside this crate can
@@ -3165,6 +3170,26 @@ impl Router {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn wire_check_state_for_tests(&self) -> &crate::wire_check_state::WireCheckState {
         &self.wire_check
+    }
+
+    /// The sampling params this router's wire check runs on.
+    #[cfg(test)]
+    pub(crate) const fn wire_check_params_for_tests(
+        &self,
+    ) -> crate::wire_check_state::WireCheckParams {
+        self.wire_check_params
+    }
+
+    /// This router, sampling wire checks and reporting the status window per
+    /// `params` instead of the values its config derives.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub const fn with_wire_check_params_for_tests(
+        mut self,
+        params: crate::wire_check_state::WireCheckParams,
+    ) -> Self {
+        self.wire_check_params = params;
+        self
     }
 
     /// This router, with every wire tap it installs removing the member at

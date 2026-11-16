@@ -22,10 +22,10 @@ use super::WireRevert;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
-use crate::wire_check_state::{FieldRepairOutcome, WireCheckSnapshot};
+use crate::wire_check_state::{FieldRepairOutcome, WireCheckParams, WireCheckSnapshot};
 
 const ALIAS: &str = "a";
-const NEVER_SAMPLED: &str = "first_n = 0\nsample_one_in = 1000";
+const NEVER_SAMPLED: WireCheckParams = WireCheckParams::sampling_for_tests(0, 1000);
 const EDIT_REJECTED: &str = "routectl_edit_rejected";
 const REFUSED_FIELD: &str = "Extra inputs are not permitted";
 const ANTHROPIC: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
@@ -59,7 +59,7 @@ fn router(provider_block: &str, cache: bool, providers: &[Arc<ScriptedProvider>]
 fn router_over(provider_block: &str, cache: bool, providers: &[Arc<dyn Provider>]) -> Router {
     let mut toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [cache]\nauto_emit_top_level_breakpoint = {cache}\n[wire_check]\n{NEVER_SAMPLED}\n"
+         [cache]\nauto_emit_top_level_breakpoint = {cache}\n"
     );
     let mut nicknames = Vec::new();
     for idx in 0..providers.len() {
@@ -71,7 +71,7 @@ fn router_over(provider_block: &str, cache: bool, providers: &[Arc<dyn Provider>
         nicknames.join(", ")
     ));
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(NEVER_SAMPLED);
     let models = providers
         .iter()
         .enumerate()

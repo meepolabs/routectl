@@ -46,3 +46,35 @@ fn invalid_sections_are_refused_naming_the_key() {
         assert!(err.to_string().contains(key), "{name}: {err}");
     }
 }
+
+#[test]
+fn a_router_samples_and_reports_its_window_per_the_section() {
+    let config: Config = toml::from_str(
+        "version = 5\n[wire_check]\nfirst_n = 3\nsample_one_in = 7\nwindow_secs = 60\n",
+    )
+    .expect("parse");
+
+    let router = crate::router::Router::new(std::sync::Arc::new(config));
+
+    assert_eq!(
+        router.wire_check_params_for_tests(),
+        crate::wire_check_state::WireCheckParams {
+            first_n: 3,
+            sample_one_in: std::num::NonZeroU32::new(7).expect("non-zero"),
+            window_secs: std::num::NonZeroU64::new(60).expect("non-zero"),
+        }
+    );
+    assert_eq!(router.wire_check_snapshot().window_secs, 60);
+}
+
+#[test]
+fn the_section_defaults_are_the_sampler_defaults() {
+    let config: Config = toml::from_str("version = 5\n").expect("parse");
+
+    let router = crate::router::Router::new(std::sync::Arc::new(config));
+
+    assert_eq!(
+        router.wire_check_params_for_tests(),
+        crate::wire_check_state::WireCheckParams::default()
+    );
+}

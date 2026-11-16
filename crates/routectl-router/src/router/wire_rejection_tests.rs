@@ -28,10 +28,12 @@ use super::PendingWireRejection;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{DispatchMeta, FieldRepair, Router, RouterOptions};
-use crate::wire_check_state::{CheckOutcome, FieldRepairOutcome, WireCheckSnapshot};
+use crate::wire_check_state::{
+    CheckOutcome, FieldRepairOutcome, WireCheckParams, WireCheckSnapshot,
+};
 
 const ALIAS: &str = "a";
-const NEVER_SAMPLED: &str = "first_n = 0\nsample_one_in = 1000";
+const NEVER_SAMPLED: WireCheckParams = WireCheckParams::sampling_for_tests(0, 1000);
 const WARN_TARGET: &str = "routectl_router::wire_check";
 const UNREPAIRED_WARN: &str = "upstream rejected a request field and it was not repaired";
 
@@ -47,11 +49,10 @@ fn rejection(path: &str, reason: &str) -> Error {
 const REFUSED_FIELD: &str = "Extra inputs are not permitted";
 
 /// A router whose alias walks one anthropic-api target per provider in
-/// `chain`, one call per target.
-fn router(wire_check: &str, chain: Vec<Arc<dyn Provider>>) -> Router {
-    let mut toml_text = format!(
-        "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [wire_check]\n{wire_check}\n"
+/// `chain`, one call per target, sampling per `params`.
+fn router(params: WireCheckParams, chain: Vec<Arc<dyn Provider>>) -> Router {
+    let mut toml_text = String::from(
+        "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n",
     );
     let mut nicknames = Vec::new();
     for idx in 0..chain.len() {
@@ -65,7 +66,7 @@ fn router(wire_check: &str, chain: Vec<Arc<dyn Provider>>) -> Router {
         nicknames.join(", ")
     ));
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(params);
     let models: BTreeMap<String, Arc<ResolvedModel>> = chain
         .into_iter()
         .enumerate()
@@ -261,7 +262,7 @@ async fn a_server_error_runs_no_rejection_check() {
     for surface in SURFACES {
         let provider =
             ScriptedProvider::boxed(unchanged, |_| Err(Error::upstream("scripted", 500, "boom")));
-        let router = router("first_n = 0\nsample_one_in = 1", vec![provider]);
+        let router = router(WireCheckParams::sampling_for_tests(0, 1), vec![provider]);
 
         dispatch(&router, surface, request(IngressDialect::Anthropic)).await;
 
@@ -285,7 +286,10 @@ async fn a_failed_attempt_gives_back_its_sampler_charge() {
         let failing =
             ScriptedProvider::boxed(unchanged, |_| Err(Error::upstream("scripted", 503, "down")));
         let serving = ScriptedProvider::boxed(lose_metadata, |_| Ok(()));
-        let router = router("first_n = 1\nsample_one_in = 1000", vec![failing, serving]);
+        let router = router(
+            WireCheckParams::sampling_for_tests(1, 1000),
+            vec![failing, serving],
+        );
 
         let served = dispatch(&router, surface, request(IngressDialect::Anthropic)).await;
 

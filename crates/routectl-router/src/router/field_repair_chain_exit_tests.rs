@@ -49,7 +49,7 @@ async fn a_moved_on_commit_counts_its_step_committed() {
     let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
         disabled_then(body, stop_refused)
     });
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
@@ -67,7 +67,7 @@ async fn a_moved_on_commit_counts_its_step_committed() {
 #[tokio::test]
 async fn a_success_commit_counts_its_step_committed() {
     let seat = ChainSeat::new(Egress::Anthropic, disabled_then_serve);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(anthropic_req(4096, false), RouterOptions::new())
@@ -109,7 +109,7 @@ async fn a_proven_step_that_teaches_nothing_is_committed_without_a_verdict() {
 #[tokio::test]
 async fn a_non_settling_count_counts_no_step_exit() {
     let seat = ChainSeat::new(Egress::Anthropic, two_key);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let counted = router.count_tokens(two_key_req()).await;
 
@@ -135,7 +135,7 @@ async fn a_same_field_refusal_counts_its_step_dropped() {
     let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
         disabled_then(body, adaptive_refused)
     });
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(anthropic_req(4096, false), RouterOptions::new())
@@ -158,7 +158,7 @@ async fn a_moved_target_counts_its_pending_step_dropped() {
     let seat1 = ChainSeat::new(Egress::Anthropic, |_, _| None);
     let router = chain_router(
         &[(ANTHROPIC_API_TOML, &seat0), (ANTHROPIC_API_TOML, &seat1)],
-        &wire_checked(ONE_ATTEMPT),
+        ONE_ATTEMPT,
     );
 
     let dispatched = router
@@ -190,7 +190,7 @@ async fn an_unpaid_repair_proposal_counts_once_on_its_lane() {
     });
     let router = chain_router(
         &[(OPENAI_COMPAT_TOML, &seat0), (OPENAI_COMPAT_TOML, &seat1)],
-        &wire_checked(ONE_ATTEMPT),
+        ONE_ATTEMPT,
     );
 
     let dispatched = router
@@ -230,7 +230,7 @@ async fn a_plain_refusal_on_an_empty_allowance_is_not_exhaustion() {
     });
     let router = chain_router(
         &[(OPENAI_COMPAT_TOML, &seat0), (OPENAI_COMPAT_TOML, &seat1)],
-        &wire_checked(ONE_ATTEMPT),
+        ONE_ATTEMPT,
     );
 
     let dispatched = router
@@ -298,7 +298,7 @@ async fn a_request_with_no_repair_lands_in_bucket_zero_on_every_walk() {
 async fn a_two_key_request_lands_in_bucket_two_on_every_walk() {
     for walk in WALKS {
         let seat = ChainSeat::new(Egress::Anthropic, two_key);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         drive(&router, walk, two_key_req()).await;
 
@@ -362,7 +362,7 @@ fn histogram_repairs(router: &Router) -> u64 {
 async fn the_slot_and_the_histogram_count_the_same_repairs_on_every_walk() {
     for walk in WALKS {
         let seat = ChainSeat::new(Egress::Anthropic, two_key);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
         let (req, slot) = observed(two_key_req());
 
         drive(&router, walk, req).await;
@@ -377,7 +377,7 @@ async fn the_slot_and_the_histogram_count_the_same_repairs_on_every_walk() {
 #[tokio::test]
 async fn a_count_tokens_walk_stamps_identity_and_field_repairs() {
     let seat = ChainSeat::new(Egress::Anthropic, two_key);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
     let (req, slot) = observed(two_key_req());
 
     let counted = router.count_tokens_with_meta(req).await;

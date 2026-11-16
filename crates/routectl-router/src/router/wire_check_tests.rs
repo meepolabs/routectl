@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::config::{Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
-use crate::wire_check_state::{CheckOutcome, WireCheckSnapshot};
+use crate::wire_check_state::{CheckOutcome, WireCheckParams, WireCheckSnapshot};
 
 const ALIAS: &str = "a";
 const LOST_KEY: &str = "metadata";
@@ -243,16 +243,20 @@ fn content_chunk() -> ChatChunk {
 
 /// A router whose alias walks one model per provider in `chain`, each
 /// `[providers.pN]` an anthropic-api entry so every target's egress kind is
-/// `anthropic-api`.
-fn router(wire_check: &str, chain: Vec<Arc<dyn Provider>>) -> Router {
-    router_retrying(1, wire_check, chain)
+/// `anthropic-api`, sampling per `params`.
+fn router(params: WireCheckParams, chain: Vec<Arc<dyn Provider>>) -> Router {
+    router_retrying(1, params, chain)
 }
 
 /// [`router`] with `max_attempts` calls per chain target.
-fn router_retrying(max_attempts: u32, wire_check: &str, chain: Vec<Arc<dyn Provider>>) -> Router {
+fn router_retrying(
+    max_attempts: u32,
+    params: WireCheckParams,
+    chain: Vec<Arc<dyn Provider>>,
+) -> Router {
     let mut toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = {max_attempts}\ninitial_backoff_ms = 0\n\
-         jitter_ms = 0\n[wire_check]\n{wire_check}\n"
+         jitter_ms = 0\n"
     );
     let mut nicknames = Vec::new();
     for idx in 0..chain.len() {
@@ -266,7 +270,7 @@ fn router_retrying(max_attempts: u32, wire_check: &str, chain: Vec<Arc<dyn Provi
         nicknames.join(", ")
     ));
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(params);
     let models: BTreeMap<String, Arc<ResolvedModel>> = chain
         .into_iter()
         .enumerate()
@@ -280,7 +284,7 @@ fn router_retrying(max_attempts: u32, wire_check: &str, chain: Vec<Arc<dyn Provi
     router
 }
 
-const CHECK_EVERY: &str = "first_n = 8\nsample_one_in = 1";
+const CHECK_EVERY: WireCheckParams = WireCheckParams::sampling_for_tests(8, 1);
 
 fn client_body() -> Value {
     json!({
@@ -493,7 +497,7 @@ async fn a_retry_on_the_same_target_gets_a_fresh_tap() {
 async fn admission_is_charged_once_per_attempt() {
     for surface in SURFACES {
         let provider = Arc::new(DepositingProvider::new(Deposit::Nothing));
-        let router = router("first_n = 1\nsample_one_in = 1000", vec![provider]);
+        let router = router(WireCheckParams::sampling_for_tests(1, 1000), vec![provider]);
 
         dispatch(&router, surface, anthropic_request()).await;
         dispatch(&router, surface, anthropic_request()).await;
@@ -510,7 +514,11 @@ async fn admission_is_charged_once_per_attempt() {
 async fn the_tap_handed_to_the_provider_carries_the_admission_decision() {
     let rows = [
         ("admitted", CHECK_EVERY, true),
-        ("not admitted", "first_n = 0\nsample_one_in = 1000", false),
+        (
+            "not admitted",
+            WireCheckParams::sampling_for_tests(0, 1000),
+            false,
+        ),
     ];
     for surface in SURFACES {
         for (name, wire_check, expected) in rows {
@@ -534,7 +542,7 @@ async fn the_tap_handed_to_the_provider_carries_the_admission_decision() {
 async fn an_unadmitted_success_records_no_check() {
     for surface in SURFACES {
         let provider = Arc::new(DepositingProvider::new(Deposit::IngressWithout(LOST_KEY)));
-        let router = router("first_n = 0\nsample_one_in = 1000", vec![provider]);
+        let router = router(WireCheckParams::sampling_for_tests(0, 1000), vec![provider]);
 
         dispatch(&router, surface, anthropic_request()).await;
 

@@ -15,8 +15,7 @@ mod responses_param_refusals {
     const SERVICE_TIER: &str = "service_tier";
     const EDIT_REJECTED: &str = "routectl_edit_rejected";
 
-    const RESPONSES_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
-         [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+    const RESPONSES_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"openai-responses\"\nauth_kind = \"api-key\"\n\
          base_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
     /// An operator extra the egress merges into the body as a top-level key
@@ -119,7 +118,8 @@ mod responses_param_refusals {
         config
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-        let mut router = Router::new(Arc::new(config));
+        let mut router = Router::new(Arc::new(config))
+            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(BTreeMap::from([(
             "m0".to_string(),
             Arc::new(ResolvedModel::new(
@@ -264,8 +264,7 @@ mod responses_param_refusals {
     #[tokio::test]
     async fn a_mantle_prompt_cache_refusal_names_no_row_and_repairs_nothing() {
         const PROMPT_CACHE_OPTIONS: &str = "prompt_cache_options";
-        const MANTLE_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
-             [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+        const MANTLE_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
              [providers.p0]\nkind = \"openai-responses\"\napi_key_ref = \"\"\n\
              bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
         let code = "unsupported_parameter";

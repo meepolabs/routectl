@@ -20,7 +20,7 @@ use super::ResponseCheck;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
-use crate::wire_check_state::{CheckOutcome, WireCheckSnapshot};
+use crate::wire_check_state::{CheckOutcome, WireCheckParams, WireCheckSnapshot};
 
 const ALIAS: &str = "a";
 const UPSTREAM_BODY: &str = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
@@ -123,22 +123,22 @@ impl Provider for AnsweringProvider {
 }
 
 /// A router over one anthropic-api target (`kind` picks the egress) whose
-/// sampler admits per `wire_check`.
-fn router(kind: &str, wire_check: &str) -> Router {
+/// sampler admits per `params`.
+fn router(kind: &str, params: WireCheckParams) -> Router {
     let toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [wire_check]\n{wire_check}\n[providers.p0]\nkind = \"{kind}\"\n\
+         [providers.p0]\nkind = \"{kind}\"\n\
          api_key_ref = \"literal:k\"\n[aliases]\n{ALIAS} = [\"m0\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(params);
     let model = ResolvedModel::new("m0", "p0", Arc::new(AnsweringProvider), "upstream");
     router.install_resolved_models(BTreeMap::from([("m0".to_string(), Arc::new(model))]));
     router
 }
 
-const CHECK_EVERY: &str = "first_n = 8\nsample_one_in = 1";
-const CHECK_NONE: &str = "first_n = 0\nsample_one_in = 1000";
+const CHECK_EVERY: WireCheckParams = WireCheckParams::sampling_for_tests(8, 1);
+const CHECK_NONE: WireCheckParams = WireCheckParams::sampling_for_tests(0, 1000);
 
 fn request(dialect: IngressDialect, stream: bool) -> ChatRequest {
     let mut req = ChatRequest {
@@ -534,7 +534,7 @@ async fn carries_a_check(
 /// side.
 #[tokio::test]
 async fn a_translation_stream_is_folded_only_while_the_body_trace_is_on() {
-    let rows: [(&str, &str, bool, bool, bool); 5] = [
+    let rows: [(&str, WireCheckParams, bool, bool, bool); 5] = [
         ("traced admitted stream", CHECK_EVERY, true, true, true),
         ("traced unadmitted stream", CHECK_NONE, true, true, true),
         ("untraced admitted stream", CHECK_EVERY, true, false, false),

@@ -143,7 +143,8 @@ impl Provider for ChainSeat {
 }
 
 /// A router over one seat per `(provider_toml, seat)`, in chain order,
-/// with `extra_toml` prepended and durable capability writes assumed.
+/// with `extra_toml` prepended, every successful attempt wire-checked, and
+/// durable capability writes assumed.
 fn chain_router(seats: &[(&str, &Arc<ChainSeat>)], extra_toml: &str) -> Router {
     let mut toml_text = String::from(extra_toml);
     for (idx, (provider_toml, _)) in seats.iter().enumerate() {
@@ -154,7 +155,8 @@ fn chain_router(seats: &[(&str, &Arc<ChainSeat>)], extra_toml: &str) -> Router {
         ALIAS.to_string(),
         AliasValue::Chain((0..seats.len()).map(|idx| format!("m{idx}")).collect()),
     );
-    let mut router = Router::new(Arc::new(config));
+    let mut router =
+        Router::new(Arc::new(config)).with_wire_check_params_for_tests(WIRE_CHECK_EVERY);
     router.install_resolved_models(
         seats
             .iter()
@@ -206,10 +208,6 @@ fn responses_body(
             .join()
             .expect("the body assembly thread finishes")
     })
-}
-
-fn wire_checked(retry: &str) -> String {
-    format!("{WIRE_CHECK_EVERY}{retry}")
 }
 
 // -----------------------------------------------------------------------

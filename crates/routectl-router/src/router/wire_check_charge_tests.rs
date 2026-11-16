@@ -113,7 +113,7 @@ fn loss_checks(router: &Router) -> u64 {
 async fn an_attempt_dropped_before_the_provider_answers_gives_its_charge_back() {
     for surface in SURFACES {
         let provider = Arc::new(ScriptedProvider::new([Step::Hang, Step::ServeLosing]));
-        let router = router("first_n = 1\nsample_one_in = 1000", vec![provider]);
+        let router = router(WireCheckParams::sampling_for_tests(1, 1000), vec![provider]);
 
         let dropped = tokio::time::timeout(
             Duration::from_millis(50),
@@ -142,7 +142,7 @@ async fn a_failed_attempt_gives_its_charge_back_exactly_once() {
             Step::ServeLosing,
         ];
         let provider = Arc::new(ScriptedProvider::new(steps));
-        let router = router("first_n = 2\nsample_one_in = 1000", vec![provider]);
+        let router = router(WireCheckParams::sampling_for_tests(2, 1000), vec![provider]);
 
         for _ in steps {
             dispatch_any(&router, surface, anthropic_request()).await;
@@ -163,7 +163,7 @@ async fn a_stream_failing_after_first_content_keeps_its_charge() {
         Step::ContentThenFail,
         Step::ServeLosing,
     ]));
-    let router = router("first_n = 1\nsample_one_in = 1000", vec![provider]);
+    let router = router(WireCheckParams::sampling_for_tests(1, 1000), vec![provider]);
 
     dispatch_any(&router, Surface::Stream, anthropic_request()).await;
     dispatch(&router, Surface::Stream, anthropic_request()).await;
@@ -181,7 +181,7 @@ async fn a_retry_on_the_same_target_is_charged_once_after_the_failed_attempt_giv
     let provider = Arc::new(ScriptedProvider::new([Step::Fail, Step::ServeLosing]));
     let router = router_retrying(
         2,
-        "first_n = 2\nsample_one_in = 1000",
+        WireCheckParams::sampling_for_tests(2, 1000),
         vec![provider.clone()],
     );
 

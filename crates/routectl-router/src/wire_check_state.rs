@@ -30,14 +30,13 @@
 //! across a `tracing` call or an await.
 
 use std::collections::{HashMap, VecDeque};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use routectl_core::warn_dedup::{CappedWarnSet, WarnDecision};
 use routectl_core::wire_check::{Lane, Leg, PathClass, RejectionProvenance, WirePath};
 use routectl_core::{RefusalReason, is_safe_token};
-
-use crate::config::WireCheckConfig;
 
 /// Most client versions the sampler tracks per lane for first-N checking.
 pub const MAX_TRACKED_VERSIONS_PER_LANE: usize = 8;
@@ -52,6 +51,59 @@ pub const FINDINGS_RING_CAPACITY: usize = 128;
 const WARN_DEDUP_CAP: usize = 1024;
 
 const LOG_TARGET: &str = "routectl_router::wire_check";
+
+/// Successful attempts checked per (lane, client version) before sampling
+/// starts.
+pub const DEFAULT_FIRST_N: u32 = 8;
+
+/// After the first [`DEFAULT_FIRST_N`], one successful attempt in this many
+/// is checked.
+pub const DEFAULT_SAMPLE_ONE_IN: NonZeroU32 = NonZeroU32::new(100).expect("non-zero literal");
+
+/// How far back, in seconds, a counter's last sighting still counts as
+/// current on the status surface.
+pub const DEFAULT_WINDOW_SECS: NonZeroU64 = NonZeroU64::new(86_400).expect("non-zero literal");
+
+/// How the sampler admits successful attempts and how wide the status window
+/// is. [`Default`] carries the named consts above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireCheckParams {
+    /// Successful attempts checked per (lane, client version) since boot
+    /// before sampling starts.
+    pub first_n: u32,
+    /// After the first `first_n`, one successful attempt in this many is
+    /// checked.
+    pub sample_one_in: NonZeroU32,
+    /// The status window, in seconds.
+    pub window_secs: NonZeroU64,
+}
+
+impl Default for WireCheckParams {
+    fn default() -> Self {
+        Self {
+            first_n: DEFAULT_FIRST_N,
+            sample_one_in: DEFAULT_SAMPLE_ONE_IN,
+            window_secs: DEFAULT_WINDOW_SECS,
+        }
+    }
+}
+
+impl WireCheckParams {
+    /// Sampling with the given counts and the default window. Panics when
+    /// `sample_one_in` is zero.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub const fn sampling_for_tests(first_n: u32, sample_one_in: u32) -> Self {
+        let Some(sample_one_in) = NonZeroU32::new(sample_one_in) else {
+            panic!("sample_one_in must be non-zero");
+        };
+        Self {
+            first_n,
+            sample_one_in,
+            window_secs: DEFAULT_WINDOW_SECS,
+        }
+    }
+}
 
 /// How one check ended. Closed; it is the `outcome` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -333,10 +385,10 @@ impl WireCheckState {
             &self,
             lane: Lane,
             client_version: Option<&str>,
-            config: &WireCheckConfig,
+            params: &WireCheckParams,
         ) -> bool {
-            let first_n = u64::from(config.first_n);
-            let sample_one_in = u64::from(config.sample_one_in.get());
+            let first_n = u64::from(params.first_n);
+            let sample_one_in = u64::from(params.sample_one_in.get());
             let client_version = client_version.filter(|v| is_safe_token(v));
             let Some(shard) = self.sampler.get(lane.index()) else {
                 return false;
@@ -549,7 +601,7 @@ impl WireCheckState {
 
     /// Copy every counter and the ring. Reads only: the sampler is not
     /// touched and nothing is reset.
-    pub fn snapshot(&self, config: &WireCheckConfig) -> WireCheckSnapshot {
+    pub fn snapshot(&self, params: &WireCheckParams) -> WireCheckSnapshot {
         let registry = lock(&self.registry);
         let mut loss: Vec<WireLossCounter> = registry
             .loss
@@ -584,7 +636,7 @@ impl WireCheckState {
         checks.sort_by_key(|c| (c.lane.label(), c.outcome.label()));
         local_refusals.sort_by_key(|c| (c.lane.label(), c.reason.as_str()));
         WireCheckSnapshot {
-            window_secs: config.window_secs.get(),
+            window_secs: params.window_secs.get(),
             loss,
             checks,
             local_refusals,

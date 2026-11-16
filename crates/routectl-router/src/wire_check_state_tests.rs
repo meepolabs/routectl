@@ -2,18 +2,14 @@ use routectl_core::wire_check::{
     EgressKind, IngressDialect, Lane, Leg, PathClass, RejectionProvenance, WirePath,
 };
 
+use super::WireCheckParams;
 use super::{
     CheckOutcome, FINDINGS_RING_CAPACITY, FieldRepairOutcome, MAX_TRACKED_VERSIONS_PER_LANE,
     WireCheckState,
 };
-use crate::config::{Config, WireCheckConfig};
 
-fn config(first_n: u32, sample_one_in: u32) -> WireCheckConfig {
-    let config: Config = toml::from_str(&format!(
-        "version = 5\n[wire_check]\nfirst_n = {first_n}\nsample_one_in = {sample_one_in}\n"
-    ))
-    .expect("wire_check config parses");
-    config.wire_check
+fn config(first_n: u32, sample_one_in: u32) -> WireCheckParams {
+    WireCheckParams::sampling_for_tests(first_n, sample_one_in)
 }
 
 fn anthropic_lane() -> Lane {
@@ -40,7 +36,7 @@ fn admitted_indices(
     state: &WireCheckState,
     lane: Lane,
     version: Option<&str>,
-    config: &WireCheckConfig,
+    config: &WireCheckParams,
     calls: usize,
 ) -> Vec<usize> {
     (0..calls)
@@ -205,7 +201,7 @@ fn only_a_finished_untruncated_comparison_with_no_findings_is_clean() {
         );
 
         assert_eq!(outcome, expected, "{name}");
-        let checks = state.snapshot(&WireCheckConfig::default()).checks;
+        let checks = state.snapshot(&WireCheckParams::default()).checks;
         assert_eq!(checks.len(), 1, "{name}");
         assert_eq!(checks[0].outcome, expected, "{name}");
         assert_eq!(checks[0].reading.count, 1, "{name}");
@@ -218,7 +214,7 @@ fn an_incomplete_check_is_counted_incomplete_not_clean() {
 
     state.record_incomplete(anthropic_lane());
 
-    let checks = state.snapshot(&WireCheckConfig::default()).checks;
+    let checks = state.snapshot(&WireCheckParams::default()).checks;
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].outcome, CheckOutcome::Incomplete);
     assert_eq!(checks[0].lane, anthropic_lane());
@@ -236,7 +232,7 @@ fn a_loss_bumps_its_lane_and_class_counter_and_enters_the_ring_with_its_leg() {
         false,
     );
 
-    let snapshot = state.snapshot(&WireCheckConfig::default());
+    let snapshot = state.snapshot(&WireCheckParams::default());
     assert_eq!(snapshot.loss.len(), 1);
     assert_eq!(snapshot.loss[0].lane, chat_lane());
     assert_eq!(snapshot.loss[0].path_class, PathClass::Changed);
@@ -263,7 +259,7 @@ fn the_ring_holds_at_most_its_capacity_keeping_the_newest() {
         );
     }
 
-    let findings = state.snapshot(&WireCheckConfig::default()).findings;
+    let findings = state.snapshot(&WireCheckParams::default()).findings;
     assert_eq!(findings.len(), FINDINGS_RING_CAPACITY);
     assert_eq!(findings[0].path, path(&["tools", "72"]), "oldest kept");
     assert_eq!(
@@ -298,7 +294,7 @@ fn a_flood_of_rejections_never_evicts_a_loss_finding() {
 
     record_unrepaired_rejections(&state, FINDINGS_RING_CAPACITY + 72);
 
-    let findings = state.snapshot(&WireCheckConfig::default()).findings;
+    let findings = state.snapshot(&WireCheckParams::default()).findings;
     let losses: Vec<&WirePath> = findings
         .iter()
         .filter(|f| f.class.is_some())
@@ -346,7 +342,7 @@ fn a_local_refusal_counts_per_lane_and_reason_sorted_by_both() {
     state.record_local_refusal(egress, RefusalReason::ToolPairing);
 
     let refusals: Vec<_> = state
-        .snapshot(&WireCheckConfig::default())
+        .snapshot(&WireCheckParams::default())
         .local_refusals
         .iter()
         .map(|c| (c.lane.label(), c.reason.as_str(), c.reading.count))
@@ -415,7 +411,7 @@ fn a_repeated_loss_warns_once_while_its_counter_reaches_the_call_count() {
         assert!(!value.contains(BODY_SENTINEL), "field {name} = {value}");
     }
     assert!(!warn.message.contains(BODY_SENTINEL));
-    let snapshot = state.snapshot(&WireCheckConfig::default());
+    let snapshot = state.snapshot(&WireCheckParams::default());
     assert_eq!(snapshot.loss[0].reading.count, calls);
     assert_eq!(snapshot.findings.len(), calls as usize);
 }
@@ -469,7 +465,7 @@ fn only_an_unrepaired_rejection_warns_and_only_once_per_path() {
     assert_eq!(warns[0].field("provenance"), Some("routectl_added"));
     assert_eq!(warns[0].field("path"), Some("/thinking"));
     assert_eq!(
-        state.snapshot(&WireCheckConfig::default()).findings.len(),
+        state.snapshot(&WireCheckParams::default()).findings.len(),
         4
     );
 }

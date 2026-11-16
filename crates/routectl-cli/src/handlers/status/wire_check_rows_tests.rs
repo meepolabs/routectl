@@ -5,8 +5,7 @@ use routectl_core::RefusalReason;
 use routectl_core::wire_check::{
     EgressKind, IngressDialect, Lane, Leg, PathClass, RejectionProvenance, WirePath,
 };
-use routectl_router::Config;
-use routectl_router::wire_check_state::{FieldRepairOutcome, WireCheckState};
+use routectl_router::wire_check_state::{FieldRepairOutcome, WireCheckParams, WireCheckState};
 use serde_json::{Value, json};
 
 use super::project;
@@ -18,7 +17,7 @@ fn lane() -> Lane {
 }
 
 fn snapshot_of(state: &WireCheckState) -> routectl_router::wire_check_state::WireCheckSnapshot {
-    state.snapshot(&Config::default().wire_check)
+    state.snapshot(&WireCheckParams::default())
 }
 
 fn rendered(rows: &super::WireCheckRows) -> Value {

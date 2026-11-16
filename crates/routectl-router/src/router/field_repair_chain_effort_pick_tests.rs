@@ -66,7 +66,7 @@ fn a_higher_pick_records_its_own_action_and_counts_lossy_once_on_the_lane() {
     use crate::wire_check_state::FieldRepairOutcome;
 
     let seat = ChainSeat::new(Egress::Anthropic, refuse_low);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let (dispatched, warns) = dispatch_capturing_warns(
         &router,
@@ -121,7 +121,7 @@ fn a_higher_pick_records_its_own_action_and_counts_lossy_once_on_the_lane() {
 #[test]
 fn a_lower_pick_keeps_the_rewrite_action_and_carries_direction_lower() {
     let seat = ChainSeat::new(Egress::Anthropic, refuse_xhigh);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let (dispatched, warns) = dispatch_capturing_warns(
         &router,
@@ -162,7 +162,7 @@ fn a_lower_pick_keeps_the_rewrite_action_and_carries_direction_lower() {
 #[test]
 fn an_unheld_replacement_step_records_its_pick_like_a_held_one() {
     let seat = ChainSeat::new(Egress::Anthropic, refuse_xhigh_then_high);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
     let sibling_req = effort_req("high", Some(json!({"type": "adaptive"})));
     let sibling_target = router
         .dispatch_chain_for_request(

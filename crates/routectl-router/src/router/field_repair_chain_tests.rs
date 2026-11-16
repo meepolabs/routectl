@@ -40,7 +40,7 @@ mod repair_chain {
     #[tokio::test]
     async fn two_refused_fields_on_anthropic_api_complete_converge_in_one_request() {
         let seat = ChainSeat::new(Egress::Anthropic, two_key);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(two_key_req(), RouterOptions::new())
@@ -60,7 +60,7 @@ mod repair_chain {
     #[tokio::test]
     async fn two_refused_fields_converge_on_a_stream_before_content() {
         let seat = ChainSeat::new(Egress::Anthropic, two_key);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .stream_with_options(two_key_req(), RouterOptions::new())
@@ -75,7 +75,7 @@ mod repair_chain {
     #[tokio::test]
     async fn two_refused_fields_converge_on_a_settling_token_count() {
         let seat = ChainSeat::new(Egress::Anthropic, two_key);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let counted = router.count_tokens_with_meta(two_key_req()).await;
 
@@ -87,7 +87,7 @@ mod repair_chain {
     #[tokio::test]
     async fn a_non_settling_token_count_repairs_both_fields_and_commits_nothing() {
         let seat = ChainSeat::new(Egress::Anthropic, two_key);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let counted = router.count_tokens(two_key_req()).await;
 
@@ -110,7 +110,7 @@ mod repair_chain {
         let seat = ChainSeat::new(Egress::OpenAiCompat, |body, _| {
             refuse_first_of(&THREE_KEYS, body)
         });
-        let router = chain_router(&[(OPENAI_COMPAT_TOML, &seat)], &wire_checked(ONE_ATTEMPT));
+        let router = chain_router(&[(OPENAI_COMPAT_TOML, &seat)], ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(compat_req(&THREE_KEYS), RouterOptions::new())
@@ -170,7 +170,7 @@ mod repair_chain {
     #[tokio::test]
     async fn a_refused_repair_value_on_a_row_that_is_not_ranked_reaches_the_client() {
         let seat = ChainSeat::new(Egress::Anthropic, max_tokens_twice);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(two_key_req(), RouterOptions::new())
@@ -223,7 +223,7 @@ mod repair_chain {
         let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
             disabled_then(body, adaptive_refused)
         });
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(anthropic_req(4096, false), RouterOptions::new())
@@ -241,7 +241,7 @@ mod repair_chain {
         let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
             disabled_then(body, stop_refused_inferred)
         });
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
@@ -262,7 +262,7 @@ mod repair_chain {
         let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
             disabled_then(body, absent_top_k_refused)
         });
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(anthropic_req(4096, false), RouterOptions::new())
@@ -287,7 +287,7 @@ mod repair_chain {
             |body, _| disabled_then(body, stop_refused),
             1,
         );
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
@@ -327,7 +327,7 @@ mod repair_chain {
         let seat = ChainSeat::new(Egress::Anthropic, disabled_then_extra);
         let router = chain_router(
             &[(&format!("{ANTHROPIC_API_TOML}{OPERATOR_EXTRA}"), &seat)],
-            &wire_checked(ONE_ATTEMPT),
+            ONE_ATTEMPT,
         );
         let mut req = anthropic_req(4096, false);
         let mut client = disabled_client_body(None);
@@ -393,7 +393,7 @@ mod repair_chain {
     #[tokio::test]
     async fn a_supported_levels_refusal_after_a_thinking_rewrite_commits_both_repairs() {
         let seat = ChainSeat::new(Egress::Anthropic, disabled_then_xhigh);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(disabled_req(Some("xhigh")), RouterOptions::new())
@@ -495,7 +495,7 @@ mod repair_chain {
 
         for (name, respond, moved_on) in rows {
             let seat = ChainSeat::new(Egress::Anthropic, respond);
-            let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+            let router = anthropic_router(&seat, ONE_ATTEMPT);
             let taught = router
                 .complete_with_options(anthropic_adaptive_req(32_000), RouterOptions::new())
                 .await;
@@ -556,7 +556,7 @@ mod repair_chain {
         let seat = ChainSeat::new(Egress::Anthropic, |body, _| {
             disabled_then(body, stop_refused)
         });
-        let router = chain_router(&[(ANTHROPIC_API_TOML, &seat)], &wire_checked(ONE_ATTEMPT));
+        let router = chain_router(&[(ANTHROPIC_API_TOML, &seat)], ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
@@ -595,7 +595,7 @@ mod repair_chain {
         });
         let router = chain_router(
             &[(OPENAI_COMPAT_TOML, &seat0), (OPENAI_COMPAT_TOML, &seat1)],
-            &wire_checked(ONE_ATTEMPT),
+            ONE_ATTEMPT,
         );
 
         let dispatched = router
@@ -651,7 +651,7 @@ mod repair_chain {
         let seat1 = ChainSeat::new(Egress::Anthropic, |_, _| None);
         let router = chain_router(
             &[(ANTHROPIC_API_TOML, &seat0), (ANTHROPIC_API_TOML, &seat1)],
-            &wire_checked(ONE_ATTEMPT),
+            ONE_ATTEMPT,
         );
 
         let dispatched = router
@@ -682,7 +682,7 @@ mod repair_chain {
             }
             (position == 1).then(unavailable)
         });
-        let router = anthropic_router(&seat, &wire_checked(THREE_ATTEMPTS));
+        let router = anthropic_router(&seat, THREE_ATTEMPTS);
 
         let dispatched = router
             .complete_with_options(anthropic_req(4096, false), RouterOptions::new())

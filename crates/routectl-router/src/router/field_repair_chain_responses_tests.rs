@@ -100,7 +100,7 @@ fn responses_effort_req(effort: &str) -> ChatRequest {
 }
 
 fn responses_router(provider_toml: &str, seat: &Arc<ChainSeat>) -> Router {
-    chain_router(&[(provider_toml, seat)], &wire_checked(ONE_ATTEMPT))
+    chain_router(&[(provider_toml, seat)], ONE_ATTEMPT)
 }
 
 /// Drive one request on the stream walk and drain it, so a committed stream

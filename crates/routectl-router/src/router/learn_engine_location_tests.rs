@@ -18,9 +18,10 @@ use super::RejectionSite;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{DispatchMeta, Router};
+use crate::wire_check_state::WireCheckParams;
 
 const ALIAS: &str = "a";
-const NEVER_SAMPLED: &str = "first_n = 0\nsample_one_in = 1000";
+const NEVER_SAMPLED: WireCheckParams = WireCheckParams::sampling_for_tests(0, 1000);
 const REFUSED_FIELD: &str = "Extra inputs are not permitted";
 const CONVERSE_BAG: &str = "additionalModelRequestFields";
 const DISPLAY_FIXTURE: &str =
@@ -47,11 +48,11 @@ const GEMINI: &str = "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n";
 fn router(provider_block: &str, provider: Arc<dyn Provider>) -> Router {
     let toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [wire_check]\n{NEVER_SAMPLED}\n[providers.p0]\n{provider_block}\
+         [providers.p0]\n{provider_block}\
          [aliases]\n{ALIAS} = [\"m0\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(NEVER_SAMPLED);
     let model = ResolvedModel::new("m0", "p0", provider, "upstream");
     router.install_resolved_models(BTreeMap::from([("m0".to_string(), Arc::new(model))]));
     router

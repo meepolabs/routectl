@@ -144,7 +144,7 @@ async fn a_refused_level_is_retried_at_the_nearest_lower_listed_level_and_learne
     use crate::wire_check_state::FieldRepairOutcome;
 
     let seat = ChainSeat::new(Egress::Anthropic, refuse_xhigh);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
     let adaptive = || effort_req("xhigh", Some(json!({"type": "adaptive"})));
 
     let first = router
@@ -231,7 +231,7 @@ async fn a_refused_level_is_learned_only_beside_a_thinking_shape_it_cannot_depen
 
     for (name, thinking, learns) in rows {
         let seat = ChainSeat::new(Egress::Anthropic, refuse_xhigh);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(effort_req("xhigh", thinking), RouterOptions::new())
@@ -303,7 +303,7 @@ async fn an_effort_refusal_naming_no_level_repairs_and_learns_nothing() {
 
     for (name, respond) in rows {
         let seat = ChainSeat::new(Egress::Anthropic, respond);
-        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let router = anthropic_router(&seat, ONE_ATTEMPT);
 
         let dispatched = router
             .complete_with_options(
@@ -357,7 +357,7 @@ fn disabled_xhigh_then_high(body: &serde_json::Value, _: usize) -> Option<Error>
 #[tokio::test]
 async fn a_refusal_of_the_replacement_level_is_repaired_again_and_both_levels_learn() {
     let seat = ChainSeat::new(Egress::Anthropic, disabled_xhigh_then_high);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(disabled_req(Some("xhigh")), RouterOptions::new())
@@ -429,7 +429,7 @@ fn refuse_max_then_xhigh(body: &serde_json::Value, _: usize) -> Option<Error> {
 #[tokio::test]
 async fn each_refused_level_in_a_chain_learns_the_level_that_succeeded() {
     let seat = ChainSeat::new(Egress::Anthropic, refuse_max_then_xhigh);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(
@@ -492,7 +492,7 @@ fn refuse_low_then_medium(body: &serde_json::Value, _: usize) -> Option<Error> {
 #[tokio::test]
 async fn a_level_already_sent_is_never_picked_again_in_a_chain() {
     let seat = ChainSeat::new(Egress::Anthropic, refuse_low_then_medium);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(
@@ -546,7 +546,7 @@ fn refuse_every_level(body: &serde_json::Value, _: usize) -> Option<Error> {
 #[tokio::test]
 async fn refusing_every_level_ends_at_the_budget_with_every_sent_level_distinct() {
     let seat = ChainSeat::new(Egress::Anthropic, refuse_every_level);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(
@@ -635,7 +635,7 @@ async fn an_injected_effort_refused_with_a_level_list_repairs_and_commits_the_pe
 
     for (name, output_config) in rows {
         let seat = ChainSeat::new(Egress::Anthropic, disabled_ceiling_then_low);
-        let router = anthropic_router(&seat, &wire_checked(THREE_ATTEMPTS));
+        let router = anthropic_router(&seat, THREE_ATTEMPTS);
         let taught = router
             .complete_with_options(disabled_req(Some("high")), RouterOptions::new())
             .await;
@@ -706,7 +706,7 @@ async fn a_refused_companion_effort_written_after_admission_is_repaired_and_lear
         }
         (sent_effort(body) == Some("low")).then(low_refused)
     });
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
 
     let dispatched = router
         .complete_with_options(disabled_req(None), RouterOptions::new())
@@ -777,7 +777,7 @@ async fn a_declared_edit_on_a_row_that_is_not_ranked_is_not_answered_as_ranked()
         Egress::Anthropic,
         disabled_ceiling_then_lower_from_the_second_request,
     );
-    let router = anthropic_router(&seat, &wire_checked(THREE_ATTEMPTS));
+    let router = anthropic_router(&seat, THREE_ATTEMPTS);
     let mut teaching = effort_req("high", Some(json!({"type": "adaptive"})));
     teaching.max_tokens = Some(SENT_MAX_TOKENS);
     let taught = router
@@ -893,7 +893,7 @@ async fn an_inferred_effort_verdict_drives_preflight_only_after_a_second_observa
         routectl_core::capability::SignalTier::Inferred,
     );
     let seat = ChainSeat::new(Egress::Anthropic, refuse_xhigh);
-    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let router = anthropic_router(&seat, ONE_ATTEMPT);
     let adaptive = || effort_req("xhigh", Some(json!({"type": "adaptive"})));
 
     let first = router

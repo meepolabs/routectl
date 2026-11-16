@@ -24,6 +24,7 @@ use serde_json::{Map, Value, json};
 use crate::config::{AliasValue, Config};
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
+use crate::wire_check_state::WireCheckParams;
 
 use super::field_repair_tests::success_response;
 
@@ -231,14 +232,14 @@ fn content_chunk() -> ChatChunk {
 }
 
 fn member_router(seat: &Arc<MemberSeat>) -> Router {
-    let toml_text = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
-         [providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+    let toml_text = "[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
     let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
     config.retry.max_attempts = 1;
     config
         .aliases
         .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config))
+        .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
     router.install_resolved_models(BTreeMap::from([(
         "m0".to_string(),
         Arc::new(ResolvedModel::new(

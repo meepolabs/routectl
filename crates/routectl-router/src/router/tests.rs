@@ -2023,12 +2023,10 @@ fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
 
     let lane = Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi);
     let lost = WirePath::from_segments(["metadata"]);
-    let config: Config =
-        toml::from_str("version = 5\n[wire_check]\nfirst_n = 2\nsample_one_in = 1000\n")
-            .expect("parse");
-    let config = Arc::new(config);
+    let params = crate::wire_check_state::WireCheckParams::sampling_for_tests(2, 1000);
+    let config = Arc::new(Config::default());
     let before = Router::new(config.clone());
-    assert!(before.wire_check.admit(lane, None, &config.wire_check));
+    assert!(before.wire_check.admit(lane, None, &params));
     before
         .wire_check
         .record_compared(lane, Leg::Request, [(&lost, PathClass::Missing)], false);
@@ -2046,11 +2044,11 @@ fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
     assert_eq!(snapshot.local_refusals.len(), 1);
     assert_eq!(snapshot.findings.len(), 1);
     assert!(
-        after.wire_check.admit(lane, None, &config.wire_check),
+        after.wire_check.admit(lane, None, &params),
         "the second success continues the carried first-N window"
     );
     assert!(
-        !before.wire_check.admit(lane, None, &config.wire_check),
+        !before.wire_check.admit(lane, None, &params),
         "both routers advance one shared sampler"
     );
 }

@@ -22,8 +22,7 @@ mod ceiling_fill {
     /// The model's configured `max_output_tokens`, the value the capture was
     /// refused for, so the seat refuses the very body the upstream refused.
     const FILLED: u32 = 1_000_000;
-    const TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
-         [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+    const TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
 
     /// The captured refusal, naming `limit` in place of [`NAMED_LIMIT`].
@@ -177,7 +176,8 @@ mod ceiling_fill {
             "m0",
             &config.models["m0"],
         );
-        let mut router = Router::new(Arc::new(config));
+        let mut router = Router::new(Arc::new(config))
+            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(BTreeMap::from([("m0".to_string(), Arc::new(model))]));
         router.with_capability_writes_assumed_durable_for_tests()
     }

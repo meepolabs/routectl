@@ -125,8 +125,7 @@ mod converse_temperature {
     const TEMPERATURE_FIXTURE: &str =
         include_str!("../../tests/fixtures/rejections/bedrock/temperature-field-unsupported.json");
 
-    const CONVERSE_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
-         [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+    const CONVERSE_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
          creds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
 
@@ -241,7 +240,8 @@ mod converse_temperature {
         config
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-        let mut router = Router::new(Arc::new(config));
+        let mut router = Router::new(Arc::new(config))
+            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(BTreeMap::from([(
             "m0".to_string(),
             Arc::new(ResolvedModel::new(
@@ -440,8 +440,7 @@ mod openai_compat_sampling {
     /// egress forwards every sampling parameter the client sent.
     const UNPROFILED_MODEL: &str = "acme-chat-1";
 
-    const OPENAI_COMPAT_SEAT_TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
-         [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
+    const OPENAI_COMPAT_SEAT_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
          api_key_ref = \"literal:k\"\n";
 
@@ -574,7 +573,8 @@ mod openai_compat_sampling {
         config
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-        let mut router = Router::new(Arc::new(config));
+        let mut router = Router::new(Arc::new(config))
+            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(BTreeMap::from([(
             "m0".to_string(),
             Arc::new(ResolvedModel::new(

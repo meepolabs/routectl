@@ -60,8 +60,7 @@ use routectl_core::{
     Provider, Role, Usage,
 };
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
-use routectl_router::wire_check_state::{CheckOutcome, WireCheckState};
-use routectl_router::{Config, WireCheckConfig};
+use routectl_router::wire_check_state::{CheckOutcome, WireCheckParams, WireCheckState};
 #[cfg(not(feature = "dhat"))]
 use routectl_testkit::bench_alloc::CountingAllocator;
 use routectl_testkit::bench_alloc::{self, BenchCase};
@@ -282,13 +281,9 @@ fn wire_check_lane() -> Lane {
     Lane::of(IngressDialect::Anthropic, EgressKind::AnthropicApi)
 }
 
-/// A `[wire_check]` block with the given sampling knobs.
-fn wire_check_config(first_n: u32, sample_one_in: u32) -> WireCheckConfig {
-    let config: Config = toml::from_str(&format!(
-        "version = 5\n[wire_check]\nfirst_n = {first_n}\nsample_one_in = {sample_one_in}\n"
-    ))
-    .expect("bench wire_check config parses");
-    config.wire_check
+/// Sampler params with the given counts.
+const fn wire_check_params(first_n: u32, sample_one_in: u32) -> WireCheckParams {
+    WireCheckParams::sampling_for_tests(first_n, sample_one_in)
 }
 
 /// One profile's wire-check inputs, each produced by the real ingress,
@@ -403,14 +398,14 @@ fn capture_ingress(req: &mut ChatRequest, ingress: &Bytes) {
 }
 
 /// Ask the sampler about `req` and attach the tap its answer earns.
-fn install_tap(req: &mut ChatRequest, state: &WireCheckState, config: &WireCheckConfig) -> WireTap {
+fn install_tap(req: &mut ChatRequest, state: &WireCheckState, params: &WireCheckParams) -> WireTap {
     let lane = wire_check_lane();
     let version = req
         .routectl_internal
         .ingress_wire
         .as_ref()
         .and_then(|wire| wire.client_version.as_deref());
-    let tap = if state.admit(lane, version, config) {
+    let tap = if state.admit(lane, version, params) {
         WireTap::checking_response(lane.ingress())
     } else {
         WireTap::default()
@@ -434,10 +429,10 @@ fn run_full_check(
     fx: &WireCheckFixture,
     mut req: ChatRequest,
     state: &WireCheckState,
-    config: &WireCheckConfig,
+    params: &WireCheckParams,
 ) -> (CheckOutcome, CheckOutcome) {
     capture_ingress(&mut req, &fx.ingress);
-    let tap = install_tap(&mut req, state, config);
+    let tap = install_tap(&mut req, state, params);
     assert!(tap.checks_response(), "wire_check case must be admitted");
     for edit in &fx.request_edits {
         tap.declare(edit.clone());
@@ -515,7 +510,7 @@ fn check_response_leg(state: &WireCheckState, tap: &WireTap, client: &Bytes) -> 
 fn assert_wire_check_compares(profile: SpectrumProfile, fx: &WireCheckFixture) {
     let state = WireCheckState::default();
     let (request, response) =
-        run_full_check(fx, ChatRequest::default(), &state, &wire_check_config(0, 1));
+        run_full_check(fx, ChatRequest::default(), &state, &wire_check_params(0, 1));
     for (leg, outcome) in [("request", request), ("response", response)] {
         assert!(
             matches!(outcome, CheckOutcome::Clean),
@@ -556,11 +551,11 @@ fn main() {
             })
             .collect();
     let checked_state = WireCheckState::default();
-    let checked_config = wire_check_config(0, 1);
+    let checked_params = wire_check_params(0, 1);
     let declined_state = WireCheckState::default();
     // Past `first_n` the sampler admits the M-th attempt, so with M at
     // u32::MAX no timed attempt is ever admitted.
-    let declined_config = wire_check_config(0, u32::MAX);
+    let declined_params = wire_check_params(0, u32::MAX);
 
     let mut cases: Vec<BenchCase> = Vec::new();
 
@@ -639,9 +634,9 @@ fn main() {
 
     let wire_check_provider = &wire_check_provider;
     let checked_state = &checked_state;
-    let checked_config = &checked_config;
+    let checked_params = &checked_params;
     let declined_state = &declined_state;
-    let declined_config = &declined_config;
+    let declined_params = &declined_params;
     for (profile, fx, check) in &wire_check_fixtures {
         let wire = &fx.anthropic_wire;
         cases.push(BenchCase::new(
@@ -657,7 +652,7 @@ fn main() {
                     .parse_request(headers, wire)
                     .expect("anthropic fixture parses");
                 capture_ingress(&mut req, &check.ingress);
-                let tap = install_tap(&mut req, declined_state, declined_config);
+                let tap = install_tap(&mut req, declined_state, declined_params);
                 assert!(!tap.is_admitted(), "wire_unadmitted case must be declined");
                 black_box(serve_parsed(wire_check_provider, &req, &check.upstream));
             },
@@ -667,7 +662,7 @@ fn main() {
             ChatRequest::default,
             move |mut req: ChatRequest| {
                 capture_ingress(&mut req, &check.ingress);
-                let tap = install_tap(&mut req, declined_state, declined_config);
+                let tap = install_tap(&mut req, declined_state, declined_params);
                 for edit in &check.request_edits {
                     tap.declare(edit.clone());
                 }
@@ -679,7 +674,7 @@ fn main() {
             format!("wire_check__{}__anthropic", profile.snake_name()),
             ChatRequest::default,
             move |req: ChatRequest| {
-                black_box(run_full_check(check, req, checked_state, checked_config));
+                black_box(run_full_check(check, req, checked_state, checked_params));
             },
         ));
     }

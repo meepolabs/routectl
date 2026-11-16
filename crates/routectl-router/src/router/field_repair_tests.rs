@@ -45,6 +45,7 @@ use serde_json::json;
 use crate::config::{AliasValue, Config};
 use crate::resolved::ResolvedModel;
 use crate::router::RouterOptions;
+use crate::wire_check_state::WireCheckParams;
 
 /// The qualified dotted path the captured rejection envelope named. The one
 /// grounded row in the closed repair table, so it is what a repair can act

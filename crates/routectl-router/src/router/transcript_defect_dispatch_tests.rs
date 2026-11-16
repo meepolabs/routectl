@@ -104,12 +104,12 @@ fn chain_router_with_retry(
 ) -> Router {
     let toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         {retry_tables}[wire_check]\n{NEVER_SAMPLED}\n[providers.p0]\n{first_block}\
+         {retry_tables}[providers.p0]\n{first_block}\
          [providers.p1]\n{second_block}\
          [aliases]\n{ALIAS} = [\"m0\", \"m1\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config));
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(NEVER_SAMPLED);
     // Anthropic-family upstream ids, so a Bedrock seat is admitted to count
     // tokens.
     router.install_resolved_models(BTreeMap::from([
