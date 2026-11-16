@@ -326,7 +326,9 @@ in the file, sorted by key path, one line each:
 `models.gpt.effort_levels` is retired: refused effort levels are learned per lane; delete it
 ```
 
-Only the key path is shown, never its value. `config set` on a retired
+Only the key path is shown, never its value. An entry name that is not a
+bare key (letters, digits, `_` and `-`) is shown as `<quoted name>`,
+since a quoted name can hold any text. `config set` on a retired
 key, or on a path under a retired table, prints the same line. Delete the
 keys by hand; nothing converts them. A key is written as its dotted path:
 `bedrock` is the whole `[bedrock]` table, and `<name>` stands for any

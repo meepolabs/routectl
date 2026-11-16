@@ -36,7 +36,8 @@ pub use tuning::{BreakerThreshold, Resolved, ResolvedTuning, TuningSource, resol
 use validate::default_config_version;
 pub use validate::{
     CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,
-    RawConfigPreflightError, VersionTooNewError, preflight_config_version, preflight_raw_config,
+    RawConfigPreflightError, VersionTooNewError, is_bare_key, preflight_config_version,
+    preflight_raw_config,
 };
 pub(crate) use validate::{
     validate_model_pricing, validate_model_token_limits, validate_server_body_limit,

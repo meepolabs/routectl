@@ -16,6 +16,8 @@
 //! (always bare keys) are safe to keep; user-controlled names and field VALUES
 //! never are.
 
+use routectl_router::is_bare_key;
+
 /// Redact a `parse_config` error down to provably-safe content. See the module
 /// docs for why this is fail-safe (allowlist) rather than a blocklist.
 pub(crate) fn redact_parse_error(err: &str) -> String {
@@ -73,16 +75,10 @@ fn is_header_line(line: &str) -> bool {
     line.trim_start().starts_with("TOML parse error")
 }
 
-/// Whether `key` is a strict bare key: non-empty and drawn only from the
-/// TOML bare-key alphabet (`[A-Za-z0-9_-.]`). A quoted TOML key can be an
-/// arbitrary string -- a `literal:` credential, a token with `:` / `/` /
-/// whitespace -- so any name that is NOT a bare key is treated as
-/// user-controlled and unsafe to echo.
-fn is_bare_key(key: &str) -> bool {
-    !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+/// Whether `key` is a bare key or a dotted path of bare keys. Any name that
+/// is not is treated as user-controlled and unsafe to echo.
+fn is_bare_dotted_key(key: &str) -> bool {
+    key.split('.').all(is_bare_key)
 }
 
 /// Extract the safe bare key (text left of the first `=`) from a numbered
@@ -92,7 +88,7 @@ fn is_bare_key(key: &str) -> bool {
 fn snippet_field_name(row: &str) -> Option<String> {
     let after_pipe = row.split_once('|')?.1;
     let key = after_pipe.split_once('=')?.0.trim();
-    is_bare_key(key).then(|| key.to_string())
+    is_bare_dotted_key(key).then(|| key.to_string())
 }
 
 /// Render a recognized-safe clause line, or `None` to drop an unrecognized
@@ -167,7 +163,7 @@ fn keep_schema_token(clause: &str, class: &str) -> String {
         .and_then(|(_, r)| r.split_once('`'))
         .map(|(name, _)| name)
     {
-        Some(name) if is_bare_key(name) => format!("{class} `{name}`"),
+        Some(name) if is_bare_dotted_key(name) => format!("{class} `{name}`"),
         _ => class.to_string(),
     }
 }
@@ -189,7 +185,7 @@ fn sanitize_backtick_names(clause: &str) -> String {
             return out;
         };
         let token = &after_open[..close];
-        if is_bare_key(token) {
+        if is_bare_dotted_key(token) {
             out.push('`');
             out.push_str(token);
             out.push('`');

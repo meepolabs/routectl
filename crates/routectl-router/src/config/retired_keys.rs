@@ -1,10 +1,13 @@
 //! The retired config-key table and the one raw-text pass that refuses every
 //! retired key a config still carries, each naming what replaces it.
 
-use super::validate::message_safe_key;
+use super::validate::{is_bare_key, message_safe_key};
 
 /// Path segment standing for any one non-empty entry name.
 const ANY_ENTRY: &str = "*";
+
+/// Shown in place of a path segment that is not a bare key.
+const QUOTED_NAME_PLACEHOLDER: &str = "<quoted name>";
 
 /// One retired key: where it sat and what replaces it.
 #[derive(Debug, Clone, Copy)]
@@ -362,11 +365,23 @@ fn render_hits(hits: &[RetiredKeyHit]) -> String {
 }
 
 fn render_line<S: AsRef<str>>(path: &[S], replacement: &str) -> String {
-    let dotted = path.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(".");
+    let dotted = path
+        .iter()
+        .map(|segment| shown_segment(segment.as_ref()))
+        .collect::<Vec<_>>()
+        .join(".");
     format!(
         "`{}` is retired: {replacement}; delete it",
         message_safe_key(&dotted)
     )
+}
+
+fn shown_segment(segment: &str) -> &str {
+    if is_bare_key(segment) {
+        segment
+    } else {
+        QUOTED_NAME_PLACEHOLDER
+    }
 }
 
 #[cfg(test)]

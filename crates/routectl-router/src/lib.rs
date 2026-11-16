@@ -111,7 +111,7 @@ pub use config::{
     ConfigVersionError, Format, HistoryReasoning, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, RawConfigPreflightError, ReasoningDialect,
     ReductionConfig, Resolved, ResolvedTuning, RetiredKeysError, RetryPolicy, ServerAuth,
-    ServerConfig, TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig,
+    ServerConfig, TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig, is_bare_key,
     is_config_provider_kind, preflight_config_version, preflight_raw_config, resolve_tuning,
     retired_key_message,
 };

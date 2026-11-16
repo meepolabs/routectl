@@ -630,8 +630,8 @@ fn the_table_leaves_other_refusals_to_their_owners() {
     assert!(typed.contains("TOML parse error"), "{typed}");
 }
 
-/// A quoted entry name is rendered without control bytes and capped, on the
-/// file pass and on the edit-path lookup alike.
+/// An entry name is rendered without control bytes and capped, on the file
+/// pass and on the edit-path lookup alike.
 #[test]
 fn a_hostile_entry_name_is_sanitized_and_capped() {
     let table = [RetiredKey {
@@ -644,7 +644,7 @@ fn a_hostile_entry_name_is_sanitized_and_capped() {
         (
             "control bytes",
             "[models.\"m\\u001b[31m\\r\\n\"]\nknob = 1\n".to_string(),
-            "models.m?[31m??.knob".to_string(),
+            "models.<quoted name>.knob".to_string(),
         ),
         (
             "an overlong name",
@@ -670,7 +670,87 @@ fn a_hostile_entry_name_is_sanitized_and_capped() {
 
     let lookup = retired_key_message_in(&table, "models.m\u{1b}\r\n.knob")
         .expect("a retired key under any entry name");
-    assert_eq!(lookup, "`models.m???.knob` is retired: r; delete it");
+    assert_eq!(
+        lookup,
+        "`models.<quoted name>.knob` is retired: r; delete it"
+    );
+}
+
+/// The `allowed_betas` row, the retired key under a provider entry.
+fn allowed_betas_row() -> &'static RetiredKey {
+    RETIRED_KEYS
+        .iter()
+        .find(|row| row.path == ["providers", ANY_ENTRY, "allowed_betas"])
+        .expect("the table retires `providers.*.allowed_betas`")
+}
+
+/// A quoted entry name can be any string, a pasted credential included, so
+/// a name that is not a bare key is shown as a placeholder on the file pass
+/// and on the edit-path lookup, never echoed.
+#[test]
+fn a_quoted_entry_name_renders_as_a_placeholder() {
+    let row = allowed_betas_row();
+    let expected = format!(
+        "`providers.<quoted name>.allowed_betas` is retired: {}; delete it",
+        row.replacement
+    );
+    let names = [
+        ("a credential-shaped name", format!("sk-ant:{SENTINEL}")),
+        ("a name with a space", format!("my {SENTINEL}")),
+        ("a non-ASCII name", format!("{SENTINEL}\u{e9}")),
+        ("a name with a dot", format!("{SENTINEL}.x")),
+    ];
+
+    for (case, name) in &names {
+        // Arrange
+        let mut entry = toml::Table::new();
+        entry.insert("allowed_betas".to_string(), toml::Value::Integer(1));
+        let mut providers = toml::Table::new();
+        providers.insert(name.clone(), toml::Value::Table(entry));
+        let mut root = toml::Table::new();
+        root.insert("providers".to_string(), toml::Value::Table(providers));
+        let raw = at_current_version(&root);
+        assert!(raw.contains(SENTINEL), "control `{case}`: {raw}");
+
+        // Act
+        let msg = refusal_message(&raw);
+
+        // Assert
+        assert_eq!(msg, expected, "file pass `{case}`");
+        assert!(!msg.contains(SENTINEL), "file pass `{case}`: {msg}");
+    }
+
+    // A dotted path cannot carry a dot inside one segment, so the lookup
+    // takes the other names only.
+    for (case, name) in &names[..3] {
+        let msg = retired_key_message(&format!("providers.{name}.allowed_betas"))
+            .expect("a retired key under any entry name");
+
+        assert_eq!(msg, expected, "lookup `{case}`");
+        assert!(!msg.contains(SENTINEL), "lookup `{case}`: {msg}");
+    }
+}
+
+/// A bare entry name is shown as written, on both passes.
+#[test]
+fn a_bare_entry_name_renders_verbatim() {
+    let row = allowed_betas_row();
+    let names = ["anthropic", "Work_2", "east-1"];
+
+    for name in names {
+        let raw =
+            format!("version = {CURRENT_CONFIG_VERSION}\n[providers.{name}]\nallowed_betas = 1\n");
+        let expected = format!(
+            "`providers.{name}.allowed_betas` is retired: {}; delete it",
+            row.replacement
+        );
+
+        let file_pass = refusal_message(&raw);
+        let lookup = retired_key_message(&format!("providers.{name}.allowed_betas"));
+
+        assert_eq!(file_pass, expected, "file pass `{name}`");
+        assert_eq!(lookup, Some(expected), "lookup `{name}`");
+    }
 }
 
 /// The cloak table does not deny unknown fields, so the typed parse alone

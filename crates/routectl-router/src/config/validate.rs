@@ -271,6 +271,18 @@ pub fn message_safe_key(key: &str) -> String {
     routectl_core::sanitize_for_log_with_cap(key, MAX_MESSAGE_KEY_CHARS)
 }
 
+/// Whether one key segment is a strict TOML bare key: non-empty and drawn
+/// only from `[A-Za-z0-9_-]`. A quoted key can be any string, a pasted
+/// credential included, so a segment that is not bare is treated as
+/// operator-controlled text that must not be echoed. A dotted path is
+/// checked one segment at a time.
+pub fn is_bare_key(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
 /// A refusal from [`preflight_raw_config`]. `Display` is the wrapped
 /// check's own message, unchanged, so every caller surfaces the same wording.
 ///
