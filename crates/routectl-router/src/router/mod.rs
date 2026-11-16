@@ -3435,6 +3435,15 @@ mod scripted_provider_test_support;
 #[path = "stream_commit_tests.rs"]
 mod stream_commit_tests;
 
+#[cfg(all(
+    test,
+    feature = "bedrock",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+#[path = "stored_family_token_tests.rs"]
+mod stored_family_token_tests;
+
 #[cfg(test)]
 #[path = "dispatch_divergence_tests.rs"]
 mod dispatch_divergence_tests;
