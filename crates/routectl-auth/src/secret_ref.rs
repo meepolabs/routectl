@@ -179,6 +179,98 @@ impl From<&SecretRef> for SecretScheme {
     }
 }
 
+/// The one string an operator writes as a provider's `credential`: a
+/// [`SecretRef`], an AWS credential source, or the reserved `forwarded`.
+/// Parse-only: resolving the AWS forms is the caller's job, so no
+/// [`crate::SecretStore`] ever sees them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CredentialRef {
+    /// `env://`, `file://` or `oauth://<vendor>[#label]`.
+    Secret(SecretRef),
+    /// `aws://profile/<name>`: a named profile from the shared AWS config.
+    AwsProfile(String),
+    /// `aws://chain`: the AWS SDK default credential chain.
+    AwsChain,
+    /// `forwarded`: the client's own credential is passed through.
+    Forwarded,
+}
+
+const AWS_PREFIX: &str = "aws://";
+const AWS_PROFILE_PREFIX: &str = "aws://profile/";
+const AWS_CHAIN: &str = "aws://chain";
+const FORWARDED: &str = "forwarded";
+
+impl CredentialRef {
+    /// Every value [`Self::scheme_label`] can return.
+    pub const SCHEME_LABELS: &'static [&'static str] = &[
+        "env",
+        "file",
+        "oauth",
+        "literal",
+        "aws-profile",
+        "aws-chain",
+        "forwarded",
+    ];
+
+    /// Parse a `credential` string. The `aws://` forms and the exact word
+    /// `forwarded` are matched first; anything else goes through
+    /// [`SecretRef::parse`], so `literal:` stays refused. Errors never
+    /// echo the input.
+    pub fn parse(uri: &str) -> Result<Self> {
+        if uri == FORWARDED {
+            return Ok(Self::Forwarded);
+        }
+        if uri == AWS_CHAIN {
+            return Ok(Self::AwsChain);
+        }
+        if let Some(name) = uri.strip_prefix(AWS_PROFILE_PREFIX) {
+            if name.is_empty() || name.contains('/') {
+                return Err(Error::Auth(
+                    "aws://profile/ credential needs exactly one profile name segment".into(),
+                ));
+            }
+            return Ok(Self::AwsProfile(name.to_string()));
+        }
+        if uri.starts_with(AWS_PREFIX) {
+            return Err(Error::Auth(
+                "aws:// credential must be aws://profile/<name> or aws://chain".into(),
+            ));
+        }
+        if SecretScheme::classify(uri).is_none() {
+            return Err(Error::Auth(
+                "unrecognized credential (expected env://, file://, oauth://, \
+                 aws://profile/<name>, aws://chain, or forwarded)"
+                    .into(),
+            ));
+        }
+        SecretRef::parse(uri).map(Self::Secret)
+    }
+
+    /// The closed-vocabulary label for this credential's scheme, one of
+    /// [`Self::SCHEME_LABELS`]. Never carries a byte of the ref body.
+    #[must_use]
+    pub fn scheme_label(&self) -> &'static str {
+        match self {
+            Self::Secret(secret_ref) => SecretScheme::from(secret_ref).as_token(),
+            Self::AwsProfile(_) => "aws-profile",
+            Self::AwsChain => "aws-chain",
+            Self::Forwarded => "forwarded",
+        }
+    }
+}
+
+impl fmt::Display for CredentialRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Secret(secret_ref) => fmt::Display::fmt(secret_ref, f),
+            Self::AwsProfile(name) => write!(f, "{AWS_PROFILE_PREFIX}{name}"),
+            Self::AwsChain => f.write_str(AWS_CHAIN),
+            Self::Forwarded => f.write_str(FORWARDED),
+        }
+    }
+}
+
 /// The rejection error for a `literal:` secret ref, shared by parse and by
 /// resolve so both boundaries speak with one voice. Names the safe
 /// key-setting paths and NEVER echoes the key value.
@@ -238,6 +330,10 @@ impl fmt::Display for SecretRef {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "credential_ref_tests.rs"]
+mod credential_ref_tests;
 
 #[cfg(test)]
 mod tests {
