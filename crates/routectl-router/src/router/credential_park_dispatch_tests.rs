@@ -197,43 +197,23 @@ pub(super) fn chain_router(
     sibling: Arc<ScriptedProvider>,
     primary_forwarded: bool,
 ) -> Router {
-    chain_router_with_auth_fallback(primary, sibling, primary_forwarded, None)
+    chain_router_with(primary, sibling, primary_forwarded, |_| {})
 }
 
-/// [`chain_router`] with the operator's `auth` class fallback override.
-fn chain_router_with_auth_fallback(
-    primary: Arc<ScriptedProvider>,
-    sibling: Arc<ScriptedProvider>,
-    primary_forwarded: bool,
-    auth_fallback: Option<bool>,
-) -> Router {
-    chain_router_with(primary, sibling, primary_forwarded, auth_fallback, |_| {})
-}
-
-/// [`chain_router_with_auth_fallback`] with `tweak` applied to the config
-/// before the router is built.
+/// [`chain_router`] with `tweak` applied to the config before the router is
+/// built.
 pub(super) fn chain_router_with(
     primary: Arc<ScriptedProvider>,
     sibling: Arc<ScriptedProvider>,
     primary_forwarded: bool,
-    auth_fallback: Option<bool>,
     tweak: impl FnOnce(&mut Config),
 ) -> Router {
-    let mut retry = RetryPolicy {
+    let retry = RetryPolicy {
         max_attempts: 1,
         initial_backoff_ms: 0,
         jitter_ms: 0,
         ..RetryPolicy::default()
     };
-    if let Some(fallback) = auth_fallback {
-        retry.classes.insert(
-            crate::class_policy::ConfigFailureClass::Auth,
-            crate::class_policy::ClassPolicy {
-                retry: None,
-                fallback: Some(fallback),
-            },
-        );
-    }
     let mut config = Config {
         retry,
         ..Config::default()
@@ -365,38 +345,23 @@ async fn a_rejection_that_must_not_judge_the_seat_never_parks_it() {
 
 #[tokio::test]
 async fn a_parked_seat_is_skipped_and_the_chain_falls_back() {
-    let policies = [
-        ("default auth policy", None),
-        ("auth fallback disabled", Some(false)),
-    ];
     for surface in SURFACES {
-        for (name, auth_fallback) in policies {
-            // Arrange
-            let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
-            let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
-            let router = chain_router_with_auth_fallback(
-                primary.clone(),
-                sibling.clone(),
-                false,
-                auth_fallback,
-            );
-            let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
-            assert!(router.park_credential_for_tests(
-                "m-a",
-                UpstreamReason::CredentialExpired,
-                until
-            ));
+        // Arrange
+        let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
+        let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
+        let router = chain_router(primary.clone(), sibling.clone(), false);
+        let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
+        assert!(router.park_credential_for_tests("m-a", UpstreamReason::CredentialExpired, until));
 
-            // Act
-            let served = dispatch(&router, surface, request(None, false)).await;
+        // Act
+        let served = dispatch(&router, surface, request(None, false)).await;
 
-            // Assert
-            let label = format!("{surface:?} {name}");
-            assert!(served, "{label}: the sibling must serve");
-            assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{label}");
-            assert_eq!(sibling.calls.load(Ordering::SeqCst), 1, "{label}");
-            assert_eq!(park_reason(&router, "m-a"), EXPIRED, "{label}");
-        }
+        // Assert
+        let label = format!("{surface:?}");
+        assert!(served, "{label}: the sibling must serve");
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{label}");
+        assert_eq!(sibling.calls.load(Ordering::SeqCst), 1, "{label}");
+        assert_eq!(park_reason(&router, "m-a"), EXPIRED, "{label}");
     }
 }
 
@@ -750,7 +715,7 @@ fn gated_chain_router(
     gates: [Gate; 2],
 ) -> Router {
     let seats = [("m-a", "p-a"), ("m-b", "p-b")];
-    let router = chain_router_with(primary, sibling, false, None, |config| {
+    let router = chain_router_with(primary, sibling, false, |config| {
         for ((_, provider), gate) in seats.iter().zip(gates) {
             if matches!(gate, Gate::RpmExhausted) {
                 let entry = config.providers.get_mut(*provider).expect("seat provider");

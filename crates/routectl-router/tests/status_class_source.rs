@@ -1,12 +1,12 @@
-//! A status's failure class comes from the built-in table plus
-//! `[retry.classes]` only: same-provider retry, fallback and the
-//! committed-stream breaker settle by the built-in class, and a
-//! `[retry.classes]` leaf moves retry and fallback.
+//! A status's failure class comes from the built-in table only:
+//! same-provider retry, fallback and the committed-stream breaker settle by
+//! the built-in class, and a `[retry.classes]` count moves only retry.
 //!
 //! Each path carries a positive control showing the fixture can see the
-//! decision move: a `[retry.classes]` leaf for retry and fallback, and a
-//! status whose built-in class does not debit for the breaker (no
-//! `[retry.classes]` leaf reaches breaker debit).
+//! decision move: a `[retry.classes]` count for retry, a status whose
+//! built-in class is unknown for fallback, and a status whose built-in class
+//! does not debit for the breaker (no `[retry.classes]` count reaches
+//! fallback or breaker debit).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -194,7 +194,7 @@ async fn observe(path: Path, status: u16, extra: &str) -> Observed {
 
 #[tokio::test]
 async fn retry_fallback_and_breaker_follow_the_built_in_class_and_retry_classes() {
-    let rows: [(&str, Path, u16, &str, Observed); 6] = [
+    let rows: [(&str, Path, u16, &str, Observed); 7] = [
         (
             "retry / 503 built-in",
             Path::Retry,
@@ -206,7 +206,7 @@ async fn retry_fallback_and_breaker_follow_the_built_in_class_and_retry_classes(
             "retry / control: [retry.classes] caps server-error",
             Path::Retry,
             503,
-            "[retry.classes.server-error]\nretry = 1\n",
+            "[retry.classes]\nserver-error = 1\n",
             Observed::Calls(1),
         ),
         (
@@ -217,10 +217,17 @@ async fn retry_fallback_and_breaker_follow_the_built_in_class_and_retry_classes(
             Observed::ReachedSecondSeat(true),
         ),
         (
-            "fallback / control: [retry.classes] ends server-error",
+            "fallback / a server-error count of 0 still walks on",
             Path::Fallback,
             503,
-            "[retry.classes.server-error]\nfallback = false\n",
+            "[retry.classes]\nserver-error = 0\n",
+            Observed::ReachedSecondSeat(true),
+        ),
+        (
+            "fallback / control: an unknown status ends the walk",
+            Path::Fallback,
+            302,
+            "",
             Observed::ReachedSecondSeat(false),
         ),
         (

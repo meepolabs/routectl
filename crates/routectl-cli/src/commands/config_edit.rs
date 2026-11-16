@@ -192,8 +192,10 @@ pub fn run(config_path: &Path, dotted_path: &str, kind: EditKind, yes: bool) -> 
 /// targets the hand-edit-only message this version's scope calls for, and a
 /// retired key the preflight's wording that names its replacement.
 fn render_path_error(dotted_path: &str, err: PathError) -> Error {
-    if matches!(err, PathError::UnknownSegment { .. })
-        && let Some(message) = retired_key_message(dotted_path)
+    if matches!(
+        err,
+        PathError::UnknownSegment { .. } | PathError::NotATable { .. }
+    ) && let Some(message) = retired_key_message(dotted_path)
     {
         return Error::Config(message);
     }
@@ -354,9 +356,9 @@ version = {CURRENT_CONFIG_VERSION}
 [retry]
 max_attempts = 2
 
-[retry.classes.server-error]
+[retry.classes]
 # tuned for this upstream
-retry = 2
+server-error = 2
 
 [providers.fast]
 kind = \"openai-compat\"
@@ -373,11 +375,20 @@ default = \"gpt\"
         );
         let path = write_config(dir.path(), &body);
 
-        let result = set(&path, "retry.classes.server-error.retry", "4").expect("set");
+        let result = set(&path, "retry.classes.server-error", "4").expect("set");
         assert!(matches!(result, SetResult::Written { .. }));
 
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(on_disk.contains("retry = 4"), "{on_disk}");
+        assert!(on_disk.contains("server-error = 4"), "{on_disk}");
+        let reparsed = parse_config(&on_disk).expect("the written file parses");
+        assert_eq!(
+            reparsed
+                .retry
+                .resolved_class(&routectl_core::failure_class::FailureClass::ServerError)
+                .0,
+            4,
+            "the written count is the class's retry cap"
+        );
         assert!(on_disk.contains("# operator note"), "{on_disk}");
         assert!(on_disk.contains("# tuned for this upstream"), "{on_disk}");
         // Order: the note still precedes the retry section header.
@@ -531,6 +542,16 @@ default = \"gpt\"
                 "a retired key beside live ones",
                 "usage.enabled",
                 "[usage]\nenabled = 1\n",
+            ),
+            (
+                "a retired retry cap beside live retry keys",
+                "retry.retry_on_5xx",
+                "[retry]\nretry_on_5xx = 1\n",
+            ),
+            (
+                "a retired leaf under a retry class count",
+                "retry.classes.server-error.retry",
+                "[retry.classes.server-error]\nretry = 1\n",
             ),
         ];
 
@@ -827,8 +848,8 @@ default = \"gpt\"
 
     use routectl_core::failure_class::FailureClass;
 
-    /// Config whose only retry override is a single sparse class leaf, so
-    /// removing it empties the whole `[retry.classes.*]` chain.
+    /// Config whose only retry override is a single class count, so
+    /// removing it empties the whole `[retry.classes]` chain.
     fn retry_override() -> String {
         format!("version = {CURRENT_CONFIG_VERSION}\n\n{RETRY_OVERRIDE_BODY}")
     }
@@ -838,8 +859,8 @@ default = \"gpt\"
 host = \"127.0.0.1\"
 port = 8787
 
-[retry.classes.server-error]
-retry = 5
+[retry.classes]
+server-error = 5
 
 [providers.fast]
 kind = \"openai-compat\"
@@ -863,7 +884,7 @@ default = \"gpt\"
         let before = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(before.retry.resolved_class(&FailureClass::ServerError).0, 5);
 
-        let result = unset(&path, "retry.classes.server-error.retry").expect("unset");
+        let result = unset(&path, "retry.classes.server-error").expect("unset");
         assert!(matches!(result, SetResult::Written { .. }));
 
         // Re-parse: the key is gone and the class resolves to the baked
@@ -885,9 +906,9 @@ default = \"gpt\"
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), &retry_override());
 
-        unset(&path, "retry.classes.server-error.retry").expect("unset");
+        unset(&path, "retry.classes.server-error").expect("unset");
 
-        // server-error emptied -> classes emptied -> retry emptied: the
+        // server-error removed -> classes emptied -> retry emptied: the
         // whole chain is pruned, no orphan headers left behind.
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -955,8 +976,8 @@ port = 8787
 [retry]
 max_attempts = 4
 
-[retry.classes.server-error]
-retry = 5
+[retry.classes]
+server-error = 5
 
 [providers.fast]
 kind = \"openai-compat\"
@@ -973,7 +994,7 @@ default = \"gpt\"
         );
         let path = write_config(dir.path(), &body);
 
-        unset(&path, "retry.classes.server-error.retry").expect("unset");
+        unset(&path, "retry.classes.server-error").expect("unset");
 
         let text = std::fs::read_to_string(&path).unwrap();
         // classes emptied and pruned, but [retry] keeps max_attempts.
@@ -983,7 +1004,7 @@ default = \"gpt\"
     }
 
     #[test]
-    fn unset_keeps_parent_with_a_surviving_sibling_table() {
+    fn unset_keeps_parent_with_a_surviving_sibling_key_in_the_map() {
         let dir = tempfile::tempdir().unwrap();
         let body = format!(
             "\
@@ -993,11 +1014,9 @@ version = {CURRENT_CONFIG_VERSION}
 host = \"127.0.0.1\"
 port = 8787
 
-[retry.classes.server-error]
-retry = 5
-
-[retry.classes.rate-limited]
-retry = 3
+[retry.classes]
+server-error = 5
+rate-limited = 3
 
 [providers.fast]
 kind = \"openai-compat\"
@@ -1014,24 +1033,24 @@ default = \"gpt\"
         );
         let path = write_config(dir.path(), &body);
 
-        unset(&path, "retry.classes.server-error.retry").expect("unset");
+        unset(&path, "retry.classes.server-error").expect("unset");
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("server-error"), "{text}");
         assert!(
             text.contains("rate-limited"),
-            "sibling table must survive: {text}"
+            "sibling key must survive: {text}"
         );
     }
 
     #[test]
     fn unset_targeting_a_whole_table_removes_the_block() {
         // PathShape::Table is accepted for unset (rejected only for set):
-        // naming the table node drops the whole override block at once.
+        // naming the table node drops the whole count map at once.
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), &retry_override());
 
-        let result = unset(&path, "retry.classes.server-error").expect("unset table node");
+        let result = unset(&path, "retry.classes").expect("unset table node");
         assert!(matches!(result, SetResult::Written { .. }));
 
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1050,9 +1069,9 @@ version = {CURRENT_CONFIG_VERSION}
 host = \"127.0.0.1\"
 port = 8787
 
-[retry.classes.server-error]
+[retry.classes]
 # tuned for this upstream
-retry = 5
+server-error = 5
 
 [providers.fast]
 kind = \"openai-compat\"
@@ -1069,7 +1088,7 @@ default = \"gpt\"
         );
         let path = write_config(dir.path(), &body);
 
-        unset(&path, "retry.classes.server-error.retry").expect("unset");
+        unset(&path, "retry.classes.server-error").expect("unset");
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# operator note"), "{text}");
@@ -1154,7 +1173,7 @@ default = \"gpt\"
         let path = write_config(dir.path(), &retry_override());
 
         let events = routectl_testkit::capture_events(|| {
-            unset(&path, "retry.classes.server-error.retry").expect("unset");
+            unset(&path, "retry.classes.server-error").expect("unset");
         });
 
         let audit: Vec<_> = events
@@ -1162,10 +1181,7 @@ default = \"gpt\"
             .filter(|e| e.field("surface") == Some("cli") && e.field("verb") == Some("unset"))
             .collect();
         assert_eq!(audit.len(), 1, "exactly one unset audit event expected");
-        assert_eq!(
-            audit[0].field("path"),
-            Some("retry.classes.server-error.retry")
-        );
+        assert_eq!(audit[0].field("path"), Some("retry.classes.server-error"));
         assert!(
             audit[0].field("value").is_none(),
             "the value must never be audited"

@@ -329,8 +329,8 @@ async fn a_raised_retry_cap_never_resends_a_learned_rejection() {
 [retry]
 max_attempts = 3
 
-[retry.classes.feature-unsupported]
-retry = 2
+[retry.classes]
+feature-unsupported = 2
 
 [providers.p1]
 kind = "openai-compat"

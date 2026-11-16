@@ -1,7 +1,5 @@
 //! Non-fatal config warnings.
 
-use super::validate::class_token;
-use crate::class_policy::ConfigFailureClass;
 use crate::config::ProviderEntry;
 
 /// Returns `true` when `entry` is `ProviderEntry::AnthropicApi { context_management: true, .. }`.
@@ -56,105 +54,6 @@ pub(super) fn warn_context_management_needs_preserve(
          docs/PROVIDER-QUIRKS.md \"context_management\" for the \
          recommended config."
     );
-}
-
-/// Advisory (never fatal) checks over the same `[retry.classes]` surface
-/// `validate_class_policy` hard-rejects on. Each finding here is a config
-/// smell the operator probably didn't intend, not a misconfiguration the
-/// loader must refuse.
-///
-/// Two checks, each producing zero or more warning lines:
-///
-///   - An empty `[retry.classes.<c>]` block (both `retry` and `fallback`
-///     leaves `None`). Parses fine and does nothing; almost always a
-///     leftover the operator forgot to fill in or clear out.
-///
-///   - `[retry.classes.bad-request] fallback = false`. Valid config
-///     (the override works as written), but the baked `bad-request`
-///     fallback is what walks a capability-filter rejection to a capable
-///     target: turning it off also turns off structured-output rescue,
-///     so a request needing a capability the target lacks hard-fails
-///     instead of falling over.
-///
-/// Plus one deprecation line per `[retry] retry_on_*` key that is set,
-/// naming the `[retry.classes.<class>] retry` blocks that replace it. The
-/// key is still honored (above the baked row, below `[retry.classes]`).
-///
-/// Call once per process startup (or `routectl config check`) alongside
-/// `validate_class_policy`; unlike that function, warnings never fail
-/// the load.
-pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
-    let mut warnings = retry_on_deprecation_warnings(&config.retry);
-
-    for (class, policy) in &config.retry.classes {
-        if policy.retry.is_none() && policy.fallback.is_none() {
-            warnings.push(format!(
-                "[retry.classes.{}]: `retry` and `fallback` are both unset -- this block \
-                 has no effect",
-                class_token(*class),
-            ));
-        }
-    }
-
-    if config
-        .retry
-        .classes
-        .get(&ConfigFailureClass::BadRequest)
-        .and_then(|policy| policy.fallback)
-        == Some(false)
-    {
-        warnings.push(
-            "[retry.classes.bad-request] fallback = false: disabling bad-request fallback \
-             also disables capability-filter structured-output rescue -- a request needing \
-             a capability the target lacks will hard-fail instead of walking to a capable \
-             target"
-                .to_string(),
-        );
-    }
-
-    warnings
-}
-
-/// One advisory line per deprecated `[retry] retry_on_*` key that is set,
-/// naming its exact `[retry.classes.<class>] retry = <n>` replacement.
-fn retry_on_deprecation_warnings(retry: &crate::config::RetryPolicy) -> Vec<String> {
-    let keys: [(&str, Option<u32>, &[ConfigFailureClass]); 3] = [
-        (
-            "retry_on_429",
-            retry.retry_on_429,
-            &[ConfigFailureClass::RateLimited],
-        ),
-        (
-            "retry_on_5xx",
-            retry.retry_on_5xx,
-            &[
-                ConfigFailureClass::ServerError,
-                ConfigFailureClass::Overloaded,
-            ],
-        ),
-        (
-            "retry_on_network",
-            retry.retry_on_network,
-            &[
-                ConfigFailureClass::Timeout,
-                ConfigFailureClass::NetworkError,
-            ],
-        ),
-    ];
-    keys.into_iter()
-        .filter_map(|(key, value, classes)| {
-            let cap = value?;
-            let replacement = classes
-                .iter()
-                .map(|class| format!("[retry.classes.{}] retry = {cap}", class_token(*class)))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            Some(format!(
-                "[retry] {key} = {cap} is deprecated: set {replacement} instead (the key is \
-                 still honored for now)"
-            ))
-        })
-        .collect()
 }
 
 /// Advisory (never fatal) load-time check on the Cloud Code host surface:

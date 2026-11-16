@@ -1056,7 +1056,7 @@ async fn a_transient_failure_on_a_defective_transcript_routes_as_for_any_request
 /// target on the same origin.
 #[tokio::test]
 async fn a_raised_bad_request_retry_cap_resends_no_400_on_either_transcript() {
-    const RAISED_RETRY: &str = "[retry.classes.bad-request]\nretry = 2\n";
+    const RAISED_RETRY: &str = "[retry.classes]\nbad-request = 2\n";
     for (transcript, messages, first_calls, second_calls) in
         [("defective", defective(), 1, 0), ("paired", paired(), 1, 0)]
     {

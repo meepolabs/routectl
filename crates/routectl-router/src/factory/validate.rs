@@ -1,7 +1,6 @@
 //! Config-row validation family + validation collection.
 
 use super::build::ipv4_compatible_embedded;
-use super::warnings::class_policy_warnings;
 use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
 use routectl_core::Result;
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
@@ -277,26 +276,9 @@ pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> R
     }
 }
 
-/// Render a [`crate::class_policy::ConfigFailureClass`] as the kebab-case
-/// token it parses from / serializes to in TOML (e.g. `bad-request`), for
-/// validator and warning messages that name a class. Delegates to the
-/// canonical [`routectl_core::failure_class::FailureClass::class_token`] via
-/// the config-to-canonical adapter, so validator, migrator, and `/status`
-/// share one token vocabulary and cannot drift. Every
-/// [`ConfigFailureClass`](crate::class_policy::ConfigFailureClass) maps to a
-/// canonical class that yields a token (only `Unknown`, which the closed
-/// config set never names, returns `None`).
-pub(super) fn class_token(class: crate::class_policy::ConfigFailureClass) -> String {
-    class
-        .to_failure_class()
-        .class_token()
-        .expect("every ConfigFailureClass maps to a canonical class with a token")
-        .to_string()
-}
-
-/// Validate the `[retry.classes]` overlay for a HARD policy violation the
+/// Validate the `[retry.classes]` counts for a HARD policy violation the
 /// loader's serde layer cannot catch on its own (syntactically valid TOML,
-/// rejected by policy): `[retry.classes.feature-unsupported]` is present.
+/// rejected by policy): a `feature-unsupported` count is present.
 ///
 /// This class is reserved: the baked class defaults already govern it, and
 /// an override here has no path to take effect yet. Rejected outright
@@ -316,10 +298,10 @@ pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
         .contains_key(&ConfigFailureClass::FeatureUnsupported)
     {
         return Err(Error::Config(
-            "[retry.classes.feature-unsupported]: this class is reserved -- the baked \
-             defaults already govern it, so an override here is rejected. See the \
-             [retry] section of docs/CONFIGURATION.md for the classes that accept an \
-             override."
+            "[retry.classes] feature-unsupported: this class is reserved -- the built-in \
+             default already governs it, so a count here is rejected; delete the line. \
+             See the [retry] section of docs/CONFIGURATION.md for the classes that \
+             accept a count."
                 .into(),
         ));
     }
@@ -1654,8 +1636,7 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(bare_validation_message(e));
     }
 
-    let mut warnings = class_policy_warnings(config);
-    warnings.extend(super::warnings::codex_identity_warnings(config));
+    let mut warnings = super::warnings::codex_identity_warnings(config);
     warnings.extend(super::warnings::cloudcode_host_warnings(config));
     warnings.extend(super::warnings::cloudcode_model_warnings(config));
     warnings.extend(super::beta_floor_warnings::beta_floor_override_warnings(

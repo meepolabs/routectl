@@ -11,9 +11,9 @@ fn config_schema_renders() {
     assert!(value.is_object(), "root schema must be a JSON object");
     assert_eq!(
         value
-            .pointer("/$defs/RetryPolicy/properties/classes/additionalProperties/$ref")
+            .pointer("/$defs/RetryPolicy/properties/classes/additionalProperties/type")
             .and_then(serde_json::Value::as_str),
-        Some("#/$defs/ClassPolicy"),
-        "the per-class retry overlay must render as a map of ClassPolicy"
+        Some("integer"),
+        "the per-class retry counts must render as a map of integers"
     );
 }

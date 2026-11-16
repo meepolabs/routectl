@@ -74,26 +74,19 @@ async fn complete_falls_back_on_429() {
 }
 
 #[tokio::test]
-async fn complete_does_not_fall_back_on_4xx_when_class_pins_no_fallback() {
-    // Post raw-status retirement, fallback is decided per failure class.
-    // A bare 400 (BadRequest) falls back by baked default; an operator
-    // pins it terminal with `[retry.classes.bad-request] fallback = false`,
-    // the replacement for the retired raw allow/deny lists.
-    use routectl_router::class_policy::{ClassPolicy, ConfigFailureClass};
-    let p1 = MockProvider::new("p1", vec![Behavior::Status(400)]);
+async fn complete_does_not_fall_back_on_an_unknown_failure_whatever_the_class_counts() {
+    // An upstream status outside every failure class (a 3xx) classifies
+    // unknown and stays terminal; no class count makes it fall back.
+    use routectl_router::class_policy::ConfigFailureClass;
+    let p1 = MockProvider::new("p1", vec![Behavior::Status(302)]);
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
     let (k, v) = chain_alias("fast", &["m1", "m2"]);
     aliases.insert(k, v);
 
     let mut retry = default_test_retry();
-    retry.classes.insert(
-        ConfigFailureClass::BadRequest,
-        ClassPolicy {
-            retry: Some(0),
-            fallback: Some(false),
-        },
-    );
+    retry.classes.insert(ConfigFailureClass::ServerError, 3);
+    retry.classes.insert(ConfigFailureClass::BadRequest, 3);
     let r = build_router_v6_with_retry(
         aliases,
         vec![
@@ -110,8 +103,8 @@ async fn complete_does_not_fall_back_on_4xx_when_class_pins_no_fallback() {
     let err = r
         .complete(req("fast"))
         .await
-        .expect_err("400 should propagate");
-    assert!(matches!(err, Error::Upstream { status: 400, .. }));
+        .expect_err("the unknown failure should propagate");
+    assert!(matches!(err, Error::Upstream { status: 302, .. }));
     assert_eq!(p2.calls(), 0);
 }
 

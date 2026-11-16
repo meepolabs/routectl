@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use super::super::class_observe::DispatchSurface;
 use super::super::outcome_rule::{Failure, SameProvider, decide};
 use super::super::walk_state::{RequestWalk, WalkTarget};
-use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+use crate::class_policy::ConfigFailureClass;
 use crate::config::{AliasValue, Config, ProviderEntry, RetryPolicy};
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
@@ -98,14 +98,8 @@ impl Provider for ServingProvider {
     }
 }
 
-fn bad_request_overlay() -> BTreeMap<ConfigFailureClass, ClassPolicy> {
-    BTreeMap::from([(
-        ConfigFailureClass::BadRequest,
-        ClassPolicy {
-            retry: Some(OVERLAY_RETRIES),
-            fallback: None,
-        },
-    )])
+fn bad_request_overlay() -> BTreeMap<ConfigFailureClass, u32> {
+    BTreeMap::from([(ConfigFailureClass::BadRequest, OVERLAY_RETRIES)])
 }
 
 /// A two-target chain: the refusing seat first, the serving seat second,

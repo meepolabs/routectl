@@ -68,8 +68,8 @@ pub enum FailureClass {
 impl FailureClass {
     /// The kebab-case token for this class -- THE single vocabulary source
     /// for the ledger `resolved_class` column, the `/status`
-    /// `errors_by_class` JSON keys, and the `[retry.classes.<token>]`
-    /// config keys. Each token matches the kebab-case `serde` rename of the
+    /// `errors_by_class` JSON keys, and the `[retry.classes]` config
+    /// keys. Each token matches the kebab-case `serde` rename of the
     /// config-facing failure class exactly (a tripwire test pins that
     /// agreement).
     ///

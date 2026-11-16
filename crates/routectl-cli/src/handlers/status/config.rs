@@ -179,7 +179,7 @@ struct PriceWire {
 /// One failure class's resolved retry/fallback policy and winning layer.
 #[derive(Debug, Clone, Serialize)]
 struct ClassPolicyWire {
-    /// Kebab-case class token (matches the `[retry.classes.<class>]` key).
+    /// Kebab-case class token (matches the key under `[retry.classes]`).
     class: &'static str,
     retry_cap: u32,
     fallback: bool,

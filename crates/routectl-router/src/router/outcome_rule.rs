@@ -118,8 +118,8 @@ pub(super) fn reset_hint_clamped_to(err: &Error, ceiling: Duration) -> Option<Du
 
 /// The same-provider retry cap for `class` under `policy` -- the value the
 /// request-wide retry count is compared against. Delegates to
-/// [`RetryPolicy::resolved_class`], which layers any operator per-class
-/// `[retry.classes]` override on top of the baked class default. Shared by
+/// [`RetryPolicy::resolved_class`], which takes the operator's
+/// `[retry.classes]` count for the class over the baked class default. Shared by
 /// [`decide`] and the class-decision observability so the logged cap never
 /// drifts from the cap actually enforced.
 pub(super) fn retry_cap_for(class: &FailureClass, policy: &RetryPolicy) -> u32 {
@@ -253,9 +253,8 @@ impl Disposition {
 /// [`names_a_model_limit`], endpoint scope for any other);
 /// otherwise the failed target alone, retryable per its class. Only a
 /// retryable target-scoped failure may retry the same target, and only on a
-/// completion. `[retry.classes]` only narrows: its retry cap bounds the
-/// request-wide retry count and `fallback = false` ends the walk, but
-/// neither lifts an exclusion. A probe never retries, never leaves the chain
+/// completion. `[retry.classes]` only narrows: its count bounds the
+/// request-wide retry count and never lifts an exclusion. A probe never retries, never leaves the chain
 /// run of its `[models]` entry, and never dials the failed seat again under a
 /// later chain entry, whatever the failure; it takes the shared debit rule
 /// ([`breaker_outcome`]), which spares only its native 429 or 529.

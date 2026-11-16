@@ -92,7 +92,7 @@ async fn a_refused_refresh_on_the_only_seat_answers_credential_unusable() {
         // Arrange
         let primary = refused_seat("p-a", REFUSED);
         let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
-        let router = chain_router_with(primary, sibling.clone(), false, None, |config| {
+        let router = chain_router_with(primary, sibling.clone(), false, |config| {
             config
                 .aliases
                 .insert("alias".into(), AliasValue::Chain(vec!["m-a".into()]));

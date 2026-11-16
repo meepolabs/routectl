@@ -9,7 +9,7 @@ use crate::config::{Config, PricingConfig};
 /// `1` -> `2` retires the legacy `[cache_pricing]` override table (refused
 /// by name now; prices live under `[models.X.pricing]`); `2` -> `3` retires the raw-status retry
 /// allow/deny escape hatch in favor of per-class policy
-/// (`[retry.classes.*]`); `3` -> `4` moves the
+/// (`[retry.classes]`); `3` -> `4` moves the
 /// `seat_selection` knob off the provider entry onto the `[pools.<name>]`
 /// block that groups the accounts, making explicit pools the only
 /// multi-seat shape; `4` -> `5` folds the provider / model

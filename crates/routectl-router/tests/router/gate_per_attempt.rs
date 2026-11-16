@@ -3,7 +3,7 @@
 use super::*;
 
 /// Each retry against the same provider should consume one RPM
-/// token. With `rpm_limit = 2` and `retry_on_5xx = 3`, a provider that
+/// token. With `rpm_limit = 2` and a server-error count of 5, a provider that
 /// 503s every time exhausts its bucket on the second attempt and the
 /// router falls through to the next chain entry instead of completing
 /// all 3 retries against an over-budget provider.
@@ -25,7 +25,10 @@ async fn retries_consume_rpm_tokens_and_fall_through_when_bucket_empty() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_on_5xx = Some(5);
+    rp.classes.insert(
+        routectl_router::class_policy::ConfigFailureClass::ServerError,
+        5,
+    );
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();
@@ -80,7 +83,10 @@ async fn retries_count_toward_circuit_breaker_threshold() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_on_5xx = Some(5);
+    rp.classes.insert(
+        routectl_router::class_policy::ConfigFailureClass::ServerError,
+        5,
+    );
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();

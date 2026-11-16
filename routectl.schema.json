@@ -253,29 +253,6 @@
       },
       "type": "object"
     },
-    "ClassPolicy": {
-      "additionalProperties": false,
-      "description": "Per-class retry / fallback overlay. Each leaf is independently\noptional: an absent leaf defers to the baked class default, a present\nleaf overrides only itself. Unknown keys are rejected so a typo cannot\nsilently become a no-op.",
-      "properties": {
-        "fallback": {
-          "description": "Override for whether this class falls back to the next provider in\nthe chain. `None` keeps the baked default.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "retry": {
-          "description": "Override for the same-provider retry cap of this class. `None`\nkeeps the baked default.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "CloakConfig": {
       "description": "Opt-in, empty-default configuration surface for the OAuth-egress cloak.\n`CloakConfig::default()` selects the standard cloak: mode `Auto`,\n`strict_mode` false (relocate the client system into the first user\nmessage rather than dropping it).",
       "properties": {
@@ -1331,9 +1308,11 @@
         },
         "classes": {
           "additionalProperties": {
-            "$ref": "#/$defs/ClassPolicy"
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
-          "description": "Per-error-class policy overlay keyed by the config-facing failure\nclass. A present entry overrides only the leaves it names (retry\ncap and/or fallback), layered over the baked class defaults; an\nabsent entry keeps the baked defaults. An empty map (the default)\nleaves every class at its baked default. See\n[`RetryPolicy::resolved_class`].",
+          "description": "Same-target retry count per failure class, written\n`[retry.classes] server-error = 2`. A class named here takes this\ncount as its retry cap in place of its built-in one; a class not\nnamed keeps the built-in cap. Fallback is never configured here:\nevery class but an unknown failure walks on. See\n[`RetryPolicy::resolved_class`].",
           "type": "object"
         },
         "initial_backoff_ms": {
@@ -1352,7 +1331,7 @@
         },
         "max_attempts": {
           "default": 3,
-          "description": "Retry-attempts cap per provider in the chain for the five health\nclasses (rate-limited, server-error, overloaded, timeout,\nnetwork-error); the other classes never retry on the same\nprovider. `[retry.classes.<class>] retry` overrides it per class.",
+          "description": "Retry-attempts cap per provider in the chain for the five health\nclasses (rate-limited, server-error, overloaded, timeout,\nnetwork-error); the other classes never retry on the same\nprovider. A `[retry.classes]` count overrides it per class.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -1377,33 +1356,6 @@
         "request_timeout_ms": {
           "description": "End-to-end per-attempt timeout on complete and count-tokens\nrequests. The router wraps each such upstream call in\n`tokio::time::timeout` and treats expiry as a network error\n(status 0, retryable). A stream that has committed content is not\nbounded by it. The workspace-wide tier: `[providers.X]` and\n`[pools.X]` values win over this one. None here means inherit the\nshipped 30 min default, not \"no timeout\".",
           "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "retry_on_429": {
-          "description": "Deprecated: use `[retry.classes.rate-limited] retry`. Retry cap\nfor the rate-limited class; still honored over `max_attempts`,\nand a `[retry.classes]` retry leaf wins over it. Setting it logs\nan advisory config warning.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "retry_on_5xx": {
-          "description": "Deprecated: use `[retry.classes.server-error] retry` and\n`[retry.classes.overloaded] retry`. Retry cap for both classes;\nstill honored over `max_attempts`, and a `[retry.classes]` retry\nleaf wins over it. Setting it logs an advisory config warning.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "retry_on_network": {
-          "description": "Deprecated: use `[retry.classes.timeout] retry` and\n`[retry.classes.network-error] retry`. Retry cap for both classes;\nstill honored over `max_attempts`, and a `[retry.classes]` retry\nleaf wins over it. Setting it logs an advisory config warning.",
-          "format": "uint32",
           "minimum": 0,
           "type": [
             "integer",

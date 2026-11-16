@@ -12,7 +12,7 @@ use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+use crate::class_policy::ConfigFailureClass;
 
 #[cfg(test)]
 use super::Config;
@@ -2646,7 +2646,7 @@ pub struct RetryPolicy {
     /// Retry-attempts cap per provider in the chain for the five health
     /// classes (rate-limited, server-error, overloaded, timeout,
     /// network-error); the other classes never retry on the same
-    /// provider. `[retry.classes.<class>] retry` overrides it per class.
+    /// provider. A `[retry.classes]` count overrides it per class.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Initial backoff in ms.
@@ -2659,25 +2659,6 @@ pub struct RetryPolicy {
     /// Prevents thundering-herd retries when many clients fail at once.
     #[serde(default = "default_jitter_ms")]
     pub jitter_ms: u64,
-
-    /// Deprecated: use `[retry.classes.rate-limited] retry`. Retry cap
-    /// for the rate-limited class; still honored over `max_attempts`,
-    /// and a `[retry.classes]` retry leaf wins over it. Setting it logs
-    /// an advisory config warning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry_on_429: Option<u32>,
-    /// Deprecated: use `[retry.classes.server-error] retry` and
-    /// `[retry.classes.overloaded] retry`. Retry cap for both classes;
-    /// still honored over `max_attempts`, and a `[retry.classes]` retry
-    /// leaf wins over it. Setting it logs an advisory config warning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry_on_5xx: Option<u32>,
-    /// Deprecated: use `[retry.classes.timeout] retry` and
-    /// `[retry.classes.network-error] retry`. Retry cap for both classes;
-    /// still honored over `max_attempts`, and a `[retry.classes]` retry
-    /// leaf wins over it. Setting it logs an advisory config warning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry_on_network: Option<u32>,
 
     /// End-to-end per-attempt timeout on complete and count-tokens
     /// requests. The router wraps each such upstream call in
@@ -2721,14 +2702,14 @@ pub struct RetryPolicy {
     #[serde(default)]
     pub max_honored_retry_after_ms: Option<u64>,
 
-    /// Per-error-class policy overlay keyed by the config-facing failure
-    /// class. A present entry overrides only the leaves it names (retry
-    /// cap and/or fallback), layered over the baked class defaults; an
-    /// absent entry keeps the baked defaults. An empty map (the default)
-    /// leaves every class at its baked default. See
+    /// Same-target retry count per failure class, written
+    /// `[retry.classes] server-error = 2`. A class named here takes this
+    /// count as its retry cap in place of its built-in one; a class not
+    /// named keeps the built-in cap. Fallback is never configured here:
+    /// every class but an unknown failure walks on. See
     /// [`RetryPolicy::resolved_class`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub classes: BTreeMap<ConfigFailureClass, ClassPolicy>,
+    pub classes: BTreeMap<ConfigFailureClass, u32>,
 }
 
 impl Default for RetryPolicy {
@@ -2738,9 +2719,6 @@ impl Default for RetryPolicy {
             initial_backoff_ms: default_backoff_ms(),
             backoff_multiplier: default_backoff_multiplier(),
             jitter_ms: default_jitter_ms(),
-            retry_on_429: None,
-            retry_on_5xx: None,
-            retry_on_network: None,
             request_timeout_ms: None,
             stream_first_byte_timeout_ms: None,
             probe_max_tokens: default_probe_max_tokens(),
@@ -2753,20 +2731,11 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Maximum attempts a single provider can ever consume regardless
     /// of error class: the max over every cap the per-class resolver can
-    /// return, folding the `[retry.classes]` overlay, so it never sits
+    /// return, folding the `[retry.classes]` counts, so it never sits
     /// below a class cap the resolver would otherwise honor.
     pub fn hard_retry_cap(&self) -> u32 {
         self.max_attempts
-            .max(self.retry_on_429.unwrap_or(0))
-            .max(self.retry_on_5xx.unwrap_or(0))
-            .max(self.retry_on_network.unwrap_or(0))
-            .max(
-                self.classes
-                    .values()
-                    .filter_map(|c| c.retry)
-                    .max()
-                    .unwrap_or(0),
-            )
+            .max(self.classes.values().copied().max().unwrap_or(0))
             .max(1)
     }
 

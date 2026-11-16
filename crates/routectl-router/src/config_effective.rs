@@ -4,7 +4,7 @@
 //! Several surfaces have more than one layer competing for a value, so only
 //! those carry provenance: a model's facts (context window, output fill and
 //! per-field prices, each tagged with its source), a retry class's
-//! policy (the baked class default vs a `[retry.classes.<class>]` leaf), and
+//! policy (the baked class default vs a `[retry.classes]` count), and
 //! a capability cell (the config-derived override layer, tagged with the
 //! source that set it). Every other config field is trivially the value in
 //! `config.toml`; annotating it would be noise.
@@ -229,7 +229,7 @@ impl PriceTableDates {
 }
 
 /// The resolved retry/fallback policy for one failure class, tagged with the
-/// layer that supplied it.
+/// layer that supplied its retry cap. Fallback is always the built-in value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassPolicyCell {
     /// The failure class this policy governs.
@@ -245,9 +245,9 @@ pub struct ClassPolicyCell {
 /// Which layer supplied a [`ClassPolicyCell`]'s value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassPolicySource {
-    /// A `[retry.classes.<class>]` leaf the operator set.
+    /// A `[retry.classes]` count the operator set.
     Config,
-    /// The compiled-in baked class default (no operator leaf for this class).
+    /// The compiled-in baked class default (no operator count for this class).
     BakedDefault,
 }
 

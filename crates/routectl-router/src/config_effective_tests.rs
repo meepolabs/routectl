@@ -1,5 +1,4 @@
 use super::*;
-use crate::class_policy::ClassPolicy;
 use crate::config::{
     BreakerThreshold, Config, PricingConfig, Resolved, ResolvedTuning, TuningSource,
 };
@@ -36,13 +35,10 @@ fn unknown_provider_reference_yields_empty_provider_kind() {
 fn class_with_operator_leaf_tags_config_others_baked_default() {
     // Arrange: an operator leaf on rate-limited only.
     let mut config = Config::default();
-    config.retry.classes.insert(
-        ConfigFailureClass::RateLimited,
-        ClassPolicy {
-            retry: Some(7),
-            fallback: None,
-        },
-    );
+    config
+        .retry
+        .classes
+        .insert(ConfigFailureClass::RateLimited, 7);
 
     // Act
     let view = derive_effective_view(&config, None, None);
@@ -66,6 +62,48 @@ fn class_with_operator_leaf_tags_config_others_baked_default() {
 
     // Every class is represented exactly once.
     assert_eq!(view.classes.len(), ALL_CONFIG_CLASSES.len());
+}
+
+#[test]
+fn a_server_error_count_resolves_its_cap_from_config_and_leaves_the_rest_built_in() {
+    // Arrange
+    let config: Config = toml::from_str(
+        "version = 5\n[retry]\nmax_attempts = 3\n[retry.classes]\nserver-error = 2\n",
+    )
+    .expect("the count shape parses");
+
+    // Act
+    let view = derive_effective_view(&config, None, None);
+    let cell = |class: ConfigFailureClass| {
+        *view
+            .classes
+            .iter()
+            .find(|c| c.class == class)
+            .expect("every class has a cell")
+    };
+
+    // Assert
+    let server = cell(ConfigFailureClass::ServerError);
+    assert_eq!(
+        (server.retry_cap, server.fallback, server.source),
+        (2, true, ClassPolicySource::Config)
+    );
+    let overloaded = cell(ConfigFailureClass::Overloaded);
+    assert_eq!(
+        (overloaded.retry_cap, overloaded.source),
+        (3, ClassPolicySource::BakedDefault),
+        "an absent class keeps the built-in cap"
+    );
+    let bad_request = cell(ConfigFailureClass::BadRequest);
+    assert_eq!(
+        (
+            bad_request.retry_cap,
+            bad_request.fallback,
+            bad_request.source
+        ),
+        (0, true, ClassPolicySource::BakedDefault),
+        "bad-request still falls back by default"
+    );
 }
 
 #[test]
@@ -623,8 +661,8 @@ jitter_ms = 50
 request_timeout_ms = 1800000
 stream_first_byte_timeout_ms = 600000
 
-[retry.classes.bad-request]
-fallback = false
+[retry.classes]
+bad-request = 0
 
 [providers.seat-1]
 kind = "anthropic-api"

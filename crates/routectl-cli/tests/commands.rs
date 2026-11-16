@@ -1004,7 +1004,7 @@ fn run_routectl_full(args: &[&str]) -> (i32, String, String) {
 }
 
 /// `config check` is the SHOWCASE validation surface: against a config that
-/// PARSES but is semantically invalid (a reserved `[retry.classes.feature-unsupported]`
+/// PARSES but is semantically invalid (a reserved `[retry.classes] feature-unsupported`
 /// override), the real binary must exit non-zero AND render the full
 /// error list with the source-line prefix -- not abort on the load-time
 /// fail-fast gate that would print only the first plain error. The current
@@ -1017,7 +1017,7 @@ fn config_check_renders_source_line_for_semantically_invalid_config() {
     // The reserved class block is line 3 (version, blank line, then header).
     std::fs::write(
         &config_path,
-        format!("version = {CURRENT}\n\n[retry.classes.feature-unsupported]\nfallback = false\n"),
+        format!("version = {CURRENT}\n\n[retry.classes]\nfeature-unsupported = 1\n"),
     )
     .unwrap();
     let path = config_path.to_str().unwrap();
@@ -1028,7 +1028,7 @@ fn config_check_renders_source_line_for_semantically_invalid_config() {
         "a semantically-invalid config must fail check; stdout: {stdout}, stderr: {stderr}"
     );
     assert!(
-        stdout.contains("(line 3): ") && stdout.contains("[retry.classes.feature-unsupported]"),
+        stdout.contains("(line 3): ") && stdout.contains("[retry.classes] feature-unsupported"),
         "expected the reserved-class error rendered with its source line, got stdout: {stdout}"
     );
 }
@@ -1043,7 +1043,7 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
     let config_path = dir.path().join("config.toml");
     std::fs::write(
         &config_path,
-        format!("version = {CURRENT}\n\n[retry.classes.feature-unsupported]\nfallback = false\n"),
+        format!("version = {CURRENT}\n\n[retry.classes]\nfeature-unsupported = 1\n"),
     )
     .unwrap();
     let path = config_path.to_str().unwrap();
@@ -1055,7 +1055,7 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
     );
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("[retry.classes.feature-unsupported]"),
+        combined.contains("[retry.classes] feature-unsupported"),
         "expected the reserved-class error surfaced, got stdout: {stdout}, stderr: {stderr}"
     );
     assert!(
@@ -1323,11 +1323,10 @@ fn cfg_unknown_alias_target() -> Config {
     toml::from_str("[aliases]\nfast = \"ghost\"\n").expect("fixture must parse")
 }
 
-/// The reserved `[retry.classes.feature-unsupported]` override
+/// The reserved `[retry.classes] feature-unsupported` count
 /// (`validate_class_policy`).
 fn cfg_reserved_class_override() -> Config {
-    toml::from_str("[retry.classes.feature-unsupported]\nfallback = false\n")
-        .expect("fixture must parse")
+    toml::from_str("[retry.classes]\nfeature-unsupported = 1\n").expect("fixture must parse")
 }
 
 fn bad_config_fixtures() -> Vec<(&'static str, Config)> {
@@ -1387,14 +1386,13 @@ fn prompt_size_rejects_each_centralized_bad_config() {
 // The rendered error/warning lines are printed by `check`; `validation_report`
 // exposes the same rendering without the secret-store IO so it is testable.
 
-/// A `[retry.classes.feature-unsupported]` reserved-class error must be
+/// A `[retry.classes] feature-unsupported` reserved-class error must be
 /// prefixed with the source line the block sits on when the raw config text
 /// is available.
 #[test]
 fn validation_report_prefixes_semantic_error_with_source_line() {
     // The reserved class block is the 4th line (header, blank line, then it).
-    let raw =
-        "[server]\nhost = \"127.0.0.1\"\n\n[retry.classes.feature-unsupported]\nfallback = false\n";
+    let raw = "[server]\nhost = \"127.0.0.1\"\n\n[retry.classes]\nfeature-unsupported = 1\n";
     let config: Config = toml::from_str(raw).expect("fixture must parse");
 
     let report = commands::config::validation_report(&config, Some(raw));
@@ -1402,7 +1400,7 @@ fn validation_report_prefixes_semantic_error_with_source_line() {
     let retry_err = report
         .errors
         .iter()
-        .find(|e| e.contains("[retry.classes.feature-unsupported]"))
+        .find(|e| e.contains("[retry.classes] feature-unsupported"))
         .expect("the reserved-class error must be reported");
     assert!(
         retry_err.starts_with("(line 4): "),
@@ -1414,10 +1412,10 @@ fn validation_report_prefixes_semantic_error_with_source_line() {
 /// renderer keeps the plain message rather than inventing a line number.
 #[test]
 fn validation_report_falls_back_to_plain_when_path_not_locatable() {
-    // The reserved-class error derives the path `retry.classes.feature-unsupported`,
-    // but the text handed to the report carries no such block -- locate returns
+    // The reserved-class error derives the path `retry.classes`,
+    // but the text handed to the report carries no such table -- locate returns
     // None and the message stays plain.
-    let cfg_raw = "[retry.classes.feature-unsupported]\nfallback = false\n";
+    let cfg_raw = "[retry.classes]\nfeature-unsupported = 1\n";
     let config: Config = toml::from_str(cfg_raw).expect("fixture must parse");
     let unrelated_raw = "[server]\nhost = \"127.0.0.1\"\n";
 
@@ -1426,14 +1424,14 @@ fn validation_report_falls_back_to_plain_when_path_not_locatable() {
     let retry_err = report
         .errors
         .iter()
-        .find(|e| e.contains("[retry.classes.feature-unsupported]"))
+        .find(|e| e.contains("[retry.classes] feature-unsupported"))
         .expect("the reserved-class error must be reported");
     assert!(
         !retry_err.starts_with("(line "),
         "expected a plain fallback with no line prefix, got: {retry_err}"
     );
     assert!(
-        retry_err.starts_with("config: [retry.classes.feature-unsupported]"),
+        retry_err.starts_with("config: [retry.classes] feature-unsupported"),
         "expected the bare validator message, got: {retry_err}"
     );
 }
@@ -1912,8 +1910,8 @@ fn config_set_refuses_the_retired_class_overrides_with_the_loaders_line() {
     assert_ne!(code, 0, "refused: {stdout} / {stderr}");
     assert_eq!(
         loader_line,
-        "`providers.seat-a.class_overrides` is retired: per-class policy lives in \
-         `[retry.classes.*]`; a status keeps its built-in class; delete it"
+        "`providers.seat-a.class_overrides` is retired: per-class retry counts live in \
+         `[retry.classes]`; a status keeps its built-in class; delete it"
     );
     assert!(
         stderr.contains(&loader_line),

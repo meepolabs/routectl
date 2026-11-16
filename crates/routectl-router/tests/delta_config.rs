@@ -5,62 +5,59 @@
 //! realized by two EXISTING mechanisms, and this suite pins both against
 //! the contract wording so a future change cannot quietly regress them:
 //!
-//! - a per-class MAP (`retry.classes`) whose leaves are `Option<T>` --
-//!   an absent leaf inherits the baked class default, a present leaf
-//!   overrides only itself, and each class key is independent
+//! - a per-class MAP (`retry.classes`) of same-target retry counts -- an
+//!   absent class inherits the baked class default, a present class
+//!   overrides only its own retry cap, and each class key is independent
 //!   (`RetryPolicy::resolved_class`);
 //! - plain serde for Vec fields (`capability.essential`) -- a list is one
 //!   atomic value taken wholesale from the file, never element-merged.
 //!
-//! Contract rules pinned (config-schema v3, layering section):
+//! Contract rules pinned:
 //!   1. maps override one class key without restating the rest;
-//!   2. every `ClassPolicy` leaf is `Option`: absent = inherit;
+//!   2. an absent class key inherits the baked default;
 //!   3. maps merge per-key, Vecs replace whole;
 //!   4. an empty table carries no semantic meaning (absent == empty).
 
 use routectl_core::failure_class::FailureClass;
 use routectl_router::parse_config;
 
-/// A `[retry]` block whose knobs are all distinct, so a resolved cap
-/// reveals exactly which baked default fed it. Baked outcomes under this
-/// block: server-error -> (2, true), rate-limited -> (1, true),
-/// network-error -> (3, true), auth -> (0, true).
-const DISTINCT_RETRY_BLOCK: &str = "
+/// A `[retry]` block with a non-default `max_attempts`, so a resolved cap
+/// reveals whether the baked default or a class count fed it. Baked
+/// outcomes under this block: the five health classes -> (6, true),
+/// auth -> (0, true).
+const RETRY_BLOCK: &str = "
 [retry]
 max_attempts = 6
-retry_on_429 = 1
-retry_on_5xx = 2
-retry_on_network = 3
 ";
 
 #[test]
-fn sparse_class_leaf_override_changes_only_that_leaf_others_stay_baked() {
-    // Arrange: override only server-error's retry cap.
+fn one_class_count_changes_only_that_class_others_stay_baked() {
+    // Arrange: a count on server-error only.
     let toml_text = format!(
-        "{DISTINCT_RETRY_BLOCK}
-[retry.classes.server-error]
-retry = 4
+        "{RETRY_BLOCK}
+[retry.classes]
+server-error = 4
 "
     );
 
     // Act
     let cfg = parse_config(&toml_text).expect("valid config parses");
 
-    // Assert: the one overridden leaf changed...
+    // Assert: the one counted class changed...
     assert_eq!(
         cfg.retry.resolved_class(&FailureClass::ServerError),
         (4, true),
-        "server-error retry cap is the override; its fallback leaf stays baked"
+        "server-error retry cap is the count; its fallback stays built in"
     );
-    // ...and every other class / leaf still resolves to its baked default.
+    // ...and every other class still resolves to its baked default.
     assert_eq!(
         cfg.retry.resolved_class(&FailureClass::RateLimited),
-        (1, true),
-        "a sibling class with no entry is untouched"
+        (6, true),
+        "a sibling class with no count is untouched"
     );
     assert_eq!(
         cfg.retry.resolved_class(&FailureClass::NetworkError),
-        (3, true)
+        (6, true)
     );
     assert_eq!(cfg.retry.resolved_class(&FailureClass::Auth), (0, true));
 }
@@ -85,54 +82,51 @@ fn vec_field_is_taken_whole_from_the_file_never_element_merged() {
 
 #[test]
 fn map_merges_per_key_sibling_keys_stay_independent() {
-    // Arrange: set two DIFFERENT class keys, each touching a different leaf.
+    // Arrange: counts on two DIFFERENT classes.
     let toml_text = format!(
-        "{DISTINCT_RETRY_BLOCK}
-[retry.classes.server-error]
-retry = 4
-
-[retry.classes.rate-limited]
-fallback = false
+        "{RETRY_BLOCK}
+[retry.classes]
+server-error = 4
+rate-limited = 1
 "
     );
 
     // Act
     let cfg = parse_config(&toml_text).expect("valid config parses");
 
-    // Assert: writing server-error did not clobber rate-limited; each key
-    // merges only its own leaf over the baked default.
+    // Assert: each key sets only its own class.
     assert_eq!(
         cfg.retry.resolved_class(&FailureClass::ServerError),
-        (4, true),
-        "server-error: retry overridden, fallback still baked"
+        (4, true)
     );
     assert_eq!(
         cfg.retry.resolved_class(&FailureClass::RateLimited),
-        (1, false),
-        "rate-limited: fallback overridden, retry cap still the baked 1"
+        (1, true)
     );
     // A class key present in neither entry stays fully baked.
-    assert_eq!(cfg.retry.resolved_class(&FailureClass::Auth), (0, true));
+    assert_eq!(
+        cfg.retry.resolved_class(&FailureClass::Overloaded),
+        (6, true)
+    );
 }
 
 #[test]
 fn empty_class_table_behaves_as_absent() {
-    // Arrange: an empty [retry.classes.server-error] table (no leaves) vs a
-    // config that never names the class at all.
+    // Arrange: an empty [retry.classes] table vs a config that never names it.
     let with_empty_table = parse_config(&format!(
-        "{DISTINCT_RETRY_BLOCK}
-[retry.classes.server-error]
+        "{RETRY_BLOCK}
+[retry.classes]
 "
     ))
     .expect("valid config parses");
-    let without_table = parse_config(DISTINCT_RETRY_BLOCK).expect("valid config parses");
+    let without_table = parse_config(RETRY_BLOCK).expect("valid config parses");
 
     // Assert: both resolve server-error to the identical baked default --
     // the empty table adds no semantic weight.
     let baked = without_table
         .retry
         .resolved_class(&FailureClass::ServerError);
-    assert_eq!(baked, (2, true));
+    assert_eq!(baked, (6, true));
     assert_eq!(
         with_empty_table
             .retry

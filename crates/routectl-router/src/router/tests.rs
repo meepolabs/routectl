@@ -126,19 +126,13 @@ fn a_status_zero_network_error_walks_on() {
 
 #[test]
 fn retry_override_on_one_class_leaves_the_sibling_5xx_class_untouched() {
-    // Arrange: [retry.classes.overloaded] retry = 0, with a distinct
-    // baked retry_on_5xx cap so a leak into ServerError is visible.
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    // Arrange: an overloaded count of 0, with a distinct server-error
+    // count so a leak between the two 5xx classes is visible.
+    use crate::class_policy::ConfigFailureClass;
     let mut classes = std::collections::BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::Overloaded,
-        ClassPolicy {
-            retry: Some(0),
-            fallback: None,
-        },
-    );
+    classes.insert(ConfigFailureClass::Overloaded, 0);
+    classes.insert(ConfigFailureClass::ServerError, 3);
     let policy = RetryPolicy {
-        retry_on_5xx: Some(3),
         classes,
         ..RetryPolicy::default()
     };
@@ -157,12 +151,10 @@ fn retry_override_on_one_class_leaves_the_sibling_5xx_class_untouched() {
     // Act + Assert: the overridden class caps to 0 and cannot retry.
     assert_eq!(retry_cap_for(&overloaded_class, &policy), 0);
     assert!(!retries(&overloaded_err, &overloaded_class, &policy));
-    // The un-overridden sibling class in the same baked 5xx family
-    // keeps its own retry_on_5xx cap.
+    // The sibling class in the same 5xx family keeps its own count.
     assert_eq!(retry_cap_for(&server_class, &policy), 3);
     assert!(retries(&server_err, &server_class, &policy));
-    // Fallback is untouched for both -- only the retry leaf was
-    // overridden.
+    // Fallback is the built-in value for both.
     assert!(walks(&overloaded_err, &overloaded_class, &policy));
     assert!(walks(&server_err, &server_class, &policy));
 }
@@ -172,15 +164,9 @@ fn hard_retry_cap_folds_per_class_overlay_above_max_attempts() {
     // A per-class retry override above max_attempts must lift the hard
     // ceiling too, or the retry loop's hard-cap guard silently clips
     // the class cap the resolver honors.
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    use crate::class_policy::ConfigFailureClass;
     let mut classes = BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::ServerError,
-        ClassPolicy {
-            retry: Some(5),
-            fallback: None,
-        },
-    );
+    classes.insert(ConfigFailureClass::ServerError, 5);
     let policy = RetryPolicy {
         max_attempts: 2,
         classes,
@@ -203,7 +189,7 @@ fn emit_class_observability_logs_enforced_and_hard_retry_cap() {
     // The emitted class-decision event must carry the SAME retry_cap
     // the shared resolver enforces, plus hard_retry_cap, so logging can
     // never drift from enforcement.
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    use crate::class_policy::ConfigFailureClass;
 
     struct StubProvider;
     #[async_trait::async_trait]
@@ -234,13 +220,7 @@ fn emit_class_observability_logs_enforced_and_hard_retry_cap() {
     let target = into_one_dispatch_target(model);
 
     let mut classes = BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::ServerError,
-        ClassPolicy {
-            retry: Some(5),
-            fallback: None,
-        },
-    );
+    classes.insert(ConfigFailureClass::ServerError, 5);
     let policy = RetryPolicy {
         max_attempts: 2,
         classes,
@@ -288,17 +268,14 @@ fn emit_class_observability_logs_enforced_and_hard_retry_cap() {
 }
 
 #[test]
-fn fallback_override_on_bad_request_leaves_auth_untouched() {
-    // Arrange: [retry.classes.bad-request] fallback = false.
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
-    let mut classes = std::collections::BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::BadRequest,
-        ClassPolicy {
-            retry: None,
-            fallback: Some(false),
-        },
-    );
+fn a_class_count_never_changes_fallback() {
+    // Arrange: a count on bad-request and auth; fallback stays the
+    // built-in value, so a plain 400 and a 401 still walk on.
+    use crate::class_policy::ConfigFailureClass;
+    let classes = [ConfigFailureClass::BadRequest, ConfigFailureClass::Auth]
+        .into_iter()
+        .map(|class| (class, 0))
+        .collect();
     let policy = RetryPolicy {
         classes,
         ..RetryPolicy::default()
@@ -308,10 +285,30 @@ fn fallback_override_on_bad_request_leaves_auth_untouched() {
     let bad_request_class = classify(&bad_request_err, None).class;
     let auth_class = classify(&auth_err, None).class;
 
-    // Act + Assert: a plain 400 stops falling back...
-    assert!(!walks(&bad_request_err, &bad_request_class, &policy));
-    // ...but a 401 (different class, no overlay entry) still does.
+    // Act + Assert
+    assert!(walks(&bad_request_err, &bad_request_class, &policy));
     assert!(walks(&auth_err, &auth_class, &policy));
+}
+
+#[test]
+fn an_unknown_failure_stays_terminal_under_any_class_counts() {
+    // Arrange: an upstream status outside every class (a 3xx) classifies
+    // unknown; a count on every class cannot make it walk on.
+    use crate::class_policy::ConfigFailureClass;
+    let mut policy = RetryPolicy::default();
+    policy.classes.insert(ConfigFailureClass::ServerError, 5);
+    let unknown_err = Error::upstream("p", 302, "body");
+    let unknown_class = classify(&unknown_err, None).class;
+    let server_err = Error::upstream("p", 500, "body");
+    let server_class = classify(&server_err, None).class;
+
+    // Act + Assert
+    assert_eq!(unknown_class, FailureClass::Unknown);
+    assert!(!walks(&unknown_err, &unknown_class, &policy));
+    assert!(
+        walks(&server_err, &server_class, &policy),
+        "control: a 5xx walks on"
+    );
 }
 
 #[test]

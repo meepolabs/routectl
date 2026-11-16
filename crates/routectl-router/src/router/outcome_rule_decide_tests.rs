@@ -7,7 +7,7 @@ use routectl_core::failure_class::FailureClass;
 use routectl_core::{Error, FailureScope, RefusalReason, ScopeRow, UpstreamReason};
 
 use super::*;
-use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+use crate::class_policy::ConfigFailureClass;
 use crate::config::{Config, RetryPolicy};
 use crate::router::walk_state::{Exclusion, RequestWalk, WalkTarget};
 
@@ -361,15 +361,9 @@ fn a_non_probe_500_retries_debits_and_sets_no_pool_fence() {
     );
 }
 
-fn with_class(
-    class: ConfigFailureClass,
-    retry: Option<u32>,
-    fallback: Option<bool>,
-) -> RetryPolicy {
+fn with_class(class: ConfigFailureClass, count: u32) -> RetryPolicy {
     let mut policy = RetryPolicy::default();
-    policy
-        .classes
-        .insert(class, ClassPolicy { retry, fallback });
+    policy.classes.insert(class, count);
     policy
 }
 
@@ -384,9 +378,9 @@ type NarrowRow<'a> = (
     (bool, Next, Excludes),
 );
 
-/// `[retry.classes]` only narrows. Its retry cap bounds the request-wide
-/// count; `fallback = false` ends the walk; and neither re-enables a
-/// same-target retry or lifts an exclusion the scope rule set.
+/// `[retry.classes]` only narrows. Its count bounds the request-wide retry
+/// count; it never re-enables a same-target retry, lifts an exclusion the
+/// scope rule set, or stops the walk.
 #[test]
 fn retry_classes_only_narrow_the_scope_rule() {
     let cfg = seats();
@@ -397,18 +391,10 @@ fn retry_classes_only_narrow_the_scope_rule() {
     let bare = bare_rate_limit();
     let rows: Vec<NarrowRow<'_>> = vec![
         (
-            "fallback = false makes a generic 400 terminal and keeps its exclusion",
-            &bad_request,
-            FailureClass::BadRequest,
-            with_class(ConfigFailureClass::BadRequest, None, Some(false)),
-            0,
-            (false, Next::Terminal, Excludes::Endpoint),
-        ),
-        (
             "a raised retry cap does not retry an endpoint-scoped 400",
             &bad_request,
             FailureClass::BadRequest,
-            with_class(ConfigFailureClass::BadRequest, Some(9), Some(true)),
+            with_class(ConfigFailureClass::BadRequest, 9),
             0,
             (false, Next::Walk, Excludes::Endpoint),
         ),
@@ -416,23 +402,15 @@ fn retry_classes_only_narrow_the_scope_rule() {
             "a raised retry cap does not retry a recognized row",
             &bare,
             FailureClass::RateLimited,
-            with_class(ConfigFailureClass::RateLimited, Some(9), Some(true)),
+            with_class(ConfigFailureClass::RateLimited, 9),
             0,
             (false, Next::Walk, Excludes::Endpoint),
         ),
         (
-            "fallback = false on a recognized row keeps its exclusion",
-            &bare,
-            FailureClass::RateLimited,
-            with_class(ConfigFailureClass::RateLimited, None, Some(false)),
-            0,
-            (false, Next::Terminal, Excludes::Endpoint),
-        ),
-        (
-            "retry = 0 stops a retryable 429",
+            "a count of 0 stops a retryable 429",
             &unrecognized_429,
             FailureClass::RateLimited,
-            with_class(ConfigFailureClass::RateLimited, Some(0), None),
+            with_class(ConfigFailureClass::RateLimited, 0),
             0,
             (false, Next::Walk, Excludes::Target),
         ),
@@ -440,7 +418,7 @@ fn retry_classes_only_narrow_the_scope_rule() {
             "cap 3 with 1 retry spent retries once more",
             &server,
             FailureClass::ServerError,
-            with_class(ConfigFailureClass::ServerError, Some(3), None),
+            with_class(ConfigFailureClass::ServerError, 3),
             1,
             (true, Next::Walk, Excludes::Target),
         ),
@@ -448,7 +426,7 @@ fn retry_classes_only_narrow_the_scope_rule() {
             "cap 3 with 2 retries spent on earlier targets stops",
             &server,
             FailureClass::ServerError,
-            with_class(ConfigFailureClass::ServerError, Some(3), None),
+            with_class(ConfigFailureClass::ServerError, 3),
             2,
             (false, Next::Walk, Excludes::Target),
         ),

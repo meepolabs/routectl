@@ -3,8 +3,8 @@
 use super::*;
 
 #[tokio::test]
-async fn retry_on_429_overrides_max_attempts() {
-    // max_attempts = 1, but retry_on_429 = 4 -> 429 retries 4x.
+async fn a_rate_limited_count_overrides_max_attempts() {
+    // max_attempts = 1, but a rate-limited count of 4 -> 429 retries 4x.
     let p = MockProvider::new(
         "p",
         vec![
@@ -21,7 +21,10 @@ async fn retry_on_429_overrides_max_attempts() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_on_429 = Some(4);
+    rp.classes.insert(
+        routectl_router::class_policy::ConfigFailureClass::RateLimited,
+        4,
+    );
     let r = build_router_v6_with_retry(
         aliases,
         vec![("m".into(), "p".into(), "m".into())],
@@ -34,7 +37,7 @@ async fn retry_on_429_overrides_max_attempts() {
 }
 
 #[tokio::test]
-async fn retry_on_5xx_independent_of_429() {
+async fn a_server_error_count_is_independent_of_the_rate_limited_count() {
     // 5xx retries get 1 attempt; 429 retries get 5. A 5xx run that
     // exhausts its budget falls through.
     let p1 = MockProvider::new("p1", vec![Behavior::Status(503), Behavior::Status(503)]);
@@ -46,8 +49,14 @@ async fn retry_on_5xx_independent_of_429() {
     rp.max_attempts = 5;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_on_5xx = Some(1);
-    rp.retry_on_429 = Some(5);
+    rp.classes.insert(
+        routectl_router::class_policy::ConfigFailureClass::ServerError,
+        1,
+    );
+    rp.classes.insert(
+        routectl_router::class_policy::ConfigFailureClass::RateLimited,
+        5,
+    );
     let r = build_router_v6_with_retry(
         aliases,
         vec![
@@ -62,7 +71,7 @@ async fn retry_on_5xx_independent_of_429() {
     );
     let resp = r.complete(req("fast")).await.expect("eventually ok");
     assert_eq!(resp.routectl_provider.as_deref(), Some("p2"));
-    // p1 made one attempt (per retry_on_5xx=1), then fell through.
+    // p1 made one attempt (server-error count 1), then fell through.
     assert_eq!(p1.calls(), 1);
 }
 
@@ -108,7 +117,10 @@ async fn request_timeout_translates_to_network_error_and_retries() {
     rp.max_attempts = 1;
     rp.initial_backoff_ms = 1;
     rp.backoff_multiplier = 1.0;
-    rp.retry_on_network = Some(3);
+    rp.classes.insert(
+        routectl_router::class_policy::ConfigFailureClass::NetworkError,
+        3,
+    );
     rp.request_timeout_ms = Some(20);
     let r = build_router_v6_with_retry(
         aliases,

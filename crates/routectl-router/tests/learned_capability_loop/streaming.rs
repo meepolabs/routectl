@@ -374,22 +374,16 @@ async fn stream_success_on_earlier_target_releases_unreached_admission() {
     );
 }
 
-/// terminal (non-fallbackable) error on the head: A's 400 is pinned terminal
-/// so the loop returns without hopping to the admitted tail B.
+/// terminal (non-fallbackable) error on the head: A answers with a status
+/// outside every failure class, so the loop returns without hopping to the
+/// admitted tail B.
 #[tokio::test]
 async fn stream_terminal_error_releases_unreached_admission() {
-    // A's plain 400 classifies BadRequest; pinning it `fallback = false` makes
-    // it terminal so the loop returns at A without reaching B.
-    let mut retry = fast_retry();
-    retry.classes.insert(
-        ConfigFailureClass::BadRequest,
-        ClassPolicy {
-            retry: Some(0),
-            fallback: Some(false),
-        },
-    );
-    let plain_400 = json!({"error": {"type": "invalid_request_error", "message": "bad"}});
-    let a = sse_upstream_server(vec![(400, plain_400)]).await;
+    // A status outside every HTTP class routectl names (600) classifies
+    // unknown, which never falls back, so the loop returns at A without
+    // reaching B.
+    let retry = fast_retry();
+    let a = sse_upstream_server(vec![(600, json!({}))]).await;
     let b = sse_upstream_server(vec![(400, unsupported_body_for(WEB_SEARCH))]).await;
     let router = build_stream_router(
         vec![
@@ -413,7 +407,7 @@ async fn stream_terminal_error_releases_unreached_admission() {
     // chain req: A fails terminally; B (admitted, expired) is never reached.
     let (d1, events) = Box::pin(routectl_testkit::with_capture(stream(&router, "chain"))).await;
     assert!(
-        matches!(d1.result, Err(Error::Upstream { status: 400, .. })),
+        matches!(d1.result, Err(Error::Upstream { status: 600, .. })),
         "a non-fallbackable terminal error must not fall back",
     );
     assert_eq!(hits(&b).await, 1, "B was never dialed after the terminal A");

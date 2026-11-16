@@ -36,6 +36,6 @@ pub use validate::{
 #[cfg(feature = "bedrock")]
 pub use validate_region::validate_aws_regions;
 pub use warnings::{
-    auth_reserved_header_warnings, class_policy_warnings, cloudcode_host_warnings,
-    cloudcode_model_warnings, codex_identity_warnings,
+    auth_reserved_header_warnings, cloudcode_host_warnings, cloudcode_model_warnings,
+    codex_identity_warnings,
 };

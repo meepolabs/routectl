@@ -155,13 +155,12 @@ pub use factory::validate_provider_openai_mantle;
 pub use factory::{
     BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, ModelProviderTarget, ResolvedModelBuild,
     auth_reserved_header_warnings, build_provider, build_provider_with_options,
-    build_resolved_models, build_resolved_models_reported, class_policy_warnings,
-    cloudcode_host_warnings, cloudcode_model_warnings, codex_identity_warnings,
-    collect_config_validation, configured_codex_version, pool_member_refusals,
-    resolve_model_provider, resolved_codex_version, validate_alias_chain_targets,
-    validate_alias_patterns, validate_class_policy, validate_codex_version,
-    validate_managed_anthropic_credential, validate_mitm_config, validate_pools,
-    validate_provider_credential_sources,
+    build_resolved_models, build_resolved_models_reported, cloudcode_host_warnings,
+    cloudcode_model_warnings, codex_identity_warnings, collect_config_validation,
+    configured_codex_version, pool_member_refusals, resolve_model_provider, resolved_codex_version,
+    validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
+    validate_codex_version, validate_managed_anthropic_credential, validate_mitm_config,
+    validate_pools, validate_provider_credential_sources,
 };
 pub use field_canary::CanaryOutcome;
 pub use field_capability::capability_key_is_field_verdict;

@@ -252,8 +252,8 @@ fn load_effective_config_rejects_each_centralized_bad_config() {
         (
             "reserved-class-override",
             format!(
-                "version = {CURRENT_CONFIG_VERSION}\n[retry.classes.feature-unsupported]\n\
-                 fallback = false\n"
+                "version = {CURRENT_CONFIG_VERSION}\n[retry.classes]\n\
+                 feature-unsupported = 1\n"
             ),
         ),
     ];

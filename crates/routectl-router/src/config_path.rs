@@ -263,19 +263,16 @@ mod tests {
     }
 
     #[test]
-    fn class_policy_leaf_validates_as_scalar() {
+    fn retry_class_count_validates_as_scalar() {
         assert_eq!(
-            validate_config_path("retry.classes.server-error.retry"),
+            validate_config_path("retry.classes.server-error"),
             Ok(PathShape::Scalar)
         );
     }
 
     #[test]
     fn map_key_path_validates_as_table() {
-        assert_eq!(
-            validate_config_path("retry.classes.server-error"),
-            Ok(PathShape::Table)
-        );
+        assert_eq!(validate_config_path("retry.classes"), Ok(PathShape::Table));
         assert_eq!(
             validate_config_path("providers.anthropic"),
             Ok(PathShape::Table)

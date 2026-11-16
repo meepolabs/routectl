@@ -157,11 +157,11 @@ api_key_ref = \"literal:x\"
         );
     }
 
-    /// A typo'd `[retry.classes.*]` key is a bad `ConfigFailureClass` enum
+    /// A typo'd `[retry.classes]` key is a bad `ConfigFailureClass` enum
     /// map key -- also surfaced by serde as an unknown variant.
     #[test]
     fn unknown_retry_class_key_variant_suggests_the_real_class() {
-        let err = parse_config("[retry.classes.rate-limitedd]\nretry = 1\n")
+        let err = parse_config("[retry.classes]\nrate-limitedd = 1\n")
             .expect_err("a bad retry.classes key must be rejected");
 
         assert!(

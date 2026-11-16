@@ -395,7 +395,7 @@ fn locate(raw_text: Option<&str>, message: String) -> String {
 ///
 ///   - a leading TOML header, `[a.b.c] ...` -> `a.b.c` (the `[retry]`,
 ///     `[aliases.X]`, `[models.X]`, and
-///     `[retry.classes.feature-unsupported]` validator errors);
+///     `[retry.classes] feature-unsupported` validator errors);
 ///   - a leading ``alias `X` ``/``model `X` ``/``provider `X` `` clause ->
 ///     `aliases.X` / `models.X` / `providers.X` (the alias-chain, model->
 ///     provider-reference, and secret-ref checks).

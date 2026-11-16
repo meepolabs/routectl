@@ -382,7 +382,7 @@ async fn invalid_toml_keeps_old_config() {
 }
 
 /// A config text identical to `config_text_with_alias` except it also
-/// carries `[retry.classes.feature-unsupported]`, a reserved class that
+/// carries `[retry.classes] feature-unsupported`, a reserved class that
 /// `routectl_router::validate_class_policy` hard-rejects. Syntactically
 /// valid TOML -- the rejection is semantic, caught by the startup
 /// validators `load_effective_config` runs after parsing.
@@ -395,8 +395,8 @@ version = {CURRENT}
 host = "127.0.0.1"
 port = 0
 
-[retry.classes.feature-unsupported]
-retry = 1
+[retry.classes]
+feature-unsupported = 1
 
 [providers.fast]
 kind = "openai-compat"
@@ -413,7 +413,7 @@ upstream = "gpt-4o"
     )
 }
 
-/// `[retry.classes.feature-unsupported]` is rejected directly at the
+/// `[retry.classes] feature-unsupported` is rejected directly at the
 /// `load_effective_config` seam -- the same loader the hot-reload path
 /// and cold start both run through. Exercising this seam directly
 /// (rather than only through the fs-watch + poll path) pins the exact
@@ -429,7 +429,7 @@ fn class_policy_reject_surfaces_through_load_effective_config() {
     .unwrap();
 
     let err = match routectl_cli::server::load_effective_config(&config_path) {
-        Ok(_) => panic!("[retry.classes.feature-unsupported] must be rejected"),
+        Ok(_) => panic!("[retry.classes] feature-unsupported must be rejected"),
         Err(e) => e,
     };
     assert!(
@@ -479,7 +479,7 @@ api_key_ref = "{key_ref}"
 }
 
 /// End-to-end companion to the seam test above: writing a reload
-/// candidate carrying `[retry.classes.feature-unsupported]` at the
+/// candidate carrying `[retry.classes] feature-unsupported` at the
 /// running server's watched config path must NOT swap the live router
 /// -- the old alias stays visible on `/v1/models` (and the new
 /// candidate's alias never surfaces) exactly like the parse-rejected
@@ -1017,7 +1017,7 @@ default = "claude"
 // -----------------------------------------------------------------
 
 /// Config text wiring a single `anthropic-api` provider at `upstream_uri`
-/// with a `[retry.classes.rate-limited]` override of `retry_cap`. Zero
+/// with a `[retry.classes] rate-limited` count of `retry_cap`. Zero
 /// backoff/jitter keeps a same-provider retry loop from adding latency
 /// the test would otherwise have to sleep through. The breaker is off: the reload poll sends one always-429 request after
 /// another, and an opened breaker would refuse them before they dial.
@@ -1034,8 +1034,8 @@ port = 0
 initial_backoff_ms = 0
 jitter_ms = 0
 
-[retry.classes.rate-limited]
-retry = {retry_cap}
+[retry.classes]
+rate-limited = {retry_cap}
 
 [providers.up]
 kind = "anthropic-api"
@@ -1194,7 +1194,7 @@ async fn config_set_failed_candidate_makes_no_watcher_visible_write() {
     );
 }
 
-/// A `[retry.classes.rate-limited]` cap raised across a reload takes
+/// A `[retry.classes] rate-limited` count raised across a reload takes
 /// effect on the REBUILT router: a single client request dispatched
 /// against an upstream that always returns 429 hits that upstream
 /// exactly `retry_cap` times (the same-provider retry loop stops once
@@ -1219,11 +1219,11 @@ async fn retry_classes_cap_change_applies_after_reload() {
     let config_path = dir.path().join("config.toml");
     let client = reqwest::Client::new();
 
-    // Sanity: retry = 0 means the provider is dispatched exactly once.
+    // Sanity: a count of 0 means the provider is dispatched exactly once.
     let before_reload = same_provider_dispatch_count(&client, &base_url, &mock).await;
     assert_eq!(
         before_reload, 1,
-        "retry.classes.rate-limited.retry = 0 must dispatch exactly once"
+        "a rate-limited count of 0 must dispatch exactly once"
     );
 
     // Act + Assert: reload with the cap raised to 2, then poll a single client
@@ -1250,7 +1250,7 @@ async fn retry_classes_cap_change_applies_after_reload() {
     }
     assert_eq!(
         observed, 2,
-        "raised retry.classes.rate-limited cap did not apply within {RELOAD_WAIT_CEILING:?} after reload"
+        "raised rate-limited count did not apply within {RELOAD_WAIT_CEILING:?} after reload"
     );
 }
 
@@ -2023,8 +2023,8 @@ reduce-me = "m_up"
 
 /// Two-entry fallback chain (`chain = ["m_a", "m_b"]`) with `[reduction]
 /// enabled` set explicitly. A is dialed first and fails; B is the tail that
-/// serves the request. `max_attempts = 1` plus `[retry.classes.server-error]
-/// retry = 0` keeps A to exactly ONE dial, so a slow A costs its delay once.
+/// serves the request. `max_attempts = 1` plus `[retry.classes]
+/// server-error = 0` keeps A to exactly ONE dial, so a slow A costs its delay once.
 fn reduction_chain_config(a_url: &str, b_url: &str, enabled: bool, marker_alias: &str) -> String {
     let key_ref = common::file_ref("test-key");
     format!(
@@ -2039,8 +2039,8 @@ max_attempts = 1
 initial_backoff_ms = 0
 jitter_ms = 0
 
-[retry.classes.server-error]
-retry = 0
+[retry.classes]
+server-error = 0
 
 [reduction]
 enabled = {enabled}

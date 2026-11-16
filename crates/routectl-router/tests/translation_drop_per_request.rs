@@ -278,9 +278,9 @@ struct Target {
     upstream: &'static str,
 }
 
-/// Alias `fast` over `targets` in order, with `retry_on_5xx` same-target
-/// attempts per target.
-fn router(targets: Vec<Target>, retry_on_5xx: u32) -> Router {
+/// Alias `fast` over `targets` in order, with a server-error retry count of
+/// `server_error_count`.
+fn router(targets: Vec<Target>, server_error_count: u32) -> Router {
     let mut config = Config::default();
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     let mut chain = Vec::new();
@@ -303,7 +303,10 @@ fn router(targets: Vec<Target>, retry_on_5xx: u32) -> Router {
         .insert("fast".into(), AliasValue::Chain(chain));
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
-    retry.retry_on_5xx = Some(retry_on_5xx);
+    retry.classes.insert(
+        routectl_router::class_policy::ConfigFailureClass::ServerError,
+        server_error_count,
+    );
     retry.initial_backoff_ms = 1;
     retry.backoff_multiplier = 1.0;
     retry.jitter_ms = 0;

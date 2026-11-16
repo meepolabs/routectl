@@ -2,142 +2,51 @@ use super::*;
 
 #[cfg(test)]
 mod class_policy_validation_tests {
-    //! Tests for `validate_class_policy` (hard rejects) and
-    //! `class_policy_warnings` (advisory) over `[retry.classes]`.
+    //! Tests for `validate_class_policy` (hard rejects) over
+    //! `[retry.classes]`.
 
-    use super::{class_policy_warnings, validate_class_policy};
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    use super::validate_class_policy;
+    use crate::class_policy::ConfigFailureClass;
     use crate::config::Config;
 
     #[test]
-    fn rejects_reserved_feature_unsupported_classes_block() {
-        // Arrange: an operator override on the reserved key.
-        let mut cfg = Config::default();
-        cfg.retry.classes.insert(
-            ConfigFailureClass::FeatureUnsupported,
-            ClassPolicy {
-                retry: Some(1),
-                fallback: None,
-            },
-        );
+    fn rejects_a_reserved_feature_unsupported_count() {
+        // Arrange: `[retry.classes] feature-unsupported = 1`.
+        let cfg: Config = toml::from_str("[retry.classes]\nfeature-unsupported = 1\n")
+            .expect("the count shape parses");
 
         // Act
         let err = validate_class_policy(&cfg).unwrap_err();
 
         // Assert
         let msg = err.to_string();
-        assert!(msg.contains("feature-unsupported"), "msg: {msg}");
+        assert!(
+            msg.contains("[retry.classes] feature-unsupported"),
+            "msg: {msg}"
+        );
         assert!(msg.contains("reserved"), "msg: {msg}");
     }
 
     #[test]
-    fn warns_on_an_empty_class_policy_block() {
-        // Arrange: a `[retry.classes.server-error]` block with both
-        // leaves unset -- parses fine and does nothing.
+    fn every_other_class_count_validates() {
+        // Arrange: a count on every class but the reserved one.
         let mut cfg = Config::default();
-        cfg.retry.classes.insert(
-            ConfigFailureClass::ServerError,
-            ClassPolicy {
-                retry: None,
-                fallback: None,
-            },
-        );
-
-        // Act
-        let warnings = class_policy_warnings(&cfg);
-
-        // Assert
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("server-error") && w.contains("no effect")),
-            "warnings: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn clean_config_validates_ok_with_no_warnings() {
-        // Arrange: a well-formed, non-empty class policy.
-        let mut cfg = Config::default();
-        cfg.retry.classes.insert(
-            ConfigFailureClass::ServerError,
-            ClassPolicy {
-                retry: Some(2),
-                fallback: Some(true),
-            },
-        );
-
-        // Act + Assert
-        validate_class_policy(&cfg).expect("clean config must validate");
-        assert!(
-            class_policy_warnings(&cfg).is_empty(),
-            "clean config must produce no warnings"
-        );
-    }
-
-    #[test]
-    fn warns_when_bad_request_fallback_is_disabled() {
-        // Arrange: [retry.classes.bad-request] fallback = false. Valid
-        // config, but it turns off the fallback walk that rescues a
-        // capability-filter rejection onto a capable target.
-        let mut cfg = Config::default();
-        cfg.retry.classes.insert(
-            ConfigFailureClass::BadRequest,
-            ClassPolicy {
-                retry: None,
-                fallback: Some(false),
-            },
-        );
-
-        // Act + Assert: config stays valid, but a warning fires naming
-        // the structured-output rescue consequence.
-        validate_class_policy(&cfg).expect("disabling bad-request fallback is valid config");
-        let warnings = class_policy_warnings(&cfg);
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("bad-request") && w.contains("structured-output rescue")),
-            "warnings: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn no_bad_request_fallback_warning_on_default_config() {
-        // Arrange: default config -- no [retry.classes] overlay at all.
-        let cfg = Config::default();
-
-        // Act + Assert
-        let warnings = class_policy_warnings(&cfg);
-        assert!(
-            !warnings
-                .iter()
-                .any(|w| w.contains("structured-output rescue")),
-            "default config must not warn about bad-request fallback: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn no_bad_request_fallback_warning_when_a_different_class_disables_fallback() {
-        // Arrange: [retry.classes.auth] fallback = false. Disabling a
-        // DIFFERENT class's fallback must not trip the bad-request-only
-        // structured-output-rescue warning.
-        let mut cfg = Config::default();
-        cfg.retry.classes.insert(
+        for class in [
+            ConfigFailureClass::RateLimited,
             ConfigFailureClass::Auth,
-            ClassPolicy {
-                retry: None,
-                fallback: Some(false),
-            },
-        );
+            ConfigFailureClass::BadRequest,
+            ConfigFailureClass::ContentPolicy,
+            ConfigFailureClass::ContextWindow,
+            ConfigFailureClass::ServerError,
+            ConfigFailureClass::Timeout,
+            ConfigFailureClass::NetworkError,
+            ConfigFailureClass::Overloaded,
+        ] {
+            cfg.retry.classes.insert(class, 2);
+        }
 
         // Act + Assert
-        let warnings = class_policy_warnings(&cfg);
-        assert!(
-            !warnings
-                .iter()
-                .any(|w| w.contains("structured-output rescue")),
-            "disabling auth fallback must not warn about bad-request rescue: {warnings:?}"
-        );
+        validate_class_policy(&cfg).expect("a count on a non-reserved class validates");
     }
 }
 #[cfg(test)]
@@ -1147,11 +1056,10 @@ mod collect_config_validation_tests {
         toml::from_str("[aliases]\nfast = \"ghost\"\n").expect("must parse")
     }
 
-    /// The reserved `[retry.classes.feature-unsupported]` override -- trips
+    /// The reserved `[retry.classes] feature-unsupported` count -- trips
     /// `validate_class_policy`.
     fn reserved_class_override_config() -> Config {
-        toml::from_str("[retry.classes.feature-unsupported]\nfallback = false\n")
-            .expect("must parse")
+        toml::from_str("[retry.classes]\nfeature-unsupported = 1\n").expect("must parse")
     }
 
     #[test]

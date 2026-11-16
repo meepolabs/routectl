@@ -64,11 +64,11 @@ mod tests {
 
     #[test]
     fn deeply_nested_header_maps_to_its_line() {
-        let raw = "[retry]\n\n[retry.classes.feature-unsupported]\nfallback = false\n";
+        let raw = "[retry]\n\n[retry.classes]\nfeature-unsupported = 1\n";
 
         assert_eq!(
             locate_dotted_path(raw, "retry.classes.feature-unsupported"),
-            Some(3)
+            Some(4)
         );
     }
 

@@ -360,6 +360,16 @@ fn overlapping_rows_flags_every_way_two_paths_can_name_one_key() {
     }
 }
 
+/// Whether the schema has no key at `path`: an unknown segment, or a segment
+/// that descends into a scalar (a retired leaf under what is now a scalar
+/// map value, such as a retry class count).
+fn is_absent_from_schema(verdict: &Result<crate::config_path::PathShape, PathError>) -> bool {
+    matches!(
+        verdict,
+        Err(PathError::UnknownSegment { .. } | PathError::NotATable { .. })
+    )
+}
+
 /// The table stays in step with the schema: every key-retired path is no
 /// longer a config path, and a value-retired path still is one.
 #[test]
@@ -376,10 +386,42 @@ fn every_retired_path_is_absent_from_the_config_schema() {
             );
         } else {
             assert!(
-                matches!(verdict, Err(PathError::UnknownSegment { .. })),
+                is_absent_from_schema(&verdict),
                 "`{path}` must be unknown to the schema: {verdict:?}"
             );
         }
+    }
+}
+
+/// The absence check accepts both ways a path can miss the schema and
+/// nothing else: a live path, a live scalar map value and a live table
+/// stay present.
+#[test]
+fn the_schema_absence_check_rejects_live_paths() {
+    let rows = [
+        ("an unknown key", "retry.no_such_knob", true),
+        (
+            "a leaf under a scalar map value",
+            "retry.classes.server-error.retry",
+            true,
+        ),
+        ("a live scalar", "retry.max_attempts", false),
+        (
+            "a live scalar map value",
+            "retry.classes.server-error",
+            false,
+        ),
+        ("a live table", "retry.classes", false),
+    ];
+
+    for (row, path, absent) in rows {
+        let verdict = validate_config_path(path);
+
+        assert_eq!(
+            is_absent_from_schema(&verdict),
+            absent,
+            "row `{row}`: {verdict:?}"
+        );
     }
 }
 

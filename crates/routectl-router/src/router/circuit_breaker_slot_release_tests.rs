@@ -13,6 +13,7 @@ use super::*;
 use crate::config::Config;
 use crate::config::{ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
+use crate::router::RouterOptions;
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
@@ -826,33 +827,25 @@ async fn stream_half_open_401_refresh_does_not_lock_breaker() {
 #[tokio::test]
 async fn complete_half_open_non_fallbackable_429_does_not_lock_breaker() {
     // Regression: a NON-probe request hits a half-open provider that
-    // returns 429 under a policy that excludes 429 from fallback
-    // (`[retry.classes.rate-limited] fallback = false, retry = 0`).
-    // do_fallback is false and the 429 is also non-retryable, so the
+    // returns 429 on a request with fallbacks disabled and a rate-limited
+    // count of 0. The walk is terminal and the 429 is non-retryable, so the
     // dispatch surfaces verbatim. Under class-based debit the excluded
     // 429 DOES debit (RateLimited is a health class -- accounting is
     // decoupled from routing), but the half-open slot must still be
     // settled exactly once so the breaker is not left locked open.
     // With a zero cooldown the re-trip is immediately half-open-eligible,
     // so the second dispatch must still reach the upstream.
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    use crate::class_policy::ConfigFailureClass;
     let calls = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn Provider> = Arc::new(Probe429Provider {
         id: "p".into(),
         calls: calls.clone(),
     });
-    // rate-limited class fallback=false + retry=0: do_fallback=false AND
-    // the 429 is non-retryable, so the attempt is neither retried nor
-    // fallen back -- it hits the terminal non-fallbackable release. Zero
+    // Fallbacks disabled + rate-limited count 0: the attempt is neither
+    // retried nor fallen back -- it hits the terminal release. Zero
     // backoff/jitter keep the test instant.
     let mut classes = std::collections::BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::RateLimited,
-        ClassPolicy {
-            retry: Some(0),
-            fallback: Some(false),
-        },
-    );
+    classes.insert(ConfigFailureClass::RateLimited, 0);
     let retry = RetryPolicy {
         max_attempts: 1,
         initial_backoff_ms: 0,
@@ -873,12 +866,23 @@ async fn complete_half_open_non_fallbackable_429_does_not_lock_breaker() {
         ..Default::default()
     };
 
-    let first = router.complete(req.clone()).await;
+    let terminal = || {
+        let mut opts = RouterOptions::new();
+        opts.disable_fallbacks = true;
+        opts
+    };
+    let first = router
+        .complete_with_options(req.clone(), terminal())
+        .await
+        .result;
     let calls_after_first = calls.load(Ordering::SeqCst);
 
     // A leaked half-open slot would have locked the breaker; the second
     // dispatch must still reach the upstream.
-    let second = router.complete(req.clone()).await;
+    let second = router
+        .complete_with_options(req.clone(), terminal())
+        .await
+        .result;
     let calls_after_second = calls.load(Ordering::SeqCst);
 
     assert!(
@@ -1088,15 +1092,15 @@ async fn probe_with_retry_after_does_not_park() {
     );
 }
 
-/// A reset on a NON-fallbackable error (a 400 whose class is pinned
-/// non-fallbackable) does not force a retry or a park: the error
+/// A reset on a terminal error (a 400 on a request with fallbacks
+/// disabled) does not force a retry or a park: the error
 /// terminates exactly as today (the reset never changes a
 /// fallback/retry decision).
 #[tokio::test]
 async fn non_fallbackable_error_with_retry_after_still_terminates() {
     // Arrange: a 400 (client error) that is NOT fallbackable, carrying
     // a large reset hint. Threshold 5 so any stray park is observable.
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    use crate::class_policy::ConfigFailureClass;
     let calls = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
         id: "p".into(),
@@ -1105,13 +1109,7 @@ async fn non_fallbackable_error_with_retry_after_still_terminates() {
         calls: calls.clone(),
     });
     let mut classes = std::collections::BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::BadRequest,
-        ClassPolicy {
-            retry: Some(0),
-            fallback: Some(false),
-        },
-    );
+    classes.insert(ConfigFailureClass::BadRequest, 0);
     let retry = RetryPolicy {
         classes,
         ..RetryPolicy::default()
@@ -1120,7 +1118,9 @@ async fn non_fallbackable_error_with_retry_after_still_terminates() {
     let t0 = Instant::now();
 
     // Act.
-    let result = router.complete(plain_req()).await;
+    let mut opts = RouterOptions::new();
+    opts.disable_fallbacks = true;
+    let result = router.complete_with_options(plain_req(), opts).await.result;
 
     // Assert: terminated with the 400 (no retry walk), exactly one
     // upstream call, and the breaker was not parked.
@@ -1741,14 +1741,11 @@ async fn completion_501_debits_breaker() {
 
 #[tokio::test]
 async fn non_fallbackable_429_still_debits_breaker() {
-    // Intended delta: health accounting is decoupled from routing. An
-    // operator pinning the rate-limited class non-fallbackable
-    // (`[retry.classes.rate-limited] fallback = false`) makes
-    // do_fallback false -- before the rewire that suppressed the debit.
-    // Now the debit keys off the RateLimited class, not the fallback
-    // decision, so a non-fallbackable 429 STILL debits the breaker while
-    // surfacing verbatim (no fallback, no retry).
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    // Health accounting is decoupled from routing: a request with
+    // fallbacks disabled makes the 429 terminal, but the debit keys off the
+    // RateLimited class, not the walk decision, so a terminal 429 STILL
+    // debits the breaker while surfacing verbatim (no fallback, no retry).
+    use crate::class_policy::ConfigFailureClass;
     let calls = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
         id: "p".into(),
@@ -1757,20 +1754,20 @@ async fn non_fallbackable_429_still_debits_breaker() {
         calls: calls.clone(),
     });
     let mut classes = std::collections::BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::RateLimited,
-        ClassPolicy {
-            retry: Some(0),
-            fallback: Some(false),
-        },
-    );
+    classes.insert(ConfigFailureClass::RateLimited, 0);
     let retry = RetryPolicy {
         classes,
         ..no_retry_policy()
     };
     let router = build_router_with_breaker(provider, retry, 1, 60_000);
 
-    let err = router.complete(plain_req()).await.unwrap_err();
+    let mut opts = RouterOptions::new();
+    opts.disable_fallbacks = true;
+    let err = router
+        .complete_with_options(plain_req(), opts)
+        .await
+        .result
+        .unwrap_err();
 
     assert!(
         matches!(err, Error::Upstream { status: 429, .. }),

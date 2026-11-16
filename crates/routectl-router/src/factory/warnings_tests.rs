@@ -1,82 +1,10 @@
 //! Unit tests for the non-fatal config warning collectors in
 //! `factory/warnings.rs`.
 
-use super::class_policy_warnings;
 use crate::config::Config;
 
 fn parse(toml_text: &str) -> Config {
     toml::from_str(toml_text).expect("fixture must parse")
-}
-
-#[test]
-fn each_retry_on_key_yields_one_warning_naming_its_replacement() {
-    // Arrange: one row per deprecated key and the replacement blocks the
-    // warning must name.
-    let rows: [(&str, &[&str]); 3] = [
-        (
-            "retry_on_429 = 2",
-            &["[retry.classes.rate-limited] retry = 2"],
-        ),
-        (
-            "retry_on_5xx = 2",
-            &[
-                "[retry.classes.server-error] retry = 2",
-                "[retry.classes.overloaded] retry = 2",
-            ],
-        ),
-        (
-            "retry_on_network = 2",
-            &[
-                "[retry.classes.timeout] retry = 2",
-                "[retry.classes.network-error] retry = 2",
-            ],
-        ),
-    ];
-
-    for (key_line, replacements) in rows {
-        let config = parse(&format!("version = 5\n[retry]\n{key_line}\n"));
-
-        // Act
-        let warnings = class_policy_warnings(&config);
-
-        // Assert
-        assert_eq!(warnings.len(), 1, "{key_line}: {warnings:?}");
-        let line = &warnings[0];
-        assert!(
-            line.contains(&format!("[retry] {key_line} is deprecated")),
-            "{key_line}: {line}"
-        );
-        for replacement in replacements {
-            assert!(line.contains(replacement), "{key_line}: {line}");
-        }
-    }
-}
-
-#[test]
-fn all_three_retry_on_keys_yield_three_warnings() {
-    // Arrange
-    let config =
-        parse("version = 5\n[retry]\nretry_on_429 = 1\nretry_on_5xx = 2\nretry_on_network = 3\n");
-
-    // Act
-    let warnings = class_policy_warnings(&config);
-
-    // Assert
-    assert_eq!(warnings.len(), 3, "{warnings:?}");
-}
-
-#[test]
-fn no_retry_on_key_yields_no_deprecation_warning() {
-    // Arrange: a [retry] table that tunes max_attempts and a class block,
-    // but sets no retry_on_* key.
-    let config =
-        parse("version = 5\n[retry]\nmax_attempts = 4\n[retry.classes.server-error]\nretry = 2\n");
-
-    // Act
-    let warnings = class_policy_warnings(&config);
-
-    // Assert
-    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[cfg(feature = "gemini")]

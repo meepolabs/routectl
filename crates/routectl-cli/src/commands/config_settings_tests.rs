@@ -204,11 +204,11 @@ fn every_spelling_of_a_key_reads_file() {
         ("inline table", "server = { port = 9000 }\n"),
         (
             "nested dotted key in a section",
-            "[retry]\nclasses.timeout.retry = 1\n",
+            "[retry]\nclasses.timeout = 1\n",
         ),
         (
             "nested inline table",
-            "[retry]\nclasses = { timeout = { retry = 1 } }\n",
+            "[retry]\nclasses = { timeout = 1 }\n",
         ),
     ];
     for (name, raw) in rows {
@@ -216,7 +216,7 @@ fn every_spelling_of_a_key_reads_file() {
         let expected = if raw.contains("port") {
             "  server.port=9000(file)"
         } else {
-            "  retry.classes.timeout.retry=1(file)"
+            "  retry.classes.timeout=1(file)"
         };
         assert!(
             lines.iter().any(|l| l == expected),
@@ -264,11 +264,6 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
         "BedrockCredsConfig.session_token_ref",
         "off: no session token",
     ),
-    (
-        "ClassPolicy.fallback",
-        "inherit: retry class policy section",
-    ),
-    ("ClassPolicy.retry", "inherit: retry class policy section"),
     ("Config.mitm", "off: no MITM listener"),
     (
         "ModelEntry.context_window",
@@ -312,18 +307,6 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
     ("ProviderEntry.cloud_project_id", "off: project discovery"),
     ("ProviderEntry.reduction_enabled", "inherit: [reduction]"),
     ("ProviderEntry.user_agent", "inherit: the egress User-Agent"),
-    (
-        "RetryPolicy.retry_on_429",
-        "inherit: retry class policy section",
-    ),
-    (
-        "RetryPolicy.retry_on_5xx",
-        "inherit: retry class policy section",
-    ),
-    (
-        "RetryPolicy.retry_on_network",
-        "inherit: retry class policy section",
-    ),
     ("ServerConfig.auth", "off: no listener auth"),
 ];
 

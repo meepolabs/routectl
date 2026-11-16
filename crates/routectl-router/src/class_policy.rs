@@ -1,7 +1,7 @@
-//! Config-facing failure-class policy: the operator-authored overlay that
-//! layers per-class retry / fallback overrides on top of the baked class
-//! defaults, plus the adapters between the config-facing
-//! [`ConfigFailureClass`] and the canonical [`FailureClass`].
+//! Config-facing failure-class policy: the operator's per-class same-target
+//! retry counts layered over the baked class defaults, plus the adapters
+//! between the config-facing [`ConfigFailureClass`] and the canonical
+//! [`FailureClass`].
 //!
 //! [`ConfigFailureClass`] is the closed, operator-nameable subset of the
 //! canonical (`#[non_exhaustive]`) [`FailureClass`]: it omits `Unknown`
@@ -43,23 +43,6 @@ pub enum ConfigFailureClass {
     Overloaded,
     /// A requested capability is not supported by the upstream.
     FeatureUnsupported,
-}
-
-/// Per-class retry / fallback overlay. Each leaf is independently
-/// optional: an absent leaf defers to the baked class default, a present
-/// leaf overrides only itself. Unknown keys are rejected so a typo cannot
-/// silently become a no-op.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ClassPolicy {
-    /// Override for the same-provider retry cap of this class. `None`
-    /// keeps the baked default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry: Option<u32>,
-    /// Override for whether this class falls back to the next provider in
-    /// the chain. `None` keeps the baked default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback: Option<bool>,
 }
 
 impl ConfigFailureClass {
@@ -107,40 +90,17 @@ impl ConfigFailureClass {
 }
 
 impl RetryPolicy {
-    /// Resolve the `(retry_cap, fallback)` pair for `class`: the baked
-    /// class default, then the deprecated `retry_on_*` cap for its class
-    /// family, then any per-class [`ClassPolicy`] leaf the operator set,
-    /// each layer overriding the one below it.
+    /// Resolve the `(retry_cap, fallback)` pair for `class`: the built-in
+    /// class default, with the retry cap replaced by the operator's
+    /// `[retry.classes]` count for that class when one is set. Fallback is
+    /// always the built-in value.
     #[must_use]
     pub fn resolved_class(&self, class: &FailureClass) -> (u32, bool) {
-        let (mut retry_cap, mut fallback) = baked_class_defaults(self, class);
-        if let Some(compat_cap) = self.retry_on_compat_cap(class) {
-            retry_cap = compat_cap;
-        }
-        if let Some(cfg_class) = ConfigFailureClass::from_failure_class(class)
-            && let Some(overlay) = self.classes.get(&cfg_class)
-        {
-            if let Some(retry) = overlay.retry {
-                retry_cap = retry;
-            }
-            if let Some(fb) = overlay.fallback {
-                fallback = fb;
-            }
-        }
+        let (built_in_cap, fallback) = baked_class_defaults(self, class);
+        let retry_cap = ConfigFailureClass::from_failure_class(class)
+            .and_then(|cfg_class| self.classes.get(&cfg_class).copied())
+            .unwrap_or(built_in_cap);
         (retry_cap, fallback)
-    }
-
-    /// The deprecated `retry_on_*` cap covering `class`, if the operator
-    /// set it: `retry_on_429` for rate-limited, `retry_on_5xx` for
-    /// server-error and overloaded, `retry_on_network` for timeout and
-    /// network-error.
-    const fn retry_on_compat_cap(&self, class: &FailureClass) -> Option<u32> {
-        match class {
-            FailureClass::RateLimited => self.retry_on_429,
-            FailureClass::ServerError | FailureClass::Overloaded => self.retry_on_5xx,
-            FailureClass::Timeout | FailureClass::NetworkError => self.retry_on_network,
-            _ => None,
-        }
     }
 }
 
@@ -170,10 +130,9 @@ const fn baked_class_defaults(policy: &RetryPolicy, class: &FailureClass) -> (u3
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassPolicy, ConfigFailureClass};
+    use super::ConfigFailureClass;
     use crate::config::RetryPolicy;
     use routectl_core::failure_class::FailureClass;
-    use std::collections::BTreeMap;
 
     /// Every config-facing class paired with the kebab-case token it must
     /// serialize to. Exhaustive: the ten operator-nameable classes.
@@ -254,50 +213,6 @@ mod tests {
             // Assert
             assert!(got.is_err(), "typo {typo} must be rejected");
         }
-    }
-
-    // --- ClassPolicy deserialize / round-trip ---
-
-    #[test]
-    fn class_policy_rejects_unknown_field() {
-        // Arrange: a valid leaf plus a stray key.
-        let json = r#"{"retry": 2, "bogus": 1}"#;
-
-        // Act
-        let got: Result<ClassPolicy, _> = serde_json::from_str(json);
-
-        // Assert
-        assert!(got.is_err(), "unknown field must be rejected");
-    }
-
-    #[test]
-    fn class_policy_partial_leaf_omits_absent_leaf_without_null() {
-        // Arrange
-        let json = r#"{"retry": 3}"#;
-
-        // Act
-        let parsed: ClassPolicy = serde_json::from_str(json).expect("parse");
-        let reserialized = serde_json::to_string(&parsed).expect("serialize");
-
-        // Assert
-        assert_eq!(parsed.retry, Some(3));
-        assert_eq!(parsed.fallback, None);
-        assert_eq!(
-            reserialized, r#"{"retry":3}"#,
-            "absent leaf must not materialize as null"
-        );
-    }
-
-    #[test]
-    fn class_policy_default_serializes_empty() {
-        // Arrange
-        let policy = ClassPolicy::default();
-
-        // Act
-        let got = serde_json::to_string(&policy).expect("serialize");
-
-        // Assert
-        assert_eq!(got, "{}");
     }
 
     // --- Adapters ---
@@ -441,19 +356,7 @@ mod tests {
         }
     }
 
-    // --- resolved_class: baked matrix over an empty overlay ---
-
-    /// A policy whose deprecated `retry_on_*` caps are all set to distinct
-    /// values, so a resolved cap reveals which knob fed it.
-    fn distinct_caps_policy() -> RetryPolicy {
-        RetryPolicy {
-            max_attempts: 4,
-            retry_on_429: Some(1),
-            retry_on_5xx: Some(2),
-            retry_on_network: Some(3),
-            ..Default::default()
-        }
-    }
+    // --- resolved_class ---
 
     fn expected_baked(class: &FailureClass, max_attempts: u32) -> (u32, bool) {
         match class {
@@ -472,16 +375,21 @@ mod tests {
         }
     }
 
+    fn parse_retry(toml_text: &str) -> RetryPolicy {
+        let cfg: crate::config::Config = toml::from_str(toml_text).expect("parse");
+        cfg.retry
+    }
+
     #[test]
-    fn resolved_class_empty_overlay_without_compat_keys_is_the_baked_row() {
-        // Arrange: no retry_on_* key and no [retry.classes] block.
+    fn resolved_class_without_class_counts_is_the_baked_row() {
+        // Arrange
         let policy = RetryPolicy {
             max_attempts: 7,
             ..Default::default()
         };
 
         // Act + Assert: the five health classes resolve max_attempts, the
-        // rest 0, for every core variant.
+        // rest 0, and every class but unknown falls back.
         for class in all_core_variants() {
             assert_eq!(
                 policy.resolved_class(&class),
@@ -492,229 +400,99 @@ mod tests {
     }
 
     #[test]
-    fn each_retry_on_key_caps_only_its_own_classes() {
-        // Arrange: one row per deprecated key, naming the classes it caps.
-        type Setter = fn(&mut RetryPolicy, u32);
-        let rows: [(&str, Setter, &[FailureClass]); 3] = [
-            (
-                "retry_on_429",
-                |p, n| p.retry_on_429 = Some(n),
-                &[FailureClass::RateLimited],
-            ),
-            (
-                "retry_on_5xx",
-                |p, n| p.retry_on_5xx = Some(n),
-                &[FailureClass::ServerError, FailureClass::Overloaded],
-            ),
-            (
-                "retry_on_network",
-                |p, n| p.retry_on_network = Some(n),
-                &[FailureClass::Timeout, FailureClass::NetworkError],
-            ),
-        ];
-
-        for (key, set, capped) in rows {
+    fn a_class_count_sets_only_its_own_retry_cap_and_keeps_the_built_in_fallback() {
+        // Arrange: one count per row; every other class must keep the baked row.
+        for (cfg_class, _key) in all_kebab_pairs() {
             let mut policy = RetryPolicy {
                 max_attempts: 7,
                 ..Default::default()
             };
-            set(&mut policy, 1);
+            policy.classes.insert(cfg_class, 2);
+            let target = cfg_class.to_failure_class();
 
-            // Act + Assert: the key's classes take its cap; every other
-            // class keeps the baked row.
+            // Act + Assert
             for class in all_core_variants() {
-                let expected = if capped.contains(&class) {
-                    (1, true)
+                let baked = expected_baked(&class, 7);
+                let expected = if ConfigFailureClass::from_failure_class(&class) == Some(cfg_class)
+                {
+                    (2, baked.1)
                 } else {
-                    expected_baked(&class, 7)
+                    baked
                 };
                 assert_eq!(
                     policy.resolved_class(&class),
                     expected,
-                    "{key}: class {class:?}"
+                    "count on {target:?}: class {class:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn retry_on_zero_caps_its_classes_at_zero() {
+    fn a_zero_count_caps_its_class_at_zero() {
         // Arrange: an explicit 0 is a cap, not "unset".
-        let policy = RetryPolicy {
-            max_attempts: 7,
-            retry_on_5xx: Some(0),
-            ..Default::default()
-        };
+        let policy = parse_retry("[retry]\nmax_attempts = 7\n[retry.classes]\nserver-error = 0\n");
 
         // Act + Assert
         assert_eq!(policy.resolved_class(&FailureClass::ServerError), (0, true));
-        assert_eq!(policy.resolved_class(&FailureClass::Overloaded), (0, true));
+        assert_eq!(policy.resolved_class(&FailureClass::Overloaded), (7, true));
     }
 
     #[test]
-    fn retry_classes_beat_retry_on_compat() {
-        // Arrange: every compat key set, and a [retry.classes] retry leaf
-        // on one class of each key's family.
-        let mut policy = distinct_caps_policy();
-        for class in [
-            ConfigFailureClass::RateLimited,
-            ConfigFailureClass::Overloaded,
-            ConfigFailureClass::Timeout,
-        ] {
-            policy.classes.insert(
-                class,
-                ClassPolicy {
-                    retry: Some(9),
-                    fallback: None,
-                },
-            );
+    fn unknown_has_no_config_class_so_it_stays_terminal() {
+        // Arrange: counts on every nameable class.
+        let mut policy = RetryPolicy::default();
+        for (cfg_class, _key) in all_kebab_pairs() {
+            policy.classes.insert(cfg_class, 9);
         }
 
-        // Act + Assert: the class leaf wins over the compat key; a sibling
-        // class with no leaf keeps the compat cap.
-        assert_eq!(policy.resolved_class(&FailureClass::RateLimited), (9, true));
-        assert_eq!(policy.resolved_class(&FailureClass::Overloaded), (9, true));
-        assert_eq!(policy.resolved_class(&FailureClass::ServerError), (2, true));
-        assert_eq!(policy.resolved_class(&FailureClass::Timeout), (9, true));
-        assert_eq!(
-            policy.resolved_class(&FailureClass::NetworkError),
-            (3, true)
-        );
-    }
-
-    #[test]
-    fn fallback_only_class_block_keeps_the_retry_on_compat_cap() {
-        // Arrange: retry_on_5xx set, and a server-error block that sets
-        // only `fallback`; overloaded has no block.
-        let toml_text = r"
-[retry]
-max_attempts = 7
-retry_on_5xx = 4
-
-[retry.classes.server-error]
-fallback = false
-";
-        let cfg: crate::config::Config = toml::from_str(toml_text).expect("parse");
-
-        // Act + Assert: the absent retry leaf falls through to the compat
-        // cap, not to max_attempts; the fallback leaf applies on its own.
-        assert_eq!(
-            cfg.retry.resolved_class(&FailureClass::ServerError),
-            (4, false)
-        );
-        assert_eq!(
-            cfg.retry.resolved_class(&FailureClass::Overloaded),
-            (4, expected_baked(&FailureClass::Overloaded, 7).1)
-        );
-    }
-
-    // --- resolved_class: sparse operator overlay ---
-
-    #[test]
-    fn sparse_override_changes_only_the_overridden_retry_leaf() {
-        // Arrange: override only RateLimited's retry cap.
-        let mut policy = distinct_caps_policy();
-        let mut classes = BTreeMap::new();
-        classes.insert(
-            ConfigFailureClass::RateLimited,
-            ClassPolicy {
-                retry: Some(9),
-                fallback: None,
-            },
-        );
-        policy.classes = classes;
-
-        // Act + Assert: retry leaf overridden, fallback leaf still baked.
-        assert_eq!(policy.resolved_class(&FailureClass::RateLimited), (9, true));
-        // A class with no entry is untouched.
-        assert_eq!(policy.resolved_class(&FailureClass::ServerError), (2, true));
-    }
-
-    #[test]
-    fn sparse_override_changes_only_the_overridden_fallback_leaf() {
-        // Arrange: override only Auth's fallback flag (baked cap is 0).
-        let mut policy = distinct_caps_policy();
-        let mut classes = BTreeMap::new();
-        classes.insert(
-            ConfigFailureClass::Auth,
-            ClassPolicy {
-                retry: None,
-                fallback: Some(false),
-            },
-        );
-        policy.classes = classes;
-
-        // Act + Assert: fallback flipped, retry cap still the baked 0.
-        assert_eq!(policy.resolved_class(&FailureClass::Auth), (0, false));
-    }
-
-    #[test]
-    fn override_on_unknown_class_is_impossible_so_baked_wins() {
-        // Unknown has no config-facing class, so no overlay entry can
-        // target it: it always resolves to the baked (0, false).
-        let mut policy = distinct_caps_policy();
-        let mut classes = BTreeMap::new();
-        classes.insert(
-            ConfigFailureClass::RateLimited,
-            ClassPolicy {
-                retry: Some(9),
-                fallback: Some(false),
-            },
-        );
-        policy.classes = classes;
-
+        // Act + Assert
         assert_eq!(policy.resolved_class(&FailureClass::Unknown), (0, false));
     }
 
     // --- Config deserialize boundary ---
-    //
-    // `[retry].classes` parses from real TOML and an empty overlay stays
-    // out of the serialized file.
 
     #[test]
-    fn retry_classes_overlay_parses_from_toml() {
+    fn retry_class_counts_parse_from_toml() {
         // Arrange
-        let toml_text = r"
-[retry]
-max_attempts = 5
-
-[retry.classes.rate-limited]
-retry = 2
-fallback = false
-
-[retry.classes.server-error]
-fallback = true
-";
+        let toml_text =
+            "[retry]\nmax_attempts = 5\n\n[retry.classes]\nserver-error = 2\nrate-limited = 1\n";
 
         // Act
-        let cfg: crate::config::Config = toml::from_str(toml_text).expect("parse");
+        let policy = parse_retry(toml_text);
 
         // Assert
         assert_eq!(
-            cfg.retry.classes.get(&ConfigFailureClass::RateLimited),
-            Some(&ClassPolicy {
-                retry: Some(2),
-                fallback: Some(false),
-            })
+            policy.classes.get(&ConfigFailureClass::ServerError),
+            Some(&2)
         );
         assert_eq!(
-            cfg.retry.classes.get(&ConfigFailureClass::ServerError),
-            Some(&ClassPolicy {
-                retry: None,
-                fallback: Some(true),
-            })
+            policy.classes.get(&ConfigFailureClass::RateLimited),
+            Some(&1)
         );
-        // resolved_class reflects the overlay: rate-limited's cap is
-        // overridden to 2 and fallback flipped to false.
-        assert_eq!(
-            cfg.retry.resolved_class(&FailureClass::RateLimited),
-            (2, false)
-        );
+        assert_eq!(policy.resolved_class(&FailureClass::ServerError), (2, true));
+        assert_eq!(policy.resolved_class(&FailureClass::Timeout), (5, true));
+    }
+
+    #[test]
+    fn a_class_sub_table_no_longer_parses() {
+        // Arrange: the earlier `[retry.classes.<class>]` table shape, and a
+        // control in the count shape.
+        let old = "[retry.classes.server-error]\nretry = 2\n";
+        let new = "[retry.classes]\nserver-error = 2\n";
+
+        // Act
+        let old_parsed: Result<crate::config::Config, _> = toml::from_str(old);
+        let new_parsed: Result<crate::config::Config, _> = toml::from_str(new);
+
+        // Assert
+        assert!(old_parsed.is_err(), "the table shape must not parse");
+        assert!(new_parsed.is_ok(), "control: the count shape parses");
     }
 
     #[test]
     fn empty_retry_classes_omitted_from_serialized_toml() {
-        // Arrange: a default policy has an empty overlay map.
+        // Arrange: a default policy has an empty map.
         let policy = RetryPolicy::default();
 
         // Act
@@ -723,7 +501,7 @@ fallback = true
         // Assert: skip_serializing_if keeps the empty map out of the file.
         assert!(
             !rendered.contains("classes"),
-            "empty overlay must not materialize a [classes] table, got:\n{rendered}"
+            "empty map must not materialize a [classes] table, got:\n{rendered}"
         );
     }
 }

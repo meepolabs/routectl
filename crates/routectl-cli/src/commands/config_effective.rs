@@ -10,7 +10,7 @@
 //!     another entry's value applies),
 //!   - model facts (context window, output fill and each price field, tagged
 //!     with a fixed source token and, for a table price, the table date),
-//!   - retry class policy (baked class default vs `[retry.classes.<class>]`),
+//!   - retry class policy (baked class default vs a `[retry.classes]` count),
 //!   - resolved tuning (breaker, RPM and timeout cells, each tagged with the
 //!     model, provider, pool, global or default tier that supplied it), and
 //!   - capability cells (the config-derived override layer, tagged with the
@@ -149,7 +149,7 @@ fn price_cell(
 /// Render one line per failure class: the resolved retry/fallback pair and the
 /// layer that supplied it.
 fn render_class_cells(cells: &[ClassPolicyCell]) {
-    println!("\nretry class policy (baked defaults + [retry.classes] overrides):");
+    println!("\nretry class policy (baked defaults + [retry.classes] counts):");
     for cell in cells {
         println!(
             "  {class:<19} retry={retry:<3} fallback={fallback:<5} source={source}",
@@ -287,7 +287,7 @@ const fn class_source_tag(source: ClassPolicySource) -> &'static str {
 }
 
 /// The kebab-case config token for a failure class (matches the
-/// `[retry.classes.<class>]` key an operator writes).
+/// key an operator writes under `[retry.classes]`).
 const fn class_name(class: routectl_router::class_policy::ConfigFailureClass) -> &'static str {
     use routectl_router::class_policy::ConfigFailureClass as C;
     match class {

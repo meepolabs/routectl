@@ -30,11 +30,7 @@ fn sanitize_warning_for_log(warning: &str) -> String {
 /// seat-set change, which would repeat findings about a config that did not
 /// change.
 pub fn log_advisory_warnings(config: &Config) {
-    let categories: [(&str, Vec<String>); 5] = [
-        (
-            "class policy warning",
-            routectl_router::class_policy_warnings(config),
-        ),
+    let categories: [(&str, Vec<String>); 4] = [
         (
             "codex identity warning",
             routectl_router::codex_identity_warnings(config),

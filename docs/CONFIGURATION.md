@@ -259,7 +259,7 @@ schema version retired, and where its replacement lives:
   `[models.X.pricing]` (see [Retired config keys](#retired-config-keys)).
 - **v2 -> v3:** the raw-status retry allow/deny escape hatch; use
   per-class policy (see
-  [Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)).
+  [Same-target retry counts](#same-target-retry-counts-retryclasses)).
 - **v3 -> v4:** a bare `oauth://<provider>` ref means the default seat
   alone, and the provider-level `seat_selection` moves onto a
   `[pools.<name>]` block (see
@@ -359,12 +359,17 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `providers.<name>.anthropic_beta` | pin the flag in header_extras "anthropic-beta" |
 | `providers.<name>.auto_emit_per_block_breakpoints` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
-| `providers.<name>.class_overrides` | per-class policy lives in `[retry.classes.*]`; a status keeps its built-in class |
+| `providers.<name>.class_overrides` | per-class retry counts live in `[retry.classes]`; a status keeps its built-in class |
 | `providers.<name>.cloak.sensitive_words` | the sensitive-word scanner is removed; nothing replaces it |
 | `providers.<name>.cloak.tool_rename` | tool names are normalized to mcp__ only |
 | `providers.<name>.max_thinking_entry_bytes` | the thinking-cache entry cap is fixed at 1 MiB |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |
+| `retry.classes.<name>.fallback` | chains and pools fall back; an unknown failure stays terminal |
+| `retry.classes.<name>.retry` | write the count as `[retry.classes] <class> = <n>` |
+| `retry.retry_on_429` | set `[retry.classes] rate-limited = <n>` |
+| `retry.retry_on_5xx` | set `[retry.classes] server-error = <n>` and `overloaded = <n>` |
+| `retry.retry_on_network` | set `[retry.classes] timeout = <n>` and `network-error = <n>` |
 | `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
 | `server.allow_disable_fallbacks` | the x-routectl-disable-fallbacks header is always honored |
 | `server.strict_translation` | lossy seams forward and count |
@@ -1799,16 +1804,15 @@ still answers 503 with that target's token.
 
 ## Retry and fallback defaults
 
-The default `[retry]` block falls back on every 4xx/5xx upstream
-response: fallback is decided per failure CLASS, and the baked class
-matrix (see below) marks every class fallbackable except `unknown`.
-This is the safest default for Cloudflare-fronted upstreams
-(opencode.ai, openrouter.ai, etc.), which surface upstream-origin
-failures through extended 5xx codes (520-527, 530). Operators with
-bespoke upstream behavior narrow or widen a specific class through
-`[retry.classes.<class>]` (a global per-class overlay) -- the
-raw-status `retry_allowlist` / `retry_denylist` escape hatch was
-retired in config schema v3.
+Every failure class but an unknown one falls back to the next chain
+entry or pool seat: chains and pools exist to fall back, so there is no
+setting that turns it off. This is the safest default for
+Cloudflare-fronted upstreams (opencode.ai, openrouter.ai, etc.), which
+surface upstream-origin failures through extended 5xx codes (520-527,
+530). A failure routectl cannot classify (an upstream status outside
+every class below) stays terminal, and availability probes fail fast by
+a built-in rule (`probe_max_tokens`, below). The one per-class setting
+is how many times to retry the same target, `[retry.classes]`.
 
 ```toml
 [retry]
@@ -1819,12 +1823,11 @@ jitter_ms                     = 50
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 probe_max_tokens              = 1             # keep availability probes in their pool
-# Per-class retry caps (a class leaf replaces max_attempts for its class):
-# [retry.classes.rate-limited]
-# retry = 2                                   # one same-target retry per request
-# To pin a class terminal (never fall back), set a per-class overlay:
-# [retry.classes.bad-request]
-# fallback = false
+
+# Same-target retry count per failure kind; a class named here takes
+# this count in place of max_attempts.
+# [retry.classes]
+# server-error = 2                            # one same-target retry per request
 ```
 
 `probe_max_tokens` (default `1`) marks availability probes. A request
@@ -1845,19 +1848,18 @@ any request's, so a broken seat is not hidden behind quota checks. Set
 `probe_max_tokens = 0` to disable (no request is ever treated as a
 probe).
 
-### Per-class retry and fallback policy (`[retry.classes]`)
+### Same-target retry counts (`[retry.classes]`)
 
-Most deployments need nothing here: the baked class matrix below IS
+Most deployments need nothing here: the built-in class table below IS
 the policy, and `max_attempts` (default 3) is the one knob it reads.
 `max_attempts = N` allows at most N - 1 same-target retries per client
-request, unless a `[retry.classes]` retry leaf or a deprecated
-`retry_on_*` cap sets another cap for that class, counted across the
-whole fallback walk: a retry spent on the first chain entry is not
-available to a later one, so a single-entry
-chain retries N - 1 times and a longer chain never more. A repair
-resend (the router undoing or rewriting a field the upstream refused)
-and the one 401 refresh-and-retry per target have their own allowances
-and do not spend this count.
+request, unless `[retry.classes]` sets another count for that class,
+counted across the whole fallback walk: a retry spent on the first
+chain entry is not available to a later one, so a single-entry chain
+retries N - 1 times and a longer chain never more. A repair resend (the
+router undoing or rewriting a field the upstream refused) and the one
+401 refresh-and-retry per target have their own allowances and do not
+spend this count.
 
 Which failures may be retried at all, and how far one reaches, is the
 failure's scope, decided before any class leaf is read. A failure the
@@ -1893,109 +1895,68 @@ native 400 or 422 never debits the breaker. A
 request whose targets were all excluded returns the last upstream
 error it received.
 
-To tune one class, set its `retry` (or `fallback`) leaf under
-`[retry.classes.<class>]`; this is the retry surface. A status always
-keeps its built-in class.
-
 Every upstream failure classifies into one of ten config-facing
-classes (`crates/routectl-router/src/class_policy.rs`). Each class
-resolves to a `(retry_cap, falls_back)` pair via
-`RetryPolicy::resolved_class`, and separately either debits the
-per-seat circuit breaker's health accounting or does not -- a fixed
+classes (`crates/routectl-router/src/class_policy.rs`), or into no class
+at all (unknown). Each class resolves to a `(retry_cap, falls_back)`
+pair via `RetryPolicy::resolved_class`, and separately either debits
+the per-seat circuit breaker's health accounting or does not -- a fixed
 set, independent of the retry/fallback decision:
 
-| Class (kebab key) | Retry-same cap source | Falls back? | Debits breaker? |
+| Class (key) | Retry-same cap | Falls back? | Debits breaker? |
 |--------------------|------------------------|--------------|-------------------|
 | `rate-limited` | `max_attempts` | yes | yes |
 | `server-error` | `max_attempts` | yes | yes |
 | `overloaded` | `max_attempts` | yes | yes |
 | `timeout` | `max_attempts` | yes | yes |
 | `network-error` | `max_attempts` | yes | yes |
-| `auth` | 0 (fixed) | yes | no |
-| `bad-request` | 0 (fixed) | yes | no |
-| `content-policy` | 0 (fixed) | yes | no |
-| `context-window` | 0 (fixed) | yes | no |
-| `feature-unsupported` | 0 (fixed, reserved -- see below) | yes | no |
+| `auth` | 0 | yes | no |
+| `bad-request` | 0 | yes | no |
+| `content-policy` | 0 | yes | no |
+| `context-window` | 0 | yes | no |
+| `feature-unsupported` | 0 (reserved -- see below) | yes | no |
+| unknown (not nameable) | 0 | no | no |
+
+To change one class's same-target retry count, name it under
+`[retry.classes]`:
+
+```toml
+[retry.classes]
+server-error = 3    # a cap of 3 allows 2 same-target retries per request
+overloaded = 0      # never retry the same target; walk on immediately
+```
+
+A class not named keeps its cap from the table. A count only narrows
+what the scope rule allows: it is compared with the request-wide retry
+count, it never re-enables a same-target retry the scope rule forbids,
+and it never admits a target a failure excluded, so a raised
+`bad-request` count resends nothing. No count changes whether a class
+falls back.
 
 **Breaker debit is not configurable per class.** The "debits breaker?"
 column is a fixed set (`RateLimited`, `ServerError`, `Timeout`,
 `NetworkError`, `Overloaded`) baked into the router's `class_debits`
 predicate (`crates/routectl-router/src/router/outcome_rule.rs`); no
-`[retry.classes]` leaf changes whether a class counts against a seat's
-health. Routing (retry cap, fallback) and health accounting are
-deliberately separate concerns.
+`[retry.classes]` count changes whether a class counts against a seat's
+health.
 
-Every class above defaults to `fallback = true`.
-`[retry.classes.<class>]` overrides one or both leaves, sparsely. The
-leaves only narrow what the scope rule allows: a `retry` cap is compared
-with the request-wide retry count, and `fallback = false` ends the
-request at that class's failure. Neither re-enables a same-target retry
-the scope rule forbids, nor admits a target a failure excluded, so a
-raised `retry` on `bad-request` resends nothing.
+`feature-unsupported` is RESERVED: `[retry.classes] feature-unsupported`
+is rejected at config load (`validate_class_policy`,
+`crates/routectl-router/src/factory/validate.rs`). The built-in row
+above already governs it.
 
-```toml
-[retry.classes.server-error]
-retry = 3    # a class cap of 3 allows 2 same-target retries per request
-
-[retry.classes.overloaded]
-retry = 0    # stop retrying same-target; fall over to the next chain entry immediately
-```
-
-The two leaves resolve independently; `ClassPolicy`'s leaves are
-separately optional, so setting one never forces an implicit value for
-the other:
-
-- **Retry cap:** the class's `[retry.classes.<class>] retry` leaf if
-  set; otherwise the deprecated `retry_on_*` key covering that class
-  (see below) if set; otherwise the baked cap from the table above.
-- **Fallback:** the class's `[retry.classes.<class>] fallback` leaf if
-  set; otherwise the baked fallback. No `retry_on_*` key affects it.
-
-So a missing block, or a missing `retry` leaf in a present block, does
-not by itself restore the baked cap: with `retry_on_5xx = 4` and a
-`[retry.classes.server-error]` block setting only `fallback = false`,
-`server-error` resolves to a cap of 4 with fallback off.
-
-#### Deprecated: `retry_on_429`, `retry_on_5xx`, `retry_on_network`
-
-The three `[retry]` keys below predate the class table. They still
-parse and are still honored, but each one that is set logs one advisory
-config warning (`class_policy_warnings`, never fails the load) naming
-its replacement. Move each to the class blocks it covers:
-
-| Deprecated key     | Replacement |
-|--------------------|-------------|
-| `retry_on_429 = n` | `[retry.classes.rate-limited] retry = n` |
-| `retry_on_5xx = n` | `[retry.classes.server-error] retry = n` and `[retry.classes.overloaded] retry = n` |
-| `retry_on_network = n` | `[retry.classes.timeout] retry = n` and `[retry.classes.network-error] retry = n` |
-
-While set, a key replaces `max_attempts` as the retry cap of its
-classes, and a `[retry.classes.<class>] retry` leaf on one of those
-classes wins over it. It never changes a class's fallback.
-
-Setting `[retry.classes.bad-request] fallback = false` is valid but
-flagged by an advisory warning (`class_policy_warnings`, never fails
-the load): the baked `bad-request` fallback is what walks a
-capability-filter rejection to a capable target, so turning it off also
-disables structured-output rescue -- a request needing a capability the
-target lacks then hard-fails instead of falling over.
-
-`feature-unsupported` is RESERVED: `[retry.classes.feature-unsupported]`,
-even empty, is rejected at config load (`validate_class_policy`,
-`crates/routectl-router/src/factory/validate.rs`). The baked row above already
-governs it; there is no override path for this class yet.
+The earlier forms (the three per-status `[retry]` caps, and the
+`retry` and `fallback` leaves of a per-class sub-table) are refused at
+load by name, each line naming what to write instead: see the `retry.*`
+rows of [Retired config keys](#retired-config-keys).
 
 #### Precedence
 
 One failure decision governs retry and fallback for every status, in
 this order: the failure's scope (above) and the probe rule set what the
-request may still do; class policy (`resolved_class`, including any
-`[retry.classes]` overlay) then only narrows it. A chain entry with no provider at all is walked past before
-any attempt, independent of class. (The
-raw-status `retry_allowlist` / `retry_denylist` escape hatch that
-formerly took precedence per code was retired in config schema v3 --
-pin a class terminal with `[retry.classes.<class>].fallback = false`
-instead.)
+request may still do; the class's retry cap (`resolved_class`,
+including any `[retry.classes]` count) then only narrows it. A chain
+entry with no provider at all is walked past before any attempt,
+independent of class.
 
 ### Honoring upstream resets (`max_honored_retry_after_ms`)
 
@@ -3291,9 +3252,10 @@ Five sections are printed:
     no provider id or host from a downloaded table is printed.
 - **retry class policy** -- one row per failure class, showing the
   resolved `retry`/`fallback` pair and a `source=` tag:
-  - `config` -- a `[retry.classes.<class>]` leaf set this class;
-  - `baked-default` -- no operator leaf, so the baked class default
-    applies (see "Per-class retry and fallback policy").
+  - `config` -- a `[retry.classes]` count set this class's retry cap;
+  - `baked-default` -- no count, so the baked class default applies
+    (see "Same-target retry counts"). Fallback is always the built-in
+    value.
 - **resolved tuning** -- one row per `[providers.X]` entry (pool members
   included), then the rows of each `[models.X]` entry that sets its own
   `stream_first_byte_timeout_ms`: one row under the nickname for a model
@@ -3326,7 +3288,7 @@ routectl config show --effective
 
 ```sh
 routectl config set server.port 8788
-routectl config set retry.classes.server-error.retry 4
+routectl config set retry.classes.server-error 4
 routectl config set usage.retention_days 30
 ```
 
@@ -3381,8 +3343,8 @@ back to whatever it inherits -- a shared knob, or the built-in default
 -- rather than assigning a new one:
 
 ```sh
-routectl config unset retry.classes.server-error.retry
 routectl config unset retry.classes.server-error
+routectl config unset retry.classes
 ```
 
 It runs the identical pipeline as `config set` (version preflight, path
@@ -3392,12 +3354,11 @@ differing only in the mutation and in two path rules:
 
 - **Recursive empty-parent prune.** Removing a key that leaves its
   parent table empty removes that table too, and so on up the chain --
-  an empty override table is treated as absent (a leftover `[retry.classes.server-error]`
+  an empty override table is treated as absent (a leftover `[retry.classes]`
   with nothing under it would be ambiguous). A parent that keeps any
   sibling key or sub-table is left in place. In the first example above,
-  removing the last leaf under `[retry.classes.server-error]` drops that
-  table; if it was the only class override, `[retry.classes]` and an
-  otherwise-empty `[retry]` go with it.
+  removing the last count under `[retry.classes]` drops that table, and
+  an otherwise-empty `[retry]` goes with it.
 - **A whole table may be the target.** Unlike `set`, `unset` accepts a
   path that names a table node (the second example), dropping the entire
   override block in one call.
@@ -4856,8 +4817,8 @@ diagnostics reach every surface that loads config -- `config check`,
 `serve`, and hot reload.
 
 - **Did-you-mean suggestions.** An unknown field, or an unknown enum
-  variant (a mistyped `[providers.X] kind`, a bad `[retry.classes.<class>]`
-  key), is rejected with the offending token AND a `did you mean `Y`?`
+  variant (a mistyped `[providers.X] kind`, a bad class name under
+  `[retry.classes]`), is rejected with the offending token AND a `did you mean `Y`?`
   hint naming the closest real name -- when one is close enough. A token
   far from every known name gets no guess rather than a misleading one.
   The candidate list is exactly the one the TOML/serde parser already
@@ -4865,7 +4826,7 @@ diagnostics reach every surface that loads config -- `config check`,
   config is parsed (check / serve / hot reload).
 - **Source lines on `config check`.** Semantic validation errors -- an
   alias chain naming a missing nickname, a model referencing an unknown
-  provider, a reserved `[retry.classes.feature-unsupported]` override --
+  provider, a reserved `[retry.classes] feature-unsupported` count --
   are
   prefixed with `(line N): ` pointing at the line in your `config.toml`
   that produced them. This locating runs on `config check` only; it is a

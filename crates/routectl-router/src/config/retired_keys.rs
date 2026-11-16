@@ -147,8 +147,8 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
     RetiredKey {
         path: &["providers", ANY_ENTRY, "class_overrides"],
         refused_value: None,
-        replacement: "per-class policy lives in `[retry.classes.*]`; a status keeps its \
-                      built-in class",
+        replacement: "per-class retry counts live in `[retry.classes]`; a status keeps \
+                      its built-in class",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "cloak", "sensitive_words"],
@@ -174,6 +174,31 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         path: &["registry"],
         refused_value: None,
         replacement: "set prices under `[models.X.pricing]`",
+    },
+    RetiredKey {
+        path: &["retry", "classes", ANY_ENTRY, "fallback"],
+        refused_value: None,
+        replacement: "chains and pools fall back; an unknown failure stays terminal",
+    },
+    RetiredKey {
+        path: &["retry", "classes", ANY_ENTRY, "retry"],
+        refused_value: None,
+        replacement: "write the count as `[retry.classes] <class> = <n>`",
+    },
+    RetiredKey {
+        path: &["retry", "retry_on_429"],
+        refused_value: None,
+        replacement: "set `[retry.classes] rate-limited = <n>`",
+    },
+    RetiredKey {
+        path: &["retry", "retry_on_5xx"],
+        refused_value: None,
+        replacement: "set `[retry.classes] server-error = <n>` and `overloaded = <n>`",
+    },
+    RetiredKey {
+        path: &["retry", "retry_on_network"],
+        refused_value: None,
+        replacement: "set `[retry.classes] timeout = <n>` and `network-error = <n>`",
     },
     RetiredKey {
         path: &["seat_quota"],

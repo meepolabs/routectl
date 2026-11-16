@@ -21,23 +21,31 @@ use super::super::serve::{DaemonTestSeams, build_usage_writer};
 use super::super::test_support::{drain_usage_writer_strict, isolate_usage_db, never_shutdown};
 use super::build_router_from_config;
 
-const RETRY_DEPRECATION_CATEGORY: &str = "class policy warning";
 const AUTH_RESERVED_CATEGORY: &str = "auth-reserved header warning";
 const OVERLAY_DROP_MESSAGE: &str = "ignoring auth-reserved header from [models.X] header_extras";
 
-fn retry_on_config_text() -> String {
-    format!("version = {CURRENT_CONFIG_VERSION}\n[retry]\nretry_on_429 = 2\n")
+/// A config whose only advisory finding is one auth-reserved header on a
+/// model that no alias routes to, so no request ever dials it.
+fn advisory_config_text() -> String {
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
+         [providers.compat]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
+         api_key_ref = \"{}\"\n\n\
+         [models.idle]\nprovider = \"compat\"\nupstream = \"u\"\n\n\
+         [models.idle.header_extras]\nAuthorization = \"Bearer operator-typed\"\n",
+        crate::test_secret::file_ref("cadence-key")
+    )
 }
 
-/// WARN events for the deprecated `retry_on_429` key.
-fn retry_deprecation_warns(events: &[CapturedEvent]) -> usize {
+/// WARN events for the auth-reserved header on `[models.idle]`.
+fn advisory_warns(events: &[CapturedEvent]) -> usize {
     events
         .iter()
         .filter(|e| {
             e.level == tracing::Level::WARN
-                && e.message == RETRY_DEPRECATION_CATEGORY
+                && e.message == AUTH_RESERVED_CATEGORY
                 && e.field("warning")
-                    .is_some_and(|w| w.contains("retry_on_429"))
+                    .is_some_and(|w| w.contains("[models.idle.header_extras]"))
         })
         .count()
 }
@@ -87,14 +95,14 @@ where
 #[tokio::test]
 async fn serve_startup_logs_an_advisory_warning_once() {
     // Arrange
-    let mut config = parse_config(&retry_on_config_text()).expect("config parses");
+    let mut config = parse_config(&advisory_config_text()).expect("config parses");
     let _usage_dir = isolate_usage_db(&mut config);
 
     // Act
     let events = Box::pin(serve_capturing(config, |_| async {})).await;
 
     // Assert
-    assert_eq!(retry_deprecation_warns(&events), 1, "{events:#?}");
+    assert_eq!(advisory_warns(&events), 1, "{events:#?}");
 }
 
 #[tokio::test]
@@ -105,7 +113,7 @@ async fn an_accepted_config_reload_logs_an_advisory_warning_once() {
     let cfg_path = dir.path().join("config.toml");
     let text = format!(
         "{}[usage]\ndb_path = \"{}\"\n",
-        retry_on_config_text(),
+        advisory_config_text(),
         usage_db.display()
     );
     std::fs::write(&cfg_path, &text).expect("write config");
@@ -132,7 +140,7 @@ async fn an_accepted_config_reload_logs_an_advisory_warning_once() {
     reloaded
         .expect("the reload applies")
         .expect("the reload returns its config");
-    assert_eq!(retry_deprecation_warns(&events), 1, "{events:#?}");
+    assert_eq!(advisory_warns(&events), 1, "{events:#?}");
     drop(usage);
     drain_usage_writer_strict(writer).await;
 }
@@ -178,7 +186,7 @@ async fn a_seat_change_rebuild_logs_no_advisory_warning() {
     let dir = tempfile::tempdir().expect("tempdir");
     let creds = dir.path().join("routectl").join("credentials.json");
     write_credentials(&creds, &["anthropic"]);
-    let mut config = parse_config(&retry_on_config_text()).expect("config parses");
+    let mut config = parse_config(&advisory_config_text()).expect("config parses");
     let _usage_dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let composite = CompositeStore::open_at(&creds)
@@ -209,7 +217,7 @@ async fn a_seat_change_rebuild_logs_no_advisory_warning() {
         !Arc::ptr_eq(&before, &swap.load_full()),
         "a seat-set change must rebuild the router"
     );
-    assert_eq!(retry_deprecation_warns(&events), 0, "{events:#?}");
+    assert_eq!(advisory_warns(&events), 0, "{events:#?}");
 }
 
 fn chat_completion() -> ResponseTemplate {

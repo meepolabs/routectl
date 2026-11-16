@@ -22,7 +22,7 @@ use routectl_core::{
     Provider, Role, SystemContent, TokenCount,
 };
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
-use routectl_router::class_policy::{ClassPolicy, ConfigFailureClass};
+use routectl_router::class_policy::ConfigFailureClass;
 use routectl_router::runtime_state::CircuitPhase;
 use routectl_router::{
     AliasValue, Config, Dispatched, ProviderEntry, ResolvedModel, RetryPolicy, Router,
@@ -253,14 +253,8 @@ async fn a_raised_bad_request_retry_cap_cannot_reach_the_refusal() {
     // capability registry nothing.
     let fallback = fresh_fallback();
     let mut retry = RetryPolicy::default();
-    retry.retry_on_5xx = Some(3);
-    retry.classes.insert(
-        ConfigFailureClass::BadRequest,
-        ClassPolicy {
-            retry: Some(3),
-            fallback: None,
-        },
-    );
+    retry.classes.insert(ConfigFailureClass::ServerError, 3);
+    retry.classes.insert(ConfigFailureClass::BadRequest, 3);
     let router = router_with_policy(Arc::clone(&fallback), retry);
     let caller = request(vec![message(Role::System, "turn rules")]);
 
