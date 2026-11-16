@@ -328,7 +328,7 @@ pub fn vendor_containment(
     name: &str,
     entry: &ProviderEntry,
 ) -> routectl_core::Result<()> {
-    if !carries_vendor_ref(entry, row.vendor) || is_on_vendor_lane(row, entry) {
+    if is_contained_by(row, entry) {
         return Ok(());
     }
     Err(routectl_core::Error::Config(format!(
@@ -337,17 +337,27 @@ pub fn vendor_containment(
     )))
 }
 
+/// True when `row`'s token is absent from every reference slot of the
+/// entry, or the entry is that vendor's own lane.
+fn is_contained_by(row: &VendorRow, entry: &ProviderEntry) -> bool {
+    !carries_vendor_ref(entry, row.vendor) || is_on_vendor_lane(row, entry)
+}
+
 /// True when the entry presents a managed vendor's generated client
 /// identity: its credential is `oauth://<vendor>[#label]`, the vendor row
 /// has [`identity`](VendorRow::identity), and the entry is that vendor's own
 /// lane (format, base URL carrier, first-party host, routectl's own
 /// credential rather than a forwarded one). Any other credential on the same
-/// host, and any other host for the same credential, answers `false`.
+/// host, any other host for the same credential, and any entry
+/// [`containment`] refuses (another slot carrying a second vendor's token)
+/// answers `false`.
 #[must_use]
 pub fn client_identity(entry: &ProviderEntry) -> bool {
-    VENDOR_ROWS.iter().any(|row| {
-        row.identity && is_on_vendor_lane(row, entry) && is_vendor_login(entry, row.vendor)
-    })
+    let is_contained = VENDOR_ROWS.iter().all(|row| is_contained_by(row, entry));
+    is_contained
+        && VENDOR_ROWS.iter().any(|row| {
+            row.identity && is_on_vendor_lane(row, entry) && is_vendor_login(entry, row.vendor)
+        })
 }
 
 /// True when the entry's credential is routectl's stored login for `vendor`

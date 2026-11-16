@@ -607,7 +607,9 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
 /// `base_url`, the reference, and the seat label are withheld because each
 /// can carry credentials or identify a seat.
 pub fn validate_managed_anthropic_credential(name: &str, entry: &ProviderEntry) -> Result<()> {
-    let row = vendor_row("anthropic").expect("the descriptor has an anthropic vendor row");
+    let row = vendor_row("anthropic").ok_or_else(|| {
+        routectl_core::Error::Internal("the descriptor has no anthropic vendor row".to_string())
+    })?;
     vendor_containment(row, name, entry)
 }
 

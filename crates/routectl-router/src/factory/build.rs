@@ -95,6 +95,10 @@ pub async fn build_provider_with_options(
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
 ) -> Result<Arc<dyn Provider>> {
+    // The codex identity below is process-global and set-once, so a refused
+    // entry must be refused before it can seed it.
+    plan_provider(name, entry)?;
+
     // Defensive: a caller building a single provider directly (e.g.
     // `provider probe`) bypasses `build_resolved_models`, which is where the
     // codex identity is normally installed. Resolve it from THIS entry's

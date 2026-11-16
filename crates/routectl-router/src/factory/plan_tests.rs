@@ -169,6 +169,11 @@ struct VendorLane {
     entry: fn(&str, &str) -> ProviderEntry,
     /// The same reference on another format, at the vendor's own host.
     wrong_kind: fn(&str) -> ProviderEntry,
+    /// Whether a direct build of the own lane reads the store (a session or
+    /// account id). The other arms build a lazy token and read nothing until
+    /// the first request, so a zero count on their refused rows is not
+    /// evidence of the plan; those rows are pinned by the refusal text.
+    reads_at_build: bool,
 }
 
 fn vendor_lanes() -> Vec<VendorLane> {
@@ -184,6 +189,7 @@ fn vendor_lanes() -> Vec<VendorLane> {
             upstream: "claude-opus-4-7",
             entry: anthropic,
             wrong_kind: |r| openai_chat(r, "https://api.anthropic.com"),
+            reads_at_build: true,
         },
         VendorLane {
             vendor: "xai",
@@ -192,6 +198,7 @@ fn vendor_lanes() -> Vec<VendorLane> {
             upstream: "grok-4",
             entry: openai_chat,
             wrong_kind: |r| anthropic(r, "https://api.x.ai"),
+            reads_at_build: false,
         },
     ];
     #[cfg(feature = "openai-responses")]
@@ -202,6 +209,7 @@ fn vendor_lanes() -> Vec<VendorLane> {
         upstream: "gpt-5-codex",
         entry: codex,
         wrong_kind: |r| openai_chat(r, "https://chatgpt.com/backend-api/codex"),
+        reads_at_build: true,
     });
     #[cfg(feature = "gemini")]
     lanes.push(VendorLane {
@@ -211,6 +219,7 @@ fn vendor_lanes() -> Vec<VendorLane> {
         upstream: "gemini-3.1-flash-lite",
         entry: cloud_code,
         wrong_kind: |r| openai_chat(r, "https://cloudcode-pa.googleapis.com"),
+        reads_at_build: false,
     });
     lanes
 }
@@ -268,6 +277,48 @@ fn counting() -> (Arc<CountingStore>, Arc<dyn SecretStore>) {
     (store, dyn_store)
 }
 
+/// The text every plan refusal carries; no later build step produces it.
+const PLAN_REFUSAL: &str = "the managed ";
+
+/// The pool rule a plan refusal maps to. A member with no primary
+/// `api_key_ref` (the Bedrock mantle and native Bedrock rows) would
+/// otherwise be refused as having no credential reference before any probe,
+/// so on those rows this text, not the zero count, is what pins the plan.
+const POOL_PLAN_REFUSAL: &str = "carries a managed credential outside the lane";
+
+/// Build `entry` on all three paths over counting stores; every path must
+/// refuse it with the plan's own reason and reach no store method.
+async fn assert_refused_before_any_store_call(case: &str, entry: &ProviderEntry, upstream: &str) {
+    let (direct, store) = counting();
+    let built = build_provider("p", entry, store).await;
+    let err = built.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(err.contains(PLAN_REFUSAL), "{case}: build_provider: {err}");
+    assert_eq!(direct.calls(), 0, "{case}: build_provider");
+
+    let (pooled, store) = counting();
+    let refusals =
+        pool_member_refusals(&one_member_pool(entry.clone(), upstream), store, quiet()).await;
+    assert_eq!(refusals.len(), 1, "{case}: pool refuses");
+    assert!(
+        refusals[0].contains(POOL_PLAN_REFUSAL),
+        "{case}: pool: {refusals:?}"
+    );
+    assert_eq!(pooled.calls(), 0, "{case}: pool_member_refusals");
+
+    let (resolved, store) = counting();
+    let (models, failed) =
+        build_resolved_models(&direct_model(entry.clone(), upstream), store, quiet())
+            .await
+            .expect("a refused provider is skipped, not fatal");
+    assert!(models.is_empty(), "{case}: no model built");
+    assert_eq!(failed.len(), 1, "{case}: one failure");
+    assert!(
+        failed[0].1.contains(PLAN_REFUSAL),
+        "{case}: build_resolved_models: {failed:?}"
+    );
+    assert_eq!(resolved.calls(), 0, "{case}: build_resolved_models");
+}
+
 #[tokio::test]
 async fn containment_refuses_before_any_store_call() {
     for lane in vendor_lanes() {
@@ -276,45 +327,35 @@ async fn containment_refuses_before_any_store_call() {
             format!("oauth://{}#seat-secret-label", lane.vendor),
         ] {
             for (label, entry) in refused_entries(&lane, &r) {
-                let case = format!("{r} {label}");
-
-                let (direct, store) = counting();
-                let built = build_provider("p", &entry, store).await;
-                assert!(built.is_err(), "{case}: build_provider must refuse");
-                assert_eq!(direct.calls(), 0, "{case}: build_provider");
-
-                let (pooled, store) = counting();
-                let refusals = pool_member_refusals(
-                    &one_member_pool(entry.clone(), lane.upstream),
-                    store,
-                    quiet(),
+                assert_refused_before_any_store_call(
+                    &format!("{r} {label}"),
+                    &entry,
+                    lane.upstream,
                 )
                 .await;
-                assert_eq!(refusals.len(), 1, "{case}: pool refuses");
-                assert_eq!(pooled.calls(), 0, "{case}: pool_member_refusals");
-
-                let (resolved, store) = counting();
-                let (models, failed) =
-                    build_resolved_models(&direct_model(entry, lane.upstream), store, quiet())
-                        .await
-                        .expect("a refused provider is skipped, not fatal");
-                assert!(models.is_empty(), "{case}: no model built");
-                assert_eq!(failed.len(), 1, "{case}: one failure");
-                assert_eq!(resolved.calls(), 0, "{case}: build_resolved_models");
             }
         }
     }
 }
 
+/// The own lane of every vendor builds on all three paths. The pool always
+/// probes the credential; the direct and resolved-model paths read the store
+/// at build exactly on the lanes marked `reads_at_build`, which is what makes
+/// the zero count on those lanes' refused rows a pin for the plan.
 #[tokio::test]
 async fn the_own_lane_reaches_the_store_on_every_build_path() {
     for lane in vendor_lanes() {
         let r = format!("oauth://{}", lane.vendor);
         let entry = (lane.entry)(&r, lane.own_base);
 
-        let (_, store) = counting();
+        let (direct, store) = counting();
         let built = build_provider("p", &entry, store).await;
         assert!(built.is_ok(), "{r}: {:?}", built.err());
+        assert_eq!(
+            direct.calls() > 0,
+            lane.reads_at_build,
+            "{r}: build_provider"
+        );
 
         let (pooled, store) = counting();
         let refusals = pool_member_refusals(
@@ -326,34 +367,51 @@ async fn the_own_lane_reaches_the_store_on_every_build_path() {
         assert!(refusals.is_empty(), "{r}: {refusals:?}");
         assert!(pooled.calls() > 0, "{r}: the pool probes the credential");
 
-        let (resolved, store) = counting();
-        let (models, failed) =
-            build_resolved_models(&one_member_pool(entry, lane.upstream), store, quiet())
+        for (path, cfg) in [
+            ("pool", one_member_pool(entry.clone(), lane.upstream)),
+            ("direct", direct_model(entry.clone(), lane.upstream)),
+        ] {
+            let (resolved, store) = counting();
+            let (models, failed) = build_resolved_models(&cfg, store, quiet())
                 .await
                 .expect("the own lane builds");
-        assert!(failed.is_empty(), "{r}: {failed:?}");
-        assert!(models.contains_key("m"), "{r}: model built");
-        assert!(resolved.calls() > 0, "{r}: build_resolved_models");
+            assert!(failed.is_empty(), "{r} {path}: {failed:?}");
+            assert!(models.contains_key("m"), "{r} {path}: model built");
+            let expect_reads = path == "pool" || lane.reads_at_build;
+            assert_eq!(
+                resolved.calls() > 0,
+                expect_reads,
+                "{r} {path}: build_resolved_models"
+            );
+        }
     }
 }
 
-/// The direct build reads the store at construction on the lanes that resolve
-/// a session or account id there; the refused rows above are zero for them
-/// because the plan runs first, not because the arm reads nothing.
+/// A second reference slot naming another vendor refuses the entry even on
+/// the primary credential's own lane, before the account id is read.
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
-async fn the_direct_build_reads_the_store_on_its_session_and_account_lanes() {
-    #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
-    let mut own = vec![anthropic("oauth://anthropic", VENDOR_BASES[0])];
-    #[cfg(feature = "openai-responses")]
-    own.push(codex("oauth://codex", VENDOR_BASES[1]));
-    for entry in own {
-        let (direct, store) = counting();
-
-        let built = build_provider("p", &entry, store).await;
-
-        assert!(built.is_ok(), "{entry:?}: {:?}", built.err());
-        assert!(direct.calls() > 0, "{entry:?}");
+async fn a_second_slot_naming_another_vendor_refuses_before_any_store_call() {
+    let own = || codex("oauth://codex#seat-b", VENDOR_BASES[1]);
+    for foreign in ["oauth://xai", "oauth://anthropic#seat-secret-label"] {
+        let entry = own().with_account_id_ref(foreign);
+        assert_refused_before_any_store_call(
+            &format!("account_id_ref {foreign}"),
+            &entry,
+            "gpt-5-codex",
+        )
+        .await;
     }
+
+    let (direct, store) = counting();
+    let built = build_provider(
+        "p",
+        &own().with_account_id_ref("oauth://codex#seat-b"),
+        store,
+    )
+    .await;
+    assert!(built.is_ok(), "{:?}", built.err());
+    assert!(direct.calls() > 0, "its own account id slot is read");
 }
 
 /// Positive control for the Bedrock credential path of
@@ -473,6 +531,24 @@ fn client_identity_per_lane() {
                 "oauth://codex#seat-b",
                 "https://chatgpt.com/backend-api/codex",
             ),
+            true,
+        ));
+        rows.push((
+            "codex chatgpt lane on chatgpt.com with account_id_ref = oauth://xai",
+            codex("oauth://codex", "https://chatgpt.com/backend-api/codex")
+                .with_account_id_ref("oauth://xai"),
+            false,
+        ));
+        rows.push((
+            "codex default base with a labeled anthropic account_id_ref",
+            ProviderEntry::openai_responses("oauth://codex")
+                .with_account_id_ref("oauth://anthropic#seat-b"),
+            false,
+        ));
+        rows.push((
+            "codex chatgpt lane with its own account_id_ref",
+            codex("oauth://codex", "https://chatgpt.com/backend-api/codex")
+                .with_account_id_ref("oauth://codex#seat-b"),
             true,
         ));
         rows.push((

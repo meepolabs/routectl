@@ -434,6 +434,8 @@ list with more narrative.
 
 ### Changed
 
+- **`routectl config check` resolves `env://` and `file://` credential references only after the config passes validation.** When the check reports errors, the warnings no longer include unresolved-reference lines; fix the errors and re-run to see them. Output for a valid config is unchanged.
+
 - **`[providers.X.class_overrides]` no longer affects routing.** A status now keeps its built-in failure class on every provider: same-provider retry, fallback and circuit-breaker accounting (before and after a stream's first content) read only the built-in class and any `[retry.classes.<class>]` leaf. The key itself is now refused (see Removed). The `remapped` and `remap_status` fields leave the router's class-decision event, and `remapped` leaves the `feature_unsupported` and `count_tokens` events; learned-capability ledger rows keep their `remapped` column, always written 0. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) and [docs/LOGGING.md](docs/LOGGING.md).
 
 - **Retired config keys are reported all at once, each naming its replacement.** A config carrying retired keys is refused with one message listing every one of them, sorted by key path, one line each: `` `<key path>` is retired: <what replaces it>; delete it ``. Previously the first kind of retired key found was the only one reported, and the keys retired in config version 5 said only to remove them by hand. The `[mitm] credential_source` refusal is now one line naming the same provider-block replacement. `config set` on any retired key, or on a path under a retired table such as `bedrock.allowed_betas`, prints the same line. docs/CONFIGURATION.md gains a "Retired config keys" table. Values are still never shown.

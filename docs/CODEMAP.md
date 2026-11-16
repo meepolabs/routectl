@@ -5449,6 +5449,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   -> changed-reload -> same-value re-install: boot INFO fires once, a refused
   re-install with a different value WARNs pending-restart (no false INFO), and
   a same-value no-op stays silent
+- `tests/codex_identity_refused_entry.rs` -- single-test binary pinning that a
+  direct build the provider plan refuses leaves the process-global codex
+  identity unset, so the next accepted entry installs its own version
 - `tests/forwarded_auth_terminal_log.rs` -- structured-log safety for the
   forwarded-credential terminal path: an upstream 401/403/429 on a forwarded
   target surfaces verbatim (no refresh, no fallback) with a bounded,

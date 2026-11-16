@@ -13,10 +13,11 @@ use crate::commands::seat_report::{
 };
 use crate::server::CompositeStore;
 
-/// Validate the loaded config: parse syntax (already done by main.rs), resolve
-/// every secret reference (env / file; `oauth://` refs are checked for
-/// PRESENCE only, and `literal:` refs are rejected), and report any aliases
-/// that reference unknown providers.
+/// Validate the loaded config: parse syntax (already done by main.rs), run
+/// the shared validator suite and report any aliases that reference unknown
+/// providers, then, only when that finds no error, resolve every secret
+/// reference (env / file; `oauth://` refs are checked for PRESENCE only, and
+/// `literal:` refs are rejected).
 ///
 /// `raw_text` is the config file's original TOML, threaded through so a
 /// semantic error whose message names a config key/path can be rendered with
@@ -29,22 +30,11 @@ use crate::server::CompositeStore;
 /// store still reports `ok` (with the pool counts rendered as unknown).
 pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     let secrets = CompositeStore::open_default().await?;
-    let mut errors: Vec<String> = secret_ref_parse_errors(config, raw_text);
     let stored = stored_seat_keys().await;
-    let mut warnings: Vec<String> = secret_ref_resolution_warnings(config, &secrets, &stored).await;
-
-    // v0.6.0: every [models.X].provider must reference a known
-    // [providers] entry, plus the shared startup validator suite that
-    // `serve` and `test` also run -- both rendered with source lines.
-    // Without the suite here, an operator running `routectl config check`
-    // against a TOML carrying `thinking = ""`, a chain of unknown
-    // nicknames, or a non-Anthropic model on the Bedrock Invoke lane would
-    // see "ok" and only discover the failure when starting the server.
-    // The bespoke secret-ref resolution above is check-specific and stays
-    // here.
-    let report = validation_report(config, raw_text);
-    errors.extend(report.errors);
-    warnings.extend(report.warnings);
+    let CheckFindings {
+        mut errors,
+        warnings,
+    } = check_findings(config, raw_text, &secrets, &stored).await;
 
     // Serve and reload build each pool member once validation passes and
     // refuse the config when one cannot be built; check runs the same build,
@@ -98,6 +88,36 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// The error and warning lines of `config check` before member construction.
+struct CheckFindings {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+/// Collect the ref-parse errors and the shared validator suite (model
+/// references, every startup validator, managed-credential containment)
+/// first, and resolve secret refs only when both are clean: an entry the
+/// suite refuses never has any of its credentials read, the same gate that
+/// precedes member construction. Resolution warnings lead the warning list.
+async fn check_findings(
+    config: &Config,
+    raw_text: Option<&str>,
+    secrets: &dyn SecretStore,
+    stored: &Option<Vec<String>>,
+) -> CheckFindings {
+    let mut errors = secret_ref_parse_errors(config, raw_text);
+    let report = validation_report(config, raw_text);
+    errors.extend(report.errors);
+
+    let mut warnings = if errors.is_empty() {
+        secret_ref_resolution_warnings(config, secrets, stored).await
+    } else {
+        Vec::new()
+    };
+    warnings.extend(report.warnings);
+    CheckFindings { errors, warnings }
+}
+
 /// Longest reported error/warning line, in characters. Every validator
 /// formats operator-written TOML keys into its message, and the longest
 /// legitimate one (the managed-Anthropic containment error) runs past the
@@ -141,7 +161,7 @@ fn safe_line(message: &str) -> String {
 /// store path.
 async fn secret_ref_resolution_warnings(
     config: &Config,
-    secrets: &CompositeStore,
+    secrets: &dyn SecretStore,
     stored_seat_keys: &Option<Vec<String>>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -1064,5 +1084,101 @@ mod containment_line_tests {
             assert!(line.contains(part), "missing `{part}`: {line}");
         }
         assert!(line.ends_with("are withheld"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod check_resolution_order_tests {
+    use super::{CheckFindings, check_findings};
+    use async_trait::async_trait;
+    use routectl_auth::{SecretRef, SecretStore};
+    use routectl_core::Result;
+    use routectl_router::Config;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts every resolution; refuses writes.
+    #[derive(Default)]
+    struct CountingStore {
+        gets: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SecretStore for CountingStore {
+        async fn get(&self, _: &SecretRef) -> Result<String> {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            Ok("counted".to_string())
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> Result<()> {
+            unreachable!("config check never writes")
+        }
+        async fn delete(&self, _: &SecretRef) -> Result<()> {
+            unreachable!("config check never writes")
+        }
+    }
+
+    /// A Codex login entry whose second slot is a static `env://` ref, so a
+    /// resolution attempt on the entry is visible to the store.
+    fn codex_entry(base_url: Option<&str>) -> String {
+        let base = base_url.map_or(String::new(), |b| format!("base_url = \"{b}\"\n"));
+        format!(
+            "[providers.seat]\n\
+             kind = \"openai-responses\"\n\
+             api_key_ref = \"oauth://codex#seat-b\"\n\
+             account_id_ref = \"env://ROUTECTL_CHECK_ACCOUNT_ID\"\n\
+             {base}"
+        )
+    }
+
+    async fn findings(text: &str) -> (CheckFindings, usize) {
+        let config: Config = toml::from_str(text).expect("fixture parses");
+        let store = CountingStore::default();
+        let found = check_findings(&config, Some(text), &store, &None).await;
+        (found, store.gets.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_contained_entry_has_its_static_refs_resolved() {
+        let (found, gets) = findings(&codex_entry(None)).await;
+
+        assert!(found.errors.is_empty(), "{:?}", found.errors);
+        assert_eq!(gets, 1, "the env:// account id ref is resolved");
+    }
+
+    #[tokio::test]
+    async fn an_entry_containment_refuses_has_no_ref_resolved() {
+        for base in [
+            "https://gateway.example/backend-api/codex",
+            "https://chatgpt.com.gateway.example",
+            "http://127.0.0.1:18080",
+        ] {
+            let (found, gets) = findings(&codex_entry(Some(base))).await;
+
+            assert!(
+                found
+                    .errors
+                    .iter()
+                    .any(|e| e.contains("provider `seat`") && e.contains("managed Codex")),
+                "{base}: containment refuses: {:?}",
+                found.errors
+            );
+            assert_eq!(gets, 0, "{base}: no resolution before containment");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_slot_naming_another_vendor_blocks_resolution() {
+        let text = "[providers.seat]\n\
+                    kind = \"openai-responses\"\n\
+                    api_key_ref = \"env://ROUTECTL_CHECK_JWT\"\n\
+                    account_id_ref = \"oauth://anthropic#seat-b\"\n";
+
+        let (found, gets) = findings(text).await;
+
+        assert!(
+            found.errors.iter().any(|e| e.contains("managed Anthropic")),
+            "{:?}",
+            found.errors
+        );
+        assert_eq!(gets, 0);
     }
 }
