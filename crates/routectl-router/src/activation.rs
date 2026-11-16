@@ -15,6 +15,7 @@ use std::fmt;
 
 use routectl_auth::LocalProbe;
 
+use crate::config::provider_descriptor::{format_row, vendor_row};
 use crate::config::{AliasValue, Config, is_config_provider_kind};
 
 /// Local depth cap for the alias-reachability walk. Kept independent of
@@ -198,8 +199,9 @@ impl ActivationDelta {
 }
 
 /// The own-credential config kind for each routectl-owned OAuth provider
-/// id. Every id in `routectl_auth::oauth::known_provider_ids()` must have
-/// an entry here (pinned by the drift-guard test). Each kind is the
+/// id: the family token of the format the provider descriptor's vendor row
+/// names. Every id in `routectl_auth::oauth::known_provider_ids()` must
+/// have a vendor row (pinned by the drift-guard test). Each kind is the
 /// stable `kind_str()` token an operator would configure to consume the
 /// matching `oauth://<id>` credential:
 ///   - `anthropic`    -> `anthropic-api`   (claude.ai subscription)
@@ -215,17 +217,11 @@ impl ActivationDelta {
 /// to `Activated` on a present token.
 ///
 /// Public so surfaces outside the activation path (the CLI's login
-/// success output) read the id->kind mapping from this one table instead
+/// success output) read the id->kind mapping from the descriptor instead
 /// of restating it.
 #[must_use]
 pub fn provider_kind_for_oauth_id(oauth_id: &str) -> Option<&'static str> {
-    match oauth_id {
-        "anthropic" => Some(routectl_core::provider_kind::config::ANTHROPIC_API),
-        "codex" => Some(routectl_core::provider_kind::config::OPENAI_RESPONSES),
-        "xai" => Some(routectl_core::provider_kind::config::OPENAI_COMPAT),
-        "antigravity" => Some(routectl_core::provider_kind::config::GEMINI),
-        _ => None,
-    }
+    vendor_row(oauth_id).map(|vendor| format_row(vendor.format).token)
 }
 
 /// Map a local probe to an activation status. The catch-all arm handles

@@ -14,6 +14,8 @@ use serde_json::Value;
 
 use crate::class_policy::ConfigFailureClass;
 
+use super::provider_descriptor::{Carrier, Format, format_row};
+
 #[cfg(test)]
 use super::Config;
 
@@ -1429,58 +1431,80 @@ pub fn is_config_provider_kind(kind: &str) -> bool {
 }
 
 impl ProviderEntry {
-    /// The egress kind this entry sends with. Bedrock splits by API shape
-    /// and every Mantle sub-lane is its own kind, because each sends a
-    /// different wire body than its standard sibling.
-    pub const fn egress_kind(&self) -> routectl_core::wire_check::EgressKind {
-        use routectl_core::wire_check::EgressKind;
+    /// The wire format this entry speaks: the variant, refined by the
+    /// selector that changes the wire (Bedrock `api_shape`, Gemini
+    /// `auth_mode`). A Mantle sub-lane speaks its standard sibling's format.
+    #[must_use]
+    pub const fn format(&self) -> Format {
         match self {
-            #[cfg(feature = "bedrock")]
-            Self::AnthropicApi {
-                bedrock_mantle: Some(_),
-                ..
-            } => EgressKind::AnthropicApiMantle,
-            Self::AnthropicApi { .. } => EgressKind::AnthropicApi,
-            #[cfg(feature = "bedrock")]
-            Self::OpenaiCompat {
-                bedrock_mantle: Some(_),
-                ..
-            } => EgressKind::OpenaiCompatMantle,
-            Self::OpenaiCompat { .. } => EgressKind::OpenaiCompat,
-            #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-            Self::OpenaiResponses {
-                bedrock_mantle: Some(_),
-                ..
-            } => EgressKind::OpenaiResponsesMantle,
+            Self::OpenaiCompat { .. } => Format::OpenaiChat,
+            Self::AnthropicApi { .. } => Format::AnthropicMessages,
             #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { .. } => EgressKind::OpenaiResponses,
+            Self::OpenaiResponses { .. } => Format::OpenaiResponses,
             #[cfg(feature = "bedrock")]
             Self::Bedrock { api_shape, .. } => match api_shape {
-                BedrockApiShapeConfig::Invoke => EgressKind::BedrockInvoke,
-                BedrockApiShapeConfig::Converse => EgressKind::BedrockConverse,
+                BedrockApiShapeConfig::Invoke => Format::BedrockInvoke,
+                BedrockApiShapeConfig::Converse => Format::BedrockConverse,
             },
             #[cfg(feature = "gemini")]
-            Self::Gemini { .. } => EgressKind::Gemini,
+            Self::Gemini { auth_mode, .. } => match auth_mode {
+                GeminiAuthMode::ApiKey => Format::Gemini,
+                GeminiAuthMode::CloudCode => Format::GeminiCloudCode,
+            },
         }
     }
 
-    /// Stable config-key token naming this entry's provider kind. Matches
-    /// the `kind = "..."` discriminant in the TOML provider table, so the
-    /// returned value round-trips with operator configuration and is safe
-    /// to surface in usage accounting / logs.
+    /// Where this entry's requests are sent: native Bedrock and every Mantle
+    /// sub-lane ride the AWS carrier, everything else its base URL.
+    const fn carrier(&self) -> Carrier {
+        #[cfg(feature = "bedrock")]
+        if matches!(
+            self,
+            Self::Bedrock { .. }
+                | Self::AnthropicApi {
+                    bedrock_mantle: Some(_),
+                    ..
+                }
+                | Self::OpenaiCompat {
+                    bedrock_mantle: Some(_),
+                    ..
+                }
+        ) {
+            return Carrier::CloudAws;
+        }
+        #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+        if matches!(
+            self,
+            Self::OpenaiResponses {
+                bedrock_mantle: Some(_),
+                ..
+            }
+        ) {
+            return Carrier::CloudAws;
+        }
+        Carrier::BaseUrl
+    }
+
+    /// The egress kind this entry sends with, read from the descriptor row
+    /// for its [`format`](Self::format) over its carrier. Bedrock splits by
+    /// API shape and every Mantle sub-lane is its own kind, because each
+    /// sends a different wire body than its standard sibling.
+    pub const fn egress_kind(&self) -> routectl_core::wire_check::EgressKind {
+        match format_row(self.format()).route(self.carrier()) {
+            Some(route) => route.egress,
+            None => panic!("every constructible entry has a descriptor route"),
+        }
+    }
+
+    /// Stable config-key token naming this entry's provider kind: the family
+    /// token of its [`format`](Self::format). Matches the `kind = "..."`
+    /// discriminant in the TOML provider table, so the returned value
+    /// round-trips with operator configuration and is safe to surface in
+    /// usage accounting / logs.
     ///
     /// Every token this can return is in [`CONFIG_PROVIDER_KINDS`].
     pub const fn kind_str(&self) -> &'static str {
-        match self {
-            Self::OpenaiCompat { .. } => kind::OPENAI_COMPAT,
-            Self::AnthropicApi { .. } => kind::ANTHROPIC_API,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { .. } => kind::BEDROCK,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { .. } => kind::OPENAI_RESPONSES,
-            #[cfg(feature = "gemini")]
-            Self::Gemini { .. } => kind::GEMINI,
-        }
+        format_row(self.format()).token
     }
 
     /// The primary `api_key_ref` URI for this entry, or `None` for

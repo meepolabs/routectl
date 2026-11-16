@@ -1806,6 +1806,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   resolution of a `[models.X] provider` value to its `[providers]` entry (or a
   pool's first resolvable member) and its kind, read by the price-table and
   model-facts paths
+- `src/config/provider_descriptor.rs` -- the provider descriptor: the public
+  `Format` enum and two const tables. `FORMAT_ROWS` gives per format the stored
+  family token and, per carrier (base URL or AWS), the `EgressKind` and accepted
+  `Auth` values; `VENDOR_ROWS` gives per managed OAuth vendor its format,
+  writer default base, allowed hosts and client-identity flag. Lookups
+  `format_row` / `vendor_row`; read by `ProviderEntry::kind_str` /
+  `egress_kind` and `provider_kind_for_oauth_id`
 - `src/config/tuning.rs` -- the ONE precedence for the tiered tuning keys
   (`circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`,
   `stream_first_byte_timeout_ms`): `resolve_tuning(config, entry, model_ms)`

@@ -108,7 +108,7 @@ pub use capability_vocab::CURRENT_VOCAB_VERSION;
 pub use config::{
     AliasValue, BreakerThreshold, CONFIG_PROVIDER_KINDS, CONFIG_VERSION_REMEDIATION,
     CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CapabilityConfig, Config,
-    ConfigVersionError, HistoryReasoning, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
+    ConfigVersionError, Format, HistoryReasoning, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, RawConfigPreflightError, ReasoningDialect,
     ReductionConfig, Resolved, ResolvedTuning, RetiredKeysError, RetryPolicy, ServerAuth,
     ServerConfig, TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig,

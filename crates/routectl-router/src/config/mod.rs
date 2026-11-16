@@ -8,12 +8,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 mod pool;
+pub(crate) mod provider_descriptor;
 mod retired_keys;
 mod schema;
 pub mod tuning;
 mod validate;
 
 pub use pool::PoolEntry;
+pub use provider_descriptor::Format;
 pub use retired_keys::{RetiredKeysError, retired_key_message};
 #[cfg(feature = "bedrock")]
 pub(crate) use schema::default_anthropic_base;
