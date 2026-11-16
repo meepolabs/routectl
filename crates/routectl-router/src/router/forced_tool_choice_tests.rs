@@ -120,9 +120,10 @@ fn two_lane_router(
     let toml_text = format!(
         "[providers.p1]\n{p1_kind_block}\n\
          [providers.p2]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [aliases]\n\
          \"{ALIAS}\" = [\"m1\", \"m2\"]\n\
          {extra_toml}"
@@ -142,12 +143,13 @@ fn two_lane_router(
     router
 }
 
-const ANTHROPIC_KIND_BLOCK: &str = "kind = \"anthropic-api\"\n";
+const ANTHROPIC_KIND_BLOCK: &str = "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://ANTHROPIC_API_KEY\"\nauth = \"x-api-key\"\n";
 
 #[cfg(feature = "bedrock")]
-const BEDROCK_KIND_BLOCK: &str = "kind = \"bedrock\"\n\
-     region = \"us-east-1\"\n\
-     creds = { kind = \"default-chain\" }\n";
+const BEDROCK_KIND_BLOCK: &str = "format = \"bedrock-invoke\"\n\
+     cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+     credential = \"aws://chain\"\n\
+     auth = \"aws-sigv4\"\n";
 
 fn forced_request(tool_choice: Value) -> ChatRequest {
     ChatRequest {

@@ -2,11 +2,10 @@
 //! the schema type it names, and every published WHOLE config must also
 //! survive the semantic validators an operator's `config check` runs.
 //!
-//! `Config` and `ProviderEntry` are `deny_unknown_fields` (and
-//! `ProviderEntry` is `kind`-tagged), so a key written on a table that has
-//! none -- a `[models.X]` knob copied onto a provider entry, an auth
-//! selector copied between provider kinds, a renamed field left behind --
-//! is a parse error. Parsing is not enough on its own though: a config can
+//! `Config` and `ProviderEntry` are `deny_unknown_fields`, so a key written
+//! on a table that has none -- a `[models.X]` knob copied onto a provider
+//! entry, a retired provider key left behind, a renamed field -- is a parse
+//! error. Parsing is not enough on its own though: a config can
 //! deserialize perfectly and still be unloadable (an alias whose key equals
 //! the nickname it points at is a one-hop cycle the loader refuses), so a
 //! block carrying a `version` key -- i.e. one an operator can save as their
@@ -26,7 +25,9 @@
 use std::collections::BTreeMap;
 
 use routectl_cli::commands::config::validation_report;
-use routectl_router::{Config, preflight_config_version};
+use routectl_router::{
+    Config, collect_config_validation, preflight_config_version, retired_key_message,
+};
 
 const CONFIGURATION_MD: &str = include_str!("../../../docs/CONFIGURATION.md");
 const README_MD: &str = include_str!("../../../README.md");
@@ -38,7 +39,7 @@ const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.toml");
 /// the keys an entry must carry to be a whole entry rather than a
 /// documentation fragment. An empty list means any non-empty table counts.
 const ENTRY_SECTIONS: &[(&str, &[&str])] = &[
-    ("providers", &["kind"]),
+    ("providers", &["format"]),
     ("pools", &["members"]),
     ("models", &["provider", "upstream"]),
 ];
@@ -78,16 +79,16 @@ struct BlockShape {
     whole_config: bool,
 }
 
-/// The `kind` string each complete `[providers.<name>]` table declares.
-fn declared_kinds(table: &toml::Table) -> BTreeMap<String, String> {
+/// The `format` string each complete `[providers.<name>]` table declares.
+fn declared_formats(table: &toml::Table) -> BTreeMap<String, String> {
     let Some(toml::Value::Table(providers)) = table.get("providers") else {
         return BTreeMap::new();
     };
     providers
         .iter()
         .filter_map(|(name, entry)| {
-            let kind = entry.as_table()?.get("kind")?.as_str()?;
-            Some((name.clone(), kind.to_string()))
+            let format = entry.as_table()?.get("format")?.as_str()?;
+            Some((name.clone(), format.to_string()))
         })
         .collect()
 }
@@ -100,7 +101,7 @@ fn declared_kinds(table: &toml::Table) -> BTreeMap<String, String> {
 /// `Config` because the placeholder tables it contains are missing their
 /// required fields. Two shapes occur -- a lone sub-table such as
 /// `[providers.anthropic-default.header_extras]` (a provider entry with no
-/// `kind`), and the top-level shape sketch whose `[providers.X]`,
+/// `format`), and the top-level shape sketch whose `[providers.X]`,
 /// `[models.X]` and `[server.auth]` placeholders
 /// carry no keys at all. Both are detected the same way: an entry in an
 /// [`ENTRY_SECTIONS`] map that lacks its required keys, or a singleton
@@ -191,6 +192,8 @@ fn assert_block_matches_schema(origin: &str, toml_src: &str) -> Option<BlockShap
         .parse()
         .unwrap_or_else(|e| panic!("{origin} must be valid TOML: {e}\n---\n{toml_src}\n---"));
 
+    assert_no_retired_keys(origin, &table);
+
     let shape = classify(&table);
     if shape.units == 0 || shape.fragment {
         return None;
@@ -199,25 +202,80 @@ fn assert_block_matches_schema(origin: &str, toml_src: &str) -> Option<BlockShap
     let cfg: Config = toml::from_str(toml_src)
         .unwrap_or_else(|e| panic!("{origin} must parse as a config: {e}\n---\n{toml_src}\n---"));
 
-    for (name, kind) in &declared_kinds(&table) {
+    for (name, format) in &declared_formats(&table) {
         let entry = cfg
             .providers
             .get(name)
             .unwrap_or_else(|| panic!("{origin} must define provider `{name}`"));
         assert_eq!(
-            entry.kind_str(),
-            kind,
-            "{origin}: provider `{name}` declares kind `{kind}` but parsed as \
+            entry.format().as_str(),
+            format,
+            "{origin}: provider `{name}` declares format `{format}` but parsed as \
              `{}`",
-            entry.kind_str()
+            entry.format().as_str()
         );
     }
 
     if shape.whole_config {
         assert_whole_config_loads(origin, toml_src, &cfg);
+    } else {
+        assert_provider_entries_validate(origin, &cfg);
     }
 
     Some(shape)
+}
+
+/// A recipe block is merged into an operator's config rather than saved
+/// whole, so its models may name providers it does not carry. Its provider
+/// entries still have to load on their own: the provider plan (credential
+/// scheme, carrier, format x auth, managed-login containment) and the
+/// per-entry validators run over a config holding only those entries.
+fn assert_provider_entries_validate(origin: &str, cfg: &Config) {
+    if cfg.providers.is_empty() {
+        return;
+    }
+    let providers_only = Config {
+        providers: cfg.providers.clone(),
+        ..Config::default()
+    };
+    let validation = collect_config_validation(&providers_only);
+    assert!(
+        validation.errors.is_empty(),
+        "{origin} publishes provider entries that fail validation:\n  - {}",
+        validation.errors.join("\n  - "),
+    );
+}
+
+/// Every dotted key path `table` sets, tables walked recursively.
+fn dotted_key_paths(prefix: &str, table: &toml::Table, out: &mut Vec<String>) {
+    for (key, value) in table {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if let toml::Value::Table(inner) = value {
+            dotted_key_paths(&path, inner, out);
+        }
+        out.push(path);
+    }
+}
+
+/// No block may publish a retired key, fragments included: an entry written
+/// in a retired shape lacks the keys that make it a whole entry, so the
+/// skip rule on [`classify`] would otherwise pass it over unchecked.
+fn assert_no_retired_keys(origin: &str, table: &toml::Table) {
+    let mut paths = Vec::new();
+    dotted_key_paths("", table, &mut paths);
+    let retired: Vec<String> = paths
+        .iter()
+        .filter_map(|path| retired_key_message(path))
+        .collect();
+    assert!(
+        retired.is_empty(),
+        "{origin} publishes retired keys:\n  - {}",
+        retired.join("\n  - "),
+    );
 }
 
 /// The semantic half, for a block an operator can save verbatim as their
@@ -307,7 +365,7 @@ fn readme_config_blocks_parse_and_whole_configs_validate() {
 /// The provider-quirks recipes are the blocks an operator copies when a
 /// specific upstream misbehaves -- per-model knobs, auth selectors, header
 /// and payload extras, timeout bumps. Every one of them names a concrete
-/// provider kind, so a knob written on the wrong table is exactly the class
+/// provider format, so a knob written on the wrong table is exactly the class
 /// this harness catches. None carries a `version` key: they are recipes to
 /// merge into a config, not configs to save, so there is no whole-config
 /// floor here.

@@ -14,14 +14,16 @@ use routectl_core::identity::codex::resolved_identity;
 use routectl_router::{BuildOptions, Config, build_provider_with_options};
 
 const PROVIDERS: &str = "[providers.refused]\n\
-     kind = \"openai-responses\"\n\
-     api_key_ref = \"oauth://codex#seat-b\"\n\
+     format = \"openai-responses\"\n\
      base_url = \"https://gateway.example/backend-api/codex\"\n\
+     credential = \"oauth://codex#seat-b\"\n\
+     auth = \"bearer\"\n\
      codex_version = \"9.9.9-refused\"\n\
      [providers.accepted]\n\
-     kind = \"openai-responses\"\n\
-     auth_kind = \"api-key\"\n\
-     api_key_ref = \"env://ROUTECTL_REFUSED_ENTRY_TEST_KEY\"\n\
+     format = \"openai-responses\"\n\
+     base_url = \"https://api.openai.com/v1\"\n\
+     credential = \"env://ROUTECTL_REFUSED_ENTRY_TEST_KEY\"\n\
+     auth = \"bearer\"\n\
      codex_version = \"3.4.5-accepted\"\n";
 
 #[tokio::test]
@@ -48,6 +50,6 @@ async fn a_refused_entry_does_not_seed_the_codex_identity() {
 
     // Assert
     let err = refused.err().expect("the plan refuses the foreign host");
-    assert!(err.to_string().contains("managed Codex"), "{err}");
+    assert!(err.to_string().contains("managed `oauth://codex`"), "{err}");
     assert_eq!(resolved_identity().version(), "3.4.5-accepted");
 }

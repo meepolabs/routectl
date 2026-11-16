@@ -20,8 +20,7 @@ async fn build_resolved_models_installs_configured_codex_version() {
     // build_resolved_models (before any provider construction), so the
     // assertion holds even if a provider build were to fail.
     let config: Config = toml::from_str(
-        "[providers.cx]\nkind = \"openai-responses\"\napi_key_ref = \"literal:sk-test\"\n\
-         auth_kind = \"api-key\"\ncodex_version = \"3.3.3-build\"\n\
+        "[providers.cx]\nformat = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:sk-test\"\nauth = \"bearer\"\ncodex_version = \"3.3.3-build\"\n\
          [models.m]\nprovider = \"cx\"\nupstream = \"gpt-5\"\n",
     )
     .expect("fixture parses");

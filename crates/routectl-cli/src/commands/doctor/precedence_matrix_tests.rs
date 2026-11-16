@@ -23,15 +23,16 @@ fn bedrock_config(extra: &str) -> Config {
     toml::from_str(&format!(
         "version = 3\n\
          [providers.bed]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = {{ kind = \"default-chain\" }}\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          header_extras = {{ \"anthropic-beta\" = \"{PINNED_FLAG}\" }}\n\
          [providers.cv]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = {{ kind = \"default-chain\" }}\n\
-         api_shape = \"converse\"\n\
+         format = \"bedrock-converse\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          [models.claude]\n\
          provider = \"bed\"\n\
          upstream = \"anthropic.claude-test-v1:0\"\n\

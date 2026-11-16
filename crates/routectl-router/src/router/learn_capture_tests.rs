@@ -171,16 +171,20 @@ fn router_with(toml_text: &str, provider: Arc<dyn Provider>) -> Router {
 /// at its default: enabled).
 const OPENAI_P1: &str = r#"
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 /// A minimal anthropic-api provider config (capability subsystem left at
 /// its default: enabled). Serves the inferred-arm dormancy test.
 const ANTHROPIC_P1: &str = r#"
 [providers.p1]
-kind = "anthropic-api"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 "#;
 
 fn req_with_tool(tool_type: &str) -> ChatRequest {
@@ -333,9 +337,10 @@ max_attempts = 3
 feature-unsupported = 2
 
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
     let provider = self_identifying_provider();
     let router = router_with(toml, provider.clone());
@@ -365,9 +370,10 @@ async fn kill_switch_off_skips_the_learn_path() {
 enabled = false
 
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
     let router = router_with(toml, self_identifying_provider());
 
@@ -890,9 +896,10 @@ async fn count_tokens_releases_admitted_probe_without_latching() {
 #[cfg(feature = "bedrock")]
 const BEDROCK_P1: &str = r#"
 [providers.p1]
-kind = "bedrock"
-region = "us-east-1"
-creds = { kind = "default-chain" }
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#;
 
 #[cfg(feature = "bedrock")]
@@ -2611,9 +2618,10 @@ async fn a_same_capability_probe_settlement_across_a_generation_change_is_booked
 #[cfg(feature = "openai-responses")]
 const RESPONSES_P1: &str = r#"
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 /// A request whose tool answer carries a file, the part an upstream may

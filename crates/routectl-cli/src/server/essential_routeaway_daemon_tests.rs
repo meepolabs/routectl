@@ -106,10 +106,10 @@ fn two_lane_config(capability: &str) -> Config {
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{PROVIDER}]\n\
-         kind = \"bedrock\"\n\
-         region = \"{REGION}\"\n\
-         api_shape = \"invoke\"\n\
-         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"{REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [models.a]\n\
          provider = \"{PROVIDER}\"\n\
          upstream = \"{LANE_A_ID}\"\n\n\

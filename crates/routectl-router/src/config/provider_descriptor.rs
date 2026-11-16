@@ -21,9 +21,9 @@
 //! are not owned here.
 
 use crate::config::ProviderEntry;
+use routectl_auth::{CredentialRef, SecretRef};
 use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::EgressKind;
-use routectl_providers::anthropic_api::AuthKind;
 use serde::{Deserialize, Serialize};
 
 /// The wire format a provider entry speaks. Each format maps to exactly one
@@ -50,6 +50,22 @@ pub enum Format {
     GeminiCloudCode,
 }
 
+impl Format {
+    /// The value an operator writes as `format = "..."`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AnthropicMessages => "anthropic-messages",
+            Self::OpenaiChat => "openai-chat",
+            Self::OpenaiResponses => "openai-responses",
+            Self::BedrockInvoke => "bedrock-invoke",
+            Self::BedrockConverse => "bedrock-converse",
+            Self::Gemini => "gemini",
+            Self::GeminiCloudCode => "gemini-cloud-code",
+        }
+    }
+}
+
 /// How a request authenticates on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -64,6 +80,19 @@ pub enum Auth {
     AwsSigv4,
 }
 
+impl Auth {
+    /// The value an operator writes as `auth = "..."`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::XApiKey => "x-api-key",
+            Self::Bearer => "bearer",
+            Self::XGoogApiKey => "x-goog-api-key",
+            Self::AwsSigv4 => "aws-sigv4",
+        }
+    }
+}
+
 /// Where a provider entry's requests are sent: an explicit base URL, or a
 /// cloud whose endpoint is derived from its region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,7 +100,6 @@ pub enum Carrier {
     /// An explicit http(s) base URL.
     BaseUrl,
     /// AWS, endpoint derived from the region.
-    #[cfg_attr(not(feature = "bedrock"), allow(dead_code))]
     CloudAws,
 }
 
@@ -121,13 +149,10 @@ pub struct VendorRow {
     pub default_base: &'static str,
     /// The only hosts (exact, https) the vendor's token may reach.
     pub hosts: &'static [&'static str],
+    /// The `auth` value the vendor's token is sent with on its lane.
+    pub auth: Auth,
     /// Whether generated client identity applies on the vendor's own lane.
     pub identity: bool,
-    /// The containment refusal, after the `provider `<name>`: ` prefix. It
-    /// names the lane and the allowed hosts only: the configured base URL,
-    /// the reference and the seat label are withheld because each can carry
-    /// credentials or identify a seat.
-    pub refusal: &'static str,
 }
 
 const fn route(egress: EgressKind, auths: &'static [Auth]) -> Option<Route> {
@@ -243,32 +268,24 @@ pub const VENDOR_ROWS: &[VendorRow] = &[
         format: Format::AnthropicMessages,
         default_base: "https://api.anthropic.com",
         hosts: &["api.anthropic.com"],
+        auth: Auth::Bearer,
         identity: true,
-        refusal: "the managed Anthropic credential is accepted only on `anthropic-api` with \
-                  auth_kind = \"oauth-bearer\", credential_source = \"own\", no bedrock_mantle, \
-                  and base_url omitted or https://api.anthropic.com. Elsewhere use a static \
-                  env:// or file:// credential; no override. base_url and ref are withheld",
     },
     VendorRow {
         vendor: "codex",
         format: Format::OpenaiResponses,
         default_base: "https://chatgpt.com/backend-api/codex",
         hosts: &["chatgpt.com"],
+        auth: Auth::Bearer,
         identity: true,
-        refusal: "the managed Codex credential is accepted only on `openai-responses` with \
-                  auth_kind = \"chatgpt-oauth\", no bedrock_mantle, and base_url omitted or \
-                  https://chatgpt.com. Elsewhere use a static env:// or file:// credential; no \
-                  override. base_url and ref are withheld",
     },
     VendorRow {
         vendor: "xai",
         format: Format::OpenaiChat,
         default_base: "https://api.x.ai/v1",
         hosts: &["api.x.ai"],
+        auth: Auth::Bearer,
         identity: false,
-        refusal: "the managed xAI credential is accepted only on `openai-compat` with no \
-                  bedrock_mantle and base_url https on exactly api.x.ai. Elsewhere use a static \
-                  env:// or file:// credential; no override. base_url and ref are withheld",
     },
     VendorRow {
         vendor: "antigravity",
@@ -278,11 +295,8 @@ pub const VENDOR_ROWS: &[VendorRow] = &[
             "cloudcode-pa.googleapis.com",
             "daily-cloudcode-pa.googleapis.com",
         ],
+        auth: Auth::Bearer,
         identity: true,
-        refusal: "the managed Antigravity credential is accepted only on `gemini` with \
-                  auth_mode = \"cloud-code\" and base_url omitted or https on exactly \
-                  cloudcode-pa.googleapis.com or daily-cloudcode-pa.googleapis.com; no override. \
-                  base_url and ref are withheld",
     },
 ];
 
@@ -307,16 +321,21 @@ pub fn vendor_row(vendor: &str) -> Option<&'static VendorRow> {
     VENDOR_ROWS.iter().find(|row| row.vendor == vendor)
 }
 
+/// Text every containment refusal carries, whatever the vendor.
+pub const CONTAINMENT_REFUSAL_MARKER: &str = "the managed ";
+
 /// Refuse `entry` when any of its credential reference slots carries a
 /// routectl-managed vendor token (`oauth://<vendor>[#label]`) and the entry
-/// is not that vendor's own lane: the vendor's format over a base URL, on
+/// is not that vendor's own lane: the vendor's format over a `base_url`, on
 /// one of the vendor's [`hosts`](VendorRow::hosts) exactly, over https,
-/// with no userinfo and no explicit port. Static `env://` / `file://`
-/// credentials and unmanaged ids are unaffected.
+/// with no userinfo and no explicit port, sent with the vendor's
+/// [`auth`](VendorRow::auth). Static `env://` / `file://` credentials and
+/// unmanaged ids are unaffected.
 ///
-/// Pure: reads no credential. Every build path runs it before the first
-/// store read for the entry, and config validation runs it for every entry.
-/// The error names the provider and the vendor's rule only.
+/// Pure: reads no credential. Every build path runs it (through the provider
+/// plan) before the first store read for the entry, and config validation
+/// runs it for every entry. The error names the provider and the vendor's
+/// rule only.
 pub fn containment(name: &str, entry: &ProviderEntry) -> routectl_core::Result<()> {
     VENDOR_ROWS
         .iter()
@@ -334,8 +353,30 @@ pub fn vendor_containment(
     }
     Err(routectl_core::Error::Config(format!(
         "provider `{name}`: {}",
-        row.refusal
+        containment_refusal(row)
     )))
+}
+
+/// The containment rule for `row`, rendered from the row itself with the
+/// entry's own key names. It names the vendor, the format, the auth and the
+/// allowed hosts only: the configured base URL, the credential and the seat
+/// label are withheld because each can carry credentials or identify a seat.
+fn containment_refusal(row: &VendorRow) -> String {
+    let hosts = row
+        .hosts
+        .iter()
+        .map(|host| format!("https://{host}"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!(
+        "{CONTAINMENT_REFUSAL_MARKER}`oauth://{vendor}` credential is accepted only with \
+         format = \"{format}\", auth = \"{auth}\" and base_url on {hosts} (no cloud, no \
+         userinfo, no port). Elsewhere use a static env:// or file:// credential; no \
+         override. The base_url and credential are withheld",
+        vendor = row.vendor,
+        format = row.format.as_str(),
+        auth = row.auth.as_str(),
+    )
 }
 
 /// True when `row`'s token is absent from every reference slot of the
@@ -345,13 +386,12 @@ fn is_contained_by(row: &VendorRow, entry: &ProviderEntry) -> bool {
 }
 
 /// True when the entry presents a managed vendor's generated client
-/// identity: its credential is `oauth://<vendor>[#label]`, the vendor row
+/// identity: its `credential` is `oauth://<vendor>[#label]`, the vendor row
 /// has [`identity`](VendorRow::identity), and the entry is that vendor's own
-/// lane (format, base URL carrier, first-party host, routectl's own
-/// credential rather than a forwarded one). Any other credential on the same
-/// host, any other host for the same credential, and any entry
-/// [`containment`] refuses (another slot carrying a second vendor's token)
-/// answers `false`.
+/// lane (format, auth, base URL carrier, first-party host). Any other
+/// credential on the same host, any other host for the same credential, and
+/// any entry [`containment`] refuses (another slot carrying a second
+/// vendor's token) answers `false`.
 #[must_use]
 pub fn client_identity(entry: &ProviderEntry) -> bool {
     let is_contained = VENDOR_ROWS.iter().all(|row| is_contained_by(row, entry));
@@ -365,74 +405,48 @@ pub fn client_identity(entry: &ProviderEntry) -> bool {
 /// (`oauth://<vendor>[#label]`), not a static key that happens to target the
 /// vendor's host.
 fn is_vendor_login(entry: &ProviderEntry, vendor: &str) -> bool {
-    entry.api_key_ref().and_then(managed_vendor_of) == Some(vendor)
+    managed_vendor_of(&entry.credential) == Some(vendor)
 }
 
 /// The vendor id of an `oauth://<vendor>[#label]` reference, or `None` for
 /// any other reference (or one that does not parse).
-fn managed_vendor_of(uri: &str) -> Option<&str> {
-    match routectl_auth::SecretRef::parse(uri) {
-        Ok(routectl_auth::SecretRef::OAuth { provider, .. }) => VENDOR_ROWS
-            .iter()
-            .find(|row| row.vendor == provider)
-            .map(|row| row.vendor),
+pub fn managed_vendor_of(uri: &str) -> Option<&'static str> {
+    match CredentialRef::parse(uri) {
+        Ok(CredentialRef::Secret(SecretRef::OAuth { provider, .. })) => {
+            vendor_row(&provider).map(|row| row.vendor)
+        }
         _ => None,
     }
 }
 
-/// True when any credential reference slot of the entry parses to an
-/// `oauth://<vendor>` reference, bare or labeled. Every slot counts (not
-/// only `api_key_ref`): an account-id or Bedrock credential slot resolves
-/// through the same store and would carry the same token. The primary
-/// `api_key_ref` is chained in explicitly because `secret_uris` omits it on
-/// the Bedrock mantle lane.
+/// True when any credential reference slot of the entry (`credential`,
+/// `account_id_ref`) parses to an `oauth://<vendor>` reference, bare or
+/// labeled. Every slot counts: an account-id slot resolves through the same
+/// store and would carry the same token.
 fn carries_vendor_ref(entry: &ProviderEntry, vendor: &str) -> bool {
-    entry
-        .api_key_ref()
-        .into_iter()
-        .chain(entry.secret_uris())
+    std::iter::once(entry.credential.as_str())
+        .chain(entry.account_id_ref.as_deref())
         .any(|uri| managed_vendor_of(uri) == Some(vendor))
 }
 
 /// True when the entry is the one lane `row`'s token may ride: the vendor's
-/// format over a base URL whose effective value (the configured one, or the
-/// default the factory dials when unset) is on one of the vendor's hosts,
-/// plus the per-format shape the vendor's token needs.
+/// format, sent with the vendor's auth, over a base URL on one of the
+/// vendor's hosts.
 fn is_on_vendor_lane(row: &VendorRow, entry: &ProviderEntry) -> bool {
-    entry.format() == row.format
-        && matches!(entry.carrier(), Carrier::BaseUrl)
-        && has_vendor_lane_shape(row.format, entry)
+    entry.format == row.format
+        && entry.auth == row.auth
+        && entry.cloud.is_none()
         && entry
-            .classifiable_egress_base_url()
-            .is_some_and(|base| is_exact_https_host_in(&base, row.hosts))
+            .base_url
+            .as_deref()
+            .is_some_and(|base| is_exact_https_host_in(base, row.hosts))
 }
 
-/// The selectors the old entry shape adds beyond format and host: an
-/// Anthropic token rides only routectl's own credential (never the
-/// forwarded leg) in the bearer form, and a Codex token only the
-/// `chatgpt-oauth` surface.
-fn has_vendor_lane_shape(format: Format, entry: &ProviderEntry) -> bool {
-    match format {
-        Format::AnthropicMessages => {
-            entry.forwarded_base_url().is_none()
-                && matches!(
-                    entry,
-                    ProviderEntry::AnthropicApi {
-                        auth_kind: AuthKind::OauthBearer,
-                        ..
-                    }
-                )
-        }
-        #[cfg(feature = "openai-responses")]
-        Format::OpenaiResponses => entry.is_chatgpt_oauth_responses(),
-        #[cfg(not(feature = "openai-responses"))]
-        Format::OpenaiResponses => false,
-        Format::OpenaiChat
-        | Format::BedrockInvoke
-        | Format::BedrockConverse
-        | Format::Gemini
-        | Format::GeminiCloudCode => true,
-    }
+/// True when `base_url` is on one of `vendor`'s first-party hosts (exact,
+/// https, no userinfo, no port). `false` for a vendor routectl does not
+/// manage.
+pub fn is_vendor_host(vendor: &str, base_url: &str) -> bool {
+    vendor_row(vendor).is_some_and(|row| is_exact_https_host_in(base_url, row.hosts))
 }
 
 /// True when `base_url` is an `https` URL with no userinfo, no explicit

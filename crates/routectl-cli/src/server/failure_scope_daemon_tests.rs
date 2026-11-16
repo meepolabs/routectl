@@ -76,8 +76,7 @@ fn served() -> ResponseTemplate {
 
 fn oauth_seat(member: &str, origin: &str, circuit_failures: u32) -> String {
     format!(
-        "[providers.{member}]\nkind = \"anthropic-api\"\nbase_url = \"{origin}\"\n\
-         api_key_ref = \"oauth://test-loopback#{member}\"\nauth_kind = \"oauth-bearer\"\n\
+        "[providers.{member}]\nformat = \"anthropic-messages\"\nbase_url = \"{origin}\"\ncredential = \"oauth://test-loopback#{member}\"\nauth = \"bearer\"\n\
          circuit_failures = {circuit_failures}\n\n"
     )
 }
@@ -96,8 +95,7 @@ fn config_text(origin_x: &str, origin_y: &str, usage_db: &Path) -> String {
     }
     text.push_str(&oauth_seat(POOL_B_SEAT, origin_x, 2));
     text.push_str(&format!(
-        "[providers.passthrough]\nkind = \"anthropic-api\"\nbase_url = \"{origin_y}\"\n\
-         api_key_ref = \"{key_ref}\"\ncircuit_failures = 2\n\n",
+        "[providers.passthrough]\nformat = \"anthropic-messages\"\nbase_url = \"{origin_y}\"\ncredential = \"{key_ref}\"\nauth = \"x-api-key\"\ncircuit_failures = 2\n\n",
         key_ref = crate::test_secret::file_ref("passthrough-key"),
     ));
     text.push_str(&format!(

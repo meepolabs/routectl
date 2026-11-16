@@ -166,9 +166,10 @@ fn req_no_artifact() -> ChatRequest {
 
 const SINGLE_TARGET_TOML: &str = r#"
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 /// A two-leg `openai-responses` chain, each leg on its own provider entry so
@@ -179,14 +180,16 @@ auth_kind = "api-key"
 fn two_repair_router() -> (Router, Arc<ReplayMockProvider>, Arc<ReplayMockProvider>) {
     let toml_text = r#"
 [providers.p0]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
     let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
     config.aliases.insert(

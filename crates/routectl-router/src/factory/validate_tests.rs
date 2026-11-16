@@ -384,137 +384,109 @@ mod base_url_validation_tests {
 
 #[cfg(test)]
 #[cfg(feature = "bedrock")]
-mod bedrock_creds_ref_validation_tests {
-    //! Tests for `validate_bedrock_creds_refs`: a present-but-empty
-    //! required creds ref is a config error on the native Bedrock lane and
-    //! on the three `bedrock_mantle` lanes. Configs are parsed from TOML to
-    //! exercise the real deserialization path an operator hits.
+mod cloud_credential_validation_tests {
+    //! A cloud entry's credential is one string the provider plan parses
+    //! before anything is built: an empty or malformed AWS credential is a
+    //! config error naming the provider and the `credential` key, and each
+    //! accepted AWS form passes. Configs are parsed from TOML to exercise the
+    //! real deserialization path an operator hits, then run through the
+    //! validation suite the daemon runs.
 
-    use super::validate_bedrock_creds_refs;
     use crate::config::Config;
+    use crate::factory::collect_config_validation;
 
-    fn config_from(toml_text: &str) -> Config {
-        toml::from_str(toml_text).expect("config must parse")
+    fn errors_of(toml_text: &str) -> Vec<String> {
+        let cfg: Config = toml::from_str(toml_text).expect("config must parse");
+        collect_config_validation(&cfg).errors
+    }
+
+    fn cloud_entry(name: &str, format: &str, credential: &str, auth: &str) -> String {
+        format!(
+            "[providers.{name}]\nformat = \"{format}\"\n\
+             cloud = {{ name = \"aws\", region = \"us-west-2\" }}\n\
+             credential = \"{credential}\"\nauth = \"{auth}\"\n"
+        )
     }
 
     #[test]
-    fn empty_key_ref_on_native_bedrock_is_rejected() {
-        let cfg = config_from(
-            r#"
-[providers.native]
-kind = "bedrock"
-region = "us-west-2"
-creds = { kind = "bearer-key", key_ref = "" }
-"#,
-        );
+    fn an_empty_or_malformed_cloud_credential_is_refused_naming_the_key() {
+        let rows = [
+            (
+                "empty bearer on native bedrock",
+                "bedrock-invoke",
+                "",
+                "bearer",
+            ),
+            (
+                "empty bearer on the managed surface",
+                "openai-chat",
+                "",
+                "bearer",
+            ),
+            ("empty sigv4", "bedrock-converse", "", "aws-sigv4"),
+            (
+                "profile with no name",
+                "bedrock-invoke",
+                "aws://profile/",
+                "aws-sigv4",
+            ),
+            (
+                "unknown aws form",
+                "bedrock-invoke",
+                "aws://static",
+                "aws-sigv4",
+            ),
+        ];
+        for (label, format, credential, auth) in rows {
+            let errors = errors_of(&cloud_entry("cloudy", format, credential, auth));
 
-        let err = validate_bedrock_creds_refs(&cfg).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("native"), "msg: {msg}");
-        assert!(msg.contains("key_ref"), "msg: {msg}");
+            assert_eq!(errors.len(), 1, "{label}: {errors:?}");
+            assert!(
+                errors[0].contains("provider `cloudy`"),
+                "{label}: {errors:?}"
+            );
+            assert!(errors[0].contains("`credential`"), "{label}: {errors:?}");
+        }
     }
 
+    /// Positive control for the rows above: every accepted AWS credential
+    /// form, on the native and managed formats, validates clean.
     #[test]
-    fn empty_access_key_ref_on_mantle_lane_is_rejected() {
-        let cfg = config_from(
-            r#"
-[providers.compat-mantle]
-kind = "openai-compat"
-api_key_ref = ""
+    fn each_accepted_cloud_credential_form_passes() {
+        let text = [
+            cloud_entry(
+                "bearer-native",
+                "bedrock-invoke",
+                "env://AWS_BEARER_TOKEN_BEDROCK",
+                "bearer",
+            ),
+            cloud_entry(
+                "bearer-managed",
+                "anthropic-messages",
+                "file:///tmp/whatever",
+                "bearer",
+            ),
+            cloud_entry(
+                "profile-native",
+                "bedrock-invoke",
+                "aws://profile/bedrock-prod",
+                "aws-sigv4",
+            ),
+            cloud_entry(
+                "chain-native",
+                "bedrock-converse",
+                "aws://chain",
+                "aws-sigv4",
+            ),
+            cloud_entry("chain-managed", "openai-chat", "aws://chain", "aws-sigv4"),
+        ]
+        .concat();
 
-[providers.compat-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.compat-mantle.bedrock_mantle.creds]
-kind = "static"
-access_key_ref = ""
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-"#,
-        );
-
-        let err = validate_bedrock_creds_refs(&cfg).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("compat-mantle"), "msg: {msg}");
-        assert!(msg.contains("access_key_ref"), "msg: {msg}");
-    }
-
-    #[test]
-    fn present_but_empty_session_token_ref_is_rejected() {
-        let cfg = config_from(
-            r#"
-[providers.native]
-kind = "bedrock"
-region = "us-west-2"
-
-[providers.native.creds]
-kind = "static"
-access_key_ref = "env://AWS_ACCESS_KEY_ID"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-session_token_ref = ""
-"#,
-        );
-
-        let err = validate_bedrock_creds_refs(&cfg).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("session_token_ref"), "msg: {msg}");
-    }
-
-    #[test]
-    fn valid_creds_refs_pass_on_native_and_mantle_lanes() {
-        let cfg = config_from(
-            r#"
-[providers.native]
-kind = "bedrock"
-region = "us-west-2"
-
-[providers.native.creds]
-kind = "static"
-access_key_ref = "env://AWS_ACCESS_KEY_ID"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-
-[providers.anthropic-mantle]
-kind = "anthropic-api"
-bedrock_mantle = { region = "us-west-2", creds = { kind = "bearer-key", key_ref = "file:///tmp/whatever" } }
-
-[providers.profile-native]
-kind = "bedrock"
-region = "us-west-2"
-creds = { kind = "profile", name = "bedrock-prod" }
-
-[providers.chain-native]
-kind = "bedrock"
-region = "us-west-2"
-creds = { kind = "default-chain" }
-"#,
-        );
+        let errors = errors_of(&text);
 
         assert!(
-            validate_bedrock_creds_refs(&cfg).is_ok(),
-            "valid creds refs on every lane must pass"
-        );
-    }
-
-    #[test]
-    fn omitted_session_token_ref_is_valid() {
-        let cfg = config_from(
-            r#"
-[providers.native]
-kind = "bedrock"
-region = "us-west-2"
-
-[providers.native.creds]
-kind = "static"
-access_key_ref = "env://AWS_ACCESS_KEY_ID"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-"#,
-        );
-
-        assert!(
-            validate_bedrock_creds_refs(&cfg).is_ok(),
-            "an omitted optional session_token_ref must pass"
+            errors.is_empty(),
+            "every accepted form must pass: {errors:?}"
         );
     }
 }
@@ -888,90 +860,105 @@ mod validate_mitm_config_tests {
 }
 
 #[cfg(test)]
-mod validate_provider_credential_sources_tests {
+mod forwarded_credential_validation_tests {
     //! Config-BOUNDARY tests (parse via `toml::from_str`, not bare-struct
-    //! construction only) for the provider-level `credential_source`
-    //! field-coherence validator: `forwarded` requires an empty
-    //! `api_key_ref` AND a base_url pinned to `api.anthropic.com`; `own`
-    //! (the default) requires a non-empty `api_key_ref`, exactly as
-    //! every `anthropic-api` provider behaved before this field existed.
+    //! construction only) for the `credential = "forwarded"` rule the
+    //! provider plan enforces and the validation suite reports: the
+    //! forwarded seat is accepted only on `anthropic-messages` with
+    //! `auth = "bearer"` and a base_url on `api.anthropic.com`; an entry with
+    //! its own credential needs a non-empty one.
 
-    use super::validate_provider_credential_sources;
+    use super::collect_config_validation;
     use crate::config::Config;
 
-    /// A forwarded provider block with NO `api_key_ref` line at all must
-    /// parse cleanly (the field is `#[serde(default)]`) and pass
-    /// validation.
+    fn errors_of(toml_text: &str) -> Vec<String> {
+        let cfg: Config = toml::from_str(toml_text).expect("config must parse");
+        collect_config_validation(&cfg).errors
+    }
+
+    /// The four-line forwarded block parses and validates clean: the
+    /// positive control for every refusal below.
     #[test]
-    fn forwarded_block_with_no_api_key_ref_parses_and_validates() {
-        let toml_text = r#"
+    fn forwarded_block_parses_and_validates() {
+        let errors = errors_of(
+            r#"
 [providers.anthropic-forwarded]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://api.anthropic.com"
-credential_source = "forwarded"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("forwarded block must parse");
-        validate_provider_credential_sources(&cfg).expect("clean forwarded block must validate ok");
+credential = "forwarded"
+auth = "bearer"
+"#,
+        );
+        assert!(errors.is_empty(), "clean forwarded block: {errors:?}");
     }
 
-    /// `credential_source` omitted entirely defaults to `own` and the
-    /// pre-existing `api_key_ref`-required behavior is unchanged.
+    /// An entry with its own credential validates as before.
     #[test]
-    fn own_block_with_credential_source_omitted_is_unchanged() {
-        let toml_text = r#"
+    fn own_credential_block_validates() {
+        let errors = errors_of(
+            r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("own block must parse");
-        validate_provider_credential_sources(&cfg)
-            .expect("default-own block with a key must validate ok");
-    }
-
-    #[test]
-    fn rejects_forwarded_on_a_non_anthropic_host() {
-        let toml_text = r#"
-[providers.sneaky]
-kind = "anthropic-api"
-base_url = "https://evil.example.com"
-credential_source = "forwarded"
-"#;
-        let cfg: Config = toml::from_str(toml_text)
-            .expect("must parse (host pin is validator-time, not parse-time)");
-        let err = validate_provider_credential_sources(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("sneaky"), "msg: {msg}");
-        assert!(msg.contains("api.anthropic.com"), "msg: {msg}");
-    }
-
-    #[test]
-    fn rejects_forwarded_carrying_a_nonempty_api_key_ref() {
-        let toml_text = r#"
-[providers.mixed-up]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://api.anthropic.com"
-api_key_ref = "literal:sk-ant-should-not-be-here"
-credential_source = "forwarded"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_credential_sources(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mixed-up"), "msg: {msg}");
-        assert!(msg.contains("api_key_ref"), "msg: {msg}");
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
+"#,
+        );
+        assert!(errors.is_empty(), "own-credential block: {errors:?}");
+    }
+
+    /// Each row changes one key of the clean forwarded block; each is refused
+    /// naming the provider and the pinned host.
+    #[test]
+    fn rejects_forwarded_off_its_pin() {
+        let rows = [
+            (
+                "non-anthropic host",
+                "anthropic-messages",
+                "https://evil.example.com",
+                "bearer",
+            ),
+            (
+                "x-api-key auth",
+                "anthropic-messages",
+                "https://api.anthropic.com",
+                "x-api-key",
+            ),
+            (
+                "openai-chat format",
+                "openai-chat",
+                "https://api.anthropic.com",
+                "bearer",
+            ),
+        ];
+        for (label, format, base_url, auth) in rows {
+            let errors = errors_of(&format!(
+                "[providers.sneaky]\nformat = \"{format}\"\nbase_url = \"{base_url}\"\n\
+                 credential = \"forwarded\"\nauth = \"{auth}\"\n"
+            ));
+            assert_eq!(errors.len(), 1, "{label}: {errors:?}");
+            assert!(errors[0].contains("sneaky"), "{label}: {errors:?}");
+            assert!(
+                errors[0].contains("api.anthropic.com"),
+                "{label}: {errors:?}"
+            );
+        }
     }
 
     #[test]
-    fn rejects_own_with_an_empty_api_key_ref() {
-        let toml_text = r#"
+    fn rejects_an_empty_credential() {
+        let errors = errors_of(
+            r#"
 [providers.no-key]
-kind = "anthropic-api"
-"#;
-        let cfg: Config =
-            toml::from_str(toml_text).expect("must parse (api_key_ref defaults empty)");
-        let err = validate_provider_credential_sources(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("no-key"), "msg: {msg}");
-        assert!(msg.contains("own"), "msg: {msg}");
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = ""
+auth = "x-api-key"
+"#,
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("no-key"), "{errors:?}");
+        assert!(errors[0].contains("`credential`"), "{errors:?}");
     }
 
     /// Pin: a rejected forwarded `base_url` carrying embedded userinfo must not
@@ -984,15 +971,17 @@ kind = "anthropic-api"
     /// cannot pass by the message degrading into something useless.
     #[test]
     fn forwarded_host_rejection_does_not_echo_userinfo_or_base_url() {
-        let toml_text = r#"
+        let errors = errors_of(
+            r#"
 [providers.sneaky]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://user:sk-live-LEAKED@internal.example/v1?token=sk-query-LEAKED"
-credential_source = "forwarded"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_credential_sources(&cfg).unwrap_err();
-        let msg = err.to_string();
+credential = "forwarded"
+auth = "bearer"
+"#,
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let msg = &errors[0];
 
         for secret in [
             "sk-live-LEAKED",
@@ -1022,26 +1011,35 @@ credential_source = "forwarded"
         );
     }
 
-    /// Structural tripwire over the WHOLE of `validate.rs`: no `Error::Config`
-    /// message may interpolate the operator-supplied `base_url`. That value can
-    /// carry a credential in userinfo, a path, or a query, and every validator
-    /// error string reaches `/status/doctor` as a serialized `Finding.detail`.
+    /// Structural tripwire over the whole of `validate.rs` and `plan.rs`: no
+    /// error message may interpolate the operator-supplied `base_url`. That
+    /// value can carry a credential in userinfo, a path, or a query, and every
+    /// validator error string reaches `/status/doctor` as a serialized
+    /// `Finding.detail`.
     ///
-    /// This pins all 43 `Error::Config(format!(..))` sites at once rather than
-    /// only the forwarded-host one, and needs no production/test slicing because
-    /// `validate.rs` keeps its tests in this sibling `#[path]` file.
-    ///
-    /// The needle is assembled from fragments so this test's own source line
-    /// cannot satisfy the scan it performs.
+    /// Both files keep their tests in sibling `#[path]` files, so the scan
+    /// needs no production/test slicing. The needle is assembled from
+    /// fragments so this test's own source line cannot satisfy the scan it
+    /// performs; the premise rows prove each scanned text is the real file.
     #[test]
     fn no_validator_message_interpolates_the_raw_base_url() {
-        let src = include_str!("validate.rs");
-        assert!(
-            !src.contains(concat!("{", "base_url")),
-            "a validator message interpolates the raw base_url; that string may carry a \
-             credential and every validator error reaches /status/doctor as Finding.detail. \
-             Name the provider and the violated invariant instead, and withhold the value"
-        );
+        for (file, src, premise) in [
+            (
+                "validate.rs",
+                include_str!("validate.rs"),
+                "pub fn collect_config_validation",
+            ),
+            ("plan.rs", include_str!("plan.rs"), "pub fn plan_provider"),
+        ] {
+            assert!(src.contains(premise), "premise: {file} is the real source");
+            assert!(
+                !src.contains(concat!("{", "base_url")),
+                "{file}: a validator message interpolates the raw base_url; that string may \
+                 carry a credential and every validator error reaches /status/doctor as \
+                 Finding.detail. Name the provider and the violated invariant instead, and \
+                 withhold the value"
+            );
+        }
     }
 }
 
@@ -1085,9 +1083,10 @@ mod collect_config_validation_tests {
     fn contradictory_capability_override_config() -> Config {
         toml::from_str(
             "[providers.p]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://x\"\n\
-             api_key_ref = \"literal:k\"\n\
+             credential = \"env://K\"\n\
+             auth = \"bearer\"\n\
              [capability.overrides.p]\n\
              unsupported = [\"web_search\"]\n\
              force_supported = [\"web_search\"]\n",
@@ -1326,7 +1325,7 @@ mod collect_config_validation_tests {
         validation
             .errors
             .iter()
-            .any(|e| e.contains("base_url") && e.contains("kind default"))
+            .any(|e| e.contains("base_url is set but empty"))
     }
 
     #[test]
@@ -1371,13 +1370,10 @@ mod collect_config_validation_tests {
     #[test]
     fn rejects_empty_base_url_openai_compat() {
         let validation = collect_config_validation(&parse(
-            "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+            "[providers.p]\nformat = \"openai-chat\"\nbase_url = \"\"\ncredential = \"env://K\"\nauth = \"bearer\"\n",
         ));
         assert!(
-            validation
-                .errors
-                .iter()
-                .any(|e| e.contains("base_url") && e.contains("required")),
+            has_base_url_error(&validation),
             "empty openai-compat base_url must be rejected: {:?}",
             validation.errors
         );
@@ -1386,7 +1382,7 @@ mod collect_config_validation_tests {
     #[test]
     fn rejects_empty_base_url_anthropic_api() {
         let validation = collect_config_validation(&parse(
-            "[providers.p]\nkind = \"anthropic-api\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+            "[providers.p]\nformat = \"anthropic-messages\"\nbase_url = \"\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n",
         ));
         assert!(
             has_base_url_error(&validation),
@@ -1399,7 +1395,7 @@ mod collect_config_validation_tests {
     #[test]
     fn rejects_empty_base_url_gemini() {
         let validation = collect_config_validation(&parse(
-            "[providers.p]\nkind = \"gemini\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+            "[providers.p]\nformat = \"gemini\"\nbase_url = \"\"\ncredential = \"env://K\"\nauth = \"x-goog-api-key\"\n",
         ));
         assert!(
             has_base_url_error(&validation),
@@ -1412,7 +1408,7 @@ mod collect_config_validation_tests {
     #[test]
     fn rejects_present_but_empty_base_url_openai_responses() {
         let validation = collect_config_validation(&parse(
-            "[providers.p]\nkind = \"openai-responses\"\nauth_kind = \"api-key\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
+            "[providers.p]\nformat = \"openai-responses\"\nbase_url = \"\"\ncredential = \"env://K\"\nauth = \"bearer\"\n",
         ));
         assert!(
             has_base_url_error(&validation),
@@ -1423,13 +1419,13 @@ mod collect_config_validation_tests {
 
     #[cfg(feature = "openai-responses")]
     #[test]
-    fn omitted_base_url_openai_responses_stays_valid() {
+    fn a_set_base_url_openai_responses_stays_valid() {
         let validation = collect_config_validation(&parse(
-            "[providers.p]\nkind = \"openai-responses\"\nauth_kind = \"api-key\"\napi_key_ref = \"literal:k\"\n",
+            "[providers.p]\nformat = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"env://K\"\nauth = \"bearer\"\n",
         ));
         assert!(
-            !has_base_url_error(&validation),
-            "omitted openai-responses base_url must stay valid: {:?}",
+            validation.errors.is_empty(),
+            "a set openai-responses base_url must stay valid: {:?}",
             validation.errors
         );
     }
@@ -1591,491 +1587,229 @@ mod collect_config_validation_tests {
 }
 
 #[cfg(all(test, feature = "bedrock"))]
-mod validate_provider_bedrock_mantle_tests {
-    //! Config-BOUNDARY tests (parse via `toml::from_str`) for the Bedrock
-    //! mantle lane's field-coherence validator. The PRESENCE of a
-    //! `bedrock_mantle` sub-table selects the lane; every other
-    //! credential/endpoint knob must be left at its neutral default, since
-    //! the lane derives the endpoint from `region` and the credential from
-    //! `creds`.
+mod cloud_carrier_validation_tests {
+    //! Config-BOUNDARY tests (parse via `toml::from_str`) for entries over
+    //! the AWS cloud carrier on the managed formats (`anthropic-messages`,
+    //! `openai-chat`, `openai-responses`). The `cloud` table selects the
+    //! carrier; the endpoint derives from its region and the credential is an
+    //! AWS form or a bearer key reference. Every row runs the whole
+    //! validation suite the daemon runs, and each refusal row is the clean
+    //! row with one key changed.
 
-    use super::{collect_config_validation, validate_provider_bedrock_mantle};
+    use super::collect_config_validation;
     use crate::config::Config;
 
-    /// Minimal mantle lane on the default-chain credential shape: no
-    /// api_key_ref, default auth_kind / credential_source / base_url. Must
-    /// parse and pass the whole validation suite (not just the mantle
-    /// validator -- the `own`-requires-a-key rule must exempt it).
-    #[test]
-    fn default_chain_mantle_lane_parses_and_validates() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("default-chain mantle must parse");
-        validate_provider_bedrock_mantle(&cfg).expect("clean default-chain mantle validates");
-        assert!(
-            collect_config_validation(&cfg).errors.is_empty(),
-            "clean mantle lane must pass the whole suite: {:?}",
-            collect_config_validation(&cfg).errors
-        );
+    fn errors_of(toml_text: &str) -> Vec<String> {
+        let cfg: Config = toml::from_str(toml_text).expect("config must parse");
+        collect_config_validation(&cfg).errors
     }
 
-    /// Mantle lane on the bearer-key credential shape.
-    #[test]
-    fn bearer_key_mantle_lane_parses_and_validates() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-bedrock_mantle = { region = "eu-west-1", creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("bearer-key mantle must parse");
-        validate_provider_bedrock_mantle(&cfg).expect("clean bearer-key mantle validates");
-        assert!(
-            collect_config_validation(&cfg).errors.is_empty(),
-            "clean bearer-key mantle must pass the whole suite: {:?}",
-            collect_config_validation(&cfg).errors
-        );
+    fn managed_formats() -> Vec<&'static str> {
+        #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
+        let mut formats = vec!["anthropic-messages", "openai-chat"];
+        #[cfg(feature = "openai-responses")]
+        formats.push("openai-responses");
+        formats
     }
 
-    #[test]
-    fn rejects_mantle_with_oauth_bearer_auth_kind() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-auth_kind = "oauth-bearer"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mantle"), "msg: {msg}");
-        assert!(msg.contains("oauth-bearer"), "msg: {msg}");
+    fn cloud_entry(format: &str, region: &str, credential: &str, auth: &str) -> String {
+        format!(
+            "[providers.mantle]\nformat = \"{format}\"\n\
+             cloud = {{ name = \"aws\", region = \"{region}\" }}\n\
+             credential = \"{credential}\"\nauth = \"{auth}\"\n"
+        )
     }
 
+    /// The positive control for every refusal below: each managed format
+    /// over the cloud, on the default chain and on a bearer key, validates
+    /// clean.
     #[test]
-    fn rejects_mantle_with_forwarded_credential_source() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-credential_source = "forwarded"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mantle"), "msg: {msg}");
-        assert!(msg.contains("credential_source"), "msg: {msg}");
+    fn each_managed_format_over_the_cloud_validates() {
+        for format in managed_formats() {
+            for (credential, auth) in [
+                ("aws://chain", "aws-sigv4"),
+                ("env://AWS_BEARER_TOKEN_BEDROCK", "bearer"),
+            ] {
+                let errors = errors_of(&cloud_entry(format, "eu-west-1", credential, auth));
+                assert!(errors.is_empty(), "{format} {auth}: {errors:?}");
+            }
+        }
     }
 
+    /// `auth` must match the credential kind: `aws-sigv4` signs with an
+    /// `aws://` credential, and an `aws://` credential needs `aws-sigv4`.
     #[test]
-    fn rejects_mantle_with_nonempty_api_key_ref() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-api_key_ref = "literal:should-not-be-here"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mantle"), "msg: {msg}");
-        assert!(msg.contains("api_key_ref"), "msg: {msg}");
+    fn rejects_an_auth_that_does_not_match_the_credential() {
+        for format in managed_formats() {
+            for (credential, auth) in [
+                ("aws://chain", "bearer"),
+                ("env://AWS_BEARER_TOKEN_BEDROCK", "aws-sigv4"),
+            ] {
+                let errors = errors_of(&cloud_entry(format, "us-east-1", credential, auth));
+                assert_eq!(errors.len(), 1, "{format} {credential} {auth}: {errors:?}");
+                assert!(errors[0].contains("mantle"), "{errors:?}");
+                assert!(errors[0].contains("aws-sigv4"), "{errors:?}");
+            }
+        }
     }
 
+    /// An auth no AWS route accepts is refused by the descriptor.
     #[test]
-    fn rejects_mantle_with_nondefault_base_url() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_bedrock_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mantle"), "msg: {msg}");
-        assert!(msg.contains("base_url"), "msg: {msg}");
+    fn rejects_an_auth_the_cloud_route_does_not_accept() {
+        let errors = errors_of(&cloud_entry(
+            "anthropic-messages",
+            "us-east-1",
+            "env://AWS_BEARER_TOKEN_BEDROCK",
+            "x-api-key",
+        ));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("auth = \"x-api-key\""), "{errors:?}");
+        assert!(errors[0].contains("`cloud` aws"), "{errors:?}");
     }
 
+    /// The forwarded seat never rides the cloud.
     #[test]
-    fn rejects_mantle_with_empty_region() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let errors = collect_config_validation(&cfg).errors;
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("mantle") && e.contains("bedrock_mantle.region")),
-            "errors: {errors:?}"
-        );
-    }
-}
-
-#[cfg(all(test, feature = "bedrock"))]
-mod validate_provider_openai_mantle_tests {
-    //! Config-BOUNDARY tests (parse via `toml::from_str`) for the Bedrock
-    //! mantle lane on the two OpenAI-shape providers. Mirrors the
-    //! `anthropic-api` suite: the PRESENCE of a `bedrock_mantle` sub-table
-    //! selects the lane, so every other credential/endpoint knob must be
-    //! neutral, and the legacy `auth_kind = "bedrock-mantle"`-alone surface
-    //! (Responses only) is closed with a hard error.
-    //!
-    //! The `openai-compat` cases run under `bedrock` alone (the compat
-    //! branch is independent of the `openai-responses` feature); the
-    //! `openai-responses` cases are additionally gated on that feature.
-
-    use super::{collect_config_validation, validate_provider_openai_mantle};
-    use crate::config::Config;
-
-    // --- openai-compat lane ---
-
-    #[test]
-    fn compat_default_chain_mantle_parses_and_validates() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-compat"
-api_key_ref = ""
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("compat default-chain mantle parses");
-        validate_provider_openai_mantle(&cfg).expect("clean compat mantle validates");
-        assert!(
-            collect_config_validation(&cfg).errors.is_empty(),
-            "clean compat mantle must pass the whole suite: {:?}",
-            collect_config_validation(&cfg).errors
-        );
+    fn rejects_a_forwarded_credential_over_the_cloud() {
+        let errors = errors_of(&cloud_entry(
+            "anthropic-messages",
+            "us-east-1",
+            "forwarded",
+            "bearer",
+        ));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("mantle"), "{errors:?}");
+        assert!(errors[0].contains("forwarded"), "{errors:?}");
     }
 
+    /// `base_url` and `cloud` are two carriers; an entry names one.
     #[test]
-    fn compat_bearer_key_mantle_parses_and_validates() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-compat"
-api_key_ref = ""
-bedrock_mantle = { region = "eu-west-1", creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("compat bearer-key mantle parses");
-        validate_provider_openai_mantle(&cfg).expect("clean compat bearer-key mantle validates");
-        assert!(
-            collect_config_validation(&cfg).errors.is_empty(),
-            "clean compat bearer-key mantle must pass the whole suite: {:?}",
-            collect_config_validation(&cfg).errors
-        );
+    fn rejects_a_cloud_entry_that_also_sets_base_url() {
+        for format in managed_formats() {
+            let text = format!(
+                "{}base_url = \"https://example.invalid/v1\"\n",
+                cloud_entry(format, "us-east-1", "aws://chain", "aws-sigv4")
+            );
+            let errors = errors_of(&text);
+            assert_eq!(errors.len(), 1, "{format}: {errors:?}");
+            assert!(
+                errors[0].contains("exactly one of `base_url` or `cloud`"),
+                "{format}: {errors:?}"
+            );
+        }
     }
 
+    /// A region that fails admission is refused naming `cloud.region`.
     #[test]
-    fn compat_rejects_mantle_with_nonempty_api_key_ref() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-compat"
-api_key_ref = "literal:should-not-be-here"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("api_key_ref"), "msg: {msg}");
+    fn rejects_an_empty_region() {
+        for format in managed_formats() {
+            let errors = errors_of(&cloud_entry(format, "   ", "aws://chain", "aws-sigv4"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("mantle") && e.contains("cloud.region")),
+                "{format}: {errors:?}"
+            );
+        }
     }
 
-    #[test]
-    fn compat_rejects_mantle_with_nonempty_base_url() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-compat"
-api_key_ref = ""
-base_url = "https://example.invalid/v1"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("base_url"), "msg: {msg}");
-    }
-
-    #[test]
-    fn compat_rejects_mantle_with_empty_region() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-compat"
-api_key_ref = ""
-bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let errors = collect_config_validation(&cfg).errors;
-        assert!(
-            errors.iter().any(|e| e.contains("bedrock_mantle.region")),
-            "errors: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn non_mantle_compat_requires_base_url() {
-        // With `#[serde(default)]` on base_url a non-mantle compat entry may
-        // now omit it; the suite must still reject the empty value.
-        let toml_text = r#"
-[providers.plain]
-kind = "openai-compat"
-api_key_ref = "env://KEY"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse (base_url defaults empty)");
-        let errors = collect_config_validation(&cfg).errors;
-        assert!(
-            errors.iter().any(|e| e.contains("base_url")),
-            "non-mantle compat with no base_url must be rejected: {errors:?}"
-        );
-    }
-
-    // --- openai-responses lane ---
-
+    /// `account_id_ref` belongs to the Codex host; a cloud Responses entry
+    /// refuses it.
     #[cfg(feature = "openai-responses")]
     #[test]
-    fn responses_mantle_default_auth_kind_parses_and_validates() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = ""
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("responses mantle parses");
-        validate_provider_openai_mantle(&cfg).expect("clean responses mantle validates");
-        assert!(
-            collect_config_validation(&cfg).errors.is_empty(),
-            "clean responses mantle must pass the whole suite: {:?}",
-            collect_config_validation(&cfg).errors
+    fn responses_rejects_a_cloud_entry_with_account_id_ref() {
+        let text = format!(
+            "{}account_id_ref = \"env://ACCOUNT\"\n",
+            cloud_entry("openai-responses", "us-east-1", "aws://chain", "aws-sigv4")
         );
+        let errors = errors_of(&text);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("account_id_ref"), "{errors:?}");
     }
 
+    /// The Responses `store` flag is forced off over the cloud; a `store`
+    /// key in payload_extras is refused at config load. The same key on a
+    /// base-URL Responses entry is the positive control.
     #[cfg(feature = "openai-responses")]
     #[test]
-    fn responses_mantle_bearer_key_parses_and_validates() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = ""
-bedrock_mantle = { region = "eu-west-1", creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("responses bearer-key mantle parses");
-        validate_provider_openai_mantle(&cfg).expect("clean responses bearer-key mantle validates");
-        assert!(
-            collect_config_validation(&cfg).errors.is_empty(),
-            "clean responses bearer-key mantle must pass the whole suite: {:?}",
-            collect_config_validation(&cfg).errors
+    fn responses_rejects_a_cloud_entry_with_a_store_payload_extra() {
+        let cloud = format!(
+            "{}payload_extras = {{ store = true }}\n",
+            cloud_entry("openai-responses", "us-east-1", "aws://chain", "aws-sigv4")
         );
+        let base_url = "[providers.mantle]\nformat = \"openai-responses\"\n\
+                        base_url = \"https://api.openai.com/v1\"\n\
+                        credential = \"env://OPENAI_API_KEY\"\nauth = \"bearer\"\n\
+                        payload_extras = { store = true }\n";
+
+        let refused = errors_of(&cloud);
+        let accepted = errors_of(base_url);
+
+        assert!(accepted.is_empty(), "base-URL control: {accepted:?}");
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("store"), "{refused:?}");
     }
 
-    #[cfg(feature = "openai-responses")]
+    /// An entry that names neither carrier is refused, whatever its format.
     #[test]
-    fn responses_mantle_redundant_auth_kind_parses_and_validates() {
-        // Stating auth_kind = "bedrock-mantle" alongside the block is
-        // redundant but accepted (the factory sets the runtime marker).
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = ""
-auth_kind = "bedrock-mantle"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("responses mantle parses");
-        validate_provider_openai_mantle(&cfg).expect("redundant auth_kind validates");
-        assert!(
-            collect_config_validation(&cfg).errors.is_empty(),
-            "redundant auth_kind must pass the whole suite: {:?}",
-            collect_config_validation(&cfg).errors
+    fn rejects_an_entry_with_neither_base_url_nor_cloud() {
+        let errors = errors_of(
+            "[providers.plain]\nformat = \"openai-chat\"\n\
+             credential = \"env://KEY\"\nauth = \"bearer\"\n",
         );
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn responses_legacy_auth_kind_without_block_is_rejected() {
-        // The must-fix: bedrock-mantle auth_kind ALONE (no block) is the
-        // silent us-east-1 misroute. Hard error naming the block form.
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
-auth_kind = "bedrock-mantle"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse (enum stays parseable)");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
+        assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
-            msg.contains("bedrock_mantle"),
-            "must name the block form: {msg}"
+            errors[0].contains("exactly one of `base_url` or `cloud`"),
+            "{errors:?}"
         );
-        assert!(
-            msg.contains("region and creds"),
-            "must name the migration path: {msg}"
-        );
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn responses_legacy_auth_kind_with_explicit_base_url_is_rejected() {
-        // The bearer-only lane form (explicit base_url) is closed too --
-        // it cannot meet the SigV4 posture. Still errors, regardless of
-        // base_url.
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
-auth_kind = "bedrock-mantle"
-base_url = "https://bedrock-mantle.us-east-1.api.aws/openai/v1"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("bedrock_mantle"),
-            "must name the block form: {msg}"
-        );
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn responses_rejects_mantle_with_account_id_ref() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = ""
-account_id_ref = "acct-123"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("account_id_ref"), "msg: {msg}");
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn responses_rejects_mantle_with_nonempty_api_key_ref() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = "literal:should-not-be-here"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("api_key_ref"), "msg: {msg}");
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn responses_rejects_mantle_with_nonempty_base_url() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = ""
-base_url = "https://example.invalid/v1"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("base_url"), "msg: {msg}");
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn responses_rejects_mantle_with_empty_region() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = ""
-bedrock_mantle = { region = "   ", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let errors = collect_config_validation(&cfg).errors;
-        assert!(
-            errors.iter().any(|e| e.contains("bedrock_mantle.region")),
-            "errors: {errors:?}"
-        );
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn responses_rejects_mantle_with_store_payload_extra() {
-        // The Responses `store` flag is forced off on the mantle lane; a
-        // `store` key in payload_extras must be rejected at config load.
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = ""
-payload_extras = { store = true }
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("must parse");
-        let err = validate_provider_openai_mantle(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("store"), "msg: {msg}");
     }
 }
 
 #[cfg(all(test, not(feature = "bedrock")))]
-mod bedrock_mantle_feature_off_tests {
-    //! With the `bedrock` feature off, the `bedrock_mantle` field does not
-    //! exist on the `AnthropicApi` variant. A config carrying the key must
-    //! fail to parse via `deny_unknown_fields` -- a clean rejection, never
-    //! a silent drop.
+mod cloud_feature_off_tests {
+    //! With the `bedrock` feature off, the cloud carrier still parses (the
+    //! entry shape is the same in every build), and the plan refuses it as
+    //! a route this build does not have. A base-URL entry of the same format
+    //! is the positive control.
 
     use crate::config::Config;
+    use crate::factory::collect_config_validation;
 
     #[test]
-    fn bedrock_mantle_key_is_rejected_when_feature_off() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let err = toml::from_str::<Config>(toml_text)
-            .expect_err("bedrock_mantle must be rejected as an unknown field with bedrock off");
-        assert!(
-            err.to_string().contains("bedrock_mantle"),
-            "the unknown-field error should name the key: {err}"
-        );
-    }
+    fn a_cloud_entry_is_refused_as_unavailable_when_feature_off() {
+        let mut formats = vec![
+            (
+                "anthropic-messages",
+                "https://api.anthropic.com",
+                "x-api-key",
+            ),
+            ("openai-chat", "https://example.invalid/v1", "bearer"),
+        ];
+        if cfg!(feature = "openai-responses") {
+            formats.push(("openai-responses", "https://api.openai.com/v1", "bearer"));
+        }
+        for (format, base_url, auth) in formats {
+            let cloud: Config = toml::from_str(&format!(
+                "[providers.mantle]\nformat = \"{format}\"\n\
+                 cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+                 credential = \"env://KEY\"\nauth = \"bearer\"\n"
+            ))
+            .expect("the cloud carrier parses in every build");
+            let plain: Config = toml::from_str(&format!(
+                "[providers.mantle]\nformat = \"{format}\"\nbase_url = \"{base_url}\"\n\
+                 credential = \"env://KEY\"\nauth = \"{auth}\"\n"
+            ))
+            .expect("base-URL control parses");
 
-    #[test]
-    fn bedrock_mantle_key_on_openai_compat_rejected_when_feature_off() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-compat"
-base_url = "https://example.invalid/v1"
-api_key_ref = "env://KEY"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let err = toml::from_str::<Config>(toml_text)
-            .expect_err("bedrock_mantle must be rejected as an unknown field with bedrock off");
-        assert!(
-            err.to_string().contains("bedrock_mantle"),
-            "the unknown-field error should name the key: {err}"
-        );
-    }
+            let refused = collect_config_validation(&cloud).errors;
+            let accepted = collect_config_validation(&plain).errors;
 
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn bedrock_mantle_key_on_openai_responses_rejected_when_feature_off() {
-        let toml_text = r#"
-[providers.mantle]
-kind = "openai-responses"
-api_key_ref = "env://KEY"
-bedrock_mantle = { region = "us-east-1", creds = { kind = "default-chain" } }
-"#;
-        let err = toml::from_str::<Config>(toml_text)
-            .expect_err("bedrock_mantle must be rejected as an unknown field with bedrock off");
-        assert!(
-            err.to_string().contains("bedrock_mantle"),
-            "the unknown-field error should name the key: {err}"
-        );
+            assert!(accepted.is_empty(), "{format} control: {accepted:?}");
+            assert_eq!(refused.len(), 1, "{format}: {refused:?}");
+            assert!(
+                refused[0].contains("is not available over `cloud` aws in this build"),
+                "{format}: {refused:?}"
+            );
+        }
     }
 }
 
@@ -2095,8 +1829,7 @@ mod codex_version_validation_tests {
     #[test]
     fn absent_knob_resolves_to_none_and_passes() {
         let config = parse(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://ACCT\"\n",
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://ACCT\"\n",
         );
         assert_eq!(resolved_codex_version(&config), None);
         assert!(validate_codex_version(&config).is_ok());
@@ -2105,8 +1838,7 @@ mod codex_version_validation_tests {
     #[test]
     fn single_configured_value_resolves_and_passes() {
         let config = parse(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://ACCT\"\n\
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://ACCT\"\n\
              codex_version = \"0.200.0\"\n",
         );
         assert_eq!(resolved_codex_version(&config).as_deref(), Some("0.200.0"));
@@ -2116,10 +1848,8 @@ mod codex_version_validation_tests {
     #[test]
     fn matching_values_across_providers_pass() {
         let config = parse(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
-             [providers.b]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex2\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://B\"\ncodex_version = \"0.200.0\"\n",
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+             [providers.b]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex2\"\nauth = \"bearer\"\naccount_id_ref = \"env://B\"\ncodex_version = \"0.200.0\"\n",
         );
         assert!(validate_codex_version(&config).is_ok());
     }
@@ -2127,10 +1857,8 @@ mod codex_version_validation_tests {
     #[test]
     fn divergent_values_error_naming_both_providers() {
         let config = parse(
-            "[providers.alpha]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
-             [providers.beta]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex2\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://B\"\ncodex_version = \"0.201.0\"\n",
+            "[providers.alpha]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+             [providers.beta]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex2\"\nauth = \"bearer\"\naccount_id_ref = \"env://B\"\ncodex_version = \"0.201.0\"\n",
         );
         let err = validate_codex_version(&config).expect_err("divergent versions must error");
         let msg = err.to_string();
@@ -2154,8 +1882,7 @@ mod codex_version_validation_tests {
 
     fn config_with_version(version: &str) -> Config {
         parse(&format!(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"{version}\"\n"
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://A\"\ncodex_version = \"{version}\"\n"
         ))
     }
 
@@ -2195,8 +1922,7 @@ mod codex_version_validation_tests {
         // with a value diverging from the derived identity warns (but the
         // override still wins -- the warning is advisory).
         let config = parse(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
              [providers.a.header_extras]\nversion = \"0.999.0\"\n",
         );
         let warnings = codex_identity_warnings(&config);
@@ -2211,8 +1937,7 @@ mod codex_version_validation_tests {
     #[test]
     fn matching_version_header_override_does_not_warn() {
         let config = parse(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n\
              [providers.a.header_extras]\nversion = \"0.200.0\"\n",
         );
         assert!(
@@ -2228,8 +1953,7 @@ mod codex_version_validation_tests {
         // fingerprint, so a `version` header there is not an identity
         // override.
         let config = parse(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"env://KEY\"\n\
-             auth_kind = \"api-key\"\n[providers.a.header_extras]\nversion = \"0.999.0\"\n",
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"env://KEY\"\nauth = \"bearer\"\n[providers.a.header_extras]\nversion = \"0.999.0\"\n",
         );
         assert!(
             codex_identity_warnings(&config).is_empty(),
@@ -2240,8 +1964,7 @@ mod codex_version_validation_tests {
     #[test]
     fn absent_override_does_not_warn() {
         let config = parse(
-            "[providers.a]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n",
+            "[providers.a]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\naccount_id_ref = \"env://A\"\ncodex_version = \"0.200.0\"\n",
         );
         assert!(codex_identity_warnings(&config).is_empty());
     }
@@ -2259,16 +1982,14 @@ mod bedrock_invoke_model_family_tests {
     use super::{collect_config_validation, validate_bedrock_invoke_model_family};
     use crate::config::Config;
 
-    /// A Bedrock provider plus one model, with the provider's `api_shape`
-    /// line and the model's `upstream` supplied by the caller. An absent
-    /// `shape_line` exercises the defaulted (invoke) shape.
-    fn config_with(shape_line: &str, upstream: &str) -> Config {
+    /// A Bedrock provider of `format` plus one model on `upstream`.
+    fn config_with(format: &str, upstream: &str) -> Config {
         let toml_text = format!(
             "[providers.aws]\n\
-             kind = \"bedrock\"\n\
-             region = \"us-west-2\"\n\
-             creds = {{ kind = \"default-chain\" }}\n\
-             {shape_line}\n\
+             format = \"{format}\"\n\
+             cloud = {{ name = \"aws\", region = \"us-west-2\" }}\n\
+             credential = \"aws://chain\"\n\
+             auth = \"aws-sigv4\"\n\
              [models.seat]\n\
              provider = \"aws\"\n\
              upstream = \"{upstream}\"\n"
@@ -2277,9 +1998,9 @@ mod bedrock_invoke_model_family_tests {
     }
 
     #[test]
-    fn rejects_a_non_anthropic_model_on_the_defaulted_invoke_shape() {
+    fn rejects_a_non_anthropic_model_on_the_invoke_format() {
         // Arrange
-        let config = config_with("", "meta.llama3-70b-instruct-v1:0");
+        let config = config_with("bedrock-invoke", "meta.llama3-70b-instruct-v1:0");
 
         // Act
         let result = validate_bedrock_invoke_model_family(&config);
@@ -2298,13 +2019,13 @@ mod bedrock_invoke_model_family_tests {
     }
 
     #[test]
-    fn rejects_a_non_anthropic_model_on_the_explicit_invoke_shape() {
-        let config = config_with("api_shape = \"invoke\"", "mistral.mistral-large-2402-v1:0");
+    fn rejects_a_second_non_anthropic_vendor_on_the_invoke_format() {
+        let config = config_with("bedrock-invoke", "mistral.mistral-large-2402-v1:0");
 
         let result = validate_bedrock_invoke_model_family(&config);
 
         let message = result
-            .expect_err("explicit invoke shape must be gated too")
+            .expect_err("every non-Anthropic vendor is gated on invoke")
             .to_string();
         assert!(
             message.contains("mistral.mistral-large-2402-v1:0"),
@@ -2313,8 +2034,8 @@ mod bedrock_invoke_model_family_tests {
     }
 
     #[test]
-    fn accepts_a_non_anthropic_model_on_the_converse_shape() {
-        let config = config_with("api_shape = \"converse\"", "meta.llama3-70b-instruct-v1:0");
+    fn accepts_a_non_anthropic_model_on_the_converse_format() {
+        let config = config_with("bedrock-converse", "meta.llama3-70b-instruct-v1:0");
 
         let result = validate_bedrock_invoke_model_family(&config);
 
@@ -2334,7 +2055,7 @@ mod bedrock_invoke_model_family_tests {
             "global.anthropic.claude-opus-4-7",
             "global.anthropic.claude-opus-4-7[1m]",
         ] {
-            let config = config_with("", upstream);
+            let config = config_with("bedrock-invoke", upstream);
 
             let result = validate_bedrock_invoke_model_family(&config);
 
@@ -2349,7 +2070,7 @@ mod bedrock_invoke_model_family_tests {
         // obligation -- rejecting would break working Claude-on-ARN
         // deployments.
         let config = config_with(
-            "",
+            "bedrock-invoke",
             "arn:aws:bedrock:us-east-1:123456789012:inference-profile/my-profile",
         );
 
@@ -2365,7 +2086,7 @@ mod bedrock_invoke_model_family_tests {
     #[test]
     fn rejects_a_non_anthropic_foundation_model_arn_on_the_invoke_shape() {
         let config = config_with(
-            "",
+            "bedrock-invoke",
             "arn:aws:bedrock:us-east-1::foundation-model/meta.llama3-70b-instruct-v1:0",
         );
 
@@ -2382,7 +2103,7 @@ mod bedrock_invoke_model_family_tests {
     #[test]
     fn accepts_an_anthropic_foundation_model_arn_on_the_invoke_shape() {
         let config = config_with(
-            "",
+            "bedrock-invoke",
             "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5",
         );
 
@@ -2398,9 +2119,10 @@ mod bedrock_invoke_model_family_tests {
     fn ignores_a_model_routed_at_a_non_bedrock_provider() {
         let config: Config = toml::from_str(
             "[providers.oai]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://x\"\n\
-             api_key_ref = \"literal:k\"\n\
+             credential = \"env://K\"\n\
+             auth = \"bearer\"\n\
              [models.seat]\n\
              provider = \"oai\"\n\
              upstream = \"meta.llama3-70b-instruct-v1:0\"\n",
@@ -2416,7 +2138,7 @@ mod bedrock_invoke_model_family_tests {
     fn collect_config_validation_reports_the_invoke_family_error() {
         // Proves the validator is wired into the collected suite every
         // config surface routes through, not just callable directly.
-        let config = config_with("", "meta.llama3-70b-instruct-v1:0");
+        let config = config_with("bedrock-invoke", "meta.llama3-70b-instruct-v1:0");
 
         let errors = collect_config_validation(&config).errors;
 
@@ -2445,13 +2167,15 @@ mod pool_validation_tests {
 
     /// Two same-kind OAuth accounts, the shape a valid pool groups.
     const OAUTH_ACCOUNTS: &str = "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
-         auth_kind = \"oauth-bearer\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
-         auth_kind = \"oauth-bearer\"\n";
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n";
 
     /// One rejection class: a config that trips it and the substrings its
     /// error must carry.
@@ -2487,9 +2211,10 @@ mod pool_validation_tests {
             Case {
                 name: "api-key-member",
                 config: "[providers.keyed]\n\
-                     kind = \"openai-compat\"\n\
+                     format = \"openai-chat\"\n\
                      base_url = \"https://api.example.invalid\"\n\
-                     api_key_ref = \"env://SOME_KEY\"\n\
+                     credential = \"env://SOME_KEY\"\n\
+                     auth = \"bearer\"\n\
                      [pools.keyed-pool]\n\
                      members = [\"keyed\"]\n"
                     .to_string(),
@@ -2500,8 +2225,10 @@ mod pool_validation_tests {
                 config: format!(
                     "{OAUTH_ACCOUNTS}\
                      [providers.anthropic]\n\
-                     kind = \"anthropic-api\"\n\
-                     api_key_ref = \"oauth://anthropic\"\n\
+                     format = \"anthropic-messages\"\n\
+                     base_url = \"https://api.anthropic.com\"\n\
+                     credential = \"oauth://anthropic\"\n\
+                     auth = \"bearer\"\n\
                      [pools.anthropic]\n\
                      members = [\"anthropic-default\"]\n"
                 ),
@@ -2542,8 +2269,10 @@ mod pool_validation_tests {
                         let name = format!("anthropic-s{i:03}");
                         text.push_str(&format!(
                             "[providers.{name}]\n\
-                             kind = \"anthropic-api\"\n\
-                             api_key_ref = \"oauth://anthropic#s{i:03}\"\n"
+                             format = \"anthropic-messages\"\n\
+                             base_url = \"https://api.anthropic.com\"\n\
+                             credential = \"oauth://anthropic#s{i:03}\"\n\
+                             auth = \"bearer\"\n"
                         ));
                         members.push(format!("\"{name}\""));
                     }
@@ -2562,8 +2291,10 @@ mod pool_validation_tests {
             config: format!(
                 "{OAUTH_ACCOUNTS}\
                  [providers.codex-default]\n\
-                 kind = \"openai-responses\"\n\
-                 api_key_ref = \"oauth://codex\"\n\
+                 format = \"openai-responses\"\n\
+                 base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+                 credential = \"oauth://codex\"\n\
+                 auth = \"bearer\"\n\
                  [pools.mixed]\n\
                  members = [\"anthropic-default\", \"codex-default\"]\n"
             ),
@@ -2672,8 +2403,10 @@ mod pool_validation_tests {
             let name = format!("anthropic-s{i:03}");
             text.push_str(&format!(
                 "[providers.{name}]\n\
-                 kind = \"anthropic-api\"\n\
-                 api_key_ref = \"oauth://anthropic#s{i:03}\"\n"
+                 format = \"anthropic-messages\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"oauth://anthropic#s{i:03}\"\n\
+                 auth = \"bearer\"\n"
             ));
             members.push(format!("\"{name}\""));
         }
@@ -2726,9 +2459,10 @@ mod pool_validation_tests {
         // Arrange
         let config = parse(
             "[providers.br]\n\
-             kind = \"bedrock\"\n\
-             region = \"us-east-1\"\n\
-             creds = { kind = \"default-chain\" }\n\
+             format = \"bedrock-invoke\"\n\
+             cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+             credential = \"aws://chain\"\n\
+             auth = \"aws-sigv4\"\n\
              [pools.br-pool]\n\
              members = [\"br\"]\n",
         );
@@ -2747,14 +2481,18 @@ mod pool_validation_tests {
 mod managed_anthropic_credential_tests {
     //! Containment of the managed Anthropic subscription token: an
     //! `oauth://anthropic[#label]` reference is accepted only on an
-    //! `anthropic-api` entry (`credential_source = "own"`, no mantle lane)
-    //! whose `base_url` host is exactly `api.anthropic.com` over https.
+    //! `anthropic-messages` entry with `auth = "bearer"`, no `cloud`, and a
+    //! `base_url` whose host is exactly `api.anthropic.com` over https.
 
     use super::{collect_config_validation, validate_managed_anthropic_credential};
-    use crate::config::{Config, CredentialSource, ProviderEntry};
+    use crate::config::{Auth, Config, ProviderEntry};
     use routectl_providers::anthropic_api::AuthKind;
 
     const REFS: [&str; 2] = ["oauth://anthropic", "oauth://anthropic#seat-secret-label"];
+    /// The ceiling the CLI's config and doctor reports truncate a validator line
+    /// at (`MAX_REPORTED_LINE_CHARS` in routectl-cli `commands/config.rs`); a
+    /// containment refusal must arrive whole.
+    const REPORTED_LINE_CAP: usize = 512;
     const SENTINEL_HOST: &str = "https://gateway.sentinel-host.example/sentinel-path?k=1";
 
     fn anthropic(api_key_ref: &str, base_url: &str) -> ProviderEntry {
@@ -2812,20 +2550,50 @@ mod managed_anthropic_credential_tests {
     }
 
     #[test]
-    fn accepts_the_default_base_url_for_bare_and_labeled_refs() {
+    fn accepts_the_builder_base_url_for_bare_and_labeled_refs() {
         for r in REFS {
-            let entry = ProviderEntry::anthropic_api(r).with_auth_kind(AuthKind::OauthBearer);
-            assert!(!rejects(&entry), "default base_url must be accepted: {r}");
+            let entry = ProviderEntry::anthropic_api(r).with_auth(Auth::Bearer);
+            assert!(
+                !rejects(&entry),
+                "the builder's base_url must be accepted: {r}"
+            );
         }
     }
 
+    /// The managed ref rides only the own lane's `credential`: in the
+    /// second reference slot of an entry that is not the own lane it is
+    /// refused, whichever key moved the entry off the lane. The own lane
+    /// carrying the same ref in that slot is the positive control.
     #[test]
-    fn rejects_a_forwarded_credential_source_even_on_the_anthropic_host() {
+    fn rejects_a_managed_ref_in_the_second_slot_off_the_own_lane() {
+        let with_second_slot = |entry: ProviderEntry, r: &str| {
+            let mut entry = entry;
+            entry.account_id_ref = Some(r.to_string());
+            entry
+        };
         for r in REFS {
-            let entry = ProviderEntry::anthropic_api(r)
-                .with_auth_kind(AuthKind::OauthBearer)
-                .with_credential_source(CredentialSource::Forwarded);
-            assert!(rejects(&entry), "forwarded must reject {r}");
+            let own_lane =
+                with_second_slot(anthropic("env://SOME_KEY", "https://api.anthropic.com"), r);
+            assert!(!rejects(&own_lane), "own lane control must pass: {r}");
+
+            for (label, entry) in [
+                ("gateway host", anthropic("env://SOME_KEY", SENTINEL_HOST)),
+                (
+                    "x-api-key on the anthropic host",
+                    ProviderEntry::anthropic_api("env://SOME_KEY"),
+                ),
+                (
+                    "forwarded seat on a gateway host",
+                    ProviderEntry::anthropic_api("forwarded")
+                        .with_auth(Auth::Bearer)
+                        .with_base_url(SENTINEL_HOST),
+                ),
+            ] {
+                assert!(
+                    rejects(&with_second_slot(entry, r)),
+                    "{label} must reject {r}"
+                );
+            }
         }
     }
 
@@ -2854,22 +2622,24 @@ mod managed_anthropic_credential_tests {
 
     #[cfg(feature = "bedrock")]
     #[test]
-    fn rejects_a_managed_ref_in_a_bedrock_credential_slot_and_on_the_mantle_lane() {
+    fn rejects_a_managed_ref_on_the_aws_cloud() {
         let bedrock = parse(
             "[providers.br]\n\
-             kind = \"bedrock\"\n\
-             region = \"us-east-1\"\n\
-             creds = { kind = \"bearer-key\", key_ref = \"oauth://anthropic\" }\n",
+             format = \"bedrock-invoke\"\n\
+             cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+             credential = \"oauth://anthropic\"\n\
+             auth = \"bearer\"\n",
         );
         assert!(rejects(&bedrock.providers["br"]));
 
-        let mantle = parse(
+        let managed_surface = parse(
             "[providers.m]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"\"\n\
-             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", key_ref = \"oauth://anthropic#x\" } }\n",
+             format = \"anthropic-messages\"\n\
+             cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+             credential = \"oauth://anthropic#x\"\n\
+             auth = \"bearer\"\n",
         );
-        assert!(rejects(&mantle.providers["m"]));
+        assert!(rejects(&managed_surface.providers["m"]));
     }
 
     #[test]
@@ -2891,19 +2661,20 @@ mod managed_anthropic_credential_tests {
         for r in REFS {
             let config = parse(&format!(
                 "[providers.gw]\n\
-                 kind = \"anthropic-api\"\n\
-                 auth_kind = \"oauth-bearer\"\n\
-                 api_key_ref = \"{r}\"\n\
+                 format = \"anthropic-messages\"\n\
                  base_url = \"{SENTINEL_HOST}\"\n\
+                 credential = \"{r}\"\n\
+                 auth = \"bearer\"\n\
                  [providers.lo]\n\
-                 kind = \"anthropic-api\"\n\
-                 auth_kind = \"oauth-bearer\"\n\
-                 api_key_ref = \"{r}\"\n\
+                 format = \"anthropic-messages\"\n\
                  base_url = \"http://127.0.0.1:18080\"\n\
+                 credential = \"{r}\"\n\
+                 auth = \"bearer\"\n\
                  [providers.oc]\n\
-                 kind = \"openai-compat\"\n\
+                 format = \"openai-chat\"\n\
                  base_url = \"{SENTINEL_HOST}\"\n\
-                 api_key_ref = \"{r}\"\n"
+                 credential = \"{r}\"\n\
+                 auth = \"bearer\"\n"
             ));
 
             let errors = collect_config_validation(&config).errors;
@@ -2919,13 +2690,13 @@ mod managed_anthropic_credential_tests {
                     "sentinel-host",
                     "sentinel-path",
                     "127.0.0.1",
-                    "oauth://anthropic",
                     "seat-secret-label",
+                    "#",
                 ] {
                     assert!(!msg.contains(leaked), "message leaks {leaked}: {msg}");
                 }
                 assert!(
-                    msg.chars().count() <= 320,
+                    msg.chars().count() <= REPORTED_LINE_CAP,
                     "containment error must fit the reported-line cap: {msg}"
                 );
             }
@@ -2937,29 +2708,33 @@ mod managed_anthropic_credential_tests {
         #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
         let mut text = String::from(
             "[providers.managed-default]\n\
-             kind = \"anthropic-api\"\n\
-             auth_kind = \"oauth-bearer\"\n\
-             api_key_ref = \"oauth://anthropic\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic\"\n\
+             auth = \"bearer\"\n\
              [providers.managed-seat]\n\
-             kind = \"anthropic-api\"\n\
-             auth_kind = \"oauth-bearer\"\n\
-             api_key_ref = \"oauth://anthropic#seat-b\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#seat-b\"\n\
+             auth = \"bearer\"\n\
              [providers.passthrough]\n\
-             kind = \"anthropic-api\"\n\
-             auth_kind = \"api-key\"\n\
-             api_key_ref = \"file:///tmp/passthrough-key\"\n\
+             format = \"anthropic-messages\"\n\
              base_url = \"http://127.0.0.1:18080\"\n\
+             credential = \"file:///tmp/passthrough-key\"\n\
+             auth = \"x-api-key\"\n\
              [providers.third-party-gateway]\n\
-             kind = \"anthropic-api\"\n\
-             auth_kind = \"oauth-bearer\"\n\
-             api_key_ref = \"env://GATEWAY_KEY\"\n\
-             base_url = \"https://gateway.example/api\"\n",
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://gateway.example/api\"\n\
+             credential = \"env://GATEWAY_KEY\"\n\
+             auth = \"bearer\"\n",
         );
         #[cfg(feature = "openai-responses")]
         text.push_str(
             "[providers.responses-oauth]\n\
-             kind = \"openai-responses\"\n\
-             api_key_ref = \"oauth://codex\"\n",
+             format = \"openai-responses\"\n\
+             base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+             credential = \"oauth://codex\"\n\
+             auth = \"bearer\"\n",
         );
         let config = parse(&text);
 

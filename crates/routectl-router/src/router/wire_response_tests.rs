@@ -125,10 +125,15 @@ impl Provider for AnsweringProvider {
 /// A router over one anthropic-api target (`kind` picks the egress) whose
 /// sampler admits per `params`.
 fn router(kind: &str, params: WireCheckParams) -> Router {
+    assert_eq!(
+        kind, "anthropic-api",
+        "the fixture entry is anthropic-messages"
+    );
     let toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [providers.p0]\nkind = \"{kind}\"\n\
-         api_key_ref = \"literal:k\"\n[aliases]\n{ALIAS} = [\"m0\"]\n"
+         [providers.p0]\nformat = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"literal:k\"\nauth = \"x-api-key\"\n[aliases]\n{ALIAS} = [\"m0\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
     let mut router = Router::new(Arc::new(config)).with_wire_check_params(params);

@@ -640,8 +640,9 @@ mod bedrock_thinking_off {
         };
         format!(
             "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\n\
-             jitter_ms = 0\n\n[providers.p0]\nkind = \"bedrock\"\nregion = \"{REGION}\"\n\
-             creds = {{ kind = \"default-chain\" }}\napi_shape = \"{api_shape}\"\n"
+             jitter_ms = 0\n\n[providers.p0]\nformat = \"bedrock-{api_shape}\"\n\
+             cloud = {{ name = \"aws\", region = \"{REGION}\" }}\n\
+             credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n"
         )
     }
 

@@ -15,7 +15,7 @@ use routectl_core::{
 
 use super::super::{DispatchMeta, DispatchTarget, Router};
 use crate::calibration::{CalibrationLedgerReader, CalibrationLedgerRow};
-use crate::config::{AliasValue, Config, CredentialSource, PoolEntry, ProviderEntry};
+use crate::config::{AliasValue, Config, PoolEntry, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::seat_pool::SeatTarget;
 
@@ -53,7 +53,9 @@ fn own_anthropic() -> ProviderEntry {
 }
 
 fn forwarded_anthropic() -> ProviderEntry {
-    ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded)
+    ProviderEntry::anthropic_api("")
+        .with_credential("forwarded")
+        .with_auth(crate::config::Auth::Bearer)
 }
 
 fn own_compat() -> ProviderEntry {

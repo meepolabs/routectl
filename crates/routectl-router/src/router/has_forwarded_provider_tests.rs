@@ -1,10 +1,10 @@
 //! `Router::has_forwarded_provider()`: build-time cached, `true` iff
-//! `config.providers` contains a `ProviderEntry::AnthropicApi` with
-//! `credential_source == Forwarded`. Replaces the removed `[mitm]
+//! `config.providers` contains an entry with `credential = "forwarded"`.
+//! Replaces the removed `[mitm]
 //! credential_source` read as the CAPTURE gate's "configured
 //! capability" half (see `routectl_cli::handlers::ingress_handle`).
 use super::*;
-use crate::config::{CredentialSource, ProviderEntry};
+use crate::config::ProviderEntry;
 use std::collections::BTreeMap;
 
 fn router_with_providers(providers: BTreeMap<String, ProviderEntry>) -> Router {
@@ -25,7 +25,7 @@ fn false_when_only_own_credential_providers_configured() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "own-anthropic".to_string(),
-        ProviderEntry::anthropic_api("literal:k").with_credential_source(CredentialSource::Own),
+        ProviderEntry::anthropic_api("literal:k"),
     );
     providers.insert(
         "own-compat".to_string(),
@@ -40,7 +40,9 @@ fn true_when_a_forwarded_anthropic_provider_is_configured() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "forwarded".to_string(),
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        ProviderEntry::anthropic_api("")
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer),
     );
     let router = router_with_providers(providers);
     assert!(router.has_forwarded_provider());
@@ -55,7 +57,9 @@ fn true_when_a_forwarded_provider_coexists_with_own_credential_providers() {
     );
     providers.insert(
         "forwarded".to_string(),
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        ProviderEntry::anthropic_api("")
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer),
     );
     let router = router_with_providers(providers);
     assert!(

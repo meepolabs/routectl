@@ -14,9 +14,10 @@ fn has_account_id_error(errors: &[String]) -> bool {
 fn static_chatgpt_oauth_bearer_without_account_id_ref_is_refused() {
     // Arrange: the env var is never set, so a refusal cannot come from a
     // secret read.
-    let text = "[providers.codex]\nkind = \"openai-responses\"\n\
-                auth_kind = \"chatgpt-oauth\"\n\
-                api_key_ref = \"env://ROUTECTL_TEST_UNSET_OPENAI_JWT\"\n";
+    let text = "[providers.codex]\nformat = \"openai-responses\"\n\
+                base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+                credential = \"env://ROUTECTL_TEST_UNSET_OPENAI_JWT\"\n\
+                auth = \"bearer\"\n";
 
     // Act
     let errors = errors_for(text);
@@ -32,9 +33,10 @@ fn static_chatgpt_oauth_bearer_without_account_id_ref_is_refused() {
 
 #[test]
 fn static_chatgpt_oauth_bearer_with_account_id_ref_is_accepted() {
-    let text = "[providers.codex]\nkind = \"openai-responses\"\n\
-                auth_kind = \"chatgpt-oauth\"\n\
-                api_key_ref = \"env://ROUTECTL_TEST_UNSET_OPENAI_JWT\"\n\
+    let text = "[providers.codex]\nformat = \"openai-responses\"\n\
+                base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+                credential = \"env://ROUTECTL_TEST_UNSET_OPENAI_JWT\"\n\
+                auth = \"bearer\"\n\
                 account_id_ref = \"env://ROUTECTL_TEST_UNSET_OPENAI_ACCOUNT\"\n";
 
     let errors = errors_for(text);
@@ -44,8 +46,10 @@ fn static_chatgpt_oauth_bearer_with_account_id_ref_is_accepted() {
 
 #[test]
 fn oauth_bearer_may_omit_account_id_ref() {
-    let text = "[providers.codex]\nkind = \"openai-responses\"\n\
-                auth_kind = \"chatgpt-oauth\"\napi_key_ref = \"oauth://codex\"\n";
+    let text = "[providers.codex]\nformat = \"openai-responses\"\n\
+                base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+                credential = \"oauth://codex\"\n\
+                auth = \"bearer\"\n";
 
     let errors = errors_for(text);
 
@@ -54,8 +58,10 @@ fn oauth_bearer_may_omit_account_id_ref() {
 
 #[test]
 fn api_key_auth_with_account_id_ref_is_refused() {
-    let text = "[providers.openai]\nkind = \"openai-responses\"\n\
-                auth_kind = \"api-key\"\napi_key_ref = \"env://ROUTECTL_TEST_UNSET_KEY\"\n\
+    let text = "[providers.openai]\nformat = \"openai-responses\"\n\
+                base_url = \"https://api.openai.com/v1\"\n\
+                credential = \"env://ROUTECTL_TEST_UNSET_KEY\"\n\
+                auth = \"bearer\"\n\
                 account_id_ref = \"env://ROUTECTL_TEST_UNSET_OPENAI_ACCOUNT\"\n";
 
     let errors = errors_for(text);

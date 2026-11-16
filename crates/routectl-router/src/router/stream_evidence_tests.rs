@@ -595,9 +595,10 @@ impl Provider for ScriptedStream {
 
 const OPENAI_P1: &str = r#"
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 const OPENAI_P1_DISABLED: &str = r#"
@@ -605,23 +606,26 @@ const OPENAI_P1_DISABLED: &str = r#"
 enabled = false
 
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 const ANTHROPIC_P1: &str = r#"
 [providers.p1]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://example.test"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "x-api-key"
 "#;
 
 const ANTHROPIC_P1_FORWARDED: &str = r#"
 [providers.p1]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://example.test"
-credential_source = "forwarded"
+credential = "forwarded"
+auth = "bearer"
 "#;
 
 fn router_with(toml_text: &str, tail: Tail) -> Router {

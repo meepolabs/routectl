@@ -28,7 +28,7 @@ const ALIAS: &str = "a";
 const NEVER_SAMPLED: WireCheckParams = WireCheckParams::sampling_for_tests(0, 1000);
 const EDIT_REJECTED: &str = "routectl_edit_rejected";
 const REFUSED_FIELD: &str = "Extra inputs are not permitted";
-const ANTHROPIC: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+const ANTHROPIC: &str = "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
 /// An operator extra under `metadata`, whose keys render masked.
 const OPERATOR_EXTRA: &str = "payload_extras = { metadata = { op_key = \"v\" } }\n";
 /// Two operator extras under `metadata`: `op_key` added, `b` rewritten

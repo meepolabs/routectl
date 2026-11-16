@@ -70,7 +70,7 @@ impl PriceSnapshot {
 /// True iff `target` bills as a managed-OAuth subscription rather than per
 /// token.
 ///
-/// `target` may name a `[providers]` entry (its own `api_key_ref` decides) or a
+/// `target` may name a `[providers]` entry (its own `credential` decides) or a
 /// `[pools]` block, because `[models.X] provider` resolves against both in one
 /// namespace. A pool answers from its MEMBERS: `validate_pools` requires every
 /// member to authenticate with an `oauth://` credential, so a pool whose
@@ -78,7 +78,7 @@ impl PriceSnapshot {
 /// keeps the predicate honest if that restriction is later widened to API-key
 /// members. A name unknown to the config, or a provider declaring no ref at
 /// all, is NOT subscription (it simply carries no cost). This is the ONLY
-/// subscription signal -- `auth_kind` is deliberately not consulted.
+/// subscription signal -- `auth` is deliberately not consulted.
 ///
 /// THE shared predicate: every cost surface (the usage report's row
 /// classification, the doctor pricing section, the probe estimate) checks it

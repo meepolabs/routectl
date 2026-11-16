@@ -220,8 +220,9 @@ pub(super) fn chain_router_with(
     };
     let mut primary_entry = ProviderEntry::anthropic_api("literal:k");
     if primary_forwarded {
-        primary_entry =
-            primary_entry.with_credential_source(crate::config::CredentialSource::Forwarded);
+        primary_entry = primary_entry
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer);
     }
     config.providers.insert("p-a".into(), primary_entry);
     config

@@ -1,6 +1,8 @@
-use super::{CacheCapability, Config, ProviderEntry, ReductionConfig, default_anthropic_base};
-#[cfg(feature = "gemini")]
-use routectl_providers::gemini::GeminiAuthMode;
+#[cfg(feature = "bedrock")]
+use super::Cloud;
+#[cfg(any(feature = "bedrock", feature = "gemini"))]
+use super::{Auth, Format};
+use super::{CacheCapability, Config, ProviderEntry, ReductionConfig};
 
 #[test]
 #[should_panic(expected = "with_anthropic_version")]
@@ -28,26 +30,16 @@ fn kind_str_returns_stable_config_tokens() {
     assert_eq!(ProviderEntry::gemini("literal:k").kind_str(), "gemini",);
     #[cfg(feature = "bedrock")]
     {
-        let bedrock = ProviderEntry::Bedrock {
-            region: "us-east-1".into(),
-            api_shape: super::BedrockApiShapeConfig::default(),
-            creds: super::BedrockCredsConfig::DefaultChain,
-            user_agent: None,
-            header_extras: std::collections::BTreeMap::new(),
-            payload_extras: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            runtime: Default::default(),
-        };
+        let bedrock = bedrock_entry(Format::BedrockInvoke, None);
         assert_eq!(bedrock.kind_str(), "bedrock");
     }
 }
 
-/// The vocabulary and the discriminant must agree in both directions: every
+/// The vocabulary and the family tokens must agree in both directions: every
 /// constructible entry's `kind_str()` is a listed token, and every listed
-/// token parses as a `kind = "..."` discriminant. A variant added without a
-/// vocabulary entry (or vice versa) fails here rather than silently narrowing
-/// a caller that gates on the list.
+/// token is the family token of some constructible entry. A format added
+/// without a vocabulary entry (or vice versa) fails here rather than silently
+/// narrowing a caller that gates on the list.
 #[test]
 fn config_provider_kinds_matches_the_kind_str_discriminants() {
     let mut constructible: Vec<&'static str> = vec![
@@ -59,20 +51,7 @@ fn config_provider_kinds_matches_the_kind_str_discriminants() {
     #[cfg(feature = "gemini")]
     constructible.push(ProviderEntry::gemini("literal:k").kind_str());
     #[cfg(feature = "bedrock")]
-    constructible.push(
-        ProviderEntry::Bedrock {
-            region: "us-east-1".into(),
-            api_shape: super::BedrockApiShapeConfig::default(),
-            creds: super::BedrockCredsConfig::DefaultChain,
-            user_agent: None,
-            header_extras: std::collections::BTreeMap::new(),
-            payload_extras: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            runtime: Default::default(),
-        }
-        .kind_str(),
-    );
+    constructible.push(bedrock_entry(Format::BedrockInvoke, None).kind_str());
 
     constructible.sort_unstable();
     let mut listed = super::CONFIG_PROVIDER_KINDS.to_vec();
@@ -95,56 +74,49 @@ fn gemini_constructor_defaults() {
     let entry = ProviderEntry::gemini("env://GEMINI_API_KEY");
     assert_eq!(entry.kind_str(), "gemini");
     assert_eq!(entry.api_key_ref(), Some("env://GEMINI_API_KEY"));
-    match entry {
-        ProviderEntry::Gemini {
-            base_url,
-            header_extras,
-            payload_extras,
-            ..
-        } => {
-            assert_eq!(base_url, "https://generativelanguage.googleapis.com/v1beta",);
-            assert!(header_extras.is_empty());
-            assert!(payload_extras.is_none());
-        }
-        other => panic!("expected Gemini entry; got {other:?}"),
-    }
+    assert_eq!(entry.format(), Format::Gemini);
+    assert_eq!(entry.auth, Auth::XGoogApiKey);
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://generativelanguage.googleapis.com/v1beta"),
+    );
+    assert!(entry.cloud.is_none());
+    assert!(entry.header_extras.is_empty());
+    assert!(entry.payload_extras.is_none());
 }
 
 #[cfg(feature = "gemini")]
 #[test]
-fn gemini_auth_mode_defaults_to_api_key_when_omitted() {
+fn gemini_format_parses_as_the_api_key_surface() {
     let toml_text = r#"
 [providers.gemini]
-kind = "gemini"
-api_key_ref = "env://GEMINI_API_KEY"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "env://GEMINI_API_KEY"
+auth = "x-goog-api-key"
 "#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse omitted auth_mode");
+    let cfg: Config = toml::from_str(toml_text).expect("parse gemini entry");
     let entry = cfg.providers.get("gemini").expect("gemini provider");
-    match entry {
-        ProviderEntry::Gemini { auth_mode, .. } => {
-            assert_eq!(*auth_mode, GeminiAuthMode::ApiKey);
-        }
-        other => panic!("expected Gemini entry; got {other:?}"),
-    }
+    assert_eq!(entry.format(), Format::Gemini);
+    assert_eq!(entry.auth, Auth::XGoogApiKey);
+    assert_eq!(entry.kind_str(), "gemini");
 }
 
 #[cfg(feature = "gemini")]
 #[test]
-fn gemini_auth_mode_parses_cloud_code() {
+fn gemini_cloud_code_format_parses_into_the_gemini_family() {
     let toml_text = r#"
 [providers.gemini]
-kind = "gemini"
-api_key_ref = "oauth://antigravity"
-auth_mode = "cloud-code"
+format = "gemini-cloud-code"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
+credential = "oauth://antigravity"
+auth = "bearer"
 "#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse cloud-code auth_mode");
+    let cfg: Config = toml::from_str(toml_text).expect("parse cloud-code entry");
     let entry = cfg.providers.get("gemini").expect("gemini provider");
-    match entry {
-        ProviderEntry::Gemini { auth_mode, .. } => {
-            assert_eq!(*auth_mode, GeminiAuthMode::CloudCode);
-        }
-        other => panic!("expected Gemini entry; got {other:?}"),
-    }
+    assert_eq!(entry.format(), Format::GeminiCloudCode);
+    assert_eq!(entry.auth, Auth::Bearer);
+    assert_eq!(entry.kind_str(), "gemini");
 }
 
 #[test]
@@ -154,126 +126,104 @@ fn redact_secrets_redacts_literal_only() {
     assert_eq!(entry.secret_uris(), vec!["literal:[REDACTED]"]);
 }
 
-/// `redact_secrets` reduces `base_url` to its origin on the `String`-valued
-/// variants: userinfo, path, and query are all credential-carrying positions in
-/// practice, so none of them may survive into a displayed config.
+/// `redact_secrets` reduces `base_url` to its origin: userinfo, path, and
+/// query are all credential-carrying positions in practice, so none of them
+/// may survive into a displayed config.
 #[test]
-fn redact_secrets_reduces_base_url_to_origin_on_string_variants() {
+fn redact_secrets_reduces_base_url_to_origin() {
     let raw = "https://user:sk-live-FAKE@upstream.example:8443/v1?token=sk-query-FAKE";
 
     let mut compat = ProviderEntry::openai_compat(raw, "literal:sk-test");
     compat.redact_secrets();
-    match &compat {
-        ProviderEntry::OpenaiCompat { base_url, .. } => {
-            assert_eq!(base_url, "https://upstream.example:8443");
-        }
-        other => panic!("expected OpenaiCompat; got {other:?}"),
-    }
+    assert_eq!(
+        compat.base_url.as_deref(),
+        Some("https://upstream.example:8443")
+    );
 
     let mut anthropic = ProviderEntry::anthropic_api("literal:sk-ant-test").with_base_url(raw);
     anthropic.redact_secrets();
-    match &anthropic {
-        ProviderEntry::AnthropicApi { base_url, .. } => {
-            assert_eq!(base_url, "https://upstream.example:8443");
-        }
-        other => panic!("expected AnthropicApi; got {other:?}"),
-    }
+    assert_eq!(
+        anthropic.base_url.as_deref(),
+        Some("https://upstream.example:8443")
+    );
 }
 
-/// The Gemini arm reduces too -- every `base_url`-bearing variant is covered,
-/// not just the two api-backed ones.
+/// A `gemini` entry parsed from TOML reduces too, not only the code-built
+/// entries above.
 #[cfg(feature = "gemini")]
 #[test]
 fn redact_secrets_reduces_base_url_on_the_gemini_arm() {
     let toml_text = r#"
 [providers.g]
-kind = "gemini"
-api_key_ref = "literal:super-secret"
+format = "gemini"
 base_url = "https://user:sk-live-FAKE@gw.example/v1beta"
+credential = "literal:super-secret"
+auth = "x-goog-api-key"
 "#;
     let mut cfg: Config = toml::from_str(toml_text).expect("parse");
     let entry = cfg.providers.get_mut("g").expect("gemini provider");
     entry.redact_secrets();
-    match entry {
-        ProviderEntry::Gemini { base_url, .. } => {
-            assert_eq!(base_url, "https://gw.example");
-        }
-        other => panic!("expected Gemini entry; got {other:?}"),
-    }
+    assert_eq!(entry.base_url.as_deref(), Some("https://gw.example"));
 }
 
-/// `OpenaiResponses` carries `Option<String>`: `Some` reduces, `None` stays
-/// `None`. `None` means "the factory picks the default endpoint" -- turning it
-/// into a redaction sentinel would misreport a config that set nothing at all.
+/// A set `base_url` reduces; an unset one (a cloud entry, whose endpoint the
+/// region derives) stays `None`. Turning `None` into a redaction sentinel
+/// would misreport a config that set no URL at all.
 #[cfg(feature = "openai-responses")]
 #[test]
-fn redact_secrets_reduces_some_base_url_and_preserves_none_on_openai_responses() {
+fn redact_secrets_reduces_a_set_base_url_and_preserves_an_unset_one() {
     let toml_text = r#"
 [providers.set]
-kind = "openai-responses"
-api_key_ref = "literal:sk-test"
+format = "openai-responses"
 base_url = "https://user:sk-live-FAKE@gw.example/v1"
+credential = "literal:sk-test"
+auth = "bearer"
 
 [providers.unset]
-kind = "openai-responses"
-api_key_ref = "literal:sk-test"
+format = "openai-responses"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "literal:sk-test"
+auth = "bearer"
 "#;
     let mut cfg: Config = toml::from_str(toml_text).expect("parse");
     for entry in cfg.providers.values_mut() {
         entry.redact_secrets();
     }
-    match cfg.providers.get("set").expect("set provider") {
-        ProviderEntry::OpenaiResponses { base_url, .. } => {
-            assert_eq!(base_url.as_deref(), Some("https://gw.example"));
-        }
-        other => panic!("expected OpenaiResponses; got {other:?}"),
-    }
-    match cfg.providers.get("unset").expect("unset provider") {
-        ProviderEntry::OpenaiResponses { base_url, .. } => {
-            assert!(
-                base_url.is_none(),
-                "an unset base_url must stay None, never a sentinel; got: {base_url:?}"
-            );
-        }
-        other => panic!("expected OpenaiResponses; got {other:?}"),
-    }
+    let set = cfg.providers.get("set").expect("set provider");
+    assert_eq!(set.base_url.as_deref(), Some("https://gw.example"));
+    let unset = cfg.providers.get("unset").expect("unset provider");
+    assert!(
+        unset.base_url.is_none(),
+        "an unset base_url must stay None, never a sentinel; got: {:?}",
+        unset.base_url
+    );
 }
 
-/// An EMPTY `base_url` must stay empty. This is a correctness constraint, not a
-/// formatting preference: the bedrock-mantle lane REQUIRES an empty `base_url`
-/// (the factory asserts on it, because `region` is the single source of truth
-/// for the mantle endpoint), so rewriting `""` to a sentinel would render a
-/// valid mantle config as broken in `config show`.
+/// An EMPTY `base_url` stays empty: `config show` reports what the operator
+/// wrote (the plan refuses the entry, and the operator must see why), and
+/// empty stays distinguishable from the withhold sentinel below.
 #[test]
 fn redact_secrets_leaves_an_empty_base_url_empty() {
     let toml_text = r#"
-[providers.mantle-shaped]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+[providers.empty-base]
+format = "anthropic-messages"
 base_url = ""
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 "#;
     let mut cfg: Config = toml::from_str(toml_text).expect("parse");
-    let entry = cfg
-        .providers
-        .get_mut("mantle-shaped")
-        .expect("provider entry");
+    let entry = cfg.providers.get_mut("empty-base").expect("provider entry");
     entry.redact_secrets();
-    match entry {
-        ProviderEntry::AnthropicApi { base_url, .. } => {
-            assert_eq!(
-                base_url, "",
-                "the mantle lane requires an empty base_url; a sentinel here would \
-                 misreport a valid config as broken"
-            );
-        }
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some(""),
+        "an empty base_url must print as written, never as a sentinel"
+    );
 }
 
 /// A `base_url` the origin projection refuses to reduce becomes the fixed
-/// `[REDACTED]` sentinel, never an empty string -- empty means the mantle lane
-/// per `redact_secrets_leaves_an_empty_base_url_empty`, so the two outcomes must
-/// stay distinguishable.
+/// `[REDACTED]` sentinel, never an empty string, so it stays distinguishable
+/// from the empty value `redact_secrets_leaves_an_empty_base_url_empty` pins.
 #[test]
 fn redact_secrets_withholds_an_unprojectable_base_url_as_a_sentinel() {
     // A second `@` demoted past the authority: the projection withholds this
@@ -283,22 +233,12 @@ fn redact_secrets_withholds_an_unprojectable_base_url_as_a_sentinel() {
         "literal:sk-test",
     );
     entry.redact_secrets();
-    match &entry {
-        ProviderEntry::OpenaiCompat { base_url, .. } => {
-            assert_eq!(base_url, "[REDACTED]");
-            assert!(
-                !base_url.is_empty(),
-                "the withhold sentinel must never be empty: empty is a meaningful \
-                 mantle-lane value"
-            );
-        }
-        other => panic!("expected OpenaiCompat; got {other:?}"),
-    }
+    assert_eq!(entry.base_url.as_deref(), Some("[REDACTED]"));
 }
 
-/// `forward_client_headers` defaults to an empty list when the
-/// field is omitted from the TOML (secure-by-default: drop every
-/// captured `x-claude-code-*` header). Explicit lists round-trip
+/// `forward_client_headers` is unset when the field is omitted from the
+/// TOML (secure-by-default: drop every captured `x-claude-code-*`
+/// header). Explicit lists round-trip
 /// through serialize/deserialize so the operator's allowlist is
 /// preserved end-to-end.
 #[test]
@@ -306,64 +246,54 @@ fn anthropic_api_forward_client_headers_round_trips() {
     // Default: omitted -> empty Vec.
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse default");
     let entry = cfg.providers.get("anthropic").expect("anthropic provider");
-    match entry {
-        ProviderEntry::AnthropicApi {
-            forward_client_headers,
-            ..
-        } => assert!(
-            forward_client_headers.is_empty(),
-            "default must be empty; got: {forward_client_headers:?}"
-        ),
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    assert!(
+        entry.forward_client_headers.is_none(),
+        "default must be unset; got: {:?}",
+        entry.forward_client_headers
+    );
 
     // Explicit list of two names.
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
 "#;
+    let expected = vec![
+        "x-claude-code-session-id".to_string(),
+        "x-claude-code-agent-id".to_string(),
+    ];
     let cfg: Config = toml::from_str(toml_text).expect("parse explicit");
     let entry = cfg.providers.get("anthropic").expect("anthropic provider");
-    match entry {
-        ProviderEntry::AnthropicApi {
-            forward_client_headers,
-            ..
-        } => assert_eq!(
-            forward_client_headers,
-            &vec![
-                "x-claude-code-session-id".to_string(),
-                "x-claude-code-agent-id".to_string(),
-            ],
-            "explicit list must round-trip"
-        ),
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    assert_eq!(
+        entry.forward_client_headers.as_ref(),
+        Some(&expected),
+        "explicit list must parse"
+    );
 
     // Round-trip: serialize, deserialize, compare.
     let cfg_in: Config = toml::from_str(toml_text).expect("parse in");
     let serialized = toml::to_string(&cfg_in).expect("serialize");
     let cfg_out: Config = toml::from_str(&serialized).expect("parse out");
-    match cfg_out.providers.get("anthropic").expect("anthropic") {
-        ProviderEntry::AnthropicApi {
-            forward_client_headers,
-            ..
-        } => assert_eq!(
-            forward_client_headers,
-            &vec![
-                "x-claude-code-session-id".to_string(),
-                "x-claude-code-agent-id".to_string(),
-            ],
-            "round-trip must preserve list"
-        ),
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    assert_eq!(
+        cfg_out
+            .providers
+            .get("anthropic")
+            .expect("anthropic")
+            .forward_client_headers
+            .as_ref(),
+        Some(&expected),
+        "round-trip must preserve list"
+    );
 }
 
 /// `RetryPolicy::default()` ships with `jitter_ms = 50` so
@@ -431,53 +361,44 @@ fn cache_capability_per_kind_defaults_are_conservative() {
 #[cfg(feature = "gemini")]
 #[test]
 fn gemini_provider_entry_parses_and_exposes_secret_uri() {
-    // Minimal: only api_key_ref -> base_url defaults to v1beta.
     let toml_text = r#"
 [providers.g]
-kind = "gemini"
-api_key_ref = "literal:test-key"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "literal:test-key"
+auth = "x-goog-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse minimal");
-    match cfg.providers.get("g").expect("gemini provider") {
-        ProviderEntry::Gemini {
-            api_key_ref,
-            base_url,
-            ..
-        } => {
-            assert_eq!(api_key_ref, "literal:test-key");
-            assert_eq!(
-                base_url, "https://generativelanguage.googleapis.com/v1beta",
-                "base_url must default to the v1beta endpoint"
-            );
-        }
-        other => panic!("expected Gemini entry; got {other:?}"),
-    }
+    let minimal = cfg.providers.get("g").expect("gemini provider");
+    assert_eq!(minimal.api_key_ref(), Some("literal:test-key"));
+    assert_eq!(
+        minimal.base_url.as_deref(),
+        Some("https://generativelanguage.googleapis.com/v1beta"),
+    );
 
     // Explicit base_url + header_extras.
     let toml_text = r#"
 [providers.g]
-kind = "gemini"
-api_key_ref = "env://GEMINI_API_KEY"
+format = "gemini"
 base_url = "https://example.test/v1beta"
+credential = "env://GEMINI_API_KEY"
+auth = "x-goog-api-key"
 
 [providers.g.header_extras]
 x-custom = "v"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse explicit");
     let entry = cfg.providers.get("g").expect("gemini provider");
-    match entry {
-        ProviderEntry::Gemini {
-            base_url,
-            header_extras,
-            ..
-        } => {
-            assert_eq!(base_url, "https://example.test/v1beta");
-            assert_eq!(header_extras.get("x-custom").map(String::as_str), Some("v"));
-        }
-        other => panic!("expected Gemini entry; got {other:?}"),
-    }
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://example.test/v1beta")
+    );
+    assert_eq!(
+        entry.header_extras.get("x-custom").map(String::as_str),
+        Some("v")
+    );
 
-    // kind discriminator + secret enumeration / redaction contract.
+    // Family token + secret enumeration / redaction contract.
     assert_eq!(entry.kind_str(), "gemini");
     assert_eq!(entry.secret_uris(), vec!["env://GEMINI_API_KEY"]);
 }
@@ -487,19 +408,20 @@ x-custom = "v"
 fn gemini_redact_secrets_masks_literal_api_key() {
     let toml_text = r#"
 [providers.g]
-kind = "gemini"
-api_key_ref = "literal:super-secret"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "literal:super-secret"
+auth = "x-goog-api-key"
 "#;
     let mut cfg: Config = toml::from_str(toml_text).expect("parse");
     let entry = cfg.providers.get_mut("g").expect("gemini provider");
     entry.redact_secrets();
-    match entry {
-        ProviderEntry::Gemini { api_key_ref, .. } => assert!(
-            !api_key_ref.contains("super-secret"),
-            "literal key must be redacted; got: {api_key_ref}"
-        ),
-        other => panic!("expected Gemini entry; got {other:?}"),
-    }
+    assert!(
+        !entry.credential.contains("super-secret"),
+        "literal key must be redacted; got: {}",
+        entry.credential
+    );
+    assert_eq!(entry.credential, "literal:[REDACTED]");
 }
 
 #[test]
@@ -518,31 +440,20 @@ fn cache_capability_falls_back_to_per_kind_default_when_unset() {
 }
 
 #[cfg(feature = "bedrock")]
-fn bedrock_entry(
-    api_shape: super::BedrockApiShapeConfig,
-    cache_capability: Option<CacheCapability>,
-) -> ProviderEntry {
-    ProviderEntry::Bedrock {
-        region: "us-east-1".into(),
-        api_shape,
-        creds: super::BedrockCredsConfig::DefaultChain,
-        user_agent: None,
-        header_extras: std::collections::BTreeMap::new(),
-        payload_extras: None,
-        cache_capability,
-        reduction_enabled: None,
-        runtime: Default::default(),
-    }
+fn bedrock_entry(format: Format, cache_capability: Option<CacheCapability>) -> ProviderEntry {
+    let mut entry = ProviderEntry::cloud_aws(format, "us-east-1", "aws://chain", Auth::AwsSigv4);
+    entry.cache_capability = cache_capability;
+    entry
 }
 
 /// The Bedrock Invoke egress lowers a top-level `cache_control`
 /// marker to the per-block form Invoke caches on, so auto-emit is
 /// safe there: `cache_capability()` derives supports_top_level = true
-/// from `api_shape = Invoke`.
+/// from `format = "bedrock-invoke"`.
 #[cfg(feature = "bedrock")]
 #[test]
 fn cache_capability_bedrock_invoke_supports_top_level() {
-    let cap = bedrock_entry(super::BedrockApiShapeConfig::Invoke, None).cache_capability();
+    let cap = bedrock_entry(Format::BedrockInvoke, None).cache_capability();
     assert!(cap.supports_top_level_cache_control);
     assert!(cap.cache_hit_observable);
 }
@@ -553,19 +464,18 @@ fn cache_capability_bedrock_invoke_supports_top_level() {
 #[cfg(feature = "bedrock")]
 #[test]
 fn cache_capability_bedrock_converse_fails_closed() {
-    let cap = bedrock_entry(super::BedrockApiShapeConfig::Converse, None).cache_capability();
+    let cap = bedrock_entry(Format::BedrockConverse, None).cache_capability();
     assert!(!cap.supports_top_level_cache_control);
     assert!(cap.cache_hit_observable);
 }
 
-/// An explicit operator override always wins over the api_shape-
-/// derived default, even when the shape would otherwise enable
-/// auto-emit.
+/// An explicit operator override always wins over the format-derived
+/// default, even when the format would otherwise enable auto-emit.
 #[cfg(feature = "bedrock")]
 #[test]
-fn cache_capability_bedrock_override_beats_api_shape() {
+fn cache_capability_bedrock_override_beats_the_format_default() {
     let cap = bedrock_entry(
-        super::BedrockApiShapeConfig::Invoke,
+        Format::BedrockInvoke,
         Some(CacheCapability::new(false, false)),
     )
     .cache_capability();
@@ -579,8 +489,10 @@ fn cache_capability_operator_override_beats_per_kind_default() {
     // top-level breakpoint but DOES report cache hits.
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 cache_capability = { supports_top_level_cache_control = false, cache_hit_observable = true }
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse override");
@@ -606,9 +518,10 @@ cache_capability = { supports_top_level_cache_control = false, cache_hit_observa
 fn cache_capability_omitted_uses_default_and_deny_unknown_fields_holds() {
     let toml_text = r#"
 [providers.openai]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse default");
     let entry = cfg.providers.get("openai").expect("openai provider");
@@ -620,9 +533,10 @@ api_key_ref = "literal:k"
     // An unknown sub-field inside cache_capability must be rejected.
     let bad = r#"
 [providers.openai]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 cache_capability = { supports_top_level_cache_control = true, bogus = 1 }
 "#;
     assert!(
@@ -638,8 +552,10 @@ cache_capability = { supports_top_level_cache_control = true, bogus = 1 }
 fn cache_capability_anthropic_default_base_uses_optimistic_default() {
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse default base");
     let entry = cfg.providers.get("anthropic").expect("anthropic provider");
@@ -663,14 +579,16 @@ fn anthropic_api_base_url_reports_a_plain_entrys_configured_base() {
     // that never answers.
     let toml_text = r#"
 [providers.direct]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-test"
+auth = "x-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse direct anthropic");
     let entry = cfg.providers.get("direct").expect("direct provider");
     assert_eq!(
         entry.anthropic_api_base_url(),
-        Some(default_anthropic_base().as_str()),
+        Some("https://api.anthropic.com"),
         "a plain anthropic-api entry egresses to its configured base, so it is reportable",
     );
 }
@@ -679,12 +597,13 @@ api_key_ref = "literal:sk-test"
 fn anthropic_api_base_url_reports_a_plain_entrys_custom_base() {
     // A custom remote base is still the effective egress, so it is reportable
     // too -- a remote mirror's rejections ARE attributable to it. Included so
-    // the mantle refusal cannot be mistaken for "anything non-default refuses".
+    // the cloud refusal cannot be mistaken for "anything non-default refuses".
     let toml_text = r#"
 [providers.mirror]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-test"
+format = "anthropic-messages"
 base_url = "https://api.example.com/anthropic"
+credential = "literal:sk-test"
+auth = "x-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse custom base");
     let entry = cfg.providers.get("mirror").expect("mirror provider");
@@ -697,104 +616,109 @@ base_url = "https://api.example.com/anthropic"
 
 #[cfg(feature = "bedrock")]
 #[test]
-fn anthropic_api_base_url_refuses_the_bedrock_mantle_sub_lane() {
-    // The case a bare variant match gets wrong. Mantle validation REQUIRES
-    // `base_url` at its default, and the factory derives the real endpoint from
-    // the region -- so the configured value is not the effective egress, and
-    // reporting it would classify a Bedrock upstream as a remote Anthropic one.
+fn anthropic_api_base_url_refuses_an_anthropic_entry_over_the_aws_cloud() {
+    // An `anthropic-messages` entry over `cloud` egresses through the AWS
+    // managed surface; reporting it would classify a Bedrock upstream as a
+    // direct Anthropic one.
     let toml_text = r#"
 [providers.mantle]
-kind = "anthropic-api"
-api_key_ref = ""
-
-[providers.mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.mantle.bedrock_mantle.creds]
-kind = "bearer-key"
-key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+format = "anthropic-messages"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth = "bearer"
 "#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse mantle lane");
-    let entry = cfg.providers.get("mantle").expect("mantle provider");
-    // Premise: the entry really does carry the default base, so the refusal
-    // cannot be passing because the base was empty or odd.
-    assert!(
-        matches!(
-            entry,
-            ProviderEntry::AnthropicApi { base_url, .. } if base_url == &default_anthropic_base()
-        ),
-        "premise: a mantle entry keeps the DEFAULT anthropic base, which is exactly why a bare \
-         variant match would report it as an attributable remote host",
+    let cfg: Config = toml::from_str(toml_text).expect("parse cloud entry");
+    let entry = cfg.providers.get("mantle").expect("cloud provider");
+    // Premise: the entry is the same format as the reportable rows above and
+    // does name an egress, so the refusal is about the carrier.
+    assert_eq!(entry.format(), Format::AnthropicMessages);
+    assert_eq!(
+        entry.classifiable_egress_base_url().as_deref(),
+        Some("https://bedrock-mantle.us-west-2.api.aws/anthropic"),
     );
     assert_eq!(
         entry.anthropic_api_base_url(),
         None,
-        "the mantle sub-lane egresses through Bedrock, so its configured base must not be \
-         reported as a direct Anthropic one",
+        "a cloud entry egresses through Bedrock, so it must not be reported as a direct \
+         Anthropic one",
     );
 }
 
-/// One `[providers.m]` Mantle entry of `kind` in `region`.
+/// One `[providers.m]` entry of `format` over the AWS cloud in `region`,
+/// parsed from TOML.
 #[cfg(feature = "bedrock")]
-fn mantle_entry(kind: &str, region: &str) -> ProviderEntry {
+fn mantle_entry(format: Format, region: &str) -> ProviderEntry {
     toml::from_str::<Config>(&format!(
-        "[providers.m]\nkind = \"{kind}\"\napi_key_ref = \"\"\n\
-         bedrock_mantle = {{ region = \"{region}\", creds = {{ kind = \"bearer-key\", \
-         key_ref = \"env://AWS_BEARER_TOKEN_BEDROCK\" }} }}\n"
+        "[providers.m]\nformat = \"{}\"\n\
+         cloud = {{ name = \"aws\", region = \"{region}\" }}\n\
+         credential = \"env://AWS_BEARER_TOKEN_BEDROCK\"\nauth = \"bearer\"\n",
+        format.as_str()
     ))
-    .expect("parse mantle lane")
+    .expect("parse cloud entry")
     .providers
     .remove("m")
-    .expect("mantle provider")
+    .expect("cloud provider")
 }
 
-/// Each Mantle sub-lane egresses to the base its region derives, the one the
-/// factory dials, and a region that fails admission names none. Compared
-/// against literals so a drifted derivation is caught here rather than echoed
-/// back by it.
+/// Each format over the AWS cloud egresses to the base its region derives,
+/// the one the factory dials, and a region that fails admission names none.
+/// Compared against literals so a drifted derivation is caught here rather
+/// than echoed back by it.
 ///
-/// Mutation check: drop the anthropic Mantle arm -> red on the anthropic
-/// us-west-2 row (it falls to `anthropic_api_base_url`, `None`); replace a
-/// Mantle arm's body with `Some(std::borrow::Cow::Owned(<base>(&m.region)
-/// .unwrap_or_else(|_| "https://bedrock-mantle.invalid".into())))`, where
-/// `<base>` is that arm's own base function
-/// (`routectl_providers::mantle::mantle_anthropic_base` on the anthropic arm)
-/// -> red on that sub-lane's bad-region row.
+/// Mutation check: map `Format::AnthropicMessages` to the OpenAI-vocabulary
+/// base in `cloud_egress_base` -> red on the anthropic us-west-2 row; replace
+/// `base.ok()` with `Some(base.unwrap_or_else(|_| "https://bedrock-mantle.invalid".into()))`
+/// -> red on every bad-region row.
 #[cfg(feature = "bedrock")]
 #[test]
-fn classifiable_egress_base_url_answers_each_mantle_sub_lane() {
+fn classifiable_egress_base_url_answers_each_cloud_format() {
     #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
     let mut rows = vec![
         (
-            "anthropic-api",
+            Format::AnthropicMessages,
             "us-west-2",
             Some("https://bedrock-mantle.us-west-2.api.aws/anthropic"),
         ),
-        ("anthropic-api", "not-a-region", None),
+        (Format::AnthropicMessages, "not-a-region", None),
         (
-            "openai-compat",
+            Format::OpenaiChat,
             "us-west-2",
             Some("https://bedrock-mantle.us-west-2.api.aws/openai/v1"),
         ),
-        ("openai-compat", "not-a-region", None),
+        (Format::OpenaiChat, "not-a-region", None),
+        (
+            Format::BedrockInvoke,
+            "us-west-2",
+            Some("https://bedrock-runtime.us-west-2.amazonaws.com"),
+        ),
+        (Format::BedrockInvoke, "not-a-region", None),
+        (
+            Format::BedrockConverse,
+            "us-west-2",
+            Some("https://bedrock-runtime.us-west-2.amazonaws.com"),
+        ),
     ];
     #[cfg(feature = "openai-responses")]
     rows.extend([
         (
-            "openai-responses",
+            Format::OpenaiResponses,
             "us-west-2",
             Some("https://bedrock-mantle.us-west-2.api.aws/openai/v1"),
         ),
-        ("openai-responses", "not-a-region", None),
+        (Format::OpenaiResponses, "not-a-region", None),
     ]);
 
-    for (kind, region, expected) in rows {
-        let entry = mantle_entry(kind, region);
-        assert_eq!(entry.kind_str(), kind, "premise: {kind} parsed as itself");
+    for (format, region, expected) in rows {
+        let entry = mantle_entry(format, region);
+        assert_eq!(
+            entry.format(),
+            format,
+            "premise: {format:?} parsed as itself"
+        );
         assert_eq!(
             entry.classifiable_egress_base_url().as_deref(),
             expected,
-            "{kind} Mantle in {region}",
+            "{format:?} over the AWS cloud in {region}",
         );
     }
 }
@@ -803,9 +727,10 @@ fn classifiable_egress_base_url_answers_each_mantle_sub_lane() {
 fn anthropic_api_base_url_refuses_every_other_kind() {
     let toml_text = r#"
 [providers.compat]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://api.example.com/v1"
-api_key_ref = "literal:sk-test"
+credential = "literal:sk-test"
+auth = "bearer"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse openai-compat");
     assert_eq!(
@@ -818,60 +743,57 @@ api_key_ref = "literal:sk-test"
     );
 }
 
-/// An `openai-responses` entry egresses to its configured `base_url`, else to
-/// the `auth_kind` default, and a bare `bedrock-mantle` marker, which the
-/// factory refuses to build, names none. The default rows compare against
-/// literals so a drifted default is caught here, not echoed back by the
-/// function under test.
+/// An `openai-responses` entry egresses to its configured `base_url`; the
+/// code-built surfaces start on the Codex host or the OpenAI API, and an
+/// entry that sets neither `base_url` nor `cloud` (which the plan refuses)
+/// names none. The base rows compare against literals so a drifted builder
+/// base is caught here, not echoed back by the function under test.
 #[cfg(feature = "openai-responses")]
 #[test]
 fn classifiable_egress_base_url_answers_openai_responses_lanes() {
     use routectl_providers::openai_responses::AuthKind;
 
+    let no_carrier = {
+        let mut entry = ProviderEntry::openai_responses("env://OPENAI_KEY");
+        entry.base_url = None;
+        entry
+    };
     let rows: Vec<(&str, ProviderEntry, Option<&str>)> = vec![
         (
-            "chatgpt-oauth with base_url unset egresses to the codex default",
+            "the chatgpt-oauth builder egresses to the codex host",
             ProviderEntry::openai_responses("env://OPENAI_JWT"),
             Some("https://chatgpt.com/backend-api/codex"),
         ),
         (
-            "api-key with base_url unset egresses to the platform default",
+            "the api-key builder egresses to the platform host",
             ProviderEntry::openai_responses("env://OPENAI_KEY")
                 .with_openai_responses_auth_kind(AuthKind::ApiKey),
             Some("https://api.openai.com/v1"),
         ),
         (
-            "a configured base_url is the egress regardless of auth_kind",
+            "a configured base_url is the egress",
             ProviderEntry::openai_responses("env://OPENAI_KEY")
                 .with_openai_responses_auth_kind(AuthKind::ApiKey)
                 .with_openai_responses_base_url("https://responses.example.com/v1"),
             Some("https://responses.example.com/v1"),
         ),
         (
-            "a bedrock-mantle marker without a bedrock_mantle block answers None, no panic",
-            ProviderEntry::openai_responses("env://AWS_BEARER_TOKEN_BEDROCK")
-                .with_openai_responses_auth_kind(AuthKind::BedrockMantle),
+            "an entry with neither base_url nor cloud answers None, no panic",
+            no_carrier,
             None,
         ),
     ];
-    // `auth_kind` is omitted, so it defaults to chatgpt-oauth: only the
-    // block itself can make this row answer the Mantle base.
     #[cfg(feature = "bedrock")]
     let rows = {
         let mut rows = rows;
         rows.push((
-            "a bedrock_mantle block answers its region's Mantle base",
-            toml::from_str::<Config>(
-                "[providers.m]\n\
-             kind = \"openai-responses\"\n\
-             api_key_ref = \"\"\n\
-             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", \
-             key_ref = \"env://AWS_BEARER_TOKEN_BEDROCK\" } }\n",
-            )
-            .expect("parse mantle responses lane")
-            .providers
-            .remove("m")
-            .expect("mantle provider"),
+            "a cloud entry answers its region's managed base",
+            ProviderEntry::cloud_aws(
+                Format::OpenaiResponses,
+                "us-east-1",
+                "env://AWS_BEARER_TOKEN_BEDROCK",
+                Auth::Bearer,
+            ),
             Some("https://bedrock-mantle.us-east-1.api.aws/openai/v1"),
         ));
         rows
@@ -886,37 +808,42 @@ fn classifiable_egress_base_url_answers_openai_responses_lanes() {
     }
 }
 
-/// A `gemini` entry egresses to its configured `base_url`, except a
-/// `cloud-code` entry left at the api-key public default, which dials the
-/// daily Cloud Code host. Literals, so a drifted default is caught here.
+/// A `gemini` or `gemini-cloud-code` entry egresses to exactly the
+/// `base_url` it writes, whichever host that is. Literals, so a rewritten
+/// base is caught here.
 #[cfg(feature = "gemini")]
 #[test]
 fn classifiable_egress_base_url_answers_gemini_lanes() {
-    let rows: [(&str, &str, &str); 4] = [
+    let rows: [(&str, &str, &str, &str); 4] = [
         (
-            "api-key with base_url unset egresses to the public default",
-            "",
+            "api-key on the public host egresses there",
+            "gemini",
+            "x-goog-api-key",
             "https://generativelanguage.googleapis.com/v1beta",
         ),
         (
-            "cloud-code with base_url unset egresses to the daily host",
-            "auth_mode = \"cloud-code\"\n",
+            "cloud-code on the daily host egresses there",
+            "gemini-cloud-code",
+            "bearer",
             "https://daily-cloudcode-pa.googleapis.com",
         ),
         (
             "cloud-code pinned to production egresses there",
-            "auth_mode = \"cloud-code\"\nbase_url = \"https://cloudcode-pa.googleapis.com\"\n",
+            "gemini-cloud-code",
+            "bearer",
             "https://cloudcode-pa.googleapis.com",
         ),
         (
             "api-key pinned to a mirror egresses there",
-            "base_url = \"https://gemini.example.com/v1beta\"\n",
+            "gemini",
+            "x-goog-api-key",
             "https://gemini.example.com/v1beta",
         ),
     ];
-    for (name, extra, expected) in rows {
+    for (name, format, auth, expected) in rows {
         let cfg: Config = toml::from_str(&format!(
-            "[providers.g]\nkind = \"gemini\"\napi_key_ref = \"oauth://antigravity\"\n{extra}"
+            "[providers.g]\nformat = \"{format}\"\nbase_url = \"{expected}\"\n\
+             credential = \"oauth://antigravity\"\nauth = \"{auth}\"\n"
         ))
         .expect("parse gemini entry");
         assert_eq!(
@@ -931,9 +858,10 @@ fn classifiable_egress_base_url_answers_gemini_lanes() {
 fn cache_capability_anthropic_custom_base_fails_closed() {
     let toml_text = r#"
 [providers.compat]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-test"
+format = "anthropic-messages"
 base_url = "https://api.example.com/anthropic"
+credential = "literal:sk-test"
+auth = "x-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse custom base");
     let entry = cfg.providers.get("compat").expect("compat provider");
@@ -955,9 +883,10 @@ base_url = "https://api.example.com/anthropic"
 fn cache_capability_anthropic_custom_base_override_wins() {
     let toml_text = r#"
 [providers.compat]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-test"
+format = "anthropic-messages"
 base_url = "https://api.example.com/anthropic"
+credential = "literal:sk-test"
+auth = "x-api-key"
 cache_capability = { supports_top_level_cache_control = true, cache_hit_observable = true }
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse custom base override");
@@ -973,11 +902,13 @@ cache_capability = { supports_top_level_cache_control = true, cache_hit_observab
 /// The kind-level default for per-block front-marker emission is `true`
 /// only for an anthropic-api entry on the default Anthropic base URL.
 #[test]
-fn per_block_breakpoints_default_true_for_anthropic_default_base() {
+fn per_block_breakpoints_default_true_on_the_first_party_anthropic_host() {
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse anthropic default base");
     let entry = cfg.providers.get("anthropic").expect("anthropic provider");
@@ -991,12 +922,13 @@ api_key_ref = "literal:sk-ant-test"
 /// A custom-base anthropic-api entry is an Anthropic-COMPATIBLE third
 /// party, so per-block emission stays off there.
 #[test]
-fn per_block_breakpoints_default_false_for_anthropic_custom_base() {
+fn per_block_breakpoints_default_false_on_a_custom_anthropic_host() {
     let toml_text = r#"
 [providers.compat]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
 base_url = "https://example.invalid/v1"
+credential = "literal:k"
+auth = "x-api-key"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse anthropic custom base");
     let entry = cfg.providers.get("compat").expect("compat provider");
@@ -1007,18 +939,15 @@ base_url = "https://example.invalid/v1"
     );
 }
 
-/// Both Bedrock shapes default to disabled.
+/// Both Bedrock formats default to disabled.
 #[cfg(feature = "bedrock")]
 #[test]
 fn per_block_breakpoints_default_false_for_both_bedrock_shapes() {
-    for shape in [
-        super::BedrockApiShapeConfig::Invoke,
-        super::BedrockApiShapeConfig::Converse,
-    ] {
-        let entry = bedrock_entry(shape, None);
+    for format in [Format::BedrockInvoke, Format::BedrockConverse] {
+        let entry = bedrock_entry(format, None);
         assert!(
             !entry.per_block_breakpoints_enabled(),
-            "bedrock {shape:?} must default to disabled"
+            "{format:?} must default to disabled"
         );
     }
 }
@@ -1043,9 +972,10 @@ fn reduction_omitted_block_defaults_enabled() {
     // Arrange: a config with no [reduction] table at all.
     let toml_text = r#"
 [providers.openai]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
     // Act
@@ -1155,9 +1085,10 @@ fn reduction_enabled_per_provider_accessor() {
     // Arrange: an explicit per-provider override of false.
     let toml_text = r#"
 [providers.openai]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 reduction_enabled = false
 "#;
 
@@ -1394,39 +1325,47 @@ fn per_block_wire_support_is_limited_to_anthropic_and_converse() {
 #[cfg(feature = "bedrock")]
 #[test]
 fn per_block_wire_support_splits_the_two_bedrock_shapes() {
-    assert!(
-        bedrock_entry(super::BedrockApiShapeConfig::Converse, None)
-            .supports_per_block_breakpoints(),
-    );
-    assert!(
-        !bedrock_entry(super::BedrockApiShapeConfig::Invoke, None).supports_per_block_breakpoints(),
-    );
+    assert!(bedrock_entry(Format::BedrockConverse, None).supports_per_block_breakpoints(),);
+    assert!(!bedrock_entry(Format::BedrockInvoke, None).supports_per_block_breakpoints(),);
 }
 
-/// Every provider kind that can carry a `bedrock_mantle` block redacts its
-/// creds, not only the one the CLI fixture exercises.
+/// Every format that rides the AWS cloud with a bearer credential redacts
+/// that credential, not only the one the CLI fixture exercises; the cloud
+/// itself prints as written.
 #[cfg(feature = "bedrock")]
 #[test]
-fn redact_secrets_redacts_mantle_creds_on_every_kind_that_carries_them() {
-    let mut kinds = vec!["openai-compat", "anthropic-api"];
+fn redact_secrets_redacts_a_cloud_bearer_credential_on_every_format() {
+    let mut formats = vec![
+        "openai-chat",
+        "anthropic-messages",
+        "bedrock-invoke",
+        "bedrock-converse",
+    ];
     if cfg!(feature = "openai-responses") {
-        kinds.push("openai-responses");
+        formats.push("openai-responses");
     }
-    for kind in kinds {
+    for format in formats {
         let toml_text = format!(
-            "[providers.m]\nkind = \"{kind}\"\napi_key_ref = \"\"\n\
-             bedrock_mantle = {{ region = \"us-west-2\", creds = {{ kind = \"bearer-key\", \
-             key_ref = \"literal:sk-mantle-FAKE\" }} }}\n"
+            "[providers.m]\nformat = \"{format}\"\n\
+             cloud = {{ name = \"aws\", region = \"us-west-2\" }}\n\
+             credential = \"literal:sk-mantle-FAKE\"\nauth = \"bearer\"\n"
         );
-        let mut cfg: Config = toml::from_str(&toml_text).expect("parse mantle lane");
-        let entry = cfg.providers.get_mut("m").expect("mantle provider");
+        let mut cfg: Config = toml::from_str(&toml_text).expect("parse cloud entry");
+        let entry = cfg.providers.get_mut("m").expect("cloud provider");
 
         entry.redact_secrets();
 
         assert_eq!(
             entry.secret_uris(),
             vec!["literal:[REDACTED]"],
-            "kind `{kind}`"
+            "format `{format}`"
+        );
+        assert_eq!(
+            entry.cloud,
+            Some(Cloud::Aws {
+                region: "us-west-2".into()
+            }),
+            "format `{format}`"
         );
     }
 }

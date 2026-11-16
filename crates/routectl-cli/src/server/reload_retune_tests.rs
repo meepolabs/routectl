@@ -16,9 +16,10 @@ fn gate_config_text(circuit_failures: u32, rpm_limit: u32) -> String {
         "version = {CURRENT_CONFIG_VERSION}\n\
          [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
          [providers.compat]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"http://127.0.0.1:1/v1\"\n\
-         api_key_ref = \"env://{KEY_ENV}\"\n\
+         credential = \"env://{KEY_ENV}\"\n\
+         auth = \"bearer\"\n\
          circuit_failures = {circuit_failures}\n\
          rpm_limit = {rpm_limit}\n\n\
          [models.{MODEL}]\n\

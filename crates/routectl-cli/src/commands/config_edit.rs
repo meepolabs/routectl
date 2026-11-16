@@ -300,9 +300,10 @@ host = \"127.0.0.1\"
 port = 8787
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -361,9 +362,10 @@ max_attempts = 2
 server-error = 2
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -639,9 +641,10 @@ port = 8787
 credential_source = \"forwarded\"
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -697,9 +700,10 @@ host = \"127.0.0.1\"
 port = 8787
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -863,9 +867,10 @@ port = 8787
 server-error = 5
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -980,9 +985,10 @@ max_attempts = 4
 server-error = 5
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -1019,9 +1025,10 @@ server-error = 5
 rate-limited = 3
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -1074,9 +1081,10 @@ port = 8787
 server-error = 5
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -1124,9 +1132,10 @@ host = \"127.0.0.1\"
 port = 8787
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"

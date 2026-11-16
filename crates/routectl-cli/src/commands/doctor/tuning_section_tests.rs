@@ -24,16 +24,18 @@ fn every_tier_config() -> Config {
 version = 2
 
 [providers.tuned]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://tuned.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 circuit_failures = 0
 rpm_limit = 30
 
 [providers.seat-b]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://seat.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [pools.team]
 members = ["seat-b"]

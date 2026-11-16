@@ -316,24 +316,28 @@ fn the_upstream_id_is_looked_up_exactly() {
 
 const POOL_CONFIG: &str = r#"
 [providers.go-seat-1]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "https://opencode.ai/zen/go/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.go-seat-2]
-kind = "openai-compat"
-api_key_ref = "env://B"
+format = "openai-chat"
 base_url = "https://opencode.ai/zen/go/v1"
+credential = "env://B"
+auth = "bearer"
 
 [providers.direct]
-kind = "openai-compat"
-api_key_ref = "env://C"
+format = "openai-chat"
 base_url = "https://ollama.com/v1"
+credential = "env://C"
+auth = "bearer"
 
 [providers.claude]
-kind = "anthropic-api"
-api_key_ref = "env://D"
+format = "anthropic-messages"
 base_url = "https://api.anthropic.com"
+credential = "env://D"
+auth = "x-api-key"
 
 [pools.go]
 members = ["go-seat-1", "go-seat-2"]

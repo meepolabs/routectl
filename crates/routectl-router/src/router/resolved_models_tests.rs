@@ -643,22 +643,13 @@ async fn per_model_breaker_isolates_failures() {
     let mut config = Config::default();
     config.providers.insert(
         "p-shared".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k").with_runtime(
+            ProviderRuntimePolicy {
                 circuit_failures: Some(1),
                 circuit_cooldown_ms: Some(60_000),
                 ..Default::default()
             },
-        },
+        ),
     );
 
     let mut router = Router::new(Arc::new(config));

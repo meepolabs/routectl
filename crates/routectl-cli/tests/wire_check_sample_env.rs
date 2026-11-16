@@ -145,8 +145,8 @@ fn hermetic_home(port: u16, upstream: &str) -> (tempfile::TempDir, std::path::Pa
             "version = {CURRENT}\n\
              [server]\nhost = \"127.0.0.1\"\nport = {port}\n\n\
              [usage]\ndb_path = \"{}\"\n\n\
-             [providers.fast]\nkind = \"openai-compat\"\nbase_url = \"{upstream}/v1\"\n\
-             api_key_ref = \"{key_ref}\"\n\n\
+             [providers.fast]\nformat = \"openai-chat\"\nbase_url = \"{upstream}/v1\"\n\
+             credential = \"{key_ref}\"\nauth = \"bearer\"\n\n\
              [models.fast]\nprovider = \"fast\"\nupstream = \"gpt-4o-mini\"\n\n\
              [aliases]\ndefault = \"fast\"\n",
             usage_db.display()

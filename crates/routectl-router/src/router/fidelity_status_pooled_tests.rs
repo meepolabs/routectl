@@ -77,11 +77,12 @@ fn prefix_key() -> String {
 fn pooled_config() -> Config {
     use crate::config::{AliasValue, ModelEntry, PoolEntry};
     let toml_text = format!(
-        "\n[providers.{MEMBER}]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://{MEMBER}\"\n\
+        "\n[providers.{MEMBER}]\nformat = \"anthropic-messages\"\n\
          base_url = \"https://api.anthropic.com\"\n\
-         \n[providers.{OTHER_MEMBER}]\nkind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://{OTHER_MEMBER}\"\n\
-         base_url = \"https://api.anthropic.com\"\n"
+         credential = \"oauth://{MEMBER}\"\nauth = \"x-api-key\"\n\
+         \n[providers.{OTHER_MEMBER}]\nformat = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://{OTHER_MEMBER}\"\nauth = \"x-api-key\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.pools.insert(
@@ -433,9 +434,9 @@ fn a_pooled_seat_at_quorum_reads_unblocked_once_the_test_seam_admits() {
 fn fallback_config() -> Config {
     use crate::config::{AliasValue, ModelEntry};
     let toml_text = format!(
-        "\n[providers.base-oc]\nkind = \"gemini\"\napi_key_ref = \"env://K\"\n\
-         \n[providers.{MEMBER}]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K2\"\n\
-         base_url = \"https://api.anthropic.com\"\n"
+        "\n[providers.base-oc]\nformat = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\ncredential = \"env://K\"\nauth = \"x-goog-api-key\"\n\
+         \n[providers.{MEMBER}]\nformat = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\ncredential = \"env://K2\"\nauth = \"x-api-key\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.models.insert(

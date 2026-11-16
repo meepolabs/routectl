@@ -95,10 +95,8 @@ fn config(extra: &str) -> Config {
     let text = format!(
         "[retry]\nmax_attempts = 3\ninitial_backoff_ms = 1\nbackoff_multiplier = 1.0\n\
          jitter_ms = 0\n\n\
-         [providers.p1]\nkind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\ncircuit_failures = 10\n\n\
-         [providers.p2]\nkind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n\n\
+         [providers.p1]\nformat = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\ncircuit_failures = 10\n\n\
+         [providers.p2]\nformat = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n\n\
          [aliases]\nchain = [\"m1\", \"m2\"]\n\n{extra}"
     );
     toml::from_str(&text).expect("valid test toml")

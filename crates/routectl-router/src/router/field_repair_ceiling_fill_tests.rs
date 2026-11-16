@@ -23,7 +23,7 @@ mod ceiling_fill {
     /// refused for, so the seat refuses the very body the upstream refused.
     const FILLED: u32 = 1_000_000;
     const TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-         [providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+         [providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
 
     /// The captured refusal, naming `limit` in place of [`NAMED_LIMIT`].
     fn messages_ceiling_rejection(limit: u32) -> Error {
@@ -570,8 +570,8 @@ mod fill_presence {
     #[cfg(feature = "bedrock")]
     const BEDROCK_UPSTREAM: &str = "anthropic.claude-opus-4-6-v1:0";
 
-    const ANTHROPIC: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
-    const OPENAI: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
+    const ANTHROPIC: &str = "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
+    const OPENAI: &str = "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
     /// An Anthropic upstream id.
     const CLAUDE: &str = "claude-opus-4-6";
 
@@ -623,7 +623,8 @@ mod fill_presence {
     async fn with_no_client_value_max_tokens_is_present_on_invoke_and_absent_on_converse() {
         let bedrock = |shape: &str| {
             format!(
-                "kind = \"bedrock\"\nregion = \"us-east-1\"\ncreds = {{ kind = \"default-chain\" }}\napi_shape = \"{shape}\"\n"
+                "format = \"bedrock-{shape}\"\ncloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+                 credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n"
             )
         };
         let rows = [
@@ -682,7 +683,7 @@ mod fill_presence {
     #[tokio::test]
     async fn the_invoke_body_limit_is_the_configured_then_baseline_value() {
         use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
-        let provider = "kind = \"bedrock\"\nregion = \"us-east-1\"\ncreds = { kind = \"default-chain\" }\napi_shape = \"invoke\"\n";
+        let provider = "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
         let rows = [
             ("configured", BEDROCK_UPSTREAM, Some(8000), 8000),
             ("baseline", BEDROCK_UPSTREAM, None, 64_000),
@@ -720,7 +721,7 @@ mod fill_presence {
     #[tokio::test]
     async fn the_converse_thinking_budget_fits_the_configured_ceiling_with_no_client_limit() {
         use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
-        let provider = "kind = \"bedrock\"\nregion = \"us-east-1\"\ncreds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
+        let provider = "format = \"bedrock-converse\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
         let rows = [
             ("enabled, no effort", None, 4000),
             ("explicit budget above the ceiling", Some(48_000), 7999),

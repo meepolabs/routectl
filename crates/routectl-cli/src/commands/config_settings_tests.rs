@@ -47,9 +47,10 @@ enabled = true
 inferred_window_hours = 2
 
 [providers.relay]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://relay.example/v1"
-api_key_ref = "env://RELAY_KEY"
+credential = "env://RELAY_KEY"
+auth = "bearer"
 rpm_limit = 60
 
 [models.fast]
@@ -71,9 +72,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "capability.decay_hours",
         "capability.enabled",
         "capability.inferred_window_hours",
-        "providers.relay.kind",
+        "providers.relay.format",
         "providers.relay.base_url",
-        "providers.relay.api_key_ref",
+        "providers.relay.credential",
+        "providers.relay.auth",
         "providers.relay.rpm_limit",
         "models.fast.provider",
         "models.fast.upstream",
@@ -112,10 +114,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (17, 11));
+    assert_eq!((file.len(), default.len()), (18, 11));
     assert_eq!(
         lines.len(),
-        28,
+        29,
         "every line is tagged file or default, once"
     );
 }
@@ -139,12 +141,16 @@ fn an_unset_code_default_key_prints_its_value_from_code() {
 fn a_provider_kind_code_default_applies_only_to_entries_of_that_kind() {
     let raw = r#"
 [providers.claude]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 
 [providers.codex]
-kind = "openai-responses"
-api_key_ref = "env://K"
+format = "openai-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = "env://K"
+auth = "bearer"
 "#;
 
     let lines = lines_for(raw);
@@ -167,9 +173,10 @@ api_key_ref = "env://K"
 fn a_credential_bearing_base_url_prints_only_its_origin() {
     let raw = r#"
 [providers.relay]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-FAKE-KEY"
+format = "anthropic-messages"
 base_url = "https://svc:sk-userinfo-FAKE@internal.example:8443/v1?key=sk-query-FAKE"
+credential = "literal:sk-ant-FAKE-KEY"
+auth = "x-api-key"
 "#;
 
     let lines = lines_for(raw);
@@ -260,10 +267,6 @@ const TUNING_BLOCK: &[&str] = &[
 /// value is inherited from another table, kind rule or effective-view
 /// section; each names what unset means.
 const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
-    (
-        "BedrockCredsConfig.session_token_ref",
-        "off: no session token",
-    ),
     ("Config.mitm", "off: no MITM listener"),
     (
         "ModelEntry.context_window",
@@ -301,10 +304,24 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
     ("PricingConfig.input_per_mtok", "inherit: price tables"),
     ("PricingConfig.output_per_mtok", "inherit: price tables"),
     ("ProviderEntry.account_id_ref", "off: no ChatGPT account"),
-    ("ProviderEntry.base_url", "inherit: the auth_kind endpoint"),
-    ("ProviderEntry.bedrock_mantle", "off: no mantle lane"),
-    ("ProviderEntry.cache_capability", "inherit: kind rule"),
+    (
+        "ProviderEntry.anthropic_version",
+        "inherit: the pinned anthropic-version",
+    ),
+    ("ProviderEntry.base_url", "off: the entry rides its cloud"),
+    ("ProviderEntry.cache_capability", "inherit: format rule"),
+    ("ProviderEntry.cloak_mode", "inherit: auto"),
+    (
+        "ProviderEntry.cloak_strict_mode",
+        "off: system content relocated",
+    ),
+    ("ProviderEntry.cloud", "off: the entry rides its base_url"),
     ("ProviderEntry.cloud_project_id", "off: project discovery"),
+    ("ProviderEntry.context_management", "off: no emulation"),
+    (
+        "ProviderEntry.forward_client_headers",
+        "off: no client header forwarded",
+    ),
     ("ProviderEntry.reduction_enabled", "inherit: [reduction]"),
     ("ProviderEntry.user_agent", "inherit: the egress User-Agent"),
     ("ServerConfig.auth", "off: no listener auth"),
@@ -365,7 +382,7 @@ fn schema_option_keys() -> BTreeSet<String> {
 fn census_key(default: &CodeDefault) -> String {
     let owner = match default.scope {
         DefaultScope::Section("retry") => "RetryPolicy",
-        DefaultScope::ProviderKind(_) => "ProviderEntry",
+        DefaultScope::ProviderFormat(_) => "ProviderEntry",
         DefaultScope::Section(other) => panic!("no schema type mapped for [{other}]"),
     };
     format!("{owner}.{}", default.key)
@@ -420,8 +437,7 @@ struct SecretRow {
 const SECRET_ROWS: &[SecretRow] = &[
     SecretRow {
         name: "provider header_extras",
-        raw: "[providers.gw]\nkind = \"openai-compat\"\nbase_url = \"https://gw.example\"\n\
-              api_key_ref = \"env://K\"\n[providers.gw.header_extras]\n\
+        raw: "[providers.gw]\nformat = \"openai-chat\"\nbase_url = \"https://gw.example\"\ncredential = \"env://K\"\nauth = \"bearer\"\n[providers.gw.header_extras]\n\
               cf-aig-authorization = \"Bearer sk-header-FAKE\"\n",
         secrets: &["sk-header-FAKE"],
         settings_line: "  providers.gw.header_extras.cf-aig-authorization=\"[REDACTED]\"(file)",
@@ -437,8 +453,7 @@ const SECRET_ROWS: &[SecretRow] = &[
     },
     SecretRow {
         name: "provider payload_extras nested string",
-        raw: "[providers.gw]\nkind = \"openai-compat\"\nbase_url = \"https://gw.example\"\n\
-              api_key_ref = \"env://K\"\n[providers.gw.payload_extras.metadata]\n\
+        raw: "[providers.gw]\nformat = \"openai-chat\"\nbase_url = \"https://gw.example\"\ncredential = \"env://K\"\nauth = \"bearer\"\n[providers.gw.payload_extras.metadata]\n\
               api_token = \"sk-payload-FAKE\"\ntags = [\"sk-payload-array-FAKE\"]\n",
         secrets: &["sk-payload-FAKE", "sk-payload-array-FAKE"],
         settings_line: "  providers.gw.payload_extras.metadata.api_token=\"[REDACTED]\"(file)",
@@ -453,14 +468,13 @@ const SECRET_ROWS: &[SecretRow] = &[
         show_line: "user = \"[REDACTED]\"",
     },
     SecretRow {
-        name: "mantle creds literal",
-        raw: "[providers.mantle]\nkind = \"openai-compat\"\napi_key_ref = \"\"\n\
-              [providers.mantle.bedrock_mantle]\nregion = \"us-west-2\"\n\
-              [providers.mantle.bedrock_mantle.creds]\nkind = \"bearer-key\"\n\
-              key_ref = \"literal:sk-mantle-FAKE\"\n",
+        name: "cloud credential literal",
+        raw: "[providers.mantle]\nformat = \"openai-chat\"\n\
+              cloud = { name = \"aws\", region = \"us-west-2\" }\n\
+              credential = \"literal:sk-mantle-FAKE\"\nauth = \"bearer\"\n",
         secrets: &["sk-mantle-FAKE"],
-        settings_line: "  providers.mantle.bedrock_mantle.creds.key_ref=\"literal:[REDACTED]\"(file)",
-        show_line: "key_ref = \"literal:[REDACTED]\"",
+        settings_line: "  providers.mantle.credential=\"literal:[REDACTED]\"(file)",
+        show_line: "credential = \"literal:[REDACTED]\"",
     },
     SecretRow {
         name: "server.auth.tokens literal",
@@ -470,12 +484,12 @@ const SECRET_ROWS: &[SecretRow] = &[
         show_line: "\"literal:[REDACTED]\",",
     },
     SecretRow {
-        name: "bare api_key_ref",
-        raw: "[providers.gw]\nkind = \"openai-compat\"\nbase_url = \"https://gw.example\"\n\
-              api_key_ref = \"sk-bare-FAKE\"\n",
+        name: "bare credential",
+        raw: "[providers.gw]\nformat = \"openai-chat\"\nbase_url = \"https://gw.example\"\n\
+              credential = \"sk-bare-FAKE\"\nauth = \"bearer\"\n",
         secrets: &["sk-bare-FAKE"],
-        settings_line: "  providers.gw.api_key_ref=\"[REDACTED]\"(file)",
-        show_line: "api_key_ref = \"[REDACTED]\"",
+        settings_line: "  providers.gw.credential=\"[REDACTED]\"(file)",
+        show_line: "credential = \"[REDACTED]\"",
     },
 ];
 

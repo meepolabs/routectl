@@ -83,18 +83,20 @@ fn circuit_failures_zero_never_opens() {
     let provider_zero = parse(
         r#"
 [providers.seat-a]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 circuit_failures = 0
 "#,
     );
     let pool_zero = parse(
         r#"
 [providers.seat-a]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [pools.team]
 members = ["seat-a"]

@@ -304,21 +304,25 @@ const ALL_PROVIDERS: Providers = Providers {
 fn config_with(db_path: &Path, providers: &Providers) -> Config {
     let direct = if providers.direct {
         "[providers.direct]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://CACHE_IGNORE_DRIVER_TEST_UNUSED\"\n"
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://CACHE_IGNORE_DRIVER_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n"
     } else {
         ""
     };
     let text = format!(
         "[usage]\ndb_path = {db}\n\
          [providers.other]\n\
-         kind = \"openai-responses\"\n\
-         api_key_ref = \"env://CACHE_IGNORE_DRIVER_TEST_UNUSED\"\n\
+         format = \"openai-responses\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"env://CACHE_IGNORE_DRIVER_TEST_UNUSED\"\n\
+         auth = \"bearer\"\n\
          [providers.aws]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         api_shape = \"{shape}\"\n\
-         creds = {{ kind = \"default-chain\" }}\n\
+         format = \"bedrock-{shape}\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          {direct}",
         db = toml::Value::String(db_path.display().to_string()),
         shape = providers.aws_shape,

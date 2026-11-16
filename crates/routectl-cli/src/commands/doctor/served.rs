@@ -141,9 +141,8 @@ pub enum SeatFix {
 impl SeatFix {
     /// The fix for a seat on `[providers]` entry `entry` of `config`.
     pub fn of(config: &Config, entry: &str) -> Self {
-        let uris = config
-            .providers
-            .get(entry)
+        let provider = config.providers.get(entry);
+        let uris = provider
             .map(routectl_router::ProviderEntry::secret_uris)
             .unwrap_or_default();
         let oauth = uris.iter().find_map(|uri| match SecretRef::parse(uri) {
@@ -154,7 +153,10 @@ impl SeatFix {
             Some((provider, label)) => Self::for_oauth_ref(entry, provider, label),
             None => Self::Credential {
                 entry: entry.to_string(),
-                scheme: uris.first().map(|uri| scheme_label(uri)),
+                scheme: provider
+                    .map(|p| p.credential.as_str())
+                    .filter(|credential| !credential.is_empty())
+                    .map(scheme_label),
             },
         }
     }

@@ -195,32 +195,38 @@ fn load_effective_config_rejects_a_version_newer_than_supported() {
     );
 }
 
-/// `validate_provider_credential_sources` is wired into
-/// `validate_effective_config`, which `load_effective_config` calls at
-/// the end of its own pre-parse gate -- this proves the rejection
-/// fires on the actual serve/reload load path (the function
-/// `read_parse_validate_config` calls), not only via the separate
-/// `commands::config::check` entry point that also happens to call
-/// the same validator.
+/// The provider plan is wired into `validate_effective_config`, which
+/// `load_effective_config` calls at the end of its own pre-parse gate --
+/// this proves the rejection fires on the actual serve/reload load path
+/// (the function `read_parse_validate_config` calls), not only via the
+/// separate `commands::config::check` entry point that also happens to call
+/// the same validator. The same entry on the pinned host loads, so the
+/// refusal is the host's.
 #[test]
 #[serial_test::serial]
 fn load_effective_config_rejects_forwarded_provider_on_non_anthropic_host() {
     // Arrange: a current-version config so the load path exercises
-    // only the credential-source validator, not the version preflight.
+    // only the forwarded-credential pin, not the version preflight.
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(
-        &cfg_path,
+    let forwarded_on = |base_url: &str| {
         format!(
             "version = {CURRENT_CONFIG_VERSION}\n\
              [providers.sneaky]\n\
-             kind = \"anthropic-api\"\n\
-             base_url = \"https://evil.example.com\"\n\
-             credential_source = \"forwarded\"\n"
-        ),
-    )
-    .expect("write config.toml");
+             format = \"anthropic-messages\"\n\
+             base_url = \"{base_url}\"\n\
+             credential = \"forwarded\"\n\
+             auth = \"bearer\"\n"
+        )
+    };
+    std::fs::write(&cfg_path, forwarded_on("https://api.anthropic.com"))
+        .expect("write config.toml");
+    assert!(
+        load_effective_config(&cfg_path).is_ok(),
+        "control: the forwarded entry on the pinned host must load"
+    );
+    std::fs::write(&cfg_path, forwarded_on("https://evil.example.com")).expect("write config.toml");
 
     // Act. `LoadedConfig` is not `Debug`, so match rather than
     // `expect_err`.
@@ -232,6 +238,7 @@ fn load_effective_config_rejects_forwarded_provider_on_non_anthropic_host() {
     // Assert
     assert!(err.contains("sneaky"), "err: {err}");
     assert!(err.contains("forwarded"), "err: {err}");
+    assert!(!err.contains("evil.example.com"), "err: {err}");
 }
 
 /// The serve/reload pre-parse gate (`validate_effective_config`, called
@@ -371,13 +378,15 @@ fn hot_reload_parse_error_warn_redacts_literal_secret() {
 
 /// Two same-kind OAuth accounts every pool fixture below groups.
 const POOL_ACCOUNTS: &str = "[providers.anthropic-default]\n\
-     kind = \"anthropic-api\"\n\
-     api_key_ref = \"oauth://anthropic\"\n\
-     auth_kind = \"oauth-bearer\"\n\
+     format = \"anthropic-messages\"\n\
+     base_url = \"https://api.anthropic.com\"\n\
+     credential = \"oauth://anthropic\"\n\
+     auth = \"bearer\"\n\
      [providers.anthropic-work]\n\
-     kind = \"anthropic-api\"\n\
-     api_key_ref = \"oauth://anthropic#work\"\n\
-     auth_kind = \"oauth-bearer\"\n";
+     format = \"anthropic-messages\"\n\
+     base_url = \"https://api.anthropic.com\"\n\
+     credential = \"oauth://anthropic#work\"\n\
+     auth = \"bearer\"\n";
 
 /// One config text per pool rejection class, each the smallest fixture
 /// that trips it.
@@ -388,8 +397,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             format!(
                 "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.codex-default]\n\
-                 kind = \"openai-responses\"\n\
-                 api_key_ref = \"oauth://codex\"\n\
+                 format = \"openai-responses\"\n\
+                 base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+                 credential = \"oauth://codex\"\n\
+                 auth = \"bearer\"\n\
                  [pools.mixed]\n\
                  members = [\"anthropic-default\", \"codex-default\"]\n"
             ),
@@ -417,9 +428,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             format!(
                 "version = {CURRENT_CONFIG_VERSION}\n\
                  [providers.keyed]\n\
-                 kind = \"openai-compat\"\n\
+                 format = \"openai-chat\"\n\
                  base_url = \"https://api.example.invalid\"\n\
-                 api_key_ref = \"env://SOME_KEY\"\n\
+                 credential = \"env://SOME_KEY\"\n\
+                 auth = \"bearer\"\n\
                  [pools.keyed-pool]\n\
                  members = [\"keyed\"]\n"
             ),
@@ -429,9 +441,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             format!(
                 "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.anthropic]\n\
-                 kind = \"anthropic-api\"\n\
-                 api_key_ref = \"oauth://anthropic\"\n\
-                 auth_kind = \"oauth-bearer\"\n\
+                 format = \"anthropic-messages\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"oauth://anthropic\"\n\
+                 auth = \"bearer\"\n\
                  [pools.anthropic]\n\
                  members = [\"anthropic-default\"]\n"
             ),
@@ -441,9 +454,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             format!(
                 "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.passthrough]\n\
-                 kind = \"anthropic-api\"\n\
-                 credential_source = \"forwarded\"\n\
+                 format = \"anthropic-messages\"\n\
                  base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"forwarded\"\n\
+                 auth = \"bearer\"\n\
                  [pools.anthropic]\n\
                  members = [\"anthropic-default\", \"passthrough\"]\n"
             ),
@@ -453,8 +467,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             format!(
                 "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.blank]\n\
-                 kind = \"anthropic-api\"\n\
-                 api_key_ref = \"\"\n\
+                 format = \"anthropic-messages\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"\"\n\
+                 auth = \"x-api-key\"\n\
                  [pools.anthropic]\n\
                  members = [\"anthropic-default\", \"blank\"]\n"
             ),
@@ -464,8 +480,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             format!(
                 "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.typo]\n\
-                 kind = \"anthropic-api\"\n\
-                 api_key_ref = \"oauth://\"\n\
+                 format = \"anthropic-messages\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"oauth://\"\n\
+                 auth = \"x-api-key\"\n\
                  [pools.anthropic]\n\
                  members = [\"anthropic-default\", \"typo\"]\n"
             ),
@@ -475,10 +493,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             format!(
                 "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
                  [providers.gateway]\n\
-                 kind = \"anthropic-api\"\n\
-                 auth_kind = \"oauth-bearer\"\n\
-                 api_key_ref = \"oauth://anthropic#gw\"\n\
+                 format = \"anthropic-messages\"\n\
                  base_url = \"https://gateway.example/v1\"\n\
+                 credential = \"oauth://anthropic#gw\"\n\
+                 auth = \"bearer\"\n\
                  [pools.anthropic]\n\
                  members = [\"anthropic-default\", \"gateway\"]\n"
             ),
@@ -505,9 +523,10 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
                 let name = format!("anthropic-s{i:03}");
                 text.push_str(&format!(
                     "[providers.{name}]\n\
-                         kind = \"anthropic-api\"\n\
-                         api_key_ref = \"oauth://anthropic#s{i:03}\"\n\
-                         auth_kind = \"oauth-bearer\"\n"
+                         format = \"anthropic-messages\"\n\
+                         base_url = \"https://api.anthropic.com\"\n\
+                         credential = \"oauth://anthropic#s{i:03}\"\n\
+                         auth = \"bearer\"\n"
                 ));
                 members.push(format!("\"{name}\""));
             }
@@ -660,9 +679,10 @@ fn previous_version_config_with_retired_key() -> String {
     format!(
         "version = {}\n\
          [providers.anthropic-managed]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
-         auth_kind = \"oauth-bearer\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          seat_selection = \"fill-first\"\n",
         CURRENT_CONFIG_VERSION - 1
     )
@@ -851,9 +871,10 @@ fn config_with(version: u32, at: Splice, extra: &str) -> String {
     format!(
         "version = {version}\n\
          [providers.fast]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"http://127.0.0.1:1\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_UNSET_KEY\"\n\
+         credential = \"env://ROUTECTL_TEST_UNSET_KEY\"\n\
+         auth = \"bearer\"\n\
          {provider}\
          [models.gpt]\n\
          provider = \"fast\"\n\

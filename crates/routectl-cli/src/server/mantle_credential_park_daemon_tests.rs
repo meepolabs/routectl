@@ -63,10 +63,10 @@ fn config_text(backup: Option<&str>) -> String {
     let mut text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{SEAT}]\n\
-         kind = \"openai-compat\"\n\
-         base_url = \"\"\n\
-         api_key_ref = \"\"\n\
-         bedrock_mantle = {{ region = \"{REGION}\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n\n\
+         format = \"openai-chat\"\n\
+         cloud = {{ name = \"aws\", region = \"{REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [models.{SEAT}]\n\
          provider = \"{SEAT}\"\n\
          upstream = \"{UPSTREAM}\"\n\n"
@@ -77,9 +77,10 @@ fn config_text(backup: Option<&str>) -> String {
             let backup_key = crate::test_secret::file_ref("backup-key");
             text.push_str(&format!(
                 "[providers.{BACKUP}]\n\
-                 kind = \"openai-compat\"\n\
+                 format = \"openai-chat\"\n\
                  base_url = \"{origin}\"\n\
-                 api_key_ref = \"{backup_key}\"\n\n\
+                 credential = \"{backup_key}\"\n\
+                 auth = \"bearer\"\n\n\
                  [models.{BACKUP}]\n\
                  provider = \"{BACKUP}\"\n\
                  upstream = \"{UPSTREAM}\"\n\n"

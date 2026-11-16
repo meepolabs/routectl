@@ -338,7 +338,7 @@ impl Provider for TapProbe {
 
 fn probe_router(probe: &Arc<TapProbe>) -> Router {
     let toml_text = format!(
-        "version = 5\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
+        "version = 5\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n\
          [aliases]\n{ALIAS} = [\"m0\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");

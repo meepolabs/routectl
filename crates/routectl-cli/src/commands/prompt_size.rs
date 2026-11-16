@@ -905,13 +905,16 @@ mod tests {
     fn capability_config() -> Config {
         let toml = r#"
 [providers.anthro]
-kind = "anthropic-api"
-api_key_ref = "literal:placeholder"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://PROMPT_SIZE_TEST_KEY"
+auth = "x-api-key"
 
 [providers.oai]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://api.example.invalid/v1"
-api_key_ref = "literal:placeholder"
+credential = "env://PROMPT_SIZE_TEST_KEY"
+auth = "bearer"
 
 [models.sonnet]
 provider = "anthro"
@@ -1563,21 +1566,26 @@ fast = "sonnet"
             r#"
 version = {CURRENT_CONFIG_VERSION}
 [providers.anthro]
-kind = "anthropic-api"
-api_key_ref = "literal:placeholder"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://PROMPT_SIZE_TEST_KEY"
+auth = "x-api-key"
 
 [providers.compat]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://api.example.invalid/v1"
-api_key_ref = "literal:placeholder"
+credential = "env://PROMPT_SIZE_TEST_KEY"
+auth = "bearer"
 
 [models.opus]
 provider = "anthro"
 upstream = "claude-opus-4-8"
 
 [providers.gem]
-kind = "gemini"
-api_key_ref = "literal:placeholder"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "env://PROMPT_SIZE_TEST_KEY"
+auth = "x-goog-api-key"
 
 [models.mystery_model]
 provider = "compat"

@@ -461,50 +461,31 @@ fn build_router_learning(
     with_negative: bool,
 ) -> Router {
     let mut entry = ProviderEntry::anthropic_api("literal:k");
-    if let ProviderEntry::AnthropicApi {
-        base_url: b,
-        runtime,
-        ..
-    } = &mut entry
-    {
-        *b = base_url.to_string();
-        runtime.circuit_failures = circuit_failures;
-        runtime.rpm_limit = rpm_limit;
-    }
+    entry = entry.with_base_url(base_url);
+    entry.runtime.circuit_failures = circuit_failures;
+    entry.runtime.rpm_limit = rpm_limit;
     router_over_entry(entry, provider, lanes, with_negative)
 }
 
 /// A remote router whose one entry sends on the Bedrock Mantle Anthropic
 /// sub-lane, with an explicit RPM limit and breaker threshold: the entry an
-/// operator writes for Mantle (no `api_key_ref`, a bearer key, the default
-/// Anthropic base), for the tests whose subject is what a probe refused by
-/// the Mantle lane's narrower view does NOT consume.
+/// operator writes for Mantle (`format = "anthropic-messages"` over the AWS
+/// cloud with a bearer key), for the tests whose subject is what a probe
+/// refused by the Mantle lane's narrower view does NOT consume.
 #[cfg(feature = "bedrock")]
 pub(super) fn remote_mantle_router_with_rpm(
     provider: Arc<dyn Provider>,
     rpm_limit: u32,
     circuit_failures: Option<u32>,
 ) -> Router {
-    let mut entry = ProviderEntry::anthropic_api("literal:k");
-    if let ProviderEntry::AnthropicApi {
-        api_key_ref,
-        base_url,
-        bedrock_mantle,
-        runtime,
-        ..
-    } = &mut entry
-    {
-        api_key_ref.clear();
-        *base_url = crate::config::default_anthropic_base();
-        *bedrock_mantle = Some(crate::config::BedrockMantleConfig {
-            region: "us-west-2".to_string(),
-            creds: crate::config::BedrockCredsConfig::BearerKey {
-                key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
-            },
-        });
-        runtime.circuit_failures = circuit_failures;
-        runtime.rpm_limit = Some(rpm_limit);
-    }
+    let mut entry = ProviderEntry::cloud_aws(
+        crate::config::Format::AnthropicMessages,
+        "us-west-2",
+        crate::test_secret::file_ref("mantle-bearer-key"),
+        crate::config::Auth::Bearer,
+    );
+    entry.runtime.circuit_failures = circuit_failures;
+    entry.runtime.rpm_limit = Some(rpm_limit);
     assert_eq!(
         entry.egress_kind(),
         routectl_core::wire_check::EgressKind::AnthropicApiMantle,
@@ -573,15 +554,8 @@ fn router_over_entry(
 pub(super) fn remote_router_with_model_beta(provider: Arc<dyn Provider>, beta: &str) -> Router {
     let mut config = Config::default();
     let mut entry = ProviderEntry::anthropic_api("literal:k");
-    if let ProviderEntry::AnthropicApi {
-        base_url: b,
-        runtime,
-        ..
-    } = &mut entry
-    {
-        *b = "https://api.anthropic.com".to_string();
-        runtime.circuit_failures = Some(1);
-    }
+    entry = entry.with_base_url("https://api.anthropic.com");
+    entry.runtime.circuit_failures = Some(1);
     config.providers.insert("p1".to_string(), entry);
     let mut extras = std::collections::BTreeMap::new();
     extras.insert("anthropic-beta".to_string(), beta.to_string());

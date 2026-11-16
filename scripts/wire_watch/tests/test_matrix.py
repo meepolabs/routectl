@@ -136,14 +136,15 @@ class AwsProfileLaneTests(MatrixTestCase):
                 self.assertEqual(matrix.aws_profile_names(text), {want})
                 self.assertNotIn("env://", text, "a Bedrock lane must not also reference a forwarded key")
 
-    def test_the_mantle_lane_carries_one_profile_creds_line_per_vocabulary(self) -> None:
+    def test_the_mantle_lane_carries_one_profile_credential_line_per_vocabulary(self) -> None:
         with open(os.path.join(self.paths.config_dir, "bedrock-mantle.toml"), encoding="utf-8") as handle:
-            hits = matrix.AWS_PROFILE_CREDS_RE.findall(handle.read())
+            hits = matrix.AWS_PROFILE_CREDENTIAL_RE.findall(handle.read())
         self.assertEqual(len(hits), 3)
 
-    def test_profile_creds_declare_the_bedrock_provider(self) -> None:
-        self.assertEqual(matrix._config_providers('creds = { kind = "profile", name = "x" }\n'), {"bedrock"})
-        self.assertEqual(matrix._config_providers('creds = { kind = "default-chain" }\n'), set())
+    def test_a_profile_credential_declares_the_bedrock_provider(self) -> None:
+        self.assertEqual(matrix._config_providers('credential = "aws://profile/x"\n'), {"bedrock"})
+        self.assertEqual(matrix._config_providers('credential = "aws://chain"\n'), set())
+        self.assertEqual(matrix._config_providers('credential = "aws://profile/a/b"\n'), set())
 
     def test_every_bedrock_row_uses_no_key_file(self) -> None:
         rows = [r for r in matrix.load_rows(self.paths) if "bedrock" in r.providers]

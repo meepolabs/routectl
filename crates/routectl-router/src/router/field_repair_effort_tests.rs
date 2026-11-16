@@ -370,8 +370,7 @@ fn the_openai_compat_view_carries_no_effort_row() {
 /// An openai-compat router, one seat on a non-loopback base URL.
 fn compat_router() -> Router {
     let mut config: crate::config::Config = toml::from_str(
-        "[providers.p0]\nkind = \"openai-compat\"\nbase_url = \"https://compat.example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n",
+        "[providers.p0]\nformat = \"openai-chat\"\nbase_url = \"https://compat.example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
     )
     .expect("valid test toml");
     config.aliases.insert(
@@ -495,8 +494,7 @@ fn the_openai_responses_view_carries_only_the_effort_rows() {
 #[cfg(feature = "openai-responses")]
 fn responses_router() -> Router {
     let mut config: crate::config::Config = toml::from_str(
-        "[providers.p0]\nkind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n\
-         auth_kind = \"api-key\"\n",
+        "[providers.p0]\nformat = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
     )
     .expect("valid test toml");
     config.aliases.insert(

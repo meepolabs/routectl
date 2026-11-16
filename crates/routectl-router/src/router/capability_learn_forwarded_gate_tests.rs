@@ -97,20 +97,21 @@ fn openai_web_search_rejection() -> Arc<Rejecting> {
 /// Chain `[a, b]`: `a` on anthropic-api provider `pa` (forwarded or own
 /// credential per `a_forwarded`), `b` on own-credential openai-compat `pb`.
 fn mixed_chain_router(a_forwarded: bool) -> Router {
-    let credential_line = if a_forwarded {
-        "credential_source = \"forwarded\"\n"
+    let credential_lines = if a_forwarded {
+        "credential = \"forwarded\"\nauth = \"bearer\"\n"
     } else {
-        ""
+        "credential = \"env://ANTHROPIC_API_KEY\"\nauth = \"x-api-key\"\n"
     };
     let toml_text = format!(
         "[providers.pa]\n\
-         kind = \"anthropic-api\"\n\
+         format = \"anthropic-messages\"\n\
          base_url = \"https://api.anthropic.com\"\n\
-         {credential_line}\
+         {credential_lines}\
          [providers.pb]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [aliases]\n\
          \"{ALIAS}\" = [\"a\", \"b\"]\n"
     );

@@ -21,8 +21,10 @@ fn config_with_ref(ref_uri: &str, selection: Option<&str>) -> Config {
     let text = format!(
         "version = 3\n\
          [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"{ref_uri}\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"{ref_uri}\"\n\
+         auth = \"x-api-key\"\n\
          {pool_block}"
     );
     toml::from_str(&text).expect("fixture config parses")
@@ -35,11 +37,15 @@ fn pooled_config(selection: &str, accepts_new_logins: bool) -> Config {
     let text = format!(
         "version = 3\n\
          [providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"anthropic-default\", \"anthropic-work\"]\n\
          seat_selection = \"{selection}\"\n\
@@ -258,17 +264,19 @@ fn non_oauth_refs_emit_no_row() {
     let env_config: Config = toml::from_str(
         "version = 3\n\
          [providers.env_provider]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.invalid\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_KEY\"\n",
+         credential = \"env://ROUTECTL_TEST_KEY\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("env fixture parses");
     let file_config: Config = toml::from_str(
         "version = 3\n\
          [providers.file_provider]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.invalid\"\n\
-         api_key_ref = \"file:///dev/null\"\n",
+         credential = \"file:///dev/null\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("file fixture parses");
     let stored = keys(&["anthropic"]);
@@ -317,14 +325,20 @@ fn the_check_block_renders_pools_and_only_unpooled_entries() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [providers.codex]\n\
-         kind = \"openai-responses\"\n\
-         api_key_ref = \"oauth://codex\"\n\
+         format = \"openai-responses\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"oauth://codex\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"anthropic-default\", \"anthropic-work\"]\n",
     )
@@ -396,11 +410,15 @@ fn rendered_pool_surfaces_carry_seat_labels_but_no_token_account_or_path_materia
     let config: Config = toml::from_str(&format!(
         "version = 3\n\
          [providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-sentinel]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#{SENTINEL_LABEL}\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#{SENTINEL_LABEL}\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"anthropic-default\", \"anthropic-sentinel\"]\n"
     ))
@@ -434,8 +452,10 @@ fn hostile_labels_and_entry_names_render_on_one_safe_line() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#we\\u001B[31mrk\\nPASS forged: all good\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#we\\u001B[31mrk\\nPASS forged: all good\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("hostile fixture parses");
 
@@ -467,8 +487,10 @@ fn a_delimiter_bearing_member_name_cannot_forge_a_second_selection_clause() {
     let config: Config = toml::from_str(&format!(
         "version = 3\n\
          [providers.\"{forgery}\"]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"{forgery}\"]\n"
     ))
@@ -499,8 +521,10 @@ fn an_equals_or_backtick_bearing_key_cannot_forge_a_pair_or_close_the_quoting() 
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.\"ghost=default\"]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.\"p`x\"]\n\
          members = [\"ghost=default\"]\n",
     )
@@ -535,8 +559,10 @@ fn a_hostile_entry_key_cannot_fabricate_an_extra_check_row() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.\"a: ref oauth://forged pins the default seat; ok\"]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("fixture config parses");
     let stored = keys(&["anthropic"]);
@@ -572,8 +598,10 @@ fn a_large_pool_lists_ten_members_and_collapses_the_rest_with_an_exact_count() {
     for (index, member) in members.iter().enumerate() {
         text.push_str(&format!(
             "[providers.{member}]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#seat{index:03}\"\n"
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#seat{index:03}\"\n\
+             auth = \"bearer\"\n"
         ));
     }
     text.push_str("[pools.anthropic]\n");
@@ -610,9 +638,10 @@ fn seat_pool_lines_are_empty_without_any_pool_or_oauth_ref() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.invalid\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_KEY\"\n",
+         credential = \"env://ROUTECTL_TEST_KEY\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("fixture parses");
 
@@ -634,11 +663,15 @@ fn each_provider_entry_contributes_its_own_row() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.primary]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.pinned]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("fixture parses");
     let stored = keys(&["anthropic", "anthropic#work"]);

@@ -58,7 +58,7 @@ use super::edit_pipeline::{
     preflight, render_gate_errors, upsert_pool_members as upsert_pool,
 };
 use super::login_provider_block::{
-    ProviderBlock, entry_field_str, provider_block, required_auth_fields, toml_key, toml_string,
+    ProviderBlock, provider_block, required_auth_fields, toml_key, toml_string,
 };
 use super::login_surface_availability::availability_gap;
 use super::parse_error_redaction::{CONFIG_UNREADABLE, redact_parse_error};
@@ -446,10 +446,10 @@ fn pools_holding<'a>(
 /// The required auth fields `entry_name` does not satisfy, or `None` when
 /// it satisfies all of them.
 ///
-/// Only the `kind` tag and the auth-selector field are checked -- the
-/// fields whose drift makes the entry authenticate on the wrong surface.
-/// An operator's `base_url` or header override is legitimate
-/// configuration, and the full validation gate owns everything structural.
+/// Only `format` and `auth` are checked -- the fields whose drift makes the
+/// entry authenticate on the wrong surface. An operator's `base_url` or
+/// header override is legitimate configuration, and the full validation
+/// gate owns everything structural.
 fn drifted_auth_fields(
     config: &Config,
     family: &str,
@@ -459,13 +459,11 @@ fn drifted_auth_fields(
     let entry = config.providers.get(entry_name)?;
 
     let mut drifted = Vec::new();
-    if entry.kind_str() != required.kind {
-        drifted.push("kind");
+    if entry.format != required.format {
+        drifted.push("format");
     }
-    if let Some((key, value)) = required.auth_selector
-        && entry_field_str(entry, key).as_deref() != Some(value)
-    {
-        drifted.push(key);
+    if entry.auth != required.auth {
+        drifted.push("auth");
     }
     (!drifted.is_empty()).then_some(drifted)
 }

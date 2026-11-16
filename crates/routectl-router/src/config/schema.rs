@@ -4,7 +4,7 @@ use routectl_core::provider_kind::config as kind;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use routectl_providers::anthropic_api::{AuthKind, CloakConfig};
+use routectl_providers::anthropic_api::{AuthKind, CloakMode};
 #[cfg(feature = "gemini")]
 use routectl_providers::gemini::GeminiAuthMode;
 #[cfg(feature = "openai-responses")]
@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::class_policy::ConfigFailureClass;
 
-use super::provider_descriptor::{Carrier, Format, format_row};
+use super::provider_descriptor::{Auth, Carrier, Format, format_row, is_vendor_host};
 
 #[cfg(test)]
 use super::Config;
@@ -367,28 +367,6 @@ fn default_usage_db_path() -> PathBuf {
     config_folder_child("usage.db")
 }
 
-/// Which credential a provider egress authenticates with. `own` (the
-/// default) preserves prior behavior byte-for-byte: the egress
-/// authenticates with routectl's own managed credential. `forwarded`
-/// instead relays the client's inbound credential straight through to
-/// the upstream untouched. Used ONLY by `ProviderEntry::AnthropicApi`
-/// (the forwarded-provider credential, pinned to `api.anthropic.com` by
-/// `validate_provider_credential_sources`) -- the legacy `[mitm]
-/// credential_source` field this enum also backed is retired; see
-/// `RETIRED_KEYS`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum CredentialSource {
-    /// Authenticate to the upstream with routectl's own managed
-    /// credential (the default behavior).
-    #[default]
-    Own,
-    /// Relay the client's inbound credential to the upstream untouched.
-    Forwarded,
-}
-
 /// Operator-facing `[mitm]` config block for the MITM front-proxy: a
 /// local TLS-terminating listener that fronts `api.anthropic.com` (e.g.
 /// Claude Code's own traffic) so routectl can observe and translate the
@@ -401,7 +379,7 @@ pub enum CredentialSource {
 /// upstream origin and TLS host are fixed in routectl-cli's proxy module,
 /// because the proxy forwards the client's full-scope claude.ai token.
 /// Which credential a forwarded egress uses is a per-provider choice
-/// (`ProviderEntry::AnthropicApi.credential_source`). Retired keys of
+/// (`credential = "forwarded"` on a `[providers.X]` entry). Retired keys of
 /// this block are refused by the pre-parse retired-key table
 /// (`RETIRED_KEYS`), which names each replacement.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -965,453 +943,149 @@ impl CacheCapability {
     }
 }
 
-/// One `[providers.X]` entry, tagged by `kind`. Each variant carries the
-/// transport-side knobs (auth, base URL, header/payload extras, cache and
-/// runtime policy) for one upstream shape.
+/// One `[providers.X]` entry. Every entry answers the same questions with
+/// the same keys, in this order: `format` (the API), exactly one of
+/// `base_url` or `cloud` (where requests go), `credential` (which secret)
+/// and `auth` (how it is sent), then the companions `account_id_ref` and
+/// `cloud_project_id`, then tuning. The identity keys are always written;
+/// tuning keys default when omitted.
+///
+/// Which combinations are coherent (a format over a carrier with an auth,
+/// a credential scheme with an auth, a managed login on its vendor's host)
+/// is decided by the factory's provider plan, which every build path and
+/// config validation run before any credential is read.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
-pub enum ProviderEntry {
-    /// OpenAI-compatible chat-completions provider.
-    #[non_exhaustive]
-    OpenaiCompat {
-        /// Endpoint base URL. Required (non-empty) on the standard lane
-        /// -- validation rejects an omitted / empty value. Defaulted
-        /// (empty) only so the mantle lane may omit it: when
-        /// `bedrock_mantle` is set the factory derives the URL from
-        /// `bedrock_mantle.region`, and validation then REQUIRES this be
-        /// left unset.
-        #[serde(default)]
-        base_url: String,
-        /// Reference to the API key. One of:
-        ///   - `env://VAR_NAME`             (process env var)
-        ///   - `file:///abs/path/to/key`    (mode-600 file)
-        ///   - `oauth://<provider>[#seat]`  (routectl-managed OAuth token)
-        api_key_ref: String,
-        /// Provider-level header extras. Merged with the per-model
-        /// `header_extras` at dispatch time; model wins on key
-        /// collision (list-valued `anthropic-beta` runs through a
-        /// comma-split-union-rejoin post-pass instead).
-        #[serde(default)]
-        header_extras: BTreeMap<String, String>,
-        /// Provider-level payload extras. Deep-merged with the
-        /// per-model `payload_extras` at dispatch time (model wins on
-        /// leaf collision).
-        #[serde(default)]
-        payload_extras: Option<Value>,
-        /// Override the outbound User-Agent.
-        #[serde(default)]
-        user_agent: Option<String>,
-        /// Operator override for this entry's prompt-cache capability.
-        /// `None` -> use the conservative per-kind default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_capability: Option<CacheCapability>,
-        /// Per-provider override for the dispatch-path token-reduction
-        /// feature. `None` inherits the global `[reduction]` switch;
-        /// `Some(false)` disables reduction for this provider even when
-        /// global is on. Reduction policy, NOT a runtime/rate knob --
-        /// lives outside `runtime`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reduction_enabled: Option<bool>,
-        /// Opt-in AWS Bedrock mantle lane (OpenAI Chat Completions shape).
-        /// Present -> this provider egresses through Bedrock's managed
-        /// OpenAI-compatible surface: the factory derives `base_url` from
-        /// `bedrock_mantle.region` and authenticates with
-        /// `bedrock_mantle.creds`. Omitted (default) -> the standard
-        /// OpenAI-compatible lane. When set, `api_key_ref` must be empty
-        /// and `base_url` left unset -- validation rejects every other
-        /// combination (region is the single source of truth for the
-        /// endpoint, and the credential lives in `creds`).
-        #[cfg(feature = "bedrock")]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        bedrock_mantle: Option<BedrockMantleConfig>,
-        /// Shared runtime and rate-limit policy for this provider.
-        #[serde(default, flatten)]
-        runtime: ProviderRuntimePolicy,
-    },
-    /// Native Anthropic Messages API provider.
-    #[non_exhaustive]
-    AnthropicApi {
-        /// Reference to the API key, resolved the same way as every
-        /// other provider's `api_key_ref`. Defaulted (empty string) so a
-        /// `credential_source = "forwarded"` block can omit it entirely
-        /// -- `validate_provider_credential_sources` then REQUIRES it be
-        /// empty for `forwarded` and non-empty for `own`.
-        #[serde(default)]
-        api_key_ref: String,
-        /// Endpoint base URL.
-        #[serde(default = "default_anthropic_base")]
-        base_url: String,
-        /// `anthropic-version` header value sent upstream.
-        #[serde(default = "default_anthropic_version")]
-        anthropic_version: String,
-        /// How the Messages API authenticates this provider. Default
-        /// is `api-key` (the standard `x-api-key` header). Use
-        /// `oauth-bearer` when `api_key_ref` resolves to a Claude Code
-        /// subscription access token (`sk-ant-oat01-...`).
-        #[serde(default)]
-        auth_kind: AuthKind,
-        /// Which credential this provider's Anthropic egress
-        /// authenticates with. Default `own`: the provider uses
-        /// `api_key_ref`/`auth_kind` exactly as before. `forwarded`
-        /// relays the client's captured claude.ai bearer instead --
-        /// `validate_provider_credential_sources` requires `base_url`'s
-        /// host be exactly `api.anthropic.com` and `api_key_ref` be
-        /// empty whenever this is `forwarded`.
-        #[serde(default)]
-        credential_source: CredentialSource,
-        /// Provider-level header extras. Merged with per-model entries
-        /// at dispatch time.
-        #[serde(default)]
-        header_extras: BTreeMap<String, String>,
-        /// Provider-level payload extras. Deep-merged with per-model
-        /// entries at dispatch time.
-        #[serde(default)]
-        payload_extras: Option<Value>,
-        /// Override the outbound User-Agent. Useful for IAM-gated upstreams.
-        #[serde(default)]
-        user_agent: Option<String>,
-        /// Strict allowlist of inbound `x-claude-code-*` header names
-        /// the egress is permitted to forward to api.anthropic.com.
-        /// Empty (default) drops every captured `x-claude-code-*`
-        /// header at the egress -- secure-by-default for new
-        /// providers. Names match case-insensitively. Capture happens
-        /// at the Anthropic ingress (defense-in-depth, namespace-
-        /// bounded); this list is the operator's filter on which
-        /// captured names actually go upstream.
-        #[serde(default)]
-        forward_client_headers: Vec<String>,
-        /// When true, routectl emulates Anthropic's
-        /// context-management-2025-06-27 beta server-side for this
-        /// provider. Set this for non-Anthropic anthropic-api providers
-        /// (e.g. DeepSeek's /anthropic surface) that do not honor the
-        /// beta natively. Default false: routectl forwards the body
-        /// verbatim and the real Anthropic server handles the beta
-        /// itself.
-        #[serde(default)]
-        context_management: bool,
-        /// Operator override for this entry's prompt-cache capability.
-        /// `None` -> use the conservative per-kind default. Useful when a
-        /// non-Anthropic upstream behind this anthropic-api-shaped
-        /// provider does not honor a top-level breakpoint.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_capability: Option<CacheCapability>,
-        /// Per-provider override for the dispatch-path token-reduction
-        /// feature. `None` inherits the global `[reduction]` switch;
-        /// `Some(false)` disables reduction for this provider. Reduction
-        /// policy, not a runtime/rate knob.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reduction_enabled: Option<bool>,
-        /// Opt-in OAuth-cloak configuration. Omitting the `[cloak]`
-        /// sub-table yields `CloakConfig::default()` (mode `auto`, no
-        /// strict mode) -- identical to the always-on `mcp_`
-        /// normalization. TOML surface: `[providers.X.cloak]` with
-        /// `mode` / `strict_mode`.
-        #[serde(default)]
-        cloak: CloakConfig,
-        /// Opt-in AWS Bedrock mantle lane. Present -> this provider
-        /// egresses through Bedrock's managed Anthropic Messages surface:
-        /// the factory derives `base_url` from `bedrock_mantle.region` and
-        /// authenticates with `bedrock_mantle.creds`. Omitted (default) ->
-        /// the standard direct-to-Anthropic lane. When set, `auth_kind`
-        /// must be `api-key`, `credential_source` `own`, `api_key_ref`
-        /// empty, and `base_url` left at its default -- validation rejects
-        /// every other combination (region is the single source of truth
-        /// for the endpoint, and the credential lives in `creds`).
-        #[cfg(feature = "bedrock")]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        bedrock_mantle: Option<BedrockMantleConfig>,
-        /// Shared runtime and rate-limit policy for this provider.
-        #[serde(default, flatten)]
-        runtime: ProviderRuntimePolicy,
-    },
-    /// OpenAI Responses API provider. Three auth surfaces:
-    /// - `chatgpt-oauth`: ChatGPT subscription JWT.
-    /// - `api-key`: standard OpenAI API key.
-    /// - `bedrock-mantle`: `Authorization: Bearer <bearer>` using the
-    ///   long-term Bedrock API key (resolved via api_key_ref, typically
-    ///   env://AWS_BEARER_TOKEN_BEDROCK).
+pub struct ProviderEntry {
+    /// The API this provider speaks: `anthropic-messages`, `openai-chat`,
+    /// `openai-responses`, `bedrock-invoke`, `bedrock-converse`, `gemini`
+    /// or `gemini-cloud-code`.
+    pub format: Format,
+    /// Endpoint base URL: a plain http(s) URL with a host. Exactly one of
+    /// `base_url` and `cloud` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// The cloud this provider is reached through, whose endpoint is derived
+    /// from its location keys. Exactly one of `base_url` and `cloud` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<Cloud>,
+    /// The one credential string: `env://VAR`, `file:///abs/path`,
+    /// `oauth://<vendor>[#label]` (a routectl-managed login),
+    /// `aws://profile/<name>`, `aws://chain`, or `forwarded` (the client's
+    /// own credential is passed through).
+    pub credential: String,
+    /// How the credential goes on the wire: `x-api-key`, `bearer`,
+    /// `x-goog-api-key` or `aws-sigv4`.
+    pub auth: Auth,
+    /// ChatGPT account id reference for the Codex host. Optional with a
+    /// managed `oauth://codex` login (read from the login); required with a
+    /// static credential there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id_ref: Option<String>,
+    /// Cloud Code project id for a `gemini-cloud-code` seat. Give the BARE
+    /// id (`my-project-1234`), never the `projects/`-prefixed resource name.
     ///
-    /// `base_url` is optional: when unset, the factory picks the
-    /// auth_kind-appropriate default at provider build time.
-    #[cfg(feature = "openai-responses")]
-    #[non_exhaustive]
-    OpenaiResponses {
-        /// Resolves to the bearer JWT (ChatgptOauth), API key (ApiKey),
-        /// or long-term Bedrock API key (BedrockMantle, typically
-        /// env://AWS_BEARER_TOKEN_BEDROCK).
-        api_key_ref: String,
-        /// ChatGPT account UUID. Required when `auth_kind =
-        /// "chatgpt-oauth"`; must be absent for the other variants.
-        #[serde(default)]
-        account_id_ref: Option<String>,
-        /// Endpoint base URL. None -> factory picks an auth_kind-
-        /// appropriate default. Operators can pin a specific value
-        /// to point at a staging shard, a localhost mock, etc. A managed
-        /// `oauth://codex` credential is accepted only on
-        /// `https://chatgpt.com` with `auth_kind = "chatgpt-oauth"`; a
-        /// staging shard, mirror, or mock needs a static `env://` or
-        /// `file://` credential.
-        #[serde(default)]
-        base_url: Option<String>,
-        /// Which auth surface to dispatch on. Default
-        /// `chatgpt-oauth`.
-        #[serde(default)]
-        auth_kind: OpenaiResponsesAuthKind,
-        /// Provider-level header extras.
-        #[serde(default)]
-        header_extras: BTreeMap<String, String>,
-        /// Provider-level payload extras.
-        #[serde(default)]
-        payload_extras: Option<Value>,
-        /// Override the outbound User-Agent. None -> default
-        /// `routectl/<version> codex-cli`.
-        #[serde(default)]
-        user_agent: Option<String>,
-        /// Codex CLI version this provider claims on the wire, threaded
-        /// into the derived User-Agent and the `version` identity header
-        /// (chatgpt-oauth surface). None -> the pinned default. The codex
-        /// identity is process-global, so every openai-responses provider
-        /// that sets this must agree on one value (validation rejects
-        /// divergence). RESTART-REQUIRED: a hot reload cannot flip it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        codex_version: Option<String>,
-        /// Operator override for this entry's prompt-cache capability.
-        /// `None` -> use the conservative per-kind default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_capability: Option<CacheCapability>,
-        /// Per-provider override for the dispatch-path token-reduction
-        /// feature. `None` inherits the global `[reduction]` switch;
-        /// `Some(false)` disables reduction for this provider. Reduction
-        /// policy, not a runtime/rate knob.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reduction_enabled: Option<bool>,
-        /// Opt-in AWS Bedrock mantle lane (OpenAI Responses shape).
-        /// Present -> this provider egresses through Bedrock's managed
-        /// Responses surface: the factory derives `base_url` from
-        /// `bedrock_mantle.region` and authenticates with
-        /// `bedrock_mantle.creds`. Omitted (default) -> the standard
-        /// Responses lane. When set, `auth_kind` must be `bedrock-mantle`
-        /// (or omitted -- the factory sets the marker), `account_id_ref`
-        /// and `api_key_ref` empty, and `base_url` left unset --
-        /// validation rejects every other combination. Setting
-        /// `auth_kind = "bedrock-mantle"` WITHOUT this block is a hard
-        /// error (the legacy bearer-only surface is closed).
-        #[cfg(feature = "bedrock")]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        bedrock_mantle: Option<BedrockMantleConfig>,
-        /// Shared runtime and rate-limit policy for this provider.
-        #[serde(default, flatten)]
-        runtime: ProviderRuntimePolicy,
-    },
-    /// Native AWS Bedrock provider. Speaks SigV4 directly to
-    /// `bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to
-    /// switch between vendor-specific InvokeModel (default) and
-    /// vendor-neutral Converse.
-    #[cfg(feature = "bedrock")]
-    #[non_exhaustive]
-    Bedrock {
-        /// AWS region for the Bedrock runtime endpoint; must be a canonical
-        /// AWS region identifier (commercial, GovCloud or China partition).
+    /// Set it to skip discovery entirely: it is consulted before the
+    /// credential store's cached project id and before `loadCodeAssist` /
+    /// `onboardUser`, so a cold request goes straight to `generateContent`.
+    /// The value also writes through to the seat's persisted project id, so
+    /// later requests -- and other entries on the same seat -- read it from
+    /// the cache. Two entries naming the same seat with different ids: last
+    /// writer wins.
+    ///
+    /// If the host rejects the id as not applying to this seat, that request
+    /// fails and the entry falls back to discovery for the rest of the
+    /// process. Unset (or empty) leaves discovery as the only source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_project_id: Option<String>,
+    /// `anthropic-version` header value sent upstream. Unset: `2023-06-01`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_version: Option<String>,
+    /// Strict allowlist of inbound `x-claude-code-*` header names the egress
+    /// may forward to api.anthropic.com. Unset or empty drops every captured
+    /// `x-claude-code-*` header at the egress. Names match
+    /// case-insensitively.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_client_headers: Option<Vec<String>>,
+    /// When true, routectl emulates Anthropic's
+    /// context-management-2025-06-27 beta server-side for this provider. Set
+    /// this for non-Anthropic `anthropic-messages` upstreams that do not
+    /// honor the beta natively. Unset: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<bool>,
+    /// Claude Code cloak mode: `auto` (the default), `always` or `never`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloak_mode: Option<CloakMode>,
+    /// When true the cloak drops the client's own `system` content instead
+    /// of relocating it into the first user message. Unset: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloak_strict_mode: Option<bool>,
+    /// Codex CLI version this provider claims on the wire, threaded into the
+    /// derived User-Agent and the `version` identity header. None -> the
+    /// pinned default. The codex identity is process-global, so every
+    /// provider that sets this must agree on one value (validation rejects
+    /// divergence). RESTART-REQUIRED: a hot reload cannot flip it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_version: Option<String>,
+    /// Provider-level header extras. Merged with the per-model
+    /// `header_extras` at dispatch time; model wins on key collision
+    /// (list-valued `anthropic-beta` runs through a comma-split-union-rejoin
+    /// post-pass instead).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_extras: BTreeMap<String, String>,
+    /// Provider-level payload extras. Deep-merged with the per-model
+    /// `payload_extras` at dispatch time (model wins on leaf collision).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_extras: Option<Value>,
+    /// Override the outbound User-Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    /// Operator override for this entry's prompt-cache capability.
+    /// `None` -> use the conservative per-format default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_capability: Option<CacheCapability>,
+    /// Per-provider override for the dispatch-path token-reduction feature.
+    /// `None` inherits the global `[reduction]` switch; `Some(false)`
+    /// disables reduction for this provider even when global is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduction_enabled: Option<bool>,
+    /// Shared runtime and rate-limit policy for this provider.
+    #[serde(default, flatten)]
+    pub runtime: ProviderRuntimePolicy,
+}
+
+/// The cloud a provider entry is reached through. Its endpoint host and
+/// signing scope derive from the location keys, never from text the
+/// operator writes as a URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "name", rename_all = "kebab-case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum Cloud {
+    /// Amazon Web Services: Bedrock runtime for the `bedrock-*` formats,
+    /// Bedrock's managed surface for the others.
+    Aws {
+        /// A canonical AWS region identifier (commercial, GovCloud or China
+        /// partition), e.g. `us-east-1`.
         region: String,
-        /// Wire shape: InvokeModel (default) or Converse.
-        #[serde(default)]
-        api_shape: BedrockApiShapeConfig,
-        /// AWS credential source for SigV4 signing.
-        creds: BedrockCredsConfig,
-        /// Override the outbound User-Agent.
-        #[serde(default)]
-        user_agent: Option<String>,
-        /// Provider-level header extras.
-        #[serde(default)]
-        header_extras: BTreeMap<String, String>,
-        /// Provider-level payload extras.
-        #[serde(default)]
-        payload_extras: Option<Value>,
-        /// Operator override for this entry's prompt-cache capability.
-        /// `None` -> use the conservative per-kind default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_capability: Option<CacheCapability>,
-        /// Per-provider override for the dispatch-path token-reduction
-        /// feature. `None` inherits the global `[reduction]` switch;
-        /// `Some(false)` disables reduction for this provider. Reduction
-        /// policy, not a runtime/rate knob.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reduction_enabled: Option<bool>,
-        /// Shared runtime and rate-limit policy for this provider.
-        #[serde(default, flatten)]
-        runtime: ProviderRuntimePolicy,
-    },
-    /// Native Google Gemini provider (REST v1beta `generateContent`).
-    #[cfg(feature = "gemini")]
-    #[non_exhaustive]
-    Gemini {
-        /// Resolves to the Gemini API key (sent as `x-goog-api-key`).
-        api_key_ref: String,
-        /// Endpoint base URL. Default (api-key mode):
-        /// `https://generativelanguage.googleapis.com/v1beta`. In
-        /// `cloud-code` mode the effective default is the daily Cloud Code
-        /// host `https://daily-cloudcode-pa.googleapis.com`; set this only to
-        /// reach the production host `https://cloudcode-pa.googleapis.com`.
-        /// One value carries the whole cloud-code lane -- generateContent,
-        /// loadCodeAssist, and onboardUser all go to it -- and it is
-        /// forwarded to the provider only when it differs from the api-key
-        /// default. The managed `oauth://antigravity` credential is accepted
-        /// only on the production or daily Cloud Code host over https, and
-        /// `cloud-code` mode accepts no static credential, so an enterprise
-        /// mirror or a test/staging host is not reachable on this lane; an
-        /// `api-key` entry with a static `env://` or `file://` key may point
-        /// at any host.
-        #[serde(default = "default_gemini_base")]
-        base_url: String,
-        /// Provider-level header extras.
-        #[serde(default)]
-        header_extras: BTreeMap<String, String>,
-        /// Provider-level payload extras.
-        #[serde(default)]
-        payload_extras: Option<Value>,
-        /// Override the outbound User-Agent.
-        #[serde(default)]
-        user_agent: Option<String>,
-        /// Selects the Gemini wire dialect. `api-key` (default) uses the
-        /// public `generativelanguage.googleapis.com` REST surface with the
-        /// `x-goog-api-key` header. `cloud-code` uses the Cloud Code
-        /// ("antigravity") surface with an OAuth bearer; in that mode
-        /// `api_key_ref` MUST be an `oauth://<provider>` reference.
-        #[serde(default)]
-        auth_mode: GeminiAuthMode,
-        /// Cloud Code project id for this seat, in `cloud-code` mode. Give
-        /// the BARE id (`my-project-1234`), never the `projects/`-prefixed
-        /// resource name.
-        ///
-        /// Set it to skip discovery entirely: it is consulted before the
-        /// credential store's cached project id and before `loadCodeAssist`
-        /// / `onboardUser`, so a cold request goes straight to
-        /// `generateContent`. The value also writes through to the seat's
-        /// persisted project id, so later requests -- and other entries on
-        /// the same seat -- read it from the cache. Two entries naming the
-        /// same seat with different ids: last writer wins.
-        ///
-        /// If the host rejects the id as not applying to this seat, that
-        /// request fails and the entry falls back to discovery for the rest
-        /// of the process. Unset (or empty) leaves discovery as the only
-        /// source. Ignored in `api-key` mode.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cloud_project_id: Option<String>,
-        /// Operator override for this entry's prompt-cache capability.
-        /// `None` -> use the conservative per-kind default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_capability: Option<CacheCapability>,
-        /// Per-provider override for the dispatch-path token-reduction
-        /// feature. `None` inherits the global `[reduction]` switch;
-        /// `Some(false)` disables reduction for this provider. Reduction
-        /// policy, not a runtime/rate knob.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reduction_enabled: Option<bool>,
-        /// Shared runtime and rate-limit policy for this provider.
-        #[serde(default, flatten)]
-        runtime: ProviderRuntimePolicy,
     },
 }
 
-/// TOML-side mirror of `routectl_providers::bedrock::BedrockApiShape`.
-/// We don't re-export the providers-side enum directly because TOML
-/// configs need to parse cleanly even when the `bedrock` feature is
-/// off (so non-Bedrock builds stay lean), and serde derives don't
-/// like cfg-gated re-exports.
-#[cfg(feature = "bedrock")]
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum BedrockApiShapeConfig {
-    /// The vendor-specific InvokeModel wire shape.
-    #[default]
-    Invoke,
-    /// The vendor-neutral Converse wire shape.
-    Converse,
+impl Cloud {
+    /// The AWS region this cloud names.
+    #[must_use]
+    pub fn aws_region(&self) -> &str {
+        match self {
+            Self::Aws { region } => region,
+        }
+    }
 }
 
-/// TOML-side credentials descriptor for a Bedrock provider.
-///
-/// Each variant is tagged by `kind`. Secret-bearing fields hold raw
-/// secret-URI strings (`env://`, `file://`) which the
-/// factory parses + resolves at provider build time -- same pattern
-/// as `api_key_ref` on the other provider variants.
-///
-/// Examples:
-/// ```toml
-/// # Bedrock console short-term API key
-/// creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
-///
-/// # Static AWS access keys
-/// creds = { kind = "static",
-///           access_key_ref  = "env://AWS_ACCESS_KEY_ID",
-///           secret_key_ref  = "env://AWS_SECRET_ACCESS_KEY",
-///           session_token_ref = "env://AWS_SESSION_TOKEN" }
-///
-/// # Named profile in ~/.aws/credentials (incl. SSO)
-/// creds = { kind = "profile", name = "bedrock-prod" }
-///
-/// # Standard AWS provider chain (env -> profile -> SSO -> IRSA -> IMDS)
-/// creds = { kind = "default-chain" }
-/// ```
-#[cfg(feature = "bedrock")]
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-#[non_exhaustive]
-pub enum BedrockCredsConfig {
-    /// A long-term Bedrock API key (bearer token).
-    BearerKey {
-        /// Reference to the bearer key.
-        key_ref: String,
-    },
-    /// Static AWS access/secret keys, optionally with a session token.
-    Static {
-        /// Reference to the AWS access key id.
-        access_key_ref: String,
-        /// Reference to the AWS secret access key.
-        secret_key_ref: String,
-        /// Reference to an optional AWS session token.
-        #[serde(default)]
-        session_token_ref: Option<String>,
-    },
-    /// A named profile from the AWS shared-credentials file.
-    Profile {
-        /// The profile name.
-        name: String,
-    },
-    /// The AWS default credential provider chain.
-    DefaultChain,
-}
-
-/// Shared mantle sub-config for AWS Bedrock's managed inference lane. Its
-/// PRESENCE on a provider entry selects the mantle lane: the factory
-/// derives the endpoint base URL from `region` (region is the single
-/// source of truth -- no manual `base_url`) and authenticates with
-/// `creds`. Naming is deliberately lane-neutral so the OpenAI-shape lanes
-/// reuse this exact type.
-#[cfg(feature = "bedrock")]
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-#[non_exhaustive]
-pub struct BedrockMantleConfig {
-    /// AWS region the mantle endpoint lives in (e.g. `us-east-1`). The
-    /// factory derives both the endpoint host and the SigV4 signing scope
-    /// from this single value, so it must be a canonical AWS region
-    /// identifier (commercial, GovCloud or China partition).
-    pub region: String,
-    /// Credential descriptor for this lane: a long-term bearer key or a
-    /// SigV4 credential source (static keys, named profile, or the AWS
-    /// default provider chain).
-    pub creds: BedrockCredsConfig,
-}
-
-/// Every provider-kind token an operator can write as `kind = "..."` in a
-/// `[providers.X]` block, under the feature set this binary was built with.
-/// The vocabulary [`ProviderEntry::kind_str`] draws from, listed in variant
-/// order, gated by the same `cfg`s -- a kind the build cannot construct is
-/// also a kind no config can name.
+/// Every provider-kind token a `[providers.X]` entry can resolve to through
+/// its `format`, under the feature set this binary was built with. The
+/// vocabulary [`ProviderEntry::kind_str`] draws from, gated by the same
+/// `cfg`s -- a kind the build cannot construct is also a kind no config can
+/// reach.
 pub const CONFIG_PROVIDER_KINDS: &[&str] = &[
     kind::OPENAI_COMPAT,
     kind::ANTHROPIC_API,
@@ -1423,198 +1097,154 @@ pub const CONFIG_PROVIDER_KINDS: &[&str] = &[
     kind::GEMINI,
 ];
 
-/// True when `kind` is a provider-kind token a `[providers.X]` block can
-/// declare in this build -- membership in [`CONFIG_PROVIDER_KINDS`].
+/// True when `kind` is a provider-kind token a `[providers.X]` entry can
+/// resolve to in this build -- membership in [`CONFIG_PROVIDER_KINDS`].
 #[must_use]
 pub fn is_config_provider_kind(kind: &str) -> bool {
     CONFIG_PROVIDER_KINDS.contains(&kind)
 }
 
+/// The Anthropic API base a code-built `anthropic-messages` entry starts on.
+const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
+
+/// The ChatGPT Codex base a code-built `openai-responses` entry starts on.
+#[cfg(feature = "openai-responses")]
+const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
+
+/// The OpenAI API base the `api-key` Responses builder selects.
+#[cfg(feature = "openai-responses")]
+const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
+
+/// The public Gemini REST base a code-built `gemini` entry starts on.
+#[cfg(feature = "gemini")]
+const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+/// The daily Cloud Code base the `cloud-code` Gemini builder selects.
+#[cfg(feature = "gemini")]
+const CLOUD_CODE_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
+
+/// The `anthropic-version` header value when the entry sets none.
+pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+
 impl ProviderEntry {
-    /// The wire format this entry speaks: the variant, refined by the
-    /// selector that changes the wire (Bedrock `api_shape`, Gemini
-    /// `auth_mode`). A Mantle sub-lane speaks its standard sibling's format.
-    #[must_use]
-    pub const fn format(&self) -> Format {
-        match self {
-            Self::OpenaiCompat { .. } => Format::OpenaiChat,
-            Self::AnthropicApi { .. } => Format::AnthropicMessages,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { .. } => Format::OpenaiResponses,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { api_shape, .. } => match api_shape {
-                BedrockApiShapeConfig::Invoke => Format::BedrockInvoke,
-                BedrockApiShapeConfig::Converse => Format::BedrockConverse,
-            },
-            #[cfg(feature = "gemini")]
-            Self::Gemini { auth_mode, .. } => match auth_mode {
-                GeminiAuthMode::ApiKey => Format::Gemini,
-                GeminiAuthMode::CloudCode => Format::GeminiCloudCode,
-            },
+    /// An entry over a base URL with every tuning key unset.
+    fn over_base_url(format: Format, base_url: &str, credential: String, auth: Auth) -> Self {
+        Self {
+            format,
+            base_url: Some(base_url.to_string()),
+            cloud: None,
+            credential,
+            auth,
+            account_id_ref: None,
+            cloud_project_id: None,
+            anthropic_version: None,
+            forward_client_headers: None,
+            context_management: None,
+            cloak_mode: None,
+            cloak_strict_mode: None,
+            codex_version: None,
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            user_agent: None,
+            cache_capability: None,
+            reduction_enabled: None,
+            runtime: ProviderRuntimePolicy::default(),
         }
     }
 
-    /// Where this entry's requests are sent: native Bedrock and every Mantle
-    /// sub-lane ride the AWS carrier, everything else its base URL.
+    /// The wire format this entry speaks.
+    #[must_use]
+    pub const fn format(&self) -> Format {
+        self.format
+    }
+
+    /// Where this entry's requests are sent. An entry with a `cloud` rides
+    /// that cloud; anything else (including an entry that sets neither,
+    /// which the plan refuses) is read as the base-URL carrier.
     pub(crate) const fn carrier(&self) -> Carrier {
-        #[cfg(feature = "bedrock")]
-        if matches!(
-            self,
-            Self::Bedrock { .. }
-                | Self::AnthropicApi {
-                    bedrock_mantle: Some(_),
-                    ..
-                }
-                | Self::OpenaiCompat {
-                    bedrock_mantle: Some(_),
-                    ..
-                }
-        ) {
-            return Carrier::CloudAws;
+        if self.cloud.is_some() {
+            Carrier::CloudAws
+        } else {
+            Carrier::BaseUrl
         }
-        #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-        if matches!(
-            self,
-            Self::OpenaiResponses {
-                bedrock_mantle: Some(_),
-                ..
-            }
-        ) {
-            return Carrier::CloudAws;
-        }
-        Carrier::BaseUrl
     }
 
     /// The egress kind this entry sends with, read from the descriptor row
-    /// for its [`format`](Self::format) over its carrier. Bedrock splits by
-    /// API shape and every Mantle sub-lane is its own kind, because each
-    /// sends a different wire body than its standard sibling.
+    /// for its [`format`](Self::format) over its carrier. `Local` for an
+    /// entry the descriptor has no route for; the provider plan refuses
+    /// such an entry before anything is built.
     pub const fn egress_kind(&self) -> routectl_core::wire_check::EgressKind {
-        match format_row(self.format()).route(self.carrier()) {
+        match format_row(self.format).route(self.carrier()) {
             Some(route) => route.egress,
-            None => panic!("every constructible entry has a descriptor route"),
+            None => routectl_core::wire_check::EgressKind::Local,
         }
     }
 
-    /// Stable config-key token naming this entry's provider kind: the family
-    /// token of its [`format`](Self::format). Matches the `kind = "..."`
-    /// discriminant in the TOML provider table, so the returned value
-    /// round-trips with operator configuration and is safe to surface in
-    /// usage accounting / logs.
+    /// Stable token naming this entry's provider family: the family token
+    /// of its [`format`](Self::format). Safe to surface in usage accounting
+    /// and logs; persisted rows key on it.
     ///
-    /// Every token this can return is in [`CONFIG_PROVIDER_KINDS`].
+    /// Every token this can return is in [`CONFIG_PROVIDER_KINDS`] for a
+    /// format this build compiles.
     pub const fn kind_str(&self) -> &'static str {
-        format_row(self.format()).token
+        format_row(self.format).token
     }
 
-    /// The primary `api_key_ref` URI for this entry, or `None` for
-    /// variants with no single canonical key slot (Bedrock). The usage
-    /// CLI inspects this to detect a subscription provider (an
-    /// `oauth://`-prefixed ref), which has no per-token dollar cost.
+    /// The entry's `credential` when it is a reference the credential store
+    /// resolves (`env://`, `file://`, `oauth://`, or anything that is not one
+    /// of the AWS forms or `forwarded`), else `None`. The usage CLI and the
+    /// 401 self-heal path read this to find the store reference.
     pub fn api_key_ref(&self) -> Option<&str> {
-        match self {
-            Self::OpenaiCompat { api_key_ref, .. } => Some(api_key_ref),
-            Self::AnthropicApi { api_key_ref, .. } => Some(api_key_ref),
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { api_key_ref, .. } => Some(api_key_ref),
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { .. } => None,
-            #[cfg(feature = "gemini")]
-            Self::Gemini { api_key_ref, .. } => Some(api_key_ref),
+        match routectl_auth::CredentialRef::parse(&self.credential) {
+            Ok(
+                routectl_auth::CredentialRef::AwsProfile(_)
+                | routectl_auth::CredentialRef::AwsChain
+                | routectl_auth::CredentialRef::Forwarded,
+            ) => None,
+            _ => Some(&self.credential),
         }
     }
 
-    /// Get the runtime policy attached to this entry. Centralizes the
-    /// match so the router doesn't repeat it.
+    /// Get the runtime policy attached to this entry.
     pub const fn runtime(&self) -> &ProviderRuntimePolicy {
-        match self {
-            Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => runtime,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { runtime, .. } => runtime,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { runtime, .. } => runtime,
-            #[cfg(feature = "gemini")]
-            Self::Gemini { runtime, .. } => runtime,
-        }
+        &self.runtime
     }
 
     /// The operator-set `codex_version` for this entry, or `None` when
-    /// unset or the variant carries no such knob (only `OpenaiResponses`
-    /// does). The resolved codex identity is derived from this across the
+    /// unset. The resolved codex identity is derived from this across the
     /// whole config; see `factory::resolved_codex_version`.
-    ///
-    /// Not `const`: with `openai-responses` enabled the body calls
-    /// `Option::as_deref`, which is not a const operation. Only the
-    /// reduced build collapses to the constant `None` arm, and constness
-    /// is part of the recorded public API -- so it cannot vary by feature.
-    #[allow(clippy::missing_const_for_fn)]
     pub fn codex_version(&self) -> Option<&str> {
-        match self {
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { codex_version, .. } => codex_version.as_deref(),
-            _ => None,
-        }
+        self.codex_version.as_deref()
     }
 
-    /// `true` iff this entry is an `OpenaiResponses` provider on the
-    /// `chatgpt-oauth` surface -- the only shape that emits the codex
-    /// identity fingerprint, so the only one the codex-identity
-    /// header-override warning applies to.
-    #[cfg(feature = "openai-responses")]
-    pub const fn is_chatgpt_oauth_responses(&self) -> bool {
-        matches!(
-            self,
-            Self::OpenaiResponses {
-                auth_kind: OpenaiResponsesAuthKind::ChatgptOauth,
-                ..
-            }
-        )
+    /// `true` iff this entry speaks the ChatGPT Codex dialect: an
+    /// `openai-responses` entry whose `base_url` is on the Codex host. The
+    /// codex-identity header-override warning applies only to it.
+    pub fn is_chatgpt_oauth_responses(&self) -> bool {
+        self.format == Format::OpenaiResponses
+            && self.cloud.is_none()
+            && self
+                .base_url
+                .as_deref()
+                .is_some_and(|base| is_vendor_host("codex", base))
     }
 
-    /// `Some(base_url)` iff this entry is an `AnthropicApi` variant with
-    /// `credential_source == Forwarded`, `None` otherwise. The single
-    /// place that recognizes "this is the forwarded provider" so
-    /// callers (a boolean scan, a dispatch-target flag, and the
-    /// forwarded-proxy `/v1/models` handler) don't each hand-roll the
-    /// same `matches!` against the enum's inner fields.
+    /// `Some(base_url)` iff this entry relays the client's own credential
+    /// (`credential = "forwarded"`), `None` otherwise. The single place that
+    /// recognizes "this is the forwarded provider". An entry that sets no
+    /// `base_url` answers the empty string: it is still forwarded, and the
+    /// plan refuses it.
     pub fn forwarded_base_url(&self) -> Option<&str> {
-        match self {
-            Self::AnthropicApi {
-                credential_source: CredentialSource::Forwarded,
-                base_url,
-                ..
-            } => Some(base_url),
-            _ => None,
-        }
+        (self.credential == FORWARDED_CREDENTIAL)
+            .then(|| self.base_url.as_deref().unwrap_or_default())
     }
 
-    /// `Some(base_url)` iff this entry is an `AnthropicApi` variant whose
-    /// configured base URL is the one it will actually egress to, `None`
-    /// otherwise.
-    ///
-    /// Answers ONLY for that lane on purpose. The caller is the
-    /// envelope-field mint suppression, whose predicate keys on the
-    /// configured base URL, and the reactive field repair acts on this lane
-    /// alone -- so a caller reaching for another kind's URL gets `None` and
-    /// fails closed rather than silently classifying a lane this stage has
-    /// captured no rejection envelope for.
-    ///
-    /// The BEDROCK MANTLE sub-lane returns `None`, and it is the case a bare
-    /// variant match gets wrong: a mantle entry leaves `base_url` at the
-    /// Anthropic default and validation REQUIRES that, while the factory
-    /// derives the real endpoint from `bedrock_mantle.region`. So the
-    /// configured value is not the effective egress, and a caller keyed on a
-    /// direct Anthropic base must not read a Bedrock upstream as one. The
-    /// Mantle endpoint itself is [`Self::classifiable_egress_base_url`]'s
-    /// answer, not this accessor's.
+    /// `Some(base_url)` iff this entry is `anthropic-messages` over a base
+    /// URL, `None` otherwise (another format, or the cloud carrier, whose
+    /// endpoint is [`Self::classifiable_egress_base_url`]'s answer).
     pub fn anthropic_api_base_url(&self) -> Option<&str> {
-        match self {
-            #[cfg(feature = "bedrock")]
-            Self::AnthropicApi {
-                bedrock_mantle: Some(_),
-                ..
-            } => None,
-            Self::AnthropicApi { base_url, .. } => Some(base_url),
+        match (self.format, &self.cloud) {
+            (Format::AnthropicMessages, None) => self.base_url.as_deref(),
             _ => None,
         }
     }
@@ -1622,763 +1252,430 @@ impl ProviderEntry {
     /// The base URL this entry actually egresses to, when the configured
     /// fields alone determine it; `None` when they do not.
     ///
-    /// - `anthropic-api`: [`Self::anthropic_api_base_url`]; on the Mantle
-    ///   sub-lane, the Anthropic-vocabulary Mantle base derived from
-    ///   `bedrock_mantle.region`, the same derivation the factory dials;
-    /// - `openai-compat`: the configured `base_url`; on the Mantle sub-lane,
-    ///   whose `base_url` is left empty, the OpenAI-vocabulary Mantle base
-    ///   derived from `bedrock_mantle.region`;
-    /// - native `bedrock`: the runtime endpoint derived from `region`, the
-    ///   same derivation the provider dials;
-    /// - `openai-responses`: the configured `base_url`, else the `auth_kind`
-    ///   default the factory dials; on a `bedrock_mantle` block, the
-    ///   OpenAI-vocabulary Mantle base derived from its region; `None` for a
-    ///   bare `bedrock-mantle` marker, which the factory refuses to build;
-    /// - `gemini`: the configured `base_url`, except a `cloud-code` entry
-    ///   left at the api-key public default, which the factory leaves on the
-    ///   constructor's cloud-code default (the daily Cloud Code host);
-    /// - every other kind: `None`. Their egress is not classified here, so a
-    ///   caller keying a decision on it fails closed.
+    /// - over a base URL: the configured `base_url`;
+    /// - over the AWS cloud: the endpoint derived from `cloud.region`, the
+    ///   same derivation the factory dials -- the Anthropic-vocabulary
+    ///   managed base for `anthropic-messages`, the OpenAI-vocabulary managed
+    ///   base for `openai-chat` and `openai-responses`, the runtime endpoint
+    ///   for the `bedrock-*` formats.
     ///
-    /// Every region-derived arm answers `None` for a region that fails
+    /// Every region-derived answer is `None` for a region that fails
     /// admission: it names no endpoint the factory could dial.
     pub fn classifiable_egress_base_url(&self) -> Option<std::borrow::Cow<'_, str>> {
-        match self {
-            #[cfg(feature = "bedrock")]
-            Self::AnthropicApi {
-                bedrock_mantle: Some(m),
-                ..
-            } => routectl_providers::mantle::mantle_anthropic_base(&m.region)
-                .ok()
-                .map(std::borrow::Cow::Owned),
-            Self::AnthropicApi { .. } => self
-                .anthropic_api_base_url()
-                .map(std::borrow::Cow::Borrowed),
-            #[cfg(feature = "bedrock")]
-            Self::OpenaiCompat {
-                bedrock_mantle: Some(m),
-                ..
-            } => routectl_providers::mantle::mantle_openai_base(&m.region)
-                .ok()
-                .map(std::borrow::Cow::Owned),
-            Self::OpenaiCompat { base_url, .. } => Some(std::borrow::Cow::Borrowed(base_url)),
-            #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-            Self::OpenaiResponses {
-                bedrock_mantle: Some(m),
-                ..
-            } => routectl_providers::mantle::mantle_openai_base(&m.region)
-                .ok()
-                .map(std::borrow::Cow::Owned),
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses {
-                auth_kind: OpenaiResponsesAuthKind::BedrockMantle,
-                ..
-            } => None,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses {
-                base_url,
-                auth_kind,
-                ..
-            } => Some(match base_url {
-                Some(configured) => std::borrow::Cow::Borrowed(configured.as_str()),
-                None => std::borrow::Cow::Owned(default_responses_base(*auth_kind)),
-            }),
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { region, .. } => {
-                routectl_providers::bedrock::endpoint::bedrock_runtime_url(region)
-                    .ok()
-                    .map(std::borrow::Cow::Owned)
-            }
-            #[cfg(feature = "gemini")]
-            Self::Gemini {
-                base_url,
-                auth_mode: GeminiAuthMode::CloudCode,
-                ..
-            } if *base_url == default_gemini_base() => Some(std::borrow::Cow::Borrowed(
-                routectl_providers::gemini::DAILY_BASE_URL,
-            )),
-            #[cfg(feature = "gemini")]
-            Self::Gemini { base_url, .. } => Some(std::borrow::Cow::Borrowed(base_url)),
-            #[allow(unreachable_patterns)]
-            _ => None,
-        }
+        let Some(cloud) = &self.cloud else {
+            return self.base_url.as_deref().map(std::borrow::Cow::Borrowed);
+        };
+        cloud_egress_base(self.format, cloud.aws_region()).map(std::borrow::Cow::Owned)
     }
 
-    /// Per-provider `header_extras`. Returns a reference to the
-    /// per-variant map so the dispatch-layer merge helpers can read
-    /// without re-matching the enum.
+    /// Per-provider `header_extras`.
     pub const fn header_extras(&self) -> &BTreeMap<String, String> {
-        match self {
-            Self::OpenaiCompat { header_extras, .. } => header_extras,
-            Self::AnthropicApi { header_extras, .. } => header_extras,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { header_extras, .. } => header_extras,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { header_extras, .. } => header_extras,
-            #[cfg(feature = "gemini")]
-            Self::Gemini { header_extras, .. } => header_extras,
-        }
+        &self.header_extras
     }
 
-    /// Per-provider `payload_extras`. Returns a reference (None when
-    /// the operator did not configure any) so the dispatch-layer deep
-    /// merge can borrow without cloning on the no-op path.
+    /// Per-provider `payload_extras` (None when the operator did not
+    /// configure any).
     pub const fn payload_extras(&self) -> Option<&Value> {
-        match self {
-            Self::OpenaiCompat { payload_extras, .. } => payload_extras.as_ref(),
-            Self::AnthropicApi { payload_extras, .. } => payload_extras.as_ref(),
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { payload_extras, .. } => payload_extras.as_ref(),
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { payload_extras, .. } => payload_extras.as_ref(),
-            #[cfg(feature = "gemini")]
-            Self::Gemini { payload_extras, .. } => payload_extras.as_ref(),
-        }
+        self.payload_extras.as_ref()
     }
 
     /// Prompt-cache capability for this entry. Returns the operator
-    /// override when set, otherwise the conservative per-kind default.
+    /// override when set, otherwise the conservative per-format default.
     ///
-    /// AnthropicApi is special-cased on its `base_url`: a `kind =
-    /// "anthropic-api"` entry pointed at a NON-default base_url is an
-    /// Anthropic-COMPATIBLE third party (e.g. a vendor's `/anthropic`
-    /// surface) that may 400 on or silently drop a top-level
-    /// `cache_control` breakpoint. Since auto-emit is default-on, the
-    /// optimistic per-kind default (true/true) would risk breaking such
-    /// a host. So when there is no operator override and the base_url is
-    /// not the default Anthropic base, fail closed -> (false, false). An
-    /// operator who knows their custom-base host supports caching opts
-    /// in via an explicit `cache_capability` (which always wins below).
+    /// `anthropic-messages` keeps the optimistic Anthropic default only on
+    /// the Anthropic API host and on the AWS managed surface. Pointed at any
+    /// other base URL it is an Anthropic-COMPATIBLE third party that may 400
+    /// on or silently drop a top-level `cache_control` breakpoint, so the
+    /// default fails closed -> (false, false).
+    ///
+    /// Bedrock is split by format: on `bedrock-invoke` the egress lowers a
+    /// routectl-injected top-level marker to the per-block form Invoke caches
+    /// on, so auto-emit is safe; on `bedrock-converse` a top-level marker is
+    /// inert. Hit usage is reported back on both.
     pub fn cache_capability(&self) -> CacheCapability {
-        if let Self::AnthropicApi {
-            base_url,
-            cache_capability,
-            ..
-        } = self
-        {
-            return cache_capability.unwrap_or_else(|| {
-                if base_url == &default_anthropic_base() {
-                    CacheCapability::for_provider_kind(self.kind_str())
-                } else {
-                    CacheCapability::new(false, false)
-                }
-            });
-        }
+        self.cache_capability.unwrap_or_else(|| match self.format {
+            Format::AnthropicMessages if self.has_anthropic_cache_defaults() => {
+                CacheCapability::for_provider_kind(self.kind_str())
+            }
+            Format::AnthropicMessages => CacheCapability::new(false, false),
+            Format::BedrockInvoke => CacheCapability::new(true, true),
+            Format::BedrockConverse => CacheCapability::new(false, true),
+            Format::OpenaiChat
+            | Format::OpenaiResponses
+            | Format::Gemini
+            | Format::GeminiCloudCode => CacheCapability::for_provider_kind(self.kind_str()),
+        })
+    }
 
-        // Bedrock is special-cased on its `api_shape`: the two shapes
-        // cache a top-level `cache_control` marker differently. On
-        // Invoke the egress lowers a routectl-injected top-level marker
-        // to the per-block form Invoke caches on (commit 3e12f88), so
-        // auto-emit is safe -> supports_top_level = true. On Converse a
-        // top-level marker is inert (no `cachePoint` translation), so it
-        // stays fail-closed. Hit usage is reported back on both shapes.
-        // An explicit operator override always wins (mirrors the
-        // AnthropicApi case above).
-        #[cfg(feature = "bedrock")]
-        if let Self::Bedrock {
-            api_shape,
-            cache_capability,
-            ..
-        } = self
-        {
-            return cache_capability.unwrap_or_else(|| match api_shape {
-                BedrockApiShapeConfig::Invoke => CacheCapability::new(true, true),
-                BedrockApiShapeConfig::Converse => CacheCapability::new(false, true),
-            });
-        }
-
-        let override_value = match self {
-            Self::OpenaiCompat {
-                cache_capability, ..
-            } => cache_capability,
-            Self::AnthropicApi {
-                cache_capability, ..
-            } => cache_capability,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock {
-                cache_capability, ..
-            } => cache_capability,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses {
-                cache_capability, ..
-            } => cache_capability,
-            #[cfg(feature = "gemini")]
-            Self::Gemini {
-                cache_capability, ..
-            } => cache_capability,
-        };
-        override_value.unwrap_or_else(|| CacheCapability::for_provider_kind(self.kind_str()))
+    /// True for an `anthropic-messages` entry on the Anthropic API host or on
+    /// the AWS managed surface: the destinations whose caching behavior the
+    /// Anthropic defaults describe.
+    fn has_anthropic_cache_defaults(&self) -> bool {
+        self.format == Format::AnthropicMessages
+            && (self.cloud.is_some()
+                || self
+                    .base_url
+                    .as_deref()
+                    .is_some_and(routectl_core::identity::anthropic::is_anthropic_api_host))
     }
 
     /// Whether this entry's EGRESS can actually carry a per-block cache
-    /// marker to the wire. Wire capability, not operator intent -- the
-    /// counterpart of `CacheCapability::supports_top_level_cache_control`
-    /// for the front marker, and the reason that struct is not widened
-    /// (its `new()` is public with fixed arity).
+    /// marker to the wire. Wire capability, not operator intent.
     ///
-    /// True for `anthropic-api` (native per-block `cache_control`) and for
-    /// `bedrock` with `api_shape = "converse"` (the egress translates a
-    /// per-block marker into a sibling `cachePoint` block). False
-    /// everywhere else:
-    ///
-    /// - `bedrock` / `api_shape = "invoke"` -- no front-marker path; the
-    ///   egress lowers the TOP-LEVEL marker to per-block itself, so an
-    ///   additionally-placed front marker is redundant at best.
-    /// - `openai-compat` -- the egress DROPS a per-block marker with a
-    ///   WARN.
-    /// - `openai-responses` / `gemini` -- no per-block breakpoint surface
-    ///   (both cache server-side automatically).
+    /// True for `anthropic-messages` (native per-block `cache_control`) and
+    /// for `bedrock-converse` (the egress translates a per-block marker into
+    /// a sibling `cachePoint` block). False everywhere else: `bedrock-invoke`
+    /// lowers the top-level marker itself, `openai-chat` drops a per-block
+    /// marker with a WARN, and the Responses and Gemini formats cache
+    /// server-side.
     ///
     /// Placement requires this AND [`Self::per_block_breakpoints_enabled`].
     pub const fn supports_per_block_breakpoints(&self) -> bool {
-        match self {
-            Self::AnthropicApi { .. } => true,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { api_shape, .. } => {
-                matches!(api_shape, BedrockApiShapeConfig::Converse)
-            }
-            _ => false,
-        }
+        matches!(
+            self.format,
+            Format::AnthropicMessages | Format::BedrockConverse
+        )
     }
 
     /// Whether per-block front-marker auto-emission is enabled for this
-    /// entry's kind.
-    ///
-    /// `true` ONLY for an `anthropic-api` entry on the default Anthropic
-    /// base URL -- the population whose terminal marker is already
-    /// auto-emitted. Everything else, including both Bedrock shapes and a
-    /// custom-base `anthropic-api` entry, is `false`.
+    /// entry: `true` ONLY for an `anthropic-messages` entry on the Anthropic
+    /// API host or the AWS managed surface -- the population whose terminal
+    /// marker is already auto-emitted.
     ///
     /// Placement additionally requires
     /// [`Self::supports_per_block_breakpoints`].
     pub fn per_block_breakpoints_enabled(&self) -> bool {
-        match self {
-            Self::AnthropicApi { base_url, .. } => base_url == &default_anthropic_base(),
-            _ => false,
-        }
+        self.has_anthropic_cache_defaults()
     }
 
-    /// Per-provider override for the dispatch-path token-reduction
-    /// feature. `None` means "inherit the global `[reduction]` switch";
-    /// `Some(false)` disables reduction for this provider even when the
-    /// global switch is on.
-    ///
-    /// The effective decision rule a later dispatch task will consume:
-    /// reduction applies when the global `[reduction] enabled == true` AND
-    /// this override is not explicitly `Some(false)`. That decision logic
-    /// is NOT implemented here -- this is the config surface only.
+    /// Per-provider override for the dispatch-path token-reduction feature.
+    /// `None` means "inherit the global `[reduction]` switch".
     pub const fn reduction_enabled(&self) -> Option<bool> {
-        match self {
-            Self::OpenaiCompat {
-                reduction_enabled, ..
-            } => *reduction_enabled,
-            Self::AnthropicApi {
-                reduction_enabled, ..
-            } => *reduction_enabled,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock {
-                reduction_enabled, ..
-            } => *reduction_enabled,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses {
-                reduction_enabled, ..
-            } => *reduction_enabled,
-            #[cfg(feature = "gemini")]
-            Self::Gemini {
-                reduction_enabled, ..
-            } => *reduction_enabled,
-        }
+        self.reduction_enabled
     }
 
-    /// Construct an `OpenaiCompat` entry with the given base URL and key
-    /// reference and all other knobs at their defaults.
-    pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
-        Self::OpenaiCompat {
-            base_url: base_url.into(),
-            api_key_ref: api_key_ref.into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        }
+    /// Construct an `openai-chat` entry over `base_url` with the given
+    /// credential sent as a bearer, every tuning key unset.
+    pub fn openai_compat(base_url: impl Into<String>, credential: impl Into<String>) -> Self {
+        Self::over_base_url(
+            Format::OpenaiChat,
+            &base_url.into(),
+            credential.into(),
+            Auth::Bearer,
+        )
     }
 
-    /// Construct an `AnthropicApi` entry with the given key reference and
-    /// all other knobs at their defaults.
-    pub fn anthropic_api(api_key_ref: impl Into<String>) -> Self {
-        Self::AnthropicApi {
-            api_key_ref: api_key_ref.into(),
-            base_url: default_anthropic_base(),
-            anthropic_version: default_anthropic_version(),
-            auth_kind: AuthKind::ApiKey,
-            credential_source: CredentialSource::Own,
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            forward_client_headers: Vec::new(),
-            context_management: false,
-            cache_capability: None,
-            reduction_enabled: None,
-            cloak: CloakConfig::default(),
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        }
+    /// Construct an `anthropic-messages` entry on the Anthropic API with the
+    /// given credential sent as `x-api-key`, every tuning key unset.
+    pub fn anthropic_api(credential: impl Into<String>) -> Self {
+        Self::over_base_url(
+            Format::AnthropicMessages,
+            ANTHROPIC_BASE,
+            credential.into(),
+            Auth::XApiKey,
+        )
     }
 
-    /// Construct an `OpenaiResponses` entry with sane defaults. The
-    /// only required field is `api_key_ref`; everything else defaults
-    /// to `None` / `Default::default()`. Use the variant-specific
-    /// setters below to populate optional fields.
+    /// Construct an `openai-responses` entry on the ChatGPT Codex host with
+    /// the given credential sent as a bearer, every tuning key unset.
     #[cfg(feature = "openai-responses")]
-    pub fn openai_responses(api_key_ref: impl Into<String>) -> Self {
-        Self::OpenaiResponses {
-            api_key_ref: api_key_ref.into(),
-            account_id_ref: None,
-            base_url: None,
-            auth_kind: OpenaiResponsesAuthKind::default(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            codex_version: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        }
+    pub fn openai_responses(credential: impl Into<String>) -> Self {
+        Self::over_base_url(
+            Format::OpenaiResponses,
+            CODEX_BASE,
+            credential.into(),
+            Auth::Bearer,
+        )
     }
 
-    /// Construct a `Gemini` entry with sane defaults. The only required
-    /// field is `api_key_ref` (resolved and sent as the `x-goog-api-key`
-    /// header); `base_url` defaults to the public v1beta endpoint and
-    /// everything else defaults to empty / `None`. Use `with_header_extras`
-    /// / `with_payload_extras` to populate the optional fields.
+    /// Construct a `gemini` entry on the public Gemini REST base with the
+    /// given credential sent as `x-goog-api-key`, every tuning key unset.
     #[cfg(feature = "gemini")]
-    pub fn gemini(api_key_ref: impl Into<String>) -> Self {
-        Self::Gemini {
-            api_key_ref: api_key_ref.into(),
-            base_url: default_gemini_base(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            auth_mode: GeminiAuthMode::default(),
-            cloud_project_id: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            runtime: ProviderRuntimePolicy::default(),
+    pub fn gemini(credential: impl Into<String>) -> Self {
+        Self::over_base_url(
+            Format::Gemini,
+            GEMINI_BASE,
+            credential.into(),
+            Auth::XGoogApiKey,
+        )
+    }
+
+    /// Construct an entry of `format` over the AWS cloud in `region`, with
+    /// `credential` sent as `auth`, every tuning key unset.
+    pub fn cloud_aws(
+        format: Format,
+        region: impl Into<String>,
+        credential: impl Into<String>,
+        auth: Auth,
+    ) -> Self {
+        Self {
+            base_url: None,
+            cloud: Some(Cloud::Aws {
+                region: region.into(),
+            }),
+            ..Self::over_base_url(format, "", credential.into(), auth)
         }
     }
 
-    /// Set the AnthropicApi variant's `auth_kind`. Panics on other variants.
+    /// Set how an `anthropic-messages` entry sends its credential: `ApiKey`
+    /// is `auth = "x-api-key"`, `OauthBearer` is `auth = "bearer"`. Panics on
+    /// other formats.
     pub fn with_auth_kind(mut self, kind: AuthKind) -> Self {
-        match &mut self {
-            Self::AnthropicApi { auth_kind, .. } => *auth_kind = kind,
-            _ => panic!("ProviderEntry::with_auth_kind only applies to anthropic-api"),
-        }
+        assert!(
+            self.format == Format::AnthropicMessages,
+            "ProviderEntry::with_auth_kind only applies to anthropic-messages"
+        );
+        self.auth = match kind {
+            AuthKind::ApiKey => Auth::XApiKey,
+            AuthKind::OauthBearer => Auth::Bearer,
+        };
         self
     }
 
-    /// Set the Gemini variant's `auth_mode`. Panics on other variants.
+    /// Select the Gemini surface: `ApiKey` is `format = "gemini"` with
+    /// `x-goog-api-key`, `CloudCode` is `format = "gemini-cloud-code"` with
+    /// `bearer`. An entry still on the other surface's builder base moves to
+    /// this surface's base. Panics on other formats.
     #[cfg(feature = "gemini")]
     pub fn with_gemini_auth_mode(mut self, mode: GeminiAuthMode) -> Self {
-        match &mut self {
-            Self::Gemini { auth_mode, .. } => *auth_mode = mode,
-            _ => panic!("ProviderEntry::with_gemini_auth_mode only applies to gemini"),
-        }
+        assert!(
+            matches!(self.format, Format::Gemini | Format::GeminiCloudCode),
+            "ProviderEntry::with_gemini_auth_mode only applies to the gemini formats"
+        );
+        let (format, auth, from, to) = match mode {
+            GeminiAuthMode::ApiKey => (
+                Format::Gemini,
+                Auth::XGoogApiKey,
+                CLOUD_CODE_BASE,
+                GEMINI_BASE,
+            ),
+            GeminiAuthMode::CloudCode => (
+                Format::GeminiCloudCode,
+                Auth::Bearer,
+                GEMINI_BASE,
+                CLOUD_CODE_BASE,
+            ),
+        };
+        self.format = format;
+        self.auth = auth;
+        self.swap_builder_base(from, to);
         self
     }
 
-    /// Set the `account_id_ref` on an `OpenaiResponses` entry. Panics
-    /// on other variants -- the field is OpenaiResponses-only.
+    /// Replace a base URL still at the builder value `from` with `to`; any
+    /// other value is the caller's and is kept.
+    #[cfg(any(feature = "gemini", feature = "openai-responses"))]
+    fn swap_builder_base(&mut self, from: &str, to: &str) {
+        if self.base_url.as_deref() == Some(from) {
+            self.base_url = Some(to.to_string());
+        }
+    }
+
+    /// Set the `account_id_ref` companion.
     #[cfg(feature = "openai-responses")]
     pub fn with_account_id_ref(mut self, account_id_ref: impl Into<String>) -> Self {
-        match &mut self {
-            Self::OpenaiResponses {
-                account_id_ref: slot,
-                ..
-            } => {
-                *slot = Some(account_id_ref.into());
-            }
-            _ => panic!("ProviderEntry::with_account_id_ref only applies to openai-responses"),
-        }
+        self.account_id_ref = Some(account_id_ref.into());
         self
     }
 
-    /// Set the `base_url` on an `OpenaiResponses` entry. Panics on
-    /// other variants. Named `with_openai_responses_base_url` to avoid
-    /// colliding with `with_base_url` (which serves the api-backed
-    /// providers whose `base_url` is `String`, not `Option<String>`).
+    /// Set the `base_url` on an `openai-responses` entry. Panics on other
+    /// formats.
     #[cfg(feature = "openai-responses")]
-    pub fn with_openai_responses_base_url(mut self, base_url: impl Into<String>) -> Self {
-        match &mut self {
-            Self::OpenaiResponses { base_url: slot, .. } => {
-                *slot = Some(base_url.into());
-            }
-            _ => panic!(
-                "ProviderEntry::with_openai_responses_base_url only applies to openai-responses"
-            ),
-        }
-        self
+    pub fn with_openai_responses_base_url(self, base_url: impl Into<String>) -> Self {
+        assert!(
+            self.format == Format::OpenaiResponses,
+            "ProviderEntry::with_openai_responses_base_url only applies to openai-responses"
+        );
+        self.with_base_url(base_url)
     }
 
-    /// Set the `auth_kind` on an `OpenaiResponses` entry. Panics on
-    /// other variants. Named `with_openai_responses_auth_kind` to
-    /// avoid colliding with `with_auth_kind` (which targets the
-    /// AnthropicApi variant and takes a different enum).
+    /// Select the Responses surface by destination: `ChatgptOauth` moves an
+    /// entry still on the OpenAI API builder base to the Codex host, and
+    /// `ApiKey` moves one still on the Codex builder base to the OpenAI API.
+    /// The Bedrock managed surface is a cloud; use [`Self::cloud_aws`].
+    /// Panics on other formats and on `BedrockMantle`.
     #[cfg(feature = "openai-responses")]
     pub fn with_openai_responses_auth_kind(mut self, kind: OpenaiResponsesAuthKind) -> Self {
-        match &mut self {
-            Self::OpenaiResponses { auth_kind, .. } => *auth_kind = kind,
-            _ => panic!(
-                "ProviderEntry::with_openai_responses_auth_kind only applies to openai-responses"
-            ),
+        assert!(
+            self.format == Format::OpenaiResponses,
+            "ProviderEntry::with_openai_responses_auth_kind only applies to openai-responses"
+        );
+        match kind {
+            OpenaiResponsesAuthKind::ChatgptOauth => {
+                self.swap_builder_base(OPENAI_API_BASE, CODEX_BASE);
+            }
+            OpenaiResponsesAuthKind::ApiKey => self.swap_builder_base(CODEX_BASE, OPENAI_API_BASE),
+            OpenaiResponsesAuthKind::BedrockMantle => {
+                panic!("the Bedrock managed surface is a cloud; build it with cloud_aws")
+            }
         }
         self
     }
 
-    /// Set the `codex_version` on an `OpenaiResponses` entry. Panics on
-    /// other variants -- the field is OpenaiResponses-only.
+    /// Set the `codex_version` on an `openai-responses` entry. Panics on
+    /// other formats.
     #[cfg(feature = "openai-responses")]
     pub fn with_openai_responses_codex_version(mut self, version: impl Into<String>) -> Self {
-        match &mut self {
-            Self::OpenaiResponses { codex_version, .. } => *codex_version = Some(version.into()),
-            _ => panic!(
-                "ProviderEntry::with_openai_responses_codex_version only applies to openai-responses"
-            ),
-        }
+        assert!(
+            self.format == Format::OpenaiResponses,
+            "ProviderEntry::with_openai_responses_codex_version only applies to openai-responses"
+        );
+        self.codex_version = Some(version.into());
         self
     }
 
     /// Replace this entry's runtime/rate-limit policy.
     pub const fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
-        match &mut self {
-            Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => {
-                *runtime = rt;
-            }
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { runtime, .. } => *runtime = rt,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { runtime, .. } => *runtime = rt,
-            #[cfg(feature = "gemini")]
-            Self::Gemini { runtime, .. } => *runtime = rt,
-        }
+        self.runtime = rt;
         self
     }
 
     /// Replace this entry's provider-level header extras.
     pub fn with_header_extras(mut self, headers: BTreeMap<String, String>) -> Self {
-        match &mut self {
-            Self::OpenaiCompat { header_extras, .. } => *header_extras = headers,
-            Self::AnthropicApi { header_extras, .. } => *header_extras = headers,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { header_extras, .. } => *header_extras = headers,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { header_extras, .. } => *header_extras = headers,
-            #[cfg(feature = "gemini")]
-            Self::Gemini { header_extras, .. } => *header_extras = headers,
-        }
+        self.header_extras = headers;
         self
     }
 
     /// Replace this entry's provider-level payload extras.
     pub fn with_payload_extras(mut self, extras: Value) -> Self {
-        let slot = Some(extras);
-        match &mut self {
-            Self::OpenaiCompat { payload_extras, .. } => *payload_extras = slot,
-            Self::AnthropicApi { payload_extras, .. } => *payload_extras = slot,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { payload_extras, .. } => *payload_extras = slot,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses { payload_extras, .. } => *payload_extras = slot,
-            #[cfg(feature = "gemini")]
-            Self::Gemini { payload_extras, .. } => *payload_extras = slot,
-        }
+        self.payload_extras = Some(extras);
         self
     }
 
-    /// Set the `base_url` on an api-backed variant. Panics on others.
+    /// Point the entry at `url`, replacing any `cloud`.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        let u = url.into();
-        match &mut self {
-            Self::OpenaiCompat { base_url, .. } | Self::AnthropicApi { base_url, .. } => {
-                *base_url = u;
-            }
-            #[cfg(any(feature = "bedrock", feature = "openai-responses", feature = "gemini"))]
-            _ => panic!("ProviderEntry::with_base_url only applies to api-backed providers"),
-        }
+        self.base_url = Some(url.into());
+        self.cloud = None;
         self
     }
 
-    /// Set the AnthropicApi variant's `anthropic_version`. Panics on others.
+    /// Set the `anthropic-version` an `anthropic-messages` entry sends.
+    /// Panics on other formats.
     pub fn with_anthropic_version(mut self, version: impl Into<String>) -> Self {
-        match &mut self {
-            Self::AnthropicApi {
-                anthropic_version, ..
-            } => *anthropic_version = version.into(),
-            _ => {
-                panic!("ProviderEntry::with_anthropic_version only applies to anthropic-api")
-            }
-        }
+        assert!(
+            self.format == Format::AnthropicMessages,
+            "ProviderEntry::with_anthropic_version only applies to anthropic-messages"
+        );
+        self.anthropic_version = Some(version.into());
         self
     }
 
-    /// Set the AnthropicApi variant's `credential_source`. Panics on
-    /// other variants -- the field is AnthropicApi-only.
-    pub fn with_credential_source(mut self, source: CredentialSource) -> Self {
-        match &mut self {
-            Self::AnthropicApi {
-                credential_source, ..
-            } => *credential_source = source,
-            _ => panic!("ProviderEntry::with_credential_source only applies to anthropic-api"),
-        }
+    /// Replace the entry's `credential` string.
+    pub fn with_credential(mut self, credential: impl Into<String>) -> Self {
+        self.credential = credential.into();
         self
     }
 
-    /// Set the AnthropicApi variant's `forward_client_headers`
-    /// allowlist (names of inbound `x-claude-code-*` headers the
-    /// egress may forward to api.anthropic.com). Panics on other
-    /// variants -- the field is AnthropicApi-only.
+    /// Replace how the entry sends its credential.
+    pub const fn with_auth(mut self, auth: Auth) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// Set the `forward_client_headers` allowlist of an
+    /// `anthropic-messages` entry. Panics on other formats.
     pub fn with_forward_client_headers(mut self, v: Vec<String>) -> Self {
-        match &mut self {
-            Self::AnthropicApi {
-                forward_client_headers,
-                ..
-            } => *forward_client_headers = v,
-            _ => panic!("ProviderEntry::with_forward_client_headers only applies to anthropic-api"),
-        }
+        assert!(
+            self.format == Format::AnthropicMessages,
+            "ProviderEntry::with_forward_client_headers only applies to anthropic-messages"
+        );
+        self.forward_client_headers = Some(v);
         self
     }
 
     /// Redact every credential-bearing value in this entry, in place, so the
-    /// entry is safe to serialize into diagnostics: key refs that are not
-    /// `env://` / `file://` / `oauth://` pointers become sentinels (including
-    /// the bedrock-mantle and Bedrock creds), every `header_extras` value and
-    /// every string leaf of `payload_extras` becomes `[REDACTED]`, and
-    /// `base_url` is reduced to its origin.
+    /// entry is safe to serialize into diagnostics: a credential or
+    /// account-id reference that is not an `env://` / `file://` / `oauth://`
+    /// pointer, an AWS form or `forwarded` becomes a sentinel, every
+    /// `header_extras` value and every string leaf of `payload_extras`
+    /// becomes `[REDACTED]`, and `base_url` is reduced to its origin.
     ///
-    /// The output is NOT round-trippable back into a config file. Every arm
-    /// names every field of its variant (non-secret ones as `_`), so a new
-    /// variant or field fails to compile here until someone decides whether
-    /// it carries a secret.
+    /// The output is NOT round-trippable back into a config file. The
+    /// destructure names every field (non-secret ones as `_`), so a new field
+    /// fails to compile here until someone decides whether it carries a
+    /// secret.
     pub fn redact_secrets(&mut self) {
-        match self {
-            Self::OpenaiCompat {
-                base_url,
-                api_key_ref,
-                header_extras,
-                payload_extras,
-                #[cfg(feature = "bedrock")]
-                bedrock_mantle,
-                user_agent: _,
-                cache_capability: _,
-                reduction_enabled: _,
-                runtime: _,
-            } => {
-                *api_key_ref = redact_literal_secret(api_key_ref);
-                *base_url = redact_base_url(base_url);
-                redact_extras(header_extras, payload_extras);
-                #[cfg(feature = "bedrock")]
-                redact_mantle(bedrock_mantle.as_mut());
-            }
-            Self::AnthropicApi {
-                api_key_ref,
-                base_url,
-                header_extras,
-                payload_extras,
-                #[cfg(feature = "bedrock")]
-                bedrock_mantle,
-                anthropic_version: _,
-                auth_kind: _,
-                credential_source: _,
-                user_agent: _,
-                forward_client_headers: _,
-                context_management: _,
-                cache_capability: _,
-                reduction_enabled: _,
-                cloak: _,
-                runtime: _,
-            } => {
-                *api_key_ref = redact_literal_secret(api_key_ref);
-                *base_url = redact_base_url(base_url);
-                redact_extras(header_extras, payload_extras);
-                #[cfg(feature = "bedrock")]
-                redact_mantle(bedrock_mantle.as_mut());
-            }
-            // Carries no `base_url` at all: the region derives the endpoint.
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock {
-                creds,
-                header_extras,
-                payload_extras,
-                region: _,
-                api_shape: _,
-                user_agent: _,
-                cache_capability: _,
-                reduction_enabled: _,
-                runtime: _,
-            } => {
-                creds.redact();
-                redact_extras(header_extras, payload_extras);
-            }
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses {
-                api_key_ref,
-                account_id_ref,
-                base_url,
-                header_extras,
-                payload_extras,
-                #[cfg(feature = "bedrock")]
-                bedrock_mantle,
-                auth_kind: _,
-                user_agent: _,
-                codex_version: _,
-                cache_capability: _,
-                reduction_enabled: _,
-                runtime: _,
-            } => {
-                *api_key_ref = redact_literal_secret(api_key_ref);
-                if let Some(a) = account_id_ref {
-                    *a = redact_literal_secret(a);
-                }
-                // Optional here: `None` means "the factory picks the default"
-                // and must stay `None`, not become a redaction sentinel.
-                if let Some(url) = base_url {
-                    *url = redact_base_url(url);
-                }
-                redact_extras(header_extras, payload_extras);
-                #[cfg(feature = "bedrock")]
-                redact_mantle(bedrock_mantle.as_mut());
-            }
-            #[cfg(feature = "gemini")]
-            Self::Gemini {
-                api_key_ref,
-                base_url,
-                header_extras,
-                payload_extras,
-                user_agent: _,
-                auth_mode: _,
-                cloud_project_id: _,
-                cache_capability: _,
-                reduction_enabled: _,
-                runtime: _,
-            } => {
-                *api_key_ref = redact_literal_secret(api_key_ref);
-                *base_url = redact_base_url(base_url);
-                redact_extras(header_extras, payload_extras);
-            }
+        let Self {
+            format: _,
+            base_url,
+            cloud: _,
+            credential,
+            auth: _,
+            account_id_ref,
+            cloud_project_id: _,
+            anthropic_version: _,
+            forward_client_headers: _,
+            context_management: _,
+            cloak_mode: _,
+            cloak_strict_mode: _,
+            codex_version: _,
+            header_extras,
+            payload_extras,
+            user_agent: _,
+            cache_capability: _,
+            reduction_enabled: _,
+            runtime: _,
+        } = self;
+        *credential = redact_credential(credential);
+        if let Some(a) = account_id_ref {
+            *a = redact_literal_secret(a);
         }
+        if let Some(url) = base_url {
+            *url = redact_base_url(url);
+        }
+        redact_extras(header_extras, payload_extras);
     }
 
     /// Every secret-URI reference this entry carries, for startup
-    /// resolution. A `forwarded` entry's empty `api_key_ref` is omitted.
+    /// resolution: the credential when the store resolves it (never an AWS
+    /// form or `forwarded`), then `account_id_ref`. Empty references are
+    /// skipped; an empty string is not a parseable secret URI.
     pub fn secret_uris(&self) -> Vec<&str> {
-        match self {
-            // The Bedrock mantle lane authenticates with
-            // `bedrock_mantle.creds`, not `api_key_ref` (validation REQUIRES
-            // the latter empty), so the empty ref is not surfaced -- doing so
-            // would fail `SecretRef::parse` with a spurious "unrecognized
-            // scheme" error on an otherwise-clean mantle provider. The creds
-            // descriptor IS walked so a malformed creds ref scheme fails at
-            // config check rather than only at build/probe.
-            #[cfg(feature = "bedrock")]
-            Self::OpenaiCompat {
-                bedrock_mantle: Some(mantle),
-                ..
-            } => mantle.creds.secret_uris(),
-            Self::OpenaiCompat { api_key_ref, .. } => vec![api_key_ref.as_str()],
-            // A mantle AnthropicApi entry also authenticates with
-            // `bedrock_mantle.creds` and REQUIRES an empty `api_key_ref`;
-            // walk the creds descriptor (not the empty ref) so its scheme is
-            // checked. Must precede the empty-ref guard below, which the
-            // mantle shape would otherwise fall into.
-            #[cfg(feature = "bedrock")]
-            Self::AnthropicApi {
-                bedrock_mantle: Some(mantle),
-                ..
-            } => mantle.creds.secret_uris(),
-            // A `forwarded` entry's `api_key_ref` is intentionally empty
-            // (validated by `validate_provider_credential_sources`, not
-            // resolved through a `SecretStore`) -- an empty ref is not a
-            // secret URI to resolve, so surfacing it would fail
-            // `SecretRef::parse` with a spurious "unrecognized scheme"
-            // error on an otherwise-clean forwarded provider.
-            Self::AnthropicApi { api_key_ref, .. } if api_key_ref.is_empty() => Vec::new(),
-            Self::AnthropicApi { api_key_ref, .. } => vec![api_key_ref.as_str()],
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock { creds, .. } => creds.secret_uris(),
-            #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-            Self::OpenaiResponses {
-                bedrock_mantle: Some(mantle),
-                ..
-            } => mantle.creds.secret_uris(),
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses {
-                api_key_ref,
-                account_id_ref,
-                ..
-            } => {
-                let mut v = vec![api_key_ref.as_str()];
-                if let Some(a) = account_id_ref {
-                    v.push(a.as_str());
-                }
-                v
-            }
-            #[cfg(feature = "gemini")]
-            Self::Gemini { api_key_ref, .. } => vec![api_key_ref.as_str()],
-        }
+        self.api_key_ref()
+            .into_iter()
+            .chain(self.account_id_ref.as_deref())
+            .filter(|uri| !uri.is_empty())
+            .collect()
     }
 }
 
-#[cfg(feature = "bedrock")]
-impl BedrockCredsConfig {
-    /// Replace every ref that is not an `env://`, `file://` or `oauth://`
-    /// pointer with a sentinel (`literal:[REDACTED]` for a `literal:` value).
-    pub fn redact(&mut self) {
-        match self {
-            Self::BearerKey { key_ref } => {
-                *key_ref = redact_literal_secret(key_ref);
-            }
-            Self::Static {
-                access_key_ref,
-                secret_key_ref,
-                session_token_ref,
-            } => {
-                *access_key_ref = redact_literal_secret(access_key_ref);
-                *secret_key_ref = redact_literal_secret(secret_key_ref);
-                if let Some(t) = session_token_ref {
-                    *t = redact_literal_secret(t);
-                }
-            }
-            Self::Profile { .. } | Self::DefaultChain => {}
-        }
-    }
+/// The reserved `credential` value that relays the client's own credential.
+const FORWARDED_CREDENTIAL: &str = "forwarded";
 
-    /// Enumerate every secret-URI string a config check should resolve.
-    /// Empty ref slots are skipped: an empty string fed to `SecretRef::parse`
-    /// fails as an "unrecognized scheme", a spurious error on the config-check
-    /// walk. A genuinely-required-but-empty ref is caught by the validator.
-    pub fn secret_uris(&self) -> Vec<&str> {
-        let refs: Vec<&str> = match self {
-            Self::BearerKey { key_ref } => vec![key_ref.as_str()],
-            Self::Static {
-                access_key_ref,
-                secret_key_ref,
-                session_token_ref,
-            } => {
-                let mut v = vec![access_key_ref.as_str(), secret_key_ref.as_str()];
-                if let Some(t) = session_token_ref {
-                    v.push(t.as_str());
-                }
-                v
-            }
-            Self::Profile { .. } | Self::DefaultChain => Vec::new(),
-        };
-        refs.into_iter().filter(|r| !r.is_empty()).collect()
+/// The endpoint base the factory derives for `format` over the AWS cloud in
+/// `region`, or `None` when the region fails admission or the build has no
+/// AWS lanes.
+#[cfg(feature = "bedrock")]
+fn cloud_egress_base(format: Format, region: &str) -> Option<String> {
+    let base = match format {
+        Format::AnthropicMessages => routectl_providers::mantle::mantle_anthropic_base(region),
+        Format::OpenaiChat | Format::OpenaiResponses => {
+            routectl_providers::mantle::mantle_openai_base(region)
+        }
+        Format::BedrockInvoke | Format::BedrockConverse => {
+            routectl_providers::bedrock::endpoint::bedrock_runtime_url(region)
+        }
+        Format::Gemini | Format::GeminiCloudCode => return None,
+    };
+    base.ok()
+}
+
+#[cfg(not(feature = "bedrock"))]
+const fn cloud_egress_base(_format: Format, _region: &str) -> Option<String> {
+    None
+}
+
+/// A credential as it may be displayed: the AWS forms and `forwarded` name
+/// no secret and print as written; anything else is shown per
+/// [`redact_literal_secret`].
+fn redact_credential(credential: &str) -> String {
+    match routectl_auth::CredentialRef::parse(credential) {
+        Ok(
+            routectl_auth::CredentialRef::AwsProfile(_)
+            | routectl_auth::CredentialRef::AwsChain
+            | routectl_auth::CredentialRef::Forwarded,
+        ) => credential.to_string(),
+        _ => redact_literal_secret(credential),
     }
 }
 
@@ -2426,27 +1723,16 @@ fn redact_json_strings(value: &mut Value) {
     }
 }
 
-#[cfg(feature = "bedrock")]
-fn redact_mantle(mantle: Option<&mut BedrockMantleConfig>) {
-    if let Some(BedrockMantleConfig { creds, region: _ }) = mantle {
-        creds.redact();
-    }
-}
-
 /// Reduce a configured `base_url` to something safe to display, with exactly
 /// three outcomes:
 ///
-/// - **empty stays EMPTY.** This is load-bearing, not a formatting nicety: the
-///   bedrock-mantle lane REQUIRES an empty `base_url` (the factory carries a
-///   `debug_assert!` on it, because `region` is the single source of truth for
-///   the endpoint there). Rewriting `""` to a sentinel would render a correct
-///   mantle config as broken.
+/// - **empty stays EMPTY**, so a blank value still reads as blank and the
+///   validator's own "set but empty" refusal stays recognizable.
 /// - **a projectable value becomes its ORIGIN** -- scheme, host, and port only.
 ///   Userinfo, path, query, and fragment are dropped; each is a position a
 ///   credential is known to occupy in practice.
 /// - **anything unprojectable becomes `[REDACTED]`** -- the fail-safe withhold,
-///   never an empty string, because empty now means the mantle lane per the
-///   first bullet.
+///   never an empty string, which would read as the first bullet.
 ///
 /// # When a surface must reduce
 ///
@@ -2556,42 +1842,6 @@ pub enum SeatSelection {
     /// remaining short-window budget when the evidence suffices.
     #[default]
     StickyLeastLoaded,
-}
-
-pub fn default_anthropic_base() -> String {
-    "https://api.anthropic.com".into()
-}
-
-fn default_anthropic_version() -> String {
-    "2023-06-01".into()
-}
-
-#[cfg(feature = "gemini")]
-pub fn default_gemini_base() -> String {
-    "https://generativelanguage.googleapis.com/v1beta".into()
-}
-
-/// The default Responses API base URL for an `auth_kind`, used wherever an
-/// `openai-responses` entry left `base_url` unset. Keyed on `auth_kind` at
-/// use time rather than as a serde default, because `auth_kind` is not known
-/// when `base_url`'s serde default would fire.
-#[cfg(feature = "openai-responses")]
-pub fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
-    match auth_kind {
-        OpenaiResponsesAuthKind::ChatgptOauth => "https://chatgpt.com/backend-api/codex".into(),
-        OpenaiResponsesAuthKind::ApiKey => "https://api.openai.com/v1".into(),
-        // The mantle lane derives its region-specific base_url in the
-        // factory's `bedrock_mantle` branch and returns before this
-        // fallback; the non-mantle path then rejects a bare `bedrock-mantle`
-        // marker with a Config error (in every build and for unvalidated
-        // callers) before any base_url is resolved.
-        // `ProviderEntry::classifiable_egress_base_url` answers a host from
-        // its `bedrock_mantle` block arm and `None` for a bare marker, both
-        // before calling here. No path reaches here.
-        OpenaiResponsesAuthKind::BedrockMantle => {
-            unreachable!("bedrock-mantle base_url is derived in the factory mantle branch")
-        }
-    }
 }
 
 /// How an openai-compat provider expresses reasoning/thinking on the wire.

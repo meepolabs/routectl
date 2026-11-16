@@ -179,19 +179,21 @@ marked `credential_source = "forwarded"` route on the client's bearer.
 
 ### How to enable
 
-Add an `anthropic-api` provider with `credential_source = "forwarded"`:
+Add an `anthropic-messages` provider with `credential = "forwarded"`
+and `auth = "bearer"`:
 
 ```toml
 [providers.anthropic-forwarded]
-kind              = "anthropic-api"
-base_url          = "https://api.anthropic.com"
-credential_source = "forwarded"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "forwarded"
+auth       = "bearer"
 ```
 
-Omit `api_key_ref` -- a forwarded provider has no configured credential
-of its own. Validation rejects a non-empty `api_key_ref` on a
-forwarded entry, and rejects any `base_url` whose host is not exactly
-`api.anthropic.com` (see [`docs/CONFIGURATION.md`](CONFIGURATION.md)
+`credential = "forwarded"` is the whole credential -- a forwarded
+provider has no configured credential of its own. Validation rejects a
+forwarded entry on any other format or auth, and rejects any `base_url`
+whose host is not exactly `api.anthropic.com` (see [`docs/CONFIGURATION.md`](CONFIGURATION.md)
 "credential_source"). Route an alias or model to this provider the
 same way you would any other. Unlike `[mitm]` itself, this is an
 ordinary provider edit -- it hot-reloads on the next config swap, no

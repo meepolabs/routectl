@@ -73,22 +73,13 @@ fn router_with_parking_entry() -> (Router, Arc<AtomicUsize>) {
         .insert("solo".into(), AliasValue::Chain(vec!["seat".into()]));
     config.providers.insert(
         "p".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k").with_runtime(
+            ProviderRuntimePolicy {
                 circuit_failures: Some(1),
                 circuit_cooldown_ms: Some(60_000),
                 ..Default::default()
             },
-        },
+        ),
     );
 
     let calls = Arc::new(AtomicUsize::new(0));

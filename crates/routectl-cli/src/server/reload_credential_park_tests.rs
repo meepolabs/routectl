@@ -22,17 +22,20 @@ fn mixed_config_text(extra_model: bool) -> String {
         "version = {CURRENT_CONFIG_VERSION}\n\
          [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
          [providers.seat_a]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#a\"\n\
-         auth_kind = \"oauth-bearer\"\n\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#a\"\n\
+         auth = \"bearer\"\n\n\
          [providers.seat_b]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#b\"\n\
-         auth_kind = \"oauth-bearer\"\n\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#b\"\n\
+         auth = \"bearer\"\n\n\
          [providers.compat]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"http://127.0.0.1:1/v1\"\n\
-         api_key_ref = \"env://{KEY_ENV}\"\n\n\
+         credential = \"env://{KEY_ENV}\"\n\
+         auth = \"bearer\"\n\n\
          [models.claude-a]\nprovider = \"seat_a\"\nupstream = \"claude-sonnet-4-6\"\n\n\
          [models.claude-b]\nprovider = \"seat_b\"\nupstream = \"claude-sonnet-4-6\"\n\n\
          [models.glm]\nprovider = \"compat\"\nupstream = \"glm-4.6\"\n"

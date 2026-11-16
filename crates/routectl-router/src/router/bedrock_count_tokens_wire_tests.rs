@@ -48,10 +48,10 @@ initial_backoff_ms = 0
 jitter_ms = 0
 
 [providers.p1]
-kind = "bedrock"
-region = "us-east-1"
-api_shape = "invoke"
-creds = { kind = "default-chain" }
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 
 [aliases]
 "count-alias" = ["m1"]
@@ -82,11 +82,11 @@ async fn refusing_upstream() -> MockServer {
 
 /// [`CONFIG`] with the operator's payload extras on the provider.
 fn config_with_extras() -> String {
+    const ANCHOR: &str = "auth = \"aws-sigv4\"\n";
+    assert_eq!(CONFIG.matches(ANCHOR).count(), 1, "one provider auth line");
     CONFIG.replace(
-        "creds = { kind = \"default-chain\" }\n",
-        &format!(
-            "creds = {{ kind = \"default-chain\" }}\npayload_extras = {{ {EXTRA_KEY} = \"x\" }}\n"
-        ),
+        ANCHOR,
+        &format!("{ANCHOR}payload_extras = {{ {EXTRA_KEY} = \"x\" }}\n"),
     )
 }
 

@@ -63,7 +63,7 @@ impl RepairSink for ScriptedSink {
 
 fn anthropic_target() -> DispatchTarget {
     let config: Config =
-        toml::from_str("[providers.p1]\nkind = \"anthropic-api\"\n").expect("valid test toml");
+        toml::from_str("[providers.p1]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://ANTHROPIC_API_KEY\"\nauth = \"x-api-key\"\n").expect("valid test toml");
     let router = Router::new(Arc::new(config));
     let provider: Arc<dyn Provider> = Arc::new(OkProvider {
         count_calls: AtomicUsize::new(0),

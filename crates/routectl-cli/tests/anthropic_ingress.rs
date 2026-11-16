@@ -4156,10 +4156,10 @@ mod bedrock_beta_withhold {
         }
     }
 
-    const fn shape_toml(shape: BedrockApiShape) -> &'static str {
+    const fn format_toml(shape: BedrockApiShape) -> &'static str {
         match shape {
-            BedrockApiShape::Converse => "converse",
-            _ => "invoke",
+            BedrockApiShape::Converse => "bedrock-converse",
+            _ => "bedrock-invoke",
         }
     }
 
@@ -4174,16 +4174,16 @@ mod bedrock_beta_withhold {
         let text = format!(
             "version = {CURRENT_CONFIG_VERSION}\n\n\
              [providers.{PROVIDER}]\n\
-             kind = \"bedrock\"\n\
-             region = \"{REGION}\"\n\
-             api_shape = \"{shape}\"\n\
-             creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+             format = \"{format}\"\n\
+             cloud = {{ name = \"aws\", region = \"{REGION}\" }}\n\
+             credential = \"{key_ref}\"\n\
+             auth = \"bearer\"\n\n\
              [models.{NICKNAME}]\n\
              provider = \"{PROVIDER}\"\n\
              upstream = \"{MODEL_ID}\"\n\n\
              [capability.overrides.{PROVIDER}]\n\
              unsupported = [\"{key}\"]\n",
-            shape = shape_toml(shape),
+            format = format_toml(shape),
             key_ref = common::file_ref(&bearer_key()),
         );
         parse_config(&text).expect("valid test config")

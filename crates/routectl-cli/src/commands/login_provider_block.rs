@@ -14,68 +14,50 @@
 
 use routectl_auth::SecretRef;
 use routectl_router::seat_naming::account_entry_name;
-use routectl_router::{ProviderEntry, provider_kind_for_oauth_id};
+use routectl_router::{Auth, Format};
 use toml_edit::Table;
 
-/// The auth-selector field and endpoint an `oauth://<id>` credential must
-/// be consumed with, keyed by login-provider id.
+/// The `format`, `auth` and `base_url` an `oauth://<id>` credential must be
+/// consumed with, keyed by login-provider id.
 ///
-/// This table MUST track the factory's requirements
-/// (`routectl-router/src/factory/build.rs` and `factory/validate.rs`) --
-/// a provider entry that omits one of these fields is rejected at
-/// provider-build time, or worse, authenticates on the wrong surface.
-/// It deliberately owns only what the router carries nowhere as data:
-/// the `kind` comes from `provider_kind_for_oauth_id`, the single map the
-/// activation path already reads, rather than being restated here.
+/// Each row is the vendor's own lane as the router's provider descriptor
+/// states it: config validation refuses a managed login on any other
+/// format, auth or host, so a row that drifts from the descriptor yields a
+/// block that fails at the operator's next startup.
 ///
-/// Per-provider grounding:
-/// - `anthropic` (anthropic-api): `auth_kind = "oauth-bearer"` selects
-///   the `Authorization: Bearer` surface for a subscription access
-///   token; the default `api-key` would send `x-api-key` and 401.
-///   `base_url` defaults to the Anthropic origin.
-/// - `codex` (openai-responses): `auth_kind = "chatgpt-oauth"` is also
-///   the serde default, and an `oauth://` bearer lets `account_id_ref`
-///   be derived from the session, so the field is emitted for clarity
-///   rather than necessity. `base_url` is picked per auth kind by the
-///   factory when unset.
-/// - `xai` (openai-compat): that variant carries NO auth-selector field
-///   at all (the entry is `deny_unknown_fields`, so adding one fails the
-///   parse), and its `base_url` is REQUIRED non-empty by validation.
-///   The endpoint value is the one field here with no code-side
-///   constant -- it comes from the xAI section of `docs/CONFIGURATION.md`.
-/// - `antigravity` (gemini): `auth_mode = "cloud-code"` selects the
-///   Cloud Code surface, which additionally REQUIRES the `api_key_ref`
-///   be an `oauth://` reference. `base_url` is left unset so the
-///   cloud-code default applies -- pinning the public api-key endpoint
-///   here would point the bearer at the wrong host.
+/// - `anthropic`: `anthropic-messages` over `https://api.anthropic.com`,
+///   sent as `bearer` (a subscription token on `x-api-key` would 401).
+/// - `codex`: `openai-responses` over the ChatGPT Codex base, `bearer`;
+///   `account_id_ref` is derived from the login, so it is not written.
+/// - `xai`: `openai-chat` over `https://api.x.ai/v1`, `bearer`.
+/// - `antigravity`: `gemini-cloud-code` over the daily Cloud Code base,
+///   `bearer`.
 fn auth_shape_for_oauth_id(oauth_id: &str) -> Option<AuthShape> {
-    match oauth_id {
-        "anthropic" => Some(AuthShape {
-            auth_field: Some(("auth_kind", "oauth-bearer")),
-            base_url: None,
-        }),
-        "codex" => Some(AuthShape {
-            auth_field: Some(("auth_kind", "chatgpt-oauth")),
-            base_url: None,
-        }),
-        "xai" => Some(AuthShape {
-            auth_field: None,
-            base_url: Some("https://api.x.ai/v1"),
-        }),
-        "antigravity" => Some(AuthShape {
-            auth_field: Some(("auth_mode", "cloud-code")),
-            base_url: None,
-        }),
-        _ => None,
-    }
+    let (format, base_url) = match oauth_id {
+        "anthropic" => (Format::AnthropicMessages, "https://api.anthropic.com"),
+        "codex" => (
+            Format::OpenaiResponses,
+            "https://chatgpt.com/backend-api/codex",
+        ),
+        "xai" => (Format::OpenaiChat, "https://api.x.ai/v1"),
+        "antigravity" => (
+            Format::GeminiCloudCode,
+            "https://daily-cloudcode-pa.googleapis.com",
+        ),
+        _ => return None,
+    };
+    Some(AuthShape {
+        format,
+        auth: Auth::Bearer,
+        base_url,
+    })
 }
 
-/// The provider-shape facts [`auth_shape_for_oauth_id`] owns: which
-/// auth-selector key/value the entry needs (if any), and whether
-/// `base_url` must be written out (`None` = leave it at its default).
+/// The provider-shape facts [`auth_shape_for_oauth_id`] owns.
 struct AuthShape {
-    auth_field: Option<(&'static str, &'static str)>,
-    base_url: Option<&'static str>,
+    format: Format,
+    auth: Auth,
+    base_url: &'static str,
 }
 
 /// A rendered `[providers.<name>]` entry for one logged-in seat.
@@ -85,10 +67,10 @@ struct AuthShape {
 #[derive(Debug)]
 pub struct ProviderBlock {
     name: String,
-    kind: &'static str,
-    auth_field: Option<(&'static str, &'static str)>,
-    base_url: Option<&'static str>,
-    api_key_ref: String,
+    format: Format,
+    auth: Auth,
+    base_url: &'static str,
+    credential: String,
 }
 
 /// Build the provider entry that consumes the seat `routectl login
@@ -96,26 +78,25 @@ pub struct ProviderBlock {
 /// known provider shape (unreachable through the CLI, whose accepted set
 /// is the login registry itself).
 ///
-/// The `api_key_ref` carries the `#<label>` fragment exactly when a label
+/// The `credential` carries the `#<label>` fragment exactly when a label
 /// was passed. Emitting a bare ref for a labelled login would silently
 /// point the entry at the DEFAULT seat -- a wrong-credential failure that
 /// presents as a config typo -- and inventing a fragment for an
 /// unlabelled login would reference a seat that does not exist.
 #[must_use]
 pub fn provider_block(oauth_id: &str, label: Option<&str>) -> Option<ProviderBlock> {
-    let kind = provider_kind_for_oauth_id(oauth_id)?;
     let shape = auth_shape_for_oauth_id(oauth_id)?;
-    let api_key_ref = SecretRef::OAuth {
+    let credential = SecretRef::OAuth {
         provider: oauth_id.to_string(),
         label: label.map(str::to_string),
     }
     .to_string();
     Some(ProviderBlock {
         name: block_name(oauth_id, label),
-        kind,
-        auth_field: shape.auth_field,
+        format: shape.format,
+        auth: shape.auth,
         base_url: shape.base_url,
-        api_key_ref,
+        credential,
     })
 }
 
@@ -138,43 +119,29 @@ fn block_name(oauth_id: &str, label: Option<&str>) -> String {
 }
 
 /// The auth-shape fields a provider entry consuming `oauth://<oauth_id>`
-/// MUST carry: the `kind` tag and the auth-selector key/value (absent for
-/// a variant that has none).
+/// MUST carry: its `format` and its `auth`.
 ///
 /// Read by the login auto-surface to check an existing entry it matched by
 /// ref for auth drift. Deliberately narrower than the full auth shape: an
-/// operator's `base_url` override is legitimate configuration, while a
-/// wrong `kind` or auth selector means the entry authenticates on the
-/// wrong surface.
+/// operator's `base_url` override is legitimate configuration (validation
+/// owns which hosts a managed login may reach), while a wrong `format` or
+/// `auth` means the entry authenticates on the wrong surface.
 pub struct RequiredAuthFields {
-    /// The `kind` discriminant the entry must carry.
-    pub kind: &'static str,
-    /// The auth-selector key and value, or `None` for a variant with no
-    /// such field.
-    pub auth_selector: Option<(&'static str, &'static str)>,
+    /// The `format` the entry must carry.
+    pub format: Format,
+    /// The `auth` the entry must carry.
+    pub auth: Auth,
 }
 
 /// The required auth-shape fields for `oauth_id`, or `None` for an id with
 /// no known provider shape.
 #[must_use]
 pub fn required_auth_fields(oauth_id: &str) -> Option<RequiredAuthFields> {
-    let kind = provider_kind_for_oauth_id(oauth_id)?;
     let shape = auth_shape_for_oauth_id(oauth_id)?;
     Some(RequiredAuthFields {
-        kind,
-        auth_selector: shape.auth_field,
+        format: shape.format,
+        auth: shape.auth,
     })
-}
-
-/// One string-valued field of a provider entry, read through its own
-/// serialization so the compared token is exactly what the parser accepts
-/// (the auth-selector enums are kebab-case on the wire).
-pub(crate) fn entry_field_str(entry: &ProviderEntry, key: &str) -> Option<String> {
-    toml::Value::try_from(entry)
-        .ok()?
-        .get(key)?
-        .as_str()
-        .map(str::to_string)
 }
 
 impl ProviderBlock {
@@ -218,19 +185,15 @@ impl ProviderBlock {
         out
     }
 
-    /// Fields in emission order. `kind` first (it is the tag the parser
-    /// dispatches on), then the auth selector, then the endpoint, then
-    /// the credential reference.
+    /// Fields in the entry's documented key order: `format`, `base_url`,
+    /// `credential`, `auth`.
     fn rows(&self) -> Vec<(&'static str, String)> {
-        let mut rows = vec![("kind", self.kind.to_string())];
-        if let Some((key, value)) = self.auth_field {
-            rows.push((key, value.to_string()));
-        }
-        if let Some(url) = self.base_url {
-            rows.push(("base_url", url.to_string()));
-        }
-        rows.push(("api_key_ref", self.api_key_ref.clone()));
-        rows
+        vec![
+            ("format", self.format.as_str().to_string()),
+            ("base_url", self.base_url.to_string()),
+            ("credential", self.credential.clone()),
+            ("auth", self.auth.as_str().to_string()),
+        ]
     }
 }
 
@@ -310,28 +273,38 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_block_carries_the_gemini_kind_cloud_code_mode_and_oauth_ref() {
+    fn antigravity_block_carries_the_cloud_code_format_bearer_auth_and_oauth_ref() {
         // Arrange + Act
         let block = rendered("antigravity", None);
 
-        // Assert: all three non-obvious fields, and the kind is `gemini`
-        // -- NOT the login id.
-        assert!(block.contains(r#"kind        = "gemini""#), "{block}");
-        assert!(block.contains(r#"auth_mode   = "cloud-code""#), "{block}");
+        // Assert: all three non-obvious fields, and the format is
+        // `gemini-cloud-code` -- NOT the login id.
         assert!(
-            block.contains(r#"api_key_ref = "oauth://antigravity""#),
+            block.contains(r#"format     = "gemini-cloud-code""#),
             "{block}"
         );
-        assert!(!block.contains(r#""antigravity""#), "kind leaked: {block}");
+        assert!(block.contains(r#"auth       = "bearer""#), "{block}");
+        assert!(
+            block.contains(r#"credential = "oauth://antigravity""#),
+            "{block}"
+        );
+        assert!(
+            !block.contains(r#""antigravity""#),
+            "format leaked: {block}"
+        );
     }
 
     #[test]
-    fn antigravity_block_leaves_base_url_unset() {
-        // The cloud-code surface derives its own endpoint; a written
-        // base_url would pin the bearer to the api-key host.
+    fn antigravity_block_writes_the_daily_cloud_code_base() {
+        // The carrier is an always-written identity key; the Cloud Code
+        // surface is written as its daily base, never the api-key host.
         let block = rendered("antigravity", None);
 
-        assert!(!block.contains("base_url"), "{block}");
+        assert!(
+            block.contains(r#"base_url   = "https://daily-cloudcode-pa.googleapis.com""#),
+            "{block}"
+        );
+        assert!(!block.contains("generativelanguage"), "{block}");
     }
 
     #[test]
@@ -342,7 +315,7 @@ mod tests {
         // Assert: without the fragment the entry silently consumes the
         // default seat instead of the one just minted.
         assert!(
-            block.contains(r#"api_key_ref = "oauth://anthropic#seat-b""#),
+            block.contains(r#"credential = "oauth://anthropic#seat-b""#),
             "{block}"
         );
     }
@@ -365,57 +338,56 @@ mod tests {
         // Assert: a `#` anywhere in the ref would name a seat that was
         // never created.
         assert!(
-            block.contains(r#"api_key_ref = "oauth://anthropic""#),
+            block.contains(r#"credential = "oauth://anthropic""#),
             "{block}"
         );
         assert!(!block.contains('#'), "invented a fragment: {block}");
     }
 
     #[test]
-    fn anthropic_block_selects_the_oauth_bearer_surface() {
+    fn anthropic_block_selects_the_bearer_surface() {
         let block = rendered("anthropic", None);
 
         assert!(
-            block.contains(r#"kind        = "anthropic-api""#),
+            block.contains(r#"format     = "anthropic-messages""#),
             "{block}"
         );
-        assert!(block.contains(r#"auth_kind   = "oauth-bearer""#), "{block}");
+        assert!(
+            block.contains(r#"base_url   = "https://api.anthropic.com""#),
+            "{block}"
+        );
+        assert!(block.contains(r#"auth       = "bearer""#), "{block}");
     }
 
     #[test]
-    fn codex_block_selects_the_chatgpt_oauth_surface() {
+    fn codex_block_selects_the_chatgpt_codex_surface() {
         let block = rendered("codex", None);
 
         assert!(
-            block.contains(r#"kind        = "openai-responses""#),
+            block.contains(r#"format     = "openai-responses""#),
             "{block}"
         );
         assert!(
-            block.contains(r#"auth_kind   = "chatgpt-oauth""#),
+            block.contains(r#"base_url   = "https://chatgpt.com/backend-api/codex""#),
             "{block}"
         );
-        assert!(
-            block.contains(r#"api_key_ref = "oauth://codex""#),
-            "{block}"
-        );
+        assert!(block.contains(r#"auth       = "bearer""#), "{block}");
+        assert!(block.contains(r#"credential = "oauth://codex""#), "{block}");
+        assert!(!block.contains("account_id_ref"), "{block}");
     }
 
     #[test]
-    fn xai_block_writes_the_required_endpoint_and_no_auth_selector() {
-        // openai-compat validation rejects an empty base_url, and the
-        // variant has no auth-selector field to write.
+    fn xai_block_writes_the_required_endpoint_and_bearer_auth() {
+        // The carrier is required on every entry; openai-chat takes only
+        // the bearer form.
         let block = rendered("xai", None);
 
+        assert!(block.contains(r#"format     = "openai-chat""#), "{block}");
         assert!(
-            block.contains(r#"kind        = "openai-compat""#),
+            block.contains(r#"base_url   = "https://api.x.ai/v1""#),
             "{block}"
         );
-        assert!(
-            block.contains(r#"base_url    = "https://api.x.ai/v1""#),
-            "{block}"
-        );
-        assert!(!block.contains("auth_kind"), "{block}");
-        assert!(!block.contains("auth_mode"), "{block}");
+        assert!(block.contains(r#"auth       = "bearer""#), "{block}");
     }
 
     #[test]
@@ -451,15 +423,16 @@ mod tests {
     }
 
     #[test]
-    fn every_emitted_block_parses_as_a_provider_entry_of_the_stated_kind() {
-        // The entries are `deny_unknown_fields`, so an auth-selector key
-        // written on a variant that has none fails the parse here rather
-        // than at the operator's next startup.
+    fn every_emitted_block_parses_as_a_provider_entry_of_the_stated_format() {
+        // The entry is `deny_unknown_fields`, so a key the flat entry does
+        // not take fails the parse here rather than at the operator's next
+        // startup.
         for id in routectl_auth::oauth::known_provider_ids() {
             for label in [None, Some("seat-b")] {
                 let block = provider_block(id, label).expect("block");
                 let name = block.name.clone();
-                let expected_kind = block.kind;
+                let expected_format = block.format;
+                let expected_auth = block.auth;
 
                 let cfg: routectl_router::Config = toml::from_str(&block.render())
                     .unwrap_or_else(|e| panic!("block for `{id}` must parse: {e}"));
@@ -468,15 +441,16 @@ mod tests {
                     .providers
                     .get(&name)
                     .unwrap_or_else(|| panic!("block for `{id}` must define `{name}`"));
-                assert_eq!(entry.kind_str(), expected_kind, "id `{id}`");
+                assert_eq!(entry.format(), expected_format, "id `{id}`");
+                assert_eq!(entry.auth, expected_auth, "id `{id}`");
             }
         }
     }
 
     #[test]
     fn the_antigravity_block_parses_into_a_cloud_code_gemini_entry() {
-        // Arrange + Act: the worst case -- the kind, the auth mode, and
-        // the oauth ref are each a separate startup rejection when wrong.
+        // Arrange + Act: the worst case -- the format, the auth, and the
+        // oauth ref are each a separate startup rejection when wrong.
         let cfg: routectl_router::Config =
             toml::from_str(&rendered("antigravity", None)).expect("parse antigravity block");
 
@@ -484,10 +458,8 @@ mod tests {
         let entry = cfg.providers.get("antigravity-default").expect("entry");
         assert_eq!(entry.kind_str(), "gemini");
         assert_eq!(entry.api_key_ref(), Some("oauth://antigravity"));
-        assert!(
-            format!("{entry:?}").contains("CloudCode"),
-            "auth_mode must be cloud-code: {entry:?}"
-        );
+        assert_eq!(entry.format(), routectl_router::Format::GeminiCloudCode);
+        assert_eq!(entry.auth, routectl_router::Auth::Bearer);
     }
 
     #[test]

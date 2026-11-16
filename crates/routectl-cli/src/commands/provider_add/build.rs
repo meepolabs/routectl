@@ -3,15 +3,14 @@
 use routectl_auth::{SecretRef, env_ref};
 use routectl_core::provider_kind::config as kind;
 use routectl_core::{Error, Result};
-use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::ProviderEntry;
-use routectl_router::config::CredentialSource;
+use routectl_router::config::Auth;
 
 use super::capture::{PendingSecret, capture_from_stdin, ref_class, resolve_interactive};
 use super::{AddIo, ProviderAddArgs};
 
 /// Provider kinds this flag-driven command can construct from a single
-/// `api_key_ref`. Kinds needing richer inputs are out of this command's
+/// credential reference. Kinds needing richer inputs are out of this command's
 /// non-interactive scope: Bedrock takes a multi-field credential block, and
 /// OpenAI Responses defaults to OAuth; both are configured by hand or through
 /// the interactive flow.
@@ -103,9 +102,9 @@ pub(super) fn build_entry(
     }
 }
 
-/// Build a `credential_source = "forwarded"` anthropic-api entry: it
-/// carries NO secret (`api_key_ref` stays empty) and its base URL is pinned
-/// to the Anthropic origin the shared gate requires. Forwarded is valid for
+/// Build a `credential = "forwarded"` anthropic-messages entry sent as
+/// `auth = "bearer"`: it carries NO secret and its base URL is pinned to the
+/// Anthropic origin the shared gate requires. Forwarded is valid for
 /// `anthropic-api` ONLY, and never mixes with a secret-source flag.
 fn build_forwarded(args: &ProviderAddArgs) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
     if args.kind != kind::ANTHROPIC_API {
@@ -125,8 +124,7 @@ fn build_forwarded(args: &ProviderAddArgs) -> Result<(ProviderEntry, &'static st
     // The constructor already pins `base_url` to https://api.anthropic.com;
     // an explicit `--base-url` (e.g. a pinned path on that host) passes
     // through and is host-checked by the shared gate.
-    let entry =
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded);
+    let entry = ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer);
     let entry = match args.base_url.as_deref() {
         Some(base_url) => entry.with_base_url(base_url),
         None => entry,
@@ -134,8 +132,8 @@ fn build_forwarded(args: &ProviderAddArgs) -> Result<(ProviderEntry, &'static st
     Ok((entry, "forwarded", PendingSecret::None))
 }
 
-/// Build an oauth-backed anthropic-api entry and defer the login. The ref
-/// is `oauth://<provider>` and no key is captured to the file store; the
+/// Build an oauth-backed anthropic-api entry sent as `auth = "bearer"` and
+/// defer the login. The credential is `oauth://<provider>` and no key is captured to the file store; the
 /// login runs post-confirm via `execute_pending`.
 fn build_oauth(
     args: &ProviderAddArgs,
@@ -155,8 +153,7 @@ fn build_oauth(
             args.kind
         )));
     }
-    let entry = ProviderEntry::anthropic_api(format!("oauth://{provider}"))
-        .with_auth_kind(AuthKind::OauthBearer);
+    let entry = ProviderEntry::anthropic_api(format!("oauth://{provider}")).with_auth(Auth::Bearer);
     Ok((
         entry,
         "oauth",
@@ -167,7 +164,7 @@ fn build_oauth(
 }
 
 /// Resolve the api-key secret source into the ref STRING that lands in
-/// `api_key_ref`, its scheme CLASS, and any deferred capture. `--api-key-env
+/// `credential`, its scheme CLASS, and any deferred capture. `--api-key-env
 /// VAR` verifies the var resolves now and yields `env://VAR`; `--secret-ref
 /// REF` validates the ref parses and writes it back verbatim (so a
 /// `file://` ref is preserved exactly, never round-tripped through the

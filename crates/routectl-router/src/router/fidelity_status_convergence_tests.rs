@@ -183,8 +183,20 @@ const REFUSED_KIND: &str = "gemini";
 
 fn convergence_router(base_url: &str, kind: &str) -> Router {
     convergence_router_on(&format!(
-        "kind = \"{kind}\"\napi_key_ref = \"env://K\"\nbase_url = \"{base_url}\"\n"
+        "{}base_url = \"{base_url}\"\ncredential = \"env://K\"\n",
+        entry_identity(kind)
     ))
+}
+
+/// The `format` and `auth` lines of a fixture entry whose family token is
+/// `kind`.
+fn entry_identity(kind: &str) -> &'static str {
+    match kind {
+        "anthropic-api" => "format = \"anthropic-messages\"\nauth = \"x-api-key\"\n",
+        "openai-compat" => "format = \"openai-chat\"\nauth = \"bearer\"\n",
+        "gemini" => "format = \"gemini\"\nauth = \"x-goog-api-key\"\n",
+        other => panic!("no fixture entry for family `{other}`"),
+    }
 }
 
 /// A convergence fixture router whose `[providers.p0]` body is `provider_toml`.
@@ -270,12 +282,12 @@ fn push_widened_kind_positive_rows(cases: &mut Vec<ConvergenceCase>, envelope: &
     #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
     let mut lanes = vec![(
         "eligible envelope verdict on an openai-compat lane",
-        "kind = \"openai-compat\"\napi_key_ref = \"env://K\"\nbase_url = \"https://example.test/v1\"\n",
+        "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"env://K\"\nauth = \"bearer\"\n",
     )];
     #[cfg(feature = "bedrock")]
     lanes.push((
         "eligible envelope verdict on a native bedrock lane",
-        "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
+        "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
     ));
     for (name, provider_toml) in lanes {
         let router = convergence_router_on(provider_toml);
@@ -360,15 +372,16 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
     // other client, so neither side may act on a verdict for its lane.
     let forwarded = {
         let mut config: Config = toml::from_str(
-            "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n\
-             base_url = \"https://api.anthropic.com\"\n",
+            "\n[providers.p0]\nformat = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n",
         )
         .expect("valid convergence toml");
         let entry = config
             .providers
             .remove("p0")
             .expect("the fixture entry exists")
-            .with_credential_source(crate::config::CredentialSource::Forwarded);
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer);
         config.providers.insert("p0".to_string(), entry);
         convergence_router_with_config(config)
     };
@@ -571,8 +584,8 @@ fn convergence_router_without_health_read() -> Router {
     use crate::config::{AliasValue, ModelEntry};
     use crate::resolved::ResolvedModel;
 
-    let toml_text = "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n\
-         base_url = \"https://api.anthropic.com\"\n";
+    let toml_text = "\n[providers.p0]\nformat = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n";
     let mut config: Config = toml::from_str(toml_text).expect("valid convergence toml");
     config
         .models
@@ -625,8 +638,8 @@ fn rebuild_convergence_router_with_kind(
     kind: &str,
 ) -> Router {
     let toml_text = format!(
-        "\n[providers.p0]\nkind = \"{kind}\"\napi_key_ref = \"env://K\"\n\
-         base_url = \"{base_url}\"\n"
+        "\n[providers.p0]\n{}base_url = \"{base_url}\"\ncredential = \"env://K\"\n",
+        entry_identity(kind)
     );
     let parsed: Config = toml::from_str(&toml_text).expect("valid convergence toml");
     config.providers = parsed.providers;

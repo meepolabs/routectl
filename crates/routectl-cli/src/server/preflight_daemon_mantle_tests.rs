@@ -44,6 +44,14 @@ mod mantle {
             }
         }
 
+        const fn format(self) -> &'static str {
+            match self {
+                Self::Anthropic => "anthropic-messages",
+                Self::Compat => "openai-chat",
+                Self::Responses => "openai-responses",
+            }
+        }
+
         const fn upstream(self) -> &'static str {
             match self {
                 Self::Anthropic => "anthropic.claude-haiku-4-5",
@@ -178,10 +186,10 @@ mod mantle {
     fn mantle_config(lane: SubLane, upstream: &str) -> (Arc<Config>, tempfile::TempDir) {
         let key_ref = crate::test_secret::file_ref("mantle-daemon-key");
         let toml_text = format!(
-            "\n[providers.{SEAT}]\nkind = \"{}\"\napi_key_ref = \"\"\n\n\
-             [providers.{SEAT}.bedrock_mantle]\nregion = \"{REGION}\"\n\
-             creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n",
-            lane.kind()
+            "\n[providers.{SEAT}]\nformat = \"{}\"\n\
+             cloud = {{ name = \"aws\", region = \"{REGION}\" }}\n\
+             credential = \"{key_ref}\"\nauth = \"bearer\"\n",
+            lane.format()
         );
         let mut config: Config = toml::from_str(&toml_text).expect("valid mantle test toml");
         config

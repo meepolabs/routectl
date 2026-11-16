@@ -161,10 +161,10 @@ fn lane_config(shape: BedrockApiShape, operator: &Operator<'_>) -> Config {
     let mut text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{PROVIDER}]\n\
-         kind = \"bedrock\"\n\
-         region = \"{REGION}\"\n\
-         api_shape = \"{shape}\"\n\
-         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\
+         format = \"bedrock-{shape}\"\n\
+         cloud = {{ name = \"aws\", region = \"{REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\
          {provider_pins}\n\
          [models.{NICKNAME}]\n\
          provider = \"{PROVIDER}\"\n\

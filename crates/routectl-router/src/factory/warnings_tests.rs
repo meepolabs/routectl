@@ -13,17 +13,17 @@ mod cloud_code {
     use crate::config::Config;
     use crate::factory::warnings::{cloudcode_host_warnings, cloudcode_model_warnings};
 
-    /// A `cloud-code` Gemini entry, optionally pinning `base_url`. `None`
-    /// leaves the key unset, which is the daily-default shape.
+    /// A `gemini-cloud-code` entry on `base_url`; `None` writes the daily
+    /// host, the base the login writes.
     fn cloud_code_config(base_url: Option<&str>) -> Config {
-        let pin = base_url.map_or_else(String::new, |b| format!("base_url = \"{b}\"\n"));
+        let base = base_url.unwrap_or("https://daily-cloudcode-pa.googleapis.com");
         parse(&format!(
             "version = 2\n\
              [providers.g]\n\
-             kind = \"gemini\"\n\
-             api_key_ref = \"oauth://antigravity\"\n\
-             auth_mode = \"cloud-code\"\n\
-             {pin}"
+             format = \"gemini-cloud-code\"\n\
+             base_url = \"{base}\"\n\
+             credential = \"oauth://antigravity\"\n\
+             auth = \"bearer\"\n"
         ))
     }
 
@@ -97,17 +97,13 @@ mod cloud_code {
     }
 
     #[test]
-    fn silent_for_an_unset_base_url_and_an_explicit_daily_pin() {
-        assert!(
-            cloudcode_host_warnings(&cloud_code_config(None)).is_empty(),
-            "an unset base_url takes the daily lane default"
-        );
+    fn silent_for_the_daily_host() {
         assert!(
             cloudcode_host_warnings(&cloud_code_config(Some(
                 routectl_providers::gemini::DAILY_BASE_URL
             )))
             .is_empty(),
-            "an explicit daily pin is the default host, not a divergence"
+            "the daily host is the login-written base, not a divergence"
         );
     }
 
@@ -118,9 +114,10 @@ mod cloud_code {
         let config = parse(&format!(
             "version = 2\n\
              [providers.g]\n\
-             kind = \"gemini\"\n\
-             api_key_ref = \"env://GEMINI_API_KEY\"\n\
-             base_url = \"{}\"\n",
+             format = \"gemini\"\n\
+             base_url = \"{}\"\n\
+             credential = \"env://GEMINI_API_KEY\"\n\
+             auth = \"x-goog-api-key\"\n",
             routectl_providers::gemini::PROD_BASE_URL
         ));
         assert!(
@@ -153,15 +150,23 @@ mod cloud_code {
         );
     }
 
-    /// One `[models.m]` entry bound to a single Gemini provider on `auth_mode`,
-    /// pinning `upstream`.
-    fn model_config(auth_mode: &str, upstream: &str) -> Config {
+    /// One `[models.m]` entry bound to a single provider of the given Gemini
+    /// `format`, pinning `upstream`.
+    fn model_config(format: &str, upstream: &str) -> Config {
+        let (base_url, auth) = match format {
+            "gemini-cloud-code" => ("https://daily-cloudcode-pa.googleapis.com", "bearer"),
+            _ => (
+                "https://generativelanguage.googleapis.com/v1beta",
+                "x-goog-api-key",
+            ),
+        };
         parse(&format!(
             "version = 2\n\
              [providers.g]\n\
-             kind = \"gemini\"\n\
-             api_key_ref = \"oauth://antigravity\"\n\
-             auth_mode = \"{auth_mode}\"\n\
+             format = \"{format}\"\n\
+             base_url = \"{base_url}\"\n\
+             credential = \"oauth://antigravity\"\n\
+             auth = \"{auth}\"\n\
              [models.m]\n\
              provider = \"g\"\n\
              upstream = \"{upstream}\"\n"
@@ -175,7 +180,7 @@ mod cloud_code {
             ("gemini-2.5-pro", "gemini-3.1-pro-low"),
         ] {
             // Arrange
-            let config = model_config("cloud-code", upstream);
+            let config = model_config("gemini-cloud-code", upstream);
 
             // Act
             let warnings = cloudcode_model_warnings(&config);
@@ -212,7 +217,7 @@ mod cloud_code {
         // The positive above (same id, cloud-code mode) proves this is not
         // vacuous -- only the lane differs.
         for upstream in ["gemini-2.5-flash", "gemini-2.5-pro"] {
-            let warnings = cloudcode_model_warnings(&model_config("api-key", upstream));
+            let warnings = cloudcode_model_warnings(&model_config("gemini", upstream));
             assert!(
                 warnings.is_empty(),
                 "{upstream} is current on the api-key lane and must stay silent: {warnings:?}"
@@ -223,7 +228,7 @@ mod cloud_code {
     #[test]
     fn silent_for_a_cloud_code_entry_pinning_a_verified_id() {
         for upstream in ["gemini-3.1-flash-lite", "gemini-3.1-pro-low"] {
-            let warnings = cloudcode_model_warnings(&model_config("cloud-code", upstream));
+            let warnings = cloudcode_model_warnings(&model_config("gemini-cloud-code", upstream));
             assert!(
                 warnings.is_empty(),
                 "{upstream} is verified on the cloud-code lane: {warnings:?}"
@@ -234,7 +239,7 @@ mod cloud_code {
     #[test]
     fn collect_config_validation_surfaces_the_deprecated_alias_as_a_warning_not_an_error() {
         // Arrange
-        let config = model_config("cloud-code", "gemini-2.5-flash");
+        let config = model_config("gemini-cloud-code", "gemini-2.5-flash");
 
         // Act
         let validation = crate::factory::validate::collect_config_validation(&config);
@@ -263,8 +268,7 @@ fn auth_reserved_header_warnings_name_each_reserved_model_header() {
     for reserved in ["Authorization", "x-api-key", "ANTHROPIC-VERSION"] {
         let config = parse(&format!(
             "version = 5\n\
-             [providers.p]\nkind = \"openai-compat\"\nbase_url = \"https://example.invalid\"\n\
-             api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
+             [providers.p]\nformat = \"openai-chat\"\nbase_url = \"https://example.invalid\"\ncredential = \"env://ROUTECTL_TEST_ABSENT\"\nauth = \"bearer\"\n\
              [models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
              [models.m.header_extras]\n\"{reserved}\" = \"secret-value\"\nx-app = \"ok\"\n"
         ));
@@ -286,8 +290,7 @@ fn auth_reserved_header_warnings_name_each_reserved_model_header() {
 fn auth_reserved_header_warnings_skip_a_config_without_reserved_model_headers() {
     let config = parse(
         "version = 5\n\
-         [providers.p]\nkind = \"openai-compat\"\nbase_url = \"https://example.invalid\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
+         [providers.p]\nformat = \"openai-chat\"\nbase_url = \"https://example.invalid\"\ncredential = \"env://ROUTECTL_TEST_ABSENT\"\nauth = \"bearer\"\n\
          [models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
          [models.m.header_extras]\nhost = \"x\"\nx-app = \"ok\"\n",
     );

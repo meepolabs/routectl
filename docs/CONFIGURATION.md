@@ -35,8 +35,8 @@ overlays merge, what's reserved.
 - Bedrock: [api_shape](#providersx-api_shape----bedrock-api-selector) -
   [beta-flag controls](#bedrock-and-anthropic-api-beta-flag-controls) -
   [body fields](#bedrock-body-fields) -
-  [mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane) -
-  [mantle OpenAI lanes](#providersxbedrock_mantle----bedrock-mantle-openai-lanes)
+  [mantle Anthropic lane](#bedrock-mantle-anthropic-lane) -
+  [mantle OpenAI lanes](#bedrock-mantle-openai-lanes)
 - anthropic-api flags: [context_management](#context_management-anthropic-api-provider-flag) -
   [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
 
@@ -97,8 +97,10 @@ version = 5           # config schema version; routectl refuses an older
                       # `routectl init`)
 
 [providers.anthropic-api-key]
-kind        = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth       = "x-api-key"
 
 [models.heavy]
 provider = "anthropic-api-key"
@@ -344,7 +346,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `capability.staleness_hint_days` | diagnostics use a fixed 14-day hint |
 | `fidelity` | prefix-impacting pre-flight repair is never admitted; class and quorum are fixed |
 | `log` | set ROUTECTL_TRACE_HEADERS / ROUTECTL_TRACE_BODY_BYTES / ROUTECTL_LOG_REDACT_PROMPTS in the environment |
-| `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `kind = "anthropic-api"`, `base_url = "https://api.anthropic.com"` and `credential_source = "forwarded"`, and no `api_key_ref` |
+| `mitm.credential_source` | a forwarded credential is a per-provider choice: add `[providers.anthropic-forwarded]` with `format = "anthropic-messages"`, `base_url = "https://api.anthropic.com"`, `credential = "forwarded"` and `auth = "bearer"` |
 | `mitm.mitm_host` | pinned to https://api.anthropic.com |
 | `mitm.tested_cc_version` | routectl pins the Claude Code version it mints; nothing replaces the check |
 | `mitm.upstream_origin` | pinned to https://api.anthropic.com |
@@ -359,12 +361,22 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `pools.<name>.seat_selection = "round-robin"` | use sticky-least-loaded |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
 | `providers.<name>.anthropic_beta` | pin the flag in header_extras "anthropic-beta" |
+| `providers.<name>.api_key_ref` | write the reference as `credential` |
+| `providers.<name>.api_shape` | the Bedrock API is the format: `format = "bedrock-invoke"` or `format = "bedrock-converse"` |
+| `providers.<name>.auth_kind` | set `auth`: `api-key` is `x-api-key`, `oauth-bearer` and `chatgpt-oauth` are `bearer`; the Bedrock managed surface is a `cloud` |
+| `providers.<name>.auth_mode` | set `format`: `api-key` is `format = "gemini"` with `auth = "x-goog-api-key"`, `cloud-code` is `format = "gemini-cloud-code"` with `auth = "bearer"` |
 | `providers.<name>.auto_emit_per_block_breakpoints` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
+| `providers.<name>.bedrock_mantle` | set `cloud = { name = "aws", region = "<region>" }` and write the credential as `credential` |
 | `providers.<name>.class_overrides` | per-class retry counts live in `[retry.classes]`; a status keeps its built-in class |
-| `providers.<name>.cloak.sensitive_words` | the sensitive-word scanner is removed; nothing replaces it |
-| `providers.<name>.cloak.tool_rename` | tool names are normalized to mcp__ only |
+| `providers.<name>.cloak` | set `cloak_mode` and `cloak_strict_mode` on the entry itself |
+| `providers.<name>.cloak_sensitive_words` | the sensitive-word scanner is removed; nothing replaces it |
+| `providers.<name>.cloak_tool_rename` | tool names are normalized to mcp__ only |
+| `providers.<name>.credential_source` | `forwarded` is `credential = "forwarded"` with `auth = "bearer"`; `own` is the entry's own `credential` |
+| `providers.<name>.creds` | write one `credential`: `aws://profile/<name>`, `aws://chain`, or a bearer key reference with `auth = "bearer"`; static key pairs move to a profile or the environment |
+| `providers.<name>.kind` | set `format`: `anthropic-api` is `anthropic-messages`, `openai-compat` is `openai-chat`, `bedrock` is `bedrock-invoke` or `bedrock-converse`, `gemini` is `gemini` or `gemini-cloud-code`, `openai-responses` stays |
 | `providers.<name>.max_thinking_entry_bytes` | the thinking-cache entry cap is fixed at 1 MiB |
+| `providers.<name>.region` | set `cloud = { name = "aws", region = "<region>" }` |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
 | `registry` | set prices under `[models.X.pricing]` |
 | `retry.classes.<name>.fallback` | chains and pools fall back; an unknown failure stays terminal |
@@ -847,9 +859,10 @@ Anthropic ingress lifts the header into `req.anthropic_beta = ["foo"]`
 
 ```toml
 [providers.anthropic-default]
-kind = "anthropic-api"
-api_key_ref = "env://ROUTECTL_ANTHROPIC"
-auth_kind = "oauth-bearer"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ROUTECTL_ANTHROPIC"
+auth = "bearer"
 header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 
 [models.anthropic-opus]
@@ -1029,7 +1042,7 @@ and `output_config` and the Converse body fields `inferenceConfig`,
 
 The client's `metadata` block (its `user_id` / `account_uuid`) never
 reaches AWS on Bedrock Invoke, Bedrock Converse, or the
-[Bedrock mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane).
+[Bedrock mantle Anthropic lane](#bedrock-mantle-anthropic-lane).
 The operator's own `metadata` is sent in its place: the provider or
 model `payload_extras` value. Of that value,
 only what the request still carries when it is sent ships: a member a
@@ -1060,9 +1073,10 @@ correctly).
 
 ```toml
 [providers.bedrock-computer]
-kind          = "bedrock"
-region        = "us-west-2"
-creds         = { kind = "default-chain" }
+format        = "bedrock-invoke"
+cloud         = { name = "aws", region = "us-west-2" }
+credential    = "aws://chain"
+auth          = "aws-sigv4"
 header_extras = { "anthropic-beta" = "computer-use-2025-01-24" }
 ```
 
@@ -1216,19 +1230,18 @@ non-Anthropic host.
 
 ## `[providers.X] api_shape` -- Bedrock API selector
 
-A `bedrock`-kind provider picks its wire shape with `api_shape`
-(string, default `"invoke"`, also accepts `"converse"`):
+A Bedrock provider picks its wire shape with `format`:
 
-- `"invoke"` -- vendor-specific InvokeModel body (the Anthropic
-  Messages payload, default).
-- `"converse"` -- vendor-neutral Converse API.
+- `"bedrock-invoke"` -- vendor-specific InvokeModel body (the Anthropic
+  Messages payload).
+- `"bedrock-converse"` -- vendor-neutral Converse API.
 
 ```toml
 [providers.bedrock]
-kind      = "bedrock"
-region    = "us-west-2"
-creds     = { kind = "default-chain" }
-api_shape = "converse"   # default "invoke"
+format     = "bedrock-converse"   # or "bedrock-invoke"
+cloud      = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth       = "aws-sigv4"
 ```
 
 Both shapes are wired for Anthropic models on Bedrock; see
@@ -1251,23 +1264,22 @@ partition's DNS suffix: `bedrock-runtime.<region>.amazonaws.com`
 (`.amazonaws.com.cn` in China) and `bedrock-mantle.<region>.api.aws`
 (`.api.amazonwebservices.com.cn` in China).
 
-## `[providers.X.bedrock_mantle]` -- Bedrock mantle Anthropic lane
+## Bedrock mantle Anthropic lane
 
-An `anthropic-api`-kind provider reaches AWS Bedrock's managed mantle
-endpoint (Anthropic Messages vocabulary, AWS-authenticated) by adding a
-`[providers.X.bedrock_mantle]` sub-table. The mere PRESENCE of the
-sub-table selects the lane. The provider speaks the ordinary Anthropic
+An `anthropic-messages` provider reaches AWS Bedrock's managed mantle
+endpoint (Anthropic Messages vocabulary, AWS-authenticated) by setting
+`cloud = { name = "aws", region = "..." }` instead of `base_url`. The
+`cloud` key selects the lane. The provider speaks the ordinary Anthropic
 Messages API (`complete`, `stream`, `count_tokens`), but every request is
 SigV4/bearer-signed under the `bedrock-mantle` service scope and NO
 `x-api-key` is sent.
 
 ```toml
 [providers.bedrock-mantle]
-kind = "anthropic-api"
-
-[providers.bedrock-mantle.bedrock_mantle]
-region = "us-east-1"
-creds  = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+format     = "anthropic-messages"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth       = "bearer"
 
 [models.claude-mantle]
 provider = "bedrock-mantle"
@@ -1353,13 +1365,13 @@ entry between a direct endpoint and this sub-table under the same name,
 keeps that history exactly like a `base_url` repoint; decay re-checks each
 verdict.
 
-## `[providers.X.bedrock_mantle]` -- Bedrock mantle OpenAI lanes
+## Bedrock mantle OpenAI lanes
 
-The same `[providers.X.bedrock_mantle]` sub-table reaches the mantle
-endpoint's OpenAI vocabularies from an `openai-responses`-kind or
-`openai-compat`-kind provider. As on the Anthropic lane, the mere PRESENCE
-of the sub-table selects the lane: every request is SigV4/bearer-signed
-under the `bedrock-mantle` service scope, NO first-party `Authorization:
+The same `cloud = { name = "aws", region = "..." }` key reaches the mantle
+endpoint's OpenAI vocabularies from an `openai-responses` or `openai-chat`
+provider. As on the Anthropic lane, the `cloud` key selects the lane:
+every request is SigV4/bearer-signed under the `bedrock-mantle` service
+scope, NO first-party `Authorization:
 Bearer` is sent, and the client follows no redirects. `region` is the
 single source of truth -- the factory derives the endpoint host
 (`https://bedrock-mantle.<region>.api.aws/openai/v1`) and the SigV4 scope
@@ -1371,12 +1383,10 @@ from it; do NOT set `base_url`. The `creds` descriptor takes the same four
 
 ```toml
 [providers.mantle-responses]
-kind        = "openai-responses"
-api_key_ref = ""   # required key, must be empty; the sub-table carries the credential
-
-[providers.mantle-responses.bedrock_mantle]
-region = "us-east-1"
-creds  = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+format     = "openai-responses"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth       = "bearer"
 
 [models.gpt-oss-mantle]
 provider = "mantle-responses"
@@ -1428,8 +1438,8 @@ Migration from the legacy `auth_kind = "bedrock-mantle"` form: earlier
 builds selected a bearer-only mantle Responses lane with
 `auth_kind = "bedrock-mantle"` plus an `api_key_ref`. That form is closed
 -- it silently defaulted the region and could not meet the SigV4 posture.
-Replace it with the `[providers.X.bedrock_mantle]` sub-table carrying
-`region` and `creds`:
+Replace it with `cloud = { name = "aws", region = "..." }` and the
+bearer key as `credential` with `auth = "bearer"`:
 
 ```toml
 # OLD (rejected):
@@ -1440,28 +1450,20 @@ Replace it with the `[providers.X.bedrock_mantle]` sub-table carrying
 
 # NEW:
 [providers.mantle-responses]
-kind        = "openai-responses"
-api_key_ref = ""
-
-[providers.mantle-responses.bedrock_mantle]
-region = "us-east-1"
-creds  = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+format     = "openai-responses"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth       = "bearer"
 ```
-
-Stating `auth_kind = "bedrock-mantle"` ALONGSIDE the sub-table is
-redundant but accepted (the factory sets the runtime marker from the
-block's presence).
 
 ### `openai-compat` mantle lane
 
 ```toml
 [providers.mantle-compat]
-kind        = "openai-compat"
-api_key_ref = ""   # empty; the sub-table carries the credential
-
-[providers.mantle-compat.bedrock_mantle]
-region = "us-east-1"
-creds  = { kind = "default-chain" }
+format     = "openai-chat"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth       = "aws-sigv4"
 
 [models.gpt-oss-compat]
 provider = "mantle-compat"
@@ -1542,11 +1544,10 @@ the per-feature mapping and the before/after fidelity note.
 
 ```toml
 [providers.gemini]
-kind        = "gemini"
-api_key_ref = "env://GEMINI_API_KEY"
-# base_url defaults to the public v1beta endpoint; omit unless you are
-# pointing at a Vertex-style endpoint (see below).
-# base_url  = "https://generativelanguage.googleapis.com/v1beta"
+format     = "gemini"
+base_url   = "https://generativelanguage.googleapis.com/v1beta"   # the public v1beta endpoint
+credential = "env://GEMINI_API_KEY"
+auth       = "x-goog-api-key"
 
 [models.gemini-flash]
 provider = "gemini"
@@ -1654,13 +1655,15 @@ yourself:
 
 ```toml
 [providers.gemini-cloud-code]
-kind        = "gemini"
-auth_mode   = "cloud-code"
-api_key_ref = "oauth://antigravity"
-# base_url defaults to the daily cloud-code host in cloud-code mode; omit
-# it unless this seat serves on the production host, in which case the one
-# value moves generate, loadCodeAssist and onboardUser together. The Cloud Code project id is auto-resolved and persisted;
-# set cloud_project_id to the BARE id to skip discovery.
+format     = "gemini-cloud-code"
+# The daily cloud-code host; a seat served on the production host uses
+# https://cloudcode-pa.googleapis.com instead, and the one value moves
+# generate, loadCodeAssist and onboardUser together.
+base_url   = "https://daily-cloudcode-pa.googleapis.com"
+credential = "oauth://antigravity"
+auth       = "bearer"
+# The Cloud Code project id is auto-resolved and persisted; set
+# cloud_project_id to the BARE id to skip discovery.
 # cloud_project_id = "my-project-1234"
 
 [models.gemini-flash]
@@ -1765,9 +1768,10 @@ Example:
 
 ```toml
 [providers.bedrock]
-kind                   = "bedrock"
-region                 = "us-west-2"
-creds                  = { kind = "default-chain" }
+format                 = "bedrock-invoke"
+cloud                  = { name = "aws", region = "us-west-2" }
+credential             = "aws://chain"
+auth                   = "aws-sigv4"
 rpm_limit              = 60
 circuit_failures       = 5
 circuit_cooldown_ms    = 60000
@@ -2470,9 +2474,10 @@ Example:
 
 ```toml
 [providers.bedrock]
-kind   = "bedrock"
-region = "us-west-2"
-creds  = { kind = "default-chain" }
+format     = "bedrock-invoke"
+cloud      = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth       = "aws-sigv4"
 stream_first_byte_timeout_ms = 60000          # provider default
 
 [models.opus47]
@@ -2515,9 +2520,10 @@ There is no key to change the rule. The `vllm`, `raw-think-tag`,
 
 ```toml
 [providers.local-vllm]
-kind        = "openai-compat"
-base_url    = "http://127.0.0.1:8000/v1"
-api_key_ref = "env://LOCAL_VLLM_KEY"
+format     = "openai-chat"
+base_url   = "http://127.0.0.1:8000/v1"
+credential = "env://LOCAL_VLLM_KEY"
+auth       = "bearer"
 
 [models.gpt-oss-local]
 provider          = "local-vllm"
@@ -2581,10 +2587,10 @@ beta itself.
 # DeepSeek /anthropic provider: routectl emulates context management because
 # DeepSeek does not natively honor the beta header.
 [providers.deepseek-anthropic]
-kind               = "anthropic-api"
+format             = "anthropic-messages"
 base_url           = "https://api.deepseek.com/anthropic"
-api_key_ref        = "env://DS_KEY"
-auth_kind          = "oauth-bearer"
+credential         = "env://DS_KEY"
+auth               = "bearer"
 context_management = true
 ```
 
@@ -2614,15 +2620,16 @@ credential that provider's Anthropic egress authenticates with. Default
 as every provider always has; this default is byte-for-byte unchanged
 behavior.
 
-Set `credential_source = "forwarded"` to make the provider a pure passthrough
-for the client's own captured claude.ai bearer instead of a routectl-managed
-credential:
+Set `credential = "forwarded"` with `auth = "bearer"` to make the provider a
+pure passthrough for the client's own captured claude.ai bearer instead of a
+routectl-managed credential:
 
 ```toml
 [providers.anthropic-forwarded]
-kind              = "anthropic-api"
-base_url          = "https://api.anthropic.com"
-credential_source = "forwarded"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "forwarded"
+auth       = "bearer"
 ```
 
 - Omit `api_key_ref` entirely -- a forwarded provider has no configured
@@ -2867,9 +2874,10 @@ and add a provider block instead:
 
 ```toml
 [providers.anthropic-forwarded]
-kind              = "anthropic-api"
-base_url          = "https://api.anthropic.com"
-credential_source = "forwarded"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "forwarded"
+auth       = "bearer"
 ```
 
 No `api_key_ref` line -- a forwarded provider has no configured
@@ -3427,9 +3435,10 @@ override the default per entry with an explicit `cache_capability`:
 # An anthropic-compatible third-party host that DOES honor a top-level
 # breakpoint and DOES report cache hits.
 [providers.compat-anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://COMPAT_ANTHROPIC_API_KEY"
+format = "anthropic-messages"
 base_url = "https://example.invalid/v1"
+credential = "env://COMPAT_ANTHROPIC_API_KEY"
+auth = "x-api-key"
 cache_capability = { supports_top_level_cache_control = true, cache_hit_observable = true }
 ```
 
@@ -3998,15 +4007,17 @@ decision is "global `enabled = true` AND provider not explicitly
 enabled = true
 
 [providers.compat-a]
-kind = "openai-compat"
-api_key_ref = "env://COMPAT_A_API_KEY"
+format = "openai-chat"
 base_url = "https://example.invalid/v1"
+credential = "env://COMPAT_A_API_KEY"
+auth = "bearer"
 # Inherits the global switch (reduction ON for this provider).
 
 [providers.compat-b]
-kind = "openai-compat"
-api_key_ref = "env://COMPAT_B_API_KEY"
+format = "openai-chat"
 base_url = "https://example.invalid/v1"
+credential = "env://COMPAT_B_API_KEY"
+auth = "bearer"
 # Opt this provider out while leaving the global default on.
 reduction_enabled = false
 ```
@@ -4924,9 +4935,10 @@ There is no override.
    Credential stored. This config change would route to it:
 
    [providers.anthropic-default]
-   kind        = "anthropic-api"
-   auth_kind   = "oauth-bearer"
-   api_key_ref = "oauth://anthropic"
+   format     = "anthropic-messages"
+   base_url   = "https://api.anthropic.com"
+   credential = "oauth://anthropic"
+   auth       = "bearer"
 
    [pools.anthropic]
    members = ["anthropic-default"]
@@ -4955,7 +4967,7 @@ There is no override.
      model. The upstream model id is never guessed.
 
    The `oauth://anthropic` ref resolves at request time against the
-   credentials store; the `auth_kind = "oauth-bearer"` flag emits
+   credentials store; `auth = "bearer"` emits
    `Authorization: Bearer <token>` instead of `x-api-key`. Because the
    credential is the managed login and the host is `api.anthropic.com`,
    the entry also emits the built-in Claude Code identity (stainless header
@@ -4971,9 +4983,10 @@ There is no override.
 
    ```toml
    [providers.anthropic-default]
-   kind          = "anthropic-api"
-   api_key_ref   = "oauth://anthropic"
-   auth_kind     = "oauth-bearer"
+   format        = "anthropic-messages"
+   base_url      = "https://api.anthropic.com"
+   credential    = "oauth://anthropic"
+   auth          = "bearer"
    user_agent    = "claude-cli/2.1.294 (external, cli)"
    forward_client_headers = [
        "x-claude-code-session-id",
@@ -4993,9 +5006,10 @@ There is no override.
 
    ```toml
    [providers.anthropic-api-key]
-   kind        = "anthropic-api"
-   api_key_ref = "env://ANTHROPIC_API_KEY"
-   auth_kind   = "api-key"
+   format     = "anthropic-messages"
+   base_url   = "https://api.anthropic.com"
+   credential = "env://ANTHROPIC_API_KEY"
+   auth       = "x-api-key"
    ```
 
 3. Add models and aliases that match what claude-code expects on the
@@ -5120,14 +5134,16 @@ groups, all of the same provider kind:
 
 ```toml
 [providers.anthropic-default]
-kind        = "anthropic-api"
-api_key_ref = "oauth://anthropic"
-auth_kind   = "oauth-bearer"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "oauth://anthropic"
+auth       = "bearer"
 
 [providers.anthropic-seat-b]
-kind        = "anthropic-api"
-api_key_ref = "oauth://anthropic#seat-b"
-auth_kind   = "oauth-bearer"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "oauth://anthropic#seat-b"
+auth       = "bearer"
 
 [pools.anthropic]
 members            = ["anthropic-default", "anthropic-seat-b"]
@@ -5173,9 +5189,10 @@ members          = ["anthropic-default", "anthropic-seat-b"]
 circuit_failures = 3        # every seat trips after 3 failures...
 
 [providers.anthropic-seat-b]
-kind             = "anthropic-api"
-api_key_ref      = "oauth://anthropic#seat-b"
-auth_kind        = "oauth-bearer"
+format           = "anthropic-messages"
+base_url         = "https://api.anthropic.com"
+credential       = "oauth://anthropic#seat-b"
+auth             = "bearer"
 circuit_failures = 5        # ...except seat-b, whose own value wins
 ```
 
@@ -5440,9 +5457,10 @@ delta), so the block below usually lands without hand-editing:
 
 ```toml
 [providers.codex-default]
-kind        = "openai-responses"
-auth_kind   = "chatgpt-oauth"
-api_key_ref = "oauth://codex"
+format     = "openai-responses"
+base_url   = "https://chatgpt.com/backend-api/codex"
+credential = "oauth://codex"
+auth       = "bearer"
 # account_id_ref omitted: routectl reads `chatgpt_account_id` off the
 # OAuth-session JWT and injects it as the `ChatGPT-Account-Id` header.
 
@@ -5470,9 +5488,10 @@ at the file or env var and supply the account UUID explicitly:
 
 ```toml
 [providers.codex-static]
-kind           = "openai-responses"
-auth_kind      = "chatgpt-oauth"
-api_key_ref    = "env://OPENAI_JWT"
+format         = "openai-responses"
+base_url       = "https://chatgpt.com/backend-api/codex"
+credential     = "env://OPENAI_JWT"
+auth           = "bearer"
 account_id_ref = "env://OPENAI_ACCOUNT_ID"
 ```
 
@@ -5499,9 +5518,10 @@ moment it lands rather than waiting for a routectl release.
 
 ```toml
 [providers.codex-default]
-kind          = "openai-responses"
-auth_kind     = "chatgpt-oauth"
-api_key_ref   = "oauth://codex"
+format        = "openai-responses"
+base_url      = "https://chatgpt.com/backend-api/codex"
+credential    = "oauth://codex"
+auth          = "bearer"
 # codex_version = "0.167.0"   # default: the version pinned into this build
 ```
 
@@ -5565,20 +5585,19 @@ The login then OFFERS this config change and writes it on confirmation
 
 ```toml
 [providers.xai-default]
-kind        = "openai-compat"
-base_url    = "https://api.x.ai/v1"   # REQUIRED non-empty on this kind
-api_key_ref = "oauth://xai"
+format     = "openai-chat"
+base_url   = "https://api.x.ai/v1"
+credential = "oauth://xai"
+auth       = "bearer"
 
 [pools.xai]
 members = ["xai-default"]
 accepts_new_logins = true
 ```
 
-The `openai-compat` variant carries NO auth-selector field -- entries are
-`deny_unknown_fields`, so writing an `auth_kind` here fails config load with
-`unknown field`. The `oauth://` scheme on `api_key_ref` is what selects the
-bearer surface; `base_url` must be spelled out because validation rejects an
-empty one on this kind. Declining the offer writes nothing and exits 0 --
+The `oauth://xai` credential is sent as a bearer, so the entry writes
+`auth = "bearer"`; `base_url` must be spelled out because every entry
+names its destination. Declining the offer writes nothing and exits 0 --
 `routectl login xai` prints exactly this block either way, so it can be
 pasted by hand.
 

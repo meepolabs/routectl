@@ -108,9 +108,7 @@ impl Provider for CapturingProvider {
 fn router_with(nicknames: [(&str, &Extras); 2], provider: &Arc<CapturingProvider>) -> Router {
     let mut config = Config::default();
     let mut entry = ProviderEntry::anthropic_api("literal:k");
-    if let ProviderEntry::AnthropicApi { base_url, .. } = &mut entry {
-        *base_url = "https://api.anthropic.com".to_string();
-    }
+    entry = entry.with_base_url("https://api.anthropic.com");
     config.providers.insert("p1".to_string(), entry);
     for (nickname, extras) in nicknames {
         config.models.insert(

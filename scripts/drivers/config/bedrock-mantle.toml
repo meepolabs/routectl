@@ -48,34 +48,28 @@ version = 5
 host = "127.0.0.1"
 port = 8787
 
-# The mantle endpoint speaks three vocabularies, one provider kind each,
-# all on the SAME region and the SAME AWS profile (`routectl-cell`, see the
-# header), SigV4-signed. This lane names only us-east-1. `region` derives
-# both the endpoint host and the signing scope, so no `base_url` appears.
+# The mantle endpoint speaks three vocabularies, one format each, all on
+# the SAME region and the SAME AWS profile (`routectl-cell`, see the
+# header), SigV4-signed. This lane names only us-east-1. The cloud's
+# `region` derives both the endpoint host and the signing scope, so no
+# `base_url` appears.
 [providers.mantle-anthropic]
-kind = "anthropic-api"
+format     = "anthropic-messages"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "aws://profile/routectl-cell"
+auth       = "aws-sigv4"
 
-[providers.mantle-anthropic.bedrock_mantle]
-region = "us-east-1"
-creds  = { kind = "profile", name = "routectl-cell" }
-
-# `api_key_ref` is a required key on this kind and must be empty: the
-# sub-table carries the credential.
 [providers.mantle-responses]
-kind        = "openai-responses"
-api_key_ref = ""
-
-[providers.mantle-responses.bedrock_mantle]
-region = "us-east-1"
-creds  = { kind = "profile", name = "routectl-cell" }
+format     = "openai-responses"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "aws://profile/routectl-cell"
+auth       = "aws-sigv4"
 
 [providers.mantle-chat]
-kind        = "openai-compat"
-api_key_ref = ""
-
-[providers.mantle-chat.bedrock_mantle]
-region = "us-east-1"
-creds  = { kind = "profile", name = "routectl-cell" }
+format     = "openai-chat"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "aws://profile/routectl-cell"
+auth       = "aws-sigv4"
 
 [models.mantle-claude-opus-5-5]
 provider = "mantle-anthropic"

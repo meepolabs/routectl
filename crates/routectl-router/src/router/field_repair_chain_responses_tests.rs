@@ -15,13 +15,13 @@ const MINIMAL_PATH: &str = "output_config.effort.minimal";
 const RESPONSES_LANES: [(&str, &str, AuthKind); 2] = [
     (
         "chatgpt-oauth",
-        "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n\
+        "format = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n\
          account_id_ref = \"literal:a\"\n",
         AuthKind::ChatgptOauth,
     ),
     (
         "api-key",
-        "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n",
+        "format = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
         AuthKind::ApiKey,
     ),
 ];

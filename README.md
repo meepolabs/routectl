@@ -157,17 +157,20 @@ host = "127.0.0.1"
 port = 8787
 
 [providers.deepseek]
-kind = "openai-compat"
-base_url = "https://api.deepseek.com/v1"
-api_key_ref = "env://DEEPSEEK_API_KEY"
+format     = "openai-chat"
+base_url   = "https://api.deepseek.com/v1"
+credential = "env://DEEPSEEK_API_KEY"
+auth       = "bearer"
 
 # Named `anthropic-api-key`, not the bare family name: providers, pools
 # and model nicknames share ONE namespace, so an entry holding `anthropic`
 # would make `[pools.anthropic]` unnameable and leave a later
 # `routectl login anthropic` nowhere to put a subscription seat.
 [providers.anthropic-api-key]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth       = "x-api-key"
 
 [models.fast]
 provider = "deepseek"

@@ -35,13 +35,17 @@ use crate::router::{DispatchMeta, DispatchTarget, Router};
 const NICKNAME: &str = "m1";
 /// The learned lane the fixture's one model keys its verdicts on.
 const WIRE_LANE: &str = "p1#wire-model";
-const OPENAI_COMPAT: &str = "[providers.p1]\nkind = \"openai-compat\"\n\
-    base_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
-const ANTHROPIC: &str = "[providers.p1]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+const OPENAI_COMPAT: &str = "[providers.p1]\nformat = \"openai-chat\"\n\
+    base_url = \"https://example.test/v1\"\n\
+    credential = \"literal:k\"\n\
+    auth = \"bearer\"\n";
+const ANTHROPIC: &str = "[providers.p1]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
 /// The one provider kind the replay-rejection classifier is fixture-backed for.
 #[cfg(feature = "openai-responses")]
-const OPENAI_RESPONSES: &str = "[providers.p1]\nkind = \"openai-responses\"\n\
-    api_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n";
+const OPENAI_RESPONSES: &str = "[providers.p1]\nformat = \"openai-responses\"\n\
+    base_url = \"https://api.openai.com/v1\"\n\
+    credential = \"literal:k\"\n\
+    auth = \"bearer\"\n";
 /// The proven replay-rejection body a mantle lane answers a foreign artifact
 /// with.
 #[cfg(feature = "openai-responses")]
@@ -492,10 +496,11 @@ fn admit_carries_honors_non_settling_mode() {
 #[test]
 fn on_success_yields_an_evidence_scope_only_where_response_evidence_may_be_read() {
     const KILLED: &str = "[capability]\nenabled = false\n\n[providers.p1]\n\
-        kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-        api_key_ref = \"literal:k\"\n";
-    const FORWARDED: &str = "[providers.p1]\nkind = \"anthropic-api\"\n\
-        base_url = \"https://api.anthropic.com\"\ncredential_source = \"forwarded\"\n";
+        format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+    const FORWARDED: &str = "[providers.p1]\nformat = \"anthropic-messages\"\n\
+        base_url = \"https://api.anthropic.com\"\n\
+        credential = \"forwarded\"\n\
+        auth = \"bearer\"\n";
     enum Target {
         Expanded,
         WithoutProviderKind,

@@ -39,9 +39,10 @@ const WIRE_B: &str = "wire-b";
 const WIRE_C: &str = "wire-c";
 
 const BEDROCK_PROVIDER_BLOCK: &str = "[providers.p1]\n\
-     kind = \"bedrock\"\n\
-     region = \"us-east-1\"\n\
-     creds = { kind = \"default-chain\" }\n";
+     format = \"bedrock-invoke\"\n\
+     cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+     credential = \"aws://chain\"\n\
+     auth = \"aws-sigv4\"\n";
 
 fn fixture() -> Value {
     serde_json::from_str(FIXTURE).expect("valid bedrock capture fixture")
@@ -233,9 +234,10 @@ fn three_lane_router(p1_extra: &str, lanes: &Lanes) -> Router {
     let toml_text = format!(
         "{BEDROCK_PROVIDER_BLOCK}{p1_extra}\
          [providers.p2]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [aliases]\n\
          \"{ALIAS}\" = [\"m1\", \"m2\", \"m3\"]\n"
     );

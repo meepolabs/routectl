@@ -91,8 +91,7 @@ mod thinking_adaptive {
     fn converse_config(model: &str) -> (Arc<Config>, tempfile::TempDir) {
         let toml_text = format!(
             "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-             [providers.{PROVIDER}]\nkind = \"bedrock\"\nregion = \"{REGION}\"\n\
-             creds = {{ kind = \"default-chain\" }}\napi_shape = \"converse\"\n"
+             [providers.{PROVIDER}]\nformat = \"bedrock-converse\"\ncloud = {{ name = \"aws\", region = \"{REGION}\" }}\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n"
         );
         let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
         config

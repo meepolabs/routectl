@@ -481,8 +481,8 @@ pub struct Router {
     /// see [`Router::prefix_impact_admitted`].
     #[cfg(test)]
     prefix_impact_admitted_for_tests: bool,
-    /// `true` iff `config.providers` contains a `ProviderEntry::AnthropicApi`
-    /// with `credential_source == Forwarded`. Computed ONCE here at
+    /// `true` iff `config.providers` contains an entry with
+    /// `credential = "forwarded"`. Computed ONCE here at
     /// construction (a full `config.providers` scan) rather than re-scanned
     /// per request -- this is the "configured capability" half of the
     /// forwarded-mode CAPTURE gate (`forwarded_capture_armed` in
@@ -2208,8 +2208,8 @@ impl Router {
         }
     }
 
-    /// `true` iff a `ProviderEntry::AnthropicApi` with
-    /// `credential_source == Forwarded` is configured. Build-time cached
+    /// `true` iff an entry with `credential = "forwarded"` is configured.
+    /// Build-time cached
     /// (see [`Router::has_forwarded_provider`] field doc) -- callers never
     /// re-scan `config.providers` per request.
     pub const fn has_forwarded_provider(&self) -> bool {

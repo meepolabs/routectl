@@ -32,9 +32,10 @@ initial_backoff_ms = 0
 jitter_ms = 0
 
 [providers.p1]
-kind = "bedrock"
-region = "us-east-1"
-creds = { kind = "default-chain" }
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#;
 
 /// The learned lane every target the fixture router builds keys on.

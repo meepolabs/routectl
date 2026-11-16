@@ -47,29 +47,34 @@ const LANE: &str = "alpha#model-x";
 
 const ALPHA_COMPAT: &str = r#"
 [providers.alpha]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://alpha.example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 const ALPHA_ANTHROPIC: &str = r#"
 [providers.alpha]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 "#;
 
 const BETA_COMPAT: &str = r#"
 [providers.beta]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://beta.example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 const ALPHA_REPOINTED: &str = r#"
 [providers.alpha]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://elsewhere.example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 fn router(providers: &str) -> Router {

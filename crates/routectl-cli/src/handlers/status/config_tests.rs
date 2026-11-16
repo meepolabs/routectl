@@ -293,20 +293,23 @@ fn config_with_three_rpm_states() -> Config {
 version = 2
 
 [providers.throttled]
-kind = "anthropic-api"
-api_key_ref = "env://THROTTLED_KEY"
+format = "anthropic-messages"
 base_url = "https://throttled.example/v1"
+credential = "env://THROTTLED_KEY"
+auth = "x-api-key"
 rpm_limit = 0
 
 [providers.unset]
-kind = "anthropic-api"
-api_key_ref = "env://UNSET_KEY"
+format = "anthropic-messages"
 base_url = "https://unset.example:8443/v1"
+credential = "env://UNSET_KEY"
+auth = "x-api-key"
 
 [providers.capped]
-kind = "openai-compat"
-api_key_ref = "file:///nonexistent/capped.key"
+format = "openai-chat"
 base_url = "https://capped.example/v1"
+credential = "file:///nonexistent/capped.key"
+auth = "bearer"
 rpm_limit = 60
 "#,
     )
@@ -366,12 +369,16 @@ fn a_pool_rpm_limit_leaves_member_provider_rows_null() {
 version = 2
 
 [providers.seat-a]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_A"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_A"
+auth = "x-api-key"
 
 [providers.seat-b]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_B"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_B"
+auth = "x-api-key"
 rpm_limit = 15
 
 [pools.seats]
@@ -407,6 +414,8 @@ fn provider_wire_carries_the_contract_fields_and_only_the_origin() {
     for key in [
         "provider_id",
         "provider_kind",
+        "format",
+        "cloud",
         "endpoint_origin",
         "credential_ref_scheme",
         "auth_token",
@@ -415,14 +424,17 @@ fn provider_wire_carries_the_contract_fields_and_only_the_origin() {
         assert!(obj.contains_key(key), "provider row must carry `{key}`");
     }
     assert_eq!(unset["provider_kind"], "anthropic-api");
+    assert_eq!(unset["format"], "anthropic-messages");
+    assert_eq!(unset["cloud"], Value::Null);
     assert_eq!(unset["endpoint_origin"], "https://unset.example:8443");
     assert_eq!(unset["credential_ref_scheme"], "env");
-    assert_eq!(unset["auth_token"], "api-key");
+    assert_eq!(unset["auth_token"], "x-api-key");
 
-    // The variant with no auth discriminant reports absence rather than a
-    // spanning token, and its ref contributes the scheme only.
+    // Every entry now names its `auth`, so a second format reports its own
+    // token, and its ref contributes the scheme only.
     let capped = provider_json(&config, "capped");
-    assert_eq!(capped["auth_token"], Value::Null);
+    assert_eq!(capped["format"], "openai-chat");
+    assert_eq!(capped["auth_token"], "bearer");
     assert_eq!(capped["credential_ref_scheme"], "file");
 }
 
@@ -437,9 +449,10 @@ fn provider_rows_never_carry_a_credential_or_a_ref_body() {
 version = 2
 
 [providers.leaky]
-kind = "anthropic-api"
-api_key_ref = "env://LEAKY_SECRET_VAR"
+format = "anthropic-messages"
 base_url = "https://user:sk-live-LEAKED@internal.example/v1?key=sk-live-LEAKED#sk-live-LEAKED"
+credential = "env://LEAKY_SECRET_VAR"
+auth = "x-api-key"
 "#,
     )
     .expect("valid config");
@@ -606,13 +619,16 @@ fn priced_panel_json() -> Value {
 version = 2
 
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 
 [providers.compat]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://compat.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [models.opus]
 provider = "anthropic"
@@ -713,9 +729,10 @@ fn model_wire_carries_a_row_per_extra_priced_write_lifetime() {
 version = 2
 
 [providers.compat]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://compat.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [models.glm]
 provider = "compat"
@@ -813,8 +830,10 @@ async fn panel_reports_a_refreshed_price_from_the_status_price_book() {
 version = 2
 
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 
 [models.opus]
 provider = "anthropic"

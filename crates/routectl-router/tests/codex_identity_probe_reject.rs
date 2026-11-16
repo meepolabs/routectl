@@ -26,8 +26,7 @@ async fn illegal_codex_version_on_probe_falls_back_to_pinned_and_warns() {
     // ASCII while the parsed value is header-illegal. Parsing does NOT
     // validate the syntax -- that is exactly the gap the probe path hits.
     let config: Config = toml::from_str(
-        "[providers.cx]\nkind = \"openai-responses\"\napi_key_ref = \"literal:sk-test\"\n\
-         auth_kind = \"api-key\"\ncodex_version = \"1.2.3\\u007f\"\n\
+        "[providers.cx]\nformat = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"env://ROUTECTL_PROBE_REJECT_UNSET_KEY\"\nauth = \"bearer\"\ncodex_version = \"1.2.3\\u007f\"\n\
          [models.m]\nprovider = \"cx\"\nupstream = \"gpt-5\"\n",
     )
     .expect("fixture parses");

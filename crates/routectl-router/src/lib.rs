@@ -106,8 +106,8 @@ pub use capability_rebuild::{
 };
 pub use capability_vocab::CURRENT_VOCAB_VERSION;
 pub use config::{
-    AliasValue, BreakerThreshold, CONFIG_PROVIDER_KINDS, CONFIG_VERSION_REMEDIATION,
-    CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CapabilityConfig, Config,
+    AliasValue, Auth, BreakerThreshold, CONFIG_PROVIDER_KINDS, CONFIG_VERSION_REMEDIATION,
+    CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CapabilityConfig, Cloud, Config,
     ConfigVersionError, Format, HistoryReasoning, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, RawConfigPreflightError, ReasoningDialect,
     ReductionConfig, Resolved, ResolvedTuning, RetiredKeysError, RetryPolicy, ServerAuth,
@@ -115,8 +115,6 @@ pub use config::{
     is_config_provider_kind, preflight_config_version, preflight_raw_config, resolve_tuning,
     retired_key_message,
 };
-#[cfg(feature = "bedrock")]
-pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 pub use config_effective::{
     AliasChain, ClassPolicyCell, ClassPolicySource, EffectiveView, FillCeiling, FillSource,
     ModelCell, PriceDimension, PriceTableDates, ProviderCell, TuningRow, TuningTargetKind,
@@ -145,13 +143,7 @@ pub use doctor::{
 #[cfg(feature = "bedrock")]
 pub use factory::validate_aws_regions;
 #[cfg(feature = "bedrock")]
-pub use factory::validate_bedrock_creds_refs;
-#[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_invoke_model_family;
-#[cfg(feature = "bedrock")]
-pub use factory::validate_provider_bedrock_mantle;
-#[cfg(feature = "bedrock")]
-pub use factory::validate_provider_openai_mantle;
 pub use factory::{
     BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, ModelProviderTarget, ResolvedModelBuild,
     auth_reserved_header_warnings, build_provider, build_provider_with_options,
@@ -160,7 +152,7 @@ pub use factory::{
     configured_codex_version, pool_member_refusals, resolve_model_provider, resolved_codex_version,
     validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
     validate_codex_version, validate_managed_anthropic_credential, validate_mitm_config,
-    validate_pools, validate_provider_credential_sources,
+    validate_pools,
 };
 pub use field_canary::CanaryOutcome;
 pub use field_capability::capability_key_is_field_verdict;

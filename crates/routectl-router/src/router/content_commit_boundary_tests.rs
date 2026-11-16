@@ -205,14 +205,16 @@ impl Provider for ScriptedProvider {
 fn compat_toml() -> &'static str {
     r#"
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 
 [providers.p2]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 
 [aliases]
 alias = ["m1", "m2"]

@@ -116,8 +116,9 @@ impl Provider for Seat {
 }
 
 fn entry(origin: &str) -> ProviderEntry {
-    let text =
-        format!("kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"{origin}\"\n");
+    let text = format!(
+        "format = \"anthropic-messages\"\nbase_url = \"{origin}\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
+    );
     toml::from_str(&text).expect("valid provider entry")
 }
 

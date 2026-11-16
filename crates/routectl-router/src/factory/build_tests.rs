@@ -192,19 +192,12 @@ mod build_resolved_models_tests {
             calls: calls.clone(),
         });
 
-        let bedrock = ProviderEntry::Bedrock {
-            region: "us-east-1".to_string(),
-            api_shape: BedrockApiShapeConfig::default(),
-            creds: BedrockCredsConfig::BearerKey {
-                key_ref: crate::test_secret::file_ref("unused"),
-            },
-            user_agent: None,
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            runtime: Default::default(),
-        };
+        let bedrock = ProviderEntry::cloud_aws(
+            Format::BedrockInvoke,
+            "us-east-1",
+            crate::test_secret::file_ref("unused"),
+            Auth::Bearer,
+        );
         let cfg = config_with_models(
             vec![("br", bedrock)],
             vec![
@@ -872,7 +865,7 @@ mod managed_token_tests {
     async fn managed_token_re_enters_store_per_call() {
         let counting = Arc::new(CountingStore::new());
         let store: Arc<dyn SecretStore> = counting.clone();
-        let ts = resolve_token_source(&store, "oauth://anthropic")
+        let ts = resolve_token_source(&store, SecretRef::parse("oauth://anthropic").unwrap())
             .await
             .unwrap();
         assert_eq!(ts.token().await.unwrap(), "token-for-anthropic");
@@ -894,9 +887,12 @@ mod managed_token_tests {
         // and subsequent `token()` invocations reuse the cached value.
         let counting = Arc::new(CountingStore::new());
         let store: Arc<dyn SecretStore> = counting.clone();
-        let ts = resolve_token_source(&store, "env://ROUTECTL_TEST_STATIC_TOKEN_VAR")
-            .await
-            .unwrap();
+        let ts = resolve_token_source(
+            &store,
+            SecretRef::parse("env://ROUTECTL_TEST_STATIC_TOKEN_VAR").unwrap(),
+        )
+        .await
+        .unwrap();
         let _ = ts.token().await.unwrap();
         let _ = ts.token().await.unwrap();
         assert_eq!(
@@ -1009,9 +1005,27 @@ mod openai_responses_account_id_tests {
         (dir, Arc::new(store) as Arc<dyn SecretStore>)
     }
 
-    fn chatgpt_oauth_entry(api_key_ref: &str) -> ProviderEntry {
-        ProviderEntry::openai_responses(api_key_ref)
+    fn chatgpt_oauth_entry(credential: &str) -> ProviderEntry {
+        ProviderEntry::openai_responses(credential)
             .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::ChatgptOauth)
+    }
+
+    /// The account id the factory resolves for `entry` (planned as
+    /// provider `name`) over `store`.
+    async fn account_id_for(
+        name: &str,
+        entry: &ProviderEntry,
+        store: &Arc<dyn SecretStore>,
+    ) -> Result<Option<String>> {
+        let plan = plan_provider(name, entry).expect("the entry plans");
+        resolve_responses_account_id(&BuildContext {
+            name,
+            entry,
+            plan: &plan,
+            secrets: store.clone(),
+            opts: BuildOptions::default(),
+        })
+        .await
     }
 
     #[tokio::test]
@@ -1019,12 +1033,12 @@ mod openai_responses_account_id_tests {
         // (a) populated store -> account id derived; provider builds.
         let (_dir, store) = oauth_store_with_codex(Some("acct-from-jwt")).await;
 
-        let derived = resolve_responses_account_id(&store, "oauth://codex", &None, "codex-pro")
+        let entry = chatgpt_oauth_entry("oauth://codex");
+        let derived = account_id_for("codex-pro", &entry, &store)
             .await
             .expect("derivation should succeed");
         assert_eq!(derived, Some("acct-from-jwt".to_string()));
 
-        let entry = chatgpt_oauth_entry("oauth://codex");
         let provider = build_provider("codex-pro", &entry, store.clone()).await;
         assert!(
             provider.is_ok(),
@@ -1038,7 +1052,8 @@ mod openai_responses_account_id_tests {
         // (b) empty store -> clean Error mentioning `routectl login codex`.
         let (_dir, store) = oauth_store_with_codex(None).await;
 
-        let err = resolve_responses_account_id(&store, "oauth://codex", &None, "codex-pro")
+        let entry = chatgpt_oauth_entry("oauth://codex");
+        let err = account_id_for("codex-pro", &entry, &store)
             .await
             .expect_err("empty store must error");
         let msg = err.to_string();
@@ -1049,7 +1064,6 @@ mod openai_responses_account_id_tests {
 
         // The full build arm must surface the same error. `Arc<dyn
         // Provider>` is not `Debug`, so match instead of `expect_err`.
-        let entry = chatgpt_oauth_entry("oauth://codex");
         match build_provider("codex-pro", &entry, store.clone()).await {
             Ok(_) => panic!("build must fail with no session"),
             Err(e) => assert!(
@@ -1081,11 +1095,11 @@ mod openai_responses_account_id_tests {
         // one even when the store has a (different) stored account id.
         let (_dir, store) = oauth_store_with_codex(Some("acct-from-jwt")).await;
 
-        let override_ref = Some(crate::test_secret::file_ref("acct-operator-override"));
-        let derived =
-            resolve_responses_account_id(&store, "oauth://codex", &override_ref, "codex-pro")
-                .await
-                .expect("override should resolve");
+        let entry = chatgpt_oauth_entry("oauth://codex")
+            .with_account_id_ref(crate::test_secret::file_ref("acct-operator-override"));
+        let derived = account_id_for("codex-pro", &entry, &store)
+            .await
+            .expect("override should resolve");
         assert_eq!(
             derived,
             Some("acct-operator-override".to_string()),
@@ -1096,25 +1110,25 @@ mod openai_responses_account_id_tests {
 
 #[cfg(test)]
 mod anthropic_api_config_propagation_tests {
-    //! Pin that the `[providers.X]` anthropic-api knobs `context_management`
-    //! and `credential_source` reach the built provider through the REAL
-    //! `build_provider` path -- observed via provider behavior, not a
-    //! re-implemented factory destructure.
+    //! Pin that the `[providers.X]` anthropic-messages knob
+    //! `context_management` and the `credential` choice reach the built
+    //! provider through the REAL `build_provider` path -- observed via
+    //! provider behavior, not a re-implemented factory destructure.
     //!
     //! `context_management` is observed through `Provider::normalize_request`:
     //! the flag decides whether the top-level `context_management` body key
     //! is stripped (the provider emulates the edits itself and must not
     //! forward the key to a non-Anthropic upstream) or forwarded verbatim.
     //!
-    //! `credential_source` is observed through the build-time secret
-    //! resolution seam: an own-mode entry resolves its configured
-    //! `api_key_ref` through the store, whereas a forwarded entry takes the
-    //! sentinel-token path and never touches the store. That seam is exactly
-    //! what `config check` cannot see (it validates a forwarded entry's shape
-    //! but never builds it).
+    //! The credential choice is observed through the build-time secret
+    //! resolution seam: an entry with its own credential resolves it through
+    //! the store, whereas `credential = "forwarded"` takes the sentinel-token
+    //! path and never touches the store. That seam is exactly what
+    //! `config check` cannot see (it validates a forwarded entry's shape but
+    //! never builds it).
 
     use super::build_provider;
-    use crate::config::{CredentialSource, ProviderEntry};
+    use crate::config::{Auth, ProviderEntry};
     use async_trait::async_trait;
     use routectl_auth::{SecretRef, SecretStore};
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
@@ -1159,19 +1173,13 @@ mod anthropic_api_config_propagation_tests {
         }
     }
 
-    /// An own-mode anthropic-api entry (default `credential_source = Own`,
-    /// ApiKey auth) with `context_management` set as requested. The
-    /// `env://` api_key_ref lets the real build path resolve a token via
+    /// An anthropic-messages entry with its own credential (x-api-key auth)
+    /// and `context_management` set as requested (`None` leaves it omitted).
+    /// The `env://` credential lets the real build path resolve a token via
     /// `RecordingStore`.
-    fn own_entry_with_context_management(cm: bool) -> ProviderEntry {
+    fn own_entry_with_context_management(cm: Option<bool>) -> ProviderEntry {
         let mut entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_ANTHROPIC_KEY");
-        if let ProviderEntry::AnthropicApi {
-            ref mut context_management,
-            ..
-        } = entry
-        {
-            *context_management = cm;
-        }
+        entry.context_management = cm;
         entry
     }
 
@@ -1210,7 +1218,7 @@ mod anthropic_api_config_propagation_tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(RecordingStore::new());
         let provider = build_provider(
             "anthropic-cm-on",
-            &own_entry_with_context_management(true),
+            &own_entry_with_context_management(Some(true)),
             secrets,
         )
         .await
@@ -1234,7 +1242,7 @@ mod anthropic_api_config_propagation_tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(RecordingStore::new());
         let provider = build_provider(
             "anthropic-cm-off",
-            &own_entry_with_context_management(false),
+            &own_entry_with_context_management(None),
             secrets,
         )
         .await
@@ -1250,11 +1258,12 @@ mod anthropic_api_config_propagation_tests {
         );
     }
 
-    /// `credential_source = "own"` (the default) drives the factory to
-    /// resolve the entry's configured `api_key_ref` through the store --
-    /// the own-credential build path (`use_forwarded_bearer = false`).
+    /// An entry's own credential drives the factory to resolve it through
+    /// the store -- the own-credential build path
+    /// (`use_forwarded_bearer = false`). The positive control for the
+    /// forwarded row below.
     #[tokio::test]
-    async fn own_credential_source_resolves_configured_secret() {
+    async fn own_credential_resolves_configured_secret() {
         let store = Arc::new(RecordingStore::new());
         let secrets: Arc<dyn SecretStore> = store.clone();
         let entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_ANTHROPIC_KEY");
@@ -1266,21 +1275,19 @@ mod anthropic_api_config_propagation_tests {
         assert_eq!(
             store.gets(),
             1,
-            "own credential_source must resolve its configured api_key_ref exactly once at build"
+            "an own credential must be resolved exactly once at build"
         );
     }
 
-    /// `credential_source = "forwarded"` drives the factory onto the
-    /// sentinel-token path (`use_forwarded_bearer = true`): the empty
-    /// `api_key_ref` is NEVER resolved, so the store stays untouched. This
-    /// is the seam `config check` cannot see -- it validates the forwarded
-    /// entry's shape but never builds it.
+    /// `credential = "forwarded"` drives the factory onto the sentinel-token
+    /// path (`use_forwarded_bearer = true`): no secret is resolved, so the
+    /// store stays untouched. This is the seam `config check` cannot see --
+    /// it validates the forwarded entry's shape but never builds it.
     #[tokio::test]
-    async fn forwarded_credential_source_skips_secret_resolution() {
+    async fn forwarded_credential_skips_secret_resolution() {
         let store = Arc::new(RecordingStore::new());
         let secrets: Arc<dyn SecretStore> = store.clone();
-        let entry =
-            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded);
+        let entry = ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer);
 
         build_provider("anthropic-forwarded", &entry, secrets)
             .await
@@ -1289,39 +1296,36 @@ mod anthropic_api_config_propagation_tests {
         assert_eq!(
             store.gets(),
             0,
-            "forwarded credential_source must build the sentinel token without resolving api_key_ref"
+            "a forwarded credential must build the sentinel token without resolving a secret"
         );
     }
 }
 
 #[cfg(test)]
 mod forwarded_provider_build_tests {
-    //! Regression coverage for the gap `validate_provider_credential_sources`
-    //! cannot see: that field-coherence validator runs at `config check`
-    //! time and confirms a `credential_source = "forwarded"` entry's
-    //! shape is coherent (empty `api_key_ref`, host pinned), but it never
-    //! calls `build_provider` -- so a forwarded entry could pass `config
-    //! check` and still fail at `serve` time if the factory's build arm
-    //! ever tried to resolve a token from the (guaranteed-empty)
-    //! `api_key_ref`. These tests close that gap by driving the real
+    //! Regression coverage for the gap config validation cannot see: it
+    //! confirms a `credential = "forwarded"` entry's shape is coherent
+    //! (format, auth and host pinned), but it never calls `build_provider`
+    //! -- so a forwarded entry could pass `config check` and still fail at
+    //! `serve` time if the factory's build arm ever tried to resolve a token
+    //! for it. These tests close that gap by driving the real
     //! `build_provider` entry point.
 
     use super::build_provider;
-    use crate::config::{CredentialSource, ProviderEntry};
+    use crate::config::{Auth, ProviderEntry};
     use async_trait::async_trait;
     use routectl_auth::{SecretRef, SecretStore};
     use std::sync::Arc;
 
-    /// A forwarded, own-host `anthropic-api` provider entry, matching the
-    /// shape `validate_provider_credential_sources` requires: empty
-    /// `api_key_ref`, `credential_source = "forwarded"`.
+    /// A forwarded `anthropic-messages` entry on the Anthropic host, the
+    /// shape the provider plan accepts: `credential = "forwarded"`,
+    /// `auth = "bearer"`.
     fn forwarded_entry() -> ProviderEntry {
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded)
+        ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer)
     }
 
-    /// A `SecretStore` that panics on any call. A forwarded entry's
-    /// `api_key_ref` is guaranteed empty by config validation, so there
-    /// is no secret to resolve for it -- the factory must never touch
+    /// A `SecretStore` that panics on any call. A forwarded entry names
+    /// no secret, so there is nothing to resolve for it -- the factory must never touch
     /// the store while building this provider. Panicking (rather than
     /// just erroring) makes an accidental store call fail loudly instead
     /// of being swallowed by `?` and mistaken for the pre-fix bug.
@@ -1340,9 +1344,9 @@ mod forwarded_provider_build_tests {
         }
     }
 
-    /// The regression this task fixes: a `credential_source = "forwarded"`
-    /// provider (valid config, passes `config check`) must actually BUILD
-    /// at `serve` time instead of erroring on the empty `api_key_ref`.
+    /// A `credential = "forwarded"` provider (valid config, passes
+    /// `config check`) must actually BUILD at `serve` time without
+    /// resolving a secret.
     #[tokio::test]
     async fn forwarded_entry_builds_successfully() {
         let secrets: Arc<dyn SecretStore> = Arc::new(PanicIfTouchedStore);
@@ -1365,15 +1369,19 @@ mod gemini_cloud_code_factory_tests {
     //! and that the built config's Debug renders the auth field as
     //! `[REDACTED]` rather than the underlying token source.
     //!
-    //! The mock-backed cases ride a non-managed `oauth://` provider id: the
-    //! managed Antigravity ref is contained to the Cloud Code hosts and so
-    //! can never reach a loopback mock.
+    //! The mock-backed cases ride a non-managed `oauth://` provider id built
+    //! from a hand-taken plan: the provider plan accepts the Cloud Code
+    //! format only with the managed Antigravity login, which is contained to
+    //! the Cloud Code hosts and so can never reach a loopback mock. Those
+    //! cases pin the build path after the plan; the plan's own refusals are
+    //! pinned through `build_provider` below.
 
     use super::*;
     use crate::config::ProviderEntry;
     use async_trait::async_trait;
     use routectl_auth::{MemoryStore, SecretRef, SecretStore};
     use routectl_core::{Error, MessageContent};
+    use routectl_providers::gemini::GeminiAuthMode;
     use std::sync::Arc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1408,34 +1416,37 @@ mod gemini_cloud_code_factory_tests {
     }
 
     fn cloud_code_entry(base_url: &str) -> ProviderEntry {
-        match ProviderEntry::gemini(UNMANAGED_OAUTH_REF)
+        ProviderEntry::gemini(UNMANAGED_OAUTH_REF)
             .with_gemini_auth_mode(GeminiAuthMode::CloudCode)
-        {
-            ProviderEntry::Gemini {
-                api_key_ref,
-                header_extras,
-                payload_extras,
-                user_agent,
-                auth_mode,
-                cloud_project_id,
-                cache_capability,
-                reduction_enabled,
-                runtime,
-                ..
-            } => ProviderEntry::Gemini {
-                api_key_ref,
-                base_url: base_url.to_string(),
-                header_extras,
-                payload_extras,
-                user_agent,
-                auth_mode,
-                cloud_project_id,
-                cache_capability,
-                reduction_enabled,
-                runtime,
-            },
-            other => panic!("expected Gemini entry; got {other:?}"),
-        }
+            .with_base_url(base_url)
+    }
+
+    /// Build a Cloud Code `entry` from the plan the factory takes for the
+    /// managed login, with the fixture ref and the entry's own base URL in
+    /// its place.
+    async fn build_planned_cloud_code(
+        entry: &ProviderEntry,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Arc<dyn Provider>> {
+        let plan = ProviderPlan {
+            credential: CredentialRef::parse(UNMANAGED_OAUTH_REF).expect("fixture ref parses"),
+            destination: Destination::BaseUrl(
+                entry
+                    .base_url
+                    .clone()
+                    .expect("cloud-code fixture sets base_url"),
+            ),
+            egress: EgressKind::Gemini,
+            client_identity: false,
+        };
+        gemini_provider(&BuildContext {
+            name: "gemini-cc",
+            entry,
+            plan: &plan,
+            secrets,
+            opts: BuildOptions::default(),
+        })
+        .await
     }
 
     fn gemini_ok_response() -> serde_json::Value {
@@ -1501,7 +1512,7 @@ mod gemini_cloud_code_factory_tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
         let entry = cloud_code_entry(&server.uri());
 
-        let provider = build_provider("gemini-cc", &entry, secrets)
+        let provider = build_planned_cloud_code(&entry, secrets)
             .await
             .expect("cloud-code provider builds from oauth:// ref");
 
@@ -1548,8 +1559,8 @@ mod gemini_cloud_code_factory_tests {
         };
         match err {
             Error::Config(msg) => assert!(
-                msg.contains("scheme `oauth://`") && msg.contains("not a valid secret URI"),
-                "the parse refusal must name the oauth:// scheme; got: {msg}"
+                msg.contains("`credential` is not usable") && msg.contains("oauth://"),
+                "the parse refusal must name the key and the oauth:// scheme; got: {msg}"
             ),
             other => panic!("expected Error::Config, got {other:?}"),
         }
@@ -1559,7 +1570,7 @@ mod gemini_cloud_code_factory_tests {
     async fn cloud_code_build_does_not_leak_token_in_debug() {
         let secret_ref = SecretRef::parse("oauth://antigravity").expect("parse oauth ref");
         let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
-        let auth = resolve_token_source(&secrets, "oauth://antigravity")
+        let auth = resolve_token_source(&secrets, secret_ref.clone())
             .await
             .expect("token source resolves");
         let project_cache: Arc<dyn CloudProjectCache> =
@@ -1585,7 +1596,7 @@ mod gemini_cloud_code_factory_tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
         let entry = cloud_code_entry("ftp://attacker.example");
 
-        let err = match build_provider("gemini-cc", &entry, secrets).await {
+        let err = match build_planned_cloud_code(&entry, secrets).await {
             Ok(_) => panic!("cloud-code mode must reject a non-http(s) base_url"),
             Err(e) => e,
         };
@@ -1601,12 +1612,7 @@ mod gemini_cloud_code_factory_tests {
     /// `cloud_code_entry` with `cloud_project_id` set to `value`.
     fn cloud_code_entry_with_project(base_url: &str, value: &str) -> ProviderEntry {
         let mut entry = cloud_code_entry(base_url);
-        if let ProviderEntry::Gemini {
-            cloud_project_id, ..
-        } = &mut entry
-        {
-            *cloud_project_id = Some(value.to_string());
-        }
+        entry.cloud_project_id = Some(value.to_string());
         entry
     }
 
@@ -1648,7 +1654,7 @@ mod gemini_cloud_code_factory_tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
         let entry = cloud_code_entry_with_project(&server.uri(), "cfg-proj-1");
 
-        let provider = build_provider("gemini-cc", &entry, secrets)
+        let provider = build_planned_cloud_code(&entry, secrets)
             .await
             .expect("cloud-code provider builds");
         provider
@@ -1689,7 +1695,7 @@ mod gemini_cloud_code_factory_tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
         let entry = cloud_code_entry_with_project(&server.uri(), "");
 
-        let provider = build_provider("gemini-cc", &entry, secrets)
+        let provider = build_planned_cloud_code(&entry, secrets)
             .await
             .expect("cloud-code provider builds");
         provider
@@ -1699,6 +1705,7 @@ mod gemini_cloud_code_factory_tests {
     }
 }
 
+#[cfg(feature = "openai-responses")]
 mod scheme_of_tests {
     use super::scheme_of;
 
@@ -1718,88 +1725,105 @@ mod scheme_of_tests {
 }
 
 #[cfg(feature = "bedrock")]
-mod mantle_lane_factory_tests {
-    //! Factory wiring for the Bedrock mantle anthropic-api lane: region
+mod cloud_carrier_factory_tests {
+    //! Factory wiring for the managed formats over the AWS cloud
+    //! (`anthropic-messages`, `openai-chat`, `openai-responses`): the region
     //! derives the endpoint, credentials resolve fail-fast, and the probe
     //! stays a credential-resolve (never an inference-host dial).
 
     use super::*;
-    use crate::config::{
-        BedrockCredsConfig, BedrockMantleConfig, Config, ModelEntry, ProviderEntry,
-    };
+    use crate::config::{Config, ModelEntry, ProviderEntry};
     use routectl_auth::MemoryStore;
     use routectl_core::ProbeOutcome;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    /// Build an anthropic-api entry on the mantle lane: empty api_key_ref
-    /// (the credential rides `bedrock_mantle.creds`) and base_url left at
-    /// its default (the factory derives it from region).
-    fn mantle_entry(region: &str, creds: BedrockCredsConfig) -> ProviderEntry {
-        let mut entry = ProviderEntry::anthropic_api("");
-        if let ProviderEntry::AnthropicApi { bedrock_mantle, .. } = &mut entry {
-            *bedrock_mantle = Some(BedrockMantleConfig {
-                region: region.to_string(),
-                creds,
-            });
+    /// Each managed format over the cloud, with the provider id prefix the
+    /// factory gives it.
+    fn managed_formats() -> Vec<(Format, &'static str)> {
+        #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
+        let mut formats = vec![
+            (Format::AnthropicMessages, "anthropic-api"),
+            (Format::OpenaiChat, "openai-compat"),
+        ];
+        #[cfg(feature = "openai-responses")]
+        formats.push((Format::OpenaiResponses, "openai-responses"));
+        formats
+    }
+
+    /// An entry of `format` over the cloud in `region`, its credential a
+    /// bearer key read from a file reference.
+    fn bearer_entry(format: Format, region: &str) -> ProviderEntry {
+        ProviderEntry::cloud_aws(
+            format,
+            region,
+            crate::test_secret::file_ref("mantle-bearer-key"),
+            Auth::Bearer,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_bearer_cloud_entry_builds_and_probes_reachable() {
+        // A bearer cloud entry builds with no network: the credential
+        // resolves from the file ref, the provider keeps its format's id,
+        // and the credential-resolve probe reports Reachable for a bearer
+        // key rather than dialing the inference host.
+        for (format, id) in managed_formats() {
+            let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+            let entry = bearer_entry(format, "eu-west-1");
+
+            let provider = build_provider("mantle", &entry, store)
+                .await
+                .unwrap_or_else(|e| panic!("{format:?} bearer cloud entry must build: {e}"));
+
+            assert_eq!(provider.id(), format!("{id}:mantle"), "{format:?}");
+            assert_eq!(
+                provider.probe().await,
+                ProbeOutcome::Reachable,
+                "{format:?}"
+            );
         }
-        entry
     }
 
-    fn bearer_creds() -> BedrockCredsConfig {
-        BedrockCredsConfig::BearerKey {
-            key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
+    #[tokio::test]
+    async fn a_missing_named_profile_fails_fast_at_build() {
+        // `aws://profile/<name>` and `aws://chain` resolve probe-once at
+        // build, so a named profile that does not exist must surface as a
+        // build error here, not on the first chat request. A missing named
+        // profile fails during local aws-config chain construction (no
+        // network).
+        for (format, _) in managed_formats() {
+            let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+            let entry = ProviderEntry::cloud_aws(
+                format,
+                "us-east-1",
+                "aws://profile/routectl-nonexistent-mantle-profile",
+                Auth::AwsSigv4,
+            );
+
+            let result = build_provider("mantle", &entry, store).await;
+
+            assert!(
+                result.is_err(),
+                "{format:?}: a cloud entry whose profile does not exist must fail fast at build"
+            );
         }
     }
 
     #[tokio::test]
-    async fn mantle_bearer_entry_builds_and_probes_reachable() {
-        // A bearer mantle entry builds with no network: the credential
-        // resolves from the file ref, the provider keeps the anthropic-api
-        // id, and the credential-resolve probe reports Reachable for a
-        // bearer key rather than dialing the inference host.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let entry = mantle_entry("eu-west-1", bearer_creds());
-
-        let provider = build_provider("br-mantle", &entry, store)
-            .await
-            .expect("mantle bearer provider must build");
-        assert_eq!(provider.id(), "anthropic-api:br-mantle");
-        assert_eq!(provider.probe().await, ProbeOutcome::Reachable);
-    }
-
-    #[tokio::test]
-    async fn mantle_profile_missing_profile_fails_fast_at_build() {
-        // Profile / DefaultChain resolve probe-once at build, so a named
-        // profile that does not exist must surface as a build error here,
-        // not on the first chat request. A missing named profile fails
-        // during local aws-config chain construction (no network).
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let creds = BedrockCredsConfig::Profile {
-            name: "routectl-nonexistent-mantle-profile".to_string(),
-        };
-        let entry = mantle_entry("us-east-1", creds);
-
-        let result = build_provider("br-mantle", &entry, store).await;
-        assert!(
-            result.is_err(),
-            "a mantle entry whose profile does not exist must fail fast at build"
-        );
-    }
-
-    #[tokio::test]
-    async fn mantle_model_resolves_end_to_end_without_network() {
-        // config -> router build: a model referencing a bearer mantle
-        // provider resolves through `build_resolved_models` (the path the
-        // hot-reload loader drives) with no failures and no network.
+    async fn every_managed_cloud_format_resolves_end_to_end_without_network() {
+        // config -> router build: one config carrying a bearer cloud entry of
+        // each managed format resolves through `build_resolved_models` (the
+        // path the hot-reload loader drives) with no failures and no
+        // network. Every model probes Reachable.
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
         let mut providers = BTreeMap::new();
-        providers.insert("br".to_string(), mantle_entry("us-east-1", bearer_creds()));
         let mut models = BTreeMap::new();
-        models.insert(
-            "opus".to_string(),
-            ModelEntry::new("br", "anthropic.claude-opus"),
-        );
+        for (format, id) in managed_formats() {
+            providers.insert(id.to_string(), bearer_entry(format, "us-east-1"));
+            models.insert(format!("m-{id}"), ModelEntry::new(id, "upstream-model"));
+        }
+        let expected = models.len();
         let cfg = Config {
             providers,
             models,
@@ -1809,251 +1833,63 @@ mod mantle_lane_factory_tests {
         let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
             .await
             .expect("router build must succeed");
+
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        let opus = resolved.get("opus").expect("opus model resolved");
-        assert_eq!(opus.provider.probe().await, ProbeOutcome::Reachable);
+        assert_eq!(resolved.len(), expected);
+        for (name, model) in &resolved {
+            assert_eq!(
+                model.provider.probe().await,
+                ProbeOutcome::Reachable,
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn mantle_bearer_resolve_does_not_block_the_reload_path() {
-        // The mantle lane resolves credentials through the async
+    async fn a_bearer_resolve_does_not_block_the_reload_path() {
+        // The cloud carrier resolves credentials through the async
         // `bedrock::auth::resolve` seam, exactly as the Bedrock provider
         // does -- never a blocking call on the async reload path. A bearer
         // key short-circuits with no round-trip, so the build completes
         // well within a tight deadline.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let entry = mantle_entry("us-east-1", bearer_creds());
+        for (format, _) in managed_formats() {
+            let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+            let entry = bearer_entry(format, "us-east-1");
 
-        let built = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            build_provider("br-mantle", &entry, store),
-        )
-        .await
-        .expect("mantle bearer build must not block the reload path");
-        built.expect("bearer mantle build must succeed");
-    }
-}
+            let built = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                build_provider("mantle", &entry, store),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{format:?} bearer build must not block the reload path"));
 
-#[cfg(feature = "bedrock")]
-mod openai_mantle_factory_tests {
-    //! Factory wiring for the Bedrock mantle OpenAI lanes (openai-compat and
-    //! openai-responses): region derives the endpoint, credentials resolve
-    //! fail-fast, and the probe stays a credential-resolve (never an
-    //! inference-host dial). Sibling of `mantle_lane_factory_tests` for the
-    //! anthropic-api lane.
-
-    use super::*;
-    use crate::config::{BedrockCredsConfig, BedrockMantleConfig, ProviderEntry};
-    use routectl_auth::MemoryStore;
-    use routectl_core::ProbeOutcome;
-    use std::sync::Arc;
-    #[cfg(feature = "openai-responses")]
-    use {
-        crate::config::{Config, ModelEntry},
-        std::collections::BTreeMap,
-    };
-
-    fn bearer_creds() -> BedrockCredsConfig {
-        BedrockCredsConfig::BearerKey {
-            key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
+            assert!(built.is_ok(), "{format:?}: {:?}", built.err());
         }
     }
 
-    /// Build an openai-compat entry on the mantle lane: empty api_key_ref and
-    /// empty base_url (both derived from `bedrock_mantle`).
-    fn compat_mantle_entry(region: &str, creds: BedrockCredsConfig) -> ProviderEntry {
-        let mut entry = ProviderEntry::openai_compat("", "");
-        if let ProviderEntry::OpenaiCompat { bedrock_mantle, .. } = &mut entry {
-            *bedrock_mantle = Some(BedrockMantleConfig {
-                region: region.to_string(),
-                creds,
-            });
-        }
-        entry
-    }
-
-    /// Build an openai-responses entry on the mantle lane: empty api_key_ref,
-    /// no base_url, `auth_kind = bedrock-mantle`, and the `bedrock_mantle`
-    /// block set.
-    #[cfg(feature = "openai-responses")]
-    fn responses_mantle_entry(region: &str, creds: BedrockCredsConfig) -> ProviderEntry {
-        let mut entry = ProviderEntry::openai_responses("")
-            .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::BedrockMantle);
-        if let ProviderEntry::OpenaiResponses { bedrock_mantle, .. } = &mut entry {
-            *bedrock_mantle = Some(BedrockMantleConfig {
-                region: region.to_string(),
-                creds,
-            });
-        }
-        entry
-    }
-
-    #[tokio::test]
-    async fn compat_mantle_bearer_entry_builds_and_probes_reachable() {
-        // A bearer compat mantle entry builds with no network: the credential
-        // resolves from the file ref, the provider keeps the openai-compat
-        // id, and the credential-resolve probe reports Reachable for a bearer
-        // key rather than dialing the upstream `/models`.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let entry = compat_mantle_entry("eu-west-1", bearer_creds());
-
-        let provider = build_provider("oc-mantle", &entry, store)
-            .await
-            .expect("compat mantle bearer provider must build");
-        assert_eq!(provider.id(), "openai-compat:oc-mantle");
-        assert_eq!(provider.probe().await, ProbeOutcome::Reachable);
-    }
-
-    #[tokio::test]
-    async fn compat_mantle_profile_missing_profile_fails_fast_at_build() {
-        // Profile / DefaultChain resolve probe-once at build, so a named
-        // profile that does not exist must surface as a build error here,
-        // not on the first chat request.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let creds = BedrockCredsConfig::Profile {
-            name: "routectl-nonexistent-mantle-profile".to_string(),
-        };
-        let entry = compat_mantle_entry("us-east-1", creds);
-
-        let result = build_provider("oc-mantle", &entry, store).await;
-        assert!(
-            result.is_err(),
-            "a compat mantle entry whose profile does not exist must fail fast at build"
-        );
-    }
-
-    #[tokio::test]
-    async fn compat_mantle_bearer_resolve_does_not_block_the_reload_path() {
-        // The mantle lane resolves credentials through the async
-        // `bedrock::auth::resolve` seam, never a blocking call on the async
-        // reload path. A bearer key short-circuits with no round-trip, so the
-        // build completes well within a tight deadline.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let entry = compat_mantle_entry("us-east-1", bearer_creds());
-
-        let built = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            build_provider("oc-mantle", &entry, store),
-        )
-        .await
-        .expect("compat mantle bearer build must not block the reload path");
-        built.expect("compat bearer mantle build must succeed");
-    }
-
+    /// An `openai-responses` entry that names neither `base_url` nor
+    /// `cloud` is refused cleanly on the unvalidated `build_provider` path
+    /// (as `provider probe` takes), never a panic and never a fall-through
+    /// to a default host. The same entry over the cloud is the positive
+    /// control.
     #[cfg(feature = "openai-responses")]
     #[tokio::test]
-    async fn responses_mantle_bearer_entry_builds_and_probes_reachable() {
-        // A bearer responses mantle entry builds with no network: the
-        // credential resolves from the file ref, the provider keeps the
-        // openai-responses id, and the credential-resolve probe reports
-        // Reachable for a bearer key rather than dialing the upstream.
+    async fn a_responses_entry_with_no_carrier_fails_cleanly() {
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let entry = responses_mantle_entry("ap-southeast-2", bearer_creds());
+        let mut entry = bearer_entry(Format::OpenaiResponses, "us-east-1");
+        let control = build_provider("or-cloud", &entry, store.clone()).await;
+        entry.cloud = None;
 
-        let provider = build_provider("or-mantle", &entry, store)
-            .await
-            .expect("responses mantle bearer provider must build");
-        assert_eq!(provider.id(), "openai-responses:or-mantle");
-        assert_eq!(provider.probe().await, ProbeOutcome::Reachable);
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[tokio::test]
-    async fn responses_mantle_profile_missing_profile_fails_fast_at_build() {
-        // A named profile that does not exist must surface as a build error
-        // at construction, not on the first chat request.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let creds = BedrockCredsConfig::Profile {
-            name: "routectl-nonexistent-mantle-profile".to_string(),
-        };
-        let entry = responses_mantle_entry("us-east-1", creds);
-
-        let result = build_provider("or-mantle", &entry, store).await;
-        assert!(
-            result.is_err(),
-            "a responses mantle entry whose profile does not exist must fail fast at build"
-        );
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[tokio::test]
-    async fn both_openai_mantle_lanes_resolve_end_to_end_without_network() {
-        // config -> router build: one config carrying BOTH a mantle responses
-        // provider and a mantle compat provider resolves through
-        // `build_resolved_models` (the path the hot-reload loader drives) with
-        // no failures and no network. Both models probe Reachable.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let mut providers = BTreeMap::new();
-        providers.insert(
-            "resp".to_string(),
-            responses_mantle_entry("us-east-1", bearer_creds()),
-        );
-        providers.insert(
-            "compat".to_string(),
-            compat_mantle_entry("eu-west-1", bearer_creds()),
-        );
-        let mut models = BTreeMap::new();
-        models.insert("gpt".to_string(), ModelEntry::new("resp", "gpt-5"));
-        models.insert(
-            "deepseek".to_string(),
-            ModelEntry::new("compat", "deepseek-chat"),
-        );
-        let cfg = Config {
-            providers,
-            models,
-            ..Config::default()
-        };
-
-        let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
-            .await
-            .expect("router build must succeed");
-        assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        let gpt = resolved.get("gpt").expect("gpt model resolved");
-        assert_eq!(gpt.provider.probe().await, ProbeOutcome::Reachable);
-        let deepseek = resolved.get("deepseek").expect("deepseek model resolved");
-        assert_eq!(deepseek.provider.probe().await, ProbeOutcome::Reachable);
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[tokio::test]
-    async fn responses_mantle_bearer_resolve_does_not_block_the_reload_path() {
-        // The responses mantle lane resolves credentials through the async
-        // `bedrock::auth::resolve` seam, never a blocking call on the async
-        // reload path. A bearer key short-circuits with no round-trip, so the
-        // build completes well within a tight deadline.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let entry = responses_mantle_entry("us-east-1", bearer_creds());
-
-        let built = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            build_provider("or-mantle", &entry, store),
-        )
-        .await
-        .expect("responses mantle bearer build must not block the reload path");
-        built.expect("responses bearer mantle build must succeed");
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[tokio::test]
-    async fn responses_bedrock_mantle_marker_without_block_fails_cleanly() {
-        // The legacy bearer-only surface is closed: an entry that carries the
-        // `bedrock-mantle` auth_kind but NO `bedrock_mantle` block must fail
-        // with a clean Config error, never a panic. This exercises the
-        // unvalidated `build_provider` path (as `provider probe` does), which
-        // bypasses `collect_config_validation`, so the factory itself has to
-        // refuse the marker rather than fall through to a base_url default.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let entry = ProviderEntry::openai_responses("")
-            .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::BedrockMantle);
-
-        let err = match build_provider("or-legacy", &entry, store).await {
-            Ok(_) => panic!("bedrock-mantle marker without a block must be refused"),
+        let err = match build_provider("or-none", &entry, store).await {
+            Ok(_) => panic!("an entry with no carrier must be refused"),
             Err(e) => e,
         };
+
+        assert!(control.is_ok(), "cloud control: {:?}", control.err());
         let msg = err.to_string();
         assert!(
-            msg.contains("bedrock_mantle") && msg.contains("closed"),
-            "error must name the missing block and the closed surface: {msg}"
+            msg.contains("exactly one of `base_url` or `cloud`"),
+            "error must name the missing carrier: {msg}"
         );
     }
 }
@@ -2115,10 +1951,13 @@ mod managed_credential_factory_tests {
                     .with_auth_kind(AuthKind::OauthBearer)
                     .with_base_url("http://127.0.0.1:18080"),
             ),
-            (
-                "anthropic-api forwarded",
-                ProviderEntry::anthropic_api(r).with_credential_source(CredentialSource::Forwarded),
-            ),
+            ("forwarded off the host with the ref in its second slot", {
+                let mut entry = ProviderEntry::anthropic_api("forwarded")
+                    .with_auth(crate::config::Auth::Bearer)
+                    .with_base_url(SENTINEL_HOST);
+                entry.account_id_ref = Some(r.to_string());
+                entry
+            }),
             (
                 "openai-compat",
                 ProviderEntry::openai_compat("https://api.anthropic.com", r),
@@ -2143,12 +1982,7 @@ mod managed_credential_factory_tests {
                 };
 
                 assert!(err.contains("provider `p`"), "{label}: {err}");
-                for leaked in [
-                    "sentinel-host",
-                    "127.0.0.1",
-                    "oauth://anthropic",
-                    "secret-seat-label",
-                ] {
+                for leaked in ["sentinel-host", "127.0.0.1", "secret-seat-label", "#"] {
                     assert!(!err.contains(leaked), "{label} leaks {leaked}: {err}");
                 }
             }
@@ -2211,7 +2045,7 @@ mod managed_credential_factory_tests {
 
         let msg = err.to_string();
         assert!(
-            msg.contains("member `gw` carries a managed credential outside the lane"),
+            msg.contains("member `gw` is refused by its provider plan"),
             "{msg}"
         );
         assert!(!msg.contains("sentinel-host"), "{msg}");
@@ -2272,10 +2106,10 @@ mod managed_credential_factory_tests {
             ] {
                 let text = format!(
                     "[providers.p]\n\
-                     kind = \"gemini\"\n\
-                     auth_mode = \"cloud-code\"\n\
-                     api_key_ref = \"{antigravity}\"\n\
-                     base_url = \"{base}\"\n"
+                     format = \"gemini-cloud-code\"\n\
+                     base_url = \"{base}\"\n\
+                     credential = \"{antigravity}\"\n\
+                     auth = \"bearer\"\n"
                 );
                 let cfg: Config = toml::from_str(&text).expect("fixture parses");
                 v.push((label, cfg.providers["p"].clone()));
@@ -2306,13 +2140,7 @@ mod managed_credential_factory_tests {
 
                 assert!(err.contains("provider `p`"), "{label}: {err}");
                 assert!(err.contains("managed"), "{label}: {err}");
-                for leaked in [
-                    "sentinel-host",
-                    "127.0.0.1",
-                    "oauth://codex",
-                    "oauth://antigravity",
-                    "secret-seat-label",
-                ] {
+                for leaked in ["sentinel-host", "127.0.0.1", "secret-seat-label", "#"] {
                     assert!(!err.contains(leaked), "{label} leaks {leaked}: {err}");
                 }
             }
@@ -2323,24 +2151,22 @@ mod managed_credential_factory_tests {
     #[tokio::test]
     async fn build_provider_still_builds_the_default_cloud_code_managed_shapes() {
         for base in [
-            None,
-            Some(routectl_providers::gemini::PROD_BASE_URL),
-            Some(routectl_providers::gemini::DAILY_BASE_URL),
+            routectl_providers::gemini::PROD_BASE_URL,
+            routectl_providers::gemini::DAILY_BASE_URL,
         ] {
-            let pin = base.map_or_else(String::new, |b| format!("base_url = \"{b}\"\n"));
             let cfg: Config = toml::from_str(&format!(
                 "[providers.p]\n\
-                 kind = \"gemini\"\n\
-                 auth_mode = \"cloud-code\"\n\
-                 api_key_ref = \"oauth://antigravity#seat-b\"\n\
-                 {pin}"
+                 format = \"gemini-cloud-code\"\n\
+                 base_url = \"{base}\"\n\
+                 credential = \"oauth://antigravity#seat-b\"\n\
+                 auth = \"bearer\"\n"
             ))
             .expect("fixture parses");
             let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
 
             let built = build_provider("p", &cfg.providers["p"], store).await;
 
-            assert!(built.is_ok(), "base={base:?}: {:?}", built.err());
+            assert!(built.is_ok(), "base={base}: {:?}", built.err());
         }
     }
 
@@ -2349,10 +2175,10 @@ mod managed_credential_factory_tests {
     async fn build_resolved_models_skips_a_loopback_cloud_code_entry_without_touching_the_store() {
         let mut cfg: Config = toml::from_str(
             "[providers.cc]\n\
-             kind = \"gemini\"\n\
-             auth_mode = \"cloud-code\"\n\
-             api_key_ref = \"oauth://antigravity#secret-seat-label\"\n\
-             base_url = \"http://127.0.0.1:18080\"\n",
+             format = \"gemini-cloud-code\"\n\
+             base_url = \"http://127.0.0.1:18080\"\n\
+             credential = \"oauth://antigravity#secret-seat-label\"\n\
+             auth = \"bearer\"\n",
         )
         .expect("fixture parses");
         cfg.models
@@ -2374,9 +2200,10 @@ mod managed_credential_factory_tests {
         for key_ref in ["oauth://codex#secret-seat-label", "oauth://antigravity"] {
             let mut cfg: Config = toml::from_str(&format!(
                 "[providers.br]\n\
-                 kind = \"bedrock\"\n\
-                 region = \"us-east-1\"\n\
-                 creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n"
+                 format = \"bedrock-invoke\"\n\
+                 cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+                 credential = \"{key_ref}\"\n\
+                 auth = \"bearer\"\n"
             ))
             .expect("fixture parses");
             cfg.models.insert(
@@ -2418,7 +2245,7 @@ mod managed_credential_factory_tests {
 
         let msg = err.to_string();
         assert!(
-            msg.contains("member `gw` carries a managed credential outside the lane"),
+            msg.contains("member `gw` is refused by its provider plan"),
             "{msg}"
         );
         assert!(!msg.contains("sentinel-host"), "{msg}");
@@ -2581,10 +2408,10 @@ mod managed_family_store_read_tests {
     fn antigravity_entry(r: &str, base_url: &str) -> ProviderEntry {
         let cfg: Config = toml::from_str(&format!(
             "[providers.p]\n\
-             kind = \"gemini\"\n\
-             auth_mode = \"cloud-code\"\n\
-             api_key_ref = \"{r}\"\n\
-             base_url = \"{base_url}\"\n"
+             format = \"gemini-cloud-code\"\n\
+             base_url = \"{base_url}\"\n\
+             credential = \"{r}\"\n\
+             auth = \"bearer\"\n"
         ))
         .expect("fixture parses");
         cfg.providers["p"].clone()

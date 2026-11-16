@@ -25,8 +25,7 @@ const PENDING_RESTART_MSG: &str =
 
 fn config_with_version(version: &str) -> Config {
     toml::from_str(&format!(
-        "[providers.cx]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://openai\"\n\
-         auth_kind = \"chatgpt-oauth\"\ncodex_version = \"{version}\"\n\
+        "[providers.cx]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://openai\"\nauth = \"bearer\"\ncodex_version = \"{version}\"\n\
          [models.m]\nprovider = \"cx\"\nupstream = \"gpt-5\"\n",
     ))
     .expect("fixture parses")

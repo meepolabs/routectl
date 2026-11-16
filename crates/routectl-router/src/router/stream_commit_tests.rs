@@ -448,10 +448,8 @@ fn held_tail_router(provider: Arc<HeldTailProvider>) -> super::Router {
     use crate::config::{Config, ModelEntry, ProviderEntry};
     let mut config = Config::default();
     let mut entry = ProviderEntry::anthropic_api("literal:k");
-    if let ProviderEntry::AnthropicApi { runtime, .. } = &mut entry {
-        runtime.circuit_failures = Some(1);
-        runtime.circuit_cooldown_ms = Some(0);
-    }
+    entry.runtime.circuit_failures = Some(1);
+    entry.runtime.circuit_cooldown_ms = Some(0);
     config.providers.insert("p".into(), entry);
     config.models.insert("m".into(), ModelEntry::new("p", "u"));
     let mut router = super::Router::new(Arc::new(config));

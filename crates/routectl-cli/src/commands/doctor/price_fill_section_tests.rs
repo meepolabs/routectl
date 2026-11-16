@@ -414,9 +414,10 @@ async fn the_doctor_renders_no_table_string_beyond_prices_and_date() {
         format!(
             "version = {}\n\
              [providers.vendor]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://zz-host.example/v1\"\n\
-             api_key_ref = \"env://ROUTECTL_PRICE_FILL_TEST_KEY\"\n\
+             credential = \"env://ROUTECTL_PRICE_FILL_TEST_KEY\"\n\
+             auth = \"bearer\"\n\
              [models.sentinel]\n\
              provider = \"vendor\"\n\
              upstream = \"{SENTINEL_MODEL}\"\n",

@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use routectl_core::{Error, Result};
-use routectl_router::Config;
+use routectl_router::{Config, Format};
 use toml::{Table, Value};
 
 use super::config::redacted_config;
@@ -49,8 +49,8 @@ impl SettingSource {
 pub enum DefaultScope {
     /// A top-level section such as `[retry]`.
     Section(&'static str),
-    /// Every `[providers.X]` entry of one `kind`.
-    ProviderKind(&'static str),
+    /// Every `[providers.X]` entry of one `format`.
+    ProviderFormat(Format),
 }
 
 /// How the runtime resolves one [`CODE_DEFAULTS`] key.
@@ -96,7 +96,7 @@ pub const CODE_DEFAULTS: &[CodeDefault] = &[
         },
     },
     CodeDefault {
-        scope: DefaultScope::ProviderKind("openai-responses"),
+        scope: DefaultScope::ProviderFormat(Format::OpenaiResponses),
         key: "codex_version",
         resolve: codex_version_resolution,
     },
@@ -223,13 +223,15 @@ fn apply_code_defaults(config: &Config, tree: &Table, out: &mut Settings) {
 fn scope_tables(tree: &Table, scope: DefaultScope) -> Vec<Vec<String>> {
     match scope {
         DefaultScope::Section(name) => vec![vec![name.to_string()]],
-        DefaultScope::ProviderKind(kind) => {
+        DefaultScope::ProviderFormat(format) => {
             let Some(Value::Table(providers)) = tree.get("providers") else {
                 return Vec::new();
             };
             providers
                 .iter()
-                .filter(|(_, entry)| entry.get("kind").and_then(Value::as_str) == Some(kind))
+                .filter(|(_, entry)| {
+                    entry.get("format").and_then(Value::as_str) == Some(format.as_str())
+                })
                 .map(|(name, _)| vec!["providers".to_string(), name.clone()])
                 .collect()
         }

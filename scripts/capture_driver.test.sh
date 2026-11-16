@@ -1645,29 +1645,26 @@ check "every pin the runner exports is listed" "" \
 check "every listed pin is one the runner exports" "" \
     "$(comm -13 <(printf '%s\n' "$FIXTURE_EXPORTED") <(printf '%s\n' "$FIXTURE_LISTED") | tr '\n' ' ' | sed 's/ $//')"
 
-# --- Case 12: the lane config declares the oauth-bearer wire shape ----
-# `auth_kind` decides what the captured egress LOOKS like: `oauth-bearer`
-# against api.anthropic.com is what turns on signature re-signing, the
-# pinned beta floor, the session-id header and user-agent resolution. The
-# field is not defaultable -- the default is `api-key`, under which a
-# subscription token ships as `x-api-key` for a 401 -- so a silent revert
-# would produce a lane nobody uses, or no fixture at all. Pinned here so
-# that revert is a test failure instead of a capture-time surprise.
+# --- Case 12: the lane config declares the bearer wire shape ----------
+# `auth` decides how the captured egress sends its token: a subscription
+# token sent as `x-api-key` is answered 401, so a silent revert would
+# produce a lane nobody uses, or no fixture at all. Pinned here so that
+# revert is a test failure instead of a capture-time surprise.
 declares_oauth_bearer() {
-    if grep -qE '^[[:space:]]*auth_kind[[:space:]]*=[[:space:]]*"oauth-bearer"' "$1"; then
+    if grep -qE '^[[:space:]]*auth[[:space:]]*=[[:space:]]*"bearer"' "$1"; then
         printf 'yes\n'
     else
         printf 'no\n'
     fi
 }
-check "the committed lane config declares auth_kind = oauth-bearer" "yes" \
+check "the committed lane config declares auth = bearer" "yes" \
     "$(declares_oauth_bearer "$LANE_CONFIG")"
 
 # Paired control: the same matcher on a copy with the line stripped must
 # report absence. A matcher broken into always-true would otherwise read
 # as a pass above.
 stripped="$(mktemp)"
-grep -v 'auth_kind' "$LANE_CONFIG" >"$stripped"
+grep -vE '^[[:space:]]*auth[[:space:]]*=' "$LANE_CONFIG" >"$stripped"
 check "the matcher reports absence when the declaration is stripped" "no" \
     "$(declares_oauth_bearer "$stripped")"
 rm -f "$stripped"
@@ -1684,7 +1681,7 @@ rm -f "$stripped"
 FRONT_PROXY_CONFIG="$HERE/drivers/config/anthropic-api.front-proxy.toml"
 check "the front-proxy lane config is committed and readable" "yes" \
     "$([ -r "$FRONT_PROXY_CONFIG" ] && echo yes || echo no)"
-check "the front-proxy config declares auth_kind = oauth-bearer" "yes" \
+check "the front-proxy config declares auth = bearer" "yes" \
     "$(declares_oauth_bearer "$FRONT_PROXY_CONFIG")"
 
 # Comments and blank lines carry no wire meaning, so both sides are
@@ -1717,7 +1714,7 @@ check "the two lane configs differ only by the [mitm] table and comments" "yes" 
 # satisfiable by a comparison that always passes -- e.g. an awk program
 # that swallows every line, or a `diff` whose exit status is discarded.
 mutated="$(mktemp)"
-sed 's/^kind        = "anthropic-api"$/kind        = "openai-compat"/' \
+sed 's/^format     = "anthropic-messages"$/format     = "openai-chat"/' \
     "$FRONT_PROXY_CONFIG" >"$mutated"
 check_ne "the mutation actually altered the twin" \
     "$(sha256sum <"$FRONT_PROXY_CONFIG" | cut -d' ' -f1)" \

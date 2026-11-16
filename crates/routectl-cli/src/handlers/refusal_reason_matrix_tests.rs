@@ -28,7 +28,7 @@ use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth as bedrock_auth,
 };
 use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use routectl_router::config::CredentialSource;
+use routectl_router::config::Auth;
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, RetryPolicy, Router,
 };
@@ -85,9 +85,9 @@ fn anthropic_api(base: &str) -> ProviderEntry {
 }
 
 fn forwarded_anthropic_api(_base: &str) -> ProviderEntry {
-    ProviderEntry::anthropic_api("")
+    ProviderEntry::anthropic_api("forwarded")
         .with_base_url("https://api.anthropic.com")
-        .with_credential_source(CredentialSource::Forwarded)
+        .with_auth(Auth::Bearer)
 }
 
 fn openai_compat(base: &str) -> ProviderEntry {
@@ -101,11 +101,7 @@ fn openai_responses(base: &str) -> ProviderEntry {
 }
 
 fn gemini(base: &str) -> ProviderEntry {
-    let mut entry = ProviderEntry::gemini(crate::test_secret::file_ref("k"));
-    if let ProviderEntry::Gemini { base_url, .. } = &mut entry {
-        *base_url = base.to_string();
-    }
-    entry
+    ProviderEntry::gemini(crate::test_secret::file_ref("k")).with_base_url(base)
 }
 
 fn json_body(body: &Value) -> Vec<u8> {
@@ -617,14 +613,15 @@ async fn invoke_then_compat_router(base: &str) -> Router {
     let text = format!(
         "version = {version}\n\n\
          [providers.p0]\n\
-         kind = \"bedrock\"\n\
-         region = \"{INVOKE_REGION}\"\n\
-         api_shape = \"invoke\"\n\
-         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"{INVOKE_REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [providers.p1]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"{base}\"\n\
-         api_key_ref = \"{key_ref}\"\n\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [models.m0]\n\
          provider = \"p0\"\n\
          upstream = \"{INVOKE_MODEL_ID}\"\n\n\

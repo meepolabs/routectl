@@ -121,10 +121,8 @@ fn router_with_entries(
 ) -> Router {
     let mut config = Config::default();
     let mut oauth = ProviderEntry::anthropic_api(common::file_ref("k"));
-    if let ProviderEntry::AnthropicApi { runtime, .. } = &mut oauth {
-        runtime.circuit_failures = Some(1);
-        runtime.circuit_cooldown_ms = Some(60_000);
-    }
+    oauth.runtime.circuit_failures = Some(1);
+    oauth.runtime.circuit_cooldown_ms = Some(60_000);
     config.providers.insert("p-oauth".into(), oauth);
     config.providers.insert("p-fallback".into(), fallback_entry);
     config.aliases.insert(

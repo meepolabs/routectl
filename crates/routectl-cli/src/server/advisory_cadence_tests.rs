@@ -29,8 +29,7 @@ const OVERLAY_DROP_MESSAGE: &str = "ignoring auth-reserved header from [models.X
 fn advisory_config_text() -> String {
     format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
-         [providers.compat]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
-         api_key_ref = \"{}\"\n\n\
+         [providers.compat]\nformat = \"openai-chat\"\nbase_url = \"http://127.0.0.1:1/v1\"\ncredential = \"{}\"\nauth = \"bearer\"\n\n\
          [models.idle]\nprovider = \"compat\"\nupstream = \"u\"\n\n\
          [models.idle.header_extras]\nAuthorization = \"Bearer operator-typed\"\n",
         crate::test_secret::file_ref("cadence-key")
@@ -236,8 +235,7 @@ fn auth_reserved_config_text(origin: &str) -> String {
     format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [retry]\nmax_attempts = 1\n\n\
-         [providers.compat]\nkind = \"openai-compat\"\nbase_url = \"{origin}\"\n\
-         api_key_ref = \"{}\"\n\n\
+         [providers.compat]\nformat = \"openai-chat\"\nbase_url = \"{origin}\"\ncredential = \"{}\"\nauth = \"bearer\"\n\n\
          [models.glm]\nprovider = \"compat\"\nupstream = \"glm-4.6\"\n\n\
          [models.glm.header_extras]\nAuthorization = \"Bearer operator-typed\"\n\n\
          [aliases]\na = \"glm\"\n",

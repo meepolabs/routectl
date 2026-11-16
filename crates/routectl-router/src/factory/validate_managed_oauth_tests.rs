@@ -20,6 +20,12 @@ const ANTIGRAVITY_REFS: [&str; 2] = [
 #[cfg(any(feature = "openai-responses", feature = "gemini"))]
 const SENTINEL_HOST: &str = "https://gateway.sentinel-host.example/sentinel-path?k=1";
 
+#[cfg(any(feature = "openai-responses", feature = "gemini"))]
+/// The ceiling the CLI's config and doctor reports truncate a validator line
+/// at (`MAX_REPORTED_LINE_CHARS` in routectl-cli `commands/config.rs`); a
+/// containment refusal must arrive whole.
+const REPORTED_LINE_CAP: usize = 512;
+
 /// Hosts no managed family accepts: loopback, cleartext, smuggles, and
 /// malformed values. Each family's own lookalikes are listed with it.
 #[cfg(any(feature = "openai-responses", feature = "gemini"))]
@@ -131,20 +137,22 @@ mod codex {
         }
     }
 
+    /// The Responses dialect follows the host, so the api-key surface is the
+    /// OpenAI platform host; the managed ref is refused there, and over the
+    /// wrong auth on its own host. The own lane is the positive control.
     #[test]
-    fn rejects_the_api_key_auth_kind_even_on_the_chatgpt_host() {
+    fn rejects_the_api_key_surface_and_a_non_bearer_auth() {
         for r in CODEX_REFS {
-            for base in [None, Some("https://chatgpt.com/backend-api/codex")] {
-                let mut entry = ProviderEntry::openai_responses(r)
-                    .with_openai_responses_auth_kind(AuthKind::ApiKey);
-                if let Some(b) = base {
-                    entry = entry.with_openai_responses_base_url(b);
-                }
-                assert!(
-                    codex_rejects(&entry),
-                    "api-key must reject {r} base={base:?}"
-                );
-            }
+            let platform = ProviderEntry::openai_responses(r)
+                .with_openai_responses_auth_kind(AuthKind::ApiKey);
+            assert!(codex_rejects(&platform), "platform host must reject {r}");
+
+            let wrong_auth = responses(r, "https://chatgpt.com/backend-api/codex")
+                .with_auth(crate::config::Auth::XApiKey);
+            assert!(codex_rejects(&wrong_auth), "x-api-key must reject {r}");
+
+            let own = responses(r, "https://chatgpt.com/backend-api/codex");
+            assert!(!codex_rejects(&own), "own lane control: {r}");
         }
     }
 
@@ -165,9 +173,10 @@ mod codex {
     fn rejects_a_managed_ref_on_the_responses_mantle_lane() {
         let entry = only_entry(
             "[providers.m]\n\
-             kind = \"openai-responses\"\n\
-             api_key_ref = \"\"\n\
-             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", key_ref = \"oauth://codex\" } }\n",
+             format = \"openai-responses\"\n\
+             cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+             credential = \"oauth://codex\"\n\
+             auth = \"bearer\"\n",
         );
         assert!(codex_rejects(&entry));
     }
@@ -225,16 +234,23 @@ mod antigravity {
         "http://daily-cloudcode-pa.googleapis.com",
     ];
 
-    fn gemini(r: &str, auth_mode: &str, base_url: Option<&str>) -> ProviderEntry {
-        let pin = base_url.map_or_else(String::new, |b| {
-            format!("base_url = {}\n", toml::Value::String(b.to_string()))
-        });
+    /// A Gemini entry of `format` carrying `r`, on `base_url` or, when
+    /// `None`, on the base that format's login writes.
+    fn gemini(r: &str, format: &str, base_url: Option<&str>) -> ProviderEntry {
+        let (default_base, auth) = match format {
+            "gemini-cloud-code" => ("https://daily-cloudcode-pa.googleapis.com", "bearer"),
+            _ => (
+                "https://generativelanguage.googleapis.com/v1beta",
+                "x-goog-api-key",
+            ),
+        };
+        let base = toml::Value::String(base_url.unwrap_or(default_base).to_string());
         only_entry(&format!(
             "[providers.g]\n\
-             kind = \"gemini\"\n\
-             api_key_ref = \"{r}\"\n\
-             auth_mode = \"{auth_mode}\"\n\
-             {pin}"
+             format = \"{format}\"\n\
+             base_url = {base}\n\
+             credential = \"{r}\"\n\
+             auth = \"{auth}\"\n"
         ))
     }
 
@@ -242,40 +258,49 @@ mod antigravity {
     fn accepts_only_the_exact_https_cloud_code_hosts_for_bare_and_labeled_refs() {
         for r in ANTIGRAVITY_REFS {
             for url in ACCEPTED {
-                let entry = gemini(r, "cloud-code", Some(url));
+                let entry = gemini(r, "gemini-cloud-code", Some(url));
                 assert!(!antigravity_rejects(&entry), "must accept {url} with {r}");
             }
             for url in REJECTED.iter().chain(SHARED_REJECTED.iter()) {
-                let entry = gemini(r, "cloud-code", Some(url));
+                let entry = gemini(r, "gemini-cloud-code", Some(url));
                 assert!(antigravity_rejects(&entry), "must reject {url:?} with {r}");
             }
         }
     }
 
     #[test]
-    fn accepts_the_default_cloud_code_base_for_bare_and_labeled_refs() {
+    fn accepts_the_login_written_cloud_code_base_for_bare_and_labeled_refs() {
         for r in ANTIGRAVITY_REFS {
             assert!(
-                !antigravity_rejects(&gemini(r, "cloud-code", None)),
-                "unset base_url takes the daily host: {r}"
+                !antigravity_rejects(&gemini(r, "gemini-cloud-code", None)),
+                "the daily host the login writes: {r}"
             );
         }
     }
 
+    /// The api-key format refuses the managed ref on every host, the Cloud
+    /// Code hosts included; the same ref on `gemini-cloud-code` there is
+    /// the positive control.
     #[test]
-    fn rejects_the_api_key_auth_mode_on_any_host() {
+    fn rejects_the_api_key_format_on_any_host() {
         for r in ANTIGRAVITY_REFS {
             for base in [
                 None,
                 Some("https://generativelanguage.googleapis.com/v1beta"),
                 Some("https://cloudcode-pa.googleapis.com"),
             ] {
-                let entry = gemini(r, "api-key", base);
+                let entry = gemini(r, "gemini", base);
                 assert!(
                     antigravity_rejects(&entry),
                     "api-key must reject {r} base={base:?}"
                 );
             }
+            let control = gemini(
+                r,
+                "gemini-cloud-code",
+                Some("https://cloudcode-pa.googleapis.com"),
+            );
+            assert!(!antigravity_rejects(&control), "cloud-code control: {r}");
         }
     }
 
@@ -284,16 +309,16 @@ mod antigravity {
         let cases = [
             gemini(
                 "env://GEMINI_API_KEY",
-                "api-key",
+                "gemini",
                 Some("http://127.0.0.1:18080"),
             ),
-            gemini("file:///tmp/k", "cloud-code", Some(SENTINEL_HOST)),
+            gemini("file:///tmp/k", "gemini-cloud-code", Some(SENTINEL_HOST)),
             gemini(
                 "oauth://antigravity-a",
-                "cloud-code",
+                "gemini-cloud-code",
                 Some("http://127.0.0.1:18080"),
             ),
-            gemini("oauth://codex", "cloud-code", Some(SENTINEL_HOST)),
+            gemini("oauth://codex", "gemini-cloud-code", Some(SENTINEL_HOST)),
         ];
         for entry in &cases {
             assert!(!antigravity_rejects(entry), "must not touch {entry:?}");
@@ -320,9 +345,10 @@ fn rejects_every_foreign_provider_kind_for_both_families() {
         #[cfg(feature = "bedrock")]
         foreign.push(only_entry(&format!(
             "[providers.br]\n\
-             kind = \"bedrock\"\n\
-             region = \"us-east-1\"\n\
-             creds = {{ kind = \"bearer-key\", key_ref = \"{r}\" }}\n"
+             format = \"bedrock-invoke\"\n\
+             cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+             credential = \"{r}\"\n\
+             auth = \"bearer\"\n"
         )));
         let is_codex = r.starts_with("oauth://codex");
         #[cfg(feature = "openai-responses")]
@@ -357,33 +383,35 @@ fn config_validation_rejects_foreign_hosts_naming_the_provider_only() {
     for (i, r) in CODEX_REFS.iter().enumerate() {
         text.push_str(&format!(
             "[providers.cx-gw{i}]\n\
-             kind = \"openai-responses\"\n\
-             api_key_ref = \"{r}\"\n\
+             format = \"openai-responses\"\n\
              base_url = \"{SENTINEL_HOST}\"\n\
+             credential = \"{r}\"\n\
+             auth = \"bearer\"\n\
              [providers.cx-lo{i}]\n\
-             kind = \"openai-responses\"\n\
-             api_key_ref = \"{r}\"\n\
-             base_url = \"http://127.0.0.1:18080\"\n"
+             format = \"openai-responses\"\n\
+             base_url = \"http://127.0.0.1:18080\"\n\
+             credential = \"{r}\"\n\
+             auth = \"bearer\"\n"
         ));
-        names.push((format!("cx-gw{i}"), "Codex"));
-        names.push((format!("cx-lo{i}"), "Codex"));
+        names.push((format!("cx-gw{i}"), "codex"));
+        names.push((format!("cx-lo{i}"), "codex"));
     }
     #[cfg(feature = "gemini")]
     for (i, r) in ANTIGRAVITY_REFS.iter().enumerate() {
         text.push_str(&format!(
             "[providers.ag-gw{i}]\n\
-             kind = \"gemini\"\n\
-             auth_mode = \"cloud-code\"\n\
-             api_key_ref = \"{r}\"\n\
+             format = \"gemini-cloud-code\"\n\
              base_url = \"{SENTINEL_HOST}\"\n\
+             credential = \"{r}\"\n\
+             auth = \"bearer\"\n\
              [providers.ag-lo{i}]\n\
-             kind = \"gemini\"\n\
-             auth_mode = \"cloud-code\"\n\
-             api_key_ref = \"{r}\"\n\
-             base_url = \"http://127.0.0.1:18080\"\n"
+             format = \"gemini-cloud-code\"\n\
+             base_url = \"http://127.0.0.1:18080\"\n\
+             credential = \"{r}\"\n\
+             auth = \"bearer\"\n"
         ));
-        names.push((format!("ag-gw{i}"), "Antigravity"));
-        names.push((format!("ag-lo{i}"), "Antigravity"));
+        names.push((format!("ag-gw{i}"), "antigravity"));
+        names.push((format!("ag-lo{i}"), "antigravity"));
     }
     let config = parse(&text);
 
@@ -393,7 +421,7 @@ fn config_validation_rejects_foreign_hosts_naming_the_provider_only() {
         let needle = format!("provider `{name}`:");
         let hit: Vec<&String> = errors
             .iter()
-            .filter(|e| e.contains(&needle) && e.contains(&format!("managed {family}")))
+            .filter(|e| e.contains(&needle) && e.contains(&format!("managed `oauth://{family}`")))
             .collect();
         assert_eq!(hit.len(), 1, "one containment error for {name}: {errors:?}");
         let msg = hit[0];
@@ -401,14 +429,13 @@ fn config_validation_rejects_foreign_hosts_naming_the_provider_only() {
             "sentinel-host",
             "sentinel-path",
             "127.0.0.1",
-            "oauth://codex",
-            "oauth://antigravity",
             "seat-secret-label",
+            "#",
         ] {
             assert!(!msg.contains(leaked), "message leaks {leaked}: {msg}");
         }
         assert!(
-            msg.chars().count() <= 300,
+            msg.chars().count() <= REPORTED_LINE_CAP,
             "containment error must fit the reported-line cap: {msg}"
         );
     }
@@ -424,40 +451,43 @@ fn config_validation_keeps_the_deployed_default_shapes_valid() {
     #[cfg(feature = "openai-responses")]
     text.push_str(
         "[providers.codex-default]\n\
-         kind        = \"openai-responses\"\n\
-         auth_kind   = \"chatgpt-oauth\"\n\
-         api_key_ref = \"oauth://codex\"\n\
+         format = \"openai-responses\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"oauth://codex\"\n\
+         auth = \"bearer\"\n\
          [providers.codex-seat]\n\
-         kind        = \"openai-responses\"\n\
-         api_key_ref = \"oauth://codex#seat-b\"\n\
+         format = \"openai-responses\"\n\
          base_url    = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"oauth://codex#seat-b\"\n\
+         auth = \"bearer\"\n\
          [providers.codex-static-mock]\n\
-         kind           = \"openai-responses\"\n\
-         auth_kind      = \"chatgpt-oauth\"\n\
-         api_key_ref    = \"env://OPENAI_JWT\"\n\
-         account_id_ref = \"env://OPENAI_ACCOUNT_ID\"\n\
-         base_url       = \"http://127.0.0.1:18080\"\n",
+         format = \"openai-responses\"\n\
+         base_url       = \"http://127.0.0.1:18080\"\n\
+         credential = \"env://OPENAI_JWT\"\n\
+         auth = \"bearer\"\n",
     );
     #[cfg(feature = "gemini")]
     text.push_str(
         "[providers.antigravity-default]\n\
-         kind        = \"gemini\"\n\
-         api_key_ref = \"oauth://antigravity\"\n\
-         auth_mode   = \"cloud-code\"\n\
+         format = \"gemini-cloud-code\"\n\
+         base_url = \"https://daily-cloudcode-pa.googleapis.com\"\n\
+         credential = \"oauth://antigravity\"\n\
+         auth = \"bearer\"\n\
          [providers.antigravity-prod]\n\
-         kind        = \"gemini\"\n\
-         api_key_ref = \"oauth://antigravity#seat-b\"\n\
-         auth_mode   = \"cloud-code\"\n\
+         format = \"gemini-cloud-code\"\n\
          base_url    = \"https://cloudcode-pa.googleapis.com\"\n\
+         credential = \"oauth://antigravity#seat-b\"\n\
+         auth = \"bearer\"\n\
          [providers.antigravity-daily]\n\
-         kind        = \"gemini\"\n\
-         api_key_ref = \"oauth://antigravity\"\n\
-         auth_mode   = \"cloud-code\"\n\
+         format = \"gemini-cloud-code\"\n\
          base_url    = \"https://daily-cloudcode-pa.googleapis.com\"\n\
+         credential = \"oauth://antigravity\"\n\
+         auth = \"bearer\"\n\
          [providers.gemini-static-mirror]\n\
-         kind        = \"gemini\"\n\
-         api_key_ref = \"env://GEMINI_API_KEY\"\n\
-         base_url    = \"https://gemini-mirror.example/v1beta\"\n",
+         format = \"gemini\"\n\
+         base_url    = \"https://gemini-mirror.example/v1beta\"\n\
+         credential = \"env://GEMINI_API_KEY\"\n\
+         auth = \"x-goog-api-key\"\n",
     );
     let config = parse(&text);
 
@@ -541,10 +571,10 @@ fn codex_lane(r: &str, base_url: &str) -> ProviderEntry {
 fn antigravity_lane(r: &str, base_url: &str) -> ProviderEntry {
     only_entry(&format!(
         "[providers.g]\n\
-         kind = \"gemini\"\n\
-         api_key_ref = \"{r}\"\n\
-         auth_mode = \"cloud-code\"\n\
-         base_url = {}\n",
+         format = \"gemini-cloud-code\"\n\
+         base_url = {}\n\
+         credential = \"{r}\"\n\
+         auth = \"bearer\"\n",
         toml::Value::String(base_url.to_string())
     ))
 }
@@ -615,7 +645,7 @@ fn each_managed_family_is_accepted_only_on_its_own_vendor_host() {
                     .expect_err(&format!("{r} must be refused on {url}"));
                 let msg = err.to_string();
                 assert!(msg.contains("provider `p`"), "{r} on {url}: {msg}");
-                for leaked in ["seat-secret-label", "oauth://", "127.0.0.1", "user:pass"] {
+                for leaked in ["seat-secret-label", "#", "127.0.0.1", "user:pass"] {
                     assert!(!msg.contains(leaked), "{r} on {url} leaks {leaked}: {msg}");
                 }
             }
@@ -624,8 +654,8 @@ fn each_managed_family_is_accepted_only_on_its_own_vendor_host() {
 }
 
 /// The xAI row's own shape cases: the login-written base and the bare host
-/// are accepted (the path is not constrained); lookalikes, cleartext, smuggles
-/// and the Bedrock mantle lane are refused.
+/// are accepted (the path is not constrained); lookalikes, cleartext and
+/// smuggles are refused.
 #[test]
 fn the_xai_token_rides_only_openai_compat_on_exactly_api_x_ai() {
     let accepted = [
@@ -667,15 +697,35 @@ fn the_xai_token_rides_only_openai_compat_on_exactly_api_x_ai() {
     }
 }
 
+/// The xAI token rides `openai-chat` only over a base URL: the same format
+/// over the AWS cloud refuses it, in the credential and in the second slot.
+/// The cloud entry with a static key is the positive control.
 #[cfg(feature = "bedrock")]
 #[test]
-fn the_xai_token_is_refused_on_the_openai_compat_mantle_lane() {
-    let entry = only_entry(
-        "[providers.m]\n\
-         kind = \"openai-compat\"\n\
-         api_key_ref = \"oauth://xai\"\n\
-         bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", key_ref = \"env://K\" } }\n",
-    );
+fn the_xai_token_is_refused_on_openai_chat_over_the_aws_cloud() {
+    let cloud = |credential: &str, account_id_ref: Option<&str>| {
+        let account = account_id_ref
+            .map(|r| format!("account_id_ref = \"{r}\"\n"))
+            .unwrap_or_default();
+        only_entry(&format!(
+            "[providers.m]\n\
+             format = \"openai-chat\"\n\
+             cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+             credential = \"{credential}\"\n\
+             auth = \"bearer\"\n\
+             {account}"
+        ))
+    };
 
-    assert!(validate_managed_oauth_credentials("p", &entry).is_err());
+    assert!(validate_managed_oauth_credentials("p", &cloud("env://K", None)).is_ok());
+    for r in ["oauth://xai", "oauth://xai#seat-secret-label"] {
+        assert!(
+            validate_managed_oauth_credentials("p", &cloud(r, None)).is_err(),
+            "{r} as the credential"
+        );
+        assert!(
+            validate_managed_oauth_credentials("p", &cloud("env://K", Some(r))).is_err(),
+            "{r} in the second slot"
+        );
+    }
 }

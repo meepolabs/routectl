@@ -286,7 +286,7 @@ pub(crate) use self::served::{
 /// not answer), and one Pass line per not-evaluated reason naming the
 /// anthropic-api or bedrock providers it applies to: `unobservable providers`
 /// (cache hits cannot be observed) and `converse providers` (bedrock on
-/// `api_shape = "converse"`). Never Fails, so the exit code is unmoved.
+/// `format = "bedrock-converse"`). Never Fails, so the exit code is unmoved.
 ///
 /// v31 -> v32: the `[registry]` pricing table is gone, and its vocabulary
 /// leaves the `pricing` section: no price names the `registry` source token,

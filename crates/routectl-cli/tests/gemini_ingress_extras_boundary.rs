@@ -47,9 +47,10 @@ fn gemini_config(upstream: &MockServer) -> Arc<Config> {
     let toml_src = format!(
         r#"
 [providers.gemini-mock]
-kind = "gemini"
-api_key_ref = "{key}"
+format = "gemini"
 base_url = "{base}"
+credential = "{key}"
+auth = "x-goog-api-key"
 payload_extras = {{ safetySettings = [{{ category = "HARM_CATEGORY_HATE_SPEECH", threshold = "{threshold}" }}] }}
 
 [models.target]

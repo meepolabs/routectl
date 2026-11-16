@@ -14,7 +14,7 @@ cells.tsv (tab-separated, `#` comments, one header row) has one row per
   providers         comma list; exactly the providers whose
                     ROUTECTL_DRIVER_<PROVIDER>_* env refs the lane config
                     declares, plus `bedrock` when it declares an AWS
-                    profile credential (`kind = "profile"`)
+                    profile credential (`aws://profile/<name>`)
   key_file          a file name in the key directory holding the one
                     provider's API key, or `-` when the credential is a seat
                     or an AWS profile (always `-` for `bedrock`)
@@ -123,7 +123,7 @@ CELLS_COLUMNS = [
 NONE = "-"
 
 PROVIDER_REF_RE = re.compile(r"env://ROUTECTL_DRIVER_([A-Z0-9]+)_(?:API_KEY|ACCOUNT_ID|TOKEN)\b")
-AWS_PROFILE_CREDS_RE = re.compile(r'^creds\s*=\s*\{\s*kind\s*=\s*"profile"\s*,\s*name\s*=\s*"([^"]*)"\s*\}\s*$', re.MULTILINE)
+AWS_PROFILE_CREDENTIAL_RE = re.compile(r'^credential\s*=\s*"aws://profile/([^"/]+)"\s*$', re.MULTILINE)
 # The provider whose credential is an AWS profile the runner is given, never
 # a key file.
 AWS_PROFILE_PROVIDER = "bedrock"
@@ -238,14 +238,15 @@ def _split_list(value: str) -> Tuple[str, ...]:
 
 def _config_providers(text: str) -> Set[str]:
     declared = {m.group(1).lower() for m in PROVIDER_REF_RE.finditer(text)}
-    if AWS_PROFILE_CREDS_RE.search(text):
+    if AWS_PROFILE_CREDENTIAL_RE.search(text):
         declared.add(AWS_PROFILE_PROVIDER)
     return declared
 
 
 def aws_profile_names(text: str) -> Set[str]:
-    """The profile names a lane config's `kind = "profile"` creds reference."""
-    return {m.group(1) for m in AWS_PROFILE_CREDS_RE.finditer(text)}
+    """The profile names a lane config's `aws://profile/<name>` credentials
+    reference."""
+    return {m.group(1) for m in AWS_PROFILE_CREDENTIAL_RE.finditer(text)}
 
 
 def _provider_tables(tables: lane_configs.Tables) -> Set[str]:

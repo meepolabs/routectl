@@ -17,7 +17,7 @@ use routectl_core::{
 };
 use serde_json::{Value, json};
 
-use crate::config::{AliasValue, Config, CredentialSource, ProviderEntry};
+use crate::config::{AliasValue, Config, ProviderEntry};
 use crate::learned_capability::{EntryVerdict, ExportedEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
@@ -412,18 +412,12 @@ const SECOND_UPSTREAM: &str = "anthropic.upstream2";
 /// anthropic-api, and both targets then share one lane.
 #[cfg(feature = "bedrock")]
 fn second_entry() -> ProviderEntry {
-    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig, ProviderRuntimePolicy};
-    ProviderEntry::Bedrock {
-        region: "us-east-1".into(),
-        api_shape: BedrockApiShapeConfig::Invoke,
-        creds: BedrockCredsConfig::DefaultChain,
-        user_agent: None,
-        header_extras: BTreeMap::new(),
-        payload_extras: None,
-        cache_capability: None,
-        reduction_enabled: None,
-        runtime: ProviderRuntimePolicy::default(),
-    }
+    ProviderEntry::cloud_aws(
+        crate::config::Format::BedrockInvoke,
+        "us-east-1",
+        "aws://chain",
+        crate::config::Auth::AwsSigv4,
+    )
 }
 
 #[cfg(not(feature = "bedrock"))]
@@ -489,7 +483,9 @@ fn chain_router(
 }
 
 fn forwarded_anthropic_api() -> ProviderEntry {
-    ProviderEntry::anthropic_api("literal:k").with_credential_source(CredentialSource::Forwarded)
+    ProviderEntry::anthropic_api("literal:k")
+        .with_credential("forwarded")
+        .with_auth(crate::config::Auth::Bearer)
 }
 
 /// An advisor request whose `tool_choice` forces the advisor, so stripping

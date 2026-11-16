@@ -29,10 +29,9 @@ const SENDABLE_BETA: &str = "client-flag";
 fn router(fallback: &Arc<ScriptedProvider>) -> Router {
     let toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 2\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [providers.p0]\nkind = \"anthropic-api\"\nbase_url = \"{CLOSED_PORT}\"\n\
-         api_key_ref = \"literal:k\"\ncircuit_failures = 5\n\
-         [providers.p1]\nkind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\ncircuit_failures = 5\n\
+         [providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"{CLOSED_PORT}\"\n\
+         credential = \"literal:k\"\nauth = \"x-api-key\"\ncircuit_failures = 5\n\
+         [providers.p1]\nformat = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\ncircuit_failures = 5\n\
          [aliases]\n{ALIAS} = [\"m0\", \"m1\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");

@@ -190,8 +190,8 @@ expect_rc "Invoke/Converse name only us-west-2 and Mantle only us-east-1" 0 \
     python3 -I "$CHECKER" regions "$HERE"
 
 fresh_copy
-sed 's/^region    = "us-west-2"$/region    = "us-east-1"/' "$HERE/bedrock-converse.toml" \
-    >"$WORK/cfg/bedrock-converse.toml"
+sed 's/^cloud      = { name = "aws", region = "us-west-2" }$/cloud      = { name = "aws", region = "us-east-1" }/' \
+    "$HERE/bedrock-converse.toml" >"$WORK/cfg/bedrock-converse.toml"
 expect_rc "a Converse config in us-east-1 fails" 1 \
     python3 -I "$CHECKER" regions "$WORK/cfg"
 expect_output "the failure names the wrong region" "region 'us-east-1', lane allows only 'us-west-2'"
@@ -203,15 +203,30 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     lines = handle.read().split("\n")
 for index, line in enumerate(lines):
-    if line == 'region = "us-east-1"':
-        lines[index] = 'region = "us-west-2"'
+    if line == 'cloud      = { name = "aws", region = "us-east-1" }':
+        lines[index] = 'cloud      = { name = "aws", region = "us-west-2" }'
         break
+else:
+    sys.exit("planted mutation found no mantle cloud line")
 with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n".join(lines))
 PY
 expect_rc "one Mantle provider in us-west-2 fails" 1 \
     python3 -I "$CHECKER" regions "$WORK/cfg"
 expect_output "the failure names the Mantle region" "region 'us-west-2', lane allows only 'us-east-1'"
+
+fresh_copy
+sed 's/^cloud      = { name = "aws", region = "us-west-2" }$/cloud      = { region = "us-west-2", name = "aws" }/' \
+    "$HERE/bedrock-invoke.toml" >"$WORK/cfg/bedrock-invoke.toml"
+expect_rc "a cloud off the one supported spelling fails" 1 \
+    python3 -I "$CHECKER" regions "$WORK/cfg"
+expect_output "the failure names the unreadable cloud" "[providers.bedrock] cloud is not"
+
+fresh_copy
+grep -v '^cloud      = ' "$HERE/bedrock-invoke.toml" >"$WORK/cfg/bedrock-invoke.toml"
+expect_rc "a lane config with no cloud fails" 1 \
+    python3 -I "$CHECKER" regions "$WORK/cfg"
+expect_output "the failure names the missing region" "names no cloud region"
 
 # --- the reader refuses what it does not understand ----------------------
 fresh_copy

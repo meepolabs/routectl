@@ -41,7 +41,7 @@
 //! | S1 provider pin | 620 | adds `header_extras["anthropic-beta"]` of the provider | always, every leg | warns |
 //! | S2 model pin | 630 | adds `operator_betas` (provider + model pins, beta_capability.rs `operator_betas`) | always, every leg; per model | warns, per model a provider cell reaches |
 //! | S3 OAuth gate | `union_oauth_gate_beta` | adds `oauth-2025-04-20` | own-OAuth lane | warns on own oauth-bearer on the host only, managed login or not |
-//! | S4 Claude Code floor | `union_claude_code_beta_floor` | adds the 9-flag floor | cloak lane AND `is_non_cc` (cloak.mode always -> true, never -> false, auto -> classified non-Claude-Code: `routectl_internal.originating_claude_code_session` when set, else no Claude Code session header) | warns on a managed login on the host unless cloak.mode = never |
+//! | S4 Claude Code floor | `union_claude_code_beta_floor` | adds the 9-flag floor | cloak lane AND `is_non_cc` (cloak_mode always -> true, never -> false, auto -> classified non-Claude-Code: `routectl_internal.originating_claude_code_session` when set, else no Claude Code session header) | warns on a managed login on the host unless cloak_mode = never |
 //! | S5 context-management strip | 671-672 | removes `context-management-2025-06-27` (exact spelling) | provider `context_management = true`, every leg | that flag is never reported there |
 //! | S6 structured outputs | 699-700 | adds `structured-outputs-2025-12-15` | not forwarded leg AND body carries `output_config.format` | warns "whenever the request carries", off the forwarded leg |
 //! | S7 effort | `union_body_implied_betas` | adds `effort-2025-11-24` | cloak lane AND body carries `output_config.effort` | warns "whenever the request carries", managed login on the host only |
@@ -54,7 +54,7 @@
 //! Each label's egress fact is pinned independently against the real header
 //! composition by the rows of the same label in
 //! `crates/routectl-providers/src/anthropic_api/client_beta_floor_site_tests.rs`
-//! (each site with its condition true and false, including cloak.mode =
+//! (each site with its condition true and false, including cloak_mode =
 //! "never" for S3, S4 and S7). A change to this table updates that one.
 //!
 //! S6 and S7 are body-dependent and still warn: the override is meant to keep
@@ -73,19 +73,20 @@ use routectl_providers::anthropic_api::CONTEXT_MANAGEMENT_BETA;
 const PIN: &str = "pinned-beta-2026-01-01";
 const UNPINNED: &str = "context-1m-2025-08-07";
 
-const API_KEY: &str = "api_key_ref = \"env://KEY\"\n";
+/// An env-held key on the Anthropic host sent as `x-api-key`.
+const API_KEY: &str = "base_url = \"https://api.anthropic.com\"\n\
+                       credential = \"env://KEY\"\nauth = \"x-api-key\"\n";
 /// The managed Anthropic login on its own host: the client-identity lane.
-const MANAGED_LOGIN: &str = "api_key_ref = \"oauth://anthropic\"\nauth_kind = \"oauth-bearer\"\n\
-                             base_url = \"https://api.anthropic.com\"\n";
+const MANAGED_LOGIN: &str = "base_url = \"https://api.anthropic.com\"\n\
+                             credential = \"oauth://anthropic\"\nauth = \"bearer\"\n";
 /// An env-held bearer on the same host: the own-OAuth credential lane
 /// without the client identity.
-const OWN_OAUTH: &str = "api_key_ref = \"env://KEY\"\nauth_kind = \"oauth-bearer\"\n\
-                         base_url = \"https://api.anthropic.com\"\n";
-const OFF_HOST_OAUTH: &str = "api_key_ref = \"env://KEY\"\nauth_kind = \"oauth-bearer\"\n\
-                              base_url = \"https://anthropic-proxy.example.test\"\n";
-const FORWARDED_OAUTH: &str = "auth_kind = \"oauth-bearer\"\n\
-                               base_url = \"https://api.anthropic.com\"\n\
-                               credential_source = \"forwarded\"\n";
+const OWN_OAUTH: &str = "base_url = \"https://api.anthropic.com\"\n\
+                         credential = \"env://KEY\"\nauth = \"bearer\"\n";
+const OFF_HOST_OAUTH: &str = "base_url = \"https://anthropic-proxy.example.test\"\n\
+                              credential = \"env://KEY\"\nauth = \"bearer\"\n";
+const FORWARDED_OAUTH: &str = "base_url = \"https://api.anthropic.com\"\n\
+                               credential = \"forwarded\"\nauth = \"bearer\"\n";
 
 /// A Claude Code floor flag in no other class, so its row pins S4 alone.
 fn claude_code_only_flag() -> &'static str {
@@ -104,10 +105,11 @@ fn claude_code_only_flag() -> &'static str {
         .expect("the Claude Code floor carries a flag outside the other classes")
 }
 
-/// Provider `p` (anthropic-api, `provider_body` lines) plus `rest`.
+/// Provider `p` (anthropic-messages; `provider_body` carries its carrier,
+/// credential and auth lines) plus `rest`.
 fn config(provider_body: &str, rest: &str) -> Config {
     toml::from_str(&format!(
-        "version = 5\n[providers.p]\nkind = \"anthropic-api\"\n{provider_body}{rest}"
+        "version = 5\n[providers.p]\nformat = \"anthropic-messages\"\n{provider_body}{rest}"
     ))
     .expect("fixture must parse")
 }
@@ -238,7 +240,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             config(
                 API_KEY,
                 &format!(
-                    "[providers.q]\nkind = \"anthropic-api\"\n{API_KEY}{}{}",
+                    "[providers.q]\nformat = \"anthropic-messages\"\n{API_KEY}{}{}",
                     model("q", Some(PIN)),
                     unsupported("p", PIN)
                 ),
@@ -275,7 +277,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             config(
                 MANAGED_LOGIN,
                 &format!(
-                    "[providers.p.cloak]\nmode = \"never\"\n{}",
+                    "cloak_mode = \"never\"\n{}",
                     unsupported("p", OAUTH_ANTHROPIC_BETA)
                 ),
             ),
@@ -311,21 +313,15 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             "S4 Claude Code floor, cloak always",
             config(
                 MANAGED_LOGIN,
-                &format!(
-                    "[providers.p.cloak]\nmode = \"always\"\n{}",
-                    unsupported("p", cc)
-                ),
+                &format!("cloak_mode = \"always\"\n{}", unsupported("p", cc)),
             ),
-            warns(&["Claude Code floor", "cloak.mode = \"always\""]),
+            warns(&["Claude Code floor", "cloak_mode = \"always\""]),
         ),
         (
             "S4 Claude Code floor, cloak never",
             config(
                 MANAGED_LOGIN,
-                &format!(
-                    "[providers.p.cloak]\nmode = \"never\"\n{}",
-                    unsupported("p", cc)
-                ),
+                &format!("cloak_mode = \"never\"\n{}", unsupported("p", cc)),
             ),
             Expect::Silent,
         ),
@@ -354,10 +350,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             "S7 effort, own oauth-bearer on the host, cloak never",
             config(
                 MANAGED_LOGIN,
-                &format!(
-                    "[providers.p.cloak]\nmode = \"never\"\n{}",
-                    unsupported("p", EFFORT_BETA)
-                ),
+                &format!("cloak_mode = \"never\"\n{}", unsupported("p", EFFORT_BETA)),
             ),
             warns(&[
                 "effort:",
@@ -505,8 +498,10 @@ fn a_force_supported_floor_flag_is_silent() {
 #[test]
 fn a_floor_flag_override_on_openai_compat_is_silent() {
     let config: Config = toml::from_str(&format!(
-        "version = 5\n[providers.p]\nkind = \"openai-compat\"\n\
-         base_url = \"https://example.test/v1\"\n{API_KEY}{}",
+        "version = 5\n[providers.p]\nformat = \"openai-chat\"\n\
+         base_url = \"https://example.test/v1\"\n\
+         credential = \"env://KEY\"\n\
+         auth = \"bearer\"\n{}",
         unsupported("p", STRUCTURED_OUTPUTS_BETA)
     ))
     .expect("fixture must parse");

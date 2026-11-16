@@ -28,88 +28,106 @@ fn key_of(cfg: &Config, name: &str) -> String {
 
 const DIRECT_PAIR: &str = r#"
 [providers.lower]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
 base_url = "https://api.anthropic.com"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.upper]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
 base_url = "https://API.Anthropic.COM/v1/"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.explicit-port]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
 base_url = "https://api.anthropic.com:443"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.other-port]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
 base_url = "https://api.anthropic.com:8443"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.plain-http]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "http://LOCALHOST/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.plain-http-80]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "http://localhost:80/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.local-11434]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "http://localhost:11434/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.forwarded]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://API.anthropic.com/v1"
-credential_source = "forwarded"
+credential = "forwarded"
+auth = "bearer"
 
 [providers.direct-oauth]
-kind = "anthropic-api"
-api_key_ref = "oauth://anthropic"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "oauth://anthropic"
+auth = "bearer"
 
 [providers.other-host]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "https://gateway.example.com/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.unparseable]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "not a url"
+credential = "env://A"
+auth = "bearer"
 
 [providers.trailing-dot]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
 base_url = "https://api.anthropic.com./v1"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.v6]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "http://[::1]:8080/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.v6-spelled]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "http://[0:0:0:0:0:0:0:1]:8080/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.userinfo]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "https://user:sk-live-FAKE@gateway.example.com/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.demoted-host]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "https://sk-live-FAKE:8080/x@gateway.example.com/v1"
+credential = "env://A"
+auth = "bearer"
 
 [providers.double-at]
-kind = "openai-compat"
-api_key_ref = "env://A"
+format = "openai-chat"
 base_url = "https://x@sk-live-FAKE@gateway.example.com/v1"
+credential = "env://A"
+auth = "bearer"
 "#;
 
 /// Each row names a pair of entries and whether they share an endpoint key.
@@ -227,9 +245,9 @@ fn credential_bytes_in_a_base_url_never_reach_the_key() {
 #[cfg(feature = "bedrock")]
 fn mantle_entry(region: &str) -> ProviderEntry {
     toml::from_str::<Config>(&format!(
-        "[providers.m]\nkind = \"anthropic-api\"\napi_key_ref = \"\"\n\
-         bedrock_mantle = {{ region = \"{region}\", creds = {{ kind = \"bearer-key\", \
-         key_ref = \"env://AWS_BEARER_TOKEN_BEDROCK\" }} }}\n"
+        "[providers.m]\nformat = \"anthropic-messages\"\n\
+         cloud = {{ name = \"aws\", region = \"{region}\" }}\n\
+         credential = \"env://AWS_BEARER_TOKEN_BEDROCK\"\nauth = \"bearer\"\n"
     ))
     .expect("parse mantle lane")
     .providers
@@ -256,44 +274,55 @@ fn distinct_mantle_regions_are_distinct_endpoints() {
 
 const POOL: &str = r#"
 [providers.seat-a]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.seat-b]
-kind = "anthropic-api"
-api_key_ref = "env://B"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://B"
+auth = "x-api-key"
 
 [providers.gateway]
-kind = "openai-compat"
-api_key_ref = "env://C"
+format = "openai-chat"
 base_url = "https://gateway.example.com/v1"
+credential = "env://C"
+auth = "bearer"
 "#;
 
 #[cfg(feature = "gemini")]
 const GEMINI_SEATS: &str = r#"
 [providers.cc-a]
-kind = "gemini"
-api_key_ref = "oauth://antigravity"
-auth_mode = "cloud-code"
+format = "gemini-cloud-code"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
+credential = "oauth://antigravity"
+auth = "bearer"
 
 [providers.cc-b]
-kind = "gemini"
-api_key_ref = "oauth://antigravity"
-auth_mode = "cloud-code"
+format = "gemini-cloud-code"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
+credential = "oauth://antigravity"
+auth = "bearer"
 
 [providers.cc-prod]
-kind = "gemini"
-api_key_ref = "oauth://antigravity"
-auth_mode = "cloud-code"
+format = "gemini-cloud-code"
 base_url = "https://cloudcode-pa.googleapis.com"
+credential = "oauth://antigravity"
+auth = "bearer"
 
 [providers.key-a]
-kind = "gemini"
-api_key_ref = "env://G1"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "env://G1"
+auth = "x-goog-api-key"
 
 [providers.key-b]
-kind = "gemini"
-api_key_ref = "env://G2"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "env://G2"
+auth = "x-goog-api-key"
 "#;
 
 /// Seats on one effective base share one key, so an endpoint exclusion set

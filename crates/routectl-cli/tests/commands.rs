@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use routectl_cli::commands;
 use routectl_router::{
-    AliasValue, CURRENT_CONFIG_VERSION as CURRENT, Config, ModelEntry, ProviderEntry, RetryPolicy,
-    ServerConfig,
+    AliasValue, Auth, CURRENT_CONFIG_VERSION as CURRENT, Config, ModelEntry, ProviderEntry,
+    RetryPolicy, ServerConfig,
 };
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
@@ -227,19 +227,17 @@ async fn config_check_fails_for_empty_alias_chain() {
     }
 }
 
-/// Proves `validate_provider_credential_sources` is wired into
-/// `routectl config check`, not only serve startup: a forwarded
-/// provider pointed at a non-Anthropic host must fail `check`.
+/// Proves the provider plan is wired into `routectl config check`, not
+/// only serve startup: a forwarded provider pointed at a non-Anthropic
+/// host must fail `check`.
 #[tokio::test]
 async fn config_check_fails_for_forwarded_provider_on_non_anthropic_host() {
-    use routectl_router::config::CredentialSource;
-
     let mut config = bare_config();
     config.providers.insert(
         "sneaky".into(),
-        ProviderEntry::anthropic_api("")
+        ProviderEntry::anthropic_api("forwarded")
             .with_base_url("https://evil.example.com")
-            .with_credential_source(CredentialSource::Forwarded),
+            .with_auth(Auth::Bearer),
     );
 
     match commands::config::check(&config, None).await {
@@ -249,20 +247,19 @@ async fn config_check_fails_for_forwarded_provider_on_non_anthropic_host() {
     }
 }
 
-/// A clean forwarded provider (pinned host, empty `api_key_ref`) must
-/// pass `config check` alongside an unrelated own-credential provider
-/// -- coexistence is not itself an error at the config-validation layer.
+/// A clean forwarded provider (pinned host, `credential = "forwarded"`,
+/// bearer) must pass `config check` alongside an unrelated own-credential
+/// provider -- coexistence is not itself an error at the config-validation
+/// layer.
 #[tokio::test]
 async fn config_check_passes_for_clean_forwarded_provider() {
-    use routectl_router::config::CredentialSource;
-
     let mut config = bare_config();
     add_mock_provider(&mut config);
     config.providers.insert(
         "anthropic-forwarded".into(),
-        ProviderEntry::anthropic_api("")
+        ProviderEntry::anthropic_api("forwarded")
             .with_base_url("https://api.anthropic.com")
-            .with_credential_source(CredentialSource::Forwarded),
+            .with_auth(Auth::Bearer),
     );
 
     commands::config::check(&config, None)
@@ -291,14 +288,11 @@ fn config_show_redacts_literal_secrets() {
 
     // Render again to a string we can inspect.
     let mut redacted = config.clone();
-    if let ProviderEntry::OpenaiCompat { api_key_ref, .. } =
-        redacted.providers.get_mut("secret").unwrap()
-    {
-        // Simulate what show() does -- this confirms the redaction logic
-        // we wrote in commands/config.rs is exposed via behavior.
-        if api_key_ref.starts_with("literal:") {
-            *api_key_ref = "literal:[REDACTED]".into();
-        }
+    let entry = redacted.providers.get_mut("secret").unwrap();
+    // Simulate what show() does -- this confirms the redaction logic
+    // we wrote in commands/config.rs is exposed via behavior.
+    if entry.credential.starts_with("literal:") {
+        entry.credential = "literal:[REDACTED]".into();
     }
     let s = toml::to_string_pretty(&redacted).unwrap();
     assert!(s.contains("[REDACTED]"));
@@ -1095,9 +1089,10 @@ fn write_oauth_config(dir: &std::path::Path, ref_uri: &str) -> std::path::PathBu
         format!(
             "version = {CURRENT}\n\
              [providers.managed]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"{ref_uri}\"\n\
-             auth_kind = \"oauth-bearer\"\n"
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"{ref_uri}\"\n\
+             auth = \"bearer\"\n"
         ),
     )
     .expect("write config");
@@ -1159,13 +1154,15 @@ fn config_check_reports_a_named_pool_with_its_members_and_strategy() {
         format!(
             "version = {CURRENT}\n\
              [providers.anthropic-default]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic\"\n\
-             auth_kind = \"oauth-bearer\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic\"\n\
+             auth = \"bearer\"\n\
              [providers.anthropic-seat-b]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#seat-b\"\n\
-             auth_kind = \"oauth-bearer\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#seat-b\"\n\
+             auth = \"bearer\"\n\
              [pools.anthropic]\n\
              members = [\"anthropic-default\", \"anthropic-seat-b\"]\n\
              seat_selection = \"fill-first\"\n\
@@ -1295,9 +1292,10 @@ fn config_check_omits_the_seat_block_without_any_oauth_ref() {
         format!(
             "version = {CURRENT}\n\
              [providers.plain]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://example.invalid\"\n\
-             api_key_ref = \"env://ROUTECTL_TEST_KEY\"\n"
+             credential = \"env://ROUTECTL_TEST_KEY\"\n\
+             auth = \"bearer\"\n"
         ),
     )
     .unwrap();
@@ -1452,9 +1450,10 @@ async fn refresh_leaves_a_neighbouring_config_byte_identical() {
     let body = format!(
         "version = {}\n\
          [providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n",
         routectl_router::CURRENT_CONFIG_VERSION
     );
     std::fs::write(&config_path, &body).expect("write config");
@@ -1511,13 +1510,15 @@ fn high_consequence_config(dir: &std::path::Path) -> std::path::PathBuf {
              host = \"127.0.0.1\"\n\
              port = 8787\n\
              [providers.fast]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"http://127.0.0.1:1\"\n\
-             api_key_ref = \"literal:test-key\"\n\
+             credential = \"env://ROUTECTL_TEST_KEY\"\n\
+             auth = \"bearer\"\n\
              [providers.spare]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"http://127.0.0.1:3\"\n\
-             api_key_ref = \"literal:test-key\"\n\
+             credential = \"env://ROUTECTL_TEST_KEY\"\n\
+             auth = \"bearer\"\n\
              [models.gpt]\n\
              provider = \"fast\"\n\
              upstream = \"gpt-4o\"\n\
@@ -1643,13 +1644,15 @@ fn two_seat_pool_config(dir: &std::path::Path) -> std::path::PathBuf {
         format!(
             "version = {CURRENT}\n\
              [providers.seat-a]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic\"\n\
-             auth_kind = \"oauth-bearer\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic\"\n\
+             auth = \"bearer\"\n\
              [providers.seat-b]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#b\"\n\
-             auth_kind = \"oauth-bearer\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#b\"\n\
+             auth = \"bearer\"\n\
              [pools.team]\n\
              members = [\"seat-a\", \"seat-b\"]\n"
         ),
@@ -2158,9 +2161,9 @@ fn config_set_refuses_the_retired_max_thinking_entry_bytes_with_the_loaders_line
     );
 }
 
-/// The sensitive-word scanner is gone; `config set` on the nested cloak key
-/// refuses with the loader's line and writes nothing, while a live key in the
-/// same cloak table writes.
+/// The sensitive-word scanner is gone; `config set` on its retired cloak key
+/// refuses with the loader's line and writes nothing, while the live cloak
+/// key on the same entry writes.
 #[test]
 fn config_set_refuses_the_retired_cloak_sensitive_words_with_the_loaders_line() {
     // Arrange
@@ -2173,19 +2176,19 @@ fn config_set_refuses_the_retired_cloak_sensitive_words_with_the_loaders_line() 
     };
     let loader_line = routectl_router::preflight_raw_config(&base.replace(
         "[providers.seat-b]\n",
-        "[providers.seat-a.cloak]\nsensitive_words = [\"x\"]\n[providers.seat-b]\n",
+        "cloak_sensitive_words = [\"x\"]\n[providers.seat-b]\n",
     ))
     .expect_err("the loader refuses a file carrying the key")
     .to_string();
 
     // Act
-    let (code, stdout, stderr) = set("providers.seat-a.cloak.sensitive_words", "[\"x\"]");
+    let (code, stdout, stderr) = set("providers.seat-a.cloak_sensitive_words", "[\"x\"]");
 
     // Assert
     assert_ne!(code, 0, "refused: {stdout} / {stderr}");
     assert_eq!(
         loader_line,
-        "`providers.seat-a.cloak.sensitive_words` is retired: the sensitive-word scanner is \
+        "`providers.seat-a.cloak_sensitive_words` is retired: the sensitive-word scanner is \
          removed; nothing replaces it; delete it"
     );
     assert!(
@@ -2198,22 +2201,22 @@ fn config_set_refuses_the_retired_cloak_sensitive_words_with_the_loaders_line() 
         "a refused edit must not write"
     );
 
-    let (code, stdout, stderr) = set("providers.seat-a.cloak.strict_mode", "true");
+    let (code, stdout, stderr) = set("providers.seat-a.cloak_strict_mode", "true");
     assert_eq!(
         code, 0,
-        "control: a live key in the same cloak table writes: {stdout} / {stderr}"
+        "control: the live cloak key on the same entry writes: {stdout} / {stderr}"
     );
     assert!(
         std::fs::read_to_string(&config_path)
             .expect("read config")
-            .contains("strict_mode = true"),
+            .contains("cloak_strict_mode = true"),
         "the control edit must land on disk"
     );
 }
 
-/// Operator tool renames are gone; `config set` on the nested cloak key
-/// refuses with the loader's line and writes nothing, while a live key in the
-/// same cloak table writes.
+/// Operator tool renames are gone; `config set` on the retired cloak key
+/// refuses with the loader's line and writes nothing, while the live cloak
+/// key on the same entry writes.
 #[test]
 fn config_set_refuses_the_retired_cloak_tool_rename_with_the_loaders_line() {
     // Arrange
@@ -2226,14 +2229,14 @@ fn config_set_refuses_the_retired_cloak_tool_rename_with_the_loaders_line() {
     };
     let loader_line = routectl_router::preflight_raw_config(&base.replace(
         "[providers.seat-b]\n",
-        "[[providers.seat-a.cloak.tool_rename]]\nfrom = \"a\"\nto = \"b\"\n[providers.seat-b]\n",
+        "cloak_tool_rename = [{ from = \"a\", to = \"b\" }]\n[providers.seat-b]\n",
     ))
     .expect_err("the loader refuses a file carrying the key")
     .to_string();
 
     // Act
     let (code, stdout, stderr) = set(
-        "providers.seat-a.cloak.tool_rename",
+        "providers.seat-a.cloak_tool_rename",
         "[{ from = \"a\", to = \"b\" }]",
     );
 
@@ -2241,7 +2244,7 @@ fn config_set_refuses_the_retired_cloak_tool_rename_with_the_loaders_line() {
     assert_ne!(code, 0, "refused: {stdout} / {stderr}");
     assert_eq!(
         loader_line,
-        "`providers.seat-a.cloak.tool_rename` is retired: tool names are normalized to mcp__ \
+        "`providers.seat-a.cloak_tool_rename` is retired: tool names are normalized to mcp__ \
          only; delete it"
     );
     assert!(
@@ -2254,15 +2257,15 @@ fn config_set_refuses_the_retired_cloak_tool_rename_with_the_loaders_line() {
         "a refused edit must not write"
     );
 
-    let (code, stdout, stderr) = set("providers.seat-a.cloak.strict_mode", "true");
+    let (code, stdout, stderr) = set("providers.seat-a.cloak_strict_mode", "true");
     assert_eq!(
         code, 0,
-        "control: a live key in the same cloak table writes: {stdout} / {stderr}"
+        "control: the live cloak key on the same entry writes: {stdout} / {stderr}"
     );
     assert!(
         std::fs::read_to_string(&config_path)
             .expect("read config")
-            .contains("strict_mode = true"),
+            .contains("cloak_strict_mode = true"),
         "the control edit must land on disk"
     );
 }
@@ -2455,13 +2458,15 @@ fn config_check_neither_refreshes_nor_warns_for_a_stored_pool() {
         format!(
             "version = {CURRENT}\n\
              [providers.seat-a]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#a\"\n\
-             auth_kind = \"oauth-bearer\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#a\"\n\
+             auth = \"bearer\"\n\
              [providers.seat-b]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#b\"\n\
-             auth_kind = \"oauth-bearer\"\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#b\"\n\
+             auth = \"bearer\"\n\
              [pools.anthropic]\n\
              members = [\"seat-a\", \"seat-b\"]\n"
         ),
@@ -2659,8 +2664,10 @@ fn config_check_exits_non_zero_for_a_pool_member_that_cannot_be_built() {
         format!(
             "version = {CURRENT}\n\
              [providers.seat-c]\n\
-             kind = \"openai-responses\"\n\
-             api_key_ref = \"oauth://codex#seat-c\"\n\
+             format = \"openai-responses\"\n\
+             base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+             credential = \"oauth://codex#seat-c\"\n\
+             auth = \"bearer\"\n\
              [pools.beta]\n\
              members = [\"seat-c\"]\n\
              [models.gpt]\n\

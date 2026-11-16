@@ -154,21 +154,12 @@ fn rpm1_router(provider: Arc<dyn Provider>) -> Router {
     let mut config = Config::default();
     config.providers.insert(
         "p".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k").with_runtime(
+            ProviderRuntimePolicy {
                 rpm_limit: Some(1),
                 ..Default::default()
             },
-        },
+        ),
     );
     let mut router = Router::new(Arc::new(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
@@ -186,9 +177,10 @@ fn rpm1_router(provider: Arc<dyn Provider>) -> Router {
 fn rpm1_responses_router(provider: Arc<dyn Provider>) -> Router {
     let toml_text = r#"
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 rpm_limit = 1
 "#;
     let config: Config = toml::from_str(toml_text).expect("valid test toml");

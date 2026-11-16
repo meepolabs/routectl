@@ -15,23 +15,16 @@ pub mod tuning;
 mod validate;
 
 pub use pool::PoolEntry;
-pub use provider_descriptor::Format;
+pub use provider_descriptor::{Auth, Format};
 pub use retired_keys::{RetiredKeysError, retired_key_message};
-#[cfg(feature = "bedrock")]
-pub(crate) use schema::default_anthropic_base;
-#[cfg(feature = "gemini")]
-pub(crate) use schema::default_gemini_base;
-#[cfg(feature = "openai-responses")]
-pub(crate) use schema::default_responses_base;
+pub(crate) use schema::DEFAULT_ANTHROPIC_VERSION;
 pub use schema::{
     AliasValue, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
-    CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, HistoryReasoning, MitmConfig, ModelEntry,
+    CapabilityConfig, Cloud, ENVELOPE_QUORUM, HistoryReasoning, MitmConfig, ModelEntry,
     NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry,
     ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RetryPolicy, SeatSelection,
     ServerAuth, ServerConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
 };
-#[cfg(feature = "bedrock")]
-pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 pub use tuning::{BreakerThreshold, Resolved, ResolvedTuning, TuningSource, resolve_tuning};
 use validate::default_config_version;
 pub use validate::{
@@ -72,8 +65,8 @@ pub struct Config {
     pub server: ServerConfig,
 
     /// Provider definitions keyed by operator-facing name. Carries
-    /// transport-side knobs only (auth, base URL, headers, runtime
-    /// gates). Per-model knobs (`reasoning_dialect`, `history_reasoning`)
+    /// transport-side knobs only (format, destination, credential, auth,
+    /// headers, runtime gates). Per-model knobs (`reasoning_dialect`, `history_reasoning`)
     /// live on `[models.X]` in v0.6.0.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
@@ -160,11 +153,11 @@ pub struct Config {
 }
 
 /// A full config mirroring `examples/config.toml`'s non-feature-gated
-/// structure, using ONLY the always-available provider kinds
-/// (`openai-compat`, `anthropic-api`). The shipped example documents
-/// feature-gated kinds (`bedrock`, `openai-responses`), so it deserializes
-/// as a `Config` only when those features are compiled in. This fixture
-/// lets the shipped-example parse assertions run unchanged on a lean build.
+/// structure, using ONLY the always-available formats (`openai-chat`,
+/// `anthropic-messages`). The shipped example also documents feature-gated
+/// formats, which validate only when those features are compiled in. This
+/// fixture lets the shipped-example assertions run unchanged on a lean
+/// build.
 #[cfg(test)]
 pub(crate) const LEAN_EXAMPLE_CONFIG: &str = r#"
 version = 5
@@ -174,13 +167,16 @@ host = "127.0.0.1"
 port = 8787
 
 [providers.openrouter]
-kind        = "openai-compat"
-base_url    = "https://openrouter.ai/api/v1"
-api_key_ref = "env://OPENROUTER_API_KEY"
+format     = "openai-chat"
+base_url   = "https://openrouter.ai/api/v1"
+credential = "env://OPENROUTER_API_KEY"
+auth       = "bearer"
 
 [providers.anthropic]
-kind        = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth       = "x-api-key"
 
 [models.opus-or]
 provider = "openrouter"

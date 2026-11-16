@@ -106,17 +106,21 @@ fn router_with_real_seed(extra: &str) -> Router {
     let body = format!(
         "version = 3\n\
          [providers.bed]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = {{ kind = \"default-chain\" }}\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          header_extras = {{ \"anthropic-beta\" = \"fx-pinned\" }}\n\
          [providers.oc]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [providers.fw]\n\
-         kind = \"anthropic-api\"\n\
-         credential_source = \"forwarded\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"forwarded\"\n\
+         auth = \"bearer\"\n\
          {extra}"
     );
     let config: Config = toml::from_str(&body).expect("fixture config parses");
@@ -762,9 +766,10 @@ fn the_owner_sweep_drops_a_marker_whose_entry_was_removed_and_a_re_add_does_not_
     let without_bed: Config = toml::from_str(
         "version = 3\n\
          [providers.oc]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n",
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("fixture config parses");
     let mut removed = Router::new(Arc::new(without_bed));
@@ -795,8 +800,10 @@ fn the_owner_sweep_drops_a_marker_after_a_kind_flip() {
     let flipped: Config = toml::from_str(
         "version = 3\n\
          [providers.bed]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"literal:k\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"x-api-key\"\n",
     )
     .expect("fixture config parses");
     let mut reloaded = Router::new(Arc::new(flipped));
@@ -1032,10 +1039,10 @@ async fn without_an_override_a_mixed_case_flag_is_forwarded_as_sent() {
 /// One Converse entry `cv` whose floor pins [`CONVERSE_FLOOR`], appended to
 /// the fixture config so a row can reach the representability tier.
 const CONVERSE_ENTRY: &str = "[providers.cv]\n\
-                              kind = \"bedrock\"\n\
-                              region = \"us-east-1\"\n\
-                              creds = { kind = \"default-chain\" }\n\
-                              api_shape = \"converse\"\n\
+                              format = \"bedrock-converse\"\n\
+                              cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+                              credential = \"aws://chain\"\n\
+                              auth = \"aws-sigv4\"\n\
                               header_extras = { \"anthropic-beta\" = \"fx-converse-floor\" }\n";
 const CONVERSE_FLOOR: &str = "fx-converse-floor";
 const NON_CLAUDE: &str = "us.amazon.nova-2-lite-v1:0";

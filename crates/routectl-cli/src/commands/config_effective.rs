@@ -365,16 +365,18 @@ mod tests {
 version = 2
 
 [providers.tuned]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://tuned.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 circuit_failures = 0
 rpm_limit = 30
 
 [providers.seat-b]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://seat.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [pools.team]
 members = ["seat-b"]
@@ -467,9 +469,10 @@ upstream = "u"
 version = 2
 
 [providers.free]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://free.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 "#,
         )
         .expect("valid config");
@@ -489,13 +492,16 @@ api_key_ref = "env://K"
 version = 2
 
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 
 [providers.compat]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://compat.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [models.opus]
 provider = "anthropic"

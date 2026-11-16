@@ -1,11 +1,11 @@
 //! Config-row validation family + validation collection.
 
 use super::build::ipv4_compatible_embedded;
-use crate::config::provider_descriptor::{containment, vendor_containment, vendor_row};
-use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
+use super::plan::plan_provider;
+use crate::config::provider_descriptor::{Format, vendor_containment, vendor_row};
+use crate::config::{Config, PoolEntry, ProviderEntry};
 use routectl_core::Result;
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
-use routectl_core::identity::anthropic::is_anthropic_api_host;
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use std::collections::BTreeMap;
@@ -21,14 +21,11 @@ use std::collections::BTreeMap;
 pub(super) fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
-        // A present-but-empty base_url is an operator typo, not a
-        // "use the kind default" signal: the only default substitution
-        // is for the OpenaiResponses `None` case, which is resolved to
-        // a concrete URL BEFORE this fn is called. Reject here as
+        // A present-but-empty base_url is an operator typo; there is no
+        // per-format default to fall back on. Reject here as
         // defense-in-depth for direct library consumers.
         return Err(routectl_core::Error::Config(format!(
-            "provider `{provider_name}`: base_url is set but empty; \
-             set an explicit endpoint or omit the field to use the kind default"
+            "provider `{provider_name}`: base_url is set but empty; set an explicit endpoint"
         )));
     }
     let url = match url::Url::parse(trimmed) {
@@ -123,26 +120,24 @@ fn is_cleartext_loopback_host(host: &url::Host<&str>) -> bool {
 }
 
 /// Validate the `account_id_ref` invariant for an openai-responses
-/// entry. A misconfigured TOML surfaces here as a clean `Error::Config`
+/// entry, by the dialect its destination selects. A misconfigured TOML surfaces here as a clean `Error::Config`
 /// rather than a confusing upstream 401/403 at first request time.
 ///
 /// Rules:
-///   - ChatgptOauth + `oauth://<provider>` bearer: `account_id_ref` is
+///   - Codex host + `oauth://<provider>` credential: `account_id_ref` is
 ///     OPTIONAL. When omitted, the factory derives the account id from
 ///     the logged-in OAuth session (the `chatgpt_account_id` recorded
 ///     at `routectl login`). An explicit `account_id_ref` is still
 ///     accepted and wins as an override.
-///   - ChatgptOauth + static bearer (`env://`/`file://`/`literal:`):
+///   - Codex host + static credential (`env://`/`file://`):
 ///     `account_id_ref` is REQUIRED. There is no OAuth session to read
 ///     the account id from, so the operator must supply it -- this is
 ///     the legacy chatgpt-oauth workflow, kept unchanged.
-///   - ApiKey / BedrockMantle: `account_id_ref` is FORBIDDEN (the
-///     account id is a ChatGPT-OAuth-only concept).
+///   - any other destination: `account_id_ref` is FORBIDDEN (the account
+///     id is a ChatGPT Codex concept).
 ///
-/// `bearer_is_oauth` mirrors `matches!(SecretRef::parse(api_key_ref),
-/// Ok(SecretRef::OAuth { .. }))`; the caller computes it once and passes
-/// it in so the validator and the downstream resolver do not each
-/// reparse the same URI.
+/// `bearer_is_oauth` is whether the planned credential is an `oauth://`
+/// reference; the caller computes it once and passes it in.
 #[cfg(feature = "openai-responses")]
 pub(super) fn validate_openai_responses_account_id(
     name: &str,
@@ -159,8 +154,8 @@ pub(super) fn validate_openai_responses_account_id(
         // concept; reject it for the other surfaces.
         if has_account {
             return Err(Error::Config(format!(
-                "openai-responses provider `{name}`: `account_id_ref` is only valid \
-                 when auth_kind = \"chatgpt-oauth\"; remove it for {auth_kind:?}"
+                "openai-responses provider `{name}`: `account_id_ref` is only valid with a \
+                 base_url on the ChatGPT Codex host; remove it"
             )));
         }
         return Ok(());
@@ -172,42 +167,59 @@ pub(super) fn validate_openai_responses_account_id(
         return Ok(());
     }
     Err(Error::Config(format!(
-        "openai-responses provider `{name}`: auth_kind = \"chatgpt-oauth\" with a \
-         static bearer requires `account_id_ref` (the ChatGPT account UUID). Use an \
-         `oauth://<provider>` bearer to derive it from a logged-in session instead."
+        "openai-responses provider `{name}`: the ChatGPT Codex host with a static \
+         credential requires `account_id_ref` (the ChatGPT account UUID). Use an \
+         `oauth://codex` credential to derive it from a logged-in session instead."
     )))
 }
 
+/// The Responses dialect an `openai-responses` entry over a base URL speaks:
+/// the ChatGPT Codex dialect on the Codex host, the OpenAI API dialect
+/// anywhere else. Destination picks the dialect; the credential does not.
+#[cfg(feature = "openai-responses")]
+pub(super) fn responses_base_url_dialect(entry: &ProviderEntry) -> OpenaiResponsesAuthKind {
+    if entry.is_chatgpt_oauth_responses() {
+        OpenaiResponsesAuthKind::ChatgptOauth
+    } else {
+        OpenaiResponsesAuthKind::ApiKey
+    }
+}
+
 /// Run [`validate_openai_responses_account_id`] over every
-/// `openai-responses` entry, so `config check`, `serve` startup and hot reload
-/// refuse the same account-id shapes the provider factory refuses. Entries on
-/// the Bedrock mantle lane are skipped here exactly as the factory skips them;
-/// [`validate_provider_openai_mantle`] owns their `account_id_ref` rule.
+/// `openai-responses` entry over a base URL, so `config check`, `serve`
+/// startup and hot reload refuse the same account-id shapes the provider
+/// factory refuses. A cloud-carrier entry takes no account id; the cloud
+/// rule below refuses one there.
 ///
-/// Parses `api_key_ref` only to classify it as an `oauth://` bearer; no secret
-/// is resolved or read.
+/// Parses the credential only to classify it as an `oauth://` reference; no
+/// secret is resolved or read.
 #[cfg(feature = "openai-responses")]
 fn validate_openai_responses_account_ids(config: &Config) -> Result<()> {
-    use routectl_auth::SecretRef;
+    use routectl_auth::{CredentialRef, SecretRef};
 
     for (name, entry) in &config.providers {
-        let ProviderEntry::OpenaiResponses {
-            api_key_ref,
-            account_id_ref,
-            auth_kind,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle,
-            ..
-        } = entry
-        else {
-            continue;
-        };
-        #[cfg(feature = "bedrock")]
-        if bedrock_mantle.is_some() {
+        if entry.format() != Format::OpenaiResponses {
             continue;
         }
-        let bearer_is_oauth = matches!(SecretRef::parse(api_key_ref), Ok(SecretRef::OAuth { .. }));
-        validate_openai_responses_account_id(name, *auth_kind, bearer_is_oauth, account_id_ref)?;
+        if entry.cloud.is_some() {
+            if entry.account_id_ref.is_some() {
+                return Err(routectl_core::Error::Config(format!(
+                    "openai-responses provider `{name}`: `account_id_ref` is only valid with a \
+                     base_url on the ChatGPT Codex host; remove it"
+                )));
+            }
+            continue;
+        }
+        let bearer_is_oauth = matches!(
+            CredentialRef::parse(&entry.credential),
+            Ok(CredentialRef::Secret(SecretRef::OAuth { .. }))
+        );
+        validate_openai_responses_account_id(
+            name,
+            responses_base_url_dialect(entry),
+            bearer_is_oauth,
+            &entry.account_id_ref,
+        )?;
     }
     Ok(())
 }
@@ -225,7 +237,7 @@ fn validate_openai_responses_account_ids(config: &Config) -> Result<()> {
 /// Rejection is deliberate rather than silently switching the entry to
 /// Converse: the shape selects the response translation too, so an
 /// inferred switch would move behavior the operator did not ask for,
-/// and it would leave `api_shape` with a configured value distinct from
+/// and it would leave `format` with a configured value distinct from
 /// its effective one for every downstream consumer to reconcile.
 ///
 /// Because the model id lives at `[models.X] upstream` rather than on
@@ -248,21 +260,19 @@ pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> R
 
     let mut errors: Vec<String> = Vec::new();
     for (nickname, model) in &config.models {
-        let Some(crate::config::ProviderEntry::Bedrock { api_shape, .. }) =
-            config.providers.get(&model.provider)
-        else {
+        let Some(provider) = config.providers.get(&model.provider) else {
             continue;
         };
-        if !matches!(api_shape, crate::config::BedrockApiShapeConfig::Invoke) {
+        if provider.format() != Format::BedrockInvoke {
             continue;
         }
         if anthropic_family(&model.upstream) == AnthropicFamily::No {
             errors.push(format!(
                 "[models.{nickname}] upstream `{upstream}` is not an Anthropic-family \
                  model, but its provider `{provider}` is configured with \
-                 `api_shape = \"invoke\"`. The invoke lane sends and parses the \
+                 `format = \"bedrock-invoke\"`. The invoke lane sends and parses the \
                  Anthropic wire shape, so this model cannot work on it: set \
-                 `api_shape = \"converse\"` on [providers.{provider}] (the \
+                 `format = \"bedrock-converse\"` on [providers.{provider}] (the \
                  vendor-neutral lane), or point this model at an Anthropic upstream.",
                 upstream = model.upstream,
                 provider = model.provider,
@@ -514,91 +524,13 @@ pub fn validate_mitm_config(config: &crate::config::Config) -> Result<()> {
     Ok(())
 }
 
-/// Reject an incoherent provider-level `credential_source` on any
-/// `[providers.X]` `anthropic-api` entry, for every provider in
-/// `config.providers` (not just the ones a request happens to route
-/// through). Runs on every config-validation path, not only serve
-/// startup -- see `commands::config::check`, `commands::test::run`, and
-/// `commands::prompt_size::run` in routectl-cli.
-///
-/// - `Forwarded` requires an EMPTY `api_key_ref` AND `base_url` pinned
-///   to `api.anthropic.com` (`is_anthropic_api_host`). This is a hard
-///   containment guarantee: a forwarded provider carries the client's
-///   full-scope claude.ai bearer, which must never be sent to a
-///   non-Anthropic egress -- pinning the host at config-validation time
-///   makes containment true by construction, as the MITM front-proxy's
-///   fixed upstream does for its own egress.
-/// - `Own` requires a non-empty `api_key_ref`, exactly as before this
-///   field existed on the variant.
-pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
-    use routectl_core::Error;
-
-    for (name, entry) in &config.providers {
-        let ProviderEntry::AnthropicApi {
-            api_key_ref,
-            base_url,
-            credential_source,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle,
-            ..
-        } = entry
-        else {
-            continue;
-        };
-
-        // The Bedrock mantle lane authenticates with `bedrock_mantle.creds`,
-        // not `api_key_ref`, so it legitimately runs `own` with an empty
-        // `api_key_ref`. `validate_provider_bedrock_mantle` owns the
-        // coherence checks for that lane; the `own`-requires-a-key rule
-        // below must not fire on it.
-        #[cfg(feature = "bedrock")]
-        let is_mantle_lane = bedrock_mantle.is_some();
-        #[cfg(not(feature = "bedrock"))]
-        let is_mantle_lane = false;
-
-        match credential_source {
-            CredentialSource::Forwarded => {
-                if !api_key_ref.is_empty() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: credential_source = \"forwarded\" must not set \
-                         api_key_ref (got a non-empty value) -- a forwarded provider \
-                         authenticates with the client's captured bearer, never a configured key"
-                    )));
-                }
-                if !is_anthropic_api_host(base_url) {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: credential_source = \"forwarded\" requires \
-                         base_url's host to be exactly api.anthropic.com -- a path, port, or \
-                         credentials prefix on that host is fine, but no other host is \
-                         accepted. This is a hard containment guarantee: a forwarded provider \
-                         carries the client's full-scope claude.ai bearer, which must never be \
-                         sent to a non-Anthropic egress. The configured base_url is withheld \
-                         from this message because it may carry credentials in userinfo, a \
-                         path, or a query; see your own config.toml for the value"
-                    )));
-                }
-            }
-            CredentialSource::Own => {
-                if !is_mantle_lane && api_key_ref.is_empty() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: credential_source = \"own\" (the default) requires \
-                         a non-empty api_key_ref"
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Contain the managed Anthropic subscription token to the Anthropic API
 /// host. Any reference parsing to `oauth://anthropic[#label]` is accepted only
-/// on an `anthropic-api` entry with `credential_source = "own"`, no Bedrock
-/// mantle lane, and a `base_url` that is `https://` on exactly
-/// `api.anthropic.com` with no userinfo or explicit port; every other kind and
-/// every other host (loopback included) is rejected. Static `env://` /
-/// `file://` credentials are unaffected.
+/// on an `anthropic-messages` entry with `auth = "bearer"`, no `cloud`, and a
+/// `base_url` that is `https://` on exactly `api.anthropic.com` with no
+/// userinfo or explicit port; every other format and every other host
+/// (loopback included) is rejected. Static `env://` / `file://` credentials
+/// are unaffected.
 ///
 /// Pure and self-sufficient: the factory runs the containment of every
 /// managed vendor, this one included, before resolving any secret for the
@@ -611,286 +543,6 @@ pub fn validate_managed_anthropic_credential(name: &str, entry: &ProviderEntry) 
         routectl_core::Error::Internal("the descriptor has no anthropic vendor row".to_string())
     })?;
     vendor_containment(row, name, entry)
-}
-
-/// Reject an incoherent `bedrock_mantle` sub-config on any
-/// `[providers.X]` `anthropic-api` entry. The mere PRESENCE of the
-/// sub-table selects the Bedrock mantle lane, on which every other
-/// credential/endpoint knob is derived from the sub-table itself --
-/// `region` yields the endpoint host and SigV4 scope, `creds` carries the
-/// credential. So the standard direct-to-Anthropic knobs must be left at
-/// their neutral defaults; any operator value on them is a
-/// misconfiguration that would silently contradict the lane. Runs on every
-/// config-validation path (not only serve startup), same as
-/// [`validate_provider_credential_sources`].
-///
-/// With `bedrock_mantle` set, this rejects:
-///   - `auth_kind = "oauth-bearer"` -- the mantle lane authenticates via
-///     the bearer key or SigV4 in `creds`, never a Claude-Code OAuth token
-///     (whose identity headers / UA must never reach AWS).
-///   - a non-default `credential_source` -- the credential comes from
-///     `creds`, so `own` (the default) is the only coherent value.
-///   - a non-empty `api_key_ref` -- `creds` is the single credential
-///     source; a stray `api_key_ref` is dead config.
-///   - a non-default `base_url` -- `region` is the single source of truth
-///     for the endpoint; the factory derives the URL, so a manual
-///     `base_url` would drift from the region.
-///
-/// The region's own validity is `validate_aws_regions`'s, shared by every
-/// region-deriving lane.
-#[cfg(feature = "bedrock")]
-pub fn validate_provider_bedrock_mantle(config: &Config) -> Result<()> {
-    use crate::config::default_anthropic_base;
-    use routectl_core::Error;
-    use routectl_providers::anthropic_api::AuthKind;
-
-    for (name, entry) in &config.providers {
-        let ProviderEntry::AnthropicApi {
-            api_key_ref,
-            base_url,
-            auth_kind,
-            credential_source,
-            bedrock_mantle: Some(_),
-            ..
-        } = entry
-        else {
-            continue;
-        };
-
-        if *auth_kind == AuthKind::OauthBearer {
-            return Err(Error::Config(format!(
-                "provider `{name}`: bedrock_mantle is set but auth_kind = \"oauth-bearer\" -- \
-                 the mantle lane authenticates with bedrock_mantle.creds (bearer key or SigV4), \
-                 never a Claude Code OAuth token; remove auth_kind or set it to \"api-key\""
-            )));
-        }
-        if *credential_source != CredentialSource::Own {
-            return Err(Error::Config(format!(
-                "provider `{name}`: bedrock_mantle is set but credential_source is not \"own\" \
-                 -- the mantle lane's credential comes from bedrock_mantle.creds; remove \
-                 credential_source or set it to \"own\""
-            )));
-        }
-        if !api_key_ref.is_empty() {
-            return Err(Error::Config(format!(
-                "provider `{name}`: bedrock_mantle is set but api_key_ref is non-empty -- the \
-                 mantle lane's credential comes from bedrock_mantle.creds; remove api_key_ref"
-            )));
-        }
-        if base_url != &default_anthropic_base() {
-            return Err(Error::Config(format!(
-                "provider `{name}`: bedrock_mantle is set but base_url is not its default -- \
-                 bedrock_mantle.region is the single source of truth for the endpoint (the \
-                 factory derives the URL from it); remove base_url"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-/// Reject an incoherent Bedrock mantle lane on either OpenAI-shape provider
-/// (`openai-compat` / `openai-responses`) and close the legacy bearer-only
-/// surface. The sibling of [`validate_provider_bedrock_mantle`] for the
-/// OpenAI lanes: the PRESENCE of a `bedrock_mantle` sub-table selects the
-/// lane, on which the endpoint (`region`) and credential (`creds`) come from
-/// the sub-table, so every other credential/endpoint knob must be neutral.
-///
-/// With `bedrock_mantle` set, this rejects on either lane:
-///   - a non-empty `api_key_ref` -- `creds` is the single credential source.
-///   - a non-empty `base_url` -- `region` derives the endpoint.
-///
-/// On `openai-responses` additionally:
-///   - a set `account_id_ref` -- it belongs to the ChatGPT-OAuth surface,
-///     never the mantle lane.
-///   - a `store` key in `payload_extras` -- the Responses `store` flag is
-///     forced off on the mantle lane, so operator config must not carry it.
-///
-/// LEGACY CLOSURE (`openai-responses`): `auth_kind = "bedrock-mantle"` with
-/// NO `bedrock_mantle` block is a hard error naming the block form. The
-/// bearer-only lane cannot meet the SigV4 posture and has no known
-/// production user; the mantle lane is selected exclusively by the block.
-/// When the block IS present the factory sets the runtime marker itself, so
-/// `auth_kind` may be stated redundantly or omitted -- it never selects the
-/// lane alone.
-#[cfg(feature = "bedrock")]
-pub fn validate_provider_openai_mantle(config: &Config) -> Result<()> {
-    use routectl_core::Error;
-
-    for (name, entry) in &config.providers {
-        match entry {
-            ProviderEntry::OpenaiCompat {
-                api_key_ref,
-                base_url,
-                bedrock_mantle: Some(_),
-                ..
-            } => {
-                if !api_key_ref.is_empty() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle is set but api_key_ref is non-empty -- \
-                         the mantle lane's credential comes from bedrock_mantle.creds; remove \
-                         api_key_ref"
-                    )));
-                }
-                if !base_url.trim().is_empty() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle is set but base_url is non-empty -- \
-                         bedrock_mantle.region is the single source of truth for the endpoint \
-                         (the factory derives the URL from it); remove base_url"
-                    )));
-                }
-            }
-            #[cfg(feature = "openai-responses")]
-            ProviderEntry::OpenaiResponses {
-                api_key_ref,
-                account_id_ref,
-                base_url,
-                auth_kind,
-                payload_extras,
-                bedrock_mantle,
-                ..
-            } => {
-                if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle && bedrock_mantle.is_none()
-                {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: auth_kind = \"bedrock-mantle\" but no bedrock_mantle \
-                         block is set -- the legacy bearer-only surface is closed; set \
-                         [providers.{name}.bedrock_mantle] with region and creds to select the \
-                         mantle lane"
-                    )));
-                }
-                if bedrock_mantle.is_none() {
-                    continue;
-                }
-                if !api_key_ref.is_empty() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle is set but api_key_ref is non-empty -- \
-                         the mantle lane's credential comes from bedrock_mantle.creds; remove \
-                         api_key_ref"
-                    )));
-                }
-                if account_id_ref.is_some() {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle is set but account_id_ref is set -- it \
-                         belongs to the chatgpt-oauth surface, not the mantle lane; remove \
-                         account_id_ref"
-                    )));
-                }
-                if base_url.as_deref().is_some_and(|s| !s.trim().is_empty()) {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle is set but base_url is non-empty -- \
-                         bedrock_mantle.region is the single source of truth for the endpoint \
-                         (the factory derives the URL from it); remove base_url"
-                    )));
-                }
-                if payload_extras
-                    .as_ref()
-                    .and_then(|v| v.as_object())
-                    .is_some_and(|obj| obj.contains_key("store"))
-                {
-                    return Err(Error::Config(format!(
-                        "provider `{name}`: bedrock_mantle is set but payload_extras carries a \
-                         `store` key -- the Responses store flag is forced off on the mantle lane \
-                         and cannot be configured; remove it from payload_extras"
-                    )));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
-}
-
-/// Reject a present-but-empty required credential ref inside a
-/// [`crate::config::BedrockCredsConfig`]. The config-check secret-ref parse walk skips
-/// empty ref slots (an empty string is not a parseable secret URI), so
-/// without this check an operator typo like `key_ref = ""` on a required
-/// slot would pass config validation and only surface as a confusing
-/// failure at provider build / first request time.
-///
-/// Rejected (after trim):
-///   - `BearerKey.key_ref` empty.
-///   - `Static.access_key_ref` or `Static.secret_key_ref` empty.
-///   - `Static.session_token_ref` present-but-empty (`Some("")`) -- an
-///     optional slot that is explicitly set to empty is still a typo.
-///     Omitting it entirely (`None`) is valid.
-///
-/// `Profile` and `DefaultChain` carry no secret-ref slots to check. The
-/// error names the provider and the offending field; no secret value is
-/// echoed.
-#[cfg(feature = "bedrock")]
-fn validate_bedrock_creds(name: &str, creds: &crate::config::BedrockCredsConfig) -> Result<()> {
-    use crate::config::BedrockCredsConfig;
-    use routectl_core::Error;
-
-    let empty = |field: &str| {
-        Error::Config(format!(
-            "provider `{name}`: bedrock creds `{field}` is set but empty; \
-             give it a secret ref (env://, file://, or literal:) or remove the field \
-             where it is optional"
-        ))
-    };
-
-    match creds {
-        BedrockCredsConfig::BearerKey { key_ref } => {
-            if key_ref.trim().is_empty() {
-                return Err(empty("key_ref"));
-            }
-        }
-        BedrockCredsConfig::Static {
-            access_key_ref,
-            secret_key_ref,
-            session_token_ref,
-        } => {
-            if access_key_ref.trim().is_empty() {
-                return Err(empty("access_key_ref"));
-            }
-            if secret_key_ref.trim().is_empty() {
-                return Err(empty("secret_key_ref"));
-            }
-            if session_token_ref
-                .as_deref()
-                .is_some_and(|s| s.trim().is_empty())
-            {
-                return Err(empty("session_token_ref"));
-            }
-        }
-        BedrockCredsConfig::Profile { .. } | BedrockCredsConfig::DefaultChain => {}
-    }
-
-    Ok(())
-}
-
-/// Reject a present-but-empty required Bedrock credential ref wherever a
-/// [`crate::config::BedrockCredsConfig`] appears: the native Bedrock lane (`creds`) and
-/// all three `bedrock_mantle` lanes (`bedrock_mantle.creds` on
-/// `anthropic-api` / `openai-compat` / `openai-responses`). One shared
-/// per-descriptor check, so the four lanes cannot drift. Runs on every
-/// config-validation path via [`collect_config_validation`], not only
-/// serve startup.
-#[cfg(feature = "bedrock")]
-pub fn validate_bedrock_creds_refs(config: &Config) -> Result<()> {
-    for (name, entry) in &config.providers {
-        match entry {
-            ProviderEntry::Bedrock { creds, .. } => validate_bedrock_creds(name, creds)?,
-            ProviderEntry::AnthropicApi {
-                bedrock_mantle: Some(mantle),
-                ..
-            }
-            | ProviderEntry::OpenaiCompat {
-                bedrock_mantle: Some(mantle),
-                ..
-            } => validate_bedrock_creds(name, &mantle.creds)?,
-            #[cfg(feature = "openai-responses")]
-            ProviderEntry::OpenaiResponses {
-                bedrock_mantle: Some(mantle),
-                ..
-            } => validate_bedrock_creds(name, &mantle.creds)?,
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// Reject any float config leaf that is non-finite (NaN or +/-inf), plus a
@@ -918,60 +570,41 @@ fn validate_float_fields(config: &Config) -> Result<()> {
 }
 
 /// Reject a present-but-empty (or whitespace-only) `base_url` on any
-/// provider entry. An explicit `base_url = ""` is an operator typo;
-/// silently routing to a vendor default they did not name is the
-/// surprising behavior. A field that is omitted entirely keeps its
-/// serde default (`None` / kind-default) and is left untouched.
+/// provider entry. An explicit `base_url = ""` is an operator typo; there is
+/// no per-format default to fall back on.
 fn validate_base_urls(config: &Config) -> Result<()> {
-    use routectl_core::Error;
-
     for (name, entry) in &config.providers {
-        // openai-compat base_url is REQUIRED (non-empty) on the standard
-        // lane -- it has no kind default. It is defaulted (empty) in the
-        // schema only so the mantle lane may omit it; there the factory
-        // derives the URL from bedrock_mantle.region, so an empty value is
-        // valid and this check is skipped (validate_provider_openai_mantle
-        // owns the mantle-lane coherence instead).
-        if let ProviderEntry::OpenaiCompat { base_url, .. } = entry {
-            #[cfg(feature = "bedrock")]
-            if matches!(
-                entry,
-                ProviderEntry::OpenaiCompat {
-                    bedrock_mantle: Some(_),
-                    ..
-                }
-            ) {
-                continue;
-            }
-            if base_url.trim().is_empty() {
-                return Err(Error::Config(format!(
-                    "provider `{name}`: openai-compat base_url is required and must be non-empty; \
-                     set an explicit endpoint URL"
-                )));
-            }
-            continue;
-        }
-
-        let is_empty = match entry {
-            ProviderEntry::OpenaiCompat { .. } => false,
-            ProviderEntry::AnthropicApi { base_url, .. } => base_url.trim().is_empty(),
-            #[cfg(feature = "gemini")]
-            ProviderEntry::Gemini { base_url, .. } => base_url.trim().is_empty(),
-            #[cfg(feature = "openai-responses")]
-            ProviderEntry::OpenaiResponses { base_url, .. } => {
-                base_url.as_deref().is_some_and(|s| s.trim().is_empty())
-            }
-            #[cfg(feature = "bedrock")]
-            ProviderEntry::Bedrock { .. } => false,
-        };
-        if is_empty {
-            return Err(Error::Config(format!(
-                "provider `{name}`: base_url is set but empty; \
-                 set an explicit endpoint or omit the field to use the kind default"
+        if entry
+            .base_url
+            .as_deref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
+            return Err(routectl_core::Error::Config(format!(
+                "provider `{name}`: base_url is set but empty; set an explicit endpoint"
             )));
         }
     }
+    Ok(())
+}
 
+/// Reject a `payload_extras.store` key on an `openai-responses` entry over
+/// the AWS cloud: the Responses `store` flag is forced off on Bedrock's
+/// managed surface and cannot be configured there.
+fn validate_cloud_responses_store(config: &Config) -> Result<()> {
+    for (name, entry) in &config.providers {
+        let carries_store = entry
+            .payload_extras
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .is_some_and(|obj| obj.contains_key("store"));
+        if entry.format() == Format::OpenaiResponses && entry.cloud.is_some() && carries_store {
+            return Err(routectl_core::Error::Config(format!(
+                "provider `{name}`: payload_extras carries a `store` key -- the Responses \
+                 store flag is forced off on the AWS cloud and cannot be configured; remove it \
+                 from payload_extras"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1366,24 +999,12 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = validate_class_policy(config) {
         errors.push(bare_validation_message(e));
     }
-    if let Err(e) = validate_provider_credential_sources(config) {
-        errors.push(bare_validation_message(e));
-    }
     for (name, entry) in &config.providers {
-        if let Err(e) = containment(name, entry) {
+        if let Err(e) = plan_provider(name, entry) {
             errors.push(bare_validation_message(e));
         }
     }
-    #[cfg(feature = "bedrock")]
-    if let Err(e) = validate_provider_bedrock_mantle(config) {
-        errors.push(bare_validation_message(e));
-    }
-    #[cfg(feature = "bedrock")]
-    if let Err(e) = validate_provider_openai_mantle(config) {
-        errors.push(bare_validation_message(e));
-    }
-    #[cfg(feature = "bedrock")]
-    if let Err(e) = validate_bedrock_creds_refs(config) {
+    if let Err(e) = validate_cloud_responses_store(config) {
         errors.push(bare_validation_message(e));
     }
     #[cfg(feature = "bedrock")]

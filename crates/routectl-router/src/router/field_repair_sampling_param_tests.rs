@@ -126,8 +126,7 @@ mod converse_temperature {
         include_str!("../../tests/fixtures/rejections/bedrock/temperature-field-unsupported.json");
 
     const CONVERSE_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-         [providers.p0]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
+         [providers.p0]\nformat = \"bedrock-converse\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 
     fn temperature_key() -> String {
         crate::field_capability::field_capability_key(TEMPERATURE_ROW_PATH)
@@ -441,8 +440,7 @@ mod openai_compat_sampling {
     const UNPROFILED_MODEL: &str = "acme-chat-1";
 
     const OPENAI_COMPAT_SEAT_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-         [providers.p0]\nkind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n";
+         [providers.p0]\nformat = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
 
     /// One openai-compat row: its key, the committed refusal of it, and how
     /// a client sets it.

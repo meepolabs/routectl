@@ -17,9 +17,10 @@ const LANE: &str = "alpha#model-x";
 
 const ALPHA: &str = r#"
 [providers.alpha]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://alpha.example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 struct Ledger(Vec<CapabilityEventRow>);

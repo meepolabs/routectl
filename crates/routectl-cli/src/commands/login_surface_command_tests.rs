@@ -34,9 +34,10 @@ fn base_with_default_seat() -> String {
     format!(
         "{}\n\
          [providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          \n\
          [pools.anthropic]\n\
          members = [\"anthropic-default\"]\n\
@@ -428,9 +429,10 @@ fn an_unparseable_config_is_skipped_and_the_parse_error_carries_no_config_value(
     let sentinel = "keep-me-exactly";
     let body = format!(
         "{}[providers.x]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"http://127.0.0.1:1\"\n\
-         api_key_ref = literal:{sentinel}\n",
+         credential = \"literal\"\n\
+         auth = \"bearer\":{sentinel}\n",
         base()
     );
     let dir = tempfile::tempdir().expect("tempdir");
@@ -713,9 +715,10 @@ fn joining_a_pool_never_adds_the_growth_marker_the_delta_does_not_show() {
     let body = format!(
         "{}\n\
          [providers.codex-default]\n\
-         kind = \"openai-responses\"\n\
-         auth_kind = \"chatgpt-oauth\"\n\
-         api_key_ref = \"oauth://codex\"\n\
+         format = \"openai-responses\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"oauth://codex\"\n\
+         auth = \"bearer\"\n\
          \n\
          [pools.codex]\n\
          members = [\"codex-default\"]\n",
@@ -897,9 +900,10 @@ fn a_login_over_an_explicit_pinned_pool_writes_the_entry_and_leaves_the_pool_alo
     let mut doc: toml_edit::DocumentMut = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [providers.anthropic-managed]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n"
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n"
     )
     .parse()
     .expect("fixture parses");
@@ -1017,9 +1021,10 @@ fn a_control_character_in_a_member_name_keeps_the_shown_delta_parseable() {
     let mut doc: toml_edit::DocumentMut = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          accepts_new_logins = true\n"
     )

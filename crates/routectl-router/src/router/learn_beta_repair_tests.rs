@@ -25,7 +25,7 @@ use crate::resolved::ResolvedModel;
 use crate::router::{DispatchMeta, DispatchTarget, Router};
 
 const NICKNAME: &str = "m1";
-const ANTHROPIC: &str = "[providers.p1]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+const ANTHROPIC: &str = "[providers.p1]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
 
 /// The flag every row's rejection names.
 const NAMED: &str = "zz-named-2099-01-01";

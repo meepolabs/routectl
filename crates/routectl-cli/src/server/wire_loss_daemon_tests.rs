@@ -179,10 +179,10 @@ pub(super) fn bedrock_config() -> Config {
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{PROVIDER}]\n\
-         kind = \"bedrock\"\n\
-         region = \"{REGION}\"\n\
-         api_shape = \"invoke\"\n\
-         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"{REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [models.{NICKNAME}]\n\
          provider = \"{PROVIDER}\"\n\
          upstream = \"{BEDROCK_MODEL_ID}\"\n\n\

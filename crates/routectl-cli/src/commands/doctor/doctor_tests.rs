@@ -492,9 +492,10 @@ fn config_with_overrides() -> Config {
     toml::from_str(
         "version = 3\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://x\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [capability.overrides.p]\n\
          unsupported = [\"web_search\"]\n\
          force_supported = [\"structured_output\"]\n",
@@ -564,9 +565,10 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://x\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [capability.overrides.p]\n\
          unsupported = [\"web_search\"]\n",
     )
@@ -669,8 +671,10 @@ fn unknown_oauth_provider_remediation_matches_the_served_seat_fix() {
     let cfg: Config = toml::from_str(
         "version = 3\n\
          [providers.gamma]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://made-up\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://made-up\"\n\
+         auth = \"x-api-key\"\n",
     )
     .expect("unknown-provider fixture parses");
     let checks = gather_secret_checks(&cfg, &[("anthropic", LocalProbe::Present)]);
@@ -1124,8 +1128,10 @@ fn clean_config() -> Config {
 fn config_with_advisory(provider_name: &str) -> Config {
     let template: Config = toml::from_str(
         "[providers.p]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://ANTHROPIC_API_KEY\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://ANTHROPIC_API_KEY\"\n\
+         auth = \"x-api-key\"\n\
          [models.sonnet]\n\
          provider = \"p\"\n\
          upstream = \"claude-sonnet-4-5\"\n\
@@ -1477,8 +1483,10 @@ fn a_missing_labeled_oauth_ref_names_the_labeled_login() {
     let cfg: Config = toml::from_str(
         "version = 3\n\
          [providers.alpha-a]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#seat-a\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#seat-a\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("labeled fixture parses");
 
@@ -1511,8 +1519,10 @@ fn a_labeled_login_remediation_quotes_a_label_the_shell_would_split() {
         let cfg: Config = toml::from_str(&format!(
             "version = 3\n\
              [providers.alpha-a]\n\
-             kind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#{label}\"\n",
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#{label}\"\n\
+             auth = \"bearer\"\n",
         ))
         .unwrap_or_else(|e| panic!("{name}: fixture parses: {e}"));
 
@@ -1759,11 +1769,15 @@ fn no_seat_of_a_migrated_pooled_provider_is_an_orphan() {
     let cfg: Config = toml::from_str(
         "version = 3\n\
          [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-seat-b]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#seat-b\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#seat-b\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic-pool]\n\
          members = [\"anthropic\", \"anthropic-seat-b\"]\n",
     )
@@ -2046,11 +2060,15 @@ fn config_with_a_named_pool() -> Config {
     toml::from_str(
         "version = 3\n\
          [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic-pool]\n\
          members = [\"anthropic\", \"anthropic-work\"]\n\
          seat_selection = \"fill-first\"\n\
@@ -2252,11 +2270,15 @@ fn seat_pool_findings_stay_pass_with_unknown_presence_when_the_store_is_unreadab
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic-pool]\n\
          members = [\"anthropic\"]\n\
          seat_selection = \"fill-first\"\n",
@@ -2337,8 +2359,9 @@ async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
     std::fs::write(
         &config_path,
         format!(
-            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\nkind = \
-             \"anthropic-api\"\napi_key_ref = \"oauth://anthropic#seat-b\"\n"
+            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\n\
+             format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#seat-b\"\nauth = \"bearer\"\n"
         )
         .as_bytes(),
     )
@@ -2399,8 +2422,9 @@ async fn full_run_leaves_secret_dir_byte_identical() {
     std::fs::write(
         &config_path,
         format!(
-            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\nkind = \
-             \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n"
+            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\n\
+             format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic\"\nauth = \"bearer\"\n"
         )
         .as_bytes(),
     )
@@ -2674,8 +2698,9 @@ async fn gather_context_no_network_yields_no_probe_results() {
     std::fs::write(
         &config_path,
         format!(
-            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\nkind = \
-             \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n"
+            "version = {CURRENT_CONFIG_VERSION}\n[providers.anthropic]\n\
+             format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic\"\nauth = \"bearer\"\n"
         )
         .as_bytes(),
     )
@@ -3060,9 +3085,10 @@ mod matrix_panel {
         toml::from_str(
             "version = 3\n\
              [providers.p]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://x\"\n\
-             api_key_ref = \"literal:k\"\n\
+             credential = \"literal:k\"\n\
+             auth = \"bearer\"\n\
              [models.laneA]\n\
              provider = \"p\"\n\
              upstream = \"m-a\"\n\
@@ -3435,9 +3461,10 @@ mod seeded_matrix_surfaces {
         let mut config: Config = toml::from_str(
             "version = 3\n\
              [providers.p]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://x\"\n\
-             api_key_ref = \"literal:k\"\n\
+             credential = \"literal:k\"\n\
+             auth = \"bearer\"\n\
              [models.laneA]\n\
              provider = \"p\"\n\
              upstream = \"m-a\"\n\

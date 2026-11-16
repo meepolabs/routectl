@@ -136,7 +136,7 @@ impl Provider for SiblingProvider {
 /// sibling call counter for post-dispatch assertions. A fast,
 /// no-retry `RetryPolicy` keeps every path single-attempt-per-seat.
 /// `primary_forwarded` marks `p-primary`'s provider entry
-/// `credential_source = Forwarded` (the per-target flag the terminal
+/// `credential = "forwarded"` (the per-target flag the terminal
 /// re-key now keys off) when `true`; `p-sibling` is always an Own
 /// provider (it must never legitimately be reached by these tests).
 fn build_chain(
@@ -154,8 +154,9 @@ fn build_chain(
     };
     let mut primary_entry = ProviderEntry::anthropic_api("literal:k");
     if primary_forwarded {
-        primary_entry =
-            primary_entry.with_credential_source(crate::config::CredentialSource::Forwarded);
+        primary_entry = primary_entry
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer);
     }
     config.providers.insert("p-primary".into(), primary_entry);
     config.providers.insert(

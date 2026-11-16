@@ -389,7 +389,7 @@ fn example_config_without_oauth(port: u16) -> String {
     let providers = doc["providers"].as_table_mut().expect("[providers]");
     let oauth_providers = keys_where(providers, |entry| {
         entry
-            .get("api_key_ref")
+            .get("credential")
             .and_then(toml_edit::Item::as_str)
             .is_some_and(|r| r.starts_with("oauth://"))
     });
@@ -506,7 +506,7 @@ fn the_example_config_boots_and_shuts_down_cleanly_in_a_cleared_environment() {
     let config = example_config_without_oauth(port);
     assert!(
         config.contains(&format!("[providers.{EXAMPLE_BEDROCK_PROVIDER}]"))
-            && config.contains(r#"kind = "default-chain""#)
+            && config.contains(r#"credential = "aws://chain""#)
             && config.contains(&format!("\"{EXAMPLE_BEDROCK_ALIAS}\"")),
         "the derived config must keep the Bedrock default-chain provider and its alias:\n{config}",
     );

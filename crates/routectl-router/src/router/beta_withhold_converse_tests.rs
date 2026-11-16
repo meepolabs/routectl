@@ -37,8 +37,7 @@ const OTHER_CLIENT_BETA: &str = "context-1m-2025-08-07";
 /// The flag the operator pins on the Converse provider entry.
 const FLOOR_BETA: &str = "context-management-2025-06-27";
 
-const CONVERSE_BLOCK: &str = "kind = \"bedrock\"\nregion = \"us-east-1\"\n\
-                              creds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
+const CONVERSE_BLOCK: &str = "format = \"bedrock-converse\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 
 /// One Converse entry `cv` (floor pinned), one Converse entry `cvbare` (no
 /// floor), one Invoke entry `inv` and one own-credential anthropic-api
@@ -50,10 +49,10 @@ fn router() -> Router {
          [providers.cv.header_extras]\n\"anthropic-beta\" = \"{FLOOR_BETA}\"\n\
          [providers.cvbare]\n{CONVERSE_BLOCK}\
          [providers.inv]\n\
-         kind = \"bedrock\"\nregion = \"us-east-1\"\n\
-         creds = {{ kind = \"default-chain\" }}\napi_shape = \"invoke\"\n\
+         format = \"bedrock-invoke\"\ncloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n\
          [providers.api]\n\
-         kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
+         format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n\
          [capability]\nenabled = true\n\
          [aliases]\ndefault = \"m\"\n"
     );

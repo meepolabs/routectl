@@ -42,20 +42,23 @@ upstream = "u"
     parse(&format!(
         r#"
 [providers.{MEMBER}]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 {member}
 
 [providers.{SIBLING}]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [providers.{LONE}]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [pools.{POOL}]
 members = ["{MEMBER}", "{SIBLING}"]
@@ -437,9 +440,10 @@ stream_first_byte_timeout_ms = 0
     text.push_str(
         r#"
 [providers.seat-a]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 stream_first_byte_timeout_ms = 60000
 "#,
     );

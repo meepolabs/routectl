@@ -110,9 +110,10 @@ fn installation_file(xdg: &Path) -> std::path::PathBuf {
     xdg.join("routectl").join("installation_id")
 }
 
-const MANAGED_CODEX: &str = "kind = \"openai-responses\"\n\
-     api_key_ref = \"oauth://codex#seat-b\"\n\
-     base_url = \"https://chatgpt.com/backend-api/codex\"\n";
+const MANAGED_CODEX: &str = "format = \"openai-responses\"\n\
+     base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+     credential = \"oauth://codex#seat-b\"\n\
+     auth = \"bearer\"\n";
 
 #[tokio::test]
 #[serial_test::serial]
@@ -158,26 +159,27 @@ async fn no_other_responses_lane_reads_or_mints_codex_ids() {
     let mut lanes = vec![
         (
             "chatgpt dialect with an env bearer on chatgpt.com",
-            "kind = \"openai-responses\"\n\
-             auth_kind = \"chatgpt-oauth\"\n\
-             api_key_ref = \"env://ROUTECTL_CONTAINED_BUILD_KEY\"\n\
+            "format = \"openai-responses\"\n\
              account_id_ref = \"env://ROUTECTL_CONTAINED_BUILD_KEY\"\n\
-             base_url = \"https://chatgpt.com/backend-api/codex\"\n",
+             base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+             credential = \"env://ROUTECTL_CONTAINED_BUILD_KEY\"\n\
+             auth = \"bearer\"\n",
         ),
         (
             "responses api-key",
-            "kind = \"openai-responses\"\n\
-             auth_kind = \"api-key\"\n\
-             api_key_ref = \"env://ROUTECTL_CONTAINED_BUILD_KEY\"\n",
+            "format = \"openai-responses\"\n\
+             base_url = \"https://api.openai.com/v1\"\n\
+             credential = \"env://ROUTECTL_CONTAINED_BUILD_KEY\"\n\
+             auth = \"bearer\"\n",
         ),
     ];
     #[cfg(feature = "bedrock")]
     lanes.push((
         "responses mantle",
-        "kind = \"openai-responses\"\n\
-         api_key_ref = \"\"\n\
-         bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", \
-         key_ref = \"env://ROUTECTL_CONTAINED_BUILD_KEY\" } }\n",
+        "format = \"openai-responses\"\n\
+         cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+         credential = \"env://ROUTECTL_CONTAINED_BUILD_KEY\"\n\
+         auth = \"bearer\"\n",
     ));
 
     for (case, provider_toml) in lanes {

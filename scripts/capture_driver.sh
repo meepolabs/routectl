@@ -88,7 +88,7 @@
 #   --aws-config       an AWS shared-config file for the DAEMON alone. The
 #                      daemon is started with AWS_CONFIG_FILE set to it and
 #                      AWS_SHARED_CREDENTIALS_FILE set to /dev/null, so a
-#                      `kind = "profile"` lane resolves only that file; the
+#                      `aws://profile/<name>` lane resolves only that file; the
 #                      driven client never sees either variable. Given at
 #                      most once (the capture-cell wrapper passes it).
 #
@@ -134,8 +134,8 @@
 # the derive-rather-than-accept rule above, because nothing this script
 # reads names the value:
 #
-#   * the lane config declares the EGRESS provider (`kind`,
-#     `api_key_ref`, `auth_kind`) and says nothing about which dialect a
+#   * the lane config declares the EGRESS provider (`format`,
+#     `credential`, `auth`) and says nothing about which dialect a
 #     client speaks INBOUND -- a translation lane exists precisely so the
 #     two differ;
 #   * a case describes an INTERACTION and is deliberately

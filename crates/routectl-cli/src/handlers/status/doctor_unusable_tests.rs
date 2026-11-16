@@ -63,13 +63,13 @@ fn config_text(db_path: &std::path::Path) -> String {
         db_path.display(),
     );
     for (_, entry, uri) in SEATS {
-        let kind = if uri.starts_with("oauth://") {
-            "kind = \"anthropic-api\"\n"
+        let carrier = if uri.starts_with("oauth://") {
+            "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\n"
         } else {
-            "kind = \"openai-compat\"\nbase_url = \"https://beta.example.com\"\n"
+            "format = \"openai-chat\"\nbase_url = \"https://beta.example.com\"\n"
         };
         text.push_str(&format!(
-            "[providers.{entry}]\n{kind}api_key_ref = \"{uri}\"\n"
+            "[providers.{entry}]\n{carrier}credential = \"{uri}\"\nauth = \"bearer\"\n"
         ));
     }
     text

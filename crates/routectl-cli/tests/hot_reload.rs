@@ -47,9 +47,10 @@ host = "127.0.0.1"
 port = 0
 
 [providers.fast]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.gpt-4o]
 provider = "fast"
@@ -399,9 +400,10 @@ port = 0
 feature-unsupported = 1
 
 [providers.fast]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.gpt-4o]
 provider = "fast"
@@ -460,9 +462,10 @@ port = 0
 essential = ["advisorr"]
 
 [providers.fast]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 "#
         ),
     )
@@ -555,9 +558,10 @@ port = 0
 prt = 8080
 
 [providers.fast]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.gpt-4o]
 provider = "fast"
@@ -941,10 +945,10 @@ host = "127.0.0.1"
 port = 0
 
 [providers.anthropic_oauth]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "{}"
-api_key_ref = "oauth://test-loopback"
-auth_kind = "oauth-bearer"
+credential = "oauth://test-loopback"
+auth = "bearer"
 
 [models.claude]
 provider = "anthropic_oauth"
@@ -1038,9 +1042,10 @@ jitter_ms = 0
 rate-limited = {retry_cap}
 
 [providers.up]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "{upstream_uri}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "x-api-key"
 circuit_failures = 0
 
 [models.claude]
@@ -1103,9 +1108,10 @@ host = "127.0.0.1"
 port = 0
 
 [providers.fast]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "http://127.0.0.1:1"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.gpt-4o]
 provider = "fast"
@@ -1278,8 +1284,10 @@ host = "127.0.0.1"
 port = 0
 
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "{key_ref}"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "{key_ref}"
+auth = "x-api-key"
 
 [models.{WINDOWED_MODEL}]
 provider = "anthropic"
@@ -1554,15 +1562,16 @@ host = "127.0.0.1"
 port = 0
 
 [providers.anthropic_oauth]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "{uri}"
-api_key_ref = "oauth://test-loopback"
-auth_kind = "oauth-bearer"
+credential = "oauth://test-loopback"
+auth = "bearer"
 
 [providers.static_file]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "{uri}"
-api_key_ref = "{file_key_ref}"
+credential = "{file_key_ref}"
+auth = "x-api-key"
 
 [models.claude_oauth]
 provider = "anthropic_oauth"
@@ -1697,14 +1706,16 @@ host = "127.0.0.1"
 port = 0
 
 [providers.prov_a]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "{a_url}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [providers.prov_b]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "{b_url}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.m_a]
 provider = "prov_a"
@@ -1969,9 +1980,10 @@ port = 0
 enabled = {enabled}
 
 [providers.up]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "{upstream_uri}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.m_up]
 provider = "up"
@@ -2006,9 +2018,10 @@ prt = 8080
 enabled = {enabled}
 
 [providers.up]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "{upstream_uri}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.m_up]
 provider = "up"
@@ -2046,14 +2059,16 @@ server-error = 0
 enabled = {enabled}
 
 [providers.prov_a]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "{a_url}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [providers.prov_b]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "{b_url}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "bearer"
 
 [models.m_a]
 provider = "prov_a"

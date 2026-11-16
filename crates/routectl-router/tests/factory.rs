@@ -2,7 +2,7 @@
 
 use routectl_auth::{MemoryStore, SecretRef};
 use routectl_core::Error;
-use routectl_router::{ProviderEntry, ReasoningDialect, build_provider};
+use routectl_router::{Auth, Format, ProviderEntry, ReasoningDialect, build_provider};
 
 mod common;
 
@@ -34,80 +34,63 @@ async fn build_anthropic_api_resolves_secret() {
 fn anthropic_custom_base_url_and_version_round_trip_through_toml() {
     let toml_src = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format = "anthropic-messages"
 base_url = "https://api2.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 anthropic_version = "2024-05-01"
 "#;
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
     let entry = cfg.providers.get("anthropic").expect("anthropic entry");
-    match entry {
-        ProviderEntry::AnthropicApi {
-            base_url,
-            anthropic_version,
-            api_key_ref,
-            auth_kind,
-            ..
-        } => {
-            assert_eq!(base_url, "https://api2.anthropic.com");
-            assert_eq!(anthropic_version, "2024-05-01");
-            assert_eq!(api_key_ref, "env://ANTHROPIC_API_KEY");
-            // No `auth_kind` line in the TOML -> default api-key.
-            assert_eq!(
-                *auth_kind,
-                routectl_providers::anthropic_api::AuthKind::ApiKey
-            );
-        }
-        other => panic!("expected AnthropicApi, got {other:?}"),
-    }
+    assert_eq!(entry.format, Format::AnthropicMessages);
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://api2.anthropic.com")
+    );
+    assert_eq!(entry.anthropic_version.as_deref(), Some("2024-05-01"));
+    assert_eq!(entry.credential, "env://ANTHROPIC_API_KEY");
+    assert_eq!(entry.auth, Auth::XApiKey);
 }
 
-/// `auth_kind = "oauth-bearer"` round-trips into `AuthKind::OauthBearer`,
-/// and the absence of the field defaults to `AuthKind::ApiKey`. Locks
-/// in the kebab-case TOML surface.
+/// `auth = "bearer"` and `auth = "x-api-key"` each parse to their own
+/// [`Auth`] value and survive a serialize / re-parse. Locks in the
+/// kebab-case TOML surface.
 #[test]
-fn anthropic_auth_kind_round_trips_through_toml() {
-    use routectl_providers::anthropic_api::AuthKind;
-
+fn anthropic_auth_round_trips_through_toml() {
     let toml_src = r#"
 [providers.claude-code]
-kind = "anthropic-api"
-api_key_ref = "file://<local-path>"
-auth_kind = "oauth-bearer"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "file://<local-path>"
+auth = "bearer"
 
 [providers.anthropic-default]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 "#;
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
 
-    match cfg.providers.get("claude-code").expect("claude-code entry") {
-        ProviderEntry::AnthropicApi { auth_kind, .. } => {
-            assert_eq!(*auth_kind, AuthKind::OauthBearer);
-        }
-        other => panic!("expected AnthropicApi, got {other:?}"),
-    }
-
-    match cfg
+    let claude_code = cfg.providers.get("claude-code").expect("claude-code entry");
+    assert_eq!(claude_code.auth, Auth::Bearer);
+    let api_key = cfg
         .providers
         .get("anthropic-default")
-        .expect("anthropic-default entry")
-    {
-        ProviderEntry::AnthropicApi { auth_kind, .. } => {
-            assert_eq!(*auth_kind, AuthKind::ApiKey);
-        }
-        other => panic!("expected AnthropicApi, got {other:?}"),
-    }
+        .expect("anthropic-default entry");
+    assert_eq!(api_key.auth, Auth::XApiKey);
 
     // Round-trip the other way: serialize and re-parse must preserve the value.
     let reserialized = toml::to_string(&cfg).expect("re-serialize");
     let cfg2: routectl_router::Config = toml::from_str(&reserialized).expect("re-parse");
-    match cfg2.providers.get("claude-code").unwrap() {
-        ProviderEntry::AnthropicApi { auth_kind, .. } => {
-            assert_eq!(*auth_kind, AuthKind::OauthBearer);
-        }
-        _ => unreachable!(),
-    }
+    assert_eq!(
+        cfg2.providers.get("claude-code").unwrap().auth,
+        Auth::Bearer
+    );
+    assert_eq!(
+        cfg2.providers.get("anthropic-default").unwrap().auth,
+        Auth::XApiKey
+    );
 }
 
 /// Same test but for the OpenAI-compat shape: a custom `base_url`
@@ -118,9 +101,10 @@ api_key_ref = "env://ANTHROPIC_API_KEY"
 fn openai_compat_custom_base_url_round_trips_through_toml() {
     let toml_src = r#"
 [providers.example-deepseek-host]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://opencode.ai/zen/go/v1"
-api_key_ref = "env://OPENCODE_GO_API_KEY"
+credential = "env://OPENCODE_GO_API_KEY"
+auth = "bearer"
 
 [models.dsv4]
 provider = "example-deepseek-host"
@@ -132,12 +116,11 @@ reasoning_dialect = "deepseek"
         .providers
         .get("example-deepseek-host")
         .expect("opencode entry");
-    match entry {
-        ProviderEntry::OpenaiCompat { base_url, .. } => {
-            assert_eq!(base_url, "https://opencode.ai/zen/go/v1");
-        }
-        other => panic!("expected OpenaiCompat, got {other:?}"),
-    }
+    assert_eq!(entry.format, Format::OpenaiChat);
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://opencode.ai/zen/go/v1")
+    );
     let model = cfg.models.get("dsv4").expect("model");
     assert_eq!(model.reasoning_dialect, Some(ReasoningDialect::Deepseek));
 }
@@ -163,8 +146,10 @@ async fn build_with_missing_env_var_errors() {
 fn anthropic_header_extras_and_user_agent_round_trip_through_toml() {
     let toml_src = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 user_agent = "claude-code/1.2.3"
 
 [providers.anthropic.header_extras]
@@ -173,24 +158,22 @@ user_agent = "claude-code/1.2.3"
 "#;
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
     let entry = cfg.providers.get("anthropic").expect("anthropic entry");
-    match entry {
-        ProviderEntry::AnthropicApi {
-            header_extras,
-            user_agent,
-            ..
-        } => {
-            assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
-            assert_eq!(
-                header_extras.get("anthropic-beta").map(String::as_str),
-                Some("context-1m-2025-08-07,prompt-caching-2024-07-31"),
-            );
-            assert_eq!(
-                header_extras.get("x-custom-trace").map(String::as_str),
-                Some("abc123")
-            );
-        }
-        other => panic!("expected AnthropicApi, got {other:?}"),
-    }
+    assert_eq!(entry.format, Format::AnthropicMessages);
+    assert_eq!(entry.user_agent.as_deref(), Some("claude-code/1.2.3"));
+    assert_eq!(
+        entry
+            .header_extras
+            .get("anthropic-beta")
+            .map(String::as_str),
+        Some("context-1m-2025-08-07,prompt-caching-2024-07-31"),
+    );
+    assert_eq!(
+        entry
+            .header_extras
+            .get("x-custom-trace")
+            .map(String::as_str),
+        Some("abc123")
+    );
 }
 
 /// Pin: `build_resolved_models` threads the originating `oauth://`
@@ -207,8 +190,7 @@ async fn resolved_model_retains_oauth_secret_ref_for_anthropic() {
     let mut providers: BTreeMap<String, ProviderEntry> = BTreeMap::new();
     providers.insert(
         "anthropic".into(),
-        ProviderEntry::anthropic_api("oauth://anthropic")
-            .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
+        ProviderEntry::anthropic_api("oauth://anthropic").with_auth(Auth::Bearer),
     );
     let mut models: BTreeMap<String, ModelEntry> = BTreeMap::new();
     models.insert(
@@ -289,7 +271,7 @@ async fn resolved_model_retains_env_secret_ref_for_openai_compat() {
 mod openai_responses_tests {
     use routectl_auth::MemoryStore;
     use routectl_core::Error;
-    use routectl_router::{Config, ProviderEntry, build_provider};
+    use routectl_router::{Config, build_provider};
 
     #[tokio::test]
     async fn factory_builds_openai_responses_chatgpt_oauth_provider() {
@@ -299,10 +281,11 @@ mod openai_responses_tests {
         let toml_src = format!(
             r#"
 [providers.gpt]
-kind = "openai-responses"
-api_key_ref = "{api_key_ref}"
+format = "openai-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = "{api_key_ref}"
+auth = "bearer"
 account_id_ref = "{account_id_ref}"
-auth_kind = "chatgpt-oauth"
 "#
         );
         let cfg: Config = toml::from_str(&toml_src).expect("parse");
@@ -324,9 +307,10 @@ auth_kind = "chatgpt-oauth"
         // Arrange
         let toml_src = r#"
 [providers.gpt]
-kind = "openai-responses"
-api_key_ref = "literal:test-jwt"
-auth_kind = "chatgpt-oauth"
+format = "openai-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = "env://ROUTECTL_FACTORY_TEST_UNSET_JWT"
+auth = "bearer"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("gpt").expect("gpt entry");
@@ -339,7 +323,7 @@ auth_kind = "chatgpt-oauth"
         // Assert
         match result {
             Err(Error::Config(msg)) => {
-                assert!(msg.contains("chatgpt-oauth"), "msg: {msg}");
+                assert!(msg.contains("ChatGPT Codex host"), "msg: {msg}");
                 assert!(msg.contains("account_id_ref"), "msg: {msg}");
             }
             Ok(_) => panic!("expected Err, got Ok"),
@@ -354,9 +338,10 @@ auth_kind = "chatgpt-oauth"
         let toml_src = format!(
             r#"
 [providers.gpt-api]
-kind = "openai-responses"
-api_key_ref = "{api_key_ref}"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "{api_key_ref}"
+auth = "bearer"
 "#
         );
         let cfg: Config = toml::from_str(&toml_src).expect("parse");
@@ -378,10 +363,11 @@ auth_kind = "api-key"
         // Arrange
         let toml_src = r#"
 [providers.gpt-api]
-kind = "openai-responses"
-api_key_ref = "literal:sk-test"
-account_id_ref = "literal:acct-uuid"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "env://ROUTECTL_FACTORY_TEST_UNSET_KEY"
+auth = "bearer"
+account_id_ref = "env://ROUTECTL_FACTORY_TEST_UNSET_ACCT"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("gpt-api").expect("gpt-api entry");
@@ -395,49 +381,53 @@ auth_kind = "api-key"
         match result {
             Err(Error::Config(msg)) => {
                 assert!(msg.contains("account_id_ref"), "msg: {msg}");
-                assert!(msg.contains("chatgpt-oauth"), "msg: {msg}");
+                assert!(msg.contains("ChatGPT Codex host"), "msg: {msg}");
             }
             Ok(_) => panic!("expected Err, got Ok"),
             Err(other) => panic!("expected Error::Config, got {other:?}"),
         }
     }
 
+    /// The Responses dialect follows the destination: the Codex host speaks
+    /// the ChatGPT dialect, the OpenAI API host does not.
     #[test]
-    fn openai_responses_default_auth_kind_is_chatgpt_oauth() {
-        use routectl_providers::openai_responses::AuthKind;
-
-        // Arrange: auth_kind omitted -> default.
+    fn openai_responses_dialect_follows_the_codex_host() {
+        // Arrange
         let toml_src = r#"
 [providers.gpt]
-kind = "openai-responses"
-api_key_ref = "literal:test-jwt"
-account_id_ref = "literal:acct-uuid"
+format = "openai-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = "env://ROUTECTL_FACTORY_TEST_UNSET_JWT"
+auth = "bearer"
+account_id_ref = "env://ROUTECTL_FACTORY_TEST_UNSET_ACCT"
+
+[providers.gpt-api]
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "env://ROUTECTL_FACTORY_TEST_UNSET_KEY"
+auth = "bearer"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
 
         // Assert
-        match cfg.providers.get("gpt").unwrap() {
-            ProviderEntry::OpenaiResponses { auth_kind, .. } => {
-                assert_eq!(*auth_kind, AuthKind::ChatgptOauth);
-            }
-            other => panic!("expected OpenaiResponses, got {other:?}"),
-        }
+        assert!(cfg.providers["gpt"].is_chatgpt_oauth_responses());
+        assert!(!cfg.providers["gpt-api"].is_chatgpt_oauth_responses());
     }
 }
 
 #[cfg(feature = "bedrock")]
 mod bedrock_tests {
-    use routectl_router::{BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry};
+    use routectl_router::{Auth, Cloud, Config, Format, ProviderEntry};
 
     #[test]
     fn bedrock_invoke_with_bearer_key_round_trips() {
         let toml_src = r#"
 [providers.bedrock_anthropic]
-kind = "bedrock"
-region = "us-west-2"
-api_shape = "invoke"
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "file://<local-path>"
+auth = "bearer"
 user_agent = "claude-code/1.2.3"
-creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
 
 [providers.bedrock_anthropic.header_extras]
 "x-trace-id" = "abc"
@@ -445,141 +435,113 @@ creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("bedrock_anthropic").expect("entry");
-        match entry {
-            ProviderEntry::Bedrock {
-                region,
-                api_shape,
-                user_agent,
-                header_extras,
-                creds,
-                ..
-            } => {
-                assert_eq!(region, "us-west-2");
-                assert_eq!(*api_shape, BedrockApiShapeConfig::Invoke);
-                assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
-                assert_eq!(
-                    header_extras.get("x-trace-id").map(String::as_str),
-                    Some("abc")
-                );
-                assert_eq!(
-                    header_extras.get("anthropic-beta").map(String::as_str),
-                    Some("context-1m-2025-08-07,prompt-caching-2024-07-31")
-                );
-                match creds {
-                    BedrockCredsConfig::BearerKey { key_ref } => {
-                        assert_eq!(key_ref, "file://<local-path>");
-                    }
-                    other => panic!("expected BearerKey, got {other:?}"),
-                }
-            }
-            other => panic!("expected Bedrock, got {other:?}"),
-        }
+        assert_eq!(entry.format, Format::BedrockInvoke);
+        assert_eq!(
+            entry.cloud,
+            Some(Cloud::Aws {
+                region: "us-west-2".into()
+            })
+        );
+        assert_eq!(entry.base_url, None);
+        assert_eq!(entry.user_agent.as_deref(), Some("claude-code/1.2.3"));
+        assert_eq!(
+            entry.header_extras.get("x-trace-id").map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            entry
+                .header_extras
+                .get("anthropic-beta")
+                .map(String::as_str),
+            Some("context-1m-2025-08-07,prompt-caching-2024-07-31")
+        );
+        assert_eq!(entry.credential, "file://<local-path>");
+        assert_eq!(entry.auth, Auth::Bearer);
     }
 
+    /// Static AWS keys are not a config form: an entry that still carries
+    /// the static-keys `creds` table is refused, while the same entry on
+    /// the flat keys parses.
     #[test]
-    fn bedrock_static_creds_round_trip_with_optional_session_token() {
-        // TOML inline tables must be single-line, so we use a sub-table
-        // for `creds` here. Both syntaxes serialize to the same struct.
-        let toml_src = r#"
+    fn bedrock_static_creds_table_is_refused() {
+        let flat = r#"
 [providers.bedrock_static]
-kind = "bedrock"
-region = "us-west-2"
-
-[providers.bedrock_static.creds]
-kind = "static"
-access_key_ref = "env://AWS_ACCESS_KEY_ID"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-session_token_ref = "env://AWS_SESSION_TOKEN"
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#;
-        let cfg: Config = toml::from_str(toml_src).expect("parse");
-        match cfg.providers.get("bedrock_static").unwrap() {
-            ProviderEntry::Bedrock {
-                creds, api_shape, ..
-            } => {
-                // Default api_shape when omitted -> Invoke.
-                assert_eq!(*api_shape, BedrockApiShapeConfig::Invoke);
-                match creds {
-                    BedrockCredsConfig::Static {
-                        access_key_ref,
-                        secret_key_ref,
-                        session_token_ref,
-                    } => {
-                        assert_eq!(access_key_ref, "env://AWS_ACCESS_KEY_ID");
-                        assert_eq!(secret_key_ref, "env://AWS_SECRET_ACCESS_KEY");
-                        assert_eq!(
-                            session_token_ref.as_deref(),
-                            Some("env://AWS_SESSION_TOKEN"),
-                        );
-                    }
-                    other => panic!("expected Static, got {other:?}"),
-                }
-            }
-            other => panic!("expected Bedrock, got {other:?}"),
-        }
+        let static_keys = format!(
+            "{flat}\n[providers.bedrock_static.creds]\nkind = \"static\"\n\
+             access_key_ref = \"env://AWS_ACCESS_KEY_ID\"\n\
+             secret_key_ref = \"env://AWS_SECRET_ACCESS_KEY\"\n\
+             session_token_ref = \"env://AWS_SESSION_TOKEN\"\n"
+        );
+
+        let accepted: Config = toml::from_str(flat).expect("the flat entry parses");
+        let refused = toml::from_str::<Config>(&static_keys);
+
+        assert_eq!(
+            accepted.providers["bedrock_static"].credential,
+            "aws://chain"
+        );
+        let err = refused
+            .expect_err("a creds table is not an entry key")
+            .to_string();
+        assert!(err.contains("creds"), "names the refused key: {err}");
     }
 
     #[test]
     fn bedrock_profile_creds_round_trip() {
         let toml_src = r#"
 [providers.bedrock_profile]
-kind = "bedrock"
-region = "us-west-2"
-api_shape = "converse"
-creds = { kind = "profile", name = "bedrock-prod" }
+format = "bedrock-converse"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "aws://profile/bedrock-prod"
+auth = "aws-sigv4"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
-        match cfg.providers.get("bedrock_profile").unwrap() {
-            ProviderEntry::Bedrock {
-                creds, api_shape, ..
-            } => {
-                assert_eq!(*api_shape, BedrockApiShapeConfig::Converse);
-                match creds {
-                    BedrockCredsConfig::Profile { name } => {
-                        assert_eq!(name, "bedrock-prod");
-                    }
-                    other => panic!("expected Profile, got {other:?}"),
-                }
-            }
-            other => panic!("expected Bedrock, got {other:?}"),
-        }
+        let entry = cfg.providers.get("bedrock_profile").unwrap();
+        assert_eq!(entry.format, Format::BedrockConverse);
+        assert_eq!(entry.credential, "aws://profile/bedrock-prod");
+        assert_eq!(entry.auth, Auth::AwsSigv4);
     }
 
     #[test]
     fn bedrock_default_chain_round_trips() {
         let toml_src = r#"
 [providers.bedrock_chain]
-kind = "bedrock"
-region = "us-west-2"
-creds = { kind = "default-chain" }
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
-        match cfg.providers.get("bedrock_chain").unwrap() {
-            ProviderEntry::Bedrock { creds, .. } => {
-                assert!(matches!(creds, BedrockCredsConfig::DefaultChain));
-            }
-            other => panic!("expected Bedrock, got {other:?}"),
-        }
+        let entry = cfg.providers.get("bedrock_chain").unwrap();
+        assert_eq!(entry.format, Format::BedrockInvoke);
+        assert_eq!(entry.credential, "aws://chain");
     }
 
     #[test]
     fn bedrock_redact_secrets_clears_literals_only() {
-        let mut creds = BedrockCredsConfig::Static {
-            access_key_ref: "literal:testkey-actual-xyz".into(),
-            secret_key_ref: "env://AWS_SECRET_ACCESS_KEY".into(),
-            session_token_ref: Some("literal:abc123".into()),
+        let entry = |credential: &str| {
+            ProviderEntry::cloud_aws(Format::BedrockInvoke, "us-west-2", credential, Auth::Bearer)
         };
-        creds.redact();
-        match creds {
-            BedrockCredsConfig::Static {
-                access_key_ref,
-                secret_key_ref,
-                session_token_ref,
-            } => {
-                assert_eq!(access_key_ref, "literal:[REDACTED]");
-                assert_eq!(secret_key_ref, "env://AWS_SECRET_ACCESS_KEY");
-                assert_eq!(session_token_ref.as_deref(), Some("literal:[REDACTED]"));
-            }
-            _ => unreachable!(),
-        }
+        let mut literal = entry("literal:testkey-actual-xyz");
+        let mut pointer = entry("env://AWS_BEARER_TOKEN_BEDROCK");
+        let mut chain = ProviderEntry::cloud_aws(
+            Format::BedrockInvoke,
+            "us-west-2",
+            "aws://chain",
+            Auth::AwsSigv4,
+        );
+
+        literal.redact_secrets();
+        pointer.redact_secrets();
+        chain.redact_secrets();
+
+        assert_eq!(literal.credential, "literal:[REDACTED]");
+        assert_eq!(pointer.credential, "env://AWS_BEARER_TOKEN_BEDROCK");
+        assert_eq!(chain.credential, "aws://chain");
     }
 }

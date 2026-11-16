@@ -183,9 +183,8 @@ fn router_with(
     router
 }
 
-const ANTHROPIC_API: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"";
-const OPENAI_COMPAT: &str =
-    "kind = \"openai-compat\"\napi_key_ref = \"literal:k\"\nbase_url = \"https://x.invalid/v1\"";
+const ANTHROPIC_API: &str = "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"";
+const OPENAI_COMPAT: &str = "format = \"openai-chat\"\nbase_url = \"https://x.invalid/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"";
 
 fn anthropic_router(switches: Switches, provider: Arc<dyn Provider>) -> Router {
     router_with(switches, |_| ANTHROPIC_API.to_owned(), vec![provider])
@@ -264,7 +263,11 @@ async fn a_forwarded_target_keeps_the_model_and_declares_no_rename() {
     let provider = Recorder::new(Answer::Serve);
     let router = router_with(
         OFF,
-        |_| format!("{ANTHROPIC_API}\ncredential_source = \"forwarded\""),
+        |_| {
+            "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\n\
+             credential = \"forwarded\"\nauth = \"bearer\""
+                .to_owned()
+        },
         vec![provider.clone()],
     );
     let mut req = anthropic_request();

@@ -5,9 +5,7 @@
 //! read the captured per-attempt request (the bytes the egress would see)
 //! and the returned meta; the original request is never mutated.
 use super::*;
-use crate::config::{
-    AliasValue, CacheConfig, ProviderEntry, ProviderRuntimePolicy, ReductionConfig,
-};
+use crate::config::{AliasValue, CacheConfig, ProviderEntry, ReductionConfig};
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use parking_lot::Mutex as ParkingMutex;
@@ -167,23 +165,10 @@ fn rig_default_reduction(entry: ProviderEntry) -> (Router, Arc<ParkingMutex<Vec<
 
 /// Anthropic entry with `reduction_enabled = Some(false)` (provider opt-out).
 fn anthropic_entry_reduction_off() -> ProviderEntry {
-    ProviderEntry::AnthropicApi {
-        api_key_ref: "literal:k".into(),
-        base_url: "https://api.anthropic.com".into(),
-        anthropic_version: "2023-06-01".into(),
-        auth_kind: Default::default(),
-        credential_source: Default::default(),
-        header_extras: BTreeMap::new(),
-        payload_extras: None,
-        user_agent: None,
-        forward_client_headers: Vec::new(),
-        context_management: false,
-        cache_capability: None,
-        reduction_enabled: Some(false),
-        cloak: routectl_providers::anthropic_api::CloakConfig::default(),
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle: None,
-        runtime: ProviderRuntimePolicy::default(),
+    {
+        let mut entry = ProviderEntry::anthropic_api("literal:k");
+        entry.reduction_enabled = Some(false);
+        entry
     }
 }
 

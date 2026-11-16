@@ -68,9 +68,10 @@ pub(super) fn base_config(extra: &str) -> Config {
     let body = format!(
         "version = 3\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://x\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [capability]\n\
          enabled = true\n\
          {extra}"

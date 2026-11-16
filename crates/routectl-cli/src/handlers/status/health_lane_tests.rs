@@ -69,9 +69,10 @@ fn router() -> Router {
     let config: Config = toml::from_str(&format!(
         "version = 3\n\
          [providers.{PROVIDER}]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.invalid/v1\"\n\
-         api_key_ref = \"env://ROUTECTL_HEALTH_LANE_TEST_KEY\"\n\
+         credential = \"env://ROUTECTL_HEALTH_LANE_TEST_KEY\"\n\
+         auth = \"bearer\"\n\
          [capability]\n\
          enabled = true\n"
     ))
@@ -207,15 +208,16 @@ mod doctor_agreement {
              [usage]\n\
              db_path = \"{}\"\n\
              [providers.bed]\n\
-             kind = \"bedrock\"\n\
-             region = \"us-east-1\"\n\
-             creds = {{ kind = \"default-chain\" }}\n\
+             format = \"bedrock-invoke\"\n\
+             cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+             credential = \"aws://chain\"\n\
+             auth = \"aws-sigv4\"\n\
              header_extras = {{ \"anthropic-beta\" = \"{PINNED_FLAG}\" }}\n\
              [providers.cv]\n\
-             kind = \"bedrock\"\n\
-             region = \"us-east-1\"\n\
-             creds = {{ kind = \"default-chain\" }}\n\
-             api_shape = \"converse\"\n\
+             format = \"bedrock-converse\"\n\
+             cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+             credential = \"aws://chain\"\n\
+             auth = \"aws-sigv4\"\n\
              [models.claude]\n\
              provider = \"bed\"\n\
              upstream = \"anthropic.claude-test-v1:0\"\n\

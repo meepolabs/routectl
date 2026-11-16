@@ -219,7 +219,7 @@ fn daemon_config() -> (Arc<Config>, tempfile::TempDir) {
 /// [`daemon_config`] with `p0` configured at `base_url`.
 fn daemon_config_on(base_url: &str) -> (Arc<Config>, tempfile::TempDir) {
     let toml_text = format!(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"{base_url}\"\n"
+        "\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"{base_url}\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.models.insert(

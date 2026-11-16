@@ -138,7 +138,7 @@ fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::Export
 fn build_router(provider: Arc<dyn Provider>, learning: bool) -> Router {
     let toml = format!(
         "version = 3\n[capability]\nenabled = {learning}\n\
-             [providers.prov]\nkind = \"anthropic-api\"\n"
+             [providers.prov]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://ANTHROPIC_API_KEY\"\nauth = \"x-api-key\"\n"
     );
     let config: Config = toml::from_str(&toml).expect("config parses");
     let mut router = Router::new(Arc::new(config));

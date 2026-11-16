@@ -315,9 +315,10 @@ mod tests {
     }
 
     const OPENAI_P: &str = "[providers.p]\n\
-        kind = \"openai-compat\"\n\
+        format = \"openai-chat\"\n\
         base_url = \"https://x\"\n\
-        api_key_ref = \"literal:k\"\n";
+        credential = \"literal:k\"\n\
+        auth = \"bearer\"\n";
 
     #[test]
     fn provider_scoped_unsupported_snapshots_as_route_away_override() {
@@ -513,9 +514,10 @@ mod tests {
         // Arrange
         let config = config(
             "[providers.br]\n\
-             kind = \"bedrock\"\n\
-             region = \"us-east-1\"\n\
-             creds = { kind = \"default-chain\" }\n\
+             format = \"bedrock-invoke\"\n\
+             cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+             credential = \"aws://chain\"\n\
+             auth = \"aws-sigv4\"\n\
              [capability.overrides.br]\n\
              unsupported = [\"additionalModelRequestFields.anthropic_beta\"]\n",
         );

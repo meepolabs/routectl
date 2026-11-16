@@ -20,8 +20,10 @@ const MODEL_LIMIT: u32 = 128_000;
 /// An upstream model name no openai-compat reasoning profile matches, so
 /// the egress forwards every sampling parameter the client sent.
 const UNPROFILED_MODEL: &str = "acme-chat-1";
-const OPENAI_COMPAT_TOML: &str = "kind = \"openai-compat\"\n\
-    base_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
+const OPENAI_COMPAT_TOML: &str = "format = \"openai-chat\"\n\
+    base_url = \"https://example.test/v1\"\n\
+    credential = \"literal:k\"\n\
+    auth = \"bearer\"\n";
 const ONE_ATTEMPT: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n";
 /// Room for one same-target retry after a repaired attempt.
 const THREE_ATTEMPTS: &str = "[retry]\nmax_attempts = 3\ninitial_backoff_ms = 0\njitter_ms = 0\n";

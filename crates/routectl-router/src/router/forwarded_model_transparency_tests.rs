@@ -1,11 +1,11 @@
 //! `DispatchTarget::use_forwarded_credential`: populated once at chain
-//! expansion from the provider entry's `credential_source`, then read
+//! expansion from the provider entry's `credential`, then read
 //! at all three dispatch paths (complete, count_tokens, stream) to
 //! bypass the `attempt_req.model` rewrite. A forwarded target forwards
 //! the client's requested model verbatim; an own target still rewrites
 //! to the target's configured `upstream`.
 use super::*;
-use crate::config::{AliasValue, CredentialSource, ProviderEntry};
+use crate::config::{AliasValue, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -102,7 +102,7 @@ impl Provider for ModelSpyProvider {
 }
 
 /// Register one nickname/provider/upstream leg on a fresh router,
-/// with the provider entry's `credential_source` set per `forwarded`.
+/// with the provider entry relaying the client's credential when `forwarded`.
 fn router_with_leg(
     nickname: &str,
     provider_name: &str,
@@ -112,7 +112,9 @@ fn router_with_leg(
     let spy = Arc::new(ModelSpyProvider::new(provider_name));
     let mut entry = ProviderEntry::anthropic_api("literal:k");
     if forwarded {
-        entry = entry.with_credential_source(CredentialSource::Forwarded);
+        entry = entry
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer);
     }
     let mut config = Config::default();
     config.providers.insert(provider_name.to_string(), entry);
@@ -192,7 +194,8 @@ fn expand_chain_to_targets_sets_flag_for_every_seat_of_a_forwarded_pool() {
         config.providers.insert(
             member.to_string(),
             ProviderEntry::anthropic_api("literal:k")
-                .with_credential_source(CredentialSource::Forwarded),
+                .with_credential("forwarded")
+                .with_auth(crate::config::Auth::Bearer),
         );
     }
     config.pools.insert(

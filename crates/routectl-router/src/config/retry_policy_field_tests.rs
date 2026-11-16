@@ -113,14 +113,14 @@ max_honored_retry_after_ms = 90000
 /// context_management = true round-trips through TOML deserialization.
 #[test]
 fn provider_entry_anthropic_api_context_management_round_trips_true() {
-    use crate::config::{Config, ProviderEntry};
+    use crate::config::Config;
     // Arrange
     let toml_text = r#"
 [providers.deepseek]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://api.deepseek.com/anthropic"
-api_key_ref = "env://DS_KEY"
-auth_kind = "oauth-bearer"
+credential = "env://DS_KEY"
+auth = "bearer"
 context_management = true
 "#;
     // Act
@@ -128,52 +128,48 @@ context_management = true
     let entry = cfg.providers.get("deepseek").expect("deepseek provider");
 
     // Assert
-    match entry {
-        ProviderEntry::AnthropicApi {
-            context_management, ..
-        } => assert!(
-            *context_management,
-            "context_management = true must deserialize as true"
-        ),
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    assert_eq!(
+        entry.context_management,
+        Some(true),
+        "context_management = true must deserialize as true"
+    );
 }
 
-/// context_management omitted from TOML defaults to false.
+/// context_management omitted from TOML stays unset, which the factory reads
+/// as false.
 #[test]
 fn provider_entry_anthropic_api_context_management_defaults_false() {
-    use crate::config::{Config, ProviderEntry};
+    use crate::config::Config;
     // Arrange: no context_management key in TOML.
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 "#;
     // Act
     let cfg: Config = toml::from_str(toml_text).expect("parse");
     let entry = cfg.providers.get("anthropic").expect("anthropic provider");
 
     // Assert
-    match entry {
-        ProviderEntry::AnthropicApi {
-            context_management, ..
-        } => assert!(
-            !context_management,
-            "context_management must default to false when omitted; got {context_management}"
-        ),
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    assert_eq!(
+        entry.context_management, None,
+        "context_management must stay unset when omitted"
+    );
 }
 
 /// context_management = false round-trips through TOML deserialization.
 #[test]
 fn provider_entry_anthropic_api_context_management_round_trips_false() {
-    use crate::config::{Config, ProviderEntry};
+    use crate::config::Config;
     // Arrange
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 context_management = false
 "#;
     // Act
@@ -181,15 +177,11 @@ context_management = false
     let entry = cfg.providers.get("anthropic").expect("anthropic provider");
 
     // Assert
-    match entry {
-        ProviderEntry::AnthropicApi {
-            context_management, ..
-        } => assert!(
-            !context_management,
-            "context_management = false must deserialize as false"
-        ),
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    assert_eq!(
+        entry.context_management,
+        Some(false),
+        "context_management = false must deserialize as false"
+    );
 }
 
 // v0.8 cap-relaxation knobs: serde round-trip pins so a default,

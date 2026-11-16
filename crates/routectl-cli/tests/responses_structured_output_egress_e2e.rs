@@ -418,9 +418,10 @@ async fn flat_responses_text_format_reaches_the_gemini_egress_as_a_response_sche
     let toml_src = format!(
         r#"
 [providers.gemini-mock]
-kind = "gemini"
-api_key_ref = "{key}"
+format = "gemini"
 base_url = "{base}"
+credential = "{key}"
+auth = "x-goog-api-key"
 
 [models.target]
 provider = "gemini-mock"
@@ -513,9 +514,10 @@ async fn unknown_responses_text_format_tag_drops_and_counts_on_the_gemini_egress
     let toml_src = format!(
         r#"
 [providers.gemini-mock]
-kind = "gemini"
-api_key_ref = "{key}"
+format = "gemini"
 base_url = "{base}"
+credential = "{key}"
+auth = "x-goog-api-key"
 
 [models.target]
 provider = "gemini-mock"

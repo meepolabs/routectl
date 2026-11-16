@@ -35,7 +35,7 @@ fn ok_body() -> Value {
 fn config_toml(base_url: &str) -> Config {
     let key_ref = crate::test_secret::file_ref("test-key");
     let toml_text = format!(
-        "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"{base_url}/v1\"\napi_key_ref = \"{key_ref}\"\n\n[models.m]\nprovider = \"p\"\nupstream = \"upstream-model\"\n"
+        "[providers.p]\nformat = \"openai-chat\"\nbase_url = \"{base_url}/v1\"\ncredential = \"{key_ref}\"\nauth = \"bearer\"\n\n[models.m]\nprovider = \"p\"\nupstream = \"upstream-model\"\n"
     );
     toml::from_str(&toml_text).expect("test config parses")
 }

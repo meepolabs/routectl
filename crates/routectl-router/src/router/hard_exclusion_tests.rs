@@ -423,9 +423,10 @@ fn a_fail_fast_releases_nothing_it_did_not_claim_and_claims_nothing() {
 
 const ROUTER_TOML: &str = r#"
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 const ROUTER_LANE: &str = "p1#wire-model";

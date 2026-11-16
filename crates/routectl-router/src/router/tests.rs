@@ -15,10 +15,8 @@ fn build_router_with_provider_timeouts(
 ) -> Router {
     let mut providers = BTreeMap::new();
     let mut entry = ProviderEntry::openai_compat("https://example.test/v1", "literal:k");
-    if let ProviderEntry::OpenaiCompat { runtime, .. } = &mut entry {
-        runtime.request_timeout_ms = provider_request_timeout;
-        runtime.stream_first_byte_timeout_ms = provider_first_byte_timeout;
-    }
+    entry.runtime.request_timeout_ms = provider_request_timeout;
+    entry.runtime.stream_first_byte_timeout_ms = provider_first_byte_timeout;
     providers.insert("p1".to_string(), entry);
 
     let cfg = Config {
@@ -66,9 +64,10 @@ fn a_slotless_target_resolves_its_tuning_from_its_provider_and_model() {
     let cfg: Config = toml::from_str(
         r#"
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 request_timeout_ms = 120000
 stream_first_byte_timeout_ms = 60000
 
@@ -1128,9 +1127,10 @@ fn router_new_builds_override_registry_from_capability_overrides() {
     // construction, each carrying `Override` provenance.
     let toml_text = "\
             [providers.p]\n\
-            kind = \"openai-compat\"\n\
+            format = \"openai-chat\"\n\
             base_url = \"https://x\"\n\
-            api_key_ref = \"literal:k\"\n\
+            credential = \"literal:k\"\n\
+            auth = \"bearer\"\n\
             [models.nick]\n\
             provider = \"p\"\n\
             upstream = \"gpt-x\"\n\
@@ -1296,9 +1296,10 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     let before_cfg: Config = toml::from_str(
         "version = 3\n\
              [providers.p]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://x\"\n\
-             api_key_ref = \"literal:k\"\n\
+             credential = \"literal:k\"\n\
+             auth = \"bearer\"\n\
              [capability.overrides.p]\n\
              force_supported = [\"web_search\"]\n",
     )
@@ -1339,9 +1340,10 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     let after_cfg: Config = toml::from_str(
         "version = 3\n\
              [providers.p]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"https://x\"\n\
-             api_key_ref = \"literal:k\"\n",
+             credential = \"literal:k\"\n\
+             auth = \"bearer\"\n",
     )
     .expect("config parses");
     let mut after = Router::new(Arc::new(after_cfg));

@@ -41,8 +41,8 @@ fn config_text(upstream: &str) -> String {
     );
     for member in ["seat-a", "seat-b", "seat-c"] {
         text.push_str(&format!(
-            "[providers.{member}]\nkind = \"anthropic-api\"\nbase_url = \"{upstream}\"\n\
-             api_key_ref = \"oauth://test-loopback#{member}\"\nauth_kind = \"oauth-bearer\"\n\n"
+            "[providers.{member}]\nformat = \"anthropic-messages\"\nbase_url = \"{upstream}\"\n\
+             credential = \"oauth://test-loopback#{member}\"\nauth = \"bearer\"\n\n"
         ));
     }
     text.push_str(
@@ -363,7 +363,7 @@ async fn the_readmit_rebuild_line_says_whether_the_seat_set_changed() {
         rig.relogin_seat_a();
 
         // Act
-        let ((), events) = routectl_testkit::with_capture(rig.reload_credentials()).await;
+        let ((), events) = routectl_testkit::with_capture(Box::pin(rig.reload_credentials())).await;
 
         // Assert
         let rebuilt: Vec<_> = events

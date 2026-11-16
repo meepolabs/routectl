@@ -28,7 +28,9 @@ use routectl_cli::commands::init::scaffold::scaffold_seed;
 use routectl_cli::commands::init::{self, CredentialCapture, InitArgs, InitIo, Offer};
 use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddArgs};
 use routectl_core::Result;
-use routectl_router::{CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config};
+use routectl_router::{
+    Auth, CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config,
+};
 use routectl_testkit::ScopedEnv;
 use tokio::net::TcpListener;
 
@@ -714,8 +716,8 @@ async fn yes_with_a_missing_model_id_errors_before_any_write() {
 
 // ---------------------------------------------------------------------
 // Forwarded end to end: no secret prompt, no login, no captured credential --
-// the produced config carries the `credential_source = "forwarded"` provider
-// with an empty credential.
+// the produced config carries the `credential = "forwarded"` provider
+// with no configured credential of its own.
 // ---------------------------------------------------------------------
 
 #[tokio::test]
@@ -751,16 +753,19 @@ async fn forwarded_path_prompts_for_no_secret_and_writes_an_empty_credential() {
     );
 
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("credential_source = \"forwarded\""), "{text}");
+    assert!(text.contains("credential = \"forwarded\""), "{text}");
     let config = parse_config(&text).unwrap();
+    let entry = config.providers.get("anthropic-forwarded").unwrap();
     assert_eq!(
-        config
-            .providers
-            .get("anthropic-forwarded")
-            .unwrap()
-            .api_key_ref(),
-        Some(""),
+        entry.api_key_ref(),
+        None,
         "a forwarded provider carries no configured credential",
+    );
+    assert_eq!(entry.auth, Auth::Bearer);
+    assert_eq!(
+        entry.forwarded_base_url(),
+        Some("https://api.anthropic.com"),
+        "the forwarded entry is pinned to the Anthropic API host",
     );
 }
 

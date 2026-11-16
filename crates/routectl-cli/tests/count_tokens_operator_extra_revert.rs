@@ -109,9 +109,10 @@ initial_backoff_ms = 0
 jitter_ms = 0
 
 [providers.up]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "{upstream}"
-api_key_ref = "{key_ref}"
+credential = "{key_ref}"
+auth = "x-api-key"
 payload_extras = {{ {EXTRA_KEY} = [{{ type = "url", name = "s1", url = "https://mcp.example.com/sse" }}] }}
 
 [models.m0]

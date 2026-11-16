@@ -51,9 +51,10 @@ fn router(gate_enabled: bool) -> Router {
     let body = format!(
         "version = 3\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://x\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [window_gate]\n\
          enabled = {gate_enabled}\n"
     );
@@ -244,9 +245,10 @@ fn a_config_without_a_window_gate_block_keeps_every_target() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://x\"\n\
-         api_key_ref = \"literal:k\"\n",
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("config parses");
     let router = Router::new(Arc::new(config));
@@ -477,8 +479,10 @@ fn an_anthropic_target_without_a_ceiling_reserves_the_egress_fill() {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.p]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"literal:k\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"x-api-key\"\n\
          [window_gate]\n\
          enabled = true\n",
     )

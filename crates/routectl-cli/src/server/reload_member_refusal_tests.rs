@@ -19,8 +19,7 @@ fn config_text(upstream: &str, members: &str, extra: &str) -> String {
     format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [retry]\nmax_attempts = 1\n\n\
-         [providers.seat-a]\nkind = \"anthropic-api\"\nbase_url = \"{upstream}\"\n\
-         api_key_ref = \"oauth://test-loopback#seat-a\"\nauth_kind = \"oauth-bearer\"\n\n\
+         [providers.seat-a]\nformat = \"anthropic-messages\"\nbase_url = \"{upstream}\"\ncredential = \"oauth://test-loopback#seat-a\"\nauth = \"bearer\"\n\n\
          {extra}\
          [pools.alpha]\nmembers = [{members}]\n\n\
          [models.grok]\nprovider = \"alpha\"\nupstream = \"claude-sonnet-4-6\"\n"
@@ -35,7 +34,7 @@ fn refused_candidates(upstream: &str) -> Vec<(&'static str, String, ReloadFailur
             config_text(
                 upstream,
                 "\"seat-a\", \"seat-b\"",
-                "[providers.seat-b]\nkind = \"anthropic-api\"\napi_key_ref = \"\"\n\n",
+                "[providers.seat-b]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"\"\nauth = \"x-api-key\"\n\n",
             ),
             ReloadFailure::ConfigLoadFailed,
         ),
@@ -44,10 +43,8 @@ fn refused_candidates(upstream: &str) -> Vec<(&'static str, String, ReloadFailur
             config_text(
                 upstream,
                 "\"seat-a\"",
-                "[providers.seat-c]\nkind = \"openai-responses\"\n\
-                 api_key_ref = \"oauth://codex#seat-c\"\n\n\
-                 [providers.seat-d]\nkind = \"openai-responses\"\n\
-                 api_key_ref = \"oauth://codex#seat-d\"\n\n\
+                "[providers.seat-c]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex#seat-c\"\nauth = \"bearer\"\n\n\
+                 [providers.seat-d]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex#seat-d\"\nauth = \"bearer\"\n\n\
                  [pools.beta]\nmembers = [\"seat-c\", \"seat-d\"]\n\n\
                  [models.gpt]\nprovider = \"beta\"\nupstream = \"gpt-5-codex\"\n\n",
             ),

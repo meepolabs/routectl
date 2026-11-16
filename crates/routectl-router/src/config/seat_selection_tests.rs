@@ -12,8 +12,10 @@ fn seat_selection_defaults_to_sticky_least_loaded() {
     // Arrange: a pool block omitting seat_selection.
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 
 [pools.anthropic-pool]
 members = ["anthropic"]
@@ -56,8 +58,10 @@ fn every_default_reader_agrees_on_sticky_least_loaded() {
     // Arrange
     let cfg: Config = toml::from_str(
         "[providers.solo]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("parse");
 
@@ -149,8 +153,10 @@ fn pool_block_rejects_unknown_field() {
 fn provider_entry_no_longer_accepts_seat_selection() {
     let result = toml::from_str::<Config>(
         "[providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"literal:sk-ant-test\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"literal:sk-ant-test\"\n\
+         auth = \"x-api-key\"\n\
          seat_selection = \"fill-first\"\n",
     );
     assert!(

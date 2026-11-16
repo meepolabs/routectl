@@ -2,41 +2,31 @@ use super::validate_aws_regions;
 use crate::config::Config;
 use crate::factory::collect_config_validation;
 
-/// One provider of each region-deriving shape, all naming `region`.
+/// One provider of each format that rides the AWS cloud, all naming
+/// `region`.
 fn provider_blocks(region: &str) -> Vec<(&'static str, String)> {
-    let mut blocks = vec![
-        (
-            "bedrock",
-            format!(
-                "[providers.lane]\nkind = \"bedrock\"\nregion = {region:?}\n\
-                 creds = {{ kind = \"default-chain\" }}\n"
-            ),
-        ),
-        (
-            "anthropic-api mantle",
-            format!(
-                "[providers.lane]\nkind = \"anthropic-api\"\n\
-                 bedrock_mantle = {{ region = {region:?}, creds = {{ kind = \"default-chain\" }} }}\n"
-            ),
-        ),
-        (
-            "openai-compat mantle",
-            format!(
-                "[providers.lane]\nkind = \"openai-compat\"\napi_key_ref = \"\"\n\
-                 bedrock_mantle = {{ region = {region:?}, creds = {{ kind = \"default-chain\" }} }}\n"
-            ),
-        ),
+    let mut formats = vec![
+        "bedrock-invoke",
+        "bedrock-converse",
+        "anthropic-messages",
+        "openai-chat",
     ];
     if cfg!(feature = "openai-responses") {
-        blocks.push((
-            "openai-responses mantle",
-            format!(
-                "[providers.lane]\nkind = \"openai-responses\"\napi_key_ref = \"\"\n\
-                 bedrock_mantle = {{ region = {region:?}, creds = {{ kind = \"default-chain\" }} }}\n"
-            ),
-        ));
+        formats.push("openai-responses");
     }
-    blocks
+    formats
+        .into_iter()
+        .map(|format| {
+            (
+                format,
+                format!(
+                    "[providers.lane]\nformat = \"{format}\"\n\
+                     cloud = {{ name = \"aws\", region = {region:?} }}\n\
+                     credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n"
+                ),
+            )
+        })
+        .collect()
 }
 
 fn parse(toml_text: &str) -> Config {
@@ -113,8 +103,8 @@ fn rejection_message_does_not_echo_the_region_value() {
 #[test]
 fn ignores_providers_that_derive_no_endpoint_from_a_region() {
     let cfg = parse(
-        "[providers.plain]\nkind = \"openai-compat\"\napi_key_ref = \"env://KEY\"\n\
-         base_url = \"https://api.example.com/v1\"\n",
+        "[providers.plain]\nformat = \"openai-chat\"\n\
+         base_url = \"https://api.example.com/v1\"\ncredential = \"env://KEY\"\nauth = \"bearer\"\n",
     );
 
     assert!(validate_aws_regions(&cfg).is_ok());

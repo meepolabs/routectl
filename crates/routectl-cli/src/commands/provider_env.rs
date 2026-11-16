@@ -17,7 +17,7 @@
 //! guard in the tests below, forcing a deliberate decision when a new
 //! provider kind joins. Lookups gate on
 //! [`routectl_router::is_config_provider_kind`], the same vocabulary
-//! `[providers.X].kind` draws from -- not baked-catalog membership, which a
+//! `[providers.X].format` resolves to -- not baked-catalog membership, which a
 //! config-nameable kind can have zero rows in (today `gemini`) while still
 //! being fully configurable.
 

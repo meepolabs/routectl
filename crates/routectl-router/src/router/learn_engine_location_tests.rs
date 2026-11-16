@@ -34,14 +34,12 @@ const TEMPERATURE_FIXTURE: &str = include_str!(
 const BEDROCK_TEMPERATURE_FIXTURE: &str =
     include_str!("../../tests/fixtures/rejections/bedrock/temperature-field-unsupported.json");
 
-const ANTHROPIC: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
-const OPENAI_COMPAT: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
-const CONVERSE: &str = "kind = \"bedrock\"\nregion = \"us-east-1\"\n\
-                        creds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
-const INVOKE: &str = "kind = \"bedrock\"\nregion = \"us-east-1\"\n\
-                      creds = { kind = \"default-chain\" }\napi_shape = \"invoke\"\n";
-const OPENAI_RESPONSES: &str = "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n";
-const GEMINI: &str = "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n";
+const ANTHROPIC: &str = "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
+const OPENAI_COMPAT: &str = "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+const CONVERSE: &str = "format = \"bedrock-converse\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
+const INVOKE: &str = "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
+const OPENAI_RESPONSES: &str = "format = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+const GEMINI: &str = "format = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\ncredential = \"literal:k\"\nauth = \"x-goog-api-key\"\n";
 
 /// A router whose alias walks one target, `provider` on an entry configured
 /// by `provider_block`, one call per attempt.

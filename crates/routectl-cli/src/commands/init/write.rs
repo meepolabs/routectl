@@ -134,9 +134,10 @@ host = \"127.0.0.1\"
 port = 8787
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 ";
 
     fn with_model() -> String {
@@ -150,9 +151,10 @@ port = 8787
 
 [providers.fast]
 # keep this comment
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"

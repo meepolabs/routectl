@@ -1,7 +1,7 @@
 //! Integration: pin that ingress + provider + model anthropic-beta
 //! all union onto the upstream request on both dispatch paths.
 use super::*;
-use crate::config::{ProviderEntry, ProviderRuntimePolicy};
+use crate::config::ProviderEntry;
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
 use async_trait::async_trait;
@@ -96,18 +96,8 @@ fn router_with_capture(
     }
     config.providers.insert(
         "anthropic".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: provider_headers,
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k")
+            .with_header_extras(provider_headers),
     );
 
     let mut router = Router::new(Arc::new(config));

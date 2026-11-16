@@ -6,7 +6,7 @@
 use super::*;
 #[cfg(feature = "bedrock")]
 use crate::capability_matcher::resolve_requested_capability;
-use crate::config::{AliasValue, Config, OverrideEntry, ProviderEntry, ProviderRuntimePolicy};
+use crate::config::{AliasValue, Config, OverrideEntry, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::LearnedProbeGuard;
 use crate::router::chain::into_one_dispatch_target;
@@ -161,34 +161,12 @@ fn build_router_with_chain(
     let mut config = Config::default();
     config.providers.insert(
         "bedrock-prov".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k"),
     );
     insert_unsupported_override(&mut config, "bedrock-prov", unsupported_first);
     config.providers.insert(
         "anthropic-prov".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k"),
     );
     insert_unsupported_override(&mut config, "anthropic-prov", unsupported_second);
     config.aliases.insert(
@@ -434,18 +412,7 @@ fn build_router_two_models_one_provider(
     let mut config = Config::default();
     config.providers.insert(
         "shared-prov".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k"),
     );
     config.aliases.insert(
         "alias".into(),
@@ -590,18 +557,7 @@ fn helper_resolves_provider_and_model_scoped_overrides() {
     let mut config = Config::default();
     config.providers.insert(
         "prov-blocks-ws".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k"),
     );
     // The override registry is built from config, so the model lives in
     // config.models (mirroring build_resolved_models).
@@ -1144,18 +1100,8 @@ fn beta_pinned_reads_provider_and_model_floors_and_ignores_non_beta_strips() {
     );
     config.providers.insert(
         "prov".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: provider_headers,
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: crate::config::ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k")
+            .with_header_extras(provider_headers),
     );
     let router = Router::new(Arc::new(config));
     let target = strip_target("prov");
@@ -1179,24 +1125,20 @@ fn bedrock_provider_beta_floor_routes_away_never_strips() {
     // that floor on the wire AFTER the canonical strip, so a BetaFlag strip
     // of a floor-pinned token is a false success -> the target must route
     // away instead of shipping the pinned flag.
-    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
+
     let mut config = Config::default();
     config.providers.insert(
         "prov".into(),
-        ProviderEntry::Bedrock {
-            region: "us-west-2".into(),
-            api_shape: BedrockApiShapeConfig::Invoke,
-            creds: BedrockCredsConfig::DefaultChain,
-            user_agent: None,
-            header_extras: BTreeMap::from([(
-                "anthropic-beta".to_string(),
-                "context-management-2025-06-27".to_string(),
-            )]),
-            payload_extras: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::cloud_aws(
+            crate::config::Format::BedrockInvoke,
+            "us-west-2",
+            "aws://chain",
+            crate::config::Auth::AwsSigv4,
+        )
+        .with_header_extras(BTreeMap::from([(
+            "anthropic-beta".to_string(),
+            "context-management-2025-06-27".to_string(),
+        )])),
     );
     let router = Router::new(Arc::new(config));
     let target = strip_target("prov");
@@ -1832,7 +1774,6 @@ fn strip_helper_is_inert_with_empty_verdict() {
 #[cfg(feature = "bedrock")]
 #[test]
 fn bedrock_target_threads_kind_so_dotted_capability_resolves_to_head() {
-    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
     use routectl_core::capability::SignalTier;
     use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy};
 
@@ -1844,17 +1785,12 @@ fn bedrock_target_threads_kind_so_dotted_capability_resolves_to_head() {
     let mut config = Config::default();
     config.providers.insert(
         "bedrock-prov".into(),
-        ProviderEntry::Bedrock {
-            region: "us-east-1".into(),
-            api_shape: BedrockApiShapeConfig::default(),
-            creds: BedrockCredsConfig::DefaultChain,
-            user_agent: None,
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::cloud_aws(
+            crate::config::Format::BedrockInvoke,
+            "us-east-1",
+            "aws://chain",
+            crate::config::Auth::AwsSigv4,
+        ),
     );
     let router = Router::new(Arc::new(config));
     let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {

@@ -104,9 +104,10 @@ fn router() -> Router {
     let toml_text = r#"
 version = 3
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 [capability]
 enabled = true
 "#;

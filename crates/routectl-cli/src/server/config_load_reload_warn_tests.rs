@@ -12,9 +12,10 @@ fn config_with_model_keys(model_keys: &str) -> String {
     format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [providers.fast]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"http://127.0.0.1:1\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_UNSET_KEY\"\n\
+         credential = \"env://ROUTECTL_TEST_UNSET_KEY\"\n\
+         auth = \"bearer\"\n\
          [models.gpt]\n\
          provider = \"fast\"\n\
          upstream = \"gpt-4o\"\n\

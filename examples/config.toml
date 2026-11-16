@@ -15,8 +15,9 @@ version = 5
 # routectl config has four first-class tables:
 #
 # [providers.X]   Transport + auth ONLY. How to reach an upstream.
-#                 (kind, api_key_ref, base_url, region/creds for
-#                 Bedrock, header_extras, runtime gates, ...)
+#                 Every entry writes the same identity keys, in this
+#                 order: format, then base_url OR cloud, credential,
+#                 auth; then tuning (header_extras, runtime gates, ...).
 #                 One entry names exactly ONE credential.
 #
 # [pools.X]       A group of same-kind provider entries (OAuth accounts)
@@ -53,43 +54,50 @@ port = 8787
 
 # ---- Providers (transport + auth) ----
 
-# OpenAI-compatible host. Use this kind for OpenAI direct, OpenRouter,
+# OpenAI Chat Completions format. Use it for OpenAI direct, OpenRouter,
 # DeepSeek, Groq, NIM, vLLM, llama.cpp, and any host that speaks the
 # OpenAI Chat Completions wire shape.
 [providers.openrouter]
-kind        = "openai-compat"
-base_url    = "https://openrouter.ai/api/v1"
-api_key_ref = "env://OPENROUTER_API_KEY"
+format     = "openai-chat"
+base_url   = "https://openrouter.ai/api/v1"
+credential = "env://OPENROUTER_API_KEY"
+auth       = "bearer"
 
 [providers.deepseek]
-kind        = "openai-compat"
-base_url    = "https://api.deepseek.com/v1"
-api_key_ref = "env://DEEPSEEK_API_KEY"
+format     = "openai-chat"
+base_url   = "https://api.deepseek.com/v1"
+credential = "env://DEEPSEEK_API_KEY"
+auth       = "bearer"
 
 # Anthropic Messages API direct, with a static API key. Named
 # `anthropic-api-key` so the plain family name `anthropic` stays free for
 # the POOL below -- a pool and a provider entry may not share a name.
 [providers.anthropic-api-key]
-kind        = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format     = "anthropic-messages"
+base_url   = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth       = "x-api-key"
 
-# Anthropic via OAuth bearer (Claude Pro/Max subscription), default seat.
-# `routectl login anthropic` mints the credential and OFFERS exactly this
-# entry plus the pool below; `oauth://anthropic` resolves it at request
-# time to an `sk-ant-oat01-...` access token.
+# Anthropic with the routectl-managed login (Claude Pro/Max subscription),
+# default seat. `routectl login anthropic` mints the credential and OFFERS
+# exactly this entry plus the pool below; `oauth://anthropic` resolves it
+# at request time to an access token sent as a bearer. A managed login is
+# accepted only on https://api.anthropic.com with auth = "bearer".
 [providers.anthropic-default]
-kind        = "anthropic-api"
-api_key_ref = "oauth://anthropic"
-auth_kind   = "oauth-bearer"
+format        = "anthropic-messages"
+base_url      = "https://api.anthropic.com"
+credential    = "oauth://anthropic"
+auth          = "bearer"
 header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 
 # A second, independent Anthropic subscription seat. Created by
 # `routectl login anthropic --label work`; the `#work` fragment is what
 # selects that seat rather than the default one.
 [providers.anthropic-work]
-kind        = "anthropic-api"
-api_key_ref = "oauth://anthropic#work"
-auth_kind   = "oauth-bearer"
+format        = "anthropic-messages"
+base_url      = "https://api.anthropic.com"
+credential    = "oauth://anthropic#work"
+auth          = "bearer"
 header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 
 # The pool that groups both Anthropic seats. A model pointing at
@@ -103,14 +111,15 @@ accepts_new_logins = true
 # seat_selection   = "fill-first"   # "sticky-least-loaded" (default) /
 #                                   # "fill-first"
 
-# OpenAI Responses API via ChatGPT subscription bearer JWT (Codex),
-# default seat. `routectl login codex` mints it and offers this shape.
-# account_id_ref is deliberately absent: under an oauth:// bearer
-# routectl reads `chatgpt_account_id` off the session JWT itself.
+# OpenAI Responses API via the ChatGPT subscription login (Codex), default
+# seat. `routectl login codex` mints it and offers this shape. The Codex
+# host selects the ChatGPT dialect. account_id_ref is deliberately absent:
+# with an oauth:// credential routectl reads the account id off the login.
 [providers.codex-default]
-kind        = "openai-responses"
-auth_kind   = "chatgpt-oauth"
-api_key_ref = "oauth://codex"
+format     = "openai-responses"
+base_url   = "https://chatgpt.com/backend-api/codex"
+credential = "oauth://codex"
+auth       = "bearer"
 # codex_version = "0.167.0"   # override the pinned codex CLI version on the
                               # wire without a rebuild; restart-required.
 
@@ -121,12 +130,15 @@ members            = ["codex-default"]
 accepts_new_logins = true
 
 # AWS Bedrock with the default credential chain (env -> profile ->
-# SSO -> IRSA -> IMDS). Region applies to every model on this provider.
+# SSO -> IRSA -> IMDS). The region applies to every model on this
+# provider; the endpoint host derives from it. Use format =
+# "bedrock-converse" for the vendor-neutral Converse API, and
+# credential = "aws://profile/<name>" for a named profile.
 [providers.bedrock]
-kind   = "bedrock"
-region = "us-west-2"
-creds  = { kind = "default-chain" }
-# api_shape = "invoke"            # default; use "converse" for vendor-neutral.
+format     = "bedrock-invoke"
+cloud      = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth       = "aws-sigv4"
 # header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }   # beta floor, never withheld.
 
 # Gemini via the Cloud Code ("antigravity") surface. `routectl login
@@ -136,11 +148,11 @@ creds  = { kind = "default-chain" }
 # the offered entry does not carry (extra headers, an explicit base_url,
 # runtime gates) rather than accepting the default shape.
 # [providers.antigravity-default]
-# kind        = "gemini"
-# api_key_ref = "oauth://antigravity"
-# auth_mode   = "cloud-code"
+# format           = "gemini-cloud-code"
+# base_url         = "https://daily-cloudcode-pa.googleapis.com"   # or the PROD host https://cloudcode-pa.googleapis.com
+# credential       = "oauth://antigravity"
+# auth             = "bearer"
 # cloud_project_id = "my-project-1234"   # BARE id, never "projects/..."; skips discovery.
-# base_url    = "https://cloudcode-pa.googleapis.com"   # PROD host; default is the daily one.
 
 # ---- Models (provider + upstream + reasoning capability) ----
 # Each model picks its provider ENTRY or its POOL, names the upstream
@@ -201,7 +213,7 @@ upstream = "gpt-5.4"
 # (total tokens) lets the window gate skip a model a request cannot fit
 # and is reported on /v1/models; set it on every model in a gated chain.
 # `max_output_tokens` is the limit routectl fills when a caller OMITS
-# max_tokens (the Anthropic-shape egresses only: anthropic-api,
+# max_tokens (the Anthropic-shape egresses only: anthropic-messages,
 # bedrock-invoke), lowered by a learned ceiling; unset means 64000. Set it
 # on any model whose real ceiling is lower:
 #   context_window    = 200000
@@ -330,9 +342,10 @@ inferred_window_hours = 1       # window for a second observation to confirm an 
 # blocks echo back to the upstream intact.
 
 # [providers.deepseek-anthropic]
-# kind               = "anthropic-api"
+# format             = "anthropic-messages"
 # base_url           = "https://api.deepseek.com/anthropic"
-# api_key_ref        = "env://DEEPSEEK_API_KEY"
+# credential         = "env://DEEPSEEK_API_KEY"
+# auth               = "x-api-key"
 # context_management = true
 
 # [models.deepseek-r1]

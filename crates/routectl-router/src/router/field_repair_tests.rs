@@ -346,8 +346,8 @@ pub(super) fn chain_config(alias: &str, seats: usize) -> Config {
     let mut chain: Vec<String> = Vec::with_capacity(seats);
     for idx in 0..seats {
         toml_text.push_str(&format!(
-            "\n[providers.p{idx}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
-             base_url = \"https://seat{idx}.example.test\"\n"
+            "\n[providers.p{idx}]\nformat = \"anthropic-messages\"\n\
+             base_url = \"https://seat{idx}.example.test\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
         ));
         chain.push(format!("m{idx}"));
     }
@@ -471,7 +471,8 @@ fn forwarded_seat(answer: Answer) -> (Router, Arc<Observed>, ChatRequest) {
         .providers
         .remove("p0")
         .expect("the fixture entry exists")
-        .with_credential_source(crate::config::CredentialSource::Forwarded);
+        .with_credential("forwarded")
+        .with_auth(crate::config::Auth::Bearer);
     config.providers.insert("p0".to_string(), entry);
     let (router, mut observed, _mocks) = install(config, 1, answer);
     let mut req = req_on(ALIAS);
@@ -485,7 +486,7 @@ fn forwarded_seat(answer: Answer) -> (Router, Arc<Observed>, ChatRequest) {
 /// which this stage must not attribute a rejection to at all.
 fn loopback_seat(answer: Answer) -> (Router, Arc<Observed>) {
     let mut config: Config = toml::from_str(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:18080\"\n",
+        "\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"http://127.0.0.1:18080\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n",
     )
     .expect("valid test toml");
     config
@@ -497,23 +498,17 @@ fn loopback_seat(answer: Answer) -> (Router, Arc<Observed>) {
 
 /// A one-seat `anthropic-api` chain on the BEDROCK MANTLE sub-lane.
 ///
-/// `base_url` is deliberately left unset: mantle validation REQUIRES the
-/// default, and the factory derives the real endpoint from the region. That is
-/// the whole hazard -- the configured base reads as a remote Anthropic host
-/// while the effective egress is Bedrock.
+/// The entry rides the AWS cloud and sets no `base_url`: the factory derives
+/// the real endpoint from the region, so the effective egress is Bedrock
+/// although the format is the Anthropic one.
 #[cfg(feature = "bedrock")]
 fn mantle_seat(answer: Answer) -> (Router, Arc<Observed>) {
     let toml_text = r#"
 [providers.p0]
-kind = "anthropic-api"
-api_key_ref = ""
-
-[providers.p0.bedrock_mantle]
-region = "us-west-2"
-
-[providers.p0.bedrock_mantle.creds]
-kind = "bearer-key"
-key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+format = "anthropic-messages"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth = "bearer"
 "#;
     let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
     config
@@ -1076,7 +1071,7 @@ async fn a_loopback_target_repairs_nothing_and_mints_nothing() {
     // repairing unguarded.
     let _injection = provisional::inject(REJECTED_PATH);
     let mut config: Config = toml::from_str(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:18080\"\n",
+        "\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"http://127.0.0.1:18080\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n",
     )
     .expect("valid test toml");
     config
@@ -1208,7 +1203,7 @@ fn openai_compat_rejection(code: Option<&str>) -> Error {
 /// of the grounded field.
 type WidenedLane = (&'static str, &'static str, fn() -> Error);
 
-const OPENAI_COMPAT_TOML: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
+const OPENAI_COMPAT_TOML: &str = "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
 
 /// Each non-anthropic kind field repair acts on, openai-compat in both of the
 /// shapes its upstreams refuse a parameter in (coded and template-only).
@@ -1229,7 +1224,7 @@ fn widened_lanes() -> Vec<WidenedLane> {
     #[cfg(feature = "bedrock")]
     lanes.push((
         "bedrock",
-        "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
+        "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
         bedrock_field_rejection,
     ));
     lanes
@@ -1314,11 +1309,11 @@ async fn a_lane_that_cannot_carry_the_row_performs_no_field_repair() {
     let mut refused: Vec<&str> = Vec::new();
     if cfg!(feature = "openai-responses") {
         refused.push(
-            "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n",
+            "format = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
         );
     }
     if cfg!(feature = "gemini") {
-        refused.push("kind = \"gemini\"\napi_key_ref = \"literal:k\"\n");
+        refused.push("format = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\ncredential = \"literal:k\"\nauth = \"x-goog-api-key\"\n");
     }
     for provider_toml in refused {
         // Arrange

@@ -3,7 +3,7 @@
 //! verdict holds only for a vendor's own login on its own lane.
 
 use super::*;
-use crate::config::{Config, CredentialSource, ModelEntry, PoolEntry};
+use crate::config::{Auth, Config, ModelEntry, PoolEntry};
 use crate::factory::{BuildOptions, build_provider, build_resolved_models, pool_member_refusals};
 use async_trait::async_trait;
 use routectl_auth::{CredentialProbeFailure, SecretRef, SecretStore};
@@ -104,10 +104,10 @@ fn codex(r: &str, base_url: &str) -> ProviderEntry {
 fn cloud_code(r: &str, base_url: &str) -> ProviderEntry {
     entry_from_toml(&format!(
         "[providers.p]\n\
-         kind = \"gemini\"\n\
-         auth_mode = \"cloud-code\"\n\
-         api_key_ref = \"{r}\"\n\
-         base_url = {}\n",
+         format = \"gemini-cloud-code\"\n\
+         base_url = {}\n\
+         credential = \"{r}\"\n\
+         auth = \"bearer\"\n",
         toml::Value::String(base_url.to_string())
     ))
 }
@@ -116,9 +116,10 @@ fn cloud_code(r: &str, base_url: &str) -> ProviderEntry {
 fn mantle_chat(key_ref: &str) -> ProviderEntry {
     entry_from_toml(&format!(
         "[providers.p]\n\
-         kind = \"openai-compat\"\n\
-         api_key_ref = \"\"\n\
-         bedrock_mantle = {{ region = \"us-east-1\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n"
+         format = \"openai-chat\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n"
     ))
 }
 
@@ -126,9 +127,10 @@ fn mantle_chat(key_ref: &str) -> ProviderEntry {
 fn mantle_anthropic(key_ref: &str) -> ProviderEntry {
     entry_from_toml(&format!(
         "[providers.p]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"\"\n\
-         bedrock_mantle = {{ region = \"us-east-1\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n"
+         format = \"anthropic-messages\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n"
     ))
 }
 
@@ -136,9 +138,10 @@ fn mantle_anthropic(key_ref: &str) -> ProviderEntry {
 fn mantle_responses(key_ref: &str) -> ProviderEntry {
     entry_from_toml(&format!(
         "[providers.p]\n\
-         kind = \"openai-responses\"\n\
-         api_key_ref = \"\"\n\
-         bedrock_mantle = {{ region = \"us-east-1\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n"
+         format = \"openai-responses\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n"
     ))
 }
 
@@ -146,23 +149,10 @@ fn mantle_responses(key_ref: &str) -> ProviderEntry {
 fn native_bedrock(key_ref: &str) -> ProviderEntry {
     entry_from_toml(&format!(
         "[providers.p]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n"
-    ))
-}
-
-/// Native Bedrock with static AWS keys: `secret_key_ref` and
-/// `session_token_ref` are the two optional-shape slots a managed reference
-/// could ride.
-#[cfg(feature = "bedrock")]
-fn native_bedrock_static(secret_key_ref: &str, session_token_ref: &str) -> ProviderEntry {
-    entry_from_toml(&format!(
-        "[providers.p]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = {{ kind = \"static\", access_key_ref = \"env://ROUTECTL_PLAN_TEST_ACCESS\", \
-         secret_key_ref = \"{secret_key_ref}\", session_token_ref = \"{session_token_ref}\" }}\n"
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n"
     ))
 }
 
@@ -256,30 +246,18 @@ fn refused_entries(lane: &VendorLane, r: &str) -> Vec<(String, ProviderEntry)> {
     }
     v.push(("wrong kind".to_string(), (lane.wrong_kind)(r)));
     if lane.vendor == "anthropic" {
-        for (label, base) in [
-            ("api-key form", lane.own_base),
-            ("api-key form, unset base", ""),
-        ] {
-            let mut entry = ProviderEntry::anthropic_api(r).with_auth_kind(AuthKind::ApiKey);
-            if !base.is_empty() {
-                entry = entry.with_base_url(base);
-            }
-            v.push((label.to_string(), entry));
-        }
+        v.push((
+            "api-key form".to_string(),
+            ProviderEntry::anthropic_api(r)
+                .with_auth_kind(AuthKind::ApiKey)
+                .with_base_url(lane.own_base),
+        ));
     }
     #[cfg(feature = "bedrock")]
     {
         v.push(("mantle carrier".to_string(), mantle_chat(r)));
         v.push(("anthropic mantle carrier".to_string(), mantle_anthropic(r)));
-        v.push(("native bedrock creds".to_string(), native_bedrock(r)));
-        v.push((
-            "native bedrock static secret key".to_string(),
-            native_bedrock_static(r, "env://ROUTECTL_PLAN_TEST_TOKEN"),
-        ));
-        v.push((
-            "native bedrock static session token".to_string(),
-            native_bedrock_static("env://ROUTECTL_PLAN_TEST_SECRET", r),
-        ));
+        v.push(("native bedrock credential".to_string(), native_bedrock(r)));
     }
     #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
     v.push(("responses mantle carrier".to_string(), mantle_responses(r)));
@@ -317,11 +295,10 @@ fn counting() -> (Arc<CountingStore>, Arc<dyn SecretStore>) {
 /// The text every plan refusal carries; no later build step produces it.
 const PLAN_REFUSAL: &str = "the managed ";
 
-/// The pool rule a plan refusal maps to. A member with no primary
-/// `api_key_ref` (the Bedrock mantle and native Bedrock rows) would
-/// otherwise be refused as having no credential reference before any probe,
-/// so on those rows this text, not the zero count, is what pins the plan.
-const POOL_PLAN_REFUSAL: &str = "carries a managed credential outside the lane";
+/// The pool rule a plan refusal maps to. The pool probes a member's
+/// credential only after its plan, so on the rows whose own lane reads
+/// nothing at build this text, not the zero count, is what pins the plan.
+const POOL_PLAN_REFUSAL: &str = "is refused by its provider plan";
 
 /// Build `entry` on all three paths over counting stores; every path must
 /// refuse it with the plan's own reason and reach no store method.
@@ -485,13 +462,21 @@ fn a_refused_plan_names_the_provider_and_withholds_the_entry() {
 
     assert!(err.contains("provider `gw`"), "{err}");
     assert!(err.contains("api.anthropic.com"), "{err}");
-    for leaked in ["sentinel-host", "seat-secret-label", "oauth://"] {
+    for leaked in ["sentinel-host", "seat-secret-label", "#"] {
         assert!(!err.contains(leaked), "leaks {leaked}: {err}");
     }
+    let other_seat_and_host = anthropic("oauth://anthropic#seat-b", "https://other.example/q");
+    assert_eq!(
+        plan_provider("gw", &other_seat_and_host)
+            .expect_err("foreign host")
+            .to_string(),
+        err,
+        "the refusal is rendered from the vendor row, not from the entry"
+    );
 }
 
 /// The api-key form of a managed Anthropic login is refused with a message
-/// that names the auth selector it needs and withholds the ref.
+/// that names the auth it needs and withholds the seat label.
 #[test]
 fn the_api_key_form_of_a_managed_anthropic_login_is_refused_naming_the_selector() {
     let entry = ProviderEntry::anthropic_api("oauth://anthropic#seat-secret-label");
@@ -502,8 +487,8 @@ fn the_api_key_form_of_a_managed_anthropic_login_is_refused_naming_the_selector(
 
     assert!(err.contains("provider `claude`"), "{err}");
     assert!(err.contains(PLAN_REFUSAL), "{err}");
-    assert!(err.contains("auth_kind = \"oauth-bearer\""), "{err}");
-    for leaked in ["seat-secret-label", "oauth://"] {
+    assert!(err.contains("auth = \"bearer\""), "{err}");
+    for leaked in ["seat-secret-label", "#"] {
         assert!(!err.contains(leaked), "leaks {leaked}: {err}");
     }
     assert!(
@@ -556,13 +541,16 @@ fn client_identity_per_lane() {
         ),
         (
             "forwarded",
-            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+            ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer),
             false,
         ),
         (
-            "forwarded carrying the managed ref",
-            ProviderEntry::anthropic_api("oauth://anthropic")
-                .with_credential_source(CredentialSource::Forwarded),
+            "forwarded with the managed ref in its second slot",
+            {
+                let mut entry = ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer);
+                entry.account_id_ref = Some("oauth://anthropic".into());
+                entry
+            },
             false,
         ),
         (
@@ -573,7 +561,7 @@ fn client_identity_per_lane() {
             false,
         ),
         (
-            "labeled managed anthropic in the default api-key form, base unset",
+            "labeled managed anthropic in the builder's api-key form",
             ProviderEntry::anthropic_api("oauth://anthropic#seat-b"),
             false,
         ),
@@ -634,10 +622,9 @@ fn client_identity_per_lane() {
             false,
         ));
         rows.push((
-            "managed codex on the api-key surface",
+            "managed codex on the platform host",
             ProviderEntry::openai_responses("oauth://codex")
-                .with_openai_responses_auth_kind(ResponsesAuth::ApiKey)
-                .with_openai_responses_base_url("https://chatgpt.com/backend-api/codex"),
+                .with_openai_responses_base_url("https://api.openai.com/v1"),
             false,
         ));
     }

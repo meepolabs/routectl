@@ -307,10 +307,10 @@ async fn bedrock_invoke_router(origin: &str) -> Router {
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.p]\n\
-         kind = \"bedrock\"\n\
-         region = \"{BEDROCK_REGION}\"\n\
-         api_shape = \"invoke\"\n\
-         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"{BEDROCK_REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [models.m]\n\
          provider = \"p\"\n\
          upstream = \"{BEDROCK_MODEL_ID}\"\n\n\

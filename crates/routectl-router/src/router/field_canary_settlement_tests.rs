@@ -117,7 +117,8 @@ fn chain_config(seats: usize) -> Config {
     let mut chain: Vec<String> = Vec::with_capacity(seats);
     for idx in 0..seats {
         toml_text.push_str(&format!(
-            "\n[providers.p{idx}]\nkind = \"{ANTHROPIC}\"\napi_key_ref = \"literal:k\"\n\
+            "\n[providers.p{idx}]\nformat = \"anthropic-messages\"\n\
+             credential = \"literal:k\"\nauth = \"x-api-key\"\n\
              base_url = \"https://seat{idx}.example.test\"\n"
         ));
         chain.push(format!("m{idx}"));

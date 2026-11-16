@@ -23,7 +23,6 @@
 use super::*;
 use axum::body::to_bytes;
 use routectl_core::{Error, UpstreamBody};
-use routectl_router::config::CredentialSource;
 use routectl_usage::{CHANNEL_CAPACITY, Outcome, UsageWriter};
 
 /// A test-owned loopback upstream that accepts every connection and closes
@@ -4135,7 +4134,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
 // `req.routectl_internal.forwarded_bearer` ONLY when BOTH:
 //   (a) the `x-routectl-mitm-proxied` seam header is present (the MITM
 //       proxy stamps it exclusively on the re-injected inference leg), AND
-//   (b) `router.has_forwarded_provider()` is true (a `credential_source =
+//   (b) `router.has_forwarded_provider()` is true (a `credential =
 //       "forwarded"` provider is configured).
 // Every other path (no forwarded provider configured, no seam header, no
 // inbound bearer) MUST leave the carrier byte-identical to pre-passthrough
@@ -4143,22 +4142,28 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
 // scheme-stripped bearer value (what the egress dispatch path reads) and is
 // never rendered raw by the carrier's `Debug`.
 
-/// Build an `Arc<Router>` whose `[providers]` table carries `cs`. `None`
-/// models "no provider configured at all"; `Some(cs)` models a single
-/// `anthropic-api` provider entry with that `credential_source`. `Router::new`
-/// does no I/O, so this is a pure carrier for the `has_forwarded_provider()`
-/// read the gate performs.
-fn router_with_provider_credential_source(
-    cs: Option<CredentialSource>,
+/// The `credential` of a provider that relays the client's own credential.
+const FORWARDED: &str = "forwarded";
+
+/// The `credential` of a provider holding its own key.
+const OWN: &str = "env://OWN_KEY";
+
+/// Build an `Arc<Router>` whose `[providers]` table carries `credential`.
+/// `None` models "no provider configured at all"; `Some(credential)` models
+/// a single bearer `anthropic-messages` provider entry with that
+/// `credential`. `Router::new` does no I/O, so this is a pure carrier for
+/// the `has_forwarded_provider()` read the gate performs.
+fn router_with_provider_credential(
+    credential: Option<&str>,
 ) -> std::sync::Arc<routectl_router::Router> {
-    use routectl_router::{Config, ProviderEntry, Router};
+    use routectl_router::{Auth, Config, ProviderEntry, Router};
     use std::collections::BTreeMap;
     use std::sync::Arc;
     let mut providers = BTreeMap::new();
-    if let Some(credential_source) = cs {
+    if let Some(credential) = credential {
         providers.insert(
             "p".to_string(),
-            ProviderEntry::anthropic_api("").with_credential_source(credential_source),
+            ProviderEntry::anthropic_api(credential).with_auth(Auth::Bearer),
         );
     }
     Arc::new(Router::new(Arc::new(Config {
@@ -4183,13 +4188,13 @@ fn ingress_headers(nonce: Option<&MitmSeamNonce>, authorization: Option<&str>) -
 
 /// No forwarded provider configured is the default capability: even with
 /// the seam-header hint AND an inbound bearer present, the config gate is
-/// closed, so nothing is captured. An `Own`-credential provider present
+/// closed, so nothing is captured. An own-credential provider present
 /// (not just an EMPTY `[providers]` table) proves the gate keys on
-/// `credential_source`, not merely "some provider exists".
+/// `credential = "forwarded"`, not merely "some provider exists".
 #[test]
 fn forwarded_bearer_stays_none_without_forwarded_provider_even_with_seam_and_bearer() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Own));
+    let router = router_with_provider_credential(Some(OWN));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers(Some(&nonce), Some("Bearer sk-own-mode-tok"));
     let mut req = sample_request("m", false);
@@ -4210,7 +4215,7 @@ fn forwarded_bearer_stays_none_without_forwarded_provider_even_with_seam_and_bea
 #[test]
 fn forwarded_bearer_stays_none_in_forwarded_mode_without_seam_header() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers(None, Some("Bearer sk-no-seam-tok"));
     let mut req = sample_request("m", false);
@@ -4232,7 +4237,7 @@ fn forwarded_bearer_stays_none_in_forwarded_mode_without_seam_header() {
 #[test]
 fn forwarded_bearer_stays_none_when_seam_header_carries_a_spoofed_wrong_value() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let mut headers = ingress_headers(None, Some("Bearer sk-spoofed-seam-tok"));
     headers.insert(
@@ -4258,7 +4263,7 @@ fn forwarded_bearer_stays_none_when_seam_header_carries_a_spoofed_wrong_value() 
 #[test]
 fn forwarded_bearer_captured_when_forwarded_and_seam_and_bearer_present() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers(Some(&nonce), Some("Bearer sk-ant-oat01-passthrough"));
     let mut req = sample_request("m", false);
@@ -4284,7 +4289,7 @@ fn forwarded_bearer_captured_when_forwarded_and_seam_and_bearer_present() {
 #[test]
 fn forwarded_bearer_stays_none_when_no_provider_configured_at_all() {
     // Arrange
-    let router = router_with_provider_credential_source(None);
+    let router = router_with_provider_credential(None);
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers(Some(&nonce), Some("Bearer sk-no-mitm-tok"));
     let mut req = sample_request("m", false);
@@ -4304,7 +4309,7 @@ fn forwarded_bearer_stays_none_when_no_provider_configured_at_all() {
 #[test]
 fn forwarded_bearer_stays_none_when_gates_open_but_no_authorization_header() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers(Some(&nonce), None);
     let mut req = sample_request("m", false);
@@ -4322,7 +4327,7 @@ fn forwarded_bearer_stays_none_when_gates_open_but_no_authorization_header() {
 #[test]
 fn forwarded_bearer_stays_none_for_non_bearer_authorization_scheme() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers(Some(&nonce), Some("Basic dXNlcjpwYXNz"));
     let mut req = sample_request("m", false);
@@ -4340,7 +4345,7 @@ fn forwarded_bearer_stays_none_for_non_bearer_authorization_scheme() {
 #[test]
 fn captured_bearer_is_redacted_in_carrier_debug() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers(Some(&nonce), Some("Bearer sk-leak-canary-42"));
     let mut req = sample_request("m", false);
@@ -4399,7 +4404,7 @@ fn ingress_headers_with(nonce: Option<&MitmSeamNonce>, entries: &[(&str, &str)])
 #[test]
 fn stainless_headers_captured_when_forwarded_and_seam_present() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers_with(
         Some(&nonce),
@@ -4436,7 +4441,7 @@ fn stainless_headers_captured_when_forwarded_and_seam_present() {
 #[test]
 fn stainless_headers_stays_empty_without_forwarded_provider_even_with_seam() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Own));
+    let router = router_with_provider_credential(Some(OWN));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers_with(Some(&nonce), &[("x-stainless-lang", "js")]);
     let mut req = sample_request("m", false);
@@ -4456,7 +4461,7 @@ fn stainless_headers_stays_empty_without_forwarded_provider_even_with_seam() {
 #[test]
 fn stainless_headers_stays_empty_without_seam_header() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers_with(None, &[("x-stainless-lang", "js")]);
     let mut req = sample_request("m", false);
@@ -4476,7 +4481,7 @@ fn stainless_headers_stays_empty_without_seam_header() {
 #[test]
 fn stainless_headers_stays_empty_when_seam_header_carries_a_spoofed_wrong_value() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let mut headers = ingress_headers_with(None, &[("x-stainless-lang", "js")]);
     headers.insert(
@@ -4501,7 +4506,7 @@ fn stainless_headers_stays_empty_when_seam_header_carries_a_spoofed_wrong_value(
 #[test]
 fn stainless_headers_stays_empty_when_no_provider_configured() {
     // Arrange
-    let router = router_with_provider_credential_source(None);
+    let router = router_with_provider_credential(None);
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers_with(Some(&nonce), &[("x-stainless-lang", "js")]);
     let mut req = sample_request("m", false);
@@ -4522,7 +4527,7 @@ fn stainless_headers_stays_empty_when_no_provider_configured() {
 #[test]
 fn stainless_capture_ignores_non_stainless_headers() {
     // Arrange
-    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential(Some(FORWARDED));
     let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers_with(
         Some(&nonce),

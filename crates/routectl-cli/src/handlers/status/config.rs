@@ -82,20 +82,23 @@ struct AliasChainWire {
 struct ProviderWire {
     /// The `[providers.<id>]` table key.
     provider_id: String,
-    /// The entry's `kind = "..."` discriminant.
+    /// The entry's provider family token (derived from its `format`).
     provider_kind: String,
+    /// The entry's `format = "..."` value: a closed vocabulary.
+    format: String,
     /// The CONFIGURED endpoint origin (scheme + host + port), or `null` when
-    /// the entry's config carries no endpoint or the value does not parse.
-    /// `null` does NOT mean "no endpoint": several kinds derive theirs at
-    /// factory time, which a pure derivation over the config cannot reach.
+    /// the entry rides a cloud (see `cloud`) or the value does not parse.
     endpoint_origin: Option<String>,
-    /// The URI SCHEME of the entry's primary `api_key_ref` (`env`, `file`,
-    /// `oauth`, `literal`), never the ref body; `unknown` for a present ref
-    /// off that allowlist.
+    /// The cloud carrier: its name, then its region only when the region is
+    /// a canonical AWS region identifier (`aws us-east-1`); `null` for a
+    /// base-URL entry. The cloud derives its endpoint at startup.
+    cloud: Option<String>,
+    /// The SCHEME of the entry's `credential` (`env`, `file`, `oauth`,
+    /// `literal`, `aws-profile`, `aws-chain`, `forwarded`), never the
+    /// credential body; `unknown` for a present value off that allowlist.
     credential_ref_scheme: Option<String>,
-    /// This variant's OWN auth-mechanism token, or `null` for a kind with no
-    /// auth discriminant. A closed vocabulary from the router's single
-    /// extraction point, never an operator-supplied value.
+    /// The entry's `auth = "..."` value. A closed vocabulary from the
+    /// router's single extraction point, never an operator-supplied value.
     auth_token: Option<String>,
     /// This entry's OWN configured requests-per-minute cap. Three states reach
     /// the client, none interchangeable: a positive number is a cap set here,
@@ -313,7 +316,9 @@ fn map_provider(cell: ProviderCell) -> ProviderWire {
     ProviderWire {
         provider_id: cell.id,
         provider_kind: cell.kind,
+        format: cell.format,
         endpoint_origin: cell.endpoint_origin,
+        cloud: cell.cloud,
         credential_ref_scheme: cell.credential_ref_scheme,
         auth_token: cell.auth_token,
         rpm_limit: cell.rpm_limit,

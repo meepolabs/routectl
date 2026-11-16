@@ -26,13 +26,11 @@ fn pool_config_text(compat_rpm: Option<u32>) -> String {
     );
     for seat in ["a", "b"] {
         text.push_str(&format!(
-            "[providers.seat_{seat}]\nkind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#{seat}\"\nauth_kind = \"oauth-bearer\"\n\n"
+            "[providers.seat_{seat}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic#{seat}\"\nauth = \"bearer\"\n\n"
         ));
     }
     text.push_str(&format!(
-        "[providers.compat]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
-         api_key_ref = \"env://{KEY_A}\"\n"
+        "[providers.compat]\nformat = \"openai-chat\"\nbase_url = \"http://127.0.0.1:1/v1\"\ncredential = \"env://{KEY_A}\"\nauth = \"bearer\"\n"
     ));
     if let Some(rpm) = compat_rpm {
         text.push_str(&format!("rpm_limit = {rpm}\n"));
@@ -192,13 +190,11 @@ fn credentials_config_text() -> String {
     );
     for seat in ["a", "b", "c"] {
         text.push_str(&format!(
-            "[providers.seat_{seat}]\nkind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#{seat}\"\nauth_kind = \"oauth-bearer\"\n\n"
+            "[providers.seat_{seat}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic#{seat}\"\nauth = \"bearer\"\n\n"
         ));
     }
     text.push_str(&format!(
-        "[providers.compat]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
-         api_key_ref = \"env://{KEY_A}\"\n\n\
+        "[providers.compat]\nformat = \"openai-chat\"\nbase_url = \"http://127.0.0.1:1/v1\"\ncredential = \"env://{KEY_A}\"\nauth = \"bearer\"\n\n\
          [pools.the-pool]\nmembers = [\"seat_a\", \"seat_b\", \"seat_c\"]\n\n\
          [models.claude]\nprovider = \"the-pool\"\nupstream = \"claude-sonnet-4-6\"\n\n\
          [models.glm]\nprovider = \"compat\"\nupstream = \"glm-4.6\"\n\n\

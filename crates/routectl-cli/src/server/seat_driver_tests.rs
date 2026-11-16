@@ -78,13 +78,15 @@ fn rig_config_text() -> String {
         "version = {CURRENT_CONFIG_VERSION}\n\
          [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
          [providers.seat_a]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#a\"\n\
-         auth_kind = \"oauth-bearer\"\n\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#a\"\n\
+         auth = \"bearer\"\n\n\
          [providers.grok]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://api.x.ai/v1\"\n\
-         api_key_ref = \"oauth://xai\"\n\n\
+         credential = \"oauth://xai\"\n\
+         auth = \"bearer\"\n\n\
          [models.claude-a]\nprovider = \"seat_a\"\nupstream = \"claude-sonnet-4-6\"\n\n\
          [models.claude-a2]\nprovider = \"seat_a\"\nupstream = \"claude-opus-4-8\"\n\n\
          [models.grok]\nprovider = \"grok\"\nupstream = \"grok-4\"\n"
@@ -208,23 +210,15 @@ fn the_seat_list_is_the_configured_anthropic_and_codex_logins_once_each() {
     // managed seat no model routes to.
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
-         [providers.seat_a]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic#a\"\n\
-         auth_kind = \"oauth-bearer\"\n\n\
-         [providers.seat_unrouted]\nkind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#unrouted\"\nauth_kind = \"oauth-bearer\"\n\n\
-         [providers.codex_default]\nkind = \"openai-responses\"\nauth_kind = \"chatgpt-oauth\"\n\
-         api_key_ref = \"oauth://codex\"\n\n\
-         [providers.codex_b]\nkind = \"openai-responses\"\nauth_kind = \"chatgpt-oauth\"\n\
-         api_key_ref = \"oauth://codex#b\"\n\n\
+         [providers.seat_a]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic#a\"\nauth = \"bearer\"\n\n\
+         [providers.seat_unrouted]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic#unrouted\"\nauth = \"bearer\"\n\n\
+         [providers.codex_default]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\n\n\
+         [providers.codex_b]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex#b\"\nauth = \"bearer\"\n\n\
          [pools.codex]\nmembers = [\"codex_default\", \"codex_b\"]\n\n\
-         [providers.grok]\nkind = \"openai-compat\"\nbase_url = \"https://api.x.ai/v1\"\n\
-         api_key_ref = \"oauth://xai\"\n\n\
-         [providers.gem]\nkind = \"gemini\"\napi_key_ref = \"oauth://antigravity\"\n\
-         auth_mode = \"cloud-code\"\n\n\
-         [providers.compat]\nkind = \"openai-compat\"\nbase_url = \"https://example.invalid/v1\"\n\
-         api_key_ref = \"env://SEAT_DRIVER_UNUSED_KEY\"\n\n\
-         [providers.fwd]\nkind = \"anthropic-api\"\ncredential_source = \"forwarded\"\n\
-         api_key_ref = \"\"\n\n\
+         [providers.grok]\nformat = \"openai-chat\"\nbase_url = \"https://api.x.ai/v1\"\ncredential = \"oauth://xai\"\nauth = \"bearer\"\n\n\
+         [providers.gem]\nformat = \"gemini-cloud-code\"\nbase_url = \"https://daily-cloudcode-pa.googleapis.com\"\ncredential = \"oauth://antigravity\"\nauth = \"bearer\"\n\n\
+         [providers.compat]\nformat = \"openai-chat\"\nbase_url = \"https://example.invalid/v1\"\ncredential = \"env://SEAT_DRIVER_UNUSED_KEY\"\nauth = \"bearer\"\n\n\
+         [providers.fwd]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"forwarded\"\nauth = \"bearer\"\n\n\
          [models.m1]\nprovider = \"seat_a\"\nupstream = \"u\"\n\
          [models.m2]\nprovider = \"seat_a\"\nupstream = \"u2\"\n\
          [models.m3]\nprovider = \"codex\"\nupstream = \"u\"\n\

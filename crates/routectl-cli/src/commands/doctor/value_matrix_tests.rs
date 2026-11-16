@@ -29,9 +29,10 @@ fn config_toml(overrides: &str) -> String {
     format!(
         "version = {}\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.invalid/v1\"\n\
-         api_key_ref = \"env://ROUTECTL_VALUE_MATRIX_TEST_KEY\"\n\
+         credential = \"env://ROUTECTL_VALUE_MATRIX_TEST_KEY\"\n\
+         auth = \"bearer\"\n\
          [models.alpha]\n\
          provider = \"p\"\n\
          upstream = \"up\"\n\

@@ -19,9 +19,10 @@ fn parse(text: &str) -> Config {
 fn two_account_config(accepts_new_logins: bool) -> Config {
     parse(&format!(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"anthropic-default\"]\n\
          accepts_new_logins = {accepts_new_logins}\n"
@@ -59,11 +60,15 @@ fn matches_the_entry_carrying_the_exact_ref_and_no_neighbouring_seat() {
     // the fragment alone, so a prefix match would conflate them.
     let config = parse(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n",
     );
 
     // Act
@@ -145,9 +150,10 @@ fn plans_membership_not_a_second_entry_for_a_hand_named_entry() {
     // Arrange
     let config = parse(
         "[providers.claude-sub]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n",
     );
 
     // Act
@@ -186,16 +192,20 @@ fn a_squatted_generated_name_does_not_turn_a_required_join_into_a_pool_creation(
     // `anthropic-default` is held by an entry with a DIFFERENT credential.
     let config = parse(
         "[providers.claude-work]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [providers.claude-main]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://SOMETHING_ELSE\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://SOMETHING_ELSE\"\n\
+         auth = \"x-api-key\"\n\
          [pools.team-anthropic]\n\
          members = [\"claude-main\"]\n\
          accepts_new_logins = true\n",
@@ -232,9 +242,10 @@ fn an_entry_listed_by_two_pools_refuses_naming_both() {
     // pinned" and hides the ambiguity.
     let config = parse(
         "[providers.claude-sub]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.aaa]\n\
          members = [\"claude-sub\"]\n\
          accepts_new_logins = false\n\
@@ -267,9 +278,10 @@ fn a_hand_named_entry_already_pooled_plans_nothing() {
     // Arrange
     let config = parse(
         "[providers.claude-sub]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"claude-sub\"]\n\
          accepts_new_logins = true\n",
@@ -290,11 +302,15 @@ fn two_entries_carrying_one_ref_refuse_and_name_both() {
     // Arrange
     let config = parse(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.claude-sub]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n",
     );
 
     // Act
@@ -345,11 +361,15 @@ fn two_growth_pools_for_one_family_refuse_as_ambiguous() {
     // Arrange
     let config = parse(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [pools.first]\n\
          members = [\"anthropic-default\"]\n\
          accepts_new_logins = true\n\
@@ -379,8 +399,10 @@ fn a_generated_entry_name_held_by_an_unrelated_entry_refuses() {
     // different credential, so the labelled seat cannot take it.
     let config = parse(
         "[providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://SOMETHING_ELSE\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://SOMETHING_ELSE\"\n\
+         auth = \"x-api-key\"\n",
     );
 
     // Act
@@ -403,8 +425,10 @@ fn a_pool_name_held_by_a_provider_entry_refuses() {
     // Arrange: providers, pools and model nicknames share one namespace.
     let config = parse(
         "[providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://SOMETHING_ELSE\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://SOMETHING_ELSE\"\n\
+         auth = \"x-api-key\"\n",
     );
 
     // Act
@@ -461,17 +485,18 @@ fn the_reserved_label_default_refuses() {
     );
 }
 
-/// A matched entry whose `kind` and auth selector do not match the shape
-/// this provider needs: growing a pool around it would spread an egress
-/// that authenticates on the wrong surface. The refusal names FIELDS only.
+/// A matched entry whose `format` and `auth` do not match the shape this
+/// provider needs: growing a pool around it would spread an egress that
+/// authenticates on the wrong surface. The refusal names FIELDS only.
 #[test]
 fn auth_field_drift_on_the_matched_entry_refuses_naming_fields_only() {
-    // Arrange: right credential, wrong kind AND wrong auth selector.
+    // Arrange: right credential, wrong format AND wrong auth.
     let config = parse(
         "[providers.claude-sub]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://gateway.example/v1\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         credential = \"oauth://anthropic\"\n\
+         auth = \"x-api-key\"\n",
     );
 
     // Act
@@ -481,14 +506,14 @@ fn auth_field_drift_on_the_matched_entry_refuses_naming_fields_only() {
     match &reason {
         RefuseReason::AuthFieldDrift { entry_name, fields } => {
             assert_eq!(entry_name, "claude-sub");
-            assert_eq!(fields, &["kind", "auth_kind"]);
+            assert_eq!(fields, &["format", "auth"]);
         }
         other => panic!("expected auth drift, got {other:?}"),
     }
     let rendered = reason.to_string();
-    assert!(rendered.contains("kind"), "{rendered}");
+    assert!(rendered.contains("format, auth"), "{rendered}");
     assert!(
-        !rendered.contains("openai-compat"),
+        !rendered.contains("openai-chat"),
         "the entry's current value leaked: {rendered}"
     );
     assert!(
@@ -498,16 +523,17 @@ fn auth_field_drift_on_the_matched_entry_refuses_naming_fields_only() {
     assert!(rendered.contains("Nothing was written"), "{rendered}");
 }
 
-/// The auth selector alone drifting is caught too -- an `api-key` anthropic
-/// entry consuming a subscription bearer 401s on every request.
+/// The `auth` alone drifting is caught too -- an `x-api-key` anthropic entry
+/// consuming a subscription bearer 401s on every request.
 #[test]
 fn a_wrong_auth_selector_alone_refuses() {
     // Arrange
     let config = parse(
         "[providers.claude-sub]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"api-key\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"x-api-key\"\n",
     );
 
     // Act
@@ -515,22 +541,23 @@ fn a_wrong_auth_selector_alone_refuses() {
 
     // Assert
     match &reason {
-        RefuseReason::AuthFieldDrift { fields, .. } => assert_eq!(fields, &["auth_kind"]),
+        RefuseReason::AuthFieldDrift { fields, .. } => assert_eq!(fields, &["auth"]),
         other => panic!("expected auth drift, got {other:?}"),
     }
 }
 
-/// A provider whose variant carries NO auth-selector field has only its
-/// `kind` checked -- inventing a selector requirement there would refuse
-/// every correct xai entry (the entry is `deny_unknown_fields`).
+/// A correct xai entry (`openai-chat` with `bearer`, the vendor's own lane)
+/// raises no drift: the check compares `format` and `auth` against the
+/// vendor's shape, not the Anthropic one.
 #[test]
-fn a_variant_without_an_auth_selector_is_checked_on_kind_alone() {
+fn a_correct_xai_entry_raises_no_drift() {
     // Arrange
     let config = parse(
         "[providers.grok]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://api.x.ai/v1\"\n\
-         api_key_ref = \"oauth://xai\"\n",
+         credential = \"oauth://xai\"\n\
+         auth = \"bearer\"\n",
     );
 
     // Act / Assert: a pool is proposed, not a refusal.
@@ -575,7 +602,7 @@ fn the_rendered_delta_carries_no_credential_material() {
     let created = render_delta(&plan(&Config::default(), "anthropic", None).expect("plans"));
     for required in [
         "[providers.anthropic-default]",
-        r#"api_key_ref = "oauth://anthropic""#,
+        r#"credential = "oauth://anthropic""#,
         "[pools.anthropic]",
         r#"members = ["anthropic-default"]"#,
     ] {
@@ -648,13 +675,15 @@ fn the_multi_seat_pool_shape_plans_nothing_for_either_of_its_seats() {
     // Arrange
     let mut doc: toml_edit::DocumentMut = "version = 4\n\
          [providers.anthropic-managed]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n"
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n"
         .parse()
         .expect("fixture parses");
     crate::commands::edit_pipeline::upsert_pool_members(
@@ -699,9 +728,10 @@ fn a_new_label_over_a_pinned_pool_plans_the_entry_only_and_notes_the_pinned_pool
     // Arrange: one seat, pool included, marker absent.
     let mut doc: toml_edit::DocumentMut = "version = 4\n\
          [providers.anthropic-managed]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n"
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n"
         .parse()
         .expect("fixture parses");
     crate::commands::edit_pipeline::upsert_pool_members(
@@ -748,9 +778,10 @@ fn a_new_label_over_a_pinned_pool_plans_the_entry_only_and_notes_the_pinned_pool
 #[test]
 fn the_fresh_entry_arm_creates_joins_or_skips_the_pool_per_its_state() {
     let entry = "[providers.anthropic-default]\n\
-                 kind = \"anthropic-api\"\n\
-                 auth_kind = \"oauth-bearer\"\n\
-                 api_key_ref = \"oauth://anthropic\"\n";
+                 format = \"anthropic-messages\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"oauth://anthropic\"\n\
+                 auth = \"bearer\"\n";
 
     // No pool at all -> create it, with the marker.
     let write = expect_write(plan(&Config::default(), "anthropic", None).expect("plans"));

@@ -6,7 +6,7 @@
 //! exactly once, and that a refresh failure propagates without
 //! walking the fallback chain.
 use super::*;
-use crate::config::{ProviderEntry, ProviderRuntimePolicy};
+use crate::config::ProviderEntry;
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider};
@@ -89,18 +89,7 @@ fn build_router_with_provider(provider: Arc<dyn Provider>) -> Router {
     let mut config = Config::default();
     config.providers.insert(
         "p-recover".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy::default(),
-        },
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k"),
     );
     config
         .aliases

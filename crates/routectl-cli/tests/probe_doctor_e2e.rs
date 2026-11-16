@@ -47,19 +47,22 @@ fn mixed_config() -> String {
 
 const MIXED_CONFIG_BODY: &str = "\
 [providers.anthropic-forwarded]
-kind = \"anthropic-api\"
+format = \"anthropic-messages\"
 base_url = \"https://api.anthropic.com\"
-credential_source = \"forwarded\"
+credential = \"forwarded\"
+auth = \"bearer\"
 
 [providers.anthropic]
-kind = \"anthropic-api\"
-api_key_ref = \"oauth://anthropic\"
-auth_kind = \"oauth-bearer\"
+format = \"anthropic-messages\"
+base_url = \"https://api.anthropic.com\"
+credential = \"oauth://anthropic\"
+auth = \"bearer\"
 
 [providers.unreachable]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"__API_KEY_REF__\"
+credential = \"__API_KEY_REF__\"
+auth = \"bearer\"
 
 [models.sonnet]
 provider = \"anthropic\"
@@ -78,14 +81,16 @@ fn healthy_config() -> String {
 
 const HEALTHY_CONFIG_BODY: &str = "\
 [providers.anthropic-forwarded]
-kind = \"anthropic-api\"
+format = \"anthropic-messages\"
 base_url = \"https://api.anthropic.com\"
-credential_source = \"forwarded\"
+credential = \"forwarded\"
+auth = \"bearer\"
 
 [providers.anthropic]
-kind = \"anthropic-api\"
-api_key_ref = \"oauth://anthropic\"
-auth_kind = \"oauth-bearer\"
+format = \"anthropic-messages\"
+base_url = \"https://api.anthropic.com\"
+credential = \"oauth://anthropic\"
+auth = \"bearer\"
 
 [models.sonnet]
 provider = \"anthropic\"
@@ -109,9 +114,10 @@ fn capability_config() -> String {
 
 const CAPABILITY_CONFIG_BODY: &str = "\
 [providers.local]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"__API_KEY_REF__\"
+credential = \"__API_KEY_REF__\"
+auth = \"bearer\"
 
 [models.laneA]
 provider = \"local\"

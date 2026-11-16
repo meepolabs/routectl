@@ -30,23 +30,20 @@ version = 5
 host = "127.0.0.1"
 port = 8787
 
-# `auth_kind` is a WIRE-SHAPE declaration here, not a credential detail.
-# The codex seat is OAuth, not a static key -- `chatgpt-oauth` is what
-# points the base URL at `chatgpt.com/backend-api/codex` instead of
-# `api.openai.com`, and what makes `account_id_ref` required rather than
-# rejected. It happens to be this provider's default, but it is spelled
-# out here anyway: the wire shape this config produces should be legible
-# from the file, not from knowledge of what the factory defaults to.
+# `base_url` is the WIRE-SHAPE declaration here: the ChatGPT Codex host
+# selects the ChatGPT dialect instead of `api.openai.com`'s, and a static
+# credential on that host makes `account_id_ref` required.
 # `account_id_ref` carries the seat's ChatGPT account id -- the runner's
 # `run_capture.sh` extracts it from the same seat the bearer token comes
 # from and forwards it under this name. Both refs stay `env://`: the
 # values arrive already extracted, so no seat file and no refresh path
 # exist inside a driven run.
 [providers.codex]
-kind           = "openai-responses"
-api_key_ref    = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"
+format         = "openai-responses"
+base_url       = "https://chatgpt.com/backend-api/codex"
+credential     = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"
+auth           = "bearer"
 account_id_ref = "env://ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID"
-auth_kind      = "chatgpt-oauth"
 
 [models.fixture-codex]
 provider = "codex"

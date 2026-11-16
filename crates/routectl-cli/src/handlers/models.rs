@@ -36,7 +36,7 @@ use crate::server::AppState;
 ///     would put a non-selectable pattern in front of the user.
 ///
 /// On the forwarded (pure-proxy) lane, this local list is a fallback,
-/// not the primary answer: when a `credential_source = "forwarded"`
+/// not the primary answer: when a `credential = "forwarded"`
 /// provider is configured AND this request arrived via the MITM
 /// reinject leg carrying a captured client bearer, the handler proxies
 /// through to Anthropic's real `/v1/models` list instead (see
@@ -85,7 +85,7 @@ struct ModelListEntry {
 ///
 /// `activation` is the live credential inventory snapshot taken alongside
 /// `router` (both `AppState` ArcSwaps). When the first chain target's
-/// `api_key_ref` names an oauth provider id that `activation` does not
+/// `credential` names an oauth provider id that `activation` does not
 /// report as `Activated`, `context_length` is suppressed even though the
 /// router itself built a clean dispatch target for it: the provider's
 /// lazy oauth-ref resolution never touches the credential store at build
@@ -157,7 +157,7 @@ fn is_oauth_activated(activation: &ActivationState, oauth_id: &str) -> bool {
 ///
 /// `None` on every fall-soft trigger, all of which the caller reads as
 /// "stay on the local list, never a 5xx":
-///   - no `credential_source = "forwarded"` provider is configured
+///   - no `credential = "forwarded"` provider is configured
 ///     (`Router::has_forwarded_provider`);
 ///   - the two-key capture gate the ingress path already uses
 ///     (`handlers::ingress_handle::forwarded_capture_armed`) is not
@@ -199,12 +199,11 @@ fn forwarded_proxy_target(
     Some((outbound_headers, base_url))
 }
 
-/// The `base_url` of the configured `credential_source = "forwarded"`
-/// `anthropic-api` provider, if any. Config validation already
-/// requires this be unique-enough for the pin to matter (only an
-/// `anthropic-api` variant may set `credential_source = "forwarded"`
-/// at all, and it must be pinned to `api.anthropic.com`) -- the first
-/// match is authoritative.
+/// The `base_url` of the configured `credential = "forwarded"` provider,
+/// if any. Config validation already requires this be unique-enough for
+/// the pin to matter (only an `anthropic-messages` entry sent as `bearer`
+/// may set `credential = "forwarded"` at all, and it must be pinned to
+/// `api.anthropic.com`) -- the first match is authoritative.
 fn forwarded_provider_base_url(router: &routectl_router::Router) -> Option<String> {
     router
         .config
@@ -538,8 +537,8 @@ mod tests {
         let mut providers = BTreeMap::new();
         providers.insert(
             "forwarded".to_string(),
-            ProviderEntry::anthropic_api("")
-                .with_credential_source(routectl_router::config::CredentialSource::Forwarded),
+            ProviderEntry::anthropic_api("forwarded")
+                .with_auth(routectl_router::config::Auth::Bearer),
         );
         let config = Arc::new(Config {
             providers,
@@ -690,8 +689,8 @@ mod tests {
         let mut providers = BTreeMap::new();
         providers.insert(
             "forwarded".to_string(),
-            ProviderEntry::anthropic_api("")
-                .with_credential_source(routectl_router::config::CredentialSource::Forwarded),
+            ProviderEntry::anthropic_api("forwarded")
+                .with_auth(routectl_router::config::Auth::Bearer),
         );
         let mut aliases = BTreeMap::new();
         aliases.insert("heavy".to_string(), AliasValue::Single("haiku".into()));

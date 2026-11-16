@@ -48,10 +48,10 @@ port = 8787
 # lane and its sibling name only us-west-2, the region the profile is
 # exercised on for Invoke and Converse.
 [providers.bedrock]
-kind      = "bedrock"
-region    = "us-west-2"
-api_shape = "invoke"
-creds     = { kind = "profile", name = "routectl-cell" }
+format     = "bedrock-invoke"
+cloud      = { name = "aws", region = "us-west-2" }
+credential = "aws://profile/routectl-cell"
+auth       = "aws-sigv4"
 
 [models.invoke-claude-haiku-5-5]
 provider = "bedrock"

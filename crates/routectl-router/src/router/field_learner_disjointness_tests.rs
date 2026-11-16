@@ -161,7 +161,7 @@ fn propose_on_anthropic(
     use crate::router::learn_proposers::{CarriedMemberProposer, FieldRowProposer};
 
     let config: crate::config::Config =
-        toml::from_str("[providers.p1]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n")
+        toml::from_str("[providers.p1]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n")
             .expect("valid test toml");
     let router = crate::router::Router::new(std::sync::Arc::new(config));
     let provider: std::sync::Arc<dyn routectl_core::Provider> =

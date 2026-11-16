@@ -96,9 +96,10 @@ fn hermetic_home(port: u16, upstream: &str) -> (tempfile::TempDir, PathBuf) {
              host = \"127.0.0.1\"\n\
              port = {port}\n\
              [providers.local]\n\
-             kind = \"openai-compat\"\n\
+             format = \"openai-chat\"\n\
              base_url = \"{upstream}/v1\"\n\
-             api_key_ref = \"env://{KEY_VAR}\"\n\
+             credential = \"env://{KEY_VAR}\"\n\
+             auth = \"bearer\"\n\
              [models.m]\n\
              provider = \"local\"\n\
              upstream = \"m\"\n\

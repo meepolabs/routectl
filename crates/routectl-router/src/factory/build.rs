@@ -1,30 +1,32 @@
 //! Per-kind provider construction from config rows.
 
-use super::plan::{ProviderPlan, plan_provider};
+use super::plan::{Destination, ProviderPlan, plan_provider};
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
 use super::validate::{ModelProviderTarget, resolve_model_provider, validate_base_url_scheme};
 use super::warnings::warn_context_management_needs_preserve;
-#[cfg(feature = "bedrock")]
-use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
-use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
+use crate::config::provider_descriptor::{Auth, Format};
+use crate::config::{Config, PoolEntry, ProviderEntry};
 use crate::pool_build::{PoolOutcome, PoolPlaceholder, PoolReport};
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::UnusableCause;
 use crate::seat_pool::SeatTarget;
 #[cfg(feature = "gemini")]
 use routectl_auth::OAuthStoreProjectCache;
-use routectl_auth::{CredentialProbeFailure, SecretRef, SecretScheme, SecretStore};
+use routectl_auth::{CredentialProbeFailure, CredentialRef, SecretRef, SecretScheme, SecretStore};
 #[cfg(feature = "gemini")]
 use routectl_core::CloudProjectCache;
+use routectl_core::wire_check::EgressKind;
 use routectl_core::{Provider, Result};
 #[cfg(feature = "bedrock")]
 use routectl_providers::anthropic_api::MantleAuth;
-use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
+use routectl_providers::anthropic_api::{
+    AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
+};
 #[cfg(feature = "bedrock")]
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
 #[cfg(feature = "gemini")]
-use routectl_providers::gemini::{GeminiAuthMode, GeminiConfig, GeminiProvider};
+use routectl_providers::gemini::{GeminiConfig, GeminiProvider};
 use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::{
@@ -87,7 +89,8 @@ impl BuildOptions {
 }
 
 /// Build one provider from its config entry, resolving secrets through
-/// `secrets` and applying `opts`.
+/// `secrets` and applying `opts`. Plans the entry first, before any
+/// credential is read.
 #[tracing::instrument(skip_all, fields(provider = %routectl_core::sanitize_for_log(name)))]
 pub async fn build_provider_with_options(
     name: &str,
@@ -95,10 +98,20 @@ pub async fn build_provider_with_options(
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
 ) -> Result<Arc<dyn Provider>> {
-    // The codex identity below is process-global and set-once, so a refused
-    // entry must be refused before it can seed it.
-    plan_provider(name, entry)?;
+    let plan = plan_provider(name, entry)?;
+    build_planned_provider(name, entry, &plan, secrets, opts).await
+}
 
+/// Build one provider whose plan the caller already computed. The codex
+/// identity installed below is process-global and set-once, which is why
+/// only a planned entry may reach it.
+async fn build_planned_provider(
+    name: &str,
+    entry: &ProviderEntry,
+    plan: &ProviderPlan,
+    secrets: Arc<dyn SecretStore>,
+    opts: BuildOptions,
+) -> Result<Arc<dyn Provider>> {
     // Defensive: a caller building a single provider directly (e.g.
     // `provider probe`) bypasses `build_resolved_models`, which is where the
     // codex identity is normally installed. Resolve it from THIS entry's
@@ -113,30 +126,42 @@ pub async fn build_provider_with_options(
     // downstream.
     #[cfg(feature = "openai-responses")]
     if let Some(version) = entry.codex_version() {
-        use routectl_core::identity::codex::{CodexIdentity, PINNED_CODEX_VERSION, set_resolved};
-        match super::validate::validate_codex_version_syntax(name, version) {
-            Ok(()) => {
-                set_resolved(CodexIdentity::new(version));
-            }
-            Err(reason) => {
-                tracing::warn!(
-                    provider = %routectl_core::sanitize_for_log(name),
-                    reason = %reason,
-                    codex_version = %PINNED_CODEX_VERSION,
-                    "invalid codex_version; falling back to the pinned codex identity",
-                );
-                set_resolved(CodexIdentity::new(PINNED_CODEX_VERSION));
-            }
-        }
+        install_entry_codex_version(name, version);
     }
 
+    let ctx = BuildContext {
+        name,
+        entry,
+        plan,
+        secrets,
+        opts,
+    };
     #[cfg(feature = "bedrock")]
     {
-        build_provider_inner(name, entry, secrets, opts, None, None).await
+        build_provider_inner(ctx, None, None).await
     }
     #[cfg(not(feature = "bedrock"))]
     {
-        build_provider_inner(name, entry, secrets, opts).await
+        build_provider_inner(ctx).await
+    }
+}
+
+#[cfg(feature = "openai-responses")]
+fn install_entry_codex_version(name: &str, version: &str) {
+    use routectl_core::identity::codex::{CodexIdentity, PINNED_CODEX_VERSION, set_resolved};
+    match super::validate::validate_codex_version_syntax(name, version) {
+        Ok(()) => {
+            set_resolved(CodexIdentity::new(version));
+        }
+        Err(reason) => {
+            tracing::warn!(
+                provider = %routectl_core::sanitize_for_log(name),
+                reason = %reason,
+                codex_version = %PINNED_CODEX_VERSION,
+                "invalid codex_version; falling back to the pinned codex identity",
+            );
+            set_resolved(CodexIdentity::new(PINNED_CODEX_VERSION));
+        }
     }
 }
 
@@ -152,413 +177,148 @@ pub(super) struct CachedBedrockAuth {
     pub resolved: routectl_providers::bedrock::auth::ResolvedCreds,
 }
 
+/// Everything one provider construction reads: the entry, the plan taken
+/// over it, the store and the server-wide options.
+struct BuildContext<'a> {
+    name: &'a str,
+    entry: &'a ProviderEntry,
+    plan: &'a ProviderPlan,
+    secrets: Arc<dyn SecretStore>,
+    opts: BuildOptions,
+}
+
+impl BuildContext<'_> {
+    /// The planned base URL, checked for scheme and target before any
+    /// credential is attached to it. `None` for the cloud carrier.
+    fn checked_base_url(&self) -> Result<Option<&str>> {
+        match &self.plan.destination {
+            Destination::BaseUrl(base) => {
+                validate_base_url_scheme(self.name, base)?;
+                Ok(Some(base))
+            }
+            Destination::Aws { .. } => Ok(None),
+        }
+    }
+
+    /// The planned AWS region, or `None` for the base-URL carrier.
+    #[cfg(feature = "bedrock")]
+    fn aws_region(&self) -> Option<&str> {
+        match &self.plan.destination {
+            Destination::Aws { region } => Some(region),
+            Destination::BaseUrl(_) => None,
+        }
+    }
+
+    fn header_extras(&self) -> Vec<(String, String)> {
+        self.entry
+            .header_extras
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The store-backed token source for the planned credential.
+    async fn token_source(&self) -> Result<Arc<dyn routectl_core::TokenSource>> {
+        let secret_ref = self.plan.secret_ref().ok_or_else(|| {
+            routectl_core::Error::Config(format!(
+                "provider `{}`: this lane needs an env://, file:// or oauth:// credential",
+                self.name
+            ))
+        })?;
+        resolve_token_source(&self.secrets, secret_ref.clone()).await
+    }
+}
+
 /// Variant that sets the Bedrock upstream model id on `BedrockConfig`
 /// from the `[models.X]` entry, so each Bedrock-targeting model entry
-/// gets its own provider instance. Other provider kinds ignore it; one
-/// cached `Arc<dyn Provider>` per `[providers.X]` is shared across all
+/// gets its own provider instance. Other formats ignore it; one cached
+/// `Arc<dyn Provider>` per `[providers.X]` is shared across all
 /// `[models]` referencing it.
 ///
-/// `cached_auth` lets the caller skip the per-model SSO probe by
-/// reusing creds resolved once at the parent provider level. When
-/// `None`, the factory resolves creds from the `BedrockCredsConfig`
-/// in `entry` (the legacy path; one resolve per call).
+/// `cached_auth` lets the caller skip the per-model SSO probe by reusing
+/// creds resolved once at the parent provider level. When `None`, the
+/// factory resolves creds from the plan (one resolve per call).
 #[cfg(feature = "bedrock")]
-pub(super) async fn build_provider_with_bedrock_model_override(
+async fn build_provider_with_bedrock_model_override(
     name: &str,
     entry: &ProviderEntry,
+    plan: &ProviderPlan,
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
     bedrock_model_id: Option<String>,
     cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    build_provider_inner(name, entry, secrets, opts, bedrock_model_id, cached_auth).await
+    let ctx = BuildContext {
+        name,
+        entry,
+        plan,
+        secrets,
+        opts,
+    };
+    build_provider_inner(ctx, bedrock_model_id, cached_auth).await
 }
 
-#[tracing::instrument(skip_all, fields(provider = %routectl_core::sanitize_for_log(name)))]
+#[tracing::instrument(skip_all, fields(provider = %routectl_core::sanitize_for_log(ctx.name)))]
 async fn build_provider_inner(
-    name: &str,
-    entry: &ProviderEntry,
-    secrets: Arc<dyn SecretStore>,
-    opts: BuildOptions,
+    ctx: BuildContext<'_>,
     #[cfg(feature = "bedrock")] bedrock_model_id: Option<String>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    let plan = plan_provider(name, entry)?;
-    match entry {
-        ProviderEntry::OpenaiCompat {
-            base_url,
-            api_key_ref,
-            header_extras,
-            payload_extras: _,
-            user_agent,
-            cache_capability: _,
-            reduction_enabled: _,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle,
-            runtime: _,
-        } => {
-            // Bedrock mantle lane. Its presence flips this provider onto
-            // region-derived, SigV4/bearer-signed egress under the
-            // `bedrock-mantle` scope. Config validation guarantees an empty
-            // api_key_ref and an empty base_url, so the region is the single
-            // source of truth for the endpoint (never the operator base_url)
-            // and no first-party bearer is presented. Credentials resolve
-            // here, fail-fast probing Profile/DefaultChain exactly as the
-            // Bedrock provider does.
-            #[cfg(feature = "bedrock")]
-            if let Some(m) = bedrock_mantle {
-                debug_assert!(
-                    base_url.trim().is_empty(),
-                    "mantle lane requires an empty base_url; validation must reject a manual base_url"
-                );
-                let mantle_base = routectl_providers::mantle::mantle_openai_base(&m.region)?;
-                let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
-                let resolved =
-                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
-                let cfg = OpenAiCompatConfig {
-                    id: format!("openai-compat:{name}"),
-                    base_url: mantle_base,
-                    // Empty on the lane: the mantle credential rides the
-                    // signed request and the first-party `Authorization:
-                    // Bearer` insert is skipped. Validation already rejects
-                    // a non-empty api_key_ref on the lane.
-                    auth: Arc::new(routectl_core::StaticToken::new(String::new())),
-                    header_extras: header_extras
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                    payload_extras: None,
-                    reasoning_dialect: Default::default(),
-                    history_reasoning: Default::default(),
-                    user_agent: user_agent.clone(),
-                    mantle: Some(MantleAuth {
-                        region: m.region.clone(),
-                        creds: resolved,
-                    }),
-                };
-                return Ok(Arc::new(OpenAiCompatProvider::new(cfg)));
-            }
-            validate_base_url_scheme(name, base_url)?;
-            // `oauth://<provider>` yields a refreshing `ManagedToken` read
-            // per request; env / file / literal resolve once into a
-            // `StaticToken`.
-            let auth = resolve_token_source(&secrets, api_key_ref).await?;
-            // v0.6.0: reasoning_dialect + history_reasoning moved off
-            // [providers.X] to [models.X]; the egress reads them from
-            // `req.routectl_internal` at request time. The config-side
-            // defaults left here are pure fallback for library
-            // consumers constructing an `OpenAiCompatConfig` directly
-            // (no router).
-            let cfg = OpenAiCompatConfig {
-                id: format!("openai-compat:{name}"),
-                base_url: base_url.clone(),
-                auth,
-                header_extras: header_extras
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-                payload_extras: None,
-                reasoning_dialect: Default::default(),
-                history_reasoning: Default::default(),
-                user_agent: user_agent.clone(),
-                #[cfg(feature = "bedrock")]
-                mantle: None,
-            };
-            Ok(Arc::new(OpenAiCompatProvider::new(cfg)))
-        }
-        ProviderEntry::AnthropicApi { .. } => {
-            let cfg = anthropic_api_config(name, entry, plan, &secrets, &opts).await?;
+    match ctx.entry.format() {
+        Format::AnthropicMessages => {
+            let cfg = anthropic_api_config(&ctx).await?;
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }
+        Format::OpenaiChat => openai_compat_provider(&ctx).await,
         #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses {
-            api_key_ref,
-            account_id_ref,
-            base_url,
-            auth_kind,
-            header_extras,
-            payload_extras: _,
-            user_agent,
-            // Resolved into the process-global codex identity by the
-            // router builder before any provider is constructed, not
-            // per-provider here.
-            codex_version: _,
-            cache_capability: _,
-            reduction_enabled: _,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle,
-            runtime: _,
-        } => {
-            // Bedrock mantle lane. Its presence flips this provider onto
-            // region-derived, SigV4/bearer-signed egress under the
-            // `bedrock-mantle` scope. Config validation guarantees an empty
-            // api_key_ref, no account_id_ref, and an unset base_url, so the
-            // region is the single source of truth for the endpoint and no
-            // first-party bearer is presented. Credentials resolve here,
-            // fail-fast probing Profile/DefaultChain exactly as the Bedrock
-            // provider does. The runtime marker is set here so the extras
-            // guard and the auth dispatch see `BedrockMantle` even when the
-            // operator omitted the redundant `auth_kind`.
-            #[cfg(feature = "bedrock")]
-            if let Some(m) = bedrock_mantle {
-                debug_assert!(
-                    base_url.as_deref().is_none_or(|s| s.trim().is_empty()),
-                    "mantle lane requires an unset base_url; validation must reject a manual base_url"
-                );
-                let mantle_base = routectl_providers::mantle::mantle_openai_base(&m.region)?;
-                let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
-                let resolved =
-                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
-                let mut cfg = OpenAiResponsesConfig::new_with_auth(
-                    format!("openai-responses:{name}"),
-                    Arc::new(routectl_core::StaticToken::new(String::new())),
-                );
-                cfg.base_url = mantle_base;
-                cfg.auth_kind = OpenaiResponsesAuthKind::BedrockMantle;
-                cfg.header_extras = header_extras
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                cfg.user_agent = user_agent.clone();
-                cfg.mantle = Some(MantleAuth {
-                    region: m.region.clone(),
-                    creds: resolved,
-                });
-                return Ok(Arc::new(OpenAiResponsesProvider::new(cfg)));
-            }
-            // Close the legacy `auth_kind = "bedrock-mantle"`-alone surface
-            // for every caller. The mantle branch above returns whenever a
-            // `bedrock_mantle` block selected the lane, so reaching here with
-            // the marker means no block was set: the bearer-only surface it
-            // would otherwise build is refused. This guard is deliberately
-            // NOT `bedrock`-gated -- `validate_provider_openai_mantle` is, and
-            // callers that skip validation entirely (e.g. `provider probe`
-            // over an unvalidated config) must still fail cleanly rather than
-            // hit the `default_responses_base` fallback below.
-            if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle {
-                return Err(routectl_core::Error::Config(format!(
-                    "provider `{name}`: auth_kind = \"bedrock-mantle\" but no bedrock_mantle \
-                     block is set -- the legacy bearer-only surface is closed; set \
-                     [providers.{name}.bedrock_mantle] with region and creds to select the \
-                     mantle lane"
-                )));
-            }
-            let bearer_is_oauth =
-                matches!(SecretRef::parse(api_key_ref), Ok(SecretRef::OAuth { .. }));
-            validate_openai_responses_account_id(
-                name,
-                *auth_kind,
-                bearer_is_oauth,
-                account_id_ref,
-            )?;
-            // OAuth-aware bearer resolution, mirroring the anthropic-api
-            // arm: `oauth://<provider>` yields a refreshing
-            // `ManagedToken`; env / file / literal yield a one-shot
-            // `StaticToken`. The provider resolves `auth.token()` per
-            // request, so OAuth rotation is picked up without restart.
-            let auth = resolve_token_source(&secrets, api_key_ref).await?;
-            let account_id =
-                resolve_responses_account_id(&secrets, api_key_ref, account_id_ref, name).await?;
-            // The codex session and installation ids are part of the codex
-            // client identity, so only a provider the plan grants that
-            // identity reads (or mints) them. `api_key_ref` already carries
-            // the seat label, so `peek_session_id` resolves THIS seat's
-            // value. The ref already parsed cleanly inside
-            // `resolve_token_source` above, so a parse error here is
-            // unreachable; treat it as "no session id" rather than fail the
-            // build. An installation-id read/write failure yields None + a
-            // WARN, never a build failure.
-            let client_identity = plan.client_identity;
-            let session_id = if client_identity {
-                match SecretRef::parse(api_key_ref) {
-                    Ok(sr) => secrets.peek_session_id(&sr).await,
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-            let installation_id = if client_identity {
-                super::installation_id::resolve_installation_id(opts.mint_installation_id)
-            } else {
-                None
-            };
-            let resolved_base_url = base_url
-                .clone()
-                .unwrap_or_else(|| crate::config::default_responses_base(*auth_kind));
-            validate_base_url_scheme(name, &resolved_base_url)?;
-            let mut cfg =
-                OpenAiResponsesConfig::new_with_auth(format!("openai-responses:{name}"), auth);
-            cfg.account_id = account_id;
-            cfg.base_url = resolved_base_url;
-            cfg.auth_kind = *auth_kind;
-            cfg.header_extras = header_extras
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            cfg.user_agent = user_agent.clone();
-            cfg.session_id = session_id;
-            cfg.installation_id = installation_id;
-            cfg.client_identity = client_identity;
-            Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
-        }
+        Format::OpenaiResponses => openai_responses_provider(&ctx).await,
         #[cfg(feature = "bedrock")]
-        ProviderEntry::Bedrock {
-            region,
-            api_shape,
-            creds,
-            user_agent,
-            header_extras,
-            payload_extras: _,
-            cache_capability: _,
-            reduction_enabled: _,
-            runtime: _,
-        } => {
-            // Reuse already-resolved creds when the caller provided
-            // them (per-provider cache in `build_resolved_models`).
-            // Otherwise resolve fresh -- the legacy single-provider
-            // path still works.
-            let (bedrock_creds, resolved) = if let Some(c) = cached_auth {
-                (c.creds, c.resolved)
-            } else {
-                let bedrock_creds = resolve_bedrock_creds(&*secrets, creds).await?;
-                let resolved =
-                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
-                (bedrock_creds, resolved)
-            };
-            // The model id comes from the `[models.X]` entry, pumped in by
-            // `build_resolved_models`.
-            let cfg = BedrockConfig {
-                id: format!("bedrock:{name}"),
-                region: region.clone(),
-                model_id: bedrock_model_id.unwrap_or_default(),
-                api_shape: map_bedrock_api_shape(*api_shape),
-                creds: bedrock_creds,
-                user_agent: user_agent.clone(),
-                header_extras: header_extras
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            };
-            Ok(Arc::new(BedrockProvider::new(cfg, resolved)?))
+        Format::BedrockInvoke | Format::BedrockConverse => {
+            bedrock_provider(&ctx, bedrock_model_id, cached_auth).await
         }
         #[cfg(feature = "gemini")]
-        ProviderEntry::Gemini {
-            api_key_ref,
-            base_url,
-            header_extras,
-            payload_extras: _,
-            user_agent,
-            auth_mode,
-            cloud_project_id,
-            cache_capability: _,
-            reduction_enabled: _,
-            runtime: _,
-        } => {
-            let extras: Vec<(String, String)> = header_extras
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            match auth_mode {
-                GeminiAuthMode::ApiKey => {
-                    validate_base_url_scheme(name, base_url)?;
-                    let auth = resolve_token_source(&secrets, api_key_ref).await?;
-                    let mut cfg = GeminiConfig::new_with_auth(format!("gemini:{name}"), auth);
-                    cfg.base_url = base_url.clone();
-                    cfg.header_extras = extras;
-                    cfg.user_agent = user_agent.clone();
-                    Ok(Arc::new(GeminiProvider::new(cfg)))
-                }
-                GeminiAuthMode::CloudCode => {
-                    // The Cloud Code surface authenticates with a live OAuth
-                    // bearer, so validate the base-URL scheme before any token
-                    // can be attached to it (the api-key arm validates too; it
-                    // matters more here because the credential is a bearer).
-                    validate_base_url_scheme(name, base_url)?;
-                    let secret_ref = SecretRef::parse(api_key_ref).map_err(|e| {
-                        routectl_core::Error::Config(format!(
-                            "gemini provider `{name}`: auth_mode = \"cloud-code\" but api_key_ref (scheme `{}`) is not a valid secret URI: {e}",
-                            scheme_of(api_key_ref)
-                        ))
-                    })?;
-                    if !matches!(secret_ref, SecretRef::OAuth { .. }) {
-                        return Err(routectl_core::Error::Config(format!(
-                            "gemini provider `{name}`: auth_mode = \"cloud-code\" requires an oauth:// api_key_ref (got scheme `{}`); run `routectl login antigravity` and reference oauth://antigravity",
-                            scheme_of(api_key_ref)
-                        )));
-                    }
-                    let auth = resolve_token_source(&secrets, api_key_ref).await?;
-                    let project_cache: Arc<dyn CloudProjectCache> =
-                        Arc::new(OAuthStoreProjectCache::new(secrets.clone(), secret_ref));
-                    let mut cfg =
-                        GeminiConfig::new_cloud_code(format!("gemini:{name}"), auth, project_cache);
-                    if *base_url != crate::config::default_gemini_base() {
-                        cfg.base_url = base_url.clone();
-                    }
-                    if let Some(ua) = user_agent {
-                        cfg.user_agent = Some(ua.clone());
-                    }
-                    // An empty string is an operator leaving the knob blank,
-                    // not a project id: it must not shadow discovery.
-                    cfg.cloud_project_id = cloud_project_id
-                        .as_deref()
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string);
-                    cfg.header_extras = extras;
-                    Ok(Arc::new(GeminiProvider::new(cfg)))
-                }
-            }
-        }
+        Format::Gemini | Format::GeminiCloudCode => gemini_provider(&ctx).await,
+        #[allow(unreachable_patterns)]
+        format => Err(routectl_core::Error::Config(format!(
+            "provider `{}`: format = \"{}\" is not available in this build",
+            ctx.name,
+            format.as_str()
+        ))),
     }
 }
 
+/// The AWS credential for a cloud-carrier entry: `aws://profile/<name>` and
+/// `aws://chain` select the SDK's own loaders, and an env:// / file:// key
+/// sent as a bearer becomes a Bedrock API key. The plan already refused any
+/// other pairing.
 #[cfg(feature = "bedrock")]
-async fn resolve_bedrock_creds(
-    secrets: &dyn SecretStore,
-    creds: &BedrockCredsConfig,
-) -> Result<BedrockCreds> {
-    Ok(match creds {
-        BedrockCredsConfig::BearerKey { key_ref } => {
-            let key = resolve(secrets, key_ref).await?;
-            BedrockCreds::BearerKey { key }
-        }
-        BedrockCredsConfig::Static {
-            access_key_ref,
-            secret_key_ref,
-            session_token_ref,
-        } => {
-            let access_key = resolve(secrets, access_key_ref).await?;
-            let secret_key = resolve(secrets, secret_key_ref).await?;
-            let session_token = match session_token_ref {
-                Some(t) => Some(resolve(secrets, t).await?),
-                None => None,
-            };
-            BedrockCreds::Static {
-                access_key,
-                secret_key,
-                session_token,
-            }
-        }
-        BedrockCredsConfig::Profile { name } => BedrockCreds::Profile { name: name.clone() },
-        BedrockCredsConfig::DefaultChain => BedrockCreds::DefaultChain,
-    })
+async fn bedrock_creds_for(plan: &ProviderPlan, secrets: &dyn SecretStore) -> Result<BedrockCreds> {
+    match &plan.credential {
+        CredentialRef::AwsProfile(name) => Ok(BedrockCreds::Profile { name: name.clone() }),
+        CredentialRef::AwsChain => Ok(BedrockCreds::DefaultChain),
+        CredentialRef::Secret(secret_ref) => Ok(BedrockCreds::BearerKey {
+            key: secrets.get(secret_ref).await?,
+        }),
+        _ => Err(routectl_core::Error::Config(
+            "an AWS cloud entry needs an aws:// credential or a bearer key reference".into(),
+        )),
+    }
 }
 
-/// Resolve a Bedrock provider's creds + AWS auth handle once. Used by
-/// `build_resolved_models` to prime the per-provider auth cache before
-/// dispatching N model builds against it. Bypasses credential
-/// resolution for non-Bedrock entries (returns an error so the caller
-/// only invokes this on Bedrock-confirmed entries).
+/// Resolve a cloud-carrier entry's AWS credential and auth handle once.
+/// `build_resolved_models` calls it, after the plan, to prime the
+/// per-provider auth cache before dispatching N model builds against it.
 #[cfg(feature = "bedrock")]
 async fn resolve_bedrock_auth_for_entry(
-    entry: &ProviderEntry,
+    plan: &ProviderPlan,
     secrets: &dyn SecretStore,
 ) -> Result<CachedBedrockAuth> {
-    let ProviderEntry::Bedrock { creds, region, .. } = entry else {
+    let Destination::Aws { region } = &plan.destination else {
         return Err(routectl_core::Error::Config(
-            "resolve_bedrock_auth_for_entry called on non-Bedrock provider entry".into(),
+            "resolve_bedrock_auth_for_entry called on a base_url provider entry".into(),
         ));
     };
-    let bedrock_creds = resolve_bedrock_creds(secrets, creds).await?;
+    let bedrock_creds = bedrock_creds_for(plan, secrets).await?;
     let resolved = routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
     Ok(CachedBedrockAuth {
         creds: bedrock_creds,
@@ -566,29 +326,203 @@ async fn resolve_bedrock_auth_for_entry(
     })
 }
 
+/// The managed-surface signing material for a cloud-carrier entry.
 #[cfg(feature = "bedrock")]
-const fn map_bedrock_api_shape(s: BedrockApiShapeConfig) -> BedrockApiShape {
-    match s {
-        BedrockApiShapeConfig::Invoke => BedrockApiShape::Invoke,
-        BedrockApiShapeConfig::Converse => BedrockApiShape::Converse,
+async fn mantle_auth(ctx: &BuildContext<'_>, region: &str) -> Result<MantleAuth> {
+    let creds = bedrock_creds_for(ctx.plan, &*ctx.secrets).await?;
+    let resolved = routectl_providers::bedrock::auth::resolve(&creds, region).await?;
+    Ok(MantleAuth {
+        region: region.to_string(),
+        creds: resolved,
+    })
+}
+
+/// An `openai-chat` provider: the configured base URL with the credential
+/// as a bearer, or Bedrock's managed surface derived from `cloud.region`
+/// with the AWS credential signing the request.
+async fn openai_compat_provider(ctx: &BuildContext<'_>) -> Result<Arc<dyn Provider>> {
+    let mut cfg = OpenAiCompatConfig {
+        id: format!("openai-compat:{}", ctx.name),
+        base_url: String::new(),
+        auth: Arc::new(routectl_core::StaticToken::new(String::new())),
+        header_extras: ctx.header_extras(),
+        payload_extras: None,
+        reasoning_dialect: Default::default(),
+        history_reasoning: Default::default(),
+        user_agent: ctx.entry.user_agent.clone(),
+        #[cfg(feature = "bedrock")]
+        mantle: None,
+    };
+    if let Some(base) = ctx.checked_base_url()? {
+        cfg.base_url = base.to_string();
+        cfg.auth = ctx.token_source().await?;
+        return Ok(Arc::new(OpenAiCompatProvider::new(cfg)));
+    }
+    #[cfg(feature = "bedrock")]
+    if let Some(region) = ctx.aws_region() {
+        cfg.base_url = routectl_providers::mantle::mantle_openai_base(region)?;
+        cfg.mantle = Some(mantle_auth(ctx, region).await?);
+        return Ok(Arc::new(OpenAiCompatProvider::new(cfg)));
+    }
+    Err(cloud_unavailable(ctx.name))
+}
+
+fn cloud_unavailable(name: &str) -> routectl_core::Error {
+    routectl_core::Error::Config(format!(
+        "provider `{name}`: the `cloud` carrier is not available in this build"
+    ))
+}
+
+/// The Responses wire dialect an `openai-responses` entry speaks: the ChatGPT
+/// Codex dialect on the Codex host, the Bedrock managed dialect on the AWS
+/// cloud, the OpenAI API dialect anywhere else.
+#[cfg(feature = "openai-responses")]
+fn responses_dialect(ctx: &BuildContext<'_>) -> OpenaiResponsesAuthKind {
+    match &ctx.plan.destination {
+        Destination::Aws { .. } => OpenaiResponsesAuthKind::BedrockMantle,
+        Destination::BaseUrl(_) => super::validate::responses_base_url_dialect(ctx.entry),
     }
 }
 
-#[cfg(any(feature = "bedrock", feature = "openai-responses"))]
-async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
-    tracing::debug!(secret_scheme = scheme_of(uri), "resolving secret ref");
-    let secret_ref = SecretRef::parse(uri)?;
-    secrets.get(&secret_ref).await
+/// An `openai-responses` provider.
+#[cfg(feature = "openai-responses")]
+async fn openai_responses_provider(ctx: &BuildContext<'_>) -> Result<Arc<dyn Provider>> {
+    let dialect = responses_dialect(ctx);
+    let Some(base) = ctx.checked_base_url()? else {
+        return openai_responses_cloud_provider(ctx).await;
+    };
+    let bearer_is_oauth = matches!(ctx.plan.secret_ref(), Some(SecretRef::OAuth { .. }));
+    validate_openai_responses_account_id(
+        ctx.name,
+        dialect,
+        bearer_is_oauth,
+        &ctx.entry.account_id_ref,
+    )?;
+    let auth = ctx.token_source().await?;
+    let account_id = resolve_responses_account_id(ctx).await?;
+    // The codex session and installation ids are part of the codex client
+    // identity, so only a provider the plan grants that identity reads (or
+    // mints) them. The credential already carries the seat label, so
+    // `peek_session_id` resolves THIS seat's value. An installation-id
+    // read/write failure yields None + a WARN, never a build failure.
+    let client_identity = ctx.plan.client_identity;
+    let session_id = match (client_identity, ctx.plan.secret_ref()) {
+        (true, Some(sr)) => ctx.secrets.peek_session_id(sr).await,
+        _ => None,
+    };
+    let installation_id = if client_identity {
+        super::installation_id::resolve_installation_id(ctx.opts.mint_installation_id)
+    } else {
+        None
+    };
+    let mut cfg =
+        OpenAiResponsesConfig::new_with_auth(format!("openai-responses:{}", ctx.name), auth);
+    cfg.account_id = account_id;
+    cfg.base_url = base.to_string();
+    cfg.auth_kind = dialect;
+    cfg.header_extras = ctx.header_extras();
+    cfg.user_agent = ctx.entry.user_agent.clone();
+    cfg.session_id = session_id;
+    cfg.installation_id = installation_id;
+    cfg.client_identity = client_identity;
+    Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
 }
 
-/// Pick the primary `api_key_ref` URI off a provider entry. Used by
-/// `build_resolved_models` to thread the originating `SecretRef` onto
-/// the resolved model so the 401 self-heal path can dispatch back
-/// through the originating store. Bedrock entries return `None` --
-/// their creds shape is multi-field and the caller doesn't need a
-/// single canonical SecretRef for the self-heal hook today.
-fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
-    entry.api_key_ref()
+/// An `openai-responses` provider on Bedrock's managed surface: the endpoint
+/// derives from `cloud.region` and the AWS credential signs the request; no
+/// first-party bearer is presented.
+#[cfg(feature = "openai-responses")]
+#[cfg_attr(not(feature = "bedrock"), allow(clippy::unused_async))]
+async fn openai_responses_cloud_provider(ctx: &BuildContext<'_>) -> Result<Arc<dyn Provider>> {
+    #[cfg(feature = "bedrock")]
+    if let Some(region) = ctx.aws_region() {
+        let mut cfg = OpenAiResponsesConfig::new_with_auth(
+            format!("openai-responses:{}", ctx.name),
+            Arc::new(routectl_core::StaticToken::new(String::new())),
+        );
+        cfg.base_url = routectl_providers::mantle::mantle_openai_base(region)?;
+        cfg.auth_kind = OpenaiResponsesAuthKind::BedrockMantle;
+        cfg.header_extras = ctx.header_extras();
+        cfg.user_agent = ctx.entry.user_agent.clone();
+        cfg.mantle = Some(mantle_auth(ctx, region).await?);
+        return Ok(Arc::new(OpenAiResponsesProvider::new(cfg)));
+    }
+    Err(cloud_unavailable(ctx.name))
+}
+
+/// A native Bedrock provider (`bedrock-invoke` / `bedrock-converse`), which
+/// speaks SigV4 or a Bedrock API key to the runtime endpoint of
+/// `cloud.region`.
+#[cfg(feature = "bedrock")]
+async fn bedrock_provider(
+    ctx: &BuildContext<'_>,
+    bedrock_model_id: Option<String>,
+    cached_auth: Option<CachedBedrockAuth>,
+) -> Result<Arc<dyn Provider>> {
+    let region = ctx.aws_region().ok_or_else(|| {
+        routectl_core::Error::Config(format!(
+            "provider `{}`: the bedrock formats need `cloud`",
+            ctx.name
+        ))
+    })?;
+    let cached = match cached_auth {
+        Some(cached) => cached,
+        None => resolve_bedrock_auth_for_entry(ctx.plan, &*ctx.secrets).await?,
+    };
+    let api_shape = match ctx.entry.format() {
+        Format::BedrockConverse => BedrockApiShape::Converse,
+        _ => BedrockApiShape::Invoke,
+    };
+    let cfg = BedrockConfig {
+        id: format!("bedrock:{}", ctx.name),
+        region: region.to_string(),
+        model_id: bedrock_model_id.unwrap_or_default(),
+        api_shape,
+        creds: cached.creds,
+        user_agent: ctx.entry.user_agent.clone(),
+        header_extras: ctx.header_extras(),
+    };
+    Ok(Arc::new(BedrockProvider::new(cfg, cached.resolved)?))
+}
+
+/// A Gemini provider: the public REST surface with an API key, or the Cloud
+/// Code surface with the managed Antigravity login the plan required.
+#[cfg(feature = "gemini")]
+async fn gemini_provider(ctx: &BuildContext<'_>) -> Result<Arc<dyn Provider>> {
+    let base = ctx
+        .checked_base_url()?
+        .ok_or_else(|| cloud_unavailable(ctx.name))?
+        .to_string();
+    let auth = ctx.token_source().await?;
+    let mut cfg = if ctx.entry.format() == Format::GeminiCloudCode {
+        let secret_ref = ctx.plan.secret_ref().cloned().ok_or_else(|| {
+            routectl_core::Error::Config(format!(
+                "provider `{}`: gemini-cloud-code needs an oauth://antigravity credential",
+                ctx.name
+            ))
+        })?;
+        let project_cache: Arc<dyn CloudProjectCache> =
+            Arc::new(OAuthStoreProjectCache::new(ctx.secrets.clone(), secret_ref));
+        let mut cfg =
+            GeminiConfig::new_cloud_code(format!("gemini:{}", ctx.name), auth, project_cache);
+        // An empty string is an operator leaving the knob blank, not a
+        // project id: it must not shadow discovery.
+        cfg.cloud_project_id = ctx
+            .entry
+            .cloud_project_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        cfg
+    } else {
+        GeminiConfig::new_with_auth(format!("gemini:{}", ctx.name), auth)
+    };
+    cfg.base_url = base;
+    cfg.header_extras = ctx.header_extras();
+    if let Some(ua) = &ctx.entry.user_agent {
+        cfg.user_agent = Some(ua.clone());
+    }
+    Ok(Arc::new(GeminiProvider::new(cfg)))
 }
 
 /// Compile one `[pools.<name>]` block into the dispatch seat set every
@@ -632,13 +566,16 @@ async fn compile_pool(
             continue;
         };
         // The credential probe below reads the store, so the entry's plan
-        // must hold first.
-        if plan_provider(member, entry).is_err() {
-            refusals.push((member, MemberRefusal::OutsideContainment));
-            continue;
-        }
+        // must hold first; the same plan is passed to the build.
+        let plan = match plan_provider(member, entry) {
+            Ok(plan) => plan,
+            Err(_) => {
+                refusals.push((member, plan_refusal(entry)));
+                continue;
+            }
+        };
         let provider_kind = entry.kind_str();
-        let secret_ref = match member_secret_ref(entry) {
+        let secret_ref = match member_secret_ref(&plan) {
             Ok(sr) => sr,
             Err(refusal) => {
                 refusals.push((member, refusal));
@@ -678,7 +615,7 @@ async fn compile_pool(
             );
             continue;
         }
-        match build_provider_with_options(member, entry, secrets.clone(), opts.clone()).await {
+        match build_planned_provider(member, entry, &plan, secrets.clone(), opts.clone()).await {
             Ok(provider) => seats.push(SeatTarget::new(
                 member.clone(),
                 provider,
@@ -732,7 +669,8 @@ impl MemberRefusal {
                 "has a credential reference that is not a well-formed secret reference"
             }
             Self::OutsideContainment => {
-                "carries a managed credential outside the lane that credential is accepted on"
+                "is refused by its provider plan (an incoherent entry, or a managed \
+                 credential outside the lane that credential is accepted on)"
             }
             Self::CredentialUnresolvedAtBuild => {
                 "has a stored credential that could not be resolved when its provider was built"
@@ -774,19 +712,23 @@ const fn unusable_cause_for_probe_failure(failure: CredentialProbeFailure) -> Un
     }
 }
 
-/// The parsed credential reference of one pool member, or the refusal its
-/// absence / malformedness earns.
-///
-/// A member with no credential ref at all cannot authenticate an account, and
-/// a member whose ref does not parse cannot be resolved -- both are
-/// pre-build refusals, distinguished so the operator knows whether to add a
-/// ref or fix one.
-fn member_secret_ref(entry: &ProviderEntry) -> std::result::Result<SecretRef, MemberRefusal> {
-    let uri = primary_api_key_uri(entry).ok_or(MemberRefusal::MissingRef)?;
-    if uri.is_empty() {
-        return Err(MemberRefusal::MissingRef);
+/// The pool rule a refused plan maps to, by the shape of the entry's
+/// credential: absent, unparseable, or otherwise refused by the plan.
+fn plan_refusal(entry: &ProviderEntry) -> MemberRefusal {
+    if entry.credential.trim().is_empty() {
+        MemberRefusal::MissingRef
+    } else if routectl_auth::CredentialRef::parse(&entry.credential).is_err() {
+        MemberRefusal::MalformedRef
+    } else {
+        MemberRefusal::OutsideContainment
     }
-    SecretRef::parse(uri).map_err(|_| MemberRefusal::MalformedRef)
+}
+
+/// The store reference of one pool member's planned credential, or the
+/// refusal its absence earns. A member whose credential no store resolves
+/// (an AWS form, `forwarded`) cannot authenticate a pool account.
+fn member_secret_ref(plan: &ProviderPlan) -> std::result::Result<SecretRef, MemberRefusal> {
+    plan.secret_ref().cloned().ok_or(MemberRefusal::MissingRef)
 }
 
 /// Classify a member build failure by the error VARIANT, never its text.
@@ -850,10 +792,12 @@ fn routed_pools(config: &Config) -> BTreeMap<&str, &PoolEntry> {
 /// equivalent to the pre-v0.7 in-memory `api_key: String`.
 async fn resolve_token_source(
     secrets: &Arc<dyn SecretStore>,
-    uri: &str,
+    secret_ref: SecretRef,
 ) -> Result<Arc<dyn routectl_core::TokenSource>> {
-    tracing::debug!(secret_scheme = scheme_of(uri), "resolving token source");
-    let secret_ref = SecretRef::parse(uri)?;
+    tracing::debug!(
+        secret_scheme = SecretScheme::from(&secret_ref).as_prefix(),
+        "resolving token source"
+    );
     match secret_ref {
         SecretRef::OAuth { .. } => {
             let mt: Arc<dyn routectl_core::TokenSource> = Arc::new(ManagedToken {
@@ -926,25 +870,22 @@ impl routectl_core::TokenSource for ManagedToken {
 ///      case only arises for non-ChatgptOauth surfaces (where the id
 ///      must be absent), so `None` is correct.
 #[cfg(feature = "openai-responses")]
-async fn resolve_responses_account_id(
-    secrets: &Arc<dyn SecretStore>,
-    api_key_ref: &str,
-    account_id_ref: &Option<String>,
-    name: &str,
-) -> Result<Option<String>> {
-    if let Some(uri) = account_id_ref {
-        return Ok(Some(resolve(&**secrets, uri).await?));
+async fn resolve_responses_account_id(ctx: &BuildContext<'_>) -> Result<Option<String>> {
+    if let Some(uri) = &ctx.entry.account_id_ref {
+        tracing::debug!(secret_scheme = scheme_of(uri), "resolving account id ref");
+        let secret_ref = SecretRef::parse(uri)?;
+        return Ok(Some(ctx.secrets.get(&secret_ref).await?));
     }
-    let parsed = SecretRef::parse(api_key_ref)?;
-    let SecretRef::OAuth { provider, .. } = &parsed else {
+    let Some(parsed @ SecretRef::OAuth { provider, .. }) = ctx.plan.secret_ref() else {
         return Ok(None);
     };
-    match secrets.account_id(&parsed).await? {
+    match ctx.secrets.account_id(parsed).await? {
         Some(id) => Ok(Some(id)),
         None => Err(routectl_core::Error::Config(format!(
-            "openai-responses provider `{name}`: no ChatGPT account id found for \
+            "openai-responses provider `{}`: no ChatGPT account id found for \
              `oauth://{provider}`. Run `routectl login {provider}` first, or set \
-             `account_id_ref` explicitly."
+             `account_id_ref` explicitly.",
+            ctx.name
         ))),
     }
 }
@@ -1137,58 +1078,53 @@ pub async fn build_resolved_models_reported(
             }
         };
 
-        // Bedrock: one Arc per model. The factory pumps the model's
+        if let Some(prior_err) = provider_failed.get(&entry.provider) {
+            // Provider already failed on a sibling model; reuse the error
+            // and keep walking, so neither the plan nor any credential
+            // resolution runs twice for one [providers.X] entry.
+            failed.push((nickname.clone(), prior_err.clone()));
+            continue;
+        }
+        // Every store read and AWS credential resolution below sits behind
+        // the entry's plan, computed once per provider and passed down.
+        let plan = match plan_provider(&entry.provider, provider_entry) {
+            Ok(plan) => plan,
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::warn!(
+                    provider = %routectl_core::sanitize_for_log(&entry.provider),
+                    model = %routectl_core::sanitize_for_log(nickname),
+                    error = %msg,
+                    "skipping provider (refused by its plan)",
+                );
+                provider_failed.insert(entry.provider.clone(), msg.clone());
+                failed.push((nickname.clone(), msg));
+                continue;
+            }
+        };
+
+        // Native Bedrock: one Arc per model. The factory pumps the model's
         // upstream into BedrockConfig.model_id.
-        #[cfg(feature = "bedrock")]
-        let is_bedrock = matches!(provider_entry, ProviderEntry::Bedrock { .. });
-        #[cfg(not(feature = "bedrock"))]
-        let is_bedrock = false;
+        let is_bedrock = matches!(
+            plan.egress,
+            EgressKind::BedrockInvoke | EgressKind::BedrockConverse
+        );
 
         let provider = if is_bedrock {
             #[cfg(feature = "bedrock")]
             {
-                // A sibling model already failed cred resolution for
-                // this provider: reuse the recorded error and skip
-                // without re-probing SSO. Mirrors the non-Bedrock
-                // `provider_failed` guard below so the SSO probe /
-                // aws-config chain build is attempted at most once per
-                // [providers.X] entry on the failure path, matching the
-                // success-path dedup carried by `bedrock_auth_cache`.
-                if let Some(prior_err) = provider_failed.get(&entry.provider) {
-                    failed.push((nickname.clone(), prior_err.clone()));
-                    continue;
-                }
-                // Credential resolution below reads the store ahead of the
-                // per-provider build, so the entry's plan must hold first.
-                if let Err(e) = plan_provider(&entry.provider, provider_entry) {
-                    let msg = e.to_string();
-                    tracing::warn!(
-                        provider = %routectl_core::sanitize_for_log(&entry.provider),
-                        model = %routectl_core::sanitize_for_log(nickname),
-                        error = %msg,
-                        "skipping Bedrock model (credential rejected)",
-                    );
-                    provider_failed.insert(entry.provider.clone(), msg.clone());
-                    failed.push((nickname.clone(), msg));
-                    continue;
-                }
-                // Cache the resolved creds per provider name so the
-                // SSO probe / aws-config chain build only fires once
-                // per [providers.X] entry, regardless of how many
-                // [models.X] reference it.
+                // Cache the resolved creds per provider name so the SSO
+                // probe / aws-config chain build only fires once per
+                // [providers.X] entry, regardless of how many [models.X]
+                // reference it.
                 let cached = match bedrock_auth_cache.get(&entry.provider) {
-                    Some(c) => Some(c.clone()),
-                    None => match resolve_bedrock_auth_for_entry(provider_entry, &*secrets).await {
+                    Some(c) => c.clone(),
+                    None => match resolve_bedrock_auth_for_entry(&plan, &*secrets).await {
                         Ok(c) => {
                             bedrock_auth_cache.insert(entry.provider.clone(), c.clone());
-                            Some(c)
+                            c
                         }
                         Err(e) => {
-                            // Bedrock cred resolution failed: the
-                            // provider is unusable, so flag this
-                            // model as failed (and skip every other
-                            // model on the same provider via
-                            // `provider_failed`).
                             let msg = e.to_string();
                             tracing::warn!(
                                 provider = %routectl_core::sanitize_for_log(&entry.provider),
@@ -1206,10 +1142,11 @@ pub async fn build_resolved_models_reported(
                 match build_provider_with_bedrock_model_override(
                     &entry.provider,
                     provider_entry,
+                    &plan,
                     secrets.clone(),
                     opts.clone(),
                     Some(entry.upstream.clone()),
-                    cached,
+                    Some(cached),
                 )
                 .await
                 {
@@ -1229,19 +1166,15 @@ pub async fn build_resolved_models_reported(
             }
             #[cfg(not(feature = "bedrock"))]
             {
-                unreachable!("is_bedrock cannot be true without the bedrock feature");
+                unreachable!("the plan has no Bedrock route without the bedrock feature");
             }
         } else if let Some(cached) = provider_cache.get(&entry.provider) {
             cached.clone()
-        } else if let Some(prior_err) = provider_failed.get(&entry.provider) {
-            // Provider already failed on a sibling model; reuse the
-            // error and keep walking.
-            failed.push((nickname.clone(), prior_err.clone()));
-            continue;
         } else {
-            match build_provider_with_options(
+            match build_planned_provider(
                 &entry.provider,
                 provider_entry,
+                &plan,
                 secrets.clone(),
                 opts.clone(),
             )
@@ -1279,10 +1212,8 @@ pub async fn build_resolved_models_reported(
             provider_entry,
             entry.history_reasoning,
         );
-        if let Some(uri) = primary_api_key_uri(provider_entry)
-            && let Ok(sr) = SecretRef::parse(uri)
-        {
-            resolved = resolved.with_auth_secret_ref(sr);
+        if let Some(sr) = plan.secret_ref() {
+            resolved = resolved.with_auth_secret_ref(sr.clone());
         }
         models.insert(nickname.clone(), Arc::new(resolved));
     }
@@ -1401,172 +1332,115 @@ fn pool_reports(
         .collect()
 }
 
-/// The provider config for an `anthropic-api` entry. `plan` is the entry's
-/// plan; its client-identity verdict is passed through unchanged, and the
-/// login session id is read only when that verdict holds.
-pub(super) async fn anthropic_api_config(
-    name: &str,
-    entry: &ProviderEntry,
-    plan: ProviderPlan,
-    secrets: &Arc<dyn SecretStore>,
-    opts: &BuildOptions,
-) -> Result<AnthropicApiConfig> {
-    let ProviderEntry::AnthropicApi {
-        api_key_ref,
-        base_url,
-        anthropic_version,
-        auth_kind,
-        credential_source,
-        header_extras,
-        payload_extras: _,
-        user_agent,
-        forward_client_headers,
-        context_management,
-        cache_capability: _,
-        reduction_enabled: _,
-        cloak,
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle,
-        runtime: _,
-    } = entry
-    else {
-        return Err(routectl_core::Error::Internal(
-            "anthropic_api_config called with a non-anthropic-api entry".to_string(),
-        ));
-    };
-    // Bedrock mantle lane. Its presence flips this provider onto
-    // region-derived, SigV4/bearer-signed egress under the
-    // `bedrock-mantle` scope. Config validation guarantees
-    // auth_kind = api-key, an empty api_key_ref,
-    // credential_source = own, and base_url at its default -- so
-    // the region is the single source of truth for the endpoint
-    // (never the operator base_url) and no first-party token is
-    // presented. Credentials resolve here, fail-fast probing
-    // Profile/DefaultChain exactly as the Bedrock provider does.
-    #[cfg(feature = "bedrock")]
-    if let Some(m) = bedrock_mantle {
-        debug_assert_eq!(
-            base_url,
-            &crate::config::default_anthropic_base(),
-            "mantle lane requires base_url at its default; validation must reject a manual base_url"
-        );
-        let mantle_base = routectl_providers::mantle::mantle_anthropic_base(&m.region)?;
-        let bedrock_creds = resolve_bedrock_creds(&**secrets, &m.creds).await?;
-        let resolved =
-            routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
-        let cfg = AnthropicApiConfig {
-            id: format!("anthropic-api:{name}"),
-            auth: Arc::new(routectl_core::StaticToken::new(String::new())),
-            base_url: mantle_base,
-            anthropic_version: anthropic_version.clone(),
-            // Force api-key on the lane rather than copying the
-            // config value: the mantle credential rides the signed
-            // request, and OauthBearer would re-engage the
-            // first-party `Authorization: Bearer` / Claude-Code
-            // header plumbing this lane must bypass. Validation
-            // already rejects a non-api-key mantle entry; this is
-            // the factory-side belt-and-braces.
-            auth_kind: routectl_providers::anthropic_api::AuthKind::ApiKey,
-            header_extras: header_extras
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            user_agent: user_agent.clone(),
-            forward_client_headers: forward_client_headers.clone(),
-            context_management: *context_management,
-            session_id: None,
-            cloak: cloak_with_normalize(cloak, opts.normalize_tools),
-            use_forwarded_bearer: false,
-            client_identity: false,
-            mantle: Some(MantleAuth {
-                region: m.region.clone(),
-                creds: resolved,
-            }),
-        };
-        return Ok(cfg);
-    }
-    validate_base_url_scheme(name, base_url)?;
-    let is_forwarded = *credential_source == CredentialSource::Forwarded;
-    // OAuth-aware: for `oauth://<provider>` refs the provider
-    // gets a `ManagedToken` that re-enters `SecretStore::get`
-    // per request, so token rotation in credentials.json is
-    // picked up live without restart. For env / file / literal
-    // the value is resolved once and wrapped in `StaticToken`
-    // (semantically equivalent to the pre-v0.7 `api_key:
-    // String` field).
-    //
-    // `credential_source = "forwarded"` is the exception:
-    // `validate_provider_credential_sources` guarantees
-    // `api_key_ref` is empty for a forwarded entry (there is no
-    // configured secret to resolve -- the provider authenticates
-    // with the client's captured bearer instead), so calling
-    // `resolve_token_source` here would always fail with an
-    // "unrecognized secret URI scheme" error. Wire a sentinel
-    // `StaticToken` instead: it is unreachable by construction --
-    // `resolve_effective_token` / `build_headers` never call
-    // `cfg.auth.token()` on the forwarded leg (gated by
-    // `should_use_forwarded_bearer`, which reads
-    // `req.routectl_internal.forwarded_bearer` instead), and the
-    // router's `missing_forwarded_bearer_error` guard refuses any
-    // request with no captured bearer before this provider is
-    // ever dispatched to.
-    let auth: Arc<dyn routectl_core::TokenSource> = if is_forwarded {
-        Arc::new(routectl_core::StaticToken::new(String::new()))
-    } else {
-        resolve_token_source(secrets, api_key_ref).await?
-    };
-    // Resolve the stable per-credential Claude Code session id
-    // only for a provider that presents the Claude Code identity.
-    // `api_key_ref` already carries the seat label
-    // (`build_seat_targets` rebuilds each labeled seat with its own
-    // `oauth://anthropic#label` ref), so `peek_session_id` resolves
-    // THIS seat's session_id with no extra fallback. The ref already
-    // parsed cleanly inside `resolve_token_source` above, so a parse
-    // error here is unreachable; treat it as "no session id" rather
-    // than fail the build.
-    let session_id = if plan.client_identity {
-        match SecretRef::parse(api_key_ref) {
-            Ok(sr) => secrets.peek_session_id(&sr).await,
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-    let cfg = AnthropicApiConfig {
-        id: format!("anthropic-api:{name}"),
-        auth,
-        base_url: base_url.clone(),
-        anthropic_version: anthropic_version.clone(),
-        auth_kind: *auth_kind,
-        header_extras: header_extras
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-        user_agent: user_agent.clone(),
-        forward_client_headers: forward_client_headers.clone(),
-        context_management: *context_management,
-        session_id,
-        cloak: cloak_with_normalize(cloak, opts.normalize_tools),
-        use_forwarded_bearer: is_forwarded,
-        client_identity: plan.client_identity,
+/// The provider config for an `anthropic-messages` entry. The plan's
+/// client-identity verdict is passed through unchanged, and the login
+/// session id is read only when that verdict holds.
+async fn anthropic_api_config(ctx: &BuildContext<'_>) -> Result<AnthropicApiConfig> {
+    let entry = ctx.entry;
+    let mut cfg = AnthropicApiConfig {
+        id: format!("anthropic-api:{}", ctx.name),
+        auth: Arc::new(routectl_core::StaticToken::new(String::new())),
+        base_url: String::new(),
+        anthropic_version: entry
+            .anthropic_version
+            .clone()
+            .unwrap_or_else(|| crate::config::DEFAULT_ANTHROPIC_VERSION.to_string()),
+        auth_kind: AuthKind::ApiKey,
+        header_extras: ctx.header_extras(),
+        user_agent: entry.user_agent.clone(),
+        forward_client_headers: entry.forward_client_headers.clone().unwrap_or_default(),
+        context_management: entry.context_management.unwrap_or(false),
+        session_id: None,
+        cloak: entry_cloak(entry, ctx.opts.normalize_tools),
+        use_forwarded_bearer: false,
+        client_identity: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
+    let Some(base) = ctx.checked_base_url()? else {
+        #[cfg(feature = "bedrock")]
+        return anthropic_cloud_config(ctx, cfg).await;
+        #[cfg(not(feature = "bedrock"))]
+        return Err(cloud_unavailable(ctx.name));
+    };
+    cfg.base_url = base.to_string();
+    cfg.auth_kind = match entry.auth {
+        Auth::Bearer => AuthKind::OauthBearer,
+        _ => AuthKind::ApiKey,
+    };
+    // `forwarded` relays the client's captured bearer; the plan pinned it to
+    // the Anthropic host with the bearer form. No configured secret exists to
+    // resolve, so the token source is an empty sentinel that the forwarded
+    // leg never reads: `resolve_effective_token` takes the captured bearer,
+    // and the router refuses a forwarded target with no captured bearer
+    // before this provider is dispatched to.
+    if matches!(ctx.plan.credential, CredentialRef::Forwarded) {
+        cfg.use_forwarded_bearer = true;
+        return Ok(cfg);
+    }
+    cfg.auth = ctx.token_source().await?;
+    // The stable per-credential Claude Code session id is read only for a
+    // provider that presents the Claude Code identity. The credential
+    // already carries the seat label, so `peek_session_id` resolves THIS
+    // seat's session id.
+    if ctx.plan.client_identity
+        && let Some(sr) = ctx.plan.secret_ref()
+    {
+        cfg.session_id = ctx.secrets.peek_session_id(sr).await;
+    }
+    cfg.client_identity = ctx.plan.client_identity;
     Ok(cfg)
 }
 
-/// Clone a provider entry's `CloakConfig` and stamp the global
-/// `[cache] normalize_tools` switch onto it. `normalize_tools` is not an
-/// operator-facing `[cloak]` key (it is `#[serde(skip)]` on `CloakConfig`);
-/// it reaches the cloak seam only through this build-time stamp, so the
-/// single operator control stays under `[cache]`.
-fn cloak_with_normalize(
-    cloak: &routectl_providers::anthropic_api::CloakConfig,
-    normalize_tools: bool,
-) -> routectl_providers::anthropic_api::CloakConfig {
-    let mut c = cloak.clone();
-    c.normalize_tools = normalize_tools;
-    c
+/// [`anthropic_api_config`] over a context built from its parts.
+#[cfg(test)]
+pub(super) async fn anthropic_api_config_for(
+    name: &str,
+    entry: &ProviderEntry,
+    plan: &ProviderPlan,
+    secrets: Arc<dyn SecretStore>,
+    opts: BuildOptions,
+) -> Result<AnthropicApiConfig> {
+    anthropic_api_config(&BuildContext {
+        name,
+        entry,
+        plan,
+        secrets,
+        opts,
+    })
+    .await
+}
+
+/// An `anthropic-messages` config on Bedrock's managed surface: the endpoint
+/// derives from `cloud.region`, the AWS credential signs the request, and no
+/// first-party token or Claude Code identity is presented.
+#[cfg(feature = "bedrock")]
+async fn anthropic_cloud_config(
+    ctx: &BuildContext<'_>,
+    mut cfg: AnthropicApiConfig,
+) -> Result<AnthropicApiConfig> {
+    let region = ctx
+        .aws_region()
+        .ok_or_else(|| cloud_unavailable(ctx.name))?;
+    cfg.base_url = routectl_providers::mantle::mantle_anthropic_base(region)?;
+    cfg.mantle = Some(mantle_auth(ctx, region).await?);
+    Ok(cfg)
+}
+
+/// The entry's cloak settings, with the global `[cache] normalize_tools`
+/// switch stamped on. `normalize_tools` is not a provider key; it reaches
+/// the cloak only through this build-time stamp, so the single operator
+/// control stays under `[cache]`.
+fn entry_cloak(entry: &ProviderEntry, normalize_tools: bool) -> CloakConfig {
+    let mut cloak = CloakConfig::default();
+    if let Some(mode) = entry.cloak_mode {
+        cloak.mode = mode;
+    }
+    if let Some(strict) = entry.cloak_strict_mode {
+        cloak.strict_mode = strict;
+    }
+    cloak.normalize_tools = normalize_tools;
+    cloak
 }
 
 /// Extract the embedded IPv4 of an IPv4-COMPATIBLE IPv6 address
@@ -1592,6 +1466,7 @@ pub fn ipv4_compatible_embedded(ip: &std::net::Ipv6Addr) -> Option<std::net::Ipv
 /// `oauth://`, `literal:`, or `unknown`) without leaking the value. Used
 /// for structured tracing fields and config errors so they indicate WHICH
 /// source a ref names without revealing the secret name or its content.
+#[cfg(feature = "openai-responses")]
 fn scheme_of(uri: &str) -> &'static str {
     SecretScheme::classify(uri).map_or("unknown", SecretScheme::as_prefix)
 }

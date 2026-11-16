@@ -8,7 +8,7 @@ use crate::commands::provider_env::env_var_for_kind;
 
 /// The secret side effect deferred until AFTER the confirmation, so a
 /// declined confirm writes no secret file and runs no login. The ref
-/// STRING that lands in `api_key_ref` is already fixed in the built entry;
+/// STRING that lands in `credential` is already fixed in the built entry;
 /// this only carries the bytes/login still owed.
 pub(super) enum PendingSecret {
     /// A ref already final at build time (env / secret-ref / forwarded):

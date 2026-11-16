@@ -19,7 +19,10 @@ async fn default_router(tmp: &TempDir) -> Router {
     // Owns the fixture lane `gpt-nick#upstream` under the kind its rows record.
     config.providers.insert(
         "gpt-nick".to_string(),
-        routectl_router::ProviderEntry::openai_compat("https://gpt.example.test/v1", "literal:k"),
+        routectl_router::ProviderEntry::openai_compat(
+            "https://gpt.example.test/v1",
+            "env://ROUTECTL_TEST_KEY",
+        ),
     );
     let config = Arc::new(config);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
@@ -773,9 +776,10 @@ const FIXTURE_SEED: &[&str] = &["fx-current", "fx-stale"];
 fn seeded_bedrock_router() -> (Router, Arc<BetaRecorder>) {
     let config: Config = toml::from_str(
         "[providers.aws]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          [aliases]\n\
          default = \"m\"\n",
     )

@@ -495,19 +495,13 @@ fn router_with_unresolved_model(nickname: &str, kind: &str) -> Router {
 /// the only kind that can expose a wrong provider-kind resolution.
 #[cfg(feature = "bedrock")]
 fn bedrock_provider_entry() -> ProviderEntry {
-    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig, ProviderRuntimePolicy};
-
-    ProviderEntry::Bedrock {
-        region: "us-west-2".into(),
-        api_shape: BedrockApiShapeConfig::Invoke,
-        creds: BedrockCredsConfig::DefaultChain,
-        user_agent: None,
-        header_extras: std::collections::BTreeMap::new(),
-        payload_extras: None,
-        cache_capability: None,
-        reduction_enabled: None,
-        runtime: ProviderRuntimePolicy::default(),
-    }
+    ProviderEntry::cloud_aws(
+        crate::config::Format::BedrockInvoke,
+        "us-west-2",
+        "aws://chain",
+        crate::config::Auth::AwsSigv4,
+    )
+    .with_header_extras(std::collections::BTreeMap::new())
 }
 
 #[cfg(not(feature = "bedrock"))]

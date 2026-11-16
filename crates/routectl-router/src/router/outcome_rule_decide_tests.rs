@@ -13,22 +13,28 @@ use crate::router::walk_state::{Exclusion, RequestWalk, WalkTarget};
 
 const SEATS: &str = r#"
 [providers.seat-a]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.seat-b]
-kind = "anthropic-api"
-api_key_ref = "env://B"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://B"
+auth = "x-api-key"
 
 [providers.gateway]
-kind = "openai-compat"
-api_key_ref = "env://C"
+format = "openai-chat"
 base_url = "https://gateway.example.com/v1"
+credential = "env://C"
+auth = "bearer"
 
 [providers.userinfo]
-kind = "openai-compat"
-api_key_ref = "env://C"
+format = "openai-chat"
 base_url = "https://user:sk-live-FAKE@gateway.example.com/v1"
+credential = "env://C"
+auth = "bearer"
 "#;
 
 fn seats() -> Config {

@@ -56,7 +56,10 @@ async fn default_router(tmp: &TempDir) -> Router {
     // Owns the fixture lane `gpt-nick#upstream` under the kind its rows record.
     config.providers.insert(
         "gpt-nick".to_string(),
-        routectl_router::ProviderEntry::openai_compat("https://gpt.example.test/v1", "literal:k"),
+        routectl_router::ProviderEntry::openai_compat(
+            "https://gpt.example.test/v1",
+            "env://ROUTECTL_TEST_KEY",
+        ),
     );
     let config = Arc::new(config);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());

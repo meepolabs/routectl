@@ -32,13 +32,17 @@ fn at(ms: u64, source: TuningSource) -> Resolved<Option<u64>> {
 
 const POOL_TOML: &str = r#"
 [providers.member-a]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 stream_first_byte_timeout_ms = 50
 
 [providers.member-b]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 
 [pools.pool]
 members = ["member-a", "member-b"]
@@ -101,8 +105,10 @@ fn a_direct_model_reusing_its_providers_slot_carries_its_own_override() {
     let mut router = Router::new(Arc::new(parse(
         r#"
 [providers.p1]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 stream_first_byte_timeout_ms = 60000
 "#,
     )));

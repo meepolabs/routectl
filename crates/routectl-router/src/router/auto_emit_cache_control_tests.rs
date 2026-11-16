@@ -2033,21 +2033,11 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
 #[cfg(feature = "bedrock")]
 mod converse_front_only {
     use super::*;
-    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig, ProviderRuntimePolicy};
+    use crate::config::{Auth, Format};
 
-    /// A Bedrock entry at `api_shape`, every other knob at its default.
-    pub(super) fn bedrock_entry(api_shape: BedrockApiShapeConfig) -> ProviderEntry {
-        ProviderEntry::Bedrock {
-            region: "us-east-1".into(),
-            api_shape,
-            creds: BedrockCredsConfig::DefaultChain,
-            user_agent: None,
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            runtime: ProviderRuntimePolicy::default(),
-        }
+    /// A Bedrock entry in `format`, every other knob at its default.
+    pub(super) fn bedrock_entry(format: Format) -> ProviderEntry {
+        ProviderEntry::cloud_aws(format, "us-east-1", "aws://chain", Auth::AwsSigv4)
     }
 
     #[tokio::test]
@@ -2056,7 +2046,7 @@ mod converse_front_only {
         // capability, so neither marker is emitted, the request is
         // byte-identical to the input, and the front decision records the
         // kind default rather than a missing capability.
-        let (router, captured) = rig(bedrock_entry(BedrockApiShapeConfig::Converse), true, 0);
+        let (router, captured) = rig(bedrock_entry(Format::BedrockConverse), true, 0);
         let mut before = blocks_system_req();
         before.model = "upstream-model".into();
         let before_bytes = serde_json::to_vec(&before).expect("serialize before");
@@ -2089,7 +2079,7 @@ mod converse_front_only {
             tools_only_req(),
             long_tool_request(),
         ] {
-            let (router, captured) = rig(bedrock_entry(BedrockApiShapeConfig::Invoke), true, 0);
+            let (router, captured) = rig(bedrock_entry(Format::BedrockInvoke), true, 0);
             let mut expected = req.clone();
             expected.model = "upstream-model".into();
             // Invoke DOES support the top-level marker (the egress lowers
@@ -2208,7 +2198,7 @@ mod converse_front_only {
         ];
         for (name, marker, decision, terminal, expected_markers) in rows {
             // Arrange
-            let (router, captured) = rig(bedrock_entry(BedrockApiShapeConfig::Invoke), true, 0);
+            let (router, captured) = rig(bedrock_entry(Format::BedrockInvoke), true, 0);
 
             // Act
             let dispatched = router
@@ -2239,7 +2229,7 @@ mod converse_front_only {
 mod kind_default_decisions {
     use super::converse_front_only::bedrock_entry;
     use super::*;
-    use crate::config::BedrockApiShapeConfig;
+    use crate::config::Format;
     use routectl_core::cache_decision::{
         AUTO_EMITTED, AUTO_SKIPPED_NO_CAPABILITY, AUTO_SKIPPED_PROVIDER_DISABLED,
     };
@@ -2275,13 +2265,13 @@ mod kind_default_decisions {
             ),
             row(
                 "bedrock invoke",
-                bedrock_entry(BedrockApiShapeConfig::Invoke),
+                bedrock_entry(Format::BedrockInvoke),
                 AUTO_SKIPPED_PROVIDER_DISABLED,
                 AUTO_EMITTED,
             ),
             row(
                 "bedrock converse",
-                bedrock_entry(BedrockApiShapeConfig::Converse),
+                bedrock_entry(Format::BedrockConverse),
                 AUTO_SKIPPED_PROVIDER_DISABLED,
                 AUTO_SKIPPED_NO_CAPABILITY,
             ),

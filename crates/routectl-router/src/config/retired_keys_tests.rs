@@ -753,86 +753,75 @@ fn a_bare_entry_name_renders_verbatim() {
     }
 }
 
-/// The cloak table does not deny unknown fields, so the typed parse alone
-/// would take a leftover word list without a word; the table refuses it in
-/// every spelling TOML allows for the nested key.
+/// A provider entry on the current shape, the positive control for the
+/// cloak rows below.
+const CLOAK_PROVIDER: &str = "[providers.sub]\nformat = \"anthropic-messages\"\n\
+                              base_url = \"https://api.anthropic.com\"\n\
+                              credential = \"oauth://anthropic\"\nauth = \"bearer\"\n";
+
+/// The cloak keys moved onto the entry itself, so a leftover `cloak` table
+/// is retired whole: every spelling TOML allows for it, word list and
+/// rename pairs included, is refused as one line naming the table, never a
+/// second line for the nested key and never the value.
 #[test]
-fn a_cloak_word_list_is_refused_in_every_spelling_the_typed_parse_accepts() {
-    let provider =
-        "[providers.sub]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n";
-    let rows = [
-        (
-            "sub-table",
-            format!("{provider}[providers.sub.cloak]\nsensitive_words = [\"{SENTINEL}\"]\n"),
-        ),
-        (
-            "inline table",
-            format!("{provider}cloak = {{ sensitive_words = [\"{SENTINEL}\"] }}\n"),
-        ),
-        (
-            "dotted key",
-            format!("{provider}cloak.sensitive_words = [\"{SENTINEL}\"]\n"),
-        ),
-    ];
-    let expected = "`providers.sub.cloak.sensitive_words` is retired: the sensitive-word \
-                    scanner is removed; nothing replaces it; delete it";
-
-    for (row, body) in rows {
-        // Arrange
-        let raw = format!("version = {CURRENT_CONFIG_VERSION}\n{body}");
-        assert!(
-            crate::parse_config(&raw).is_ok(),
-            "control `{row}`: the typed parse alone accepts the key"
-        );
-
-        // Act
-        let msg = refusal_message(&raw);
-
-        // Assert
-        assert_eq!(msg, expected, "row `{row}`");
-    }
-}
-
-/// The cloak table does not deny unknown fields, so the typed parse alone
-/// would take leftover rename pairs without a word; the table refuses them in
-/// every spelling TOML allows for the nested key, the array-of-tables form
-/// included.
-#[test]
-fn cloak_tool_renames_are_refused_in_every_spelling_the_typed_parse_accepts() {
-    let provider =
-        "[providers.sub]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n";
+fn a_leftover_cloak_table_is_refused_once_in_every_spelling() {
     let pair = format!("from = \"{SENTINEL}\"\nto = \"y\"\n");
     let rows = [
         (
-            "array of tables",
-            format!("{provider}[[providers.sub.cloak.tool_rename]]\n{pair}"),
+            "word list sub-table",
+            format!("[providers.sub.cloak]\nsensitive_words = [\"{SENTINEL}\"]\n"),
         ),
         (
-            "inline table",
-            format!(
-                "{provider}cloak = {{ tool_rename = [{{ from = \"{SENTINEL}\", to = \"y\" }}] }}\n"
-            ),
+            "word list inline table",
+            format!("cloak = {{ sensitive_words = [\"{SENTINEL}\"] }}\n"),
         ),
         (
-            "dotted key",
-            format!("{provider}cloak.tool_rename = [{{ from = \"{SENTINEL}\", to = \"y\" }}]\n"),
+            "word list dotted key",
+            format!("cloak.sensitive_words = [\"{SENTINEL}\"]\n"),
+        ),
+        (
+            "rename array of tables",
+            format!("[[providers.sub.cloak.tool_rename]]\n{pair}"),
+        ),
+        (
+            "rename inline table",
+            format!("cloak = {{ tool_rename = [{{ from = \"{SENTINEL}\", to = \"y\" }}] }}\n"),
+        ),
+        (
+            "rename dotted key",
+            format!("cloak.tool_rename = [{{ from = \"{SENTINEL}\", to = \"y\" }}]\n"),
+        ),
+        (
+            "mode sub-table",
+            "[providers.sub.cloak]\nmode = \"always\"\n".to_string(),
         ),
     ];
-    let expected = "`providers.sub.cloak.tool_rename` is retired: tool names are normalized \
-                    to mcp__ only; delete it";
+    let row = RETIRED_KEYS
+        .iter()
+        .find(|row| row.path == ["providers", ANY_ENTRY, "cloak"])
+        .expect("the table retires the provider cloak table whole");
+    let expected = format!(
+        "`providers.sub.cloak` is retired: {}; delete it",
+        row.replacement
+    );
+    let clean = format!("version = {CURRENT_CONFIG_VERSION}\n{CLOAK_PROVIDER}");
+    assert!(
+        crate::parse_config(&clean).is_ok(),
+        "control: the entry without a cloak table parses"
+    );
 
     for (row, body) in rows {
         // Arrange
-        let raw = format!("version = {CURRENT_CONFIG_VERSION}\n{body}");
-        assert!(
-            crate::parse_config(&raw).is_ok(),
-            "control `{row}`: the typed parse alone accepts the key"
-        );
+        let raw = format!("version = {CURRENT_CONFIG_VERSION}\n{CLOAK_PROVIDER}{body}");
 
         // Act
         let msg = refusal_message(&raw);
 
         // Assert
         assert_eq!(msg, expected, "row `{row}`");
+        assert!(
+            !msg.contains(SENTINEL),
+            "row `{row}` echoes the value: {msg}"
+        );
     }
 }

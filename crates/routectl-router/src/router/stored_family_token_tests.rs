@@ -30,80 +30,82 @@ const UPSTREAM: &str = "fixture-upstream";
 
 const ANTHROPIC_DIRECT: &str = r#"
 [providers.p]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 "#;
 
 const ANTHROPIC_MANTLE: &str = r#"
 [providers.p]
-kind = "anthropic-api"
-
-[providers.p.bedrock_mantle]
-region = "us-east-1"
-creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+format = "anthropic-messages"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth = "bearer"
 "#;
 
 const COMPAT_DIRECT: &str = r#"
 [providers.p]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://openrouter.ai/api/v1"
-api_key_ref = "env://OPENROUTER_API_KEY"
+credential = "env://OPENROUTER_API_KEY"
+auth = "bearer"
 "#;
 
 const COMPAT_MANTLE: &str = r#"
 [providers.p]
-kind = "openai-compat"
-api_key_ref = ""
-
-[providers.p.bedrock_mantle]
-region = "us-east-1"
-creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+format = "openai-chat"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth = "bearer"
 "#;
 
 const RESPONSES_API_KEY: &str = r#"
 [providers.p]
-kind = "openai-responses"
-auth_kind = "api-key"
-api_key_ref = "env://OPENAI_API_KEY"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "env://OPENAI_API_KEY"
+auth = "bearer"
 "#;
 
 const RESPONSES_MANTLE: &str = r#"
 [providers.p]
-kind = "openai-responses"
-api_key_ref = ""
-
-[providers.p.bedrock_mantle]
-region = "us-east-1"
-creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+format = "openai-responses"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth = "bearer"
 "#;
 
 const BEDROCK_INVOKE: &str = r#"
 [providers.p]
-kind = "bedrock"
-region = "us-west-2"
-creds = { kind = "default-chain" }
-api_shape = "invoke"
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#;
 
 const BEDROCK_CONVERSE: &str = r#"
 [providers.p]
-kind = "bedrock"
-region = "us-west-2"
-creds = { kind = "default-chain" }
-api_shape = "converse"
+format = "bedrock-converse"
+cloud = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#;
 
 const GEMINI_API_KEY: &str = r#"
 [providers.p]
-kind = "gemini"
-api_key_ref = "env://GEMINI_API_KEY"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "env://GEMINI_API_KEY"
+auth = "x-goog-api-key"
 "#;
 
 const GEMINI_CLOUD_CODE: &str = r#"
 [providers.p]
-kind = "gemini"
-auth_mode = "cloud-code"
-api_key_ref = "oauth://antigravity"
+format = "gemini-cloud-code"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
+credential = "oauth://antigravity"
+auth = "bearer"
 "#;
 
 // ------------------------------------------------------------- expectations

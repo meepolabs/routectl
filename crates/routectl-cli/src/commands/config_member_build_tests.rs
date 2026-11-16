@@ -42,13 +42,15 @@ fn write_credentials(path: &Path, records: &[(&str, serde_json::Value)]) {
 
 /// Two anthropic seats pooled behind model `opus`.
 const ANTHROPIC_POOL: &str = "[providers.seat-a]\n\
-     kind = \"anthropic-api\"\n\
-     api_key_ref = \"oauth://anthropic#seat-a\"\n\
-     auth_kind = \"oauth-bearer\"\n\
+     format = \"anthropic-messages\"\n\
+     base_url = \"https://api.anthropic.com\"\n\
+     credential = \"oauth://anthropic#seat-a\"\n\
+     auth = \"bearer\"\n\
      [providers.seat-b]\n\
-     kind = \"anthropic-api\"\n\
-     api_key_ref = \"oauth://anthropic#seat-b\"\n\
-     auth_kind = \"oauth-bearer\"\n\
+     format = \"anthropic-messages\"\n\
+     base_url = \"https://api.anthropic.com\"\n\
+     credential = \"oauth://anthropic#seat-b\"\n\
+     auth = \"bearer\"\n\
      [pools.alpha]\n\
      members = [\"seat-a\", \"seat-b\"]\n\
      [models.opus]\n\
@@ -57,8 +59,10 @@ const ANTHROPIC_POOL: &str = "[providers.seat-a]\n\
 
 /// One Codex seat pooled behind model `gpt`.
 const CODEX_POOL: &str = "[providers.seat-c]\n\
-     kind = \"openai-responses\"\n\
-     api_key_ref = \"oauth://codex#seat-c\"\n\
+     format = \"openai-responses\"\n\
+     base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+     credential = \"oauth://codex#seat-c\"\n\
+     auth = \"bearer\"\n\
      [pools.beta]\n\
      members = [\"seat-c\"]\n\
      [models.gpt]\n\

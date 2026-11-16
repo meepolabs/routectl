@@ -16,159 +16,30 @@
       ],
       "description": "Value of one entry in the `[aliases]` table. Either a single model\nnickname (the most common shape) or a fallback chain of nicknames.\nUntagged so the operator-facing TOML stays terse:\n\n```toml\n[aliases]\n\"claude-opus-4-7-20251022\" = \"heavy\"      # single\n\"fast\"                     = [\"small\", \"smaller\"]  # chain\n```"
     },
-    "AuthKind": {
-      "description": "How the provider authenticates to the Anthropic Messages API.",
+    "Auth": {
+      "description": "How a request authenticates on the wire.",
       "oneOf": [
         {
-          "const": "api-key",
-          "description": "Standard `x-api-key: <key>` header. Default for `sk-ant-api03-...` keys.",
+          "const": "x-api-key",
+          "description": "`x-api-key: <key>` header.",
           "type": "string"
         },
         {
-          "const": "oauth-bearer",
-          "description": "OAuth bearer for subscription tokens (e.g. Claude Code's\n`sk-ant-oat01-...` access token). Sends `Authorization: Bearer <key>`.\nThe required `anthropic-beta: oauth-2025-04-20` gate is auto-injected\nvia the pinned beta floor in `build_headers` for the\napi.anthropic.com surface -- no manual `extra_headers` needed.",
+          "const": "bearer",
+          "description": "`Authorization: Bearer <token>` header.",
+          "type": "string"
+        },
+        {
+          "const": "x-goog-api-key",
+          "description": "`x-goog-api-key: <key>` header.",
+          "type": "string"
+        },
+        {
+          "const": "aws-sigv4",
+          "description": "AWS SigV4 request signing.",
           "type": "string"
         }
       ]
-    },
-    "AuthKind2": {
-      "description": "How the provider authenticates to the Responses API.\n\nKebab-case on the TOML wire so config writes look natural:\n  `auth_kind = \"chatgpt-oauth\"`",
-      "oneOf": [
-        {
-          "const": "chatgpt-oauth",
-          "description": "ChatGPT subscription via OAuth bearer JWT. Default.",
-          "type": "string"
-        },
-        {
-          "const": "api-key",
-          "description": "Standard OpenAI API key against `api.openai.com/v1/responses`.",
-          "type": "string"
-        },
-        {
-          "const": "bedrock-mantle",
-          "description": "AWS Bedrock Mantle proxy (OpenAI-shape):\n`Authorization: Bearer <bearer>` using the long-term Bedrock API\nkey (resolved via api_key_ref, typically\nenv://AWS_BEARER_TOKEN_BEDROCK).",
-          "type": "string"
-        }
-      ]
-    },
-    "BedrockApiShapeConfig": {
-      "description": "TOML-side mirror of `routectl_providers::bedrock::BedrockApiShape`.\nWe don't re-export the providers-side enum directly because TOML\nconfigs need to parse cleanly even when the `bedrock` feature is\noff (so non-Bedrock builds stay lean), and serde derives don't\nlike cfg-gated re-exports.",
-      "oneOf": [
-        {
-          "const": "invoke",
-          "description": "The vendor-specific InvokeModel wire shape.",
-          "type": "string"
-        },
-        {
-          "const": "converse",
-          "description": "The vendor-neutral Converse wire shape.",
-          "type": "string"
-        }
-      ]
-    },
-    "BedrockCredsConfig": {
-      "description": "TOML-side credentials descriptor for a Bedrock provider.\n\nEach variant is tagged by `kind`. Secret-bearing fields hold raw\nsecret-URI strings (`env://`, `file://`) which the\nfactory parses + resolves at provider build time -- same pattern\nas `api_key_ref` on the other provider variants.\n\nExamples:\n```toml\n# Bedrock console short-term API key\ncreds = { kind = \"bearer-key\", key_ref = \"file://<local-path>\" }\n\n# Static AWS access keys\ncreds = { kind = \"static\",\n          access_key_ref  = \"env://AWS_ACCESS_KEY_ID\",\n          secret_key_ref  = \"env://AWS_SECRET_ACCESS_KEY\",\n          session_token_ref = \"env://AWS_SESSION_TOKEN\" }\n\n# Named profile in ~/.aws/credentials (incl. SSO)\ncreds = { kind = \"profile\", name = \"bedrock-prod\" }\n\n# Standard AWS provider chain (env -> profile -> SSO -> IRSA -> IMDS)\ncreds = { kind = \"default-chain\" }\n```",
-      "oneOf": [
-        {
-          "description": "A long-term Bedrock API key (bearer token).",
-          "properties": {
-            "key_ref": {
-              "description": "Reference to the bearer key.",
-              "type": "string"
-            },
-            "kind": {
-              "const": "bearer-key",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "key_ref"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Static AWS access/secret keys, optionally with a session token.",
-          "properties": {
-            "access_key_ref": {
-              "description": "Reference to the AWS access key id.",
-              "type": "string"
-            },
-            "kind": {
-              "const": "static",
-              "type": "string"
-            },
-            "secret_key_ref": {
-              "description": "Reference to the AWS secret access key.",
-              "type": "string"
-            },
-            "session_token_ref": {
-              "default": null,
-              "description": "Reference to an optional AWS session token.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "access_key_ref",
-            "secret_key_ref"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "A named profile from the AWS shared-credentials file.",
-          "properties": {
-            "kind": {
-              "const": "profile",
-              "type": "string"
-            },
-            "name": {
-              "description": "The profile name.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "name"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "The AWS default credential provider chain.",
-          "properties": {
-            "kind": {
-              "const": "default-chain",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "BedrockMantleConfig": {
-      "additionalProperties": false,
-      "description": "Shared mantle sub-config for AWS Bedrock's managed inference lane. Its\nPRESENCE on a provider entry selects the mantle lane: the factory\nderives the endpoint base URL from `region` (region is the single\nsource of truth -- no manual `base_url`) and authenticates with\n`creds`. Naming is deliberately lane-neutral so the OpenAI-shape lanes\nreuse this exact type.",
-      "properties": {
-        "creds": {
-          "$ref": "#/$defs/BedrockCredsConfig",
-          "description": "Credential descriptor for this lane: a long-term bearer key or a\nSigV4 credential source (static keys, named profile, or the AWS\ndefault provider chain)."
-        },
-        "region": {
-          "description": "AWS region the mantle endpoint lives in (e.g. `us-east-1`). The\nfactory derives both the endpoint host and the SigV4 signing scope\nfrom this single value, so it must be a canonical AWS region\nidentifier (commercial, GovCloud or China partition).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "region",
-        "creds"
-      ],
-      "type": "object"
     },
     "CacheCapability": {
       "additionalProperties": false,
@@ -253,22 +124,6 @@
       },
       "type": "object"
     },
-    "CloakConfig": {
-      "description": "Opt-in, empty-default configuration surface for the OAuth-egress cloak.\n`CloakConfig::default()` selects the standard cloak: mode `Auto`,\n`strict_mode` false (relocate the client system into the first user\nmessage rather than dropping it).",
-      "properties": {
-        "mode": {
-          "$ref": "#/$defs/CloakMode",
-          "default": "auto",
-          "description": "Cloak mode. Default `Auto` (original heuristic)."
-        },
-        "strict_mode": {
-          "default": false,
-          "description": "How the non-CC client's real `system` content is handled after the\n`system` field is reduced to the identity line only. Default false:\nrelocate the client system verbatim into the first user message as a\n`<system-reminder>` block (client behavior preserved). When true:\ndrop the client system entirely (identity-only `system`, no\nreminder). Egress-only: the response never echoes `system`, so there\nis no reverse map for this transform.",
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "CloakMode": {
       "description": "Operator-facing cloak mode. Selects how aggressively the OAuth-egress\ncloak rewrites the outgoing body. `Auto` (default) preserves the\noriginal heuristic behavior exactly: the non-CC heuristic keys off the\npresence of an `x-claude-code-session-id` capture.",
       "oneOf": [
@@ -289,32 +144,66 @@
         }
       ]
     },
-    "CredentialSource": {
-      "description": "Which credential a provider egress authenticates with. `own` (the\ndefault) preserves prior behavior byte-for-byte: the egress\nauthenticates with routectl's own managed credential. `forwarded`\ninstead relays the client's inbound credential straight through to\nthe upstream untouched. Used ONLY by `ProviderEntry::AnthropicApi`\n(the forwarded-provider credential, pinned to `api.anthropic.com` by\n`validate_provider_credential_sources`) -- the legacy `[mitm]\ncredential_source` field this enum also backed is retired; see\n`RETIRED_KEYS`.",
+    "Cloud": {
+      "description": "The cloud a provider entry is reached through. Its endpoint host and\nsigning scope derive from the location keys, never from text the\noperator writes as a URL.",
       "oneOf": [
         {
-          "const": "own",
-          "description": "Authenticate to the upstream with routectl's own managed\ncredential (the default behavior).",
-          "type": "string"
-        },
-        {
-          "const": "forwarded",
-          "description": "Relay the client's inbound credential to the upstream untouched.",
-          "type": "string"
+          "additionalProperties": false,
+          "description": "Amazon Web Services: Bedrock runtime for the `bedrock-*` formats,\nBedrock's managed surface for the others.",
+          "properties": {
+            "name": {
+              "const": "aws",
+              "type": "string"
+            },
+            "region": {
+              "description": "A canonical AWS region identifier (commercial, GovCloud or China\npartition), e.g. `us-east-1`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "region"
+          ],
+          "type": "object"
         }
       ]
     },
-    "GeminiAuthMode": {
-      "description": "Selects which Gemini wire dialect a provider speaks.",
+    "Format": {
+      "description": "The wire format a provider entry speaks. Each format maps to exactly one\nstored family token (the value [`ProviderEntry::kind_str`] returns);\nseveral formats may share a token.\n\n[`ProviderEntry::kind_str`]: crate::ProviderEntry::kind_str",
       "oneOf": [
         {
-          "const": "api-key",
-          "description": "Public `generativelanguage.googleapis.com` REST surface with an\n`x-goog-api-key` header.",
+          "const": "anthropic-messages",
+          "description": "Anthropic Messages API.",
           "type": "string"
         },
         {
-          "const": "cloud-code",
-          "description": "Cloud Code (`cloudcode-pa.googleapis.com`) with a bearer token and\nthe request/response envelope.",
+          "const": "openai-chat",
+          "description": "OpenAI-compatible Chat Completions.",
+          "type": "string"
+        },
+        {
+          "const": "openai-responses",
+          "description": "OpenAI Responses API.",
+          "type": "string"
+        },
+        {
+          "const": "bedrock-invoke",
+          "description": "AWS Bedrock InvokeModel.",
+          "type": "string"
+        },
+        {
+          "const": "bedrock-converse",
+          "description": "AWS Bedrock Converse.",
+          "type": "string"
+        },
+        {
+          "const": "gemini",
+          "description": "Gemini REST `generateContent` with an API key.",
+          "type": "string"
+        },
+        {
+          "const": "gemini-cloud-code",
+          "description": "Gemini through the Cloud Code surface with an OAuth bearer.",
           "type": "string"
         }
       ]
@@ -341,7 +230,7 @@
     },
     "MitmConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts `api.anthropic.com` (e.g.\nClaude Code's own traffic) so routectl can observe and translate the\ndecrypted traffic. Presence of the `[mitm]` block gates the feature\non, matching the `[server.auth]` convention -- `Config::mitm == None`\nkeeps zero proxy startup and zero behavior change.\n\nTransport-only and local-only: the block names where the listener\nbinds and where its certificates live, never where traffic goes. The\nupstream origin and TLS host are fixed in routectl-cli's proxy module,\nbecause the proxy forwards the client's full-scope claude.ai token.\nWhich credential a forwarded egress uses is a per-provider choice\n(`ProviderEntry::AnthropicApi.credential_source`). Retired keys of\nthis block are refused by the pre-parse retired-key table\n(`RETIRED_KEYS`), which names each replacement.",
+      "description": "Operator-facing `[mitm]` config block for the MITM front-proxy: a\nlocal TLS-terminating listener that fronts `api.anthropic.com` (e.g.\nClaude Code's own traffic) so routectl can observe and translate the\ndecrypted traffic. Presence of the `[mitm]` block gates the feature\non, matching the `[server.auth]` convention -- `Config::mitm == None`\nkeeps zero proxy startup and zero behavior change.\n\nTransport-only and local-only: the block names where the listener\nbinds and where its certificates live, never where traffic goes. The\nupstream origin and TLS host are fixed in routectl-cli's proxy module,\nbecause the proxy forwards the client's full-scope claude.ai token.\nWhich credential a forwarded egress uses is a per-provider choice\n(`credential = \"forwarded\"` on a `[providers.X]` entry). Retired keys of\nthis block are refused by the pre-parse retired-key table\n(`RETIRED_KEYS`), which names each replacement.",
       "properties": {
         "cert_dir": {
           "default": "~/.config/routectl/mitm-certs",
@@ -602,653 +491,189 @@
       "type": "object"
     },
     "ProviderEntry": {
-      "description": "One `[providers.X]` entry, tagged by `kind`. Each variant carries the\ntransport-side knobs (auth, base URL, header/payload extras, cache and\nruntime policy) for one upstream shape.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "OpenAI-compatible chat-completions provider.",
-          "properties": {
-            "api_key_ref": {
-              "description": "Reference to the API key. One of:\n  - `env://VAR_NAME`             (process env var)\n  - `file:///abs/path/to/key`    (mode-600 file)\n  - `oauth://<provider>[#seat]`  (routectl-managed OAuth token)",
-              "type": "string"
+      "additionalProperties": false,
+      "description": "One `[providers.X]` entry. Every entry answers the same questions with\nthe same keys, in this order: `format` (the API), exactly one of\n`base_url` or `cloud` (where requests go), `credential` (which secret)\nand `auth` (how it is sent), then the companions `account_id_ref` and\n`cloud_project_id`, then tuning. The identity keys are always written;\ntuning keys default when omitted.\n\nWhich combinations are coherent (a format over a carrier with an auth,\na credential scheme with an auth, a managed login on its vendor's host)\nis decided by the factory's provider plan, which every build path and\nconfig validation run before any credential is read.",
+      "properties": {
+        "account_id_ref": {
+          "description": "ChatGPT account id reference for the Codex host. Optional with a\nmanaged `oauth://codex` login (read from the login); required with a\nstatic credential there.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "anthropic_version": {
+          "description": "`anthropic-version` header value sent upstream. Unset: `2023-06-01`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "$ref": "#/$defs/Auth",
+          "description": "How the credential goes on the wire: `x-api-key`, `bearer`,\n`x-goog-api-key` or `aws-sigv4`."
+        },
+        "base_url": {
+          "description": "Endpoint base URL: a plain http(s) URL with a host. Exactly one of\n`base_url` and `cloud` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cache_capability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CacheCapability"
             },
-            "base_url": {
-              "default": "",
-              "description": "Endpoint base URL. Required (non-empty) on the standard lane\n-- validation rejects an omitted / empty value. Defaulted\n(empty) only so the mantle lane may omit it: when\n`bedrock_mantle` is set the factory derives the URL from\n`bedrock_mantle.region`, and validation then REQUIRES this be\nleft unset.",
-              "type": "string"
-            },
-            "bedrock_mantle": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/BedrockMantleConfig"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Opt-in AWS Bedrock mantle lane (OpenAI Chat Completions shape).\nPresent -> this provider egresses through Bedrock's managed\nOpenAI-compatible surface: the factory derives `base_url` from\n`bedrock_mantle.region` and authenticates with\n`bedrock_mantle.creds`. Omitted (default) -> the standard\nOpenAI-compatible lane. When set, `api_key_ref` must be empty\nand `base_url` left unset -- validation rejects every other\ncombination (region is the single source of truth for the\nendpoint, and the credential lives in `creds`)."
-            },
-            "cache_capability": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CacheCapability"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
-            },
-            "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "header_extras": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {},
-              "description": "Provider-level header extras. Merged with the per-model\n`header_extras` at dispatch time; model wins on key\ncollision (list-valued `anthropic-beta` runs through a\ncomma-split-union-rejoin post-pass instead).",
-              "type": "object"
-            },
-            "kind": {
-              "const": "openai-compat",
-              "type": "string"
-            },
-            "payload_extras": {
-              "default": null,
-              "description": "Provider-level payload extras. Deep-merged with the\nper-model `payload_extras` at dispatch time (model wins on\nleaf collision)."
-            },
-            "reduction_enabled": {
-              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider even when\nglobal is on. Reduction policy, NOT a runtime/rate knob --\nlives outside `runtime`.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "request_timeout_ms": {
-              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "user_agent": {
-              "default": null,
-              "description": "Override the outbound User-Agent.",
-              "type": [
-                "string",
-                "null"
-              ]
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "kind",
-            "api_key_ref"
           ],
+          "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-format default."
+        },
+        "circuit_cooldown_ms": {
+          "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "circuit_failures": {
+          "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cloak_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CloakMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Claude Code cloak mode: `auto` (the default), `always` or `never`."
+        },
+        "cloak_strict_mode": {
+          "description": "When true the cloak drops the client's own `system` content instead\nof relocating it into the first user message. Unset: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "cloud": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cloud"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The cloud this provider is reached through, whose endpoint is derived\nfrom its location keys. Exactly one of `base_url` and `cloud` is set."
+        },
+        "cloud_project_id": {
+          "description": "Cloud Code project id for a `gemini-cloud-code` seat. Give the BARE\nid (`my-project-1234`), never the `projects/`-prefixed resource name.\n\nSet it to skip discovery entirely: it is consulted before the\ncredential store's cached project id and before `loadCodeAssist` /\n`onboardUser`, so a cold request goes straight to `generateContent`.\nThe value also writes through to the seat's persisted project id, so\nlater requests -- and other entries on the same seat -- read it from\nthe cache. Two entries naming the same seat with different ids: last\nwriter wins.\n\nIf the host rejects the id as not applying to this seat, that request\nfails and the entry falls back to discovery for the rest of the\nprocess. Unset (or empty) leaves discovery as the only source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "codex_version": {
+          "description": "Codex CLI version this provider claims on the wire, threaded into the\nderived User-Agent and the `version` identity header. None -> the\npinned default. The codex identity is process-global, so every\nprovider that sets this must agree on one value (validation rejects\ndivergence). RESTART-REQUIRED: a hot reload cannot flip it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context_management": {
+          "description": "When true, routectl emulates Anthropic's\ncontext-management-2025-06-27 beta server-side for this provider. Set\nthis for non-Anthropic `anthropic-messages` upstreams that do not\nhonor the beta natively. Unset: false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "credential": {
+          "description": "The one credential string: `env://VAR`, `file:///abs/path`,\n`oauth://<vendor>[#label]` (a routectl-managed login),\n`aws://profile/<name>`, `aws://chain`, or `forwarded` (the client's\nown credential is passed through).",
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/Format",
+          "description": "The API this provider speaks: `anthropic-messages`, `openai-chat`,\n`openai-responses`, `bedrock-invoke`, `bedrock-converse`, `gemini`\nor `gemini-cloud-code`."
+        },
+        "forward_client_headers": {
+          "description": "Strict allowlist of inbound `x-claude-code-*` header names the egress\nmay forward to api.anthropic.com. Unset or empty drops every captured\n`x-claude-code-*` header at the egress. Names match\ncase-insensitively.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "header_extras": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Provider-level header extras. Merged with the per-model\n`header_extras` at dispatch time; model wins on key collision\n(list-valued `anthropic-beta` runs through a comma-split-union-rejoin\npost-pass instead).",
           "type": "object"
         },
-        {
-          "additionalProperties": false,
-          "description": "Native Anthropic Messages API provider.",
-          "properties": {
-            "anthropic_version": {
-              "default": "2023-06-01",
-              "description": "`anthropic-version` header value sent upstream.",
-              "type": "string"
-            },
-            "api_key_ref": {
-              "default": "",
-              "description": "Reference to the API key, resolved the same way as every\nother provider's `api_key_ref`. Defaulted (empty string) so a\n`credential_source = \"forwarded\"` block can omit it entirely\n-- `validate_provider_credential_sources` then REQUIRES it be\nempty for `forwarded` and non-empty for `own`.",
-              "type": "string"
-            },
-            "auth_kind": {
-              "$ref": "#/$defs/AuthKind",
-              "default": "api-key",
-              "description": "How the Messages API authenticates this provider. Default\nis `api-key` (the standard `x-api-key` header). Use\n`oauth-bearer` when `api_key_ref` resolves to a Claude Code\nsubscription access token (`sk-ant-oat01-...`)."
-            },
-            "base_url": {
-              "default": "https://api.anthropic.com",
-              "description": "Endpoint base URL.",
-              "type": "string"
-            },
-            "bedrock_mantle": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/BedrockMantleConfig"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Opt-in AWS Bedrock mantle lane. Present -> this provider\negresses through Bedrock's managed Anthropic Messages surface:\nthe factory derives `base_url` from `bedrock_mantle.region` and\nauthenticates with `bedrock_mantle.creds`. Omitted (default) ->\nthe standard direct-to-Anthropic lane. When set, `auth_kind`\nmust be `api-key`, `credential_source` `own`, `api_key_ref`\nempty, and `base_url` left at its default -- validation rejects\nevery other combination (region is the single source of truth\nfor the endpoint, and the credential lives in `creds`)."
-            },
-            "cache_capability": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CacheCapability"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default. Useful when a\nnon-Anthropic upstream behind this anthropic-api-shaped\nprovider does not honor a top-level breakpoint."
-            },
-            "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "cloak": {
-              "$ref": "#/$defs/CloakConfig",
-              "default": {
-                "mode": "auto",
-                "strict_mode": false
-              },
-              "description": "Opt-in OAuth-cloak configuration. Omitting the `[cloak]`\nsub-table yields `CloakConfig::default()` (mode `auto`, no\nstrict mode) -- identical to the always-on `mcp_`\nnormalization. TOML surface: `[providers.X.cloak]` with\n`mode` / `strict_mode`."
-            },
-            "context_management": {
-              "default": false,
-              "description": "When true, routectl emulates Anthropic's\ncontext-management-2025-06-27 beta server-side for this\nprovider. Set this for non-Anthropic anthropic-api providers\n(e.g. DeepSeek's /anthropic surface) that do not honor the\nbeta natively. Default false: routectl forwards the body\nverbatim and the real Anthropic server handles the beta\nitself.",
-              "type": "boolean"
-            },
-            "credential_source": {
-              "$ref": "#/$defs/CredentialSource",
-              "default": "own",
-              "description": "Which credential this provider's Anthropic egress\nauthenticates with. Default `own`: the provider uses\n`api_key_ref`/`auth_kind` exactly as before. `forwarded`\nrelays the client's captured claude.ai bearer instead --\n`validate_provider_credential_sources` requires `base_url`'s\nhost be exactly `api.anthropic.com` and `api_key_ref` be\nempty whenever this is `forwarded`."
-            },
-            "forward_client_headers": {
-              "default": [],
-              "description": "Strict allowlist of inbound `x-claude-code-*` header names\nthe egress is permitted to forward to api.anthropic.com.\nEmpty (default) drops every captured `x-claude-code-*`\nheader at the egress -- secure-by-default for new\nproviders. Names match case-insensitively. Capture happens\nat the Anthropic ingress (defense-in-depth, namespace-\nbounded); this list is the operator's filter on which\ncaptured names actually go upstream.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "header_extras": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {},
-              "description": "Provider-level header extras. Merged with per-model entries\nat dispatch time.",
-              "type": "object"
-            },
-            "kind": {
-              "const": "anthropic-api",
-              "type": "string"
-            },
-            "payload_extras": {
-              "default": null,
-              "description": "Provider-level payload extras. Deep-merged with per-model\nentries at dispatch time."
-            },
-            "reduction_enabled": {
-              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "request_timeout_ms": {
-              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "user_agent": {
-              "default": null,
-              "description": "Override the outbound User-Agent. Useful for IAM-gated upstreams.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
+        "payload_extras": {
+          "description": "Provider-level payload extras. Deep-merged with the per-model\n`payload_extras` at dispatch time (model wins on leaf collision)."
         },
-        {
-          "additionalProperties": false,
-          "description": "OpenAI Responses API provider. Three auth surfaces:\n- `chatgpt-oauth`: ChatGPT subscription JWT.\n- `api-key`: standard OpenAI API key.\n- `bedrock-mantle`: `Authorization: Bearer <bearer>` using the\n  long-term Bedrock API key (resolved via api_key_ref, typically\n  env://AWS_BEARER_TOKEN_BEDROCK).\n\n`base_url` is optional: when unset, the factory picks the\nauth_kind-appropriate default at provider build time.",
-          "properties": {
-            "account_id_ref": {
-              "default": null,
-              "description": "ChatGPT account UUID. Required when `auth_kind =\n\"chatgpt-oauth\"`; must be absent for the other variants.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "api_key_ref": {
-              "description": "Resolves to the bearer JWT (ChatgptOauth), API key (ApiKey),\nor long-term Bedrock API key (BedrockMantle, typically\nenv://AWS_BEARER_TOKEN_BEDROCK).",
-              "type": "string"
-            },
-            "auth_kind": {
-              "$ref": "#/$defs/AuthKind2",
-              "default": "chatgpt-oauth",
-              "description": "Which auth surface to dispatch on. Default\n`chatgpt-oauth`."
-            },
-            "base_url": {
-              "default": null,
-              "description": "Endpoint base URL. None -> factory picks an auth_kind-\nappropriate default. Operators can pin a specific value\nto point at a staging shard, a localhost mock, etc. A managed\n`oauth://codex` credential is accepted only on\n`https://chatgpt.com` with `auth_kind = \"chatgpt-oauth\"`; a\nstaging shard, mirror, or mock needs a static `env://` or\n`file://` credential.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "bedrock_mantle": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/BedrockMantleConfig"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Opt-in AWS Bedrock mantle lane (OpenAI Responses shape).\nPresent -> this provider egresses through Bedrock's managed\nResponses surface: the factory derives `base_url` from\n`bedrock_mantle.region` and authenticates with\n`bedrock_mantle.creds`. Omitted (default) -> the standard\nResponses lane. When set, `auth_kind` must be `bedrock-mantle`\n(or omitted -- the factory sets the marker), `account_id_ref`\nand `api_key_ref` empty, and `base_url` left unset --\nvalidation rejects every other combination. Setting\n`auth_kind = \"bedrock-mantle\"` WITHOUT this block is a hard\nerror (the legacy bearer-only surface is closed)."
-            },
-            "cache_capability": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CacheCapability"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
-            },
-            "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "codex_version": {
-              "description": "Codex CLI version this provider claims on the wire, threaded\ninto the derived User-Agent and the `version` identity header\n(chatgpt-oauth surface). None -> the pinned default. The codex\nidentity is process-global, so every openai-responses provider\nthat sets this must agree on one value (validation rejects\ndivergence). RESTART-REQUIRED: a hot reload cannot flip it.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "header_extras": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {},
-              "description": "Provider-level header extras.",
-              "type": "object"
-            },
-            "kind": {
-              "const": "openai-responses",
-              "type": "string"
-            },
-            "payload_extras": {
-              "default": null,
-              "description": "Provider-level payload extras."
-            },
-            "reduction_enabled": {
-              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "request_timeout_ms": {
-              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "user_agent": {
-              "default": null,
-              "description": "Override the outbound User-Agent. None -> default\n`routectl/<version> codex-cli`.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "api_key_ref"
-          ],
-          "type": "object"
+        "reduction_enabled": {
+          "description": "Per-provider override for the dispatch-path token-reduction feature.\n`None` inherits the global `[reduction]` switch; `Some(false)`\ndisables reduction for this provider even when global is on.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
-        {
-          "additionalProperties": false,
-          "description": "Native AWS Bedrock provider. Speaks SigV4 directly to\n`bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to\nswitch between vendor-specific InvokeModel (default) and\nvendor-neutral Converse.",
-          "properties": {
-            "api_shape": {
-              "$ref": "#/$defs/BedrockApiShapeConfig",
-              "default": "invoke",
-              "description": "Wire shape: InvokeModel (default) or Converse."
-            },
-            "cache_capability": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CacheCapability"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
-            },
-            "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "creds": {
-              "$ref": "#/$defs/BedrockCredsConfig",
-              "description": "AWS credential source for SigV4 signing."
-            },
-            "header_extras": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {},
-              "description": "Provider-level header extras.",
-              "type": "object"
-            },
-            "kind": {
-              "const": "bedrock",
-              "type": "string"
-            },
-            "payload_extras": {
-              "default": null,
-              "description": "Provider-level payload extras."
-            },
-            "reduction_enabled": {
-              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "region": {
-              "description": "AWS region for the Bedrock runtime endpoint; must be a canonical\nAWS region identifier (commercial, GovCloud or China partition).",
-              "type": "string"
-            },
-            "request_timeout_ms": {
-              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "user_agent": {
-              "default": null,
-              "description": "Override the outbound User-Agent.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "region",
-            "creds"
-          ],
-          "type": "object"
+        "request_timeout_ms": {
+          "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
-        {
-          "additionalProperties": false,
-          "description": "Native Google Gemini provider (REST v1beta `generateContent`).",
-          "properties": {
-            "api_key_ref": {
-              "description": "Resolves to the Gemini API key (sent as `x-goog-api-key`).",
-              "type": "string"
-            },
-            "auth_mode": {
-              "$ref": "#/$defs/GeminiAuthMode",
-              "default": "api-key",
-              "description": "Selects the Gemini wire dialect. `api-key` (default) uses the\npublic `generativelanguage.googleapis.com` REST surface with the\n`x-goog-api-key` header. `cloud-code` uses the Cloud Code\n(\"antigravity\") surface with an OAuth bearer; in that mode\n`api_key_ref` MUST be an `oauth://<provider>` reference."
-            },
-            "base_url": {
-              "default": "https://generativelanguage.googleapis.com/v1beta",
-              "description": "Endpoint base URL. Default (api-key mode):\n`https://generativelanguage.googleapis.com/v1beta`. In\n`cloud-code` mode the effective default is the daily Cloud Code\nhost `https://daily-cloudcode-pa.googleapis.com`; set this only to\nreach the production host `https://cloudcode-pa.googleapis.com`.\nOne value carries the whole cloud-code lane -- generateContent,\nloadCodeAssist, and onboardUser all go to it -- and it is\nforwarded to the provider only when it differs from the api-key\ndefault. The managed `oauth://antigravity` credential is accepted\nonly on the production or daily Cloud Code host over https, and\n`cloud-code` mode accepts no static credential, so an enterprise\nmirror or a test/staging host is not reachable on this lane; an\n`api-key` entry with a static `env://` or `file://` key may point\nat any host.",
-              "type": "string"
-            },
-            "cache_capability": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CacheCapability"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
-            },
-            "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "cloud_project_id": {
-              "description": "Cloud Code project id for this seat, in `cloud-code` mode. Give\nthe BARE id (`my-project-1234`), never the `projects/`-prefixed\nresource name.\n\nSet it to skip discovery entirely: it is consulted before the\ncredential store's cached project id and before `loadCodeAssist`\n/ `onboardUser`, so a cold request goes straight to\n`generateContent`. The value also writes through to the seat's\npersisted project id, so later requests -- and other entries on\nthe same seat -- read it from the cache. Two entries naming the\nsame seat with different ids: last writer wins.\n\nIf the host rejects the id as not applying to this seat, that\nrequest fails and the entry falls back to discovery for the rest\nof the process. Unset (or empty) leaves discovery as the only\nsource. Ignored in `api-key` mode.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "header_extras": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "default": {},
-              "description": "Provider-level header extras.",
-              "type": "object"
-            },
-            "kind": {
-              "const": "gemini",
-              "type": "string"
-            },
-            "payload_extras": {
-              "default": null,
-              "description": "Provider-level payload extras."
-            },
-            "reduction_enabled": {
-              "description": "Per-provider override for the dispatch-path token-reduction\nfeature. `None` inherits the global `[reduction]` switch;\n`Some(false)` disables reduction for this provider. Reduction\npolicy, not a runtime/rate knob.",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "request_timeout_ms": {
-              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "user_agent": {
-              "default": null,
-              "description": "Override the outbound User-Agent.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "api_key_ref"
-          ],
-          "type": "object"
+        "rpm_limit": {
+          "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stream_first_byte_timeout_ms": {
+          "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "user_agent": {
+          "description": "Override the outbound User-Agent.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
-      ]
+      },
+      "required": [
+        "format",
+        "credential",
+        "auth"
+      ],
+      "type": "object"
     },
     "ReasoningDialect": {
       "description": "How an openai-compat provider expresses reasoning/thinking on the wire.",
@@ -1539,7 +964,7 @@
         "$ref": "#/$defs/ProviderEntry"
       },
       "default": {},
-      "description": "Provider definitions keyed by operator-facing name. Carries\ntransport-side knobs only (auth, base URL, headers, runtime\ngates). Per-model knobs (`reasoning_dialect`, `history_reasoning`)\nlive on `[models.X]` in v0.6.0.",
+      "description": "Provider definitions keyed by operator-facing name. Carries\ntransport-side knobs only (format, destination, credential, auth,\nheaders, runtime gates). Per-model knobs (`reasoning_dialect`, `history_reasoning`)\nlive on `[models.X]` in v0.6.0.",
       "type": "object"
     },
     "reduction": {

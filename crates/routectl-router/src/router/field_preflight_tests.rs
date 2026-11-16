@@ -136,6 +136,22 @@ fn req_without_field(alias: &str) -> ChatRequest {
 
 // --- routers and targets -----------------------------------------------
 
+/// The `format`, `base_url` and `auth` lines of a fixture entry whose family
+/// token is `kind`.
+fn entry_identity(kind: &str) -> &'static str {
+    match kind {
+        ANTHROPIC => {
+            "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\n\
+             auth = \"x-api-key\"\n"
+        }
+        "gemini" => {
+            "format = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\n\
+             auth = \"x-goog-api-key\"\n"
+        }
+        other => panic!("no fixture entry for family `{other}`"),
+    }
+}
+
 /// Config text for an N-leg chain of `kind` providers, each leg on its own
 /// provider entry so per-seat verdict keys are independent.
 fn chain_config(alias: &str, seats: usize, kind: &str) -> Config {
@@ -143,7 +159,8 @@ fn chain_config(alias: &str, seats: usize, kind: &str) -> Config {
     let mut chain: Vec<String> = Vec::with_capacity(seats);
     for idx in 0..seats {
         toml_text.push_str(&format!(
-            "\n[providers.p{idx}]\nkind = \"{kind}\"\napi_key_ref = \"literal:k\"\n"
+            "\n[providers.p{idx}]\n{}credential = \"literal:k\"\n",
+            entry_identity(kind)
         ));
         chain.push(format!("m{idx}"));
     }
@@ -208,7 +225,8 @@ fn install(config: Config, seats: usize, answer: Answer) -> (Router, Vec<Arc<Obs
 /// carry a combination config validation refuses).
 fn config_with_base_url(base_url: &str) -> Config {
     let toml_text = format!(
-        "\n[providers.p0]\nkind = \"{ANTHROPIC}\"\napi_key_ref = \"literal:k\"\nbase_url = \"{base_url}\"\n"
+        "\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"{base_url}\"\n\
+         credential = \"literal:k\"\nauth = \"x-api-key\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config
@@ -753,7 +771,8 @@ fn a_forwarded_credential_target_falls_open() {
         .providers
         .remove("p0")
         .expect("the fixture entry exists")
-        .with_credential_source(crate::config::CredentialSource::Forwarded);
+        .with_credential("forwarded")
+        .with_auth(crate::config::Auth::Bearer);
     config.providers.insert("p0".to_string(), entry);
     let (router, _seen) = install(config, 1, Answer::ServeImmediately);
     plant_eligible(&router, "m0");
@@ -1317,18 +1336,17 @@ fn a_bedrock_mantle_target_falls_open_on_rows_its_lane_view_omits() {
     // that row reports no grounded field here and is sent untouched, as the
     // reactive arm also declines it.
     let mut config = chain_config(ALIAS, 1, ANTHROPIC);
-    let mut entry = config
+    let direct = config
         .providers
         .remove("p0")
         .expect("the fixture entry exists");
-    if let crate::config::ProviderEntry::AnthropicApi { bedrock_mantle, .. } = &mut entry {
-        *bedrock_mantle = Some(crate::config::BedrockMantleConfig {
-            region: "us-west-2".to_string(),
-            creds: crate::config::BedrockCredsConfig::BearerKey {
-                key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
-            },
-        });
-    }
+    let mut entry = crate::config::ProviderEntry::cloud_aws(
+        crate::config::Format::AnthropicMessages,
+        "us-west-2",
+        crate::test_secret::file_ref("mantle-bearer-key"),
+        crate::config::Auth::Bearer,
+    );
+    entry.runtime = direct.runtime;
     assert!(
         entry.classifiable_egress_base_url().is_some(),
         "fixture premise: a mantle entry egresses to a classifiable Mantle base",

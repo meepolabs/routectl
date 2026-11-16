@@ -2184,9 +2184,10 @@ fn bedrock_router() -> Router {
     let config: Config = toml::from_str(
         "version = 3\n\
          [providers.bed]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\n",
+         format = \"bedrock-invoke\"\n\
+         cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n",
     )
     .expect("fixture config parses");
     let mut router = Router::new(Arc::new(config));

@@ -45,13 +45,15 @@ fn router_with(extra: &str) -> Router {
     let body = format!(
         "version = 5\n\
          [providers.p1]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [providers.p2]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.test/v1\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [capability]\n\
          enabled = true\n\
          {extra}"

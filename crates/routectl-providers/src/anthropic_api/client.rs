@@ -95,8 +95,8 @@ pub struct AnthropicApiConfig {
     /// operators. Threaded into `cloak_body` to gate the mode.
     pub cloak: CloakConfig,
     /// True only for a provider entry configured
-    /// `credential_source = "forwarded"` (set by the factory from
-    /// `ProviderEntry::AnthropicApi::credential_source`). Gates the WIRE
+    /// `credential = "forwarded"` (set by the factory from the entry's
+    /// credential). Gates the WIRE
     /// choke point: a captured `forwarded_bearer` is consumed ONLY when
     /// this is true (in addition to the existing bearer-present +
     /// anthropic-host legs). Default `false` -- an own-creds provider

@@ -105,7 +105,8 @@ fn text_message(role: Role, text: &str) -> Message {
 
 fn config() -> (Arc<Config>, tempfile::TempDir) {
     let toml_text = format!(
-        "\n[providers.p0]\nkind = \"{KIND}\"\napi_key_ref = \"literal:k\"\nbase_url = \"{REMOTE_BASE}\"\n"
+        "\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"{REMOTE_BASE}\"\n\
+         credential = \"literal:k\"\nauth = \"x-api-key\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.models.insert(

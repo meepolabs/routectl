@@ -52,7 +52,7 @@ use super::probe_test_support::{
     OkProvider, RECHECK_PATH, grounding_request, plant_acting_negative,
 };
 use super::{DispatchTarget, Router};
-use crate::config::{AliasValue, Config, CredentialSource, ModelEntry, ProviderEntry};
+use crate::config::{AliasValue, Auth, Config, ModelEntry, ProviderEntry};
 use crate::field_verdict::FieldVerdictKey;
 use crate::probe_scheduler::{FreeValidatorOutcome, ProbePayload, ProbeValidator};
 use crate::resolved::ResolvedModel;
@@ -66,11 +66,12 @@ struct Shape {
     /// What the row is, for a failure message.
     name: &'static str,
     base_url: &'static str,
-    credential_source: CredentialSource,
-    /// Whether the entry carries a Bedrock Mantle sub-lane. Such an entry reads
-    /// `anthropic-api` while egressing through Mantle, so its configured
-    /// `base_url` is not its effective egress -- `anthropic_api_base_url`
-    /// answers `None` for it, and the fixture asserts that premise.
+    /// Whether the entry relays the client's own credential.
+    forwarded: bool,
+    /// Whether the entry is the AWS managed-surface (Mantle) lane. Such an entry
+    /// reads `anthropic-api` while egressing through Mantle and sets no
+    /// `base_url` -- `anthropic_api_base_url` answers `None` for it, and the
+    /// fixture asserts that premise.
     #[cfg(feature = "bedrock")]
     bedrock_mantle: bool,
     /// Whether the `[providers]` entry is DROPPED after the dispatch target has
@@ -89,7 +90,7 @@ const SHAPES: &[Shape] = &[
     Shape {
         name: "the Anthropic default base, routectl's own credential",
         base_url: "https://api.anthropic.com",
-        credential_source: CredentialSource::Own,
+        forwarded: false,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
         entry_removed_after_expansion: false,
@@ -98,7 +99,7 @@ const SHAPES: &[Shape] = &[
     Shape {
         name: "an operator's remote mirror",
         base_url: "https://api.example.com/anthropic",
-        credential_source: CredentialSource::Own,
+        forwarded: false,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
         entry_removed_after_expansion: false,
@@ -107,7 +108,7 @@ const SHAPES: &[Shape] = &[
     Shape {
         name: "a loopback base URL",
         base_url: "http://127.0.0.1:8899",
-        credential_source: CredentialSource::Own,
+        forwarded: false,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
         entry_removed_after_expansion: false,
@@ -116,7 +117,7 @@ const SHAPES: &[Shape] = &[
     Shape {
         name: "a forwarded client credential",
         base_url: "https://api.anthropic.com",
-        credential_source: CredentialSource::Forwarded,
+        forwarded: true,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
         entry_removed_after_expansion: false,
@@ -125,123 +126,74 @@ const SHAPES: &[Shape] = &[
     Shape {
         name: "an entry a reload removed",
         base_url: "https://api.anthropic.com",
-        credential_source: CredentialSource::Own,
+        forwarded: false,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
         entry_removed_after_expansion: true,
         attributable: false,
     },
-    // The Mantle row is the one a raw base-url read gets WRONG: its configured
-    // base is the Anthropic default, so a stage reading the base URL directly
-    // reads a remote Anthropic host, while every stage must read the Mantle
-    // endpoint its region derives.
-    //
-    // The base is spelled EXPLICITLY as that default rather than borrowed from a
-    // sibling row, because it is the discriminating fact: pointed anywhere else
-    // this row either stops being a Mantle lane the validator accepts, or
-    // becomes a duplicate of the loopback row. The fixture's premise assertions
-    // enforce both, and it runs the production Mantle validator so the entry is
-    // one an operator could actually have written.
+    // The Mantle row is the one a raw base-url read gets WRONG: it configures
+    // no base URL at all, so every stage must read the Mantle endpoint its
+    // region derives. `base_url` below is unused for it; the fixture rebuilds
+    // the entry on the cloud carrier and runs production validation over it so
+    // the entry is one an operator could actually have written.
     #[cfg(feature = "bedrock")]
     Shape {
         name: "a Bedrock Mantle sub-lane",
-        base_url: MANTLE_BASE_URL,
-        credential_source: CredentialSource::Own,
+        base_url: "https://api.anthropic.com",
+        forwarded: false,
         bedrock_mantle: true,
         entry_removed_after_expansion: false,
         attributable: true,
     },
 ];
 
-/// The ONLY base URL a Mantle entry may carry: `region` is the single source of
-/// truth for its endpoint, so the production validator requires this exact
-/// value. Spelled here, not shared with the plain-default row, because the whole
-/// point of the Mantle row is that this base reads as a legitimate remote
-/// Anthropic host while the upstream is Bedrock Mantle.
-#[cfg(feature = "bedrock")]
-const MANTLE_BASE_URL: &str = "https://api.anthropic.com";
-
-/// Attach the Mantle sub-lane to `entry` and bring it to a shape PRODUCTION
-/// accepts, then assert every invariant the row rests on.
+/// Rebuild `entry` as the AWS managed-surface lane for the Mantle row and
+/// assert every invariant the row rests on.
 ///
-/// The base `ProviderEntry::anthropic_api` constructor hands back a
-/// direct-to-Anthropic entry carrying an `api_key_ref`, which a Mantle lane must
-/// not have: the credential comes from `bedrock_mantle.creds`, and the validator
-/// rejects a stray key as dead config. Clearing it is what makes this an entry an
-/// operator could actually have written, rather than a struct that only the
-/// accessor happens to answer `None` for.
+/// The entry rides `cloud` in `us-west-2` with a bearer key and sets no
+/// `base_url`: its endpoint derives from the region. Every assertion here is a
+/// PREMISE of the Mantle row, and each would otherwise fail silently into a
+/// row that proves something else:
 ///
-/// Every assertion here is a PREMISE of the Mantle row, and each would otherwise
-/// fail silently into a row that proves something else:
-///
-/// - the production validator accepts it, so the row is not an unreachable shape;
-/// - the sub-lane is attached, else the row duplicates the plain-default row;
-/// - `api_key_ref` is empty, the invariant the validator enforces;
-/// - the base is the production Anthropic default AND not loopback, so a stage
-///   reading the configured base instead of the derived one would still admit
-///   it -- which is what keeps it distinct from the loopback row;
+/// - production validation accepts it, so the row is not an unreachable shape;
+/// - the entry rides the cloud, else the row duplicates the plain-default row;
+/// - no `base_url` is configured, so no stage can admit it by reading one;
 /// - `anthropic_api_base_url()` answers `None`, so the row's admission comes
-///   from the region-derived egress every stage reads, not from that base.
+///   from the region-derived egress every stage reads.
 #[cfg(feature = "bedrock")]
-fn complete_mantle_entry(mut entry: ProviderEntry, base_url: &str) -> ProviderEntry {
-    if let ProviderEntry::AnthropicApi {
-        api_key_ref,
-        bedrock_mantle,
-        ..
-    } = &mut entry
-    {
-        api_key_ref.clear();
-        *bedrock_mantle = Some(crate::config::BedrockMantleConfig {
-            region: "us-west-2".to_string(),
-            creds: crate::config::BedrockCredsConfig::BearerKey {
-                key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
-            },
-        });
-    }
+fn complete_mantle_entry(entry: ProviderEntry) -> ProviderEntry {
+    let mut mantle = ProviderEntry::cloud_aws(
+        crate::config::Format::AnthropicMessages,
+        "us-west-2",
+        crate::test_secret::file_ref("mantle-bearer-key"),
+        Auth::Bearer,
+    );
+    mantle.runtime = entry.runtime;
 
-    // The PRODUCTION validator, over a config carrying only this entry -- the
-    // same contract `validate_provider_bedrock_mantle`'s own fixtures assert,
-    // reached through the same public function rather than restated here.
     let mut probe = Config::default();
-    probe.providers.insert(PROVIDER.to_string(), entry.clone());
-    crate::factory::validate_provider_bedrock_mantle(&probe)
-        .expect("premise: the mantle entry must be one production validation accepts");
-
-    match &entry {
-        ProviderEntry::AnthropicApi {
-            api_key_ref,
-            base_url: configured,
-            bedrock_mantle: Some(_),
-            ..
-        } => {
-            assert!(
-                api_key_ref.is_empty(),
-                "premise: a mantle lane carries no api_key_ref"
-            );
-            assert_eq!(
-                configured,
-                &crate::config::default_anthropic_base(),
-                "premise: a mantle lane sits at the production default Anthropic \
-                 base, which is what makes it look like a remote Anthropic host"
-            );
-            assert_eq!(
-                configured, base_url,
-                "premise: the row's base must be the one under test"
-            );
-            assert!(
-                !crate::field_verdict::loopback_target_suppresses_minting(configured),
-                "premise: the mantle base must NOT be loopback, or this row's \
-                 refusal would duplicate the loopback row's"
-            );
-        }
-        _ => panic!("premise: the mantle sub-lane must be attached to an anthropic-api entry"),
-    }
+    probe.providers.insert(PROVIDER.to_string(), mantle.clone());
+    let validation = crate::factory::collect_config_validation(&probe);
     assert!(
-        ProviderEntry::anthropic_api_base_url(&entry).is_none(),
+        validation.errors.is_empty(),
+        "premise: the mantle entry must be one production validation accepts: {:?}",
+        validation.errors
+    );
+
+    assert!(
+        mantle.cloud.is_some(),
+        "premise: the mantle lane rides the AWS cloud"
+    );
+    assert!(
+        mantle.base_url.is_none(),
+        "premise: a mantle lane configures no base URL"
+    );
+    assert!(
+        ProviderEntry::anthropic_api_base_url(&mantle).is_none(),
         "premise: a mantle entry carries no direct anthropic-api base URL, so its \
          admission rests on the region-derived egress"
     );
-    entry
+    mantle
 }
 
 /// A router carrying `shape`'s single provider entry, plus the real dispatch
@@ -267,15 +219,16 @@ fn fixture(shape: &Shape) -> (Router, DispatchTarget) {
 /// [`fixture`], dispatching to `provider`.
 fn fixture_with(shape: &Shape, provider: Arc<dyn Provider>) -> (Router, DispatchTarget) {
     let mut config = Config::default();
-    let mut entry = ProviderEntry::anthropic_api("literal:k")
-        .with_base_url(shape.base_url)
-        .with_credential_source(shape.credential_source);
-    if let ProviderEntry::AnthropicApi { runtime, .. } = &mut entry {
-        runtime.circuit_failures = Some(1);
+    let mut entry = if shape.forwarded {
+        ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer)
+    } else {
+        ProviderEntry::anthropic_api("literal:k")
     }
+    .with_base_url(shape.base_url);
+    entry.runtime.circuit_failures = Some(1);
     #[cfg(feature = "bedrock")]
     if shape.bedrock_mantle {
-        entry = complete_mantle_entry(entry, shape.base_url);
+        entry = complete_mantle_entry(entry);
     }
     config.providers.insert(PROVIDER.to_string(), entry);
     config.models.insert(

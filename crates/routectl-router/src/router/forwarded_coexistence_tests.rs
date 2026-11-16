@@ -1,7 +1,7 @@
 //! The per-provider passthrough model dissolves the earlier whole-chain
 //! forwarded-passthrough gate (`enforce_forwarded_anthropic_target` /
 //! `target_is_anthropic_egress`
-//! / `FORWARDED_EGRESS_KIND`, deleted): `credential_source = "forwarded"`
+//! / `FORWARDED_EGRESS_KIND`, deleted): `credential = "forwarded"`
 //! is now a PER-PROVIDER config, not a request-global mode switch, so
 //! an alias routes exactly like any other -- no whole-chain refusal, no
 //! steering. These tests cover what replaces it:
@@ -11,7 +11,7 @@
 //!   chain or not) dispatches with that provider's own credentials,
 //!   and is never refused up front.
 //! - A forwarded-CREDENTIAL target (an `anthropic-api` provider with
-//!   `credential_source = "forwarded"`) with NO captured bearer
+//!   `credential = "forwarded"`) with NO captured bearer
 //!   refuses cleanly BEFORE egress -- the compensating guard paired
 //!   with the gate deletion -- and the guard is per-target, so a
 //!   chain that never reaches that target is unaffected.
@@ -23,7 +23,7 @@
 //! is never consumed by it -- lives in `forwarded_auth_terminal_tests`,
 //! next to the terminal-bypass mocks it reuses.
 use super::*;
-use crate::config::{CredentialSource, ProviderEntry, ProviderRuntimePolicy};
+use crate::config::ProviderEntry;
 use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
@@ -85,11 +85,13 @@ impl Provider for RecordingProvider {
 }
 
 /// An `anthropic-api` provider entry on the default (api.anthropic.com)
-/// host, with `credential_source` set per `forwarded`.
+/// host, relaying the client's credential when `forwarded`.
 fn anthropic_entry(forwarded: bool) -> ProviderEntry {
     let entry = ProviderEntry::anthropic_api("literal:k");
     if forwarded {
-        entry.with_credential_source(CredentialSource::Forwarded)
+        entry
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer)
     } else {
         entry
     }
@@ -97,18 +99,7 @@ fn anthropic_entry(forwarded: bool) -> ProviderEntry {
 
 /// A non-`anthropic-api`, OWN-credential provider entry.
 fn openai_compat_entry() -> ProviderEntry {
-    ProviderEntry::OpenaiCompat {
-        base_url: "https://placeholder.invalid/v1".into(),
-        api_key_ref: "literal:k".into(),
-        header_extras: BTreeMap::new(),
-        payload_extras: None,
-        user_agent: None,
-        cache_capability: None,
-        reduction_enabled: None,
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle: None,
-        runtime: ProviderRuntimePolicy::default(),
-    }
+    ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k")
 }
 
 /// One leg of a test chain: config entry + matching recording mock.
@@ -258,7 +249,7 @@ async fn stream_forwarded_bearer_present_routes_to_own_compat_normally() {
 
 // ---- missing-bearer terminal guard ----
 //
-// A forwarded-CREDENTIAL target (provider `credential_source =
+// A forwarded-CREDENTIAL target (provider `credential =
 // "forwarded"`) with NO captured bearer must refuse cleanly BEFORE
 // egress -- never an ambiguous upstream 401 -- in all three dispatch
 // paths. The guard is per-target: it fires only for the target about
@@ -433,8 +424,8 @@ async fn missing_bearer_refuse_client_error_carries_no_token() {
 // Every test above wires a `RecordingProvider` mock straight onto a
 // `ResolvedModel`, bypassing `crate::factory::build_provider`
 // entirely. That is exactly why a factory-side bug (unconditionally
-// resolving a token from a forwarded entry's guaranteed-empty
-// `api_key_ref`) could break `serve` while every dispatch-behavior
+// resolving a token from a forwarded entry's `forwarded`
+// credential) could break `serve` while every dispatch-behavior
 // test here kept passing. This test drives the REAL factory build
 // for the forwarded leg so the two layers are exercised together.
 

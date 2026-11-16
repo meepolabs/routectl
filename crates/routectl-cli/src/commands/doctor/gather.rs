@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::{TokenRecord, seat_key, unix_now};
+use routectl_auth::{CredentialRef, SecretRef, SecretScheme, default_secret_dir};
 use routectl_auth::{OAuthError, OAuthStore};
-use routectl_auth::{SecretRef, SecretScheme, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CapabilityEventRow, CapabilityRebuildSummary, Config, EffectiveView,
@@ -561,11 +561,18 @@ pub(super) enum SecretPresence {
     Invalid,
 }
 
-/// The leak-safe scheme prefix of a secret URI. A bare, unprefixed value
-/// IS secret material, so it collapses to `"unknown"` rather than echoing
-/// any of its bytes.
+/// The leak-safe scheme prefix of a credential string: `env://`, `file://`,
+/// `oauth://`, `literal:`, `aws://profile/`, `aws://chain` or `forwarded`.
+/// An AWS profile label never carries the profile name. A bare, unprefixed
+/// value IS secret material, so it collapses to `"unknown"` rather than
+/// echoing any of its bytes.
 pub(super) fn scheme_label(uri: &str) -> &'static str {
-    SecretScheme::classify(uri).map_or("unknown", SecretScheme::as_prefix)
+    match CredentialRef::parse(uri) {
+        Ok(CredentialRef::AwsProfile(_)) => "aws://profile/",
+        Ok(CredentialRef::AwsChain) => "aws://chain",
+        Ok(CredentialRef::Forwarded) => "forwarded",
+        _ => SecretScheme::classify(uri).map_or("unknown", SecretScheme::as_prefix),
+    }
 }
 
 /// Classify one secret ref without resolving its value or refreshing any

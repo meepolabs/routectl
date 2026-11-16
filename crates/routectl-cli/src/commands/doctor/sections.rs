@@ -607,7 +607,7 @@ pub(super) fn section_seat_orphans(ctx: &DoctorContext) -> Vec<Finding> {
                     "seat `{shown}` has stored credentials but no provider entry uses it"
                 ),
                 remediation: Some(format!(
-                    "reference this seat from a provider `api_key_ref` or run \
+                    "reference this seat from a provider `credential` or run \
                      `routectl logout {}` to remove it",
                     safe(&logout_target(seat))
                 )),

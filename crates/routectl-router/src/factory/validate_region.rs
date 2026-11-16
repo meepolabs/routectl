@@ -1,5 +1,5 @@
 //! Config-load validation of every AWS region that derives an endpoint
-//! host: native Bedrock `region` and each lane's `bedrock_mantle.region`.
+//! host: the `region` of each entry's `cloud = { name = "aws", region }`.
 //! The check itself is the providers crate's
 //! [`routectl_providers::validate_aws_region`], shared with the endpoint
 //! builders and signers so config load and request time cannot disagree on
@@ -28,24 +28,10 @@ pub fn validate_aws_regions(config: &Config) -> Result<()> {
 }
 
 fn endpoint_region(entry: &ProviderEntry) -> Option<(&'static str, &str)> {
-    const MANTLE_FIELD: &str = "bedrock_mantle.region";
-    match entry {
-        ProviderEntry::Bedrock { region, .. } => Some(("region", region)),
-        ProviderEntry::AnthropicApi {
-            bedrock_mantle: Some(mantle),
-            ..
-        }
-        | ProviderEntry::OpenaiCompat {
-            bedrock_mantle: Some(mantle),
-            ..
-        } => Some((MANTLE_FIELD, &mantle.region)),
-        #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses {
-            bedrock_mantle: Some(mantle),
-            ..
-        } => Some((MANTLE_FIELD, &mantle.region)),
-        _ => None,
-    }
+    entry
+        .cloud
+        .as_ref()
+        .map(|cloud| ("cloud.region", cloud.aws_region()))
 }
 
 #[cfg(test)]

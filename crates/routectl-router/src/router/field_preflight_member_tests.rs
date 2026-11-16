@@ -158,8 +158,8 @@ async fn the_token_count_after_a_settled_member_drop_counts_without_it() {
 /// Two anthropic-api seats on distinct provider entries, each behind its own
 /// alias, so each is its own learned lane.
 fn two_lane_router(learning: &Arc<MemberSeat>, other: &Arc<MemberSeat>) -> Router {
-    let toml_text = "[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
-         [providers.p1]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+    let toml_text = "[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n\
+         [providers.p1]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
     let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
     config.retry.max_attempts = 1;
     config

@@ -42,9 +42,10 @@ port = 8787
 # (`ollama`), not on the lane, per the `ROUTECTL_DRIVER_<PROVIDER>_API_KEY`
 # convention.
 [providers.ollama]
-kind        = "openai-compat"
-base_url    = "https://ollama.com/v1"
-api_key_ref = "env://ROUTECTL_DRIVER_OLLAMA_API_KEY"
+format     = "openai-chat"
+base_url   = "https://ollama.com/v1"
+credential = "env://ROUTECTL_DRIVER_OLLAMA_API_KEY"
+auth       = "bearer"
 
 # The cloud model the Ollama Cloud docs name for direct API calls
 # (https://docs.ollama.com/cloud).

@@ -73,7 +73,7 @@ impl Provider for Always401 {
 }
 
 /// Router whose alias `"alias"` resolves to a single `anthropic-api`
-/// target with `credential_source = "forwarded"`, so the per-target
+/// target with `credential = "forwarded"`, so the per-target
 /// terminal-bypass re-key admits the request and dispatch reaches the
 /// 401ing seat.
 fn router_with_anthropic_target() -> Router {
@@ -83,7 +83,8 @@ fn router_with_anthropic_target() -> Router {
     config.providers.insert(
         "p-anthropic".to_string(),
         ProviderEntry::anthropic_api(common::file_ref("k"))
-            .with_credential_source(routectl_router::config::CredentialSource::Forwarded),
+            .with_credential("forwarded")
+            .with_auth(routectl_router::Auth::Bearer),
     );
     config.aliases.insert(
         "alias".to_string(),

@@ -270,7 +270,7 @@ fn a_loopback_anthropic_lane_reports_unsupported_lane() {
     use crate::config::{AliasValue, ModelEntry};
     let mut config = Config::default();
     // A loopback base URL with the anthropic-api kind.
-    let toml_text = "\n[providers.anthropic]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\nbase_url = \"http://127.0.0.1:8899\"\n";
+    let toml_text = "\n[providers.anthropic]\nformat = \"anthropic-messages\"\nbase_url = \"http://127.0.0.1:8899\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n";
     let parsed: Config = toml::from_str(toml_text).expect("valid");
     config.providers = parsed.providers;
     config.models.insert(
@@ -342,13 +342,12 @@ fn lane_view_cases() -> Vec<LaneViewCase> {
     let mut cases: Vec<LaneViewCase> = vec![
         (
             "anthropic-api (every row in view)",
-            "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n",
+            "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n",
             &[("temperature", IN), ("output_config.effort.xhigh", IN)],
         ),
         (
             "openai-compat direct (no effort rows)",
-            "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-             api_key_ref = \"literal:k\"\n",
+            "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
             &[("temperature", IN), ("output_config.effort.xhigh", OUT)],
         ),
     ];
@@ -356,33 +355,30 @@ fn lane_view_cases() -> Vec<LaneViewCase> {
     cases.extend::<[LaneViewCase; 3]>([
         (
             "bedrock (every row in view)",
-            "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
+            "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             &[("temperature", IN), ("output_config.effort.xhigh", IN)],
         ),
         (
             "anthropic-api Mantle sub-lane",
-            "kind = \"anthropic-api\"\napi_key_ref = \"\"\n\
-             bedrock_mantle = { region = \"us-west-2\", creds = { kind = \"default-chain\" } }\n",
+            "format = \"anthropic-messages\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             &[("max_tokens", IN), ("temperature", OUT)],
         ),
         (
             "openai-compat Mantle sub-lane",
-            "kind = \"openai-compat\"\napi_key_ref = \"\"\n\
-             bedrock_mantle = { region = \"us-west-2\", creds = { kind = \"default-chain\" } }\n",
+            "format = \"openai-chat\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             &[("top_p", IN), ("temperature", OUT)],
         ),
     ]);
     #[cfg(feature = "openai-responses")]
     cases.push((
         "openai-responses direct (effort rows only)",
-        "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n",
+        "format = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
         &[("output_config.effort.xhigh", IN), ("temperature", OUT)],
     ));
     #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
     cases.push((
         "openai-responses Mantle sub-lane",
-        "kind = \"openai-responses\"\napi_key_ref = \"\"\n\
-         bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n",
+        "format = \"openai-responses\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
         &[("output_config.effort.max", IN), ("temperature", OUT)],
     ));
     cases

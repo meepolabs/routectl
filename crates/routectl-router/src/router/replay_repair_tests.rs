@@ -179,9 +179,10 @@ fn req_carrying(format: &str) -> ChatRequest {
 /// classifier gates on.
 const SINGLE_TARGET_TOML: &str = r#"
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 /// Single openai-responses target `p1`/`m1` with a zero-hour decay window, so
@@ -192,9 +193,10 @@ const SINGLE_TARGET_ZERO_DECAY_TOML: &str = r#"
 decay_hours = 0
 
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 /// Parse `toml_text` and install `provider` under nickname `m1` on provider
@@ -216,14 +218,16 @@ fn router_from_toml(toml_text: &str, provider: Arc<dyn Provider>) -> Router {
 fn router_two_target_chain(p1: Arc<dyn Provider>, p2: Arc<dyn Provider>) -> Router {
     let toml_text = r#"
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 
 [providers.p2]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
     let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
     config.aliases.insert(

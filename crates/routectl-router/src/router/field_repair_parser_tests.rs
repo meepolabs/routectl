@@ -342,8 +342,7 @@ impl Provider for BedrockCanarySeat {
 fn bedrock_canary_router() -> (Router, Arc<BedrockCanarySeat>) {
     let mut config: Config = toml::from_str(
         "\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-         [providers.p0]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\n",
+         [providers.p0]\nformat = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
     )
     .expect("valid test toml");
     config

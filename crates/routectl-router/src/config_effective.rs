@@ -22,17 +22,10 @@
 
 use std::borrow::Cow;
 
-use routectl_auth::SecretScheme;
+use routectl_auth::{CredentialRef, SecretScheme};
 use routectl_core::failure_class::FailureClass;
-use routectl_providers::anthropic_api::AuthKind;
-#[cfg(feature = "gemini")]
-use routectl_providers::gemini::GeminiAuthMode;
-#[cfg(feature = "openai-responses")]
-use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 
 use crate::class_policy::ConfigFailureClass;
-#[cfg(feature = "bedrock")]
-use crate::config::BedrockCredsConfig;
 use crate::config::{
     Config, ModelEntry, PricingConfig, ProviderEntry, ResolvedTuning, resolve_tuning,
 };
@@ -274,38 +267,26 @@ pub struct AliasChain {
 pub struct ProviderCell {
     /// The `[providers.<id>]` table key.
     pub id: String,
-    /// The entry's `kind = "..."` discriminant, from
-    /// [`ProviderEntry::kind_str`].
+    /// The entry's provider family token, from [`ProviderEntry::kind_str`].
     pub kind: String,
+    /// The entry's `format = "..."` value.
+    pub format: String,
     /// The CONFIGURED endpoint origin (scheme + host + port), or `None` when
-    /// the entry's config carries no endpoint or the value does not parse.
-    ///
-    /// `None` does NOT mean "no endpoint": Bedrock derives its host from
-    /// `region`, both mantle lanes require `base_url` be left unset and derive
-    /// it from `bedrock_mantle.region`, and an unset-`base_url`
-    /// `openai-responses` entry gets an auth-kind-appropriate default. All
-    /// three are resolved at FACTORY time, which a pure derivation over
-    /// `&Config` cannot reach without duplicating factory logic and minting a
-    /// second source of truth. This field reports what the CONFIG says.
-    ///
-    /// The one exception is a `cloud-code` Gemini entry with `base_url` left
-    /// unset: reporting the api-key public base there would be a WRONG fact,
-    /// so such an entry reports the effective cloud-code host instead.
+    /// the entry's carrier is a cloud or the value does not parse. A cloud
+    /// entry's endpoint is derived at factory time and is shown as
+    /// [`Self::cloud`] instead.
     pub endpoint_origin: Option<String>,
-    /// The URI SCHEME of the entry's primary `api_key_ref` (`env`, `file`,
-    /// `oauth`, `literal`), never the ref body. `unknown` for a present ref
-    /// off that allowlist (a pasted bare value included); `None` for a
-    /// variant with no single canonical key slot, or a blank ref.
+    /// The cloud carrier: its name, then its region when the region is a
+    /// canonical AWS region identifier (`aws us-east-1`); `None` for a
+    /// base-URL entry.
+    pub cloud: Option<String>,
+    /// The SCHEME of the entry's `credential` (`env`, `file`, `oauth`,
+    /// `aws-profile`, `aws-chain`, `forwarded`, `literal`), never the
+    /// credential body. `unknown` for a present value off that allowlist (a
+    /// pasted bare value included); `None` for a blank credential.
     pub credential_ref_scheme: Option<String>,
-    /// This variant's OWN existing serde auth token (`api-key`,
-    /// `oauth-bearer`, `chatgpt-oauth`, `bedrock-mantle`, `cloud-code`,
-    /// `bearer-key`, `static`, `profile`, `default-chain`), or `None` for
-    /// `openai-compat`, which has no auth discriminant at all.
-    ///
-    /// There is deliberately NO cross-kind vocabulary here: each provider kind
-    /// carries the token its own config already uses, so the projection adds no
-    /// vocabulary of its own. The extraction point states the prohibition that
-    /// keeps this field secret-free.
+    /// The entry's `auth = "..."` value: a closed vocabulary (`x-api-key`,
+    /// `bearer`, `x-goog-api-key`, `aws-sigv4`).
     pub auth_token: Option<String>,
     /// The entry's OWN configured requests-per-minute cap. Three states, none
     /// interchangeable: `Some(n)` with `n > 0` is a live limit, `Some(0)` seeds
@@ -431,29 +412,32 @@ pub fn normalized_origin(base_url: &str) -> Option<String> {
     Some(format!("{}://{host}:{port}", url.scheme()))
 }
 
-/// The leak-safe scheme of a secret ref (`env://VAR` -> `env`), never the body.
+/// The leak-safe scheme of a credential (`env://VAR` -> `env`,
+/// `aws://profile/x` -> `aws-profile`), never the body.
 ///
-/// The body names a variable, a filesystem path, or an OAuth provider id; only
-/// the scheme says WHERE the credential class lives, which is the whole of what
-/// a read surface needs.
+/// The body names a variable, a filesystem path, an OAuth provider id or an
+/// AWS profile; only the scheme says WHERE the credential class lives, which
+/// is the whole of what a read surface needs.
 ///
-/// The vocabulary is an ALLOWLIST, matching the decision this codebase already
-/// made for the doctor surface's `scheme_label`: an unrecognized ref is not a
-/// ref with an exotic scheme, it is a bare value someone pasted into the field,
-/// and a bare value IS secret material. `api_key_ref` is a plain `String` and
-/// `SecretRef::parse` never runs for a provider no model references, so a
-/// pasted `AKIA<id>:<secret>` reaches here intact -- returning the text before
-/// its first colon would publish the key id. A present ref off the list
-/// (colon or not) collapses to the fixed `unknown`, echoing none of its bytes;
-/// only an absent or blank ref is `None`.
+/// A credential that parses reports its closed-vocabulary scheme label. One
+/// that does not falls back to an ALLOWLIST over its text: an unrecognized
+/// value is not a ref with an exotic scheme, it is a bare value someone
+/// pasted into the field, and a bare value IS secret material. A pasted
+/// `AKIA<id>:<secret>` reaches here intact, so returning the text before its
+/// first colon would publish the key id. A present value off the list
+/// (colon or not) collapses to the fixed `unknown`, echoing none of its
+/// bytes; only a blank value is `None`.
 ///
-/// The token match is deliberately looser than [`SecretScheme::classify`]
+/// The fallback match is deliberately looser than [`SecretScheme::classify`]
 /// (case-insensitive, `env:VAR` counts as `env`): this surface reports which
 /// credential class the operator MEANT, not whether the ref parses.
-fn credential_ref_scheme(api_key_ref: Option<&str>) -> Option<String> {
-    let raw = api_key_ref?.trim();
+fn credential_ref_scheme(credential: &str) -> Option<String> {
+    let raw = credential.trim();
     if raw.is_empty() {
         return None;
+    }
+    if let Ok(parsed) = CredentialRef::parse(raw) {
+        return Some(parsed.scheme_label().to_string());
     }
     let token = raw.split_once(':').map_or("", |(scheme, _)| scheme);
     let label = SecretScheme::ALL
@@ -464,71 +448,19 @@ fn credential_ref_scheme(api_key_ref: Option<&str>) -> Option<String> {
     Some(label.to_string())
 }
 
-/// What a present `api_key_ref` off the scheme allowlist renders as.
+/// What a present credential off the scheme allowlist renders as.
 const UNKNOWN_CREDENTIAL_REF_SCHEME: &str = "unknown";
 
-/// Extract the entry's own auth-mechanism token.
-///
-/// PROHIBITION -- this is the single extraction point, so the rule lives here:
-/// the returned token is a CLOSED-VOCABULARY auth-MECHANISM name. It must never
-/// encode a credential path, a secret-store name, an OAuth provider id, an
-/// account id, a region, or any other operator-supplied value. Every token
-/// below is a compile-time `&'static str` from a closed enum, which is what
-/// makes that hold today.
-///
-/// Both matches are deliberately EXHAUSTIVE with no wildcard arm, so a new
-/// provider variant or a new auth discriminant breaks the build HERE rather
-/// than silently defaulting. Whoever fixes that break must supply another
-/// closed-vocabulary token -- or, if the new discriminant cannot be reduced to
-/// one, return `Some("redacted")` instead of passing its value through. Adding
-/// a wildcard to make the break go away would turn a display field into a
-/// credential-shape disclosure.
-const fn auth_token(entry: &ProviderEntry) -> Option<&'static str> {
-    match entry {
-        // No auth discriminant exists on this variant: the credential ref is
-        // the only auth fact, and its scheme is reported separately.
-        ProviderEntry::OpenaiCompat { .. } => None,
-        ProviderEntry::AnthropicApi { auth_kind, .. } => Some(match auth_kind {
-            AuthKind::ApiKey => "api-key",
-            AuthKind::OauthBearer => "oauth-bearer",
-        }),
-        #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses { auth_kind, .. } => Some(match auth_kind {
-            OpenaiResponsesAuthKind::ChatgptOauth => "chatgpt-oauth",
-            OpenaiResponsesAuthKind::ApiKey => "api-key",
-            OpenaiResponsesAuthKind::BedrockMantle => "bedrock-mantle",
-        }),
-        #[cfg(feature = "gemini")]
-        ProviderEntry::Gemini { auth_mode, .. } => Some(match auth_mode {
-            GeminiAuthMode::ApiKey => "api-key",
-            GeminiAuthMode::CloudCode => "cloud-code",
-        }),
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::Bedrock { creds, .. } => Some(match creds {
-            BedrockCredsConfig::BearerKey { .. } => "bearer-key",
-            BedrockCredsConfig::Static { .. } => "static",
-            BedrockCredsConfig::Profile { .. } => "profile",
-            BedrockCredsConfig::DefaultChain => "default-chain",
-        }),
-    }
-}
-
-/// The configured `base_url` for an entry, or `None` for a variant whose
-/// endpoint is derived at factory time rather than carried in config. A
-/// cloud-code Gemini entry with no pin reports its effective cloud-code host.
-fn configured_base_url(entry: &ProviderEntry) -> Option<Cow<'_, str>> {
-    match entry {
-        ProviderEntry::OpenaiCompat { base_url, .. }
-        | ProviderEntry::AnthropicApi { base_url, .. } => Some(Cow::Borrowed(base_url)),
-        #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses { base_url, .. } => base_url.as_deref().map(Cow::Borrowed),
-        #[cfg(feature = "gemini")]
-        ProviderEntry::Gemini { .. } => entry.classifiable_egress_base_url(),
-        // Bedrock carries no base_url at all: the factory derives the host
-        // from `region`.
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::Bedrock { .. } => None,
-    }
+/// The cloud cell: the cloud name, plus the region only when it is a
+/// canonical AWS region identifier (operator text that fails admission is
+/// not echoed).
+fn cloud_cell(entry: &ProviderEntry) -> Option<String> {
+    let region = entry.cloud.as_ref()?.aws_region();
+    Some(if routectl_providers::validate_aws_region(region).is_ok() {
+        format!("aws {region}")
+    } else {
+        "aws".to_string()
+    })
 }
 
 /// Project one `[providers.X]` entry into its secret-safe cell.
@@ -536,9 +468,11 @@ fn provider_cell(id: &str, entry: &ProviderEntry) -> ProviderCell {
     ProviderCell {
         id: id.to_string(),
         kind: entry.kind_str().to_string(),
-        endpoint_origin: configured_base_url(entry).and_then(|base| endpoint_origin(&base)),
-        credential_ref_scheme: credential_ref_scheme(entry.api_key_ref()),
-        auth_token: auth_token(entry).map(str::to_string),
+        format: entry.format().as_str().to_string(),
+        endpoint_origin: entry.base_url.as_deref().and_then(endpoint_origin),
+        cloud: cloud_cell(entry),
+        credential_ref_scheme: credential_ref_scheme(&entry.credential),
+        auth_token: Some(entry.auth.as_str().to_string()),
         rpm_limit: entry.runtime().rpm_limit,
     }
 }

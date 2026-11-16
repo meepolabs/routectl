@@ -23,9 +23,10 @@ host = \"127.0.0.1\"
 port = 8787
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -135,7 +136,7 @@ async fn adds_openai_compat_via_secret_ref() {
     assert_eq!(entry.kind_str(), "openai-compat");
     assert_eq!(entry.api_key_ref(), Some("file:///abs/key"));
     assert!(text.contains("[providers.grok]"), "{text}");
-    assert!(text.contains("api_key_ref = \"file:///abs/key\""), "{text}");
+    assert!(text.contains("credential = \"file:///abs/key\""), "{text}");
 }
 
 // -----------------------------------------------------------------
@@ -204,9 +205,10 @@ port = 8787
 
 [providers.fast]
 # keep this comment
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -353,9 +355,10 @@ host = \"127.0.0.1\"
 port = 8787
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -952,10 +955,15 @@ async fn forwarded_anthropic_api_adds_without_a_secret_prompt() {
     assert_eq!(entry.kind_str(), "anthropic-api");
     assert_eq!(
         entry.api_key_ref(),
-        Some(""),
-        "a forwarded provider carries no configured credential"
+        None,
+        "a forwarded provider carries no store-resolved credential"
     );
-    assert!(text.contains("credential_source = \"forwarded\""), "{text}");
+    assert_eq!(
+        entry.forwarded_base_url(),
+        Some("https://api.anthropic.com")
+    );
+    assert!(text.contains("credential = \"forwarded\""), "{text}");
+    assert!(text.contains("auth = \"bearer\""), "{text}");
     assert!(
         text.contains("api.anthropic.com"),
         "base URL pinned: {text}"

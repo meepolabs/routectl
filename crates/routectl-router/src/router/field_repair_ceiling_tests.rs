@@ -430,8 +430,7 @@ mod converse_ceiling {
     const CLIENT_MAX_TOKENS: u32 = 64_000;
 
     const CONVERSE_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-         [providers.p0]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
+         [providers.p0]\nformat = \"bedrock-converse\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 
     fn ceiling_rejection() -> Error {
         let fixture: serde_json::Value =

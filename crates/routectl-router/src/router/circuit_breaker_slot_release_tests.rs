@@ -106,22 +106,13 @@ fn build_router_with_breaker(
     };
     config.providers.insert(
         "p".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://placeholder.invalid/v1".into(),
-            api_key_ref: "literal:k".into(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            cache_capability: None,
-            reduction_enabled: None,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
+        ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k").with_runtime(
+            ProviderRuntimePolicy {
                 circuit_failures: Some(circuit_failures),
                 circuit_cooldown_ms: Some(circuit_cooldown_ms),
                 ..Default::default()
             },
-        },
+        ),
     );
     let mut router = Router::new(Arc::new(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
@@ -167,28 +158,13 @@ fn build_router_with_provider_and_retry(provider: Arc<dyn Provider>, retry: Retr
     // count_tokens capability gate.
     config.providers.insert(
         "p".into(),
-        ProviderEntry::AnthropicApi {
-            api_key_ref: "literal:k".into(),
-            base_url: "https://placeholder.invalid".into(),
-            anthropic_version: "2023-06-01".into(),
-            auth_kind: routectl_providers::anthropic_api::AuthKind::default(),
-            credential_source: Default::default(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            forward_client_headers: vec![],
-            context_management: false,
-            cache_capability: None,
-            reduction_enabled: None,
-            cloak: routectl_providers::anthropic_api::CloakConfig::default(),
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle: None,
-            runtime: ProviderRuntimePolicy {
+        ProviderEntry::anthropic_api("literal:k")
+            .with_base_url("https://placeholder.invalid")
+            .with_runtime(ProviderRuntimePolicy {
                 circuit_failures: Some(1),
                 circuit_cooldown_ms: Some(0),
                 ..Default::default()
-            },
-        },
+            }),
     );
     let mut router = Router::new(Arc::new(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();

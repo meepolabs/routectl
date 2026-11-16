@@ -251,7 +251,7 @@ fn rejecting_chain(alias: &str) -> (Router, Vec<Arc<AlwaysRejectingLane>>) {
     let mut chain: Vec<String> = Vec::with_capacity(CHAIN_TARGETS);
     for idx in 0..CHAIN_TARGETS {
         toml_text.push_str(&format!(
-            "\n[providers.p{idx}]\nkind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n"
+            "\n[providers.p{idx}]\nformat = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n"
         ));
         chain.push(format!("m{idx}"));
     }
@@ -295,7 +295,7 @@ fn capable_rejecting_chain(alias: &str) -> (Router, Vec<Arc<AlwaysRejectingLane>
     let mut chain: Vec<String> = Vec::with_capacity(CHAIN_TARGETS);
     for idx in 0..CHAIN_TARGETS {
         toml_text.push_str(&format!(
-            "\n[providers.p{idx}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n"
+            "\n[providers.p{idx}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
         ));
         chain.push(format!("m{idx}"));
     }
@@ -664,9 +664,10 @@ async fn the_repaired_request_is_the_one_a_messages_walk_dispatches() {
     // uses, so this pins the post-repair dispatch shape.
     let toml_text = r#"
 [providers.p0]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
     let config: Config = toml::from_str(toml_text).expect("valid test toml");
     let mock = Arc::new(RepairingLane {

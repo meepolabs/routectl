@@ -12,7 +12,7 @@ use routectl_core::{
     ChatChunk, ChatResponse, Choice, ForwardedBearer, Message, MessageContent, Provider, Role,
     Usage,
 };
-use routectl_router::config::CredentialSource;
+use routectl_router::config::Auth;
 use routectl_router::{AliasValue, Config, ProviderEntry, ResolvedModel, Router};
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 use std::collections::BTreeMap;
@@ -91,7 +91,7 @@ fn router() -> Router {
     let mut config = Config::default();
     config.providers.insert(
         "fwd".into(),
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer),
     );
     config
         .providers

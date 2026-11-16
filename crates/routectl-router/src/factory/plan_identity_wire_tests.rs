@@ -10,8 +10,11 @@
 //! host-keyed decision in the egress still sees the first-party host.
 
 use super::*;
+use crate::config::Auth;
+#[cfg(feature = "bedrock")]
+use crate::config::Format;
 use crate::factory::BuildOptions;
-use crate::factory::build::anthropic_api_config;
+use crate::factory::build::anthropic_api_config_for;
 use async_trait::async_trait;
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{ChatRequest, Message, MessageContent, Provider, Role, SystemContent};
@@ -161,7 +164,7 @@ async fn wire_of(entry: &ProviderEntry, route: Route) -> Wire {
     let plan = plan_provider("p", entry).expect("the entry plans");
     let login = Arc::new(LoginStore::default());
     let store: Arc<dyn SecretStore> = login.clone();
-    let mut cfg = anthropic_api_config("p", entry, plan, &store, &BuildOptions::new())
+    let mut cfg = anthropic_api_config_for("p", entry, &plan, store, BuildOptions::new())
         .await
         .expect("the factory builds the config");
     if route.force_identity_flag {
@@ -247,22 +250,17 @@ const FORWARDED: Route = Route {
 };
 
 fn forwarded_entry() -> ProviderEntry {
-    ProviderEntry::anthropic_api("")
-        .with_auth_kind(AuthKind::OauthBearer)
-        .with_credential_source(crate::config::CredentialSource::Forwarded)
+    ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer)
 }
 
 #[cfg(feature = "bedrock")]
 fn mantle_entry() -> ProviderEntry {
-    let cfg: crate::config::Config = toml::from_str(
-        "[providers.p]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"\"\n\
-         bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", \
-         key_ref = \"env://ROUTECTL_IDENTITY_TEST_MANTLE\" } }\n",
+    ProviderEntry::cloud_aws(
+        Format::AnthropicMessages,
+        "us-east-1",
+        "env://ROUTECTL_IDENTITY_TEST_MANTLE",
+        Auth::Bearer,
     )
-    .expect("fixture parses");
-    cfg.providers.into_values().next().expect("one provider")
 }
 
 fn absence_rows() -> Vec<Absent> {
@@ -381,9 +379,10 @@ async fn every_other_entry_sends_no_identity_and_no_cloak() {
     assert!(violations.is_empty(), "{violations:#?}");
 }
 
-/// The api-key form of a managed Anthropic login never reaches the wire: the
-/// plan refuses it, so the factory reads no session id and builds nothing.
-/// The bearer form of the same labeled seat is the positive control.
+/// The plan refuses the api-key form of a managed Anthropic login, whether
+/// written explicitly or left at the builder's default. The bearer form of
+/// the same labeled seat is the positive control: it plans, with the
+/// client-identity verdict.
 #[test]
 fn the_api_key_form_of_a_managed_login_is_refused_before_the_wire() {
     for (label, entry) in [
@@ -396,7 +395,7 @@ fn the_api_key_form_of_a_managed_login_is_refused_before_the_wire() {
             ),
         ),
         (
-            "labeled seat, default auth kind, base unset",
+            "labeled seat in the builder's api-key form",
             ProviderEntry::anthropic_api("oauth://anthropic#seat-b"),
         ),
     ] {

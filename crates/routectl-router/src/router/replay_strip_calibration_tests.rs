@@ -170,9 +170,10 @@ fn req_carrying_bulky_artifact() -> ChatRequest {
 
 const SINGLE_TARGET_TOML: &str = r#"
 [providers.p1]
-kind = "openai-responses"
-api_key_ref = "literal:k"
-auth_kind = "api-key"
+format = "openai-responses"
+base_url = "https://api.openai.com/v1"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 fn router_with(provider: Arc<dyn Provider>) -> Router {

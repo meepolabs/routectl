@@ -154,8 +154,10 @@ async fn provider_timeout_reaches_deadline_through_stamp() {
     let mut config: Config = toml::from_str(
         r#"
 [providers.p-hangs]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 request_timeout_ms = 20
 
 [retry]
@@ -205,13 +207,17 @@ async fn each_pooled_seat_dispatches_under_its_member_tier() {
     let mut config: Config = toml::from_str(&format!(
         r#"
 [providers.{MEMBER_A}]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 request_timeout_ms = 20
 
 [providers.{MEMBER_B}]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 
 [pools.pool]
 members = ["{MEMBER_A}", "{MEMBER_B}"]

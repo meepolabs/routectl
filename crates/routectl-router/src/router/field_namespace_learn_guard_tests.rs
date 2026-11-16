@@ -79,8 +79,7 @@ impl Provider for EchoingBedrockSeat {
 
 fn bedrock_router(tool_type: &str) -> Router {
     let config: Config = toml::from_str(&format!(
-        "[providers.p0]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
-         creds = {{ kind = \"default-chain\" }}\n\
+        "[providers.p0]\nformat = \"bedrock-invoke\"\ncloud = {{ name = \"aws\", region = \"us-east-1\" }}\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n\
          [aliases]\n\"{ALIAS}\" = [\"m0\"]\n"
     ))
     .expect("valid test toml");

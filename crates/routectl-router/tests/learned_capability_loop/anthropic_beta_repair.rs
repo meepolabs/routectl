@@ -85,8 +85,10 @@ fn lane_config() -> Config {
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{PROVIDER}]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"{key_ref}\"\n\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"x-api-key\"\n\n\
          [models.{NICKNAME}]\n\
          provider = \"{PROVIDER}\"\n\
          upstream = \"{MODEL_ID}\"\n",

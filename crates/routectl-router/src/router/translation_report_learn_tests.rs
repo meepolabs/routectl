@@ -102,9 +102,10 @@ initial_backoff_ms = 0
 jitter_ms = 0
 
 [providers.p1]
-kind = "bedrock"
-region = "us-east-1"
-creds = { kind = "default-chain" }
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 
 [aliases]
 "search-alias" = ["m1", "m2"]
@@ -538,9 +539,10 @@ const OPENAI_P1: &str = r#"
 max_attempts = 1
 
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 
 [aliases]
 "search-alias" = ["m1"]

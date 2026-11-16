@@ -264,8 +264,8 @@ fn entry(toml_text: &str) -> crate::config::ProviderEntry {
     cfg.providers.into_values().next().expect("one provider")
 }
 
-/// One row per variant and selector combination the old shape can express:
-/// the derived format, the family token and the egress kind it sends with.
+/// One row per format and carrier combination an entry can express: the
+/// format, the family token and the egress kind it sends with.
 #[test]
 fn format_of_every_current_shape() {
     #[cfg_attr(
@@ -275,15 +275,14 @@ fn format_of_every_current_shape() {
     let mut rows: Vec<(&str, &str, Format, &str, EgressKind)> = vec![
         (
             "anthropic-api",
-            "[providers.p]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n",
+            "[providers.p]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n",
             Format::AnthropicMessages,
             "anthropic-api",
             EgressKind::AnthropicApi,
         ),
         (
             "openai-compat",
-            "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"https://example.com/v1\"\n\
-             api_key_ref = \"env://K\"\n",
+            "[providers.p]\nformat = \"openai-chat\"\nbase_url = \"https://example.com/v1\"\ncredential = \"env://K\"\nauth = \"bearer\"\n",
             Format::OpenaiChat,
             "openai-compat",
             EgressKind::OpenaiCompat,
@@ -293,34 +292,32 @@ fn format_of_every_current_shape() {
     rows.extend([
         (
             "anthropic-api mantle",
-            "[providers.p]\nkind = \"anthropic-api\"\napi_key_ref = \"\"\n\
-             [providers.p.bedrock_mantle]\nregion = \"us-west-2\"\n\
-             [providers.p.bedrock_mantle.creds]\nkind = \"default-chain\"\n",
+            "[providers.p]\nformat = \"anthropic-messages\"\n\
+             cloud = { name = \"aws\", region = \"us-west-2\" }\n\
+             credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             Format::AnthropicMessages,
             "anthropic-api",
             EgressKind::AnthropicApiMantle,
         ),
         (
             "openai-compat mantle",
-            "[providers.p]\nkind = \"openai-compat\"\napi_key_ref = \"\"\n\
-             [providers.p.bedrock_mantle]\nregion = \"us-west-2\"\n\
-             [providers.p.bedrock_mantle.creds]\nkind = \"default-chain\"\n",
+            "[providers.p]\nformat = \"openai-chat\"\n\
+             cloud = { name = \"aws\", region = \"us-west-2\" }\n\
+             credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             Format::OpenaiChat,
             "openai-compat",
             EgressKind::OpenaiCompatMantle,
         ),
         (
             "bedrock invoke",
-            "[providers.p]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
-             creds = { kind = \"default-chain\" }\n",
+            "[providers.p]\nformat = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             Format::BedrockInvoke,
             "bedrock",
             EgressKind::BedrockInvoke,
         ),
         (
             "bedrock converse",
-            "[providers.p]\nkind = \"bedrock\"\nregion = \"us-east-1\"\napi_shape = \"converse\"\n\
-             creds = { kind = \"default-chain\" }\n",
+            "[providers.p]\nformat = \"bedrock-converse\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             Format::BedrockConverse,
             "bedrock",
             EgressKind::BedrockConverse,
@@ -330,16 +327,14 @@ fn format_of_every_current_shape() {
     rows.extend([
         (
             "responses chatgpt-oauth",
-            "[providers.p]\nkind = \"openai-responses\"\napi_key_ref = \"oauth://codex\"\n\
-             auth_kind = \"chatgpt-oauth\"\n",
+            "[providers.p]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"oauth://codex\"\nauth = \"bearer\"\n",
             Format::OpenaiResponses,
             "openai-responses",
             EgressKind::OpenaiResponses,
         ),
         (
             "responses api-key",
-            "[providers.p]\nkind = \"openai-responses\"\napi_key_ref = \"env://K\"\n\
-             auth_kind = \"api-key\"\n",
+            "[providers.p]\nformat = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"env://K\"\nauth = \"bearer\"\n",
             Format::OpenaiResponses,
             "openai-responses",
             EgressKind::OpenaiResponses,
@@ -348,10 +343,9 @@ fn format_of_every_current_shape() {
     #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
     rows.push((
         "responses mantle",
-        "[providers.p]\nkind = \"openai-responses\"\napi_key_ref = \"\"\n\
-         auth_kind = \"bedrock-mantle\"\n\
-         [providers.p.bedrock_mantle]\nregion = \"us-west-2\"\n\
-         [providers.p.bedrock_mantle.creds]\nkind = \"default-chain\"\n",
+        "[providers.p]\nformat = \"openai-responses\"\n\
+         cloud = { name = \"aws\", region = \"us-west-2\" }\n\
+         credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
         Format::OpenaiResponses,
         "openai-responses",
         EgressKind::OpenaiResponsesMantle,
@@ -360,15 +354,14 @@ fn format_of_every_current_shape() {
     rows.extend([
         (
             "gemini api-key",
-            "[providers.p]\nkind = \"gemini\"\napi_key_ref = \"env://K\"\n",
+            "[providers.p]\nformat = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\ncredential = \"env://K\"\nauth = \"x-goog-api-key\"\n",
             Format::Gemini,
             "gemini",
             EgressKind::Gemini,
         ),
         (
             "gemini cloud-code",
-            "[providers.p]\nkind = \"gemini\"\napi_key_ref = \"oauth://antigravity\"\n\
-             auth_mode = \"cloud-code\"\n",
+            "[providers.p]\nformat = \"gemini-cloud-code\"\nbase_url = \"https://daily-cloudcode-pa.googleapis.com\"\ncredential = \"oauth://antigravity\"\nauth = \"bearer\"\n",
             Format::GeminiCloudCode,
             "gemini",
             EgressKind::Gemini,

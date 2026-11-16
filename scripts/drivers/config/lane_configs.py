@@ -26,6 +26,9 @@ Row = Tuple[int, Dict[str, str]]
 TABLE_RE = re.compile(r"^\[([A-Za-z0-9_.-]+)\]$")
 KEY_RE = re.compile(r'^("(?:[^"\\]|\\.)*"|[A-Za-z0-9_-]+)\s*=\s*(.+)$')
 STRING_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$')
+# The one `cloud` spelling the lane configs use. Any other value of a
+# `cloud` key fails the region check rather than being read loosely.
+AWS_CLOUD_RE = re.compile(r'^\{\s*name\s*=\s*"aws"\s*,\s*region\s*=\s*"([^"\\]*)"\s*\}\s*(?:#.*)?$')
 
 # Region scope per Bedrock lane: each lane is exercised in one region,
 # and a config naming any other region would move the capture somewhere
@@ -226,22 +229,33 @@ def check_weld(tsv_path: str, config_dir: str) -> List[str]:
     return failures
 
 
+def cloud_region(raw: str) -> Optional[str]:
+    match = AWS_CLOUD_RE.match(raw)
+    return match.group(1) if match else None
+
+
 def check_regions(config_dir: str) -> List[str]:
+    """Every `cloud` of a Bedrock lane config names the lane's region. A
+    `cloud` value off the one supported spelling fails, and so does a
+    config with no `cloud` at all."""
     failures: List[str] = []
     for lane, want in sorted(LANE_REGIONS.items()):
         path = os.path.join(config_dir, lane + ".toml")
         if not os.path.isfile(path):
             failures.append(f"{path}: missing")
             continue
-        regions = [
-            (table, string_value(body["region"]))
+        clouds = [
+            (table, body["cloud"])
             for table, body in read_config(path).items()
-            if "region" in body
+            if "cloud" in body
         ]
-        if not regions:
-            failures.append(f"{path}: names no region")
-        for table, region in regions:
-            if region != want:
+        if not clouds:
+            failures.append(f"{path}: names no cloud region")
+        for table, raw in clouds:
+            region = cloud_region(raw)
+            if region is None:
+                failures.append(f"{path}: [{table}] cloud is not {{ name = \"aws\", region = \"...\" }}")
+            elif region != want:
                 failures.append(f"{path}: [{table}] region {region!r}, lane allows only {want!r}")
     return failures
 

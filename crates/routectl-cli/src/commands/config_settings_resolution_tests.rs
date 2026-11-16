@@ -45,7 +45,9 @@ fn the_settings_block_prints_no_log_knob_row_whatever_the_environment_sets() {
 fn an_unset_codex_version_names_the_entry_whose_value_it_runs_under() {
     let entry = |name: &str, version: Option<&str>| {
         let pin = version.map_or_else(String::new, |v| format!("codex_version = \"{v}\"\n"));
-        format!("[providers.{name}]\nkind = \"openai-responses\"\napi_key_ref = \"env://K\"\n{pin}")
+        format!(
+            "[providers.{name}]\nformat = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"env://K\"\nauth = \"bearer\"\n{pin}"
+        )
     };
     let rows = [
         (

@@ -57,12 +57,15 @@ fn fixture_toml(db_path: &Path) -> String {
          [usage]\n\
          db_path = \"{}\"\n\
          [providers.direct]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://CACHE_SECTION_TEST_UNUSED\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://CACHE_SECTION_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n\
          [providers.vendor]\n\
-         kind = \"anthropic-api\"\n\
+         format = \"anthropic-messages\"\n\
          base_url = \"https://vendor.example.invalid/anthropic\"\n\
-         api_key_ref = \"env://CACHE_SECTION_TEST_UNUSED\"\n",
+         credential = \"env://CACHE_SECTION_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n",
         routectl_router::CURRENT_CONFIG_VERSION,
         db_path.display(),
     )
@@ -276,15 +279,17 @@ fn capability_toml(db_path: &Path) -> String {
     format!(
         "{}\
          [providers.vendor_open]\n\
-         kind = \"anthropic-api\"\n\
+         format = \"anthropic-messages\"\n\
          base_url = \"https://vendor-open.example.invalid/anthropic\"\n\
-         api_key_ref = \"env://CACHE_SECTION_TEST_UNUSED\"\n\
+         credential = \"env://CACHE_SECTION_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n\
          cache_capability = {{ supports_top_level_cache_control = false, \
          cache_hit_observable = true }}\n\
          [providers.aws_dark]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = {{ kind = \"default-chain\" }}\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          cache_capability = {{ supports_top_level_cache_control = true, \
          cache_hit_observable = false }}\n",
         fixture_toml(db_path),

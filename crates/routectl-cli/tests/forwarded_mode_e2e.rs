@@ -34,9 +34,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use routectl_router::config::CredentialSource;
 use routectl_router::{
-    AliasValue, Config, MitmConfig, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig,
+    AliasValue, Auth, Config, MitmConfig, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
@@ -405,7 +404,7 @@ fn forwarded_config_with_non_anthropic_provider(upstream_base: &str) -> Arc<Conf
 }
 
 /// A config with BOTH a genuinely forwarded `[providers]` entry
-/// (`credential_source = "forwarded"`, pinned to `api.anthropic.com`,
+/// (`credential = "forwarded"`, pinned to `api.anthropic.com`,
 /// never dispatched to in these tests) and an own-credential provider
 /// aliased as `heavy`. `Router::has_forwarded_provider()` is `true` here --
 /// used to prove the admission gate no longer 400s own-provider /
@@ -420,7 +419,7 @@ fn config_with_forwarded_and_own_providers(upstream_base: &str) -> Arc<Config> {
     );
     providers.insert(
         "forwarded-provider".to_string(),
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer),
     );
     let mut models = BTreeMap::new();
     models.insert(

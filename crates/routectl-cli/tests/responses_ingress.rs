@@ -966,9 +966,10 @@ async fn a_gemini_upstream_gets_no_declaration_named_after_a_container() {
     let toml_src = format!(
         r#"
 [providers.gemini-mock]
-kind = "gemini"
-api_key_ref = "{key}"
+format = "gemini"
 base_url = "{base}"
+credential = "{key}"
+auth = "x-goog-api-key"
 
 [models.target]
 provider = "gemini-mock"

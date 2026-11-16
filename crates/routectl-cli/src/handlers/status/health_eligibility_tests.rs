@@ -176,13 +176,15 @@ const MARKED: [(Seat, UnusableCause); 7] = [
 fn direct_config(seats: &[Seat]) -> Config {
     let mut text = format!("version = {CURRENT_CONFIG_VERSION}\n");
     for (_, entry, kind, uri) in seats {
-        let base = if *kind == "openai-compat" {
-            "base_url = \"https://gamma.example.com\"\n"
-        } else {
-            ""
+        let (format, base) = match *kind {
+            "anthropic-api" => ("anthropic-messages", "https://api.anthropic.com"),
+            "openai-responses" => ("openai-responses", "https://chatgpt.com/backend-api/codex"),
+            "openai-compat" => ("openai-chat", "https://gamma.example.com"),
+            other => panic!("no fixture format for kind `{other}`"),
         };
         text.push_str(&format!(
-            "[providers.{entry}]\nkind = \"{kind}\"\n{base}api_key_ref = \"{uri}\"\n"
+            "[providers.{entry}]\nformat = \"{format}\"\nbase_url = \"{base}\"\n\
+             credential = \"{uri}\"\nauth = \"bearer\"\n"
         ));
     }
     toml::from_str(&text).expect("fixture config parses")
@@ -330,8 +332,7 @@ fn pool_config_text(usage_db: &std::path::Path) -> String {
     );
     for member in ["seat-a", "seat-b", "seat-c"] {
         text.push_str(&format!(
-            "[providers.{member}]\nkind = \"anthropic-api\"\n\
-             api_key_ref = \"oauth://anthropic#{member}\"\nauth_kind = \"oauth-bearer\"\n\n"
+            "[providers.{member}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic#{member}\"\nauth = \"bearer\"\n\n"
         ));
     }
     text.push_str(
@@ -479,7 +480,7 @@ fn gate_fields(json: &Value) -> (Value, Value, Value, Value) {
 fn half_open_ready(entered: &Arc<Notify>, release: &Arc<Notify>) -> Arc<ArcSwap<Router>> {
     let config: Config = toml::from_str(&format!(
         "version = {CURRENT_CONFIG_VERSION}\n[retry]\nmax_attempts = 1\n\n\
-         [providers.p]\nkind = \"anthropic-api\"\napi_key_ref = \"env://P_KEY_FOR_TESTS\"\n\
+         [providers.p]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://P_KEY_FOR_TESTS\"\nauth = \"x-api-key\"\n\
          rpm_limit = 1\ncircuit_failures = 1\n"
     ))
     .expect("fixture config parses");

@@ -5475,6 +5475,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `XDG_CONFIG_HOME` and `HOME` unset, relative or empty, the `[usage]
   db_path` and `[mitm] cert_dir` defaults are empty paths (never relative to
   the cwd); an absolute `XDG_CONFIG_HOME` is the positive control
+- `tests/provider_entry_flat_shape.rs` -- the flat `[providers.X]` entry:
+  an unknown key is refused despite the flattened runtime policy, the
+  flattened keys parse, `cloud` refuses unknown keys, and `base_url` plus
+  `cloud` is refused by key name; each with a clean control
+- `tests/provider_roles_round_trip.rs` -- one row per provider role (base
+  URL, managed pool, cloud-code seat, Bedrock and Mantle over a temp AWS
+  profile): each parses, validates, builds against a scripted store,
+  serializes and reparses to the same providers table; row count asserted
 - `tests/cloak_relocation_refusal_fallback.rs` -- a cloak relocation refusal
   on the own-OAuth seat falls back with the pristine canonical request and
   leaves that seat's breaker closed, also under a raised `[retry.classes]`

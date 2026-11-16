@@ -6,50 +6,38 @@ use crate::config::Config;
 
 const PROVIDER: &str = "p0";
 
-const ANTHROPIC_REMOTE: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
-const ANTHROPIC_LOOPBACK: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"http://127.0.0.1:18080\"\n";
-const COMPAT_REMOTE: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
-const COMPAT_LOOPBACK: &str = "kind = \"openai-compat\"\nbase_url = \"http://localhost:11434/v1\"\napi_key_ref = \"literal:k\"\n";
-const COMPAT_LOOPBACK_V4: &str = "kind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:8000/v1\"\napi_key_ref = \"literal:k\"\n";
-const COMPAT_LOOPBACK_V6: &str =
-    "kind = \"openai-compat\"\nbase_url = \"http://[::1]:8000/v1\"\napi_key_ref = \"literal:k\"\n";
-const COMPAT_UNSPECIFIED: &str = "kind = \"openai-compat\"\nbase_url = \"http://0.0.0.0:8000/v1\"\napi_key_ref = \"literal:k\"\n";
+const ANTHROPIC_REMOTE: &str = "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
+const ANTHROPIC_LOOPBACK: &str = "format = \"anthropic-messages\"\nbase_url = \"http://127.0.0.1:18080\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
+const COMPAT_REMOTE: &str = "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+const COMPAT_LOOPBACK: &str = "format = \"openai-chat\"\nbase_url = \"http://localhost:11434/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+const COMPAT_LOOPBACK_V4: &str = "format = \"openai-chat\"\nbase_url = \"http://127.0.0.1:8000/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+const COMPAT_LOOPBACK_V6: &str = "format = \"openai-chat\"\nbase_url = \"http://[::1]:8000/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+const COMPAT_UNSPECIFIED: &str = "format = \"openai-chat\"\nbase_url = \"http://0.0.0.0:8000/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
 #[cfg(feature = "bedrock")]
-const BEDROCK_NATIVE: &str =
-    "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n";
+const BEDROCK_NATIVE: &str = "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(feature = "bedrock")]
-const BEDROCK_UNADMITTED_REGION: &str =
-    "kind = \"bedrock\"\nregion = \"not-a-region\"\ncreds = { kind = \"default-chain\" }\n";
+const BEDROCK_UNADMITTED_REGION: &str = "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"not-a-region\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(feature = "bedrock")]
-const ANTHROPIC_MANTLE: &str = "kind = \"anthropic-api\"\napi_key_ref = \"\"\n\
-     bedrock_mantle = { region = \"us-west-2\", creds = { kind = \"default-chain\" } }\n";
+const ANTHROPIC_MANTLE: &str = "format = \"anthropic-messages\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(feature = "bedrock")]
-const COMPAT_MANTLE: &str = "kind = \"openai-compat\"\napi_key_ref = \"\"\n\
-     bedrock_mantle = { region = \"us-west-2\", creds = { kind = \"default-chain\" } }\n";
+const COMPAT_MANTLE: &str = "format = \"openai-chat\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(feature = "openai-responses")]
-const RESPONSES_REMOTE: &str =
-    "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n";
-/// `auth_kind` omitted: the chatgpt-oauth default.
+const RESPONSES_REMOTE: &str = "format = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
+/// On the Codex host: the ChatGPT dialect.
 #[cfg(feature = "openai-responses")]
-const RESPONSES_CODEX: &str =
-    "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\naccount_id_ref = \"literal:a\"\n";
+const RESPONSES_CODEX: &str = "format = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"literal:k\"\nauth = \"bearer\"\naccount_id_ref = \"literal:a\"\n";
 #[cfg(feature = "openai-responses")]
-const RESPONSES_LOOPBACK: &str = "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n\
-     auth_kind = \"api-key\"\nbase_url = \"http://127.0.0.1:18080/v1\"\n";
+const RESPONSES_LOOPBACK: &str = "format = \"openai-responses\"\nbase_url = \"http://127.0.0.1:18080/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
 #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-const RESPONSES_MANTLE: &str = "kind = \"openai-responses\"\napi_key_ref = \"\"\n\
-     bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
+const RESPONSES_MANTLE: &str = "format = \"openai-responses\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(feature = "bedrock")]
-const ANTHROPIC_MANTLE_BAD_REGION: &str = "kind = \"anthropic-api\"\napi_key_ref = \"\"\n\
-     bedrock_mantle = { region = \"not-a-region\", creds = { kind = \"default-chain\" } }\n";
+const ANTHROPIC_MANTLE_BAD_REGION: &str = "format = \"anthropic-messages\"\ncloud = { name = \"aws\", region = \"not-a-region\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(feature = "bedrock")]
-const COMPAT_MANTLE_BAD_REGION: &str = "kind = \"openai-compat\"\napi_key_ref = \"\"\n\
-     bedrock_mantle = { region = \"not-a-region\", creds = { kind = \"default-chain\" } }\n";
+const COMPAT_MANTLE_BAD_REGION: &str = "format = \"openai-chat\"\ncloud = { name = \"aws\", region = \"not-a-region\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-const RESPONSES_MANTLE_BAD_REGION: &str = "kind = \"openai-responses\"\napi_key_ref = \"\"\n\
-     bedrock_mantle = { region = \"not-a-region\", creds = { kind = \"default-chain\" } }\n";
+const RESPONSES_MANTLE_BAD_REGION: &str = "format = \"openai-responses\"\ncloud = { name = \"aws\", region = \"not-a-region\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 #[cfg(feature = "gemini")]
-const GEMINI_REMOTE: &str = "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n";
+const GEMINI_REMOTE: &str = "format = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\ncredential = \"literal:k\"\nauth = \"x-goog-api-key\"\n";
 
 /// One row: the `[providers.p0]` body (`None` = no entry), the caller's
 /// forwarded fact, and the expected `(kind, base_url)` or refusal.

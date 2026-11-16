@@ -16,8 +16,8 @@ mod responses_param_refusals {
     const EDIT_REJECTED: &str = "routectl_edit_rejected";
 
     const RESPONSES_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-         [providers.p0]\nkind = \"openai-responses\"\nauth_kind = \"api-key\"\n\
-         base_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
+         [providers.p0]\nformat = \"openai-responses\"\n\
+         base_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n";
     /// An operator extra the egress merges into the body as a top-level key
     /// the client never sent.
     const SERVICE_TIER_EXTRA: &str = "payload_extras = { service_tier = \"priority\" }\n";
@@ -265,8 +265,7 @@ mod responses_param_refusals {
     async fn a_mantle_prompt_cache_refusal_names_no_row_and_repairs_nothing() {
         const PROMPT_CACHE_OPTIONS: &str = "prompt_cache_options";
         const MANTLE_TOML: &str = "[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
-             [providers.p0]\nkind = \"openai-responses\"\napi_key_ref = \"\"\n\
-             bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
+             [providers.p0]\nformat = \"openai-responses\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
         let code = "unsupported_parameter";
         let seat = ResponsesSeat::new(PROMPT_CACHE_OPTIONS, code);
         let router = router_on(&seat, MANTLE_TOML);

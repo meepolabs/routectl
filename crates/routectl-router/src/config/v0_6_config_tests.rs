@@ -170,9 +170,10 @@ fn provider_entry_rejects_removed_extra_headers_field() {
     // deny_unknown_fields surfaces the old key as a parse error.
     let toml_text = r#"
 [providers.bad]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 extra_headers = { "x-foo" = "bar" }
 "#;
     let err = toml::from_str::<Config>(toml_text).unwrap_err();
@@ -188,9 +189,10 @@ fn provider_entry_rejects_reasoning_dialect_on_provider() {
     // Moved to [models.X]; provider-side key must reject.
     let toml_text = r#"
 [providers.bad]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.com/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 reasoning_dialect = "deepseek"
 "#;
     let err = toml::from_str::<Config>(toml_text).unwrap_err();
@@ -257,9 +259,10 @@ fn alias_value_suffix_glob_parses() {
 fn provider_kind_field_is_kind_not_type() {
     let toml_text = r#"
 [providers.deepseek]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://api.deepseek.com/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
     let cfg: Config = toml::from_str(toml_text).expect("parse");
     assert!(cfg.providers.contains_key("deepseek"));
@@ -306,28 +309,25 @@ stream_first_byte_timeout_ms = 300000
     assert_eq!(m.stream_first_byte_timeout_ms, Some(300_000));
 }
 
-/// A `[providers.X.cloak]` block with mode + strict_mode parses into the entry's `CloakConfig`, and round-trips
-/// through serialize + re-parse.
+/// The `cloak_mode` and `cloak_strict_mode` keys parse into the entry, and
+/// round-trip through serialize + re-parse.
 #[test]
-fn anthropic_api_cloak_block_parses_and_round_trips() {
+fn anthropic_api_cloak_keys_parse_and_round_trip() {
     use crate::config::ProviderEntry;
     use routectl_providers::anthropic_api::CloakMode;
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
-
-[providers.anthropic.cloak]
-mode = "always"
-strict_mode = true
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
+cloak_mode = "always"
+cloak_strict_mode = true
 "#;
-    let cfg_in: Config = toml::from_str(toml_text).expect("parse cloak block");
-    let assert_cloak = |entry: &ProviderEntry| match entry {
-        ProviderEntry::AnthropicApi { cloak, .. } => {
-            assert_eq!(cloak.mode, CloakMode::Always);
-            assert!(cloak.strict_mode);
-        }
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
+    let cfg_in: Config = toml::from_str(toml_text).expect("parse cloak keys");
+    let assert_cloak = |entry: &ProviderEntry| {
+        assert_eq!(entry.cloak_mode, Some(CloakMode::Always));
+        assert_eq!(entry.cloak_strict_mode, Some(true));
     };
     assert_cloak(cfg_in.providers.get("anthropic").expect("anthropic"));
 
@@ -337,24 +337,19 @@ strict_mode = true
     assert_cloak(cfg_out.providers.get("anthropic").expect("anthropic"));
 }
 
-/// Omitting the `[cloak]` block yields `CloakConfig::default()` (mode
-/// auto, no strict mode).
+/// Omitting the cloak keys leaves both unset, which the factory reads as
+/// mode auto, no strict mode.
 #[test]
 fn anthropic_api_cloak_omitted_yields_default() {
-    use crate::config::ProviderEntry;
-    use routectl_providers::anthropic_api::CloakMode;
-
     let toml_text = r#"
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-test"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:sk-ant-test"
+auth = "x-api-key"
 "#;
     let cfg_in: Config = toml::from_str(toml_text).expect("parse without cloak");
-    match cfg_in.providers.get("anthropic").expect("anthropic") {
-        ProviderEntry::AnthropicApi { cloak, .. } => {
-            assert_eq!(cloak.mode, CloakMode::Auto);
-            assert!(!cloak.strict_mode);
-        }
-        other => panic!("expected AnthropicApi entry; got {other:?}"),
-    }
+    let entry = cfg_in.providers.get("anthropic").expect("anthropic");
+    assert_eq!(entry.cloak_mode, None);
+    assert_eq!(entry.cloak_strict_mode, None);
 }

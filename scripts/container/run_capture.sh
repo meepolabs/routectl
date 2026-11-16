@@ -142,7 +142,7 @@
 #       fake values in scripts/drivers/lib/common.sh, and correctly so.
 #   ROUTECTL_DRIVER_<PROVIDER>_API_KEY
 #       The REAL upstream credential routectl injects on egress. A lane
-#       config names it as `api_key_ref = "env://..."`. Never defaulted,
+#       config names it as `credential = "env://..."`. Never defaulted,
 #       never placeheld: an absent one refuses the run.
 #
 # A provider whose egress needs more than a bearer gets ONE additional
@@ -150,13 +150,13 @@
 #
 #   ROUTECTL_DRIVER_<PROVIDER>_ACCOUNT_ID
 #
-# Today exactly one provider needs it. `openai-responses` with
-# `auth_kind = "chatgpt-oauth"` requires the seat's ChatGPT account id
+# Today exactly one provider needs it. `openai-responses` on the ChatGPT
+# Codex `base_url` requires the seat's ChatGPT account id
 # (`validate_openai_responses_account_id` in the factory refuses a static
 # bearer without one, and `resolve_responses_account_id` derives it from
 # the seat only for an `oauth://` ref -- which a driven run does not use,
 # because the token arrives already extracted as `env://`). So a codex
-# lane config pairs `api_key_ref = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"`
+# lane config pairs `credential = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"`
 # with `account_id_ref = "env://ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID"`.
 #
 # HOW A PROVIDER'S CREDENTIAL IS OBTAINED depends on whether it is an
@@ -243,7 +243,7 @@
 # SIGKILL). The two are not told apart here.
 #
 # THE AWS PROFILE. The bedrock lane configs authenticate with
-# `creds = { kind = "profile", name = "routectl-cell" }`: a fixed
+# `credential = "aws://profile/routectl-cell"`: a fixed
 # placeholder, so no operator's profile name is committed and the config
 # bytes (and their sha) are the same for everyone. On the host, this
 # script parses the whole of --aws-config (scripts/container/aws_profile.py,

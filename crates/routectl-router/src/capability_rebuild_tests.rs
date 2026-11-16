@@ -1224,8 +1224,7 @@ fn each_skip_reason_logs_one_debug_event_and_bumps_its_counter() {
 #[cfg(feature = "bedrock")]
 fn bedrock_providers() -> BTreeMap<String, crate::config::ProviderEntry> {
     let config: crate::config::Config = toml::from_str(
-        "[providers.nn]\nkind = \"bedrock\"\nregion = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\n",
+        "[providers.nn]\nformat = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
     )
     .expect("valid test toml");
     config.providers

@@ -57,7 +57,7 @@ fn router(params: WireCheckParams, chain: Vec<Arc<dyn Provider>>) -> Router {
     let mut nicknames = Vec::new();
     for idx in 0..chain.len() {
         toml_text.push_str(&format!(
-            "[providers.p{idx}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n"
+            "[providers.p{idx}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
         ));
         nicknames.push(format!("\"m{idx}\""));
     }

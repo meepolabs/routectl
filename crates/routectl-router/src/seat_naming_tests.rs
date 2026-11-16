@@ -16,11 +16,15 @@ fn parse(text: &str) -> Config {
 fn two_account_config(accepts_new_logins: bool) -> Config {
     parse(&format!(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"anthropic-default\", \"anthropic-work\"]\n\
          accepts_new_logins = {accepts_new_logins}\n"
@@ -160,8 +164,10 @@ fn a_generated_entry_name_held_by_an_unrelated_entry_refuses() {
     // Arrange
     let config = parse(
         "[providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://SOMETHING_ELSE\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://SOMETHING_ELSE\"\n\
+         auth = \"x-api-key\"\n",
     );
 
     // Act
@@ -204,8 +210,10 @@ fn a_pool_name_held_by_a_provider_or_a_nickname_refuses() {
     // Arrange
     let provider_holder = parse(
         "[providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n",
     );
     let nickname_holder = parse(
         "[models.anthropic]\n\
@@ -276,11 +284,15 @@ fn two_growth_marked_pools_for_one_family_refuse_as_ambiguous() {
     // Arrange
     let config = parse(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [providers.anthropic-work]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#work\"\n\
+         auth = \"bearer\"\n\
          [pools.first]\n\
          members = [\"anthropic-default\"]\n\
          accepts_new_logins = true\n\
@@ -308,8 +320,10 @@ fn a_growth_marked_pool_of_another_family_is_not_offered() {
     // Arrange
     let config = parse(
         "[providers.codex-default]\n\
-         kind = \"openai-responses\"\n\
-         api_key_ref = \"oauth://codex\"\n\
+         format = \"openai-responses\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"oauth://codex\"\n\
+         auth = \"bearer\"\n\
          [pools.codex]\n\
          members = [\"codex-default\"]\n\
          accepts_new_logins = true\n",

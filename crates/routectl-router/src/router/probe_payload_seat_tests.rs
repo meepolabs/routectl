@@ -298,9 +298,7 @@ async fn the_actual_dial_target_is_re_guarded_for_loopback() {
     // Swap the provider entry under the queued job, as a reload would.
     let mut config = (*router.config).clone();
     let mut entry = ProviderEntry::anthropic_api("literal:k");
-    if let ProviderEntry::AnthropicApi { base_url, .. } = &mut entry {
-        *base_url = "http://127.0.0.1:9".to_string();
-    }
+    entry = entry.with_base_url("http://127.0.0.1:9");
     config.providers.insert("p1".to_string(), entry);
     let mut router = router;
     router.config = Arc::new(config);
@@ -342,7 +340,8 @@ async fn the_actual_dial_target_is_re_guarded_for_a_forwarded_entry() {
     // base url, so the only thing that changed is the credential source.
     let mut config = (*router.config).clone();
     let forwarded = ProviderEntry::anthropic_api("https://api.anthropic.com")
-        .with_credential_source(crate::config::CredentialSource::Forwarded);
+        .with_credential("forwarded")
+        .with_auth(crate::config::Auth::Bearer);
     assert!(
         forwarded.forwarded_base_url().is_some(),
         "premise: the swapped entry must actually read as forwarded, or this \

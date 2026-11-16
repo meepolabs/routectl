@@ -154,9 +154,10 @@ impl Provider for BetaSeat {
 fn fixture_config() -> (Arc<Config>, tempfile::TempDir) {
     let mut config: Config = toml::from_str(&format!(
         "[providers.{PROVIDER}]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = {{ kind = \"default-chain\" }}\n",
+         format = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"us-east-1\" }}\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n",
     ))
     .expect("fixture config parses");
     let dir = isolate_usage_db(&mut config);

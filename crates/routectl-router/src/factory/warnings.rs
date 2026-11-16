@@ -1,19 +1,16 @@
 //! Non-fatal config warnings.
 
 use crate::config::ProviderEntry;
+#[cfg(feature = "gemini")]
+use crate::config::provider_descriptor::Format;
 
-/// Returns `true` when `entry` is `ProviderEntry::AnthropicApi { context_management: true, .. }`.
-/// `false` for any other shape. Used by the model-binding warning
-/// path to scope the guard to the only provider kind where the
-/// `context_management` emulation flag exists.
-const fn anthropic_api_uses_context_management(entry: &ProviderEntry) -> bool {
-    matches!(
-        entry,
-        ProviderEntry::AnthropicApi {
-            context_management: true,
-            ..
-        }
-    )
+/// Returns `true` when `entry` is `anthropic-messages` with
+/// `context_management = true`. `false` for any other shape. Used by the
+/// model-binding warning path to scope the guard to the only format where
+/// the `context_management` emulation flag exists.
+fn anthropic_api_uses_context_management(entry: &ProviderEntry) -> bool {
+    entry.format() == crate::config::Format::AnthropicMessages
+        && entry.context_management == Some(true)
 }
 
 /// Emit a structured WARN when an anthropic-api provider declares
@@ -57,7 +54,7 @@ pub(super) fn warn_context_management_needs_preserve(
 }
 
 /// Advisory (never fatal) load-time check on the Cloud Code host surface:
-/// warn when a `cloud-code` Gemini entry pins `base_url` at the PRODUCTION
+/// warn when a `gemini-cloud-code` entry pins `base_url` at the PRODUCTION
 /// Cloud Code host. The pin is honored verbatim -- routectl never rewrites
 /// it and never issues a second request against the other host -- but the
 /// lane default is the daily host, and a consumer seat (one not covered by
@@ -68,10 +65,9 @@ pub(super) fn warn_context_management_needs_preserve(
 /// The host test is [`routectl_providers::gemini::is_prod_host`]: an exact
 /// match on the PARSED host, so a lookalike authority
 /// (`<prod-host>.example.test`, `<prod-host>@evil.example`, the host inside
-/// a path) does not fire the warning. Silent for an unset `base_url` (that
-/// entry takes the daily default), an explicit daily or enterprise-mirror
-/// pin, and every `api-key` entry -- the Cloud Code hosts are not on the
-/// api-key lane at all.
+/// a path) does not fire the warning. Silent for an explicit daily pin and
+/// every `gemini` entry -- the Cloud Code hosts are not on the api-key lane
+/// at all.
 ///
 /// Not `const`: with `gemini` enabled the body allocates and formats. Only
 /// the reduced build collapses to the empty-`Vec` arm, and constness is
@@ -80,28 +76,24 @@ pub(super) fn warn_context_management_needs_preserve(
 pub fn cloudcode_host_warnings(config: &crate::config::Config) -> Vec<String> {
     #[cfg(feature = "gemini")]
     {
-        use routectl_providers::gemini::GeminiAuthMode;
-
         config
             .providers
             .iter()
             .filter(|(_, entry)| {
-                matches!(
-                    entry,
-                    ProviderEntry::Gemini {
-                        auth_mode: GeminiAuthMode::CloudCode,
-                        base_url,
-                        ..
-                    } if routectl_providers::gemini::is_prod_host(base_url)
-                )
+                entry.format() == Format::GeminiCloudCode
+                    && entry
+                        .base_url
+                        .as_deref()
+                        .is_some_and(routectl_providers::gemini::is_prod_host)
             })
             .map(|(provider_name, _)| {
                 format!(
                     "[providers.{provider_name}] base_url pins this cloud-code entry to the \
                      production cloud-code host; the lane default is the daily host, and \
                      consumer (non-GCP-ToS) seats serve on the daily host. If this entry is \
-                     rejected on permission or quota, the pin is a candidate cause -- unset \
-                     base_url to serve on the daily default."
+                     rejected on permission or quota, the pin is a candidate cause -- set \
+                     base_url to https://daily-cloudcode-pa.googleapis.com to serve on the \
+                     daily host."
                 )
             })
             .collect()
@@ -121,9 +113,9 @@ pub fn cloudcode_host_warnings(config: &crate::config::Config) -> Vec<String> {
 /// says. The message names the verified replacement so the fix is a single
 /// edit.
 ///
-/// The provider-mode gate is load-bearing, not a scoping nicety:
+/// The provider-format gate is load-bearing, not a scoping nicety:
 /// `gemini-2.5-flash` is a LIVE, current id on the native api-key REST
-/// surface. An `api-key` entry pinning it is correct config and must stay
+/// surface. A `gemini` entry pinning it is correct config and must stay
 /// silent; only the `cloud-code` lane has the alias problem.
 ///
 /// The alias list itself lives provider-side in
@@ -141,17 +133,15 @@ pub fn cloudcode_host_warnings(config: &crate::config::Config) -> Vec<String> {
 pub fn cloudcode_model_warnings(config: &crate::config::Config) -> Vec<String> {
     #[cfg(feature = "gemini")]
     {
-        use routectl_providers::gemini::{GeminiAuthMode, deprecated_alias_replacement};
+        use routectl_providers::gemini::deprecated_alias_replacement;
 
         let mut warnings = Vec::new();
         for (nickname, model) in &config.models {
-            if !matches!(
-                config.providers.get(&model.provider),
-                Some(ProviderEntry::Gemini {
-                    auth_mode: GeminiAuthMode::CloudCode,
-                    ..
-                })
-            ) {
+            if config
+                .providers
+                .get(&model.provider)
+                .is_none_or(|entry| entry.format() != Format::GeminiCloudCode)
+            {
                 continue;
             }
             if let Some(replacement) = deprecated_alias_replacement(&model.upstream) {
@@ -160,8 +150,8 @@ pub fn cloudcode_model_warnings(config: &crate::config::Config) -> Vec<String> {
                      model id: Google still resolves it, but server-side it now aliases to \
                      another model, so this entry does not serve what its id says. Set \
                      upstream = \"{replacement}\" (verified end-to-end on the cloud-code \
-                     lane). The id remains current on the api-key Gemini lane -- only \
-                     cloud-code entries need the change.",
+                     lane). The id remains current on the `gemini` format -- only \
+                     gemini-cloud-code entries need the change.",
                     upstream = model.upstream,
                 ));
             }
@@ -176,7 +166,7 @@ pub fn cloudcode_model_warnings(config: &crate::config::Config) -> Vec<String> {
 }
 
 /// Advisory (never fatal) load-time check on the codex identity surface:
-/// warn when a chatgpt-oauth openai-responses provider overrides the
+/// warn when an openai-responses provider on the ChatGPT Codex host overrides the
 /// `version` or `user-agent` identity header via `header_extras` with a
 /// value that diverges from the derived codex identity. The override still
 /// WINS (the merge order is unchanged and settled) -- this only surfaces
@@ -252,7 +242,7 @@ pub fn auth_reserved_header_warnings(config: &crate::config::Config) -> Vec<Stri
                     format!(
                         "[models.{nickname}.header_extras] {header} is auth-reserved and is \
                          dropped from every request: configure credentials on the provider \
-                         (api_key_ref / auth_kind) instead"
+                         (credential / auth) instead"
                     )
                 })
         })

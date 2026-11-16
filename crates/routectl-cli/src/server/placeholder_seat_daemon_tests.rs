@@ -31,14 +31,10 @@ fn config_text(upstream: &str) -> String {
     format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [retry]\nmax_attempts = 1\n\n\
-         [providers.seat-a]\nkind = \"openai-compat\"\nbase_url = \"{upstream}\"\n\
-         api_key_ref = \"oauth://test-loopback#seat-a\"\n\n\
-         [providers.seat-b]\nkind = \"openai-compat\"\nbase_url = \"{upstream}\"\n\
-         api_key_ref = \"oauth://test-loopback#seat-b\"\n\n\
-         [providers.claude-a]\nkind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#seat-a\"\nauth_kind = \"oauth-bearer\"\n\n\
-         [providers.claude-b]\nkind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#seat-b\"\nauth_kind = \"oauth-bearer\"\n\n\
+         [providers.seat-a]\nformat = \"openai-chat\"\nbase_url = \"{upstream}\"\ncredential = \"oauth://test-loopback#seat-a\"\nauth = \"bearer\"\n\n\
+         [providers.seat-b]\nformat = \"openai-chat\"\nbase_url = \"{upstream}\"\ncredential = \"oauth://test-loopback#seat-b\"\nauth = \"bearer\"\n\n\
+         [providers.claude-a]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic#seat-a\"\nauth = \"bearer\"\n\n\
+         [providers.claude-b]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic#seat-b\"\nauth = \"bearer\"\n\n\
          [pools.compat-pool]\nmembers = [\"seat-a\", \"seat-b\"]\n\n\
          [pools.claude-pool]\nmembers = [\"claude-a\", \"claude-b\"]\n\n\
          [models.grok]\nprovider = \"compat-pool\"\nupstream = \"grok-4\"\n\n\

@@ -7,8 +7,10 @@ fn parse(toml_text: &str) -> Config {
 }
 
 const PROVIDER: &str = "[providers.anthropic-work]\n\
-     kind = \"anthropic-api\"\n\
-     api_key_ref = \"oauth://anthropic#work\"\n";
+     format = \"anthropic-messages\"\n\
+     base_url = \"https://api.anthropic.com\"\n\
+     credential = \"oauth://anthropic#work\"\n\
+     auth = \"bearer\"\n";
 
 fn model(nickname: &str, provider: &str) -> String {
     format!("[models.\"{nickname}\"]\nprovider = \"{provider}\"\nupstream = \"u\"\n")
@@ -51,8 +53,10 @@ fn a_provider_name_carrying_the_separator_is_refused() {
     // that seat's breaker and RPM slot.
     let config = parse(
         "[providers.\"opus#anthropic-work\"]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://KEY\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://KEY\"\n\
+         auth = \"x-api-key\"\n",
     );
 
     let err = errors(&config);
@@ -63,7 +67,7 @@ fn a_provider_name_carrying_the_separator_is_refused() {
 
 /// A second provider, so a model can be named after one provider while
 /// dispatching through another.
-const OTHER: &str = "[providers.other]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n";
+const OTHER: &str = "[providers.other]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n";
 
 #[test]
 fn a_model_nickname_equal_to_another_providers_name_is_refused() {
@@ -98,7 +102,7 @@ fn a_model_named_after_its_own_provider_passes() {
 fn every_offending_key_is_reported_in_one_pass() {
     // Arrange: one of each refusal class at once.
     let config = parse(&format!(
-        "[providers.\"p#1\"]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n\
+        "[providers.\"p#1\"]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n\
          {PROVIDER}{OTHER}{}{}",
         model("m#1", "anthropic-work"),
         model("anthropic-work", "other"),
@@ -120,7 +124,7 @@ fn each_refusal_surfaces_through_the_collected_suite() {
     // one collected suite.
     let cases = [
         format!("{PROVIDER}{}", model("x#y", "anthropic-work")),
-        "[providers.\"p#q\"]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n".to_string(),
+        "[providers.\"p#q\"]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n".to_string(),
         format!("{PROVIDER}{OTHER}{}", model("anthropic-work", "other")),
     ];
     for text in cases {
@@ -141,7 +145,7 @@ fn ordinary_direct_and_pooled_configs_pass() {
     // shape the shipped example and every generated config use.
     let config = parse(&format!(
         "{PROVIDER}\
-         [providers.anthropic-default]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n\
+         [providers.anthropic-default]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"oauth://anthropic\"\nauth = \"bearer\"\n\
          [pools.anthropic]\nmembers = [\"anthropic-default\", \"anthropic-work\"]\n\
          {}{}",
         model("opus", "anthropic"),
@@ -192,7 +196,7 @@ fn a_model_nickname_equal_to_a_provider_name_dispatching_through_a_pool_is_refus
 
 fn provider_named(name: &str) -> Config {
     parse(&format!(
-        "[providers.\"{name}\"]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n"
+        "[providers.\"{name}\"]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\nauth = \"x-api-key\"\n"
     ))
 }
 

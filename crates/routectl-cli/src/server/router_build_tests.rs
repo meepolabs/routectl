@@ -29,33 +29,51 @@ async fn build_router_twice_from_same_secrets_handle_succeeds() {
     assert!(Arc::ptr_eq(&r2.config, &config));
 }
 
-/// `validate_provider_credential_sources` is wired into
+/// A config whose one provider relays the client's forwarded credential to
+/// `base_url`.
+fn forwarded_config_on(base_url: &str) -> (Config, tempfile::TempDir) {
+    use routectl_router::ProviderEntry;
+    use routectl_router::config::Auth;
+
+    let mut config = Config::default();
+    let usage_dir = isolate_usage_db(&mut config);
+    config.providers.insert(
+        "sneaky".into(),
+        ProviderEntry::anthropic_api("forwarded")
+            .with_base_url(base_url)
+            .with_auth(Auth::Bearer),
+    );
+    (config, usage_dir)
+}
+
+/// The provider plan is wired into
 /// `build_router_from_config` itself (not only reachable
 /// via the separate `commands::config::check` call to the same
 /// validator) -- a forwarded provider pointed at a non-Anthropic host
 /// must fail the router build, i.e. serve startup and hot reload,
-/// which both call this builder directly.
+/// which both call this builder directly. The same entry on the pinned
+/// host builds, so the refusal is the host's.
 #[tokio::test]
 async fn build_router_from_config_rejects_forwarded_provider_on_non_anthropic_host() {
-    use routectl_router::ProviderEntry;
-    use routectl_router::config::CredentialSource;
-
-    let mut config = Config::default();
-    let _usage_dir = isolate_usage_db(&mut config);
-    config.providers.insert(
-        "sneaky".into(),
-        ProviderEntry::anthropic_api("")
-            .with_base_url("https://evil.example.com")
-            .with_credential_source(CredentialSource::Forwarded),
-    );
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
 
+    let (pinned, _pinned_dir) = forwarded_config_on("https://api.anthropic.com");
+    if let Err(e) = build_router_from_config(Arc::new(pinned), secrets.clone()).await {
+        panic!("control: the forwarded entry on the pinned host must build: {e:?}");
+    }
+
+    let (config, _usage_dir) = forwarded_config_on("https://evil.example.com");
     // `Router` is not `Debug`, so match rather than `expect_err`.
     let err = match build_router_from_config(Arc::new(config), secrets).await {
         Ok(_) => panic!("forwarded provider off the pinned host must fail the router build"),
         Err(e) => e,
     };
-    assert!(matches!(err, Error::Config(_)), "got: {err:?}");
+    let Error::Config(message) = &err else {
+        panic!("expected a config error, got: {err:?}");
+    };
+    assert!(message.contains("provider `sneaky`"), "{message}");
+    assert!(message.contains("credential = \"forwarded\""), "{message}");
+    assert!(!message.contains("evil.example.com"), "{message}");
 }
 
 /// A hostile provider key reaching an advisory startup warning must not
@@ -70,10 +88,10 @@ async fn build_router_from_config_rejects_forwarded_provider_on_non_anthropic_ho
 async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
     let mut config: Config = toml::from_str(
         "[providers.\"evil\\nkey\\u001B[31m\"]\n\
-         kind = \"gemini\"\n\
-         auth_mode = \"cloud-code\"\n\
+         format = \"gemini-cloud-code\"\n\
          base_url = \"https://cloudcode-pa.googleapis.com\"\n\
-         api_key_ref = \"oauth://antigravity\"\n",
+         credential = \"oauth://antigravity\"\n\
+         auth = \"bearer\"\n",
     )
     .expect("config must parse");
     let _usage_dir = isolate_usage_db(&mut config);
@@ -122,14 +140,15 @@ async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
 async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
     let mut config: Config = toml::from_str(
         "[providers.\"evil\\nkey\\u001B[31m\"]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.invalid\"\n\
-         api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
+         credential = \"env://ROUTECTL_TEST_ABSENT\"\n\
+         auth = \"bearer\"\n\
          [providers.\"evil\\ngem\\u001B[31m\"]\n\
-         kind = \"gemini\"\n\
-         auth_mode = \"cloud-code\"\n\
+         format = \"gemini-cloud-code\"\n\
          base_url = \"https://cloudcode-pa.googleapis.com\"\n\
-         api_key_ref = \"oauth://antigravity\"\n\
+         credential = \"oauth://antigravity\"\n\
+         auth = \"bearer\"\n\
          [models.\"evil\\nmodel\\u001B[31m\"]\n\
          provider = \"evil\\nkey\\u001B[31m\"\n\
          upstream = \"some-upstream\"\n\
@@ -230,13 +249,12 @@ async fn build_router_from_config_runs_the_shared_validation_suite() {
 async fn build_router_from_config_rejects_a_non_anthropic_model_on_the_invoke_lane() {
     use routectl_router::Config;
 
-    // A defaulted `api_shape` IS the invoke lane, so the omission below
-    // is the case an operator actually hits.
     let mut config: Config = toml::from_str(
         "[providers.aws]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-west-2\"\n\
-         creds = { kind = \"default-chain\" }\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = { name = \"aws\", region = \"us-west-2\" }\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          [models.seat]\n\
          provider = \"aws\"\n\
          upstream = \"meta.llama3-70b-instruct-v1:0\"\n",

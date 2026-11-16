@@ -261,7 +261,7 @@ fn router_retrying(
     let mut nicknames = Vec::new();
     for idx in 0..chain.len() {
         toml_text.push_str(&format!(
-            "[providers.p{idx}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n"
+            "[providers.p{idx}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
         ));
         nicknames.push(format!("\"m{idx}\""));
     }
@@ -595,8 +595,8 @@ fn only_entry(body: &str) -> ProviderEntry {
     config.providers.into_values().next().expect("one provider")
 }
 
-const MANTLE: &str =
-    "bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
+const AWS_CLOUD: &str = "cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+     credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 
 /// Each row pins the egress kind a provider entry derives and whether that
 /// egress fills `max_tokens` for a client that sent none.
@@ -608,14 +608,13 @@ fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
     let mut rows: Vec<(&str, String, EgressKind, bool)> = vec![
         (
             "anthropic-api",
-            "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n".into(),
+            "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n".into(),
             EgressKind::AnthropicApi,
             true,
         ),
         (
             "openai-compat",
-            "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-             api_key_ref = \"literal:k\"\n"
+            "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n"
                 .into(),
             EgressKind::OpenaiCompat,
             false,
@@ -624,7 +623,7 @@ fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
     if cfg!(feature = "openai-responses") {
         rows.push((
             "openai-responses",
-            "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n".into(),
+            "format = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n".into(),
             EgressKind::OpenaiResponses,
             false,
         ));
@@ -632,42 +631,34 @@ fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
     if cfg!(feature = "gemini") {
         rows.push((
             "gemini",
-            "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n".into(),
+            "format = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\ncredential = \"literal:k\"\nauth = \"x-goog-api-key\"\n".into(),
             EgressKind::Gemini,
             false,
         ));
     }
     if cfg!(feature = "bedrock") {
-        let bedrock = "kind = \"bedrock\"\nregion = \"us-east-1\"\n\
-                       creds = { kind = \"default-chain\" }\n";
         rows.extend([
             (
-                "bedrock default shape",
-                bedrock.into(),
-                EgressKind::BedrockInvoke,
-                true,
-            ),
-            (
                 "bedrock invoke",
-                format!("{bedrock}api_shape = \"invoke\"\n"),
+                format!("format = \"bedrock-invoke\"\n{AWS_CLOUD}"),
                 EgressKind::BedrockInvoke,
                 true,
             ),
             (
                 "bedrock converse",
-                format!("{bedrock}api_shape = \"converse\"\n"),
+                format!("format = \"bedrock-converse\"\n{AWS_CLOUD}"),
                 EgressKind::BedrockConverse,
                 false,
             ),
             (
                 "anthropic-api mantle",
-                format!("kind = \"anthropic-api\"\napi_key_ref = \"\"\n{MANTLE}"),
+                format!("format = \"anthropic-messages\"\n{AWS_CLOUD}"),
                 EgressKind::AnthropicApiMantle,
                 true,
             ),
             (
                 "openai-compat mantle",
-                format!("kind = \"openai-compat\"\napi_key_ref = \"\"\n{MANTLE}"),
+                format!("format = \"openai-chat\"\n{AWS_CLOUD}"),
                 EgressKind::OpenaiCompatMantle,
                 false,
             ),
@@ -675,7 +666,7 @@ fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
         if cfg!(feature = "openai-responses") {
             rows.push((
                 "openai-responses mantle",
-                format!("kind = \"openai-responses\"\napi_key_ref = \"\"\n{MANTLE}"),
+                format!("format = \"openai-responses\"\n{AWS_CLOUD}"),
                 EgressKind::OpenaiResponsesMantle,
                 false,
             ));

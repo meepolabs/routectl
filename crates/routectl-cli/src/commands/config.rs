@@ -515,48 +515,56 @@ mod emitted_example_tests {
 mod mantle_config_check_tests {
     use super::*;
 
-    /// A Bedrock mantle entry authenticates with `bedrock_mantle.creds` and
-    /// REQUIRES an empty `api_key_ref`. The full config-check path -- the
-    /// secret-ref parse walk plus the shared validator suite -- must accept
-    /// it end-to-end for both OpenAI-shape lanes. The parse walk previously
-    /// surfaced the empty `api_key_ref` through `SecretRef::parse` and failed
-    /// with a spurious "unrecognized scheme" error before the mantle
-    /// validator (which requires it empty) was ever consulted.
+    /// An entry of `format` on the AWS cloud carrier, with the given
+    /// credential and auth.
+    fn cloud_entry(name: &str, format: &str, credential: &str, auth: &str) -> String {
+        format!(
+            "[providers.{name}]\n\
+             format = \"{format}\"\n\
+             cloud = {{ name = \"aws\", region = \"us-west-2\" }}\n\
+             credential = \"{credential}\"\n\
+             auth = \"{auth}\"\n\n"
+        )
+    }
+
+    /// The three formats Bedrock's managed surface serves, each on the cloud
+    /// carrier with `credential` sent as `auth`.
+    fn cloud_lanes(credential: &str, auth: &str) -> String {
+        [
+            ("anthropic-mantle", "anthropic-messages"),
+            ("compat-mantle", "openai-chat"),
+            ("responses-mantle", "openai-responses"),
+        ]
+        .iter()
+        .map(|(name, format)| cloud_entry(name, format, credential, auth))
+        .collect()
+    }
+
+    /// The OpenAI-shape formats on the cloud carrier with a bearer key pass
+    /// the full config-check path -- the secret-ref parse walk plus the
+    /// shared validator suite -- end-to-end.
     #[test]
     fn openai_mantle_entries_pass_the_full_config_check() {
-        let toml_text = r#"
-[providers.compat-mantle]
-kind = "openai-compat"
-api_key_ref = ""
+        let toml_text = cloud_entry(
+            "compat-mantle",
+            "openai-chat",
+            "file:///tmp/whatever",
+            "bearer",
+        ) + &cloud_entry(
+            "responses-mantle",
+            "openai-responses",
+            "file:///tmp/whatever",
+            "bearer",
+        );
+        let config: Config = toml::from_str(&toml_text).expect("mantle config must parse");
 
-[providers.compat-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.compat-mantle.bedrock_mantle.creds]
-kind = "bearer-key"
-key_ref = "file:///tmp/whatever"
-
-[providers.responses-mantle]
-kind = "openai-responses"
-api_key_ref = ""
-auth_kind = "bedrock-mantle"
-
-[providers.responses-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.responses-mantle.bedrock_mantle.creds]
-kind = "bearer-key"
-key_ref = "file:///tmp/whatever"
-"#;
-        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
-
-        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
+        let parse_errors = secret_ref_parse_errors(&config, Some(&toml_text));
         assert!(
             parse_errors.is_empty(),
-            "mantle api_key_ref must not surface to the secret-ref parse walk: {parse_errors:?}"
+            "a cloud bearer credential must pass the parse walk: {parse_errors:?}"
         );
 
-        let report = validation_report(&config, Some(toml_text));
+        let report = validation_report(&config, Some(&toml_text));
         assert!(
             report.errors.is_empty(),
             "mantle entries must pass the shared validator suite: {:?}",
@@ -564,144 +572,76 @@ key_ref = "file:///tmp/whatever"
         );
     }
 
-    /// All three mantle-bearing lanes surface `bedrock_mantle.creds` refs to
-    /// the config-check parse walk: a valid creds ref scheme passes both the
-    /// parse walk and the shared validator suite end-to-end.
+    /// All three cloud formats surface their `credential` to the
+    /// config-check parse walk: a valid bearer key reference and an AWS
+    /// profile each pass both the parse walk and the shared validator suite
+    /// end-to-end.
     #[test]
     fn mantle_creds_refs_pass_config_check_on_all_lanes() {
-        let toml_text = r#"
-[providers.anthropic-mantle]
-kind = "anthropic-api"
-bedrock_mantle = { region = "us-west-2", creds = { kind = "bearer-key", key_ref = "file:///tmp/whatever" } }
+        for (credential, auth) in [
+            ("file:///tmp/whatever", "bearer"),
+            ("env://AWS_BEARER_TOKEN_BEDROCK", "bearer"),
+            ("aws://profile/bedrock-prod", "aws-sigv4"),
+        ] {
+            let toml_text = cloud_lanes(credential, auth);
+            let config: Config = toml::from_str(&toml_text).expect("mantle config must parse");
 
-[providers.compat-mantle]
-kind = "openai-compat"
-api_key_ref = ""
-
-[providers.compat-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.compat-mantle.bedrock_mantle.creds]
-kind = "static"
-access_key_ref = "env://AWS_ACCESS_KEY_ID"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-
-[providers.responses-mantle]
-kind = "openai-responses"
-api_key_ref = ""
-auth_kind = "bedrock-mantle"
-
-[providers.responses-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.responses-mantle.bedrock_mantle.creds]
-kind = "bearer-key"
-key_ref = "file:///tmp/whatever"
-"#;
-        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
-
-        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
-        assert!(
-            parse_errors.is_empty(),
-            "valid mantle creds refs must pass the parse walk: {parse_errors:?}"
-        );
-
-        let report = validation_report(&config, Some(toml_text));
-        assert!(
-            report.errors.is_empty(),
-            "mantle entries must pass the shared validator suite: {:?}",
-            report.errors
-        );
-    }
-
-    /// A malformed `bedrock_mantle.creds` ref scheme FAILS config check on
-    /// every mantle lane -- proof the creds descriptor is actually walked. If
-    /// the refs were not surfaced the bogus scheme would slip through to
-    /// build/probe instead of the parse walk.
-    #[test]
-    fn malformed_mantle_creds_ref_scheme_fails_config_check() {
-        let toml_text = r#"
-[providers.anthropic-mantle]
-kind = "anthropic-api"
-bedrock_mantle = { region = "us-west-2", creds = { kind = "bearer-key", key_ref = "bogus://key" } }
-
-[providers.compat-mantle]
-kind = "openai-compat"
-api_key_ref = ""
-
-[providers.compat-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.compat-mantle.bedrock_mantle.creds]
-kind = "static"
-access_key_ref = "bogus://access"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-
-[providers.responses-mantle]
-kind = "openai-responses"
-api_key_ref = ""
-auth_kind = "bedrock-mantle"
-
-[providers.responses-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.responses-mantle.bedrock_mantle.creds]
-kind = "bearer-key"
-key_ref = "bogus://key"
-"#;
-        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
-
-        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
-        for provider in ["anthropic-mantle", "compat-mantle", "responses-mantle"] {
+            let parse_errors = secret_ref_parse_errors(&config, Some(&toml_text));
             assert!(
-                parse_errors.iter().any(|e| e.contains(provider)),
-                "malformed creds ref on `{provider}` must fail the parse walk: {parse_errors:?}"
+                parse_errors.is_empty(),
+                "`{credential}`: a valid credential must pass the parse walk: {parse_errors:?}"
+            );
+
+            let report = validation_report(&config, Some(&toml_text));
+            assert!(
+                report.errors.is_empty(),
+                "`{credential}`: mantle entries must pass the shared validator suite: {:?}",
+                report.errors
             );
         }
     }
 
-    /// Ref-less and empty creds fields do not break the walk: a profile name
-    /// is not a secret ref, `default-chain` carries none, and an empty
-    /// optional `session_token_ref` is skipped (mirroring the empty-api-key
-    /// regression). None of these surface a spurious parse error.
+    /// A malformed credential scheme FAILS config check on every cloud
+    /// format -- proof the cloud entry's credential is actually walked. If
+    /// it were not surfaced the bogus scheme would slip through to
+    /// build/probe instead of the parse walk. A clean cloud entry beside
+    /// them raises nothing, so the per-provider hits are not a blanket
+    /// failure.
+    #[test]
+    fn malformed_mantle_creds_ref_scheme_fails_config_check() {
+        let toml_text = cloud_lanes("bogus://key", "bearer")
+            + &cloud_entry("clean-mantle", "openai-chat", "env://KEY", "bearer");
+        let config: Config = toml::from_str(&toml_text).expect("mantle config must parse");
+
+        let parse_errors = secret_ref_parse_errors(&config, Some(&toml_text));
+        for provider in ["anthropic-mantle", "compat-mantle", "responses-mantle"] {
+            assert!(
+                parse_errors.iter().any(|e| e.contains(provider)),
+                "malformed credential on `{provider}` must fail the parse walk: {parse_errors:?}"
+            );
+        }
+        assert!(
+            !parse_errors.iter().any(|e| e.contains("clean-mantle")),
+            "a valid credential beside them must not fail: {parse_errors:?}"
+        );
+    }
+
+    /// The AWS credential forms name no secret: a profile and the default
+    /// chain are not store references, so neither surfaces a spurious parse
+    /// error on any cloud format. The malformed-scheme test above is the
+    /// control that the walk does reach these entries.
     #[test]
     fn refless_and_empty_mantle_creds_fields_do_not_break_the_walk() {
-        let toml_text = r#"
-[providers.anthropic-mantle]
-kind = "anthropic-api"
-bedrock_mantle = { region = "us-west-2", creds = { kind = "profile", name = "bedrock-prod" } }
+        for credential in ["aws://profile/bedrock-prod", "aws://chain"] {
+            let toml_text = cloud_lanes(credential, "aws-sigv4");
+            let config: Config = toml::from_str(&toml_text).expect("mantle config must parse");
 
-[providers.compat-mantle]
-kind = "openai-compat"
-api_key_ref = ""
-
-[providers.compat-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.compat-mantle.bedrock_mantle.creds]
-kind = "default-chain"
-
-[providers.responses-mantle]
-kind = "openai-responses"
-api_key_ref = ""
-auth_kind = "bedrock-mantle"
-
-[providers.responses-mantle.bedrock_mantle]
-region = "us-west-2"
-
-[providers.responses-mantle.bedrock_mantle.creds]
-kind = "static"
-access_key_ref = "env://AWS_ACCESS_KEY_ID"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-session_token_ref = ""
-"#;
-        let config: Config = toml::from_str(toml_text).expect("mantle config must parse");
-
-        let parse_errors = secret_ref_parse_errors(&config, Some(toml_text));
-        assert!(
-            parse_errors.is_empty(),
-            "ref-less / empty creds fields must not surface a parse error: {parse_errors:?}"
-        );
+            let parse_errors = secret_ref_parse_errors(&config, Some(&toml_text));
+            assert!(
+                parse_errors.is_empty(),
+                "`{credential}` must not surface a parse error: {parse_errors:?}"
+            );
+        }
     }
 }
 
@@ -717,8 +657,10 @@ mod parse_error_scheme_wording_tests {
     fn an_oauth_parse_error_names_the_oauth_scheme() {
         // Arrange
         let toml_text = "[providers.claude]\n\
-                         kind = \"anthropic-api\"\n\
-                         api_key_ref = \"oauth://anthropic#\"\n";
+                         format = \"anthropic-messages\"\n\
+                         base_url = \"https://api.anthropic.com\"\n\
+                         credential = \"oauth://anthropic#\"\n\
+                         auth = \"bearer\"\n";
         let config: Config = toml::from_str(toml_text).expect("config must parse");
 
         // Act
@@ -741,9 +683,10 @@ mod parse_error_scheme_wording_tests {
     fn an_env_parse_error_still_names_the_env_scheme() {
         // Arrange
         let toml_text = "[providers.compat]\n\
-                         kind = \"openai-compat\"\n\
+                         format = \"openai-chat\"\n\
                          base_url = \"https://example.invalid/v1\"\n\
-                         api_key_ref = \"env://\"\n";
+                         credential = \"env://\"\n\
+                         auth = \"bearer\"\n";
         let config: Config = toml::from_str(toml_text).expect("config must parse");
 
         // Act
@@ -767,9 +710,10 @@ mod parse_error_scheme_wording_tests {
     fn a_schemeless_ref_still_renders_as_unknown() {
         // Arrange
         let toml_text = "[providers.compat]\n\
-                         kind = \"openai-compat\"\n\
+                         format = \"openai-chat\"\n\
                          base_url = \"https://example.invalid/v1\"\n\
-                         api_key_ref = \"sk-not-a-ref\"\n";
+                         credential = \"sk-not-a-ref\"\n\
+                         auth = \"bearer\"\n";
         let config: Config = toml::from_str(toml_text).expect("config must parse");
 
         // Act
@@ -801,9 +745,10 @@ mod show_redaction_tests {
     fn show_never_renders_a_credential_carried_by_a_base_url() {
         let toml_text = r#"
 [providers.relay]
-kind = "anthropic-api"
-api_key_ref = "literal:sk-ant-FAKE-KEY"
+format = "anthropic-messages"
 base_url = "https://svc:sk-userinfo-FAKE@internal.example:8443/v1?key=sk-query-FAKE"
+credential = "literal:sk-ant-FAKE-KEY"
+auth = "x-api-key"
 "#;
         let config: Config = toml::from_str(toml_text).expect("config must parse");
 
@@ -889,8 +834,10 @@ mod beta_floor_override_tests {
     fn config_check_warns_on_an_unsupported_floor_flag_without_failing() {
         // Arrange
         let toml_text = "[providers.claude]\n\
-                         kind = \"anthropic-api\"\n\
-                         api_key_ref = \"env://ANTHROPIC_KEY\"\n\
+                         format = \"anthropic-messages\"\n\
+                         base_url = \"https://api.anthropic.com\"\n\
+                         credential = \"env://ANTHROPIC_KEY\"\n\
+                         auth = \"x-api-key\"\n\
                          \n\
                          [capability.overrides.claude]\n\
                          unsupported = [\"beta:structured-outputs-2025-12-15\"]\n";
@@ -922,10 +869,10 @@ mod containment_line_tests {
     #[test]
     fn config_check_reports_the_full_containment_error_untruncated() {
         let toml_text = "[providers.gateway]\n\
-                         kind = \"anthropic-api\"\n\
-                         auth_kind = \"oauth-bearer\"\n\
-                         api_key_ref = \"oauth://anthropic\"\n\
-                         base_url = \"https://gateway.example/v1\"\n";
+                         format = \"anthropic-messages\"\n\
+                         base_url = \"https://gateway.example/v1\"\n\
+                         credential = \"oauth://anthropic\"\n\
+                         auth = \"bearer\"\n";
         let config: Config = toml::from_str(toml_text).expect("config must parse");
 
         let report = validation_report(&config, Some(toml_text));
@@ -933,7 +880,7 @@ mod containment_line_tests {
         let error = report
             .errors
             .iter()
-            .find(|e| e.contains("provider `gateway`") && e.contains("managed Anthropic"))
+            .find(|e| e.contains("provider `gateway`") && e.contains("managed `oauth://anthropic`"))
             .unwrap_or_else(|| panic!("no containment error: {:?}", report.errors));
         let line = safe_line(error);
         assert_eq!(&line, error, "the reported line must not be altered");
@@ -943,13 +890,13 @@ mod containment_line_tests {
             error.chars().count()
         );
         for part in [
-            "anthropic-api",
-            "credential_source = \"own\"",
-            "no bedrock_mantle",
+            "format = \"anthropic-messages\"",
+            "auth = \"bearer\"",
             "https://api.anthropic.com",
+            "no cloud, no userinfo, no port",
             "static env:// or file:// credential",
             "no override",
-            "base_url and ref are withheld",
+            "base_url and credential are withheld",
         ] {
             assert!(line.contains(part), "missing `{part}`: {line}");
         }
@@ -986,16 +933,20 @@ mod check_resolution_order_tests {
         }
     }
 
-    /// A Codex login entry whose second slot is a static `env://` ref, so a
-    /// resolution attempt on the entry is visible to the store.
-    fn codex_entry(base_url: Option<&str>) -> String {
-        let base = base_url.map_or(String::new(), |b| format!("base_url = \"{b}\"\n"));
+    /// The Codex host a managed `oauth://codex` login is contained to.
+    const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
+
+    /// A Codex login entry on `base_url` whose second slot is a static
+    /// `env://` ref, so a resolution attempt on the entry is visible to the
+    /// store.
+    fn codex_entry(base_url: &str) -> String {
         format!(
             "[providers.seat]\n\
-             kind = \"openai-responses\"\n\
-             api_key_ref = \"oauth://codex#seat-b\"\n\
-             account_id_ref = \"env://ROUTECTL_CHECK_ACCOUNT_ID\"\n\
-             {base}"
+             format = \"openai-responses\"\n\
+             base_url = \"{base_url}\"\n\
+             credential = \"oauth://codex#seat-b\"\n\
+             auth = \"bearer\"\n\
+             account_id_ref = \"env://ROUTECTL_CHECK_ACCOUNT_ID\"\n"
         )
     }
 
@@ -1008,7 +959,7 @@ mod check_resolution_order_tests {
 
     #[tokio::test]
     async fn a_contained_entry_has_its_static_refs_resolved() {
-        let (found, gets) = findings(&codex_entry(None)).await;
+        let (found, gets) = findings(&codex_entry(CODEX_BASE)).await;
 
         assert!(found.errors.is_empty(), "{:?}", found.errors);
         assert_eq!(gets, 1, "the env:// account id ref is resolved");
@@ -1021,13 +972,13 @@ mod check_resolution_order_tests {
             "https://chatgpt.com.gateway.example",
             "http://127.0.0.1:18080",
         ] {
-            let (found, gets) = findings(&codex_entry(Some(base))).await;
+            let (found, gets) = findings(&codex_entry(base)).await;
 
             assert!(
                 found
                     .errors
                     .iter()
-                    .any(|e| e.contains("provider `seat`") && e.contains("managed Codex")),
+                    .any(|e| e.contains("provider `seat`") && e.contains("managed `oauth://codex`")),
                 "{base}: containment refuses: {:?}",
                 found.errors
             );
@@ -1038,14 +989,19 @@ mod check_resolution_order_tests {
     #[tokio::test]
     async fn a_second_slot_naming_another_vendor_blocks_resolution() {
         let text = "[providers.seat]\n\
-                    kind = \"openai-responses\"\n\
-                    api_key_ref = \"env://ROUTECTL_CHECK_JWT\"\n\
+                    format = \"openai-responses\"\n\
+                    base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+                    credential = \"env://ROUTECTL_CHECK_JWT\"\n\
+                    auth = \"bearer\"\n\
                     account_id_ref = \"oauth://anthropic#seat-b\"\n";
 
         let (found, gets) = findings(text).await;
 
         assert!(
-            found.errors.iter().any(|e| e.contains("managed Anthropic")),
+            found
+                .errors
+                .iter()
+                .any(|e| e.contains("managed `oauth://anthropic`")),
             "{:?}",
             found.errors
         );

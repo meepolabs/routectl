@@ -23,7 +23,7 @@ use routectl_core::{
 use routectl_testkit::{CapturedEvent, capture_events};
 use serde_json::json;
 
-use crate::config::{Config, CredentialSource, ProviderEntry};
+use crate::config::{Auth, Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::{DispatchMeta, RouterOptions};
 
@@ -115,9 +115,10 @@ impl Provider for StreamOkProvider {
 /// at its default (enabled).
 const OPENAI_P1: &str = r#"
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 /// The same config with the capability subsystem killed.
@@ -126,9 +127,10 @@ const OPENAI_P1_DISABLED: &str = r#"
 enabled = false
 
 [providers.p1]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 
 fn router_with(toml_text: &str, provider: Arc<dyn Provider>) -> Router {
@@ -239,14 +241,17 @@ fn kill_switch_fully_disables_observation() {
 
 // --- forwarded-credential gate -----------------------------------------
 
-/// A router with one `anthropic-api` provider entry `a1` whose credential
-/// source is `source`, and the dispatch target chain expansion builds for it.
-fn anthropic_router_and_target(source: CredentialSource) -> (Router, DispatchTarget) {
+/// A router with one `anthropic-api` provider entry `a1` that relays the
+/// client's credential when `forwarded`, else sends its own, and the
+/// dispatch target chain expansion builds for it.
+fn anthropic_router_and_target(forwarded: bool) -> (Router, DispatchTarget) {
+    let entry = if forwarded {
+        ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer)
+    } else {
+        ProviderEntry::anthropic_api("literal:k")
+    };
     let mut config = Config::default();
-    config.providers.insert(
-        "a1".to_string(),
-        ProviderEntry::anthropic_api("literal:k").with_credential_source(source),
-    );
+    config.providers.insert("a1".to_string(), entry);
     let router = Router::new(Arc::new(config));
     let p: Arc<dyn Provider> = NoopProvider::new();
     let target = router
@@ -263,27 +268,26 @@ fn anthropic_router_and_target(source: CredentialSource) -> (Router, DispatchTar
 fn a_forwarded_credential_target_never_learns_a_positive() {
     struct Case {
         name: &'static str,
-        source: CredentialSource,
+        forwarded: bool,
         expect_learns: bool,
     }
     let cases = [
         Case {
             name: "forwarded credential",
-            source: CredentialSource::Forwarded,
+            forwarded: true,
             expect_learns: false,
         },
         Case {
             name: "own credential (positive control)",
-            source: CredentialSource::Own,
+            forwarded: false,
             expect_learns: true,
         },
     ];
     for case in cases {
         // Arrange: the same verified structured-output evidence on each.
-        let (router, target) = anthropic_router_and_target(case.source);
+        let (router, target) = anthropic_router_and_target(case.forwarded);
         assert_eq!(
-            target.use_forwarded_credential,
-            case.source == CredentialSource::Forwarded,
+            target.use_forwarded_credential, case.forwarded,
             "{}: fixture must carry the credential source under test",
             case.name,
         );
@@ -1088,21 +1092,24 @@ fn a_scope_taken_before_a_reload_still_admits() {
 fn a_scope_taken_before_a_config_only_reload_obeys_the_new_config() {
     const ANTHROPIC_P1: &str = r#"
 [providers.p1]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://example.test"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "x-api-key"
 "#;
     const ANTHROPIC_P1_FORWARDED: &str = r#"
 [providers.p1]
-kind = "anthropic-api"
+format = "anthropic-messages"
 base_url = "https://example.test"
-credential_source = "forwarded"
+credential = "forwarded"
+auth = "bearer"
 "#;
     const OPENAI_P2: &str = r#"
 [providers.p2]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
     // (name, config before, config after, events expected)
     let rows = [

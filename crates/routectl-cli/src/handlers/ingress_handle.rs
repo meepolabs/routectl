@@ -230,7 +230,7 @@ pub(crate) fn session_id_of(headers: &HeaderMap) -> Option<String> {
 ///   front-proxy (`proxy::split`) stamps that exact value exclusively on
 ///   the re-injected api.anthropic.com inference leg, so a matching value
 ///   marks a request that arrived through that channel; and
-/// - (b) config-is-the-capability: a `credential_source = "forwarded"`
+/// - (b) config-is-the-capability: a `credential = "forwarded"`
 ///   provider is configured (`Router::has_forwarded_provider`). No
 ///   configured forwarded provider means this never turns.
 ///
@@ -305,7 +305,7 @@ fn capture_stainless_headers(
 ///   only on the re-injected api.anthropic.com inference leg -- a wrong
 ///   value or an absent header are both treated as seam-absent, per
 ///   `MitmSeamNonce::is_present_in`); AND
-/// - (b) config-is-the-capability: a `credential_source = "forwarded"`
+/// - (b) config-is-the-capability: a `credential = "forwarded"`
 ///   provider is configured (`Router::has_forwarded_provider`, cached at
 ///   router build time -- no per-request config scan).
 ///

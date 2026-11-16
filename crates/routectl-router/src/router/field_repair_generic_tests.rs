@@ -232,7 +232,7 @@ fn content_chunk() -> ChatChunk {
 }
 
 fn member_router(seat: &Arc<MemberSeat>) -> Router {
-    let toml_text = "[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+    let toml_text = "[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
     let mut config: Config = toml::from_str(toml_text).expect("valid test toml");
     config.retry.max_attempts = 1;
     config

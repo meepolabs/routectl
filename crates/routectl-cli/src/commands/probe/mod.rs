@@ -7,7 +7,7 @@
 //! same way.
 //!
 //! The credential branch (BINDING, read-only):
-//!   - `credential_source = forwarded` -> [`ProbeOutcome::Skipped`]: no
+//!   - `credential = "forwarded"` -> [`ProbeOutcome::Skipped`]: no
 //!     build, no upstream call.
 //!   - an `oauth://` ref -> the in-memory-only [`routectl_auth::OAuthStore::probe_local`]
 //!     (no network, no refresh). `CompositeStore::get` is NEVER called for
@@ -373,7 +373,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use routectl_router::config::CredentialSource;
+    use routectl_router::config::Auth;
 
     fn now_unix() -> u64 {
         SystemTime::now()
@@ -430,8 +430,7 @@ mod tests {
     async fn forwarded_provider_is_skipped_without_build() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir.path().join("creds.json")).await;
-        let entry =
-            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded);
+        let entry = ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer);
         let config = config_with(&[("fwd", entry)]);
 
         let results = probe_all(&config, &store, PROBE_DEADLINE).await;
@@ -704,8 +703,7 @@ mod tests {
     async fn probe_all_returns_one_sorted_result_per_provider() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir.path().join("creds.json")).await;
-        let fwd =
-            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded);
+        let fwd = ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer);
         let config = config_with(&[("zeta", fwd.clone()), ("alpha", fwd)]);
 
         let results = probe_all(&config, &store, PROBE_DEADLINE).await;
@@ -870,9 +868,10 @@ mod tests {
 
     const ONE_PROVIDER_BODY: &str = "\
 [providers.alpha]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:k\"
+credential = \"literal:k\"
+auth = \"bearer\"
 ";
 
     #[tokio::test]

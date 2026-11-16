@@ -134,26 +134,26 @@ mod tests {
         );
     }
 
-    /// A bad provider `kind` is an unknown enum variant (the `ProviderEntry`
-    /// enum is internally tagged on `kind`); the enhancer handles the
-    /// `unknown variant` shape too.
+    /// A bad provider `format` is an unknown enum variant (`format` is the
+    /// `Format` enum); the enhancer handles the `unknown variant` shape too.
     #[test]
-    fn unknown_provider_kind_variant_suggests_the_real_kind() {
+    fn unknown_provider_format_variant_suggests_the_real_format() {
         let raw = "\
 [providers.p]
-kind = \"openai-compatt\"
+format = \"openai-chatt\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:x\"
+credential = \"env://K\"
+auth = \"bearer\"
 ";
-        let err = parse_config(raw).expect_err("a bad provider kind must be rejected");
+        let err = parse_config(raw).expect_err("a bad provider format must be rejected");
 
         assert!(
-            err.contains("unknown variant `openai-compatt`"),
+            err.contains("unknown variant `openai-chatt`"),
             "expected serde's unknown-variant phrasing, got: {err}"
         );
         assert!(
-            err.contains("did you mean `openai-compat`?"),
-            "expected an `openai-compat` suggestion, got: {err}"
+            err.contains("did you mean `openai-chat`?"),
+            "expected an `openai-chat` suggestion, got: {err}"
         );
     }
 

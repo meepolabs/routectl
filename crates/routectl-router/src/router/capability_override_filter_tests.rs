@@ -57,9 +57,10 @@ fn override_test_target(provider_name: &str, nickname: &str) -> DispatchTarget {
 }
 
 const OVERRIDE_PROVIDER_P: &str = "[providers.p]\n\
-        kind = \"openai-compat\"\n\
+        format = \"openai-chat\"\n\
         base_url = \"https://x\"\n\
-        api_key_ref = \"literal:k\"\n";
+        credential = \"literal:k\"\n\
+        auth = \"bearer\"\n";
 
 #[test]
 fn override_consult_model_scoped_unsupported_hard_drops_with_override_label() {
@@ -226,9 +227,10 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
     // A zero-hour decay lapses an observed negative immediately, so the
     // next consult would claim a re-probe slot.
     let base = "[providers.p]\n\
-            kind = \"openai-compat\"\n\
+            format = \"openai-chat\"\n\
             base_url = \"https://x\"\n\
-            api_key_ref = \"literal:k\"\n\
+            credential = \"literal:k\"\n\
+            auth = \"bearer\"\n\
             [capability]\n\
             enabled = true\n\
             decay_hours = 0\n\

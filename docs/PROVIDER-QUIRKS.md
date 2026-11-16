@@ -66,9 +66,10 @@ DeepSeek v4 inverted v3's contract on multi-turn echo-back. v3: 400 if you echo 
 
 ```toml
 [providers.example-deepseek-host]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://opencode.ai/zen/go/v1"
-api_key_ref = "env://OPENCODE_GO_API_KEY"
+credential = "env://OPENCODE_GO_API_KEY"
+auth = "bearer"
 
 [models.ds-v4]
 provider          = "example-deepseek-host"
@@ -98,9 +99,10 @@ vLLM 0.7+ matches DeepSeek v4's echo-back contract. Same fix:
 
 ```toml
 [providers.my-vllm]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "http://localhost:8000/v1"
-api_key_ref = "literal:not-needed"
+credential = "env://VLLM_API_KEY"
+auth = "bearer"
 
 [models.my-vllm-model]
 provider          = "my-vllm"
@@ -123,9 +125,10 @@ side) and the OpenAI-dialect translator forwards it as
 
 ```toml
 [providers.nim]
-kind              = "openai-compat"
+format            = "openai-chat"
 base_url          = "https://integrate.api.nvidia.com/v1"
-api_key_ref       = "env://NIM_API_KEY"
+credential        = "env://NIM_API_KEY"
+auth              = "bearer"
 
 [models.ds-nim-flash]
 provider          = "nim"
@@ -151,8 +154,10 @@ Default config works for Claude 4.5/4.6 / Haiku 4.5. The two times you need extr
 
 ```toml
 [providers.anthropic-api-key]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
 ```
 
@@ -160,12 +165,13 @@ header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
 
 ```toml
 [providers.anthropic-default]
-kind = "anthropic-api"
-api_key_ref = "file:///path/to/oauth-token"
-auth_kind = "oauth-bearer"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "file:///path/to/oauth-token"
+auth = "bearer"
 ```
 
-For `auth_kind = "api-key"` (default), routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth_kind = "oauth-bearer"` on `api.anthropic.com`, `default_claude_code_anthropic_betas()` auto-injects a 9-flag model-agnostic base -- `claude-code-20250219`, `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`, `redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28` -- so no manual `header_extras` beta list is needed for those.
+For `auth = "x-api-key"`, routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth = "bearer"` on `api.anthropic.com`, `default_claude_code_anthropic_betas()` auto-injects a 9-flag model-agnostic base -- `claude-code-20250219`, `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`, `redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28` -- so no manual `header_extras` beta list is needed for those.
 
 The base is deliberately NOT the full set genuine Claude Code emits. Model-gated flags (`context-1m-2025-08-07`, `effort-2025-11-24`, `thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`, `advisor-tool-2026-03-01`) are excluded because forcing them 400s models that do not support them (haiku rejects `context-1m-2025-08-07`). They reach upstream only when the caller sends them, as client pass-through. If you need a model-gated flag on every request to a model that DOES support it, declare it in that `[models.X] header_extras`.
 
@@ -204,8 +210,10 @@ allowlist:
 
 ```toml
 [providers.anthropic-default]
-kind        = "anthropic-api"
-api_key_ref = "oauth://anthropic"
+format      = "anthropic-messages"
+base_url    = "https://api.anthropic.com"
+credential  = "oauth://anthropic"
+auth        = "bearer"
 forward_client_headers = [
     "x-claude-code-session-id",
     "x-claude-code-agent-id",
@@ -359,10 +367,10 @@ reader parses its refusal wording.
 
 ```toml
 [providers.bedrock]
-kind      = "bedrock"
-region    = "us-east-1"
-api_shape = "invoke"
-creds     = { kind = "default-chain" }
+format     = "bedrock-invoke"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth       = "aws-sigv4"
 
 [models.opus47]
 provider = "bedrock"
@@ -375,9 +383,10 @@ Default works. Two niceties to set:
 
 ```toml
 [providers.openrouter]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://openrouter.ai/api/v1"
-api_key_ref = "env://OPENROUTER_API_KEY"
+credential = "env://OPENROUTER_API_KEY"
+auth = "bearer"
 header_extras = {
   "HTTP-Referer" = "https://github.com/your/project",
   "X-Title" = "your-project-name"
@@ -403,9 +412,10 @@ For an id outside the rule, routectl learns the drop. An `openai-compat` upstrea
 
 ```toml
 [providers.openai]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://api.openai.com/v1"
-api_key_ref = "env://OPENAI_API_KEY"
+credential = "env://OPENAI_API_KEY"
+auth = "bearer"
 
 [models.o3]
 provider          = "openai"
@@ -566,8 +576,10 @@ from `payload_extras`.
 
 ```toml
 [providers.gemini]
-kind        = "gemini"
-api_key_ref = "env://GEMINI_API_KEY"
+format      = "gemini"
+base_url    = "https://generativelanguage.googleapis.com/v1beta"
+credential  = "env://GEMINI_API_KEY"
+auth        = "x-goog-api-key"
 payload_extras = { safetySettings = [
   { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_NONE" },
 ] }
@@ -770,19 +782,22 @@ its own `[models.X]` row and chain the nicknames in `[aliases]`:
 
 ```toml
 [providers.example-deepseek-host]
-kind        = "openai-compat"
-base_url    = "https://opencode.ai/zen/go/v1"
-api_key_ref = "env://OPENCODE_GO_API_KEY"
+format     = "openai-chat"
+base_url   = "https://opencode.ai/zen/go/v1"
+credential = "env://OPENCODE_GO_API_KEY"
+auth       = "bearer"
 
 [providers.openrouter]
-kind        = "openai-compat"
-base_url    = "https://openrouter.ai/api/v1"
-api_key_ref = "env://OPENROUTER_API_KEY"
+format     = "openai-chat"
+base_url   = "https://openrouter.ai/api/v1"
+credential = "env://OPENROUTER_API_KEY"
+auth       = "bearer"
 
 [providers.nim]
-kind        = "openai-compat"
-base_url    = "https://integrate.api.nvidia.com/v1"
-api_key_ref = "env://NIM_API_KEY"
+format     = "openai-chat"
+base_url   = "https://integrate.api.nvidia.com/v1"
+credential = "env://NIM_API_KEY"
+auth       = "bearer"
 
 [models.ds-go]
 provider = "example-deepseek-host"
@@ -841,9 +856,10 @@ Anthropic-proprietary edit mechanism.
 
 ```toml
 [providers.deepseek-anthropic]
-kind               = "anthropic-api"
+format             = "anthropic-messages"
 base_url           = "https://api.deepseek.com/anthropic"
-api_key_ref        = "env://DEEPSEEK_API_KEY"
+credential         = "env://DEEPSEEK_API_KEY"
+auth               = "x-api-key"
 context_management = true
 
 [models.ds-claude]

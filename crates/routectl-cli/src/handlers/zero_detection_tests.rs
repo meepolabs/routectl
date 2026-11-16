@@ -2004,17 +2004,17 @@ fn bedrock_key() -> String {
 /// A router whose one target is a real Bedrock provider of `shape` serving
 /// `model_id`, its transport aimed at `origin`, checking every request.
 async fn bedrock_router(shape: BedrockShape, model_id: &str, origin: &str) -> Router {
-    let (api_shape, shape_token) = match shape {
-        BedrockShape::Invoke => (BedrockApiShape::Invoke, "invoke"),
-        BedrockShape::Converse => (BedrockApiShape::Converse, "converse"),
+    let (api_shape, format) = match shape {
+        BedrockShape::Invoke => (BedrockApiShape::Invoke, "bedrock-invoke"),
+        BedrockShape::Converse => (BedrockApiShape::Converse, "bedrock-converse"),
     };
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{PROVIDER}]\n\
-         kind = \"bedrock\"\n\
-         region = \"{BEDROCK_REGION}\"\n\
-         api_shape = \"{shape_token}\"\n\
-         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         format = \"{format}\"\n\
+         cloud = {{ name = \"aws\", region = \"{BEDROCK_REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [models.{NICKNAME}]\n\
          provider = \"{PROVIDER}\"\n\
          upstream = \"{model_id}\"\n\n\
@@ -2062,7 +2062,7 @@ fn mantle_key() -> String {
 
 /// A router whose one target is a real Bedrock Mantle Responses provider
 /// dialing `origin`, checking every request. The config entry keeps its
-/// `bedrock_mantle` block, so the check names the Mantle lane.
+/// `cloud` carrier, so the check names the Mantle lane.
 fn responses_mantle_router(origin: &str) -> Router {
     use routectl_providers::bedrock::auth::ResolvedCreds;
     use routectl_providers::mantle::MantleAuth;
@@ -2072,9 +2072,10 @@ fn responses_mantle_router(origin: &str) -> Router {
     let text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\n\
          [providers.{PROVIDER}]\n\
-         kind = \"openai-responses\"\n\
-         api_key_ref = \"\"\n\
-         bedrock_mantle = {{ region = \"{BEDROCK_REGION}\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n\n\
+         format = \"openai-responses\"\n\
+         cloud = {{ name = \"aws\", region = \"{BEDROCK_REGION}\" }}\n\
+         credential = \"{key_ref}\"\n\
+         auth = \"bearer\"\n\n\
          [models.{NICKNAME}]\n\
          provider = \"{PROVIDER}\"\n\
          upstream = \"{MANTLE_UPSTREAM}\"\n\n\

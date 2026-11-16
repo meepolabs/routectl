@@ -184,11 +184,10 @@ impl Provider for ThinkingTypeSeat {
     }
 }
 
-const ANTHROPIC_API_TOML: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
+const ANTHROPIC_API_TOML: &str = "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n";
 
 #[cfg(feature = "bedrock")]
-const BEDROCK_TOML: &str =
-    "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n";
+const BEDROCK_TOML: &str = "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n";
 
 /// A router over one seat per `(provider_toml, seat)`, in chain order,
 /// sampling wire checks per `params`, and durable capability writes assumed

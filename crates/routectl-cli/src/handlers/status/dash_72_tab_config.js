@@ -229,13 +229,15 @@
   // back into a fuller URL or a ref body.
   function providerSection(providers) {
     var tbl = mkTable('Configured routing providers',
-      [R('provider'), C('kind'), C('endpoint'), C('auth'), C('credential ref'), N('rate limit')],
+      [R('provider'), C('format'), C('kind'), C('endpoint'), C('auth'), C('credential ref'),
+        N('rate limit')],
       false);
     providers.forEach(function (p) {
       trow(tbl, [
         p.provider_id,
+        configuredText(p.format, 'none'),
         p.provider_kind,
-        configuredText(p.endpoint_origin, 'derived at startup'),
+        configuredText(p.endpoint_origin || p.cloud, 'none'),
         configuredText(p.auth_token, 'none'),
         configuredText(p.credential_ref_scheme, 'none'),
         rpmLimitCell(p.rpm_limit)
@@ -250,9 +252,9 @@
   function providerNote() {
     var note = document.createElement('p');
     note.className = 'footnote';
-    note.textContent = 'Endpoints are the CONFIGURED origin (scheme, host, port); a kind that ' +
-      'derives its endpoint at startup shows none. A rate limit of 0 RPM means requests are ' +
-      'throttled immediately. A limit not set here may still come from a pool or default; ' +
+    note.textContent = 'Endpoints are the CONFIGURED origin (scheme, host, port); a cloud ' +
+      'entry shows its cloud and region and derives its endpoint at startup. A rate limit of ' +
+      '0 RPM means requests are throttled immediately. A limit not set here may still come from a pool or default; ' +
       'config show --effective shows the resolved value and its source.';
     return note;
   }

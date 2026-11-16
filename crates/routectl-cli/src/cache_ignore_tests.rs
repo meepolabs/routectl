@@ -25,27 +25,35 @@ const STEP_MS: i64 = 1_000;
 fn fixture_config() -> Config {
     toml::from_str(
         "[providers.direct]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n\
          [providers.aws]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          [providers.aws_converse]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         api_shape = \"converse\"\n\
-         creds = { kind = \"default-chain\" }\n\
+         format = \"bedrock-converse\"\n\
+         cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          [providers.vendor]\n\
-         kind = \"anthropic-api\"\n\
+         format = \"anthropic-messages\"\n\
          base_url = \"https://vendor.example.invalid/anthropic\"\n\
-         api_key_ref = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         credential = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n\
          [providers.resp]\n\
-         kind = \"openai-responses\"\n\
-         api_key_ref = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         format = \"openai-responses\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         auth = \"bearer\"\n\
          [providers.resp_dark]\n\
-         kind = \"openai-responses\"\n\
-         api_key_ref = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         format = \"openai-responses\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
+         credential = \"env://CACHE_IGNORE_TEST_UNUSED\"\n\
+         auth = \"bearer\"\n\
          cache_capability = { supports_top_level_cache_control = false, cache_hit_observable = false }\n",
     )
     .expect("fixture config parses")

@@ -18,9 +18,10 @@ fn parse(text: &str) -> Config {
 fn pooled(routing: &str) -> Config {
     parse(&format!(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.anthropic]\n\
          members = [\"anthropic-default\"]\n\
          accepts_new_logins = true\n\
@@ -67,9 +68,10 @@ fn an_unpooled_seat_reports_the_model_shape_pointing_at_the_entry() {
     // Arrange: no pool at all (the entry stands alone).
     let config = parse(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n",
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n",
     );
 
     // Act
@@ -153,9 +155,10 @@ fn an_alias_reaching_only_an_unrelated_model_is_not_reachability() {
     // Arrange: an alias exists, but it names a model on another provider.
     let config = pooled(
         "[providers.other]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"http://127.0.0.1:1\"\n\
-         api_key_ref = \"env://OTHER_KEY\"\n\
+         credential = \"env://OTHER_KEY\"\n\
+         auth = \"bearer\"\n\
          [models.opus]\n\
          provider = \"anthropic\"\n\
          upstream = \"claude-opus-4-8\"\n\
@@ -180,9 +183,10 @@ fn a_pool_name_needing_toml_quoting_is_quoted_in_the_model_shape() {
     // would split the key path in the pasteable shape.
     let config = parse(
         "[providers.anthropic-default]\n\
-         kind = \"anthropic-api\"\n\
-         auth_kind = \"oauth-bearer\"\n\
-         api_key_ref = \"oauth://anthropic\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic\"\n\
+         auth = \"bearer\"\n\
          [pools.\"a.b\"]\n\
          members = [\"anthropic-default\"]\n\
          accepts_new_logins = true\n",

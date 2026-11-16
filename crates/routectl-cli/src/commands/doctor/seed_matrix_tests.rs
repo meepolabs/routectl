@@ -36,13 +36,15 @@ fn seed_config() -> Config {
     toml::from_str(
         "version = 3\n\
          [providers.aws]\n\
-         kind = \"bedrock\"\n\
-         region = \"us-east-1\"\n\
-         creds = { kind = \"default-chain\" }\n\
+         format = \"bedrock-invoke\"\n\
+         cloud = { name = \"aws\", region = \"us-east-1\" }\n\
+         credential = \"aws://chain\"\n\
+         auth = \"aws-sigv4\"\n\
          [providers.p]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"https://example.invalid\"\n\
-         api_key_ref = \"literal:k\"\n\
+         credential = \"literal:k\"\n\
+         auth = \"bearer\"\n\
          [models.claude]\n\
          provider = \"aws\"\n\
          upstream = \"up\"\n\

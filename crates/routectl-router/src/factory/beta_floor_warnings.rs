@@ -19,15 +19,16 @@ use routectl_core::identity::anthropic::{
     EFFORT_BETA, OAUTH_ANTHROPIC_BETA, REDACT_THINKING_BETA, STRUCTURED_OUTPUTS_BETA,
     default_claude_code_anthropic_betas, is_anthropic_api_host,
 };
-use routectl_providers::anthropic_api::{AuthKind, CONTEXT_MANAGEMENT_BETA, CloakMode};
+use routectl_providers::anthropic_api::{CONTEXT_MANAGEMENT_BETA, CloakMode};
 
 use crate::beta_capability::{beta_flag_of, beta_override_key};
 use crate::config::provider_descriptor::client_identity;
-use crate::config::{Config, CredentialSource, OverrideEntry, ProviderEntry};
+use crate::config::provider_descriptor::{Auth, Format};
+use crate::config::{Config, OverrideEntry, ProviderEntry};
 use crate::override_registry::split_target_spec;
 
 const OWN_OAUTH_LANE: &str =
-    "on an oauth-bearer provider on api.anthropic.com using its own credential";
+    "on an auth = \"bearer\" provider on api.anthropic.com using its own credential";
 
 const CLIENT_IDENTITY_LANE: &str = "on a provider presenting the Claude Code identity (a managed Anthropic login on \
      api.anthropic.com)";
@@ -50,7 +51,10 @@ pub(super) fn beta_floor_override_warnings(config: &Config) -> Vec<String> {
 
 fn cell_warnings(config: &Config, spec: &str, entry: &OverrideEntry) -> Vec<String> {
     let (provider_name, nickname) = split_target_spec(spec);
-    let Some(provider @ ProviderEntry::AnthropicApi { .. }) = config.providers.get(provider_name)
+    let Some(provider) = config
+        .providers
+        .get(provider_name)
+        .filter(|entry| entry.format() == Format::AnthropicMessages)
     else {
         return Vec::new();
     };
@@ -191,8 +195,8 @@ struct EgressLane {
     /// Every dispatched request takes the forwarded leg: the router refuses a
     /// forwarded target with no captured bearer, and validation pins the host.
     forwarded: bool,
-    /// The own-OAuth credential lane: oauth-bearer, own credential, on the
-    /// Anthropic API host. A mantle entry has no such host (the factory
+    /// The own-OAuth credential lane: bearer, own credential, on the
+    /// Anthropic API host. A cloud entry has no such host (the factory
     /// derives its URL).
     own_oauth: bool,
     /// The cloak lane: the factory's client-identity verdict for the entry.
@@ -203,29 +207,19 @@ struct EgressLane {
 
 impl EgressLane {
     fn of(provider: &ProviderEntry) -> Option<Self> {
-        let ProviderEntry::AnthropicApi {
-            auth_kind,
-            credential_source,
-            cloak,
-            context_management,
-            ..
-        } = provider
-        else {
+        if provider.format() != Format::AnthropicMessages {
             return None;
-        };
+        }
         let on_anthropic_host = provider
             .anthropic_api_base_url()
             .is_some_and(is_anthropic_api_host);
+        let forwarded = provider.forwarded_base_url();
         Some(Self {
-            forwarded: provider
-                .forwarded_base_url()
-                .is_some_and(is_anthropic_api_host),
-            own_oauth: *auth_kind == AuthKind::OauthBearer
-                && *credential_source == CredentialSource::Own
-                && on_anthropic_host,
+            forwarded: forwarded.is_some_and(is_anthropic_api_host),
+            own_oauth: provider.auth == Auth::Bearer && forwarded.is_none() && on_anthropic_host,
             client_identity: client_identity(provider),
-            cloak_mode: cloak.mode,
-            context_management: *context_management,
+            cloak_mode: provider.cloak_mode.unwrap_or_default(),
+            context_management: provider.context_management.unwrap_or(false),
         })
     }
 
@@ -271,7 +265,7 @@ impl EgressLane {
         match self.cloak_mode {
             CloakMode::Never => None,
             CloakMode::Always => Some(format!(
-                "always, {CLIENT_IDENTITY_LANE} with cloak.mode = \"always\""
+                "always, {CLIENT_IDENTITY_LANE} with cloak_mode = \"always\""
             )),
             CloakMode::Auto => Some(format!(
                 "on requests routectl classifies as non-Claude-Code (normally: no Claude Code \

@@ -21,7 +21,9 @@ use routectl_auth::{MemoryStore, SecretStore};
 use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddArgs};
 use routectl_cli::server::CompositeStore;
 use routectl_core::Result;
-use routectl_router::{CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config};
+use routectl_router::{
+    Auth, CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config,
+};
 use routectl_testkit::ScopedEnv;
 use tokio::net::TcpListener;
 
@@ -37,9 +39,10 @@ host = \"127.0.0.1\"
 port = 8787
 
 [providers.fast]
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"__API_KEY_REF__\"
+credential = \"__API_KEY_REF__\"
+auth = \"bearer\"
 
 [models.gpt]
 provider = \"fast\"
@@ -321,10 +324,18 @@ async fn forwarded_shape_checks_builds_and_boots() {
     a.credential_source = Some("forwarded".to_string());
     let (config, text) = add_and_parse(&path, a, &StubIo::default()).await;
 
+    let entry = config.providers.get("fwd").unwrap();
     assert_eq!(
-        config.providers.get("fwd").unwrap().api_key_ref(),
-        Some(""),
+        entry.api_key_ref(),
+        None,
         "a forwarded provider carries no configured credential"
+    );
+    assert_eq!(entry.credential, "forwarded");
+    assert_eq!(entry.auth, Auth::Bearer);
+    assert_eq!(
+        entry.forwarded_base_url(),
+        Some("https://api.anthropic.com"),
+        "the forwarded writer pins the Anthropic API host"
     );
 
     let store: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
@@ -488,9 +499,10 @@ upstream = \"gpt-4o\"
 
 [providers.fast]
 # keep this inline note
-kind = \"openai-compat\"
+format = \"openai-chat\"
 base_url = \"http://127.0.0.1:1\"
-api_key_ref = \"literal:test-key\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+auth = \"bearer\"
 ";
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &body);

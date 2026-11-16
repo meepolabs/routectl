@@ -34,12 +34,15 @@ fn fixed_now() -> DateTime<Local> {
 fn fixture_config() -> Config {
     toml::from_str(
         "[providers.direct]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://USAGE_CACHE_IGNORE_TEST_UNUSED\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://USAGE_CACHE_IGNORE_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n\
          [providers.vendor]\n\
-         kind = \"anthropic-api\"\n\
+         format = \"anthropic-messages\"\n\
          base_url = \"https://vendor.example.invalid/anthropic\"\n\
-         api_key_ref = \"env://USAGE_CACHE_IGNORE_TEST_UNUSED\"\n",
+         credential = \"env://USAGE_CACHE_IGNORE_TEST_UNUSED\"\n\
+         auth = \"x-api-key\"\n",
     )
     .expect("fixture config parses")
 }

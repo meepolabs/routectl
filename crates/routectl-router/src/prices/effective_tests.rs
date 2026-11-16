@@ -13,17 +13,22 @@ const UPSTREAM: &str = "claude-x";
 
 const CONFIG: &str = r#"
 [providers.claude]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://A"
+auth = "x-api-key"
 
 [providers.seat]
-kind = "anthropic-api"
-api_key_ref = "oauth://claude"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "oauth://claude"
+auth = "x-api-key"
 
 [providers.gateway]
-kind = "openai-compat"
-api_key_ref = "env://B"
+format = "openai-chat"
 base_url = "https://gateway.example/v1"
+credential = "env://B"
+auth = "bearer"
 
 [models.m]
 provider = "claude"
@@ -281,9 +286,10 @@ type SourcedPrice = (f64, PriceSource);
 #[cfg(feature = "bedrock")]
 const BEDROCK_CONFIG: &str = r#"
 [providers.br]
-kind = "bedrock"
-region = "us-east-1"
-creds = { kind = "default-chain" }
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#;
 
 /// The derived 1-hour write: which targets get it, and when a source
@@ -382,9 +388,10 @@ fn a_supplied_1h_write_is_never_replaced_by_the_derived_figure() {
 fn an_anthropic_api_gateway_priced_from_another_table_provider_gets_no_derived_write() {
     const GATEWAY: &str = r#"
 [providers.router]
-kind = "anthropic-api"
-api_key_ref = "env://R"
+format = "anthropic-messages"
 base_url = "https://openrouter.ai/api/v1"
+credential = "env://R"
+auth = "x-api-key"
 "#;
     let config: Config = toml::from_str(GATEWAY).expect("config parses");
     let rows = [

@@ -116,9 +116,10 @@ host = "127.0.0.1"
 port = 0
 
 [providers.anthropic_oauth]
-kind = "anthropic-api"
-api_key_ref = "oauth://anthropic"
-auth_kind = "oauth-bearer"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "oauth://anthropic"
+auth = "bearer"
 
 [models.claude]
 provider = "anthropic_oauth"
@@ -423,9 +424,10 @@ fn prompt_shaping_config_text(history_reasoning: &str) -> String {
         "version = {CURRENT_CONFIG_VERSION}\n\
          [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
          [providers.compat]\n\
-         kind = \"openai-compat\"\n\
+         format = \"openai-chat\"\n\
          base_url = \"http://127.0.0.1:1/v1\"\n\
-         api_key_ref = \"env://ROUTECTL_PROMPT_SHAPING_TEST_KEY\"\n\n\
+         credential = \"env://ROUTECTL_PROMPT_SHAPING_TEST_KEY\"\n\
+         auth = \"bearer\"\n\n\
          [models.glm]\n\
          provider = \"compat\"\n\
          upstream = \"glm-4.6\"\n\
@@ -602,10 +604,10 @@ async fn config_reload_accepts_a_candidate_whose_pool_members_are_all_unreadable
             "version = {}\n\
              [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
              [providers.anthropic-a]\n\
-             kind = \"anthropic-api\"\n\
+             format = \"anthropic-messages\"\n\
              base_url = \"https://api.anthropic.com\"\n\
-             api_key_ref = \"oauth://anthropic-a\"\n\
-             auth_kind = \"oauth-bearer\"\n\n\
+             credential = \"oauth://anthropic-a\"\n\
+             auth = \"bearer\"\n\n\
              [pools.anthropic-pool]\n\
              members = [\"anthropic-a\"]\n\n\
              [models.claude]\n\

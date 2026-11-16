@@ -199,8 +199,7 @@ fn write_config_file(dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::write(
         &path,
         format!(
-            "version = 3\n\n[providers.p0]\nkind = \"anthropic-api\"\n\
-             api_key_ref = \"literal:k\"\nbase_url = \"{REMOTE_BASE}\"\n\n\
+            "version = 3\n\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"{REMOTE_BASE}\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n\n\
              [models.{NICKNAME}]\nprovider = \"p0\"\nupstream = \"claude-sonnet-4-5\"\n\n\
              [aliases]\ndefault = \"{NICKNAME}\"\n"
         ),

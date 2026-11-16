@@ -28,8 +28,10 @@ initial_backoff_ms = 0
 jitter_ms = 0
 
 [providers.p1]
-kind = "anthropic-api"
-api_key_ref = "literal:k"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "literal:k"
+auth = "x-api-key"
 "#;
 
 /// What a provider call saw on its beta assembly slot.

@@ -269,7 +269,7 @@ mod raw_config_preflight_tests {
     fn a_clean_current_config_passes() {
         let raw = at_version(
             super::CURRENT_CONFIG_VERSION,
-            "[mitm]\n[providers.p]\nkind = \"anthropic-api\"\n",
+            "[mitm]\n[providers.p]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"env://ANTHROPIC_API_KEY\"\nauth = \"x-api-key\"\n",
         );
 
         assert_eq!(preflight_raw_config(&raw), Ok(()));
@@ -325,7 +325,7 @@ mod raw_config_preflight_tests {
             ("bedrock", "", "[bedrock]\nallowed_betas = [\"x\"]\n"),
             (
                 "allowed_betas",
-                "[providers.p]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n",
+                "[providers.p]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n",
                 "allowed_betas = [\"x\"]\n",
             ),
         ];

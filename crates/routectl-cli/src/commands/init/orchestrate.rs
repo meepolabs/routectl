@@ -874,7 +874,8 @@ mod tests {
             "forwarded prompts for no secret"
         );
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("credential_source = \"forwarded\""), "{text}");
+        assert!(text.contains("credential = \"forwarded\""), "{text}");
+        assert!(text.contains("auth = \"bearer\""), "{text}");
         assert!(text.contains("[providers.anthropic-forwarded]"), "{text}");
     }
 

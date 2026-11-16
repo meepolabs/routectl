@@ -23,8 +23,10 @@ pub(super) fn served_fixture_config(db_path: &Path) -> String {
          [usage]\n\
          db_path = \"{}\"\n\
          [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://SERVED_FIXTURE_KEY\"\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"env://SERVED_FIXTURE_KEY\"\n\
+         auth = \"x-api-key\"\n\
          [models.sonnet]\n\
          provider = \"anthropic\"\n\
          upstream = \"claude-sonnet-4-5\"\n",

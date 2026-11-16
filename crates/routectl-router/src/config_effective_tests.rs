@@ -10,8 +10,10 @@ fn config_with_opus_model() -> Config {
 version = 2
 
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 
 [models.opus]
 provider = "anthropic"
@@ -145,9 +147,10 @@ fn config_with_provider_base_url(base_url: &str) -> Config {
 version = 2
 
 [providers.acme]
-kind = "anthropic-api"
-api_key_ref = "env://ACME_KEY"
+format = "anthropic-messages"
 base_url = "{base_url}"
+credential = "env://ACME_KEY"
+auth = "x-api-key"
 "#
     ))
     .expect("valid config")
@@ -224,14 +227,13 @@ fn credential_ref_scheme_carries_the_scheme_only() {
     );
 }
 
-fn config_with_provider_api_key_ref(api_key_ref: &str) -> Config {
+fn config_with_provider_credential(credential: &str) -> Config {
     let mut config = config_with_provider_base_url("https://upstream.example");
-    if let Some(ProviderEntry::AnthropicApi {
-        api_key_ref: slot, ..
-    }) = config.providers.get_mut("acme")
-    {
-        *slot = api_key_ref.to_string();
-    }
+    config
+        .providers
+        .get_mut("acme")
+        .expect("acme provider")
+        .credential = credential.to_string();
     config
 }
 
@@ -246,7 +248,7 @@ fn unrecognized_credential_ref_publishes_none_of_its_bytes() {
         ("sk-live-no-colon-at-all", "sk-live-no-colon"),
         (":sk-live-leading", "sk-live-leading"),
     ] {
-        let config = config_with_provider_api_key_ref(pasted);
+        let config = config_with_provider_credential(pasted);
         let view = derive_effective_view(&config, None, None);
         let cell = &view.providers[0];
         assert_eq!(
@@ -269,13 +271,13 @@ fn unrecognized_credential_ref_publishes_none_of_its_bytes() {
         ("oauth://anthropic", "oauth"),
         ("literal:k", "literal"),
     ] {
-        assert_eq!(credential_ref_scheme(Some(raw)).as_deref(), Some(expected));
+        assert_eq!(credential_ref_scheme(raw).as_deref(), Some(expected));
     }
 }
 
 #[test]
 fn absent_or_blank_credential_ref_projects_none() {
-    for absent in [None, Some(""), Some("   ")] {
+    for absent in ["", "   "] {
         assert_eq!(credential_ref_scheme(absent), None, "{absent:?}");
     }
 }
@@ -378,35 +380,15 @@ fn anthropic_entry_carries_its_own_auth_token_and_kind() {
     let cell = &view.providers[0];
     assert_eq!(cell.id, "acme");
     assert_eq!(cell.kind, "anthropic-api");
-    assert_eq!(cell.auth_token.as_deref(), Some("api-key"));
+    assert_eq!(cell.format, "anthropic-messages");
+    assert_eq!(cell.auth_token.as_deref(), Some("x-api-key"));
+    assert_eq!(cell.cloud, None, "a base-URL entry has no cloud cell");
 }
 
-#[test]
-fn openai_compat_has_no_auth_token() {
-    // The variant carries no auth discriminant, so the projection reports
-    // absence rather than inventing a spanning token.
-    let config: Config = toml::from_str(
-        r#"
-version = 2
-
-[providers.compat]
-kind = "openai-compat"
-api_key_ref = "env://COMPAT_KEY"
-base_url = "https://compat.example/v1"
-"#,
-    )
-    .expect("valid config");
-
-    let view = derive_effective_view(&config, None, None);
-    assert_eq!(view.providers[0].auth_token, None);
-}
-
-/// Every auth arm the build carries, asserted against the token its own
-/// config vocabulary already uses. The `auth_token` match is exhaustive
-/// with no wildcard, so a new variant breaks the BUILD -- but a typo'd or
-/// swapped token in an existing arm compiles fine and would publish a
-/// wrong mechanism name on the panel. Only these tests catch that, and
-/// each is cfg-gated to the feature that compiles its arm.
+/// Every auth value, asserted against the token its own config vocabulary
+/// uses. The projection is `Auth::as_str`, so a typo'd or swapped token in
+/// that vocabulary would publish a wrong mechanism name on the panel; only
+/// this table catches that. Each row also pins the format and family cells.
 fn only_provider(toml_text: &str) -> ProviderCell {
     let config: Config = toml::from_str(toml_text).expect("valid config");
     let view = derive_effective_view(&config, None, None);
@@ -417,148 +399,231 @@ fn only_provider(toml_text: &str) -> ProviderCell {
 }
 
 #[test]
+fn each_auth_value_projects_its_own_token() {
+    let rows = [
+        (
+            "openai-chat",
+            "https://compat.example/v1",
+            "env://COMPAT_KEY",
+            "bearer",
+            "openai-compat",
+        ),
+        (
+            "anthropic-messages",
+            "https://api.anthropic.com",
+            "oauth://anthropic",
+            "bearer",
+            "anthropic-api",
+        ),
+        (
+            "anthropic-messages",
+            "https://api.anthropic.com",
+            "env://ANTHROPIC_API_KEY",
+            "x-api-key",
+            "anthropic-api",
+        ),
+        (
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "env://GEMINI_API_KEY",
+            "x-goog-api-key",
+            "gemini",
+        ),
+    ];
+    for (format, base_url, credential, auth, kind) in rows {
+        let cell = only_provider(&format!(
+            r#"
+version = 2
+
+[providers.p]
+format = "{format}"
+base_url = "{base_url}"
+credential = "{credential}"
+auth = "{auth}"
+"#
+        ));
+        assert_eq!(cell.kind, kind, "{format}/{auth}");
+        assert_eq!(cell.format, format, "{format}/{auth}");
+        assert_eq!(cell.auth_token.as_deref(), Some(auth), "{format}/{auth}");
+    }
+}
+
+#[test]
 fn anthropic_oauth_bearer_carries_its_own_token() {
     let cell = only_provider(
         r#"
 version = 2
 
 [providers.oauth]
-kind = "anthropic-api"
-api_key_ref = "oauth://anthropic"
-auth_kind = "oauth-bearer"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "oauth://anthropic"
+auth = "bearer"
 "#,
     );
     assert_eq!(cell.kind, "anthropic-api");
-    assert_eq!(cell.auth_token.as_deref(), Some("oauth-bearer"));
+    assert_eq!(cell.auth_token.as_deref(), Some("bearer"));
     assert_eq!(cell.credential_ref_scheme.as_deref(), Some("oauth"));
 }
 
 #[cfg(feature = "openai-responses")]
 #[test]
-fn openai_responses_carries_each_of_its_own_auth_tokens() {
-    for (auth_kind, expected) in [
-        ("api-key", "api-key"),
-        ("chatgpt-oauth", "chatgpt-oauth"),
-        ("bedrock-mantle", "bedrock-mantle"),
+fn openai_responses_projects_its_format_on_each_carrier() {
+    let base = only_provider(
+        r#"
+version = 2
+
+[providers.r]
+format = "openai-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = "oauth://codex"
+auth = "bearer"
+"#,
+    );
+    assert_eq!(base.kind, "openai-responses");
+    assert_eq!(base.format, "openai-responses");
+    assert_eq!(base.auth_token.as_deref(), Some("bearer"));
+    assert_eq!(base.cloud, None);
+
+    #[cfg(feature = "bedrock")]
+    {
+        let cloud = only_provider(
+            r#"
+version = 2
+
+[providers.r]
+format = "openai-responses"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "env://AWS_BEARER_TOKEN_BEDROCK"
+auth = "bearer"
+"#,
+        );
+        assert_eq!(cloud.format, "openai-responses");
+        assert_eq!(cloud.cloud.as_deref(), Some("aws us-east-1"));
+        assert_eq!(cloud.endpoint_origin, None);
+    }
+}
+
+#[cfg(feature = "gemini")]
+#[test]
+fn gemini_formats_project_their_own_format_and_auth() {
+    for (format, auth) in [
+        ("gemini", "x-goog-api-key"),
+        ("gemini-cloud-code", "bearer"),
     ] {
         let cell = only_provider(&format!(
             r#"
 version = 2
 
-[providers.r]
-kind = "openai-responses"
-api_key_ref = "env://K"
-auth_kind = "{auth_kind}"
+[providers.g]
+format = "{format}"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
+credential = "oauth://antigravity"
+auth = "{auth}"
 "#
         ));
-        assert_eq!(cell.kind, "openai-responses");
-        assert_eq!(
-            cell.auth_token.as_deref(),
-            Some(expected),
-            "auth_kind {auth_kind} must project its own token"
-        );
+        assert_eq!(cell.kind, "gemini");
+        assert_eq!(cell.format, format);
+        assert_eq!(cell.auth_token.as_deref(), Some(auth), "format {format}");
     }
 }
 
 #[cfg(feature = "gemini")]
 #[test]
-fn gemini_carries_each_of_its_own_auth_modes() {
-    for (auth_mode, expected) in [("api-key", "api-key"), ("cloud-code", "cloud-code")] {
+fn gemini_entries_report_the_base_url_they_write() {
+    for base_url in [
+        routectl_providers::gemini::DAILY_BASE_URL,
+        routectl_providers::gemini::PROD_BASE_URL,
+    ] {
         let cell = only_provider(&format!(
             r#"
 version = 2
 
 [providers.g]
-kind = "gemini"
-api_key_ref = "env://GEMINI_API_KEY"
-auth_mode = "{auth_mode}"
+format = "gemini-cloud-code"
+base_url = "{base_url}"
+credential = "oauth://antigravity"
+auth = "bearer"
 "#
         ));
-        assert_eq!(cell.kind, "gemini");
         assert_eq!(
-            cell.auth_token.as_deref(),
-            Some(expected),
-            "auth_mode {auth_mode} must project its own token"
+            cell.endpoint_origin.as_deref(),
+            endpoint_origin(base_url).as_deref(),
+            "a written base is reported verbatim, never rewritten"
         );
     }
-}
 
-#[cfg(feature = "gemini")]
-#[test]
-fn gemini_cloud_code_reports_its_effective_host_not_the_api_key_default() {
-    // An unset `base_url` on a cloud-code entry keeps the api-key public
-    // default in config, but the lane never talks to that host: the
-    // factory leaves the constructor's cloud-code default in place.
-    let unset = only_provider(
-        r#"
-version = 2
-
-[providers.g]
-kind = "gemini"
-api_key_ref = "oauth://antigravity"
-auth_mode = "cloud-code"
-"#,
-    );
-    assert_eq!(
-        unset.endpoint_origin.as_deref(),
-        endpoint_origin(routectl_providers::gemini::DAILY_BASE_URL).as_deref(),
-    );
-
-    // An explicit pin is reported verbatim -- never rewritten.
-    let pinned = only_provider(&format!(
-        r#"
-version = 2
-
-[providers.g]
-kind = "gemini"
-api_key_ref = "oauth://antigravity"
-auth_mode = "cloud-code"
-base_url = "{}"
-"#,
-        routectl_providers::gemini::PROD_BASE_URL
-    ));
-    assert_eq!(
-        pinned.endpoint_origin.as_deref(),
-        endpoint_origin(routectl_providers::gemini::PROD_BASE_URL).as_deref(),
-    );
-
-    // An api-key entry keeps reporting the public REST default.
     let api_key = only_provider(
         r#"
 version = 2
 
 [providers.g]
-kind = "gemini"
-api_key_ref = "env://GEMINI_API_KEY"
+format = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+credential = "env://GEMINI_API_KEY"
+auth = "x-goog-api-key"
 "#,
     );
     assert_eq!(
         api_key.endpoint_origin.as_deref(),
-        endpoint_origin(&crate::config::default_gemini_base()).as_deref(),
+        Some("https://generativelanguage.googleapis.com"),
     );
 }
 
 #[cfg(feature = "bedrock")]
 #[test]
-fn bedrock_carries_its_creds_kind_and_no_configured_endpoint() {
+fn bedrock_carries_its_credential_scheme_and_no_configured_endpoint() {
     let cell = only_provider(
         r#"
 version = 2
 
 [providers.b]
-kind = "bedrock"
-region = "us-east-1"
-
-[providers.b.creds]
-kind = "default-chain"
+format = "bedrock-invoke"
+cloud = { name = "aws", region = "us-east-1" }
+credential = "aws://chain"
+auth = "aws-sigv4"
 "#,
     );
     assert_eq!(cell.kind, "bedrock");
-    assert_eq!(cell.auth_token.as_deref(), Some("default-chain"));
-    // Bedrock carries no `base_url` at all -- the factory derives the host
-    // from `region`. A pure derivation reports absence rather than
+    assert_eq!(cell.format, "bedrock-invoke");
+    assert_eq!(cell.auth_token.as_deref(), Some("aws-sigv4"));
+    assert_eq!(cell.credential_ref_scheme.as_deref(), Some("aws-chain"));
+    assert_eq!(cell.cloud.as_deref(), Some("aws us-east-1"));
+    // A cloud entry carries no `base_url` at all -- the factory derives the
+    // host from the region. A pure derivation reports absence rather than
     // duplicating that factory logic.
     assert_eq!(cell.endpoint_origin, None);
+}
+
+/// The cloud cell names the region only when it is a canonical AWS region
+/// identifier: operator text that fails admission is not echoed. The
+/// canonical row is the positive control.
+#[cfg(feature = "bedrock")]
+#[test]
+fn cloud_cell_withholds_a_region_that_fails_admission() {
+    let cell_for = |region: &str| {
+        only_provider(&format!(
+            r#"
+version = 2
+
+[providers.b]
+format = "bedrock-converse"
+cloud = {{ name = "aws", region = "{region}" }}
+credential = "aws://profile/work"
+auth = "aws-sigv4"
+"#
+        ))
+    };
+    let canonical = cell_for("eu-west-1");
+    let refused = cell_for("sk-live-NOT-A-REGION");
+
+    assert_eq!(canonical.cloud.as_deref(), Some("aws eu-west-1"));
+    assert_eq!(
+        canonical.credential_ref_scheme.as_deref(),
+        Some("aws-profile")
+    );
+    assert_eq!(refused.cloud.as_deref(), Some("aws"));
+    assert!(!format!("{refused:?}").contains("sk-live"));
 }
 
 #[test]
@@ -570,17 +635,23 @@ fn zero_rpm_limit_stays_distinct_from_unlimited() {
 version = 2
 
 [providers.zero]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 rpm_limit = 0
 
 [providers.unlimited]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 
 [providers.capped]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 rpm_limit = 60
 "#,
     )
@@ -606,12 +677,16 @@ fn providers_are_projected_in_provider_key_order() {
 version = 2
 
 [providers.zeta]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 
 [providers.alpha]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 "#,
     )
     .expect("valid config");
@@ -665,44 +740,57 @@ stream_first_byte_timeout_ms = 600000
 bad-request = 0
 
 [providers.seat-1]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_1"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_1"
+auth = "x-api-key"
 
 [providers.seat-2]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_2"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_2"
+auth = "x-api-key"
 
 [providers.seat-3]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_3"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_3"
+auth = "x-api-key"
 
 [providers.seat-4]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_4"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_4"
+auth = "x-api-key"
 
 [providers.seat-5]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_5"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_5"
+auth = "x-api-key"
 
 [pools.seats]
 members = ["seat-1", "seat-2", "seat-3", "seat-4", "seat-5"]
 
 [providers.relay]
-kind = "anthropic-api"
-api_key_ref = "env://RELAY"
+format = "anthropic-messages"
 base_url = "https://relay.example/v1"
+credential = "env://RELAY"
+auth = "x-api-key"
 circuit_failures = 5
 circuit_cooldown_ms = 30000
 
 [providers.compat-a]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://compat-a.example/v1"
-api_key_ref = "env://COMPAT_A"
+credential = "env://COMPAT_A"
+auth = "bearer"
 
 [providers.compat-b]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://compat-b.example/v1"
-api_key_ref = "env://COMPAT_B"
+credential = "env://COMPAT_B"
+auth = "bearer"
 
 [models.big]
 provider = "seats"
@@ -827,18 +915,24 @@ fn member_override_config() -> Config {
 version = 2
 
 [providers.seat-a]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_A"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_A"
+auth = "x-api-key"
 rpm_limit = 7
 circuit_failures = 2
 
 [providers.seat-b]
-kind = "anthropic-api"
-api_key_ref = "env://SEAT_B"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SEAT_B"
+auth = "x-api-key"
 
 [providers.solo]
-kind = "anthropic-api"
-api_key_ref = "env://SOLO"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://SOLO"
+auth = "x-api-key"
 rpm_limit = 9
 
 [pools.team]
@@ -964,17 +1058,22 @@ fn facts_config() -> Config {
 version = 2
 
 [providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://ANTHROPIC_API_KEY"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
 
 [providers.compat]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://compat.example/v1"
-api_key_ref = "env://K"
+credential = "env://K"
+auth = "bearer"
 
 [providers.seat-a]
-kind = "anthropic-api"
-api_key_ref = "env://A"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://A"
+auth = "x-api-key"
 
 [pools.seats]
 members = ["seat-a"]
@@ -1060,17 +1159,16 @@ fn a_mixed_shape_bedrock_pool_reads_its_fill_through_the_first_member() {
 version = 2
 
 [providers.invoke]
-kind = "bedrock"
-region = "us-east-1"
-[providers.invoke.creds]
-kind = "default-chain"
+format = "bedrock-invoke"
+cloud = {{ name = "aws", region = "us-east-1" }}
+credential = "aws://chain"
+auth = "aws-sigv4"
 
 [providers.converse]
-kind = "bedrock"
-region = "us-east-1"
-api_shape = "converse"
-[providers.converse.creds]
-kind = "default-chain"
+format = "bedrock-converse"
+cloud = {{ name = "aws", region = "us-east-1" }}
+credential = "aws://chain"
+auth = "aws-sigv4"
 
 [pools.mixed]
 members = {members}

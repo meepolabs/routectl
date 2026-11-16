@@ -375,8 +375,10 @@ fn a_pooled_models_own_slot_takes_the_pool_tuning() {
     let config: Config = toml::from_str(
         r#"
 [providers.anthropic-a]
-kind = "anthropic-api"
-api_key_ref = "env://K"
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://K"
+auth = "x-api-key"
 
 [pools.pool]
 members = ["anthropic-a"]

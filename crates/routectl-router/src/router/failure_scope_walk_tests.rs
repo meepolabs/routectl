@@ -268,13 +268,13 @@ fn anthropic_entry(base_url: &str, runtime: ProviderRuntimePolicy) -> ProviderEn
 fn entry(lane: Lane, origin: &str, runtime: ProviderRuntimePolicy) -> ProviderEntry {
     let toml_text = match lane {
         Lane::Anthropic => format!(
-            "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"{origin}\"\n"
+            "format = \"anthropic-messages\"\nbase_url = \"{origin}\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
         ),
         Lane::OpenaiCompat => format!(
-            "kind = \"openai-compat\"\napi_key_ref = \"literal:k\"\nbase_url = \"{origin}/v1\"\n"
+            "format = \"openai-chat\"\nbase_url = \"{origin}/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n"
         ),
         Lane::AnthropicForwarded if origin == ORIGIN_X => format!(
-            "kind = \"anthropic-api\"\ncredential_source = \"forwarded\"\nbase_url = \"{origin}\"\n"
+            "format = \"anthropic-messages\"\nbase_url = \"{origin}\"\ncredential = \"forwarded\"\nauth = \"bearer\"\n"
         ),
         Lane::AnthropicForwarded => return entry(Lane::Anthropic, origin, runtime),
     };

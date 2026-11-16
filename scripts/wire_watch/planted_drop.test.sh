@@ -259,14 +259,15 @@ max_attempts = 1
 TOML
 }
 write_lane chat "[providers.mock]
-kind        = \"openai-compat\"
-base_url    = \"http://127.0.0.1:$MOCK_PORT/v1\"
-api_key_ref = \"file://$KEY_FILE\""
+format     = \"openai-chat\"
+base_url   = \"http://127.0.0.1:$MOCK_PORT/v1\"
+credential = \"file://$KEY_FILE\"
+auth       = \"bearer\""
 write_lane responses "[providers.mock]
-kind        = \"openai-responses\"
-base_url    = \"http://127.0.0.1:$MOCK_PORT/v1\"
-api_key_ref = \"file://$KEY_FILE\"
-auth_kind   = \"api-key\""
+format     = \"openai-responses\"
+base_url   = \"http://127.0.0.1:$MOCK_PORT/v1\"
+credential = \"file://$KEY_FILE\"
+auth       = \"bearer\""
 
 STUB="$WORK/stub-driver.sh"
 cat >"$STUB" <<'SH'

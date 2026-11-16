@@ -40,7 +40,7 @@ use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig, CloakMode,
 };
 use routectl_router::{
-    AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, Router, RouterOptions,
+    AliasValue, Auth, Config, ModelEntry, ProviderEntry, ResolvedModel, Router, RouterOptions,
     TEST_RECHECK_KWARG, TEST_RECHECK_PATH, plant_acting_field_verdict_for_tests,
 };
 use wiremock::matchers::{method, path};
@@ -132,18 +132,10 @@ async fn canonical_requests(
 
     let mut config = Config::default();
     let mut entry = ProviderEntry::anthropic_api("literal:sk-ant-test");
-    if let ProviderEntry::AnthropicApi {
-        base_url,
-        auth_kind,
-        cloak,
-        ..
-    } = &mut entry
-    {
-        *base_url = REMOTE_BASE.to_string();
-        if cloak_auto {
-            *auth_kind = AuthKind::OauthBearer;
-            cloak.mode = CloakMode::Auto;
-        }
+    entry = entry.with_base_url(REMOTE_BASE);
+    if cloak_auto {
+        entry = entry.with_auth(Auth::Bearer);
+        entry.cloak_mode = Some(CloakMode::Auto);
     }
     config.providers.insert("p1".to_string(), entry);
 

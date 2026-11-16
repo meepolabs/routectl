@@ -19,7 +19,6 @@ use crate::resolved::ResolvedModel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider, TokenCount};
-use routectl_providers::anthropic_api::AuthKind;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -106,41 +105,13 @@ impl Provider for CountingProvider {
 
 /// A count_tokens-capable provider entry (kind == "anthropic-api").
 fn anthropic_api_entry() -> ProviderEntry {
-    ProviderEntry::AnthropicApi {
-        api_key_ref: "literal:k".into(),
-        base_url: "https://placeholder.invalid".into(),
-        anthropic_version: "2023-06-01".into(),
-        auth_kind: AuthKind::default(),
-        credential_source: Default::default(),
-        header_extras: BTreeMap::new(),
-        payload_extras: None,
-        user_agent: None,
-        forward_client_headers: vec![],
-        context_management: false,
-        cache_capability: None,
-        reduction_enabled: None,
-        cloak: routectl_providers::anthropic_api::CloakConfig::default(),
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle: None,
-        runtime: ProviderRuntimePolicy::default(),
-    }
+    ProviderEntry::anthropic_api("literal:k").with_base_url("https://placeholder.invalid")
 }
 
 /// A count_tokens-incapable provider entry (kind == "openai-compat").
 /// Always compiled, regardless of the `bedrock` feature.
 fn openai_compat_entry() -> ProviderEntry {
-    ProviderEntry::OpenaiCompat {
-        base_url: "https://placeholder.invalid/v1".into(),
-        api_key_ref: "literal:k".into(),
-        header_extras: BTreeMap::new(),
-        payload_extras: None,
-        user_agent: None,
-        cache_capability: None,
-        reduction_enabled: None,
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle: None,
-        runtime: ProviderRuntimePolicy::default(),
-    }
+    ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:k")
 }
 
 /// A Bedrock model id whose vendor segment is not Anthropic, so a seat
@@ -164,18 +135,12 @@ const ARN_BEDROCK_MODEL: &str =
 /// admitted.
 #[cfg(feature = "bedrock")]
 fn bedrock_entry() -> ProviderEntry {
-    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
-    ProviderEntry::Bedrock {
-        region: "us-east-1".into(),
-        api_shape: BedrockApiShapeConfig::default(),
-        creds: BedrockCredsConfig::DefaultChain,
-        user_agent: None,
-        header_extras: BTreeMap::new(),
-        payload_extras: None,
-        cache_capability: None,
-        reduction_enabled: None,
-        runtime: ProviderRuntimePolicy::default(),
-    }
+    ProviderEntry::cloud_aws(
+        crate::config::Format::BedrockInvoke,
+        "us-east-1",
+        "aws://chain",
+        crate::config::Auth::AwsSigv4,
+    )
 }
 
 /// One leg of a test chain: a provider entry + the matching mock
@@ -519,10 +484,8 @@ fn anthropic_api_entry_with_breaker(
     circuit_cooldown_ms: u64,
 ) -> ProviderEntry {
     let mut entry = anthropic_api_entry();
-    if let ProviderEntry::AnthropicApi { runtime, .. } = &mut entry {
-        runtime.circuit_failures = Some(circuit_failures);
-        runtime.circuit_cooldown_ms = Some(circuit_cooldown_ms);
-    }
+    entry.runtime.circuit_failures = Some(circuit_failures);
+    entry.runtime.circuit_cooldown_ms = Some(circuit_cooldown_ms);
     entry
 }
 
@@ -532,10 +495,8 @@ fn anthropic_api_entry_with_breaker(
 #[cfg(feature = "bedrock")]
 fn bedrock_entry_with_breaker(circuit_failures: u32, circuit_cooldown_ms: u64) -> ProviderEntry {
     let mut entry = bedrock_entry();
-    if let ProviderEntry::Bedrock { runtime, .. } = &mut entry {
-        runtime.circuit_failures = Some(circuit_failures);
-        runtime.circuit_cooldown_ms = Some(circuit_cooldown_ms);
-    }
+    entry.runtime.circuit_failures = Some(circuit_failures);
+    entry.runtime.circuit_cooldown_ms = Some(circuit_cooldown_ms);
     entry
 }
 
@@ -547,7 +508,8 @@ fn forwarded_anthropic_entry_with_breaker(
     circuit_cooldown_ms: u64,
 ) -> ProviderEntry {
     ProviderEntry::anthropic_api("literal:k")
-        .with_credential_source(crate::config::CredentialSource::Forwarded)
+        .with_credential("forwarded")
+        .with_auth(crate::config::Auth::Bearer)
         .with_runtime(ProviderRuntimePolicy {
             circuit_failures: Some(circuit_failures),
             circuit_cooldown_ms: Some(circuit_cooldown_ms),

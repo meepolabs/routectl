@@ -379,15 +379,14 @@ fn kind_rows() -> Vec<KindRow> {
     let mut rows = vec![
         KindRow {
             name: "anthropic-api",
-            provider_toml: "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n",
+            provider_toml: "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n",
             kind: "anthropic-api",
             upstream: "claude-sonnet-4-5",
             queues: true,
         },
         KindRow {
             name: "openai-compat, a kind with no token count",
-            provider_toml: "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
-                            api_key_ref = \"literal:k\"\n",
+            provider_toml: "format = \"openai-chat\"\nbase_url = \"https://example.test/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
             kind: "openai-compat",
             upstream: "claude-sonnet-4-5",
             queues: false,
@@ -397,16 +396,14 @@ fn kind_rows() -> Vec<KindRow> {
     rows.extend([
         KindRow {
             name: "bedrock, an Anthropic-family model",
-            provider_toml: "kind = \"bedrock\"\nregion = \"us-west-2\"\n\
-                            creds = { kind = \"default-chain\" }\n",
+            provider_toml: "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             kind: "bedrock",
             upstream: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             queues: true,
         },
         KindRow {
             name: "bedrock, a model with no token count",
-            provider_toml: "kind = \"bedrock\"\nregion = \"us-west-2\"\n\
-                            creds = { kind = \"default-chain\" }\n",
+            provider_toml: "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
             kind: "bedrock",
             upstream: "us.meta.llama4-scout-17b-instruct-v1:0",
             queues: false,

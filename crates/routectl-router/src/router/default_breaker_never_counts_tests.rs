@@ -29,7 +29,7 @@ const PROVIDER: &str = "p0";
 fn config() -> Config {
     let toml_text = format!(
         "version = 5\n[retry]\ninitial_backoff_ms = 0\njitter_ms = 0\n\
-         [providers.{PROVIDER}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
+         [providers.{PROVIDER}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n\
          [aliases]\n{ALIAS} = [\"{NICKNAME}\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");

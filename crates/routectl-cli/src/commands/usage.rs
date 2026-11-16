@@ -5,7 +5,7 @@
 //! at query time from the effective per-field prices (`[models.X.pricing]`,
 //! then the refreshed and shipped price tables), and prints an
 //! ASCII report. Subscription providers (managed-OAuth,
-//! `api_key_ref` starting `oauth://`) carry no per-token dollar cost; their
+//! `credential` starting `oauth://`) carry no per-token dollar cost; their
 //! dollar column reads `n/a (subscription)` and the quota line is the real
 //! spend signal.
 //!

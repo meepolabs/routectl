@@ -41,14 +41,16 @@ impl Provider for StubProvider {
 
 const PROVIDERS: &str = r#"
 [providers.alpha]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://alpha.example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 
 [providers.beta]
-kind = "openai-compat"
+format = "openai-chat"
 base_url = "https://beta.example.test/v1"
-api_key_ref = "literal:k"
+credential = "literal:k"
+auth = "bearer"
 "#;
 const KIND: &str = "openai-compat";
 

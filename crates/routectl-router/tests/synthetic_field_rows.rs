@@ -117,7 +117,7 @@ fn text(role: Role, body: &str) -> Message {
 
 fn config() -> Config {
     let toml_text = format!(
-        "\n[providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\nbase_url = \"{REMOTE_BASE}\"\n"
+        "\n[providers.p0]\nformat = \"anthropic-messages\"\nbase_url = \"{REMOTE_BASE}\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n"
     );
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
     config.models.insert(

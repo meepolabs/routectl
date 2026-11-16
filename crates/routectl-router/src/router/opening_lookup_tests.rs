@@ -12,9 +12,7 @@ use futures::stream::BoxStream;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider, Result};
 
 use super::super::Router;
-use crate::config::{
-    AliasValue, Config, CredentialSource, PoolEntry, ProviderEntry, SeatSelection,
-};
+use crate::config::{AliasValue, Config, PoolEntry, ProviderEntry, SeatSelection};
 use crate::resolved::ResolvedModel;
 use crate::seat_pool::SeatTarget;
 
@@ -265,7 +263,9 @@ fn a_forwarded_credential_head_reports_the_requested_model_as_its_wire_id() {
     let mut config = Config::default();
     config.providers.insert(
         "fwd".into(),
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        ProviderEntry::anthropic_api("")
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer),
     );
     let mut router = Router::new(Arc::new(config));
     let mut models = BTreeMap::new();
@@ -297,7 +297,9 @@ fn a_pool_mixing_forwarded_and_own_seats_has_no_lane() {
     let mut config = (*router.config).clone();
     config.providers.insert(
         "seat-b".into(),
-        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        ProviderEntry::anthropic_api("")
+            .with_credential("forwarded")
+            .with_auth(crate::config::Auth::Bearer),
     );
     router.config = Arc::new(config);
 

@@ -62,9 +62,9 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         path: &["mitm", "credential_source"],
         refused_value: None,
         replacement: "a forwarded credential is a per-provider choice: add \
-                      `[providers.anthropic-forwarded]` with `kind = \"anthropic-api\"`, \
-                      `base_url = \"https://api.anthropic.com\"` and \
-                      `credential_source = \"forwarded\"`, and no `api_key_ref`",
+                      `[providers.anthropic-forwarded]` with `format = \"anthropic-messages\"`, \
+                      `base_url = \"https://api.anthropic.com\"`, `credential = \"forwarded\"` \
+                      and `auth = \"bearer\"`",
     },
     RetiredKey {
         path: &["mitm", "mitm_host"],
@@ -138,6 +138,30 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "pin the flag in header_extras \"anthropic-beta\"",
     },
     RetiredKey {
+        path: &["providers", ANY_ENTRY, "api_key_ref"],
+        refused_value: None,
+        replacement: "write the reference as `credential`",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "api_shape"],
+        refused_value: None,
+        replacement: "the Bedrock API is the format: `format = \"bedrock-invoke\"` or `format = \
+                      \"bedrock-converse\"`",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "auth_kind"],
+        refused_value: None,
+        replacement: "set `auth`: `api-key` is `x-api-key`, `oauth-bearer` and `chatgpt-oauth` \
+                      are `bearer`; the Bedrock managed surface is a `cloud`",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "auth_mode"],
+        refused_value: None,
+        replacement: "set `format`: `api-key` is `format = \"gemini\"` with `auth = \
+                      \"x-goog-api-key\"`, `cloud-code` is `format = \"gemini-cloud-code\"` with \
+                      `auth = \"bearer\"`",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "auto_emit_per_block_breakpoints"],
         refused_value: None,
         replacement: "use the global [cache] auto_emit_top_level_breakpoint switch",
@@ -148,25 +172,61 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "use the global [cache] auto_emit_top_level_breakpoint switch",
     },
     RetiredKey {
+        path: &["providers", ANY_ENTRY, "bedrock_mantle"],
+        refused_value: None,
+        replacement: "set `cloud = { name = \"aws\", region = \"<region>\" }` and write the \
+                      credential as `credential`",
+    },
+    RetiredKey {
         path: &["providers", ANY_ENTRY, "class_overrides"],
         refused_value: None,
         replacement: "per-class retry counts live in `[retry.classes]`; a status keeps \
                       its built-in class",
     },
     RetiredKey {
-        path: &["providers", ANY_ENTRY, "cloak", "sensitive_words"],
+        path: &["providers", ANY_ENTRY, "cloak"],
+        refused_value: None,
+        replacement: "set `cloak_mode` and `cloak_strict_mode` on the entry itself",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "cloak_sensitive_words"],
         refused_value: None,
         replacement: "the sensitive-word scanner is removed; nothing replaces it",
     },
     RetiredKey {
-        path: &["providers", ANY_ENTRY, "cloak", "tool_rename"],
+        path: &["providers", ANY_ENTRY, "cloak_tool_rename"],
         refused_value: None,
         replacement: "tool names are normalized to mcp__ only",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "credential_source"],
+        refused_value: None,
+        replacement: "`forwarded` is `credential = \"forwarded\"` with `auth = \"bearer\"`; \
+                      `own` is the entry's own `credential`",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "creds"],
+        refused_value: None,
+        replacement: "write one `credential`: `aws://profile/<name>`, `aws://chain`, or a bearer \
+                      key reference with `auth = \"bearer\"`; static key pairs move to a profile \
+                      or the environment",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "kind"],
+        refused_value: None,
+        replacement: "set `format`: `anthropic-api` is `anthropic-messages`, `openai-compat` is \
+                      `openai-chat`, `bedrock` is `bedrock-invoke` or `bedrock-converse`, \
+                      `gemini` is `gemini` or `gemini-cloud-code`, `openai-responses` stays",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "max_thinking_entry_bytes"],
         refused_value: None,
         replacement: "the thinking-cache entry cap is fixed at 1 MiB",
+    },
+    RetiredKey {
+        path: &["providers", ANY_ENTRY, "region"],
+        refused_value: None,
+        replacement: "set `cloud = { name = \"aws\", region = \"<region>\" }`",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "unsupported_features"],

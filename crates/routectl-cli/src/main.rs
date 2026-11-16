@@ -372,10 +372,10 @@ enum ConfigCmd {
     /// Set a config value by dotted path (e.g. `server.port 8788`),
     /// re-validating the whole file through the shared gate before an
     /// atomic write. The value's scalar type is inferred (bool / int /
-    /// float / string). An egress-defining change (a provider `base_url`
-    /// or `credential_source`, a pool's members) prompts for confirmation
-    /// unless `--yes` is given; a non-interactive run without `--yes`
-    /// declines.
+    /// float / string). An egress-defining change (a provider `format`,
+    /// `base_url`, `cloud`, `credential` or `auth`, a pool's members)
+    /// prompts for confirmation unless `--yes` is given; a non-interactive
+    /// run without `--yes` declines.
     Set {
         /// Dotted config path to the scalar leaf to set.
         path: String,
@@ -423,10 +423,10 @@ enum ProviderCmd {
         #[arg(long = "base-url")]
         base_url: Option<String>,
         /// Environment variable holding the API key; stored as
-        /// `api_key_ref = "env://<VAR>"` after verifying it resolves now.
+        /// `credential = "env://<VAR>"` after verifying it resolves now.
         #[arg(long = "api-key-env", group = "secret_source")]
         api_key_env: Option<String>,
-        /// A secret reference written verbatim to `api_key_ref`
+        /// A secret reference written verbatim to `credential`
         /// (`env://VAR`, `file:///abs/key`, `oauth://...`). `literal:` refs
         /// are rejected; use `--api-key-stdin`, the hidden prompt, or `env://`.
         #[arg(long = "secret-ref", group = "secret_source")]
@@ -438,8 +438,9 @@ enum ProviderCmd {
         api_key_stdin: bool,
         /// Credential source for an `anthropic-api` provider: `own`
         /// (default -- routectl's configured key) or `forwarded` (relay the
-        /// client's captured claude.ai bearer; captures no key, pins the
-        /// base URL to api.anthropic.com).
+        /// client's captured claude.ai bearer as `credential = "forwarded"`
+        /// with `auth = "bearer"`; captures no key, pins the base URL to
+        /// api.anthropic.com).
         #[arg(
             long = "credential-source",
             value_parser = clap::builder::PossibleValuesParser::new(["own", "forwarded"])

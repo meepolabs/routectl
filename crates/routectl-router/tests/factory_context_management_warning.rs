@@ -31,13 +31,7 @@ fn anthropic_api_config(
     history_reasoning: Option<HistoryReasoning>,
 ) -> Config {
     let mut entry = ProviderEntry::anthropic_api(common::file_ref("sk-test"));
-    if let ProviderEntry::AnthropicApi {
-        context_management: ref mut cm,
-        ..
-    } = entry
-    {
-        *cm = context_management;
-    }
+    entry.context_management = Some(context_management);
     let mut providers: BTreeMap<String, ProviderEntry> = BTreeMap::new();
     providers.insert("anthropic".into(), entry);
 
