@@ -1424,9 +1424,14 @@ mod tests {
             Arc::new(crate::ingress::MitmSeamNonce::generate()),
         );
 
-        let (listener, _acceptor, _ctx) = build_and_bind(config).await.unwrap();
+        let (listener, _acceptor, ctx) = build_and_bind(config).await.unwrap();
         let addr = listener.local_addr().unwrap();
         assert!(addr.ip().is_loopback());
         assert_ne!(addr.port(), 0, "the OS must have assigned a real port");
+        assert_eq!(ctx.mitm_host(), MITM_HOST);
+        assert_eq!(
+            ctx.upstream_origin().as_str().trim_end_matches('/'),
+            MITM_UPSTREAM_ORIGIN
+        );
     }
 }

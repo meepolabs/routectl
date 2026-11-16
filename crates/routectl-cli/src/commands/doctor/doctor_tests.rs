@@ -696,7 +696,7 @@ fn unknown_oauth_provider_remediation_matches_the_served_seat_fix() {
 }
 
 #[test]
-fn schema_version_is_thirty_one() {
+fn schema_version_is_thirty_two() {
     assert_eq!(SCHEMA_VERSION, 32);
 
     let context = ctx(

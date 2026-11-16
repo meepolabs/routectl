@@ -5,7 +5,8 @@
 //! Claude Code (via `HTTPS_PROXY`) would.
 //!
 //! Distinct from the in-module tests in `src/proxy/listener.rs` (which
-//! drive `run_listener` directly against a hand-built `MitmCtx`) and
+//! drive `run_listener` directly against a test-only `MitmCtx::for_tests`
+//! context on loopback doubles) and
 //! from `src/proxy/mitm.rs` / `src/proxy/split.rs`'s own unit tests
 //! (which drive the TLS-termination and split/classify layers in
 //! isolation): this file's job is to prove the ASSEMBLY -- that
@@ -38,10 +39,11 @@
 //! parse, TLS handoff, and the control-plane forward, all through this
 //! module's own real code paths -- by
 //! `proxy::listener::tests::connect_to_a_control_plane_path_forwards_to_upstream_origin_with_token_intact`
-//! in `src/proxy/listener.rs`, which builds `MitmCtx` directly (bypassing
-//! `Config` and the pinned pair, exactly like `split.rs`'s and
-//! `mitm.rs`'s own existing test suites already do) so it can use a
-//! plain-`http` wiremock server as the upstream double.
+//! in `src/proxy/listener.rs`, which builds its context with the test-only
+//! `MitmCtx::for_tests` (pinned host, but bypassing `Config` and the pinned
+//! origin, exactly like `split.rs`'s and `mitm.rs`'s own existing test
+//! suites already do) so it can use a plain-`http` wiremock server as the
+//! upstream double.
 
 use std::path::Path;
 use std::sync::Arc;

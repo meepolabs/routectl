@@ -9,7 +9,7 @@ use std::sync::Arc;
 use routectl_core::{ChatRequest, Provider, RequestProvenance};
 use serde_json::{Value, json};
 use wiremock::matchers::method;
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use super::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth};
 
@@ -61,16 +61,25 @@ fn request(payload_extras: Option<Value>) -> ChatRequest {
     req
 }
 
-/// The one body `shape` sent to the mock.
-async fn shipped_body(shape: BedrockApiShape, req: ChatRequest) -> Value {
+/// The one request `shape` sent to the mock.
+async fn shipped_request(shape: BedrockApiShape, req: ChatRequest) -> Request {
     let server = recording_upstream().await;
     let _ = provider(&server, shape).await.complete(req).await;
-    let received = server
+    let mut received = server
         .received_requests()
         .await
         .expect("read mock requests");
     assert_eq!(received.len(), 1, "{shape:?}: one upstream call");
-    serde_json::from_slice(&received[0].body).expect("JSON body")
+    received.remove(0)
+}
+
+fn body_of(request: &Request) -> Value {
+    serde_json::from_slice(&request.body).expect("JSON body")
+}
+
+/// The one body `shape` sent to the mock.
+async fn shipped_body(shape: BedrockApiShape, req: ChatRequest) -> Value {
+    body_of(&shipped_request(shape, req).await)
 }
 
 /// Where operator body fields ride in `body`: the whole body on Invoke, the
@@ -124,8 +133,23 @@ async fn without_payload_extras_no_operator_body_field_reaches_the_wire() {
 
 const SENTINEL: &str = "OPERATOR-SENTINEL";
 
+/// The operator `output_config.format` the Converse bag forwards out of an
+/// otherwise withheld `output_config`.
+fn operator_output_format() -> Value {
+    json!({
+        "type": "json_schema",
+        "schema": {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false,
+        },
+    })
+}
+
 /// Operator `payload_extras` naming fields the router writes itself on
-/// `shape`, each carrying [`SENTINEL`], plus the non-managed `top_k`.
+/// `shape`, each carrying [`SENTINEL`], plus the non-managed `top_k`. On
+/// Converse, `output_config` also carries a `format` that must ship.
 fn managed_key_extras(shape: BedrockApiShape) -> Value {
     let mut extras = json!({
         "model": SENTINEL,
@@ -139,6 +163,7 @@ fn managed_key_extras(shape: BedrockApiShape) -> Value {
         "tool_choice": {"type": SENTINEL},
         "cache_control": {"type": SENTINEL},
         "thinking": {"type": SENTINEL},
+        "anthropic_beta": [SENTINEL],
         "top_k": 40,
     });
     let per_shape = match shape {
@@ -150,6 +175,7 @@ fn managed_key_extras(shape: BedrockApiShape) -> Value {
             "inferenceConfig": {"maxTokens": SENTINEL},
             "toolConfig": {"tools": [SENTINEL]},
             "additionalModelResponseFieldPaths": [SENTINEL],
+            "output_config": {"format": operator_output_format(), "verbosity": SENTINEL},
         }),
     };
     let (Some(obj), Some(more)) = (extras.as_object_mut(), per_shape.as_object()) else {
@@ -161,7 +187,7 @@ fn managed_key_extras(shape: BedrockApiShape) -> Value {
 
 /// The router's own values for the managed fields it always writes: the
 /// client's message, its `max_tokens`, and the Bedrock `anthropic_version`
-/// on Invoke.
+/// on Invoke; on Converse, the operator's `output_config.format`.
 fn assert_router_values_shipped(shape: BedrockApiShape, body: &Value) {
     let text = body.to_string();
     assert!(text.contains("hello"), "{shape:?}: {body}");
@@ -180,6 +206,11 @@ fn assert_router_values_shipped(shape: BedrockApiShape, body: &Value) {
                 json!(16),
                 "{shape:?}: {body}"
             );
+            assert_eq!(
+                body["additionalModelRequestFields"]["output_config"]["format"],
+                operator_output_format(),
+                "{shape:?}: {body}"
+            );
         }
     }
 }
@@ -193,13 +224,23 @@ async fn operator_payload_extras_cannot_override_router_managed_fields_on_either
             req.routectl_internal.provenance = provenance;
 
             // Act
-            let body = shipped_body(shape, req).await;
+            let shipped = shipped_request(shape, req).await;
+            let body = body_of(&shipped);
 
             // Assert
             assert!(
                 !body.to_string().contains(SENTINEL),
                 "{provenance:?} {shape:?}: {body}"
             );
+            for (name, value) in &shipped.headers {
+                assert!(
+                    !value
+                        .as_bytes()
+                        .windows(SENTINEL.len())
+                        .any(|w| w == SENTINEL.as_bytes()),
+                    "{provenance:?} {shape:?}: header {name}"
+                );
+            }
             assert_router_values_shipped(shape, &body);
             let fields = operator_fields(shape, body);
             assert_eq!(

@@ -606,7 +606,8 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
 /// prompt-cache locality StickyLeastLoaded exists to provide.
 ///
 /// `pool` is the pool name for a pool-backed model and the model nickname for
-/// a standalone provider-backed one (see `Router::rotation_key_for`);
+/// a standalone provider-backed one (see
+/// [`ResolvedModel::rotation_key`](crate::ResolvedModel::rotation_key));
 /// validation rejects a pool name that collides with a nickname, so the two
 /// bases cannot name one lane.
 ///
