@@ -1,11 +1,9 @@
 //! Per-kind provider construction from config rows.
 
+use super::plan::plan_provider;
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
-use super::validate::{
-    ModelProviderTarget, resolve_model_provider, validate_base_url_scheme,
-    validate_managed_oauth_credentials,
-};
+use super::validate::{ModelProviderTarget, resolve_model_provider, validate_base_url_scheme};
 use super::warnings::warn_context_management_needs_preserve;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
@@ -181,7 +179,7 @@ async fn build_provider_inner(
     #[cfg(feature = "bedrock")] bedrock_model_id: Option<String>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    validate_managed_oauth_credentials(name, entry)?;
+    let _plan = plan_provider(name, entry)?;
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,
@@ -770,6 +768,12 @@ async fn compile_pool(
             refusals.push((member, MemberRefusal::UnknownMember));
             continue;
         };
+        // The credential probe below reads the store, so the entry's plan
+        // must hold first.
+        if plan_provider(member, entry).is_err() {
+            refusals.push((member, MemberRefusal::OutsideContainment));
+            continue;
+        }
         let provider_kind = entry.kind_str();
         let secret_ref = match member_secret_ref(entry) {
             Ok(sr) => sr,
@@ -778,12 +782,6 @@ async fn compile_pool(
                 continue;
             }
         };
-        // The credential probe below reads the store, so the managed
-        // credential containment rules must already hold.
-        if validate_managed_oauth_credentials(member, entry).is_err() {
-            refusals.push((member, MemberRefusal::OutsideContainment));
-            continue;
-        }
         // Probe the credential BEFORE building. An `oauth://` provider builds
         // with a LAZY token source (so rotation is picked up per request
         // without a restart), which means a logged-out member would otherwise
@@ -1298,10 +1296,8 @@ pub async fn build_resolved_models_reported(
                     continue;
                 }
                 // Credential resolution below reads the store ahead of the
-                // per-provider build, so the managed credential containment
-                // rules are enforced here first.
-                if let Err(e) = validate_managed_oauth_credentials(&entry.provider, provider_entry)
-                {
+                // per-provider build, so the entry's plan must hold first.
+                if let Err(e) = plan_provider(&entry.provider, provider_entry) {
                     let msg = e.to_string();
                     tracing::warn!(
                         provider = %routectl_core::sanitize_for_log(&entry.provider),

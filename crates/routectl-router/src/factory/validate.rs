@@ -1,6 +1,7 @@
 //! Config-row validation family + validation collection.
 
 use super::build::ipv4_compatible_embedded;
+use crate::config::provider_descriptor::{containment, vendor_containment, vendor_row};
 use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
 use routectl_core::Result;
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
@@ -591,124 +592,6 @@ pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// One managed subscription credential family and the single lane its token
-/// may ride. `message` follows the `provider `<name>`: ` prefix and names the
-/// provider and the rule only: the `base_url`, the reference, and the seat
-/// label are withheld because each can carry credentials or identify a seat.
-struct ManagedOauthFamily {
-    /// Provider id in `oauth://<family>[#label]`.
-    family: &'static str,
-    is_lane: fn(&ProviderEntry) -> bool,
-    message: &'static str,
-}
-
-const MANAGED_ANTHROPIC: ManagedOauthFamily = ManagedOauthFamily {
-    family: "anthropic",
-    is_lane: is_managed_anthropic_lane,
-    message: "the managed Anthropic credential is accepted only on `anthropic-api` with \
-              credential_source = \"own\", no bedrock_mantle, and base_url omitted or \
-              https://api.anthropic.com. For a gateway or passthrough use a static env:// or \
-              file:// credential; no override. base_url and ref are withheld",
-};
-
-const MANAGED_CODEX: ManagedOauthFamily = ManagedOauthFamily {
-    family: "codex",
-    is_lane: is_managed_codex_lane,
-    message: "the managed Codex credential is accepted only on `openai-responses` with \
-              auth_kind = \"chatgpt-oauth\", no bedrock_mantle, and base_url omitted or \
-              https://chatgpt.com. Elsewhere use a static env:// or file:// credential; no \
-              override. base_url and ref are withheld",
-};
-
-const MANAGED_XAI: ManagedOauthFamily = ManagedOauthFamily {
-    family: "xai",
-    is_lane: is_managed_xai_lane,
-    message: "the managed xAI credential is accepted only on `openai-compat` with no \
-              bedrock_mantle and base_url https on exactly api.x.ai. Elsewhere use a static \
-              env:// or file:// credential; no override. base_url and ref are withheld",
-};
-
-const MANAGED_ANTIGRAVITY: ManagedOauthFamily = ManagedOauthFamily {
-    family: "antigravity",
-    is_lane: is_managed_antigravity_lane,
-    message: "the managed Antigravity credential is accepted only on `gemini` with auth_mode = \
-              \"cloud-code\" and base_url omitted or https on exactly cloudcode-pa.googleapis.com \
-              or daily-cloudcode-pa.googleapis.com; no override. base_url and ref are withheld",
-};
-
-/// Every managed subscription credential family. Each `oauth://` provider
-/// routectl can log into must have a row: a family missing here would let
-/// its token reach any host.
-const MANAGED_OAUTH_FAMILIES: &[ManagedOauthFamily] = &[
-    MANAGED_ANTHROPIC,
-    MANAGED_CODEX,
-    MANAGED_XAI,
-    MANAGED_ANTIGRAVITY,
-];
-
-/// True when any secret reference the entry carries parses to an
-/// `oauth://<family>` reference, bare or labeled. Every reference slot
-/// counts (not only `api_key_ref`): an account-id or Bedrock credential slot
-/// resolves through the same store and would carry the same token. The
-/// primary `api_key_ref` is chained in explicitly because `secret_uris`
-/// omits it on the Bedrock mantle lane.
-fn carries_managed_oauth_ref(entry: &ProviderEntry, family: &str) -> bool {
-    let primary = entry.api_key_ref();
-    primary.into_iter().chain(entry.secret_uris()).any(|uri| {
-        matches!(
-            routectl_auth::SecretRef::parse(uri),
-            Ok(routectl_auth::SecretRef::OAuth { provider, .. }) if provider == family
-        )
-    })
-}
-
-/// True when `base_url` is an `https` URL with no userinfo, no explicit
-/// non-default port, and a host exactly equal (ASCII case-insensitive) to the
-/// host of one of `allowed_bases`. Parsed with the same WHATWG URL parser the
-/// egress uses, so a backslash or `@` smuggle resolves to the host the request
-/// would actually reach. Invalid URLs and URLs with no host return `false`.
-fn is_exact_https_host_of(base_url: &str, allowed_bases: &[&str]) -> bool {
-    let Ok(url) = url::Url::parse(base_url) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && allowed_bases.iter().any(|allowed| {
-            url::Url::parse(allowed)
-                .ok()
-                .and_then(|a| a.host_str().map(|h| h.eq_ignore_ascii_case(host)))
-                .unwrap_or(false)
-        })
-}
-
-/// True when the entry is the one lane a managed Anthropic token may ride:
-/// `anthropic-api`, `credential_source = "own"`, no Bedrock mantle lane, and
-/// an https `base_url` on exactly `api.anthropic.com` with no userinfo or
-/// explicit port.
-fn is_managed_anthropic_lane(entry: &ProviderEntry) -> bool {
-    let ProviderEntry::AnthropicApi {
-        base_url,
-        credential_source,
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle,
-        ..
-    } = entry
-    else {
-        return false;
-    };
-    #[cfg(feature = "bedrock")]
-    if bedrock_mantle.is_some() {
-        return false;
-    }
-    *credential_source == CredentialSource::Own
-        && is_exact_https_host_of(base_url, &["https://api.anthropic.com"])
-}
-
 /// Contain the managed Anthropic subscription token to the Anthropic API
 /// host. Any reference parsing to `oauth://anthropic[#label]` is accepted only
 /// on an `anthropic-api` entry with `credential_source = "own"`, no Bedrock
@@ -717,120 +600,15 @@ fn is_managed_anthropic_lane(entry: &ProviderEntry) -> bool {
 /// every other host (loopback included) is rejected. Static `env://` /
 /// `file://` credentials are unaffected.
 ///
-/// Pure and self-sufficient: the factory calls it before resolving any secret
-/// for the entry, since direct callers reach the factory without config
-/// validation. The message names the provider and the required shape only;
-/// the `base_url`, the reference, and the seat label are withheld because
-/// each can carry credentials or identify a seat.
+/// Pure and self-sufficient: the factory runs the containment of every
+/// managed vendor, this one included, before resolving any secret for the
+/// entry, since direct callers reach the factory without config validation.
+/// The message names the provider and the required shape only; the
+/// `base_url`, the reference, and the seat label are withheld because each
+/// can carry credentials or identify a seat.
 pub fn validate_managed_anthropic_credential(name: &str, entry: &ProviderEntry) -> Result<()> {
-    check_managed_oauth_family(&MANAGED_ANTHROPIC, name, entry)
-}
-
-/// True when the entry is the one lane a managed Codex token may ride:
-/// `openai-responses`, `auth_kind = "chatgpt-oauth"`, no Bedrock mantle lane,
-/// and an effective `base_url` (the kind default when unset) on exactly the
-/// ChatGPT backend host over https.
-#[cfg_attr(not(feature = "openai-responses"), allow(clippy::missing_const_for_fn))]
-fn is_managed_codex_lane(entry: &ProviderEntry) -> bool {
-    #[cfg(feature = "openai-responses")]
-    if let ProviderEntry::OpenaiResponses {
-        base_url,
-        auth_kind,
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle,
-        ..
-    } = entry
-    {
-        #[cfg(feature = "bedrock")]
-        if bedrock_mantle.is_some() {
-            return false;
-        }
-        if *auth_kind != OpenaiResponsesAuthKind::ChatgptOauth {
-            return false;
-        }
-        let default_base =
-            crate::config::default_responses_base(OpenaiResponsesAuthKind::ChatgptOauth);
-        let effective = base_url.as_deref().unwrap_or(&default_base);
-        return is_exact_https_host_of(effective, &[&default_base]);
-    }
-    #[cfg(not(feature = "openai-responses"))]
-    let _ = entry;
-    false
-}
-
-/// True when the entry is the one lane a managed xAI token may ride:
-/// `openai-compat` with no Bedrock mantle lane and a `base_url` that is
-/// `https://` on exactly `api.x.ai` with no userinfo or explicit port. The
-/// path is not constrained.
-fn is_managed_xai_lane(entry: &ProviderEntry) -> bool {
-    let ProviderEntry::OpenaiCompat {
-        base_url,
-        #[cfg(feature = "bedrock")]
-        bedrock_mantle,
-        ..
-    } = entry
-    else {
-        return false;
-    };
-    #[cfg(feature = "bedrock")]
-    if bedrock_mantle.is_some() {
-        return false;
-    }
-    is_exact_https_host_of(base_url, &["https://api.x.ai/v1"])
-}
-
-/// True when the entry is the one lane a managed Antigravity token may ride:
-/// `gemini` with `auth_mode = "cloud-code"` and an effective `base_url` (the
-/// daily Cloud Code host when unset) on exactly the production or daily Cloud
-/// Code host over https.
-#[cfg_attr(not(feature = "gemini"), allow(clippy::missing_const_for_fn))]
-fn is_managed_antigravity_lane(entry: &ProviderEntry) -> bool {
-    #[cfg(feature = "gemini")]
-    if let ProviderEntry::Gemini {
-        base_url,
-        auth_mode: routectl_providers::gemini::GeminiAuthMode::CloudCode,
-        ..
-    } = entry
-    {
-        use routectl_providers::gemini::{DAILY_BASE_URL, PROD_BASE_URL};
-        // The schema default stands for "unset": the cloud-code factory arm
-        // keeps the daily host for it rather than forwarding this value.
-        let effective = if *base_url == crate::config::default_gemini_base() {
-            DAILY_BASE_URL
-        } else {
-            base_url.as_str()
-        };
-        return is_exact_https_host_of(effective, &[PROD_BASE_URL, DAILY_BASE_URL]);
-    }
-    #[cfg(not(feature = "gemini"))]
-    let _ = entry;
-    false
-}
-
-/// Refuse the entry when it carries an `oauth://<family>[#label]` reference
-/// in any slot but is not on that family's lane. Static `env://` / `file://`
-/// credentials and other families are unaffected.
-fn check_managed_oauth_family(
-    row: &ManagedOauthFamily,
-    name: &str,
-    entry: &ProviderEntry,
-) -> Result<()> {
-    if !carries_managed_oauth_ref(entry, row.family) || (row.is_lane)(entry) {
-        return Ok(());
-    }
-    Err(routectl_core::Error::Config(format!(
-        "provider `{name}`: {}",
-        row.message
-    )))
-}
-
-/// Every managed subscription containment rule, in one call. The factory runs
-/// it before any secret is resolved for the entry, since direct callers reach
-/// the factory without config validation.
-pub(super) fn validate_managed_oauth_credentials(name: &str, entry: &ProviderEntry) -> Result<()> {
-    MANAGED_OAUTH_FAMILIES
-        .iter()
-        .try_for_each(|row| check_managed_oauth_family(row, name, entry))
+    let row = vendor_row("anthropic").expect("the descriptor has an anthropic vendor row");
+    vendor_containment(row, name, entry)
 }
 
 /// Reject an incoherent `bedrock_mantle` sub-config on any
@@ -1590,7 +1368,7 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(bare_validation_message(e));
     }
     for (name, entry) in &config.providers {
-        if let Err(e) = validate_managed_oauth_credentials(name, entry) {
+        if let Err(e) = containment(name, entry) {
             errors.push(bare_validation_message(e));
         }
     }

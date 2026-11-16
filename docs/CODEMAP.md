@@ -2096,6 +2096,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/factory/inert_provider.rs` -- the provider a pool-backed model
   projects when none of its seats built (every member a placeholder); never
   dialed, every method refuses a local `credential_unusable`
+- `src/factory/plan.rs` -- `plan_provider` -> `ProviderPlan { client_identity }`:
+  the descriptor's containment and identity verdict for one entry, run by
+  every build path before any credential read
 - `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
   rejection of a non-canonical native `region` / `bedrock_mantle.region`
 - `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:

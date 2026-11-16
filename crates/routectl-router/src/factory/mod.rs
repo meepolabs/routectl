@@ -5,6 +5,7 @@ mod build;
 mod inert_provider;
 #[cfg(feature = "openai-responses")]
 mod installation_id;
+mod plan;
 mod validate;
 #[cfg(feature = "bedrock")]
 mod validate_region;

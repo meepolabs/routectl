@@ -1,0 +1,554 @@
+//! The plan is decided from the entry alone: a refused entry reaches no
+//! credential store method on any build path, and the client-identity
+//! verdict holds only for a vendor's own login on its own lane.
+
+use super::*;
+use crate::config::{Config, CredentialSource, ModelEntry, PoolEntry};
+use crate::factory::{BuildOptions, build_provider, build_resolved_models, pool_member_refusals};
+use async_trait::async_trait;
+use routectl_auth::{CredentialProbeFailure, SecretRef, SecretStore};
+use routectl_providers::anthropic_api::AuthKind;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Counts every store call, defaulted trait methods included.
+#[derive(Default)]
+struct CountingStore {
+    calls: AtomicUsize,
+}
+
+impl CountingStore {
+    fn touch(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl SecretStore for CountingStore {
+    async fn get(&self, _: &SecretRef) -> routectl_core::Result<String> {
+        self.touch();
+        Ok("counted-token".to_string())
+    }
+    async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+        self.touch();
+        Ok(())
+    }
+    async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+        self.touch();
+        Ok(())
+    }
+    async fn probe_credential(&self, _: &SecretRef) -> Result<(), CredentialProbeFailure> {
+        self.touch();
+        Ok(())
+    }
+    async fn on_auth_failure(&self, _: &SecretRef) -> routectl_core::Result<()> {
+        self.touch();
+        Ok(())
+    }
+    async fn account_id(&self, _: &SecretRef) -> routectl_core::Result<Option<String>> {
+        self.touch();
+        Ok(Some("counted-account".to_string()))
+    }
+    async fn list_seats(&self, sr: &SecretRef) -> routectl_core::Result<Vec<SecretRef>> {
+        self.touch();
+        Ok(vec![sr.clone()])
+    }
+    async fn peek_session_id(&self, _: &SecretRef) -> Option<String> {
+        self.touch();
+        None
+    }
+    async fn peek_cloud_project_id(&self, _: &SecretRef) -> Option<String> {
+        self.touch();
+        None
+    }
+    async fn set_cloud_project_id(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+        self.touch();
+        Ok(())
+    }
+    async fn clear_cloud_project_id_if_matches(
+        &self,
+        _: &SecretRef,
+        _: &str,
+    ) -> routectl_core::Result<bool> {
+        self.touch();
+        Ok(false)
+    }
+}
+
+#[cfg(any(feature = "bedrock", feature = "gemini"))]
+fn entry_from_toml(text: &str) -> ProviderEntry {
+    let cfg: Config = toml::from_str(text).expect("fixture parses");
+    cfg.providers.into_values().next().expect("one provider")
+}
+
+fn anthropic(r: &str, base_url: &str) -> ProviderEntry {
+    ProviderEntry::anthropic_api(r)
+        .with_auth_kind(AuthKind::OauthBearer)
+        .with_base_url(base_url)
+}
+
+fn openai_chat(r: &str, base_url: &str) -> ProviderEntry {
+    ProviderEntry::openai_compat(base_url, r)
+}
+
+#[cfg(feature = "openai-responses")]
+fn codex(r: &str, base_url: &str) -> ProviderEntry {
+    ProviderEntry::openai_responses(r).with_openai_responses_base_url(base_url)
+}
+
+#[cfg(feature = "gemini")]
+fn cloud_code(r: &str, base_url: &str) -> ProviderEntry {
+    entry_from_toml(&format!(
+        "[providers.p]\n\
+         kind = \"gemini\"\n\
+         auth_mode = \"cloud-code\"\n\
+         api_key_ref = \"{r}\"\n\
+         base_url = {}\n",
+        toml::Value::String(base_url.to_string())
+    ))
+}
+
+#[cfg(feature = "bedrock")]
+fn mantle_chat(key_ref: &str) -> ProviderEntry {
+    entry_from_toml(&format!(
+        "[providers.p]\n\
+         kind = \"openai-compat\"\n\
+         api_key_ref = \"\"\n\
+         bedrock_mantle = {{ region = \"us-east-1\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n"
+    ))
+}
+
+#[cfg(feature = "bedrock")]
+fn mantle_anthropic(key_ref: &str) -> ProviderEntry {
+    entry_from_toml(&format!(
+        "[providers.p]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"\"\n\
+         bedrock_mantle = {{ region = \"us-east-1\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n"
+    ))
+}
+
+#[cfg(all(feature = "bedrock", feature = "openai-responses"))]
+fn mantle_responses(key_ref: &str) -> ProviderEntry {
+    entry_from_toml(&format!(
+        "[providers.p]\n\
+         kind = \"openai-responses\"\n\
+         api_key_ref = \"\"\n\
+         bedrock_mantle = {{ region = \"us-east-1\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n"
+    ))
+}
+
+#[cfg(feature = "bedrock")]
+fn native_bedrock(key_ref: &str) -> ProviderEntry {
+    entry_from_toml(&format!(
+        "[providers.p]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-east-1\"\n\
+         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n"
+    ))
+}
+
+const VENDOR_BASES: [&str; 4] = [
+    "https://api.anthropic.com",
+    "https://chatgpt.com/backend-api/codex",
+    "https://api.x.ai/v1",
+    "https://cloudcode-pa.googleapis.com",
+];
+
+/// One managed vendor's own lane and how to put an entry of that lane's
+/// shape at any base URL.
+struct VendorLane {
+    vendor: &'static str,
+    host: &'static str,
+    own_base: &'static str,
+    upstream: &'static str,
+    entry: fn(&str, &str) -> ProviderEntry,
+    /// The same reference on another format, at the vendor's own host.
+    wrong_kind: fn(&str) -> ProviderEntry,
+}
+
+fn vendor_lanes() -> Vec<VendorLane> {
+    #[cfg_attr(
+        not(any(feature = "openai-responses", feature = "gemini")),
+        allow(unused_mut)
+    )]
+    let mut lanes = vec![
+        VendorLane {
+            vendor: "anthropic",
+            host: "api.anthropic.com",
+            own_base: VENDOR_BASES[0],
+            upstream: "claude-opus-4-7",
+            entry: anthropic,
+            wrong_kind: |r| openai_chat(r, "https://api.anthropic.com"),
+        },
+        VendorLane {
+            vendor: "xai",
+            host: "api.x.ai",
+            own_base: VENDOR_BASES[2],
+            upstream: "grok-4",
+            entry: openai_chat,
+            wrong_kind: |r| anthropic(r, "https://api.x.ai"),
+        },
+    ];
+    #[cfg(feature = "openai-responses")]
+    lanes.push(VendorLane {
+        vendor: "codex",
+        host: "chatgpt.com",
+        own_base: VENDOR_BASES[1],
+        upstream: "gpt-5-codex",
+        entry: codex,
+        wrong_kind: |r| openai_chat(r, "https://chatgpt.com/backend-api/codex"),
+    });
+    #[cfg(feature = "gemini")]
+    lanes.push(VendorLane {
+        vendor: "antigravity",
+        host: "cloudcode-pa.googleapis.com",
+        own_base: VENDOR_BASES[3],
+        upstream: "gemini-3.1-flash-lite",
+        entry: cloud_code,
+        wrong_kind: |r| openai_chat(r, "https://cloudcode-pa.googleapis.com"),
+    });
+    lanes
+}
+
+/// Every refused shape for one vendor's reference `r`, each named.
+fn refused_entries(lane: &VendorLane, r: &str) -> Vec<(String, ProviderEntry)> {
+    let mut v: Vec<(String, ProviderEntry)> = VENDOR_BASES
+        .iter()
+        .filter(|base| **base != lane.own_base)
+        .map(|base| (format!("other vendor host {base}"), (lane.entry)(r, base)))
+        .collect();
+    let host = lane.host;
+    for (label, base) in [
+        ("loopback", "http://127.0.0.1:18080".to_string()),
+        ("userinfo", format!("https://user:pass@{host}")),
+        ("explicit port", format!("https://{host}:8443")),
+        ("invalid url", "not a url".to_string()),
+    ] {
+        v.push((label.to_string(), (lane.entry)(r, &base)));
+    }
+    v.push(("wrong kind".to_string(), (lane.wrong_kind)(r)));
+    #[cfg(feature = "bedrock")]
+    {
+        v.push(("mantle carrier".to_string(), mantle_chat(r)));
+        v.push(("native bedrock creds".to_string(), native_bedrock(r)));
+    }
+    v
+}
+
+fn one_member_pool(entry: ProviderEntry, upstream: &str) -> Config {
+    let mut cfg = Config::default();
+    cfg.providers.insert("member".into(), entry);
+    cfg.pools
+        .insert("pool".into(), PoolEntry::new(vec!["member".into()]));
+    cfg.models
+        .insert("m".into(), ModelEntry::new("pool", upstream));
+    cfg
+}
+
+fn direct_model(entry: ProviderEntry, upstream: &str) -> Config {
+    let mut cfg = Config::default();
+    cfg.providers.insert("p".into(), entry);
+    cfg.models
+        .insert("m".into(), ModelEntry::new("p", upstream));
+    cfg
+}
+
+fn quiet() -> BuildOptions {
+    BuildOptions::new().with_mint_installation_id(false)
+}
+
+fn counting() -> (Arc<CountingStore>, Arc<dyn SecretStore>) {
+    let store = Arc::new(CountingStore::default());
+    let dyn_store: Arc<dyn SecretStore> = store.clone();
+    (store, dyn_store)
+}
+
+#[tokio::test]
+async fn containment_refuses_before_any_store_call() {
+    for lane in vendor_lanes() {
+        for r in [
+            format!("oauth://{}", lane.vendor),
+            format!("oauth://{}#seat-secret-label", lane.vendor),
+        ] {
+            for (label, entry) in refused_entries(&lane, &r) {
+                let case = format!("{r} {label}");
+
+                let (direct, store) = counting();
+                let built = build_provider("p", &entry, store).await;
+                assert!(built.is_err(), "{case}: build_provider must refuse");
+                assert_eq!(direct.calls(), 0, "{case}: build_provider");
+
+                let (pooled, store) = counting();
+                let refusals = pool_member_refusals(
+                    &one_member_pool(entry.clone(), lane.upstream),
+                    store,
+                    quiet(),
+                )
+                .await;
+                assert_eq!(refusals.len(), 1, "{case}: pool refuses");
+                assert_eq!(pooled.calls(), 0, "{case}: pool_member_refusals");
+
+                let (resolved, store) = counting();
+                let (models, failed) =
+                    build_resolved_models(&direct_model(entry, lane.upstream), store, quiet())
+                        .await
+                        .expect("a refused provider is skipped, not fatal");
+                assert!(models.is_empty(), "{case}: no model built");
+                assert_eq!(failed.len(), 1, "{case}: one failure");
+                assert_eq!(resolved.calls(), 0, "{case}: build_resolved_models");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_own_lane_reaches_the_store_on_every_build_path() {
+    for lane in vendor_lanes() {
+        let r = format!("oauth://{}", lane.vendor);
+        let entry = (lane.entry)(&r, lane.own_base);
+
+        let (_, store) = counting();
+        let built = build_provider("p", &entry, store).await;
+        assert!(built.is_ok(), "{r}: {:?}", built.err());
+
+        let (pooled, store) = counting();
+        let refusals = pool_member_refusals(
+            &one_member_pool(entry.clone(), lane.upstream),
+            store,
+            quiet(),
+        )
+        .await;
+        assert!(refusals.is_empty(), "{r}: {refusals:?}");
+        assert!(pooled.calls() > 0, "{r}: the pool probes the credential");
+
+        let (resolved, store) = counting();
+        let (models, failed) =
+            build_resolved_models(&one_member_pool(entry, lane.upstream), store, quiet())
+                .await
+                .expect("the own lane builds");
+        assert!(failed.is_empty(), "{r}: {failed:?}");
+        assert!(models.contains_key("m"), "{r}: model built");
+        assert!(resolved.calls() > 0, "{r}: build_resolved_models");
+    }
+}
+
+/// The direct build reads the store at construction on the lanes that resolve
+/// a session or account id there; the refused rows above are zero for them
+/// because the plan runs first, not because the arm reads nothing.
+#[tokio::test]
+async fn the_direct_build_reads_the_store_on_its_session_and_account_lanes() {
+    #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
+    let mut own = vec![anthropic("oauth://anthropic", VENDOR_BASES[0])];
+    #[cfg(feature = "openai-responses")]
+    own.push(codex("oauth://codex", VENDOR_BASES[1]));
+    for entry in own {
+        let (direct, store) = counting();
+
+        let built = build_provider("p", &entry, store).await;
+
+        assert!(built.is_ok(), "{entry:?}: {:?}", built.err());
+        assert!(direct.calls() > 0, "{entry:?}");
+    }
+}
+
+/// Positive control for the Bedrock credential path of
+/// `build_resolved_models`: a static key there is read from the store, so the
+/// zero count for a managed key on that path is the plan's doing.
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn the_bedrock_credential_path_reads_a_static_key() {
+    let (resolved, store) = counting();
+    let cfg = direct_model(
+        native_bedrock("env://ROUTECTL_PLAN_TEST_KEY"),
+        "anthropic.claude-opus-4-7",
+    );
+
+    let (models, failed) = build_resolved_models(&cfg, store, quiet())
+        .await
+        .expect("a static bedrock key builds");
+
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(models.contains_key("m"));
+    assert!(resolved.calls() > 0);
+}
+
+#[test]
+fn a_refused_plan_names_the_provider_and_withholds_the_entry() {
+    let entry = anthropic(
+        "oauth://anthropic#seat-secret-label",
+        "https://gateway.sentinel-host.example/p?k=1",
+    );
+
+    let err = plan_provider("gw", &entry)
+        .expect_err("foreign host")
+        .to_string();
+
+    assert!(err.contains("provider `gw`"), "{err}");
+    assert!(err.contains("api.anthropic.com"), "{err}");
+    for leaked in ["sentinel-host", "seat-secret-label", "oauth://"] {
+        assert!(!err.contains(leaked), "leaks {leaked}: {err}");
+    }
+}
+
+#[test]
+fn client_identity_per_lane() {
+    #[cfg_attr(
+        not(any(feature = "bedrock", feature = "openai-responses", feature = "gemini")),
+        allow(unused_mut)
+    )]
+    let mut rows: Vec<(&str, ProviderEntry, bool)> = vec![
+        (
+            "managed anthropic on its host",
+            anthropic("oauth://anthropic", "https://api.anthropic.com"),
+            true,
+        ),
+        (
+            "labeled managed anthropic on its host",
+            anthropic("oauth://anthropic#seat-b", "https://api.anthropic.com/v1"),
+            true,
+        ),
+        (
+            "managed xai on its host",
+            openai_chat("oauth://xai", "https://api.x.ai/v1"),
+            false,
+        ),
+        (
+            "env bearer to api.anthropic.com",
+            anthropic("env://ANTHROPIC_TOKEN", "https://api.anthropic.com"),
+            false,
+        ),
+        (
+            "env key to api.anthropic.com",
+            ProviderEntry::anthropic_api("env://ANTHROPIC_API_KEY"),
+            false,
+        ),
+        (
+            "env bearer to openrouter",
+            openai_chat("env://OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+            false,
+        ),
+        (
+            "env bearer to openrouter on anthropic-api",
+            anthropic("env://OPENROUTER_API_KEY", "https://openrouter.ai/api"),
+            false,
+        ),
+        (
+            "forwarded",
+            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+            false,
+        ),
+        (
+            "forwarded carrying the managed ref",
+            ProviderEntry::anthropic_api("oauth://anthropic")
+                .with_credential_source(CredentialSource::Forwarded),
+            false,
+        ),
+        (
+            "managed anthropic off its host",
+            anthropic("oauth://anthropic", "https://gateway.example"),
+            false,
+        ),
+        (
+            "codex ref on anthropic-api at the anthropic host",
+            anthropic("oauth://codex", "https://api.anthropic.com"),
+            false,
+        ),
+    ];
+    #[cfg(feature = "openai-responses")]
+    {
+        use routectl_providers::openai_responses::AuthKind as ResponsesAuth;
+        rows.push((
+            "managed codex default base",
+            ProviderEntry::openai_responses("oauth://codex"),
+            true,
+        ));
+        rows.push((
+            "labeled managed codex on its host",
+            codex(
+                "oauth://codex#seat-b",
+                "https://chatgpt.com/backend-api/codex",
+            ),
+            true,
+        ));
+        rows.push((
+            "env bearer on the codex lane",
+            codex("env://OPENAI_JWT", "https://chatgpt.com/backend-api/codex"),
+            false,
+        ));
+        rows.push((
+            "responses api-key",
+            ProviderEntry::openai_responses("env://OPENAI_API_KEY")
+                .with_openai_responses_auth_kind(ResponsesAuth::ApiKey),
+            false,
+        ));
+        rows.push((
+            "managed codex on the api-key surface",
+            ProviderEntry::openai_responses("oauth://codex")
+                .with_openai_responses_auth_kind(ResponsesAuth::ApiKey)
+                .with_openai_responses_base_url("https://chatgpt.com/backend-api/codex"),
+            false,
+        ));
+    }
+    #[cfg(feature = "gemini")]
+    {
+        rows.push((
+            "managed antigravity on the daily host",
+            cloud_code(
+                "oauth://antigravity",
+                "https://daily-cloudcode-pa.googleapis.com",
+            ),
+            true,
+        ));
+        rows.push((
+            "managed antigravity on the prod host",
+            cloud_code(
+                "oauth://antigravity#seat-b",
+                "https://cloudcode-pa.googleapis.com",
+            ),
+            true,
+        ));
+        rows.push((
+            "codex ref on the cloud code host",
+            cloud_code("oauth://codex", "https://cloudcode-pa.googleapis.com"),
+            false,
+        ));
+        rows.push((
+            "gemini api-key",
+            ProviderEntry::gemini("env://GEMINI_API_KEY"),
+            false,
+        ));
+    }
+    #[cfg(feature = "bedrock")]
+    {
+        rows.push((
+            "anthropic mantle",
+            mantle_anthropic("oauth://anthropic"),
+            false,
+        ));
+        rows.push(("openai-chat mantle", mantle_chat("oauth://xai"), false));
+        rows.push(("native bedrock", native_bedrock("oauth://anthropic"), false));
+    }
+    #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
+    rows.push((
+        "openai-responses mantle",
+        mantle_responses("oauth://codex"),
+        false,
+    ));
+
+    for (label, entry, expected) in rows {
+        let verdict = client_identity(&entry);
+
+        assert_eq!(verdict, expected, "{label}");
+        if let Ok(plan) = plan_provider("p", &entry) {
+            assert_eq!(
+                plan.client_identity, expected,
+                "{label}: plan carries the verdict"
+            );
+        }
+    }
+}

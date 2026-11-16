@@ -5,13 +5,12 @@
 
 #[cfg(any(feature = "openai-responses", feature = "gemini"))]
 use super::collect_config_validation;
-use super::{
-    MANAGED_ANTIGRAVITY, MANAGED_CODEX, MANAGED_OAUTH_FAMILIES, check_managed_oauth_family,
-    validate_managed_oauth_credentials,
-};
 #[cfg(any(feature = "bedrock", feature = "openai-responses", feature = "gemini"))]
 use crate::config::Config;
 use crate::config::ProviderEntry;
+use crate::config::provider_descriptor::{
+    VENDOR_ROWS, containment as validate_managed_oauth_credentials, vendor_containment, vendor_row,
+};
 
 const CODEX_REFS: [&str; 2] = ["oauth://codex", "oauth://codex#seat-secret-label"];
 const ANTIGRAVITY_REFS: [&str; 2] = [
@@ -51,12 +50,17 @@ fn only_entry(text: &str) -> ProviderEntry {
         .expect("one provider")
 }
 
+fn vendor_rejects(vendor: &str, entry: &ProviderEntry) -> bool {
+    let row = vendor_row(vendor).expect("a managed vendor row");
+    vendor_containment(row, "p", entry).is_err()
+}
+
 fn codex_rejects(entry: &ProviderEntry) -> bool {
-    check_managed_oauth_family(&MANAGED_CODEX, "p", entry).is_err()
+    vendor_rejects("codex", entry)
 }
 
 fn antigravity_rejects(entry: &ProviderEntry) -> bool {
-    check_managed_oauth_family(&MANAGED_ANTIGRAVITY, "p", entry).is_err()
+    vendor_rejects("antigravity", entry)
 }
 
 #[cfg(feature = "openai-responses")]
@@ -489,21 +493,15 @@ fn shipped_example_config_clears_managed_containment() {
 /// containment row, and the table names no other family.
 #[test]
 fn the_containment_table_covers_exactly_the_known_oauth_providers() {
-    let table: std::collections::BTreeSet<&str> = MANAGED_OAUTH_FAMILIES
-        .iter()
-        .map(|row| row.family)
-        .collect();
+    let table: std::collections::BTreeSet<&str> =
+        VENDOR_ROWS.iter().map(|row| row.vendor).collect();
     let known: std::collections::BTreeSet<&str> = routectl_auth::oauth::known_provider_ids()
         .iter()
         .copied()
         .collect();
 
     assert_eq!(table, known);
-    assert_eq!(
-        table.len(),
-        MANAGED_OAUTH_FAMILIES.len(),
-        "one row per family"
-    );
+    assert_eq!(table.len(), VENDOR_ROWS.len(), "one row per family");
 }
 
 /// One vendor's managed lane: its family, its first-party host and path, and

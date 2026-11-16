@@ -1456,7 +1456,7 @@ impl ProviderEntry {
 
     /// Where this entry's requests are sent: native Bedrock and every Mantle
     /// sub-lane ride the AWS carrier, everything else its base URL.
-    const fn carrier(&self) -> Carrier {
+    pub(crate) const fn carrier(&self) -> Carrier {
         #[cfg(feature = "bedrock")]
         if matches!(
             self,
