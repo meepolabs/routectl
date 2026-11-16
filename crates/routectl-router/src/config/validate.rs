@@ -6,8 +6,8 @@ use super::retired_keys::{RETIRED_KEYS, RetiredKeysError, preflight_retired_keys
 use crate::config::{Config, PricingConfig};
 
 /// Current config schema version this build writes and fully understands.
-/// `1` -> `2` retires the legacy `[cache_pricing]` override table into the
-/// catalog overlay; `2` -> `3` retires the raw-status retry
+/// `1` -> `2` retires the legacy `[cache_pricing]` override table (refused
+/// by name now; prices live under `[models.X.pricing]`); `2` -> `3` retires the raw-status retry
 /// allow/deny escape hatch in favor of per-class policy
 /// (`[retry.classes.*]`); `3` -> `4` moves the
 /// `seat_selection` knob off the provider entry onto the `[pools.<name>]`

@@ -2505,10 +2505,10 @@ impl Router {
     ///   a miss at read time (there is no pool to walk) and re-pick naturally
     ///   if the pool ever returns; picking a survivor from an unrelated pool
     ///   would be worse than a cold miss.
-    /// - a RENAMED pool is a new pool on both sides of this join, so neither
-    ///   its cursor nor its pins transfer. Deliberate: no heuristic can tell a
-    ///   rename from a decommission-plus-introduction, and guessing wrong
-    ///   silently pins sessions onto accounts the operator moved away from.
+    /// - a RENAMED pool is a new pool on both sides of this join, so its pins
+    ///   do not transfer. Deliberate: no heuristic can tell a rename from a
+    ///   decommission-plus-introduction, and guessing wrong silently pins
+    ///   sessions onto accounts the operator moved away from.
     ///
     /// The survivor is the pool's FIRST usable member -- the operator's
     /// declared order, the same order fill-first walks -- so the choice is

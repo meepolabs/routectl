@@ -2788,7 +2788,7 @@ parse writes no row.
 
 **Walk counts on the status surface.** The `observation` block on
 `/status/usage` (usage panel schema 6, for the requested window) and on
-`/status/doctor` (doctor schema 31, for today) sums five walk counts over
+`/status/doctor` (doctor schema 32, for today) sums five walk counts over
 every `requests` row in the window, token-count rows included:
 `request_caused_failures` (failed attempts the request itself caused,
 scoped to the endpoint or the model) and `excluded_endpoint`,

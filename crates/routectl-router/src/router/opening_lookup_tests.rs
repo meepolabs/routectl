@@ -1,8 +1,8 @@
 //! Pre-dispatch opening lookups: publication generation, route-head lane,
 //! and per-lane calibrated estimate. Every lookup is also checked for what
-//! it must NOT do -- move a rotation cursor, mint a sticky pin, count a pool
-//! dispatch, or record calibration evidence -- with a positive control
-//! proving the fixture would show the mutation.
+//! it must NOT do -- mint a sticky pin, count a pool dispatch, or record
+//! calibration evidence -- with a positive control proving the fixture would
+//! show the mutation.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

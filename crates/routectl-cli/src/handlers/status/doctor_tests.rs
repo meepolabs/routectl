@@ -192,7 +192,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 31);
+    assert_eq!(panel.schema_version, 32);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -262,12 +262,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 31);
+    assert_eq!(json["schema_version"], 32);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 31);
+    assert_eq!(json["data"]["report"]["schema_version"], 32);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),
@@ -1024,7 +1024,7 @@ async fn handler_lists_the_old_folders_the_state_carries() {
 }
 
 /// The served `/status/doctor` report carries the `cache` section read from
-/// the ledger the daemon's accepted config names, at schema 31: one Warn for
+/// the ledger the daemon's accepted config names, at schema 32: one Warn for
 /// a lane whose caller markers drew no cache activity.
 ///
 /// Mutation check: drop the `cache` row from `NO_NETWORK_SECTIONS` -> red here.
@@ -1073,8 +1073,8 @@ async fn the_served_doctor_json_carries_the_cache_section() {
     let json = doctor_json(&state).await;
 
     // Assert
-    assert_eq!(json["schema_version"], 31);
-    assert_eq!(json["data"]["report"]["schema_version"], 31);
+    assert_eq!(json["schema_version"], 32);
+    assert_eq!(json["data"]["report"]["schema_version"], 32);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     let cache: Vec<&Value> = findings
         .iter()

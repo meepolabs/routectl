@@ -287,7 +287,13 @@ pub(crate) use self::served::{
 /// anthropic-api or bedrock providers it applies to: `unobservable providers`
 /// (cache hits cannot be observed) and `converse providers` (bedrock on
 /// `api_shape = "converse"`). Never Fails, so the exit code is unmoved.
-pub(crate) const SCHEMA_VERSION: u32 = 31;
+///
+/// v31 -> v32: the `[registry]` pricing table is gone, and its vocabulary
+/// leaves the `pricing` section: no price names the `registry` source token,
+/// the `unpriced: the matching [registry] row prices nothing` row is gone,
+/// and a double-spelled cache-write note names only the model's own
+/// `[models.X.pricing]` block, never `the matching [registry] row`.
+pub(crate) const SCHEMA_VERSION: u32 = 32;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

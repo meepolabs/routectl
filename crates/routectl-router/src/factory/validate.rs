@@ -1304,8 +1304,8 @@ pub const MAX_POOL_MEMBERS: usize = 32;
 ///   - a member authenticating with an API key rather than an OAuth seat,
 ///   - a pool name colliding with a provider entry name or with a model
 ///     nickname (a `[models.X] provider` value resolves against providers
-///     and pools in one namespace, and the rotation / affinity namespaces
-///     are pool-or-nickname keyed),
+///     and pools in one namespace, and the session-affinity namespace is
+///     pool-or-nickname keyed),
 ///   - an empty member list (a pool that serves nothing is a silent
 ///     no-serve rather than a configuration),
 ///   - more than [`MAX_POOL_MEMBERS`] members.
@@ -1328,10 +1328,10 @@ pub fn validate_pools(config: &Config) -> Result<()> {
         }
         if config.models.contains_key(pool_name) {
             errors.push(format!(
-                "pool `{pool_name}`: a model nickname of the same name exists; seat rotation \
-                 and session affinity are keyed by pool name or model nickname, so a name \
-                 matching both would share one rotation between unrelated targets -- rename \
-                 the pool or the model"
+                "pool `{pool_name}`: a model nickname of the same name exists; session \
+                 affinity is keyed by pool name or model nickname, so a name matching both \
+                 would share one session pin between unrelated targets -- rename the pool or \
+                 the model"
             ));
         }
         if pool.members.is_empty() {

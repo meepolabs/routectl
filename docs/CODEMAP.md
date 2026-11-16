@@ -2534,9 +2534,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_prefix_epochs_from` /
   `carry_over_calibration_from` / `carry_over_quota_from` /
-  `carry_over_pool_state_from` (per-POOL rotation cursors + the sticky-pin
-  membership reconcile: adopts surviving pools' cursor `Arc`s into a FRESH map
-  and re-picks a retired member's pins once onto a survivor) /
+  `carry_over_pool_state_from` (the sticky-pin membership reconcile: re-picks
+  a retired member's pins once onto a survivor) /
   `carry_over_learned_from` (ATTACHES the replacement Router to the outgoing
   registry `Arc` rather than copying entries -- one store spans generations, so a
   request still in flight on the pre-swap Router writes where the published
@@ -3517,7 +3516,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   config-only reloads included -- unlike `registry_generation`),
   `Router::opening_lane` -> `OpeningLane` (route head in dispatch's
   alias / nickname / `default` order, off the installed table only: no
-  rotation cursor, sticky pin, quota read or pool counter moves; a pooled
+  sticky pin, quota read or pool counter moves; a pooled
   head is the model's lane, not a seat's; forwarded heads report the
   requested model as wire id, mixed-credential pools answer `None`), and
   `Router::calibrated_estimate(provider_kind, upstream, raw)` (the raw

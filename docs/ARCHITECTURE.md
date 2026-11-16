@@ -50,7 +50,7 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   provider entries; the factory compiles one seat per usable member
   (from that member's OWN credential ref) once per pool, and
   `seat_pool.rs` owns the request-time dispatch order plus the
-  pool-keyed rotation and sticky-pin state, slotting those seats into
+  pool-keyed sticky-pin state, slotting those seats into
   the fallback chain as ordinary hops.
 
 - `crates/routectl-auth/` -- `SecretStore` trait + resolvers for
