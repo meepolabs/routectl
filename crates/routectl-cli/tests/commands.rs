@@ -1645,9 +1645,11 @@ fn two_seat_pool_config(dir: &std::path::Path) -> std::path::PathBuf {
              [providers.seat-a]\n\
              kind = \"anthropic-api\"\n\
              api_key_ref = \"oauth://anthropic\"\n\
+             auth_kind = \"oauth-bearer\"\n\
              [providers.seat-b]\n\
              kind = \"anthropic-api\"\n\
              api_key_ref = \"oauth://anthropic#b\"\n\
+             auth_kind = \"oauth-bearer\"\n\
              [pools.team]\n\
              members = [\"seat-a\", \"seat-b\"]\n"
         ),

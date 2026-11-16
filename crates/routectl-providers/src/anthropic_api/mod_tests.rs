@@ -1679,39 +1679,6 @@ fn cloak_body_forwarded_leg_is_noop() {
     );
 }
 
-/// The cch re-sign gate is the OauthBearer + api.anthropic.com surface
-/// MINUS the forwarded leg. On the forwarded leg the gate is false, so
-/// `resign_cch_in_place` never runs and the client's billing checksum
-/// reaches Anthropic verbatim; own mode keeps the gate true. Asserts the
-/// exact gate expression from the dispatch methods -- no egress needed.
-#[test]
-fn resign_gate_false_on_forwarded_leg_true_in_own_mode() {
-    let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
-        "https://api.anthropic.com",
-        Some("session-stable-123".into()),
-        Vec::new(),
-        true,
-    ));
-
-    let fwd = forwarded_req(&[], &[], &[]);
-    let resign_on_fwd = provider.cfg.auth_kind == AuthKind::OauthBearer
-        && is_anthropic_api_host(&provider.cfg.base_url)
-        && !provider.forwarded_leg(&fwd);
-    assert!(
-        !resign_on_fwd,
-        "cch re-sign must be gated off on the forwarded leg"
-    );
-
-    let own = ChatRequest::default();
-    let resign_own = provider.cfg.auth_kind == AuthKind::OauthBearer
-        && is_anthropic_api_host(&provider.cfg.base_url)
-        && !provider.forwarded_leg(&own);
-    assert!(
-        resign_own,
-        "cch re-sign must still run in own mode (no forwarded bearer)"
-    );
-}
-
 /// build_headers on the forwarded leg emits the client's anthropic-beta
 /// set VERBATIM: the client's real beta fingerprint must reach Anthropic
 /// with no routectl-minted floor beta widening it.

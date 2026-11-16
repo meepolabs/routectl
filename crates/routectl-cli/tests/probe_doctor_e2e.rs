@@ -54,6 +54,7 @@ credential_source = \"forwarded\"
 [providers.anthropic]
 kind = \"anthropic-api\"
 api_key_ref = \"oauth://anthropic\"
+auth_kind = \"oauth-bearer\"
 
 [providers.unreachable]
 kind = \"openai-compat\"
@@ -84,6 +85,7 @@ credential_source = \"forwarded\"
 [providers.anthropic]
 kind = \"anthropic-api\"
 api_key_ref = \"oauth://anthropic\"
+auth_kind = \"oauth-bearer\"
 
 [models.sonnet]
 provider = \"anthropic\"

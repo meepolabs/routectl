@@ -4783,19 +4783,6 @@ the seat-pool readout ahead of its warnings and errors -- the same rows
 `doctor`'s `pools` section renders, documented under
 [The seat-pool readout](#the-seat-pool-readout-pools-shared-with-config-check).
 
-Among those warnings is one the readout cannot show: an entry whose
-`api_key_ref` names a managed OAuth seat (`oauth://<provider>`) while its
-auth selector still points at the API-key surface -- an `anthropic-api`
-entry with no `auth_kind = "oauth-bearer"`, or a `gemini` entry with no
-`auth_mode = "cloud-code"`. The seat is logged in and the readout reports
-it PASS, but the entry serves nothing: the bearer goes out on the API-key
-header and the upstream answers 401. It is a warning rather than an error
-because the shape predates auth-selector enforcement, so an older config
-carrying it on one stale entry still loads and keeps serving its other
-providers. The required pairs are the same ones `routectl login` prints in
-its ready-to-paste block, so following that output can never trip this
-warning.
-
 `config show` prints the post-merge view: `env://`, `file://`, and
 `oauth://` references remain as opaque URIs (they are non-secret
 pointers, not credential values); defaults are filled in; layered
@@ -4856,7 +4843,8 @@ provider permits -- see the README "Responsible use" section.
 **Managed token host containment.** An `api_key_ref` of
 `oauth://anthropic` or `oauth://anthropic#<label>` is the subscription
 token, and it is accepted only on an `anthropic-api` provider with
-`credential_source = "own"`, no `bedrock_mantle` block, and a `base_url`
+`auth_kind = "oauth-bearer"`, `credential_source = "own"`, no
+`bedrock_mantle` block, and a `base_url`
 that is omitted or is `https://` on exactly `api.anthropic.com` with no
 `user:pass@` prefix and no explicit non-default port. Any other provider
 kind, and any other host (a gateway, a passthrough, a loopback address, a
@@ -4878,7 +4866,8 @@ valid.
   static credential (`api_key_ref = "env://VAR"` or `"file:///abs/path"`)
   issued for that destination. Never copy the subscription token into an
   env var or file to send it elsewhere. To use the subscription itself,
-  point the provider at the default Anthropic URL (omit `base_url`).
+  point the provider at the default Anthropic URL (omit `base_url`) and
+  set `auth_kind = "oauth-bearer"`, as `routectl login anthropic` prints.
 - **No override.** There is no flag, config key, or loopback exception
   that relaxes this check; loopback is not treated as local because a
   loopback port can be a tunnel to another machine.
@@ -5186,6 +5175,7 @@ circuit_failures = 3        # every seat trips after 3 failures...
 [providers.anthropic-seat-b]
 kind             = "anthropic-api"
 api_key_ref      = "oauth://anthropic#seat-b"
+auth_kind        = "oauth-bearer"
 circuit_failures = 5        # ...except seat-b, whose own value wins
 ```
 

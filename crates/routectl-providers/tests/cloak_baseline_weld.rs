@@ -302,10 +302,10 @@ enum Gate {
     /// factory's verdict) AND not the forwarded leg. Independent of the
     /// classification, of `CloakMode`, of the auth kind and of the host.
     ///
-    /// The two dispatch sites that spell those two terms INLINE rather than
-    /// calling the lane helper ride this same variant: the predicate is what a
-    /// gate identifies, and two extensionally identical predicates given two
-    /// names would read as two different populations. Where a row's gate is
+    /// The two dispatch sites that read the re-sign gate rather than the lane
+    /// helper ride this same variant: the predicate is what a gate identifies,
+    /// and two extensionally identical predicates given two names would read
+    /// as two different populations. Where a row's gate is
     /// evaluated is a fact about that row, so it lives in the row's reason.
     CloakLane,
     /// The own-OAuth credential predicate: OauthBearer auth kind AND exactly
@@ -511,9 +511,10 @@ const TIER_TWO: &[TierTwoRow] = &[
         reason: "routectl mutates the body after the client computed its billing-header checksum, \
                  so the checksum is recomputed over the exact transmitted bytes; skipped on the \
                  forwarded leg, where the client's own checksum must reach the upstream verbatim. \
-                 The two dispatch sites spell the lane's two terms INLINE rather than calling \
-                 the lane helper, so a change to the helper does not reach them",
-        test: "resign_gate_false_on_forwarded_leg_true_in_own_mode",
+                 Both dispatch sites read the `resigns_cch` gate, whose wire pin drives complete \
+                 and stream with an OAuth bearer on the Anthropic host with and without the \
+                 identity",
+        test: "the_checksum_is_resigned_only_with_client_identity",
         known_loss: None,
     },
     TierTwoRow {

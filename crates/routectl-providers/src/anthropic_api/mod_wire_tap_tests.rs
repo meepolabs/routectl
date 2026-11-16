@@ -92,6 +92,12 @@ async fn mock_at(route: &str, reply: Reply) -> (MockServer, Arc<Mutex<Vec<Vec<u8
 /// The cloak lane: an OAuth seat on the exact Anthropic host, resolved to
 /// the mock, so the cloak and the checksum re-sign both run.
 fn cloak_lane_provider(server: &MockServer) -> AnthropicApiProvider {
+    bearer_on_anthropic_host(server, true)
+}
+
+/// An OAuth bearer on the exact Anthropic host, resolved to the mock, with
+/// the identity verdict `client_identity`.
+fn bearer_on_anthropic_host(server: &MockServer, client_identity: bool) -> AnthropicApiProvider {
     let addr = *server.address();
     let mut provider = AnthropicApiProvider::new(AnthropicApiConfig {
         id: PROVIDER_ID.into(),
@@ -106,7 +112,7 @@ fn cloak_lane_provider(server: &MockServer) -> AnthropicApiProvider {
         session_id: Some("session-stable".into()),
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
-        client_identity: true,
+        client_identity,
         #[cfg(feature = "bedrock")]
         mantle: None,
     });
@@ -224,6 +230,49 @@ async fn stream_deposits_the_resigned_bytes_the_upstream_received() {
     let wire = received(&bodies);
     assert_deposit_is_the_wire(&tap, &wire);
     assert_checksum_resigned(&wire);
+}
+
+/// The checksum is re-signed on complete and stream exactly when the
+/// provider presents the Claude Code identity. The rows without it are an
+/// OAuth bearer on the Anthropic host, so an auth-kind-and-host gate at
+/// either dispatch site would re-sign them.
+#[tokio::test]
+async fn the_checksum_is_resigned_only_with_client_identity() {
+    for stream in [false, true] {
+        for client_identity in [true, false] {
+            let (server, bodies) = upstream(stream).await;
+            let provider = bearer_on_anthropic_host(&server, client_identity);
+            let (req, _tap) = billing_request(stream);
+
+            if stream {
+                let mut chunks = provider.stream(req).await.expect("stream opens");
+                while futures::StreamExt::next(&mut chunks).await.is_some() {}
+            } else {
+                provider.complete(req).await.expect("completes");
+            }
+
+            let wire = received(&bodies);
+            let text = String::from_utf8_lossy(&wire);
+            assert!(text.contains("cch="), "fixture carries a checksum: {text}");
+            assert_eq!(
+                !text.contains("cch=abcde"),
+                client_identity,
+                "stream={stream} client_identity={client_identity}: {text}"
+            );
+        }
+    }
+}
+
+/// The gate's forwarded term on its own: the provider clears the identity
+/// on a forwarded-bearer config, so no wire row can reach it.
+#[test]
+fn the_resign_gate_is_off_on_the_forwarded_leg() {
+    let mut cfg = AnthropicApiConfig::new(PROVIDER_ID, "k");
+    cfg.client_identity = true;
+    let provider = AnthropicApiProvider::new(cfg);
+
+    assert!(provider.resigns_cch(false), "own leg with the identity");
+    assert!(!provider.resigns_cch(true), "forwarded leg");
 }
 
 #[tokio::test]

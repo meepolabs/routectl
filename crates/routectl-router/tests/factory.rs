@@ -207,7 +207,8 @@ async fn resolved_model_retains_oauth_secret_ref_for_anthropic() {
     let mut providers: BTreeMap<String, ProviderEntry> = BTreeMap::new();
     providers.insert(
         "anthropic".into(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
+        ProviderEntry::anthropic_api("oauth://anthropic")
+            .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
     );
     let mut models: BTreeMap<String, ModelEntry> = BTreeMap::new();
     models.insert(

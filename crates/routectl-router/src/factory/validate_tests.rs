@@ -2447,9 +2447,11 @@ mod pool_validation_tests {
     const OAUTH_ACCOUNTS: &str = "[providers.anthropic-default]\n\
          kind = \"anthropic-api\"\n\
          api_key_ref = \"oauth://anthropic\"\n\
+         auth_kind = \"oauth-bearer\"\n\
          [providers.anthropic-work]\n\
          kind = \"anthropic-api\"\n\
-         api_key_ref = \"oauth://anthropic#work\"\n";
+         api_key_ref = \"oauth://anthropic#work\"\n\
+         auth_kind = \"oauth-bearer\"\n";
 
     /// One rejection class: a config that trips it and the substrings its
     /// error must carry.
@@ -2923,7 +2925,7 @@ mod managed_anthropic_credential_tests {
                     assert!(!msg.contains(leaked), "message leaks {leaked}: {msg}");
                 }
                 assert!(
-                    msg.chars().count() <= 300,
+                    msg.chars().count() <= 320,
                     "containment error must fit the reported-line cap: {msg}"
                 );
             }

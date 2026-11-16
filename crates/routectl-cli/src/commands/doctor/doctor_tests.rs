@@ -112,7 +112,7 @@ fn config_referencing_anthropic() -> Config {
     let mut cfg = Config::default();
     cfg.providers.insert(
         "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
+        ProviderEntry::anthropic_api("oauth://anthropic").with_auth_kind(AuthKind::OauthBearer),
     );
     cfg.models.insert(
         "sonnet".to_string(),
@@ -1114,22 +1114,49 @@ async fn present_but_unparseable_config_yields_fail_end_to_end() {
 /// alone would not do: the config section's Pass is only meaningful on a
 /// config that actually carries providers and models.
 fn clean_config() -> Config {
-    let mut cfg = config_referencing_anthropic();
-    cfg.providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic").with_auth_kind(AuthKind::OauthBearer),
+    config_referencing_anthropic()
+}
+
+/// A valid config whose anthropic-api provider `provider_name` carries a
+/// capability override the egress re-adds, so the shared validator suite
+/// emits one advisory naming the provider and no error. Built from the
+/// parsed shape so the name may hold bytes a TOML key cannot.
+fn config_with_advisory(provider_name: &str) -> Config {
+    let template: Config = toml::from_str(
+        "[providers.p]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"env://ANTHROPIC_API_KEY\"\n\
+         [models.sonnet]\n\
+         provider = \"p\"\n\
+         upstream = \"claude-sonnet-4-5\"\n\
+         [aliases]\n\
+         default = \"sonnet\"\n\
+         [capability.overrides.p]\n\
+         unsupported = [\"beta:structured-outputs-2025-12-15\"]\n",
+    )
+    .expect("advisory fixture parses");
+    let mut cfg = template.clone();
+    cfg.providers.clear();
+    cfg.capability.overrides.clear();
+    cfg.providers
+        .insert(provider_name.to_string(), template.providers["p"].clone());
+    cfg.capability.overrides.insert(
+        provider_name.to_string(),
+        template.capability.overrides["p"].clone(),
     );
+    if let Some(model) = cfg.models.get_mut("sonnet") {
+        model.provider = provider_name.to_string();
+    }
     cfg
 }
 
-/// A config carrying the advisory half only -- an `oauth://` ref whose
-/// auth selector is unset -- must render one Warn finding per warning and
-/// NOT the "passes the static validator suite" Pass, whose message the
-/// advisory contradicts.
+/// A config carrying the advisory half only must render one Warn finding per
+/// warning and NOT the "passes the static validator suite" Pass, whose
+/// message the advisory contradicts.
 #[test]
 fn validator_warnings_render_as_warn_findings_without_a_pass() {
     // Arrange: no errors, at least one warning.
-    let cfg = config_referencing_anthropic();
+    let cfg = config_with_advisory("anthropic");
     let report = crate::commands::config::validation_report(&cfg, None);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(!report.warnings.is_empty(), "fixture must warn");
@@ -1158,17 +1185,12 @@ fn validator_warnings_render_as_warn_findings_without_a_pass() {
 }
 
 /// The doctor render shares `config check`'s ceiling, so a long-but-benign
-/// advisory (the auth-selector gap message runs past the 256-char log-field
-/// budget once the provider name is long) reaches the operator whole.
+/// advisory (the floor-override message runs past the 256-char log-field
+/// budget) reaches the operator whole.
 #[test]
 fn a_long_validator_warning_renders_untruncated_in_the_finding_detail() {
     // Arrange: one advisory warning, longer than the 256-char log budget.
-    let mut cfg = Config::default();
-    let long_name = "anthropic-seat-for-the-shared-review-workload-primary";
-    cfg.providers.insert(
-        long_name.to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
+    let cfg = config_with_advisory("anthropic-seat-for-the-shared-review-workload-primary");
     let report = crate::commands::config::validation_report(&cfg, None);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
@@ -1202,7 +1224,7 @@ fn a_long_validator_warning_renders_untruncated_in_the_finding_detail() {
 #[test]
 fn a_warnings_only_config_renders_warn_findings_and_exits_zero() {
     let context = ctx(
-        config_referencing_anthropic(),
+        config_with_advisory("anthropic"),
         Some(&current_version_stamp()),
         vec![("anthropic", LocalProbe::Present)],
         Vec::new(),
@@ -1230,7 +1252,7 @@ fn a_warnings_only_config_renders_warn_findings_and_exits_zero() {
 /// every error as a Fail AND every warning as a Warn.
 #[test]
 fn errors_and_warnings_are_both_rendered() {
-    let mut cfg = config_referencing_anthropic();
+    let mut cfg = config_with_advisory("anthropic");
     cfg.models.insert(
         "ghost-bound".to_string(),
         ModelEntry::new("ghost", "claude-sonnet-4-5"),
@@ -1346,13 +1368,10 @@ fn a_control_byte_bearing_config_key_cannot_forge_a_finding_line() {
 /// an unsanitized error would.
 #[test]
 fn a_control_byte_bearing_config_key_cannot_forge_a_finding_line_through_a_warning() {
-    // Arrange: an `oauth://` ref with no auth selector trips the advisory,
-    // whose message formats the provider name verbatim.
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "claude\n  \u{1b}[32mPASS forged: all good".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
+    // Arrange: a floor-override advisory, whose message formats the
+    // provider name verbatim. No `:` in the name: an override key splits on
+    // it into a provider and a model nickname.
+    let cfg = config_with_advisory("claude\n  \u{1b}[32mPASS forged, all good");
     let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
 
     // Act

@@ -373,9 +373,11 @@ fn hot_reload_parse_error_warn_redacts_literal_secret() {
 const POOL_ACCOUNTS: &str = "[providers.anthropic-default]\n\
      kind = \"anthropic-api\"\n\
      api_key_ref = \"oauth://anthropic\"\n\
+     auth_kind = \"oauth-bearer\"\n\
      [providers.anthropic-work]\n\
      kind = \"anthropic-api\"\n\
-     api_key_ref = \"oauth://anthropic#work\"\n";
+     api_key_ref = \"oauth://anthropic#work\"\n\
+     auth_kind = \"oauth-bearer\"\n";
 
 /// One config text per pool rejection class, each the smallest fixture
 /// that trips it.
@@ -429,6 +431,7 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
                  [providers.anthropic]\n\
                  kind = \"anthropic-api\"\n\
                  api_key_ref = \"oauth://anthropic\"\n\
+                 auth_kind = \"oauth-bearer\"\n\
                  [pools.anthropic]\n\
                  members = [\"anthropic-default\"]\n"
             ),
@@ -503,7 +506,8 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
                 text.push_str(&format!(
                     "[providers.{name}]\n\
                          kind = \"anthropic-api\"\n\
-                         api_key_ref = \"oauth://anthropic#s{i:03}\"\n"
+                         api_key_ref = \"oauth://anthropic#s{i:03}\"\n\
+                         auth_kind = \"oauth-bearer\"\n"
                 ));
                 members.push(format!("\"{name}\""));
             }
@@ -658,6 +662,7 @@ fn previous_version_config_with_retired_key() -> String {
          [providers.anthropic-managed]\n\
          kind = \"anthropic-api\"\n\
          api_key_ref = \"oauth://anthropic\"\n\
+         auth_kind = \"oauth-bearer\"\n\
          seat_selection = \"fill-first\"\n",
         CURRENT_CONFIG_VERSION - 1
     )

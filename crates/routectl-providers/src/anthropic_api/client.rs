@@ -304,7 +304,15 @@ pub struct AnthropicApiProvider {
 /// is byte-for-byte unchanged by this contract.
 impl AnthropicApiProvider {
     /// Build a provider from its configuration.
-    pub fn new(cfg: AnthropicApiConfig) -> Self {
+    ///
+    /// `client_identity` is cleared on a Bedrock Mantle config and on a
+    /// forwarded-bearer config, whatever the caller set: neither the
+    /// AWS-signed lane nor the client's own forwarded credential is the
+    /// Claude Code client routectl presents.
+    pub fn new(mut cfg: AnthropicApiConfig) -> Self {
+        if cfg.use_forwarded_bearer || mantle_configured(&cfg) {
+            cfg.client_identity = false;
+        }
         let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.client_identity);
         // Both the mantle and first-party lanes use a no-redirect client.
         // Mantle: a signed POST must never be auto-followed across a 3xx,
@@ -538,6 +546,15 @@ impl AnthropicApiProvider {
     /// `is_cloak_lane && is_non_cc`).
     pub(super) fn is_cloak_lane(&self, req: &ChatRequest) -> bool {
         self.cfg.client_identity && !self.forwarded_leg(req)
+    }
+
+    /// Whether the serialized body's billing checksum is re-signed before
+    /// it is sent: only when the provider presents the Claude Code identity
+    /// and the request is not on the forwarded leg, whose client checksum
+    /// must reach Anthropic verbatim. The auth kind and the host never
+    /// decide it.
+    pub(super) const fn resigns_cch(&self, forwarded_leg: bool) -> bool {
+        self.cfg.client_identity && !forwarded_leg
     }
 
     /// The own-OAuth credential lane: this request sends routectl's own
@@ -1281,6 +1298,17 @@ impl AnthropicApiProvider {
             None => {}
         }
     }
+}
+
+/// Whether `cfg` selects the Bedrock Mantle lane.
+#[cfg(feature = "bedrock")]
+const fn mantle_configured(cfg: &AnthropicApiConfig) -> bool {
+    cfg.mantle.is_some()
+}
+
+#[cfg(not(feature = "bedrock"))]
+const fn mantle_configured(_cfg: &AnthropicApiConfig) -> bool {
+    false
 }
 
 /// Resolve the client-level `User-Agent` for an anthropic-api provider.

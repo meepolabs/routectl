@@ -23,6 +23,7 @@
 use crate::config::ProviderEntry;
 use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::EgressKind;
+use routectl_providers::anthropic_api::AuthKind;
 use serde::{Deserialize, Serialize};
 
 /// The wire format a provider entry speaks. Each format maps to exactly one
@@ -244,9 +245,9 @@ pub const VENDOR_ROWS: &[VendorRow] = &[
         hosts: &["api.anthropic.com"],
         identity: true,
         refusal: "the managed Anthropic credential is accepted only on `anthropic-api` with \
-                  credential_source = \"own\", no bedrock_mantle, and base_url omitted or \
-                  https://api.anthropic.com. For a gateway or passthrough use a static env:// or \
-                  file:// credential; no override. base_url and ref are withheld",
+                  auth_kind = \"oauth-bearer\", credential_source = \"own\", no bedrock_mantle, \
+                  and base_url omitted or https://api.anthropic.com. Elsewhere use a static \
+                  env:// or file:// credential; no override. base_url and ref are withheld",
     },
     VendorRow {
         vendor: "codex",
@@ -408,10 +409,20 @@ fn is_on_vendor_lane(row: &VendorRow, entry: &ProviderEntry) -> bool {
 
 /// The selectors the old entry shape adds beyond format and host: an
 /// Anthropic token rides only routectl's own credential (never the
-/// forwarded leg), and a Codex token only the `chatgpt-oauth` surface.
+/// forwarded leg) in the bearer form, and a Codex token only the
+/// `chatgpt-oauth` surface.
 fn has_vendor_lane_shape(format: Format, entry: &ProviderEntry) -> bool {
     match format {
-        Format::AnthropicMessages => entry.forwarded_base_url().is_none(),
+        Format::AnthropicMessages => {
+            entry.forwarded_base_url().is_none()
+                && matches!(
+                    entry,
+                    ProviderEntry::AnthropicApi {
+                        auth_kind: AuthKind::OauthBearer,
+                        ..
+                    }
+                )
+        }
         #[cfg(feature = "openai-responses")]
         Format::OpenaiResponses => entry.is_chatgpt_oauth_responses(),
         #[cfg(not(feature = "openai-responses"))]

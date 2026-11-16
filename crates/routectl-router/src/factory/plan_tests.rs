@@ -255,6 +255,18 @@ fn refused_entries(lane: &VendorLane, r: &str) -> Vec<(String, ProviderEntry)> {
         v.push((label.to_string(), (lane.entry)(r, &base)));
     }
     v.push(("wrong kind".to_string(), (lane.wrong_kind)(r)));
+    if lane.vendor == "anthropic" {
+        for (label, base) in [
+            ("api-key form", lane.own_base),
+            ("api-key form, unset base", ""),
+        ] {
+            let mut entry = ProviderEntry::anthropic_api(r).with_auth_kind(AuthKind::ApiKey);
+            if !base.is_empty() {
+                entry = entry.with_base_url(base);
+            }
+            v.push((label.to_string(), entry));
+        }
+    }
     #[cfg(feature = "bedrock")]
     {
         v.push(("mantle carrier".to_string(), mantle_chat(r)));
@@ -478,6 +490,28 @@ fn a_refused_plan_names_the_provider_and_withholds_the_entry() {
     }
 }
 
+/// The api-key form of a managed Anthropic login is refused with a message
+/// that names the auth selector it needs and withholds the ref.
+#[test]
+fn the_api_key_form_of_a_managed_anthropic_login_is_refused_naming_the_selector() {
+    let entry = ProviderEntry::anthropic_api("oauth://anthropic#seat-secret-label");
+
+    let err = plan_provider("claude", &entry)
+        .expect_err("api-key form")
+        .to_string();
+
+    assert!(err.contains("provider `claude`"), "{err}");
+    assert!(err.contains(PLAN_REFUSAL), "{err}");
+    assert!(err.contains("auth_kind = \"oauth-bearer\""), "{err}");
+    for leaked in ["seat-secret-label", "oauth://"] {
+        assert!(!err.contains(leaked), "leaks {leaked}: {err}");
+    }
+    assert!(
+        plan_provider("claude", &entry.with_auth_kind(AuthKind::OauthBearer)).is_ok(),
+        "the bearer form of the same entry plans"
+    );
+}
+
 #[test]
 fn client_identity_per_lane() {
     #[cfg_attr(
@@ -529,6 +563,18 @@ fn client_identity_per_lane() {
             "forwarded carrying the managed ref",
             ProviderEntry::anthropic_api("oauth://anthropic")
                 .with_credential_source(CredentialSource::Forwarded),
+            false,
+        ),
+        (
+            "managed anthropic in the api-key form on its host",
+            ProviderEntry::anthropic_api("oauth://anthropic")
+                .with_auth_kind(AuthKind::ApiKey)
+                .with_base_url("https://api.anthropic.com"),
+            false,
+        ),
+        (
+            "labeled managed anthropic in the default api-key form, base unset",
+            ProviderEntry::anthropic_api("oauth://anthropic#seat-b"),
             false,
         ),
         (

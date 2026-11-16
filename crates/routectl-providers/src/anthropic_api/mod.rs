@@ -250,7 +250,7 @@ impl Provider for AnthropicApiProvider {
         // no-op.
         let mut body_bytes = serde_json::to_vec(&body)
             .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
-        if self.cfg.client_identity && !forwarded_leg {
+        if self.resigns_cch(forwarded_leg) {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
         let body_bytes = bytes::Bytes::from(body_bytes);
@@ -482,7 +482,7 @@ impl Provider for AnthropicApiProvider {
         // Claude Code identity; a no-op everywhere else.
         let mut body_bytes = serde_json::to_vec(&body)
             .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
-        if self.cfg.client_identity && !forwarded_leg {
+        if self.resigns_cch(forwarded_leg) {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
         let body_bytes = bytes::Bytes::from(body_bytes);
