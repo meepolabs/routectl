@@ -161,7 +161,7 @@ impl Router {
         out
     }
 
-    /// Live seat counts for every pool a selectable model routes at, in
+    /// Live seat counts for every pool a model routes at, in
     /// pool-name order, read from the same side-effect-free capacity
     /// snapshot sticky placement reads: no RPM token is charged and no
     /// half-open slot is claimed, however often it is called.

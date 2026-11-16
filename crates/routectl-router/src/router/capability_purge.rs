@@ -244,7 +244,7 @@ impl Router {
         self.learned_lane_projection()
             .lanes()
             .iter()
-            .any(|resolved| resolved.routed && resolved.lane == *lane)
+            .any(|resolved| resolved.lane == *lane)
     }
 
     /// Finalize a reserved purge: remove the entry and release the lease.

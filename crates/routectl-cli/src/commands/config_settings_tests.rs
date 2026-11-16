@@ -83,8 +83,6 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "cache.auto_emit_top_level_breakpoint",
         "cache.k_gated_emission",
         "capability.essential",
-        "models.fast.selectable",
-        "models.fast.visible_routectl_provider",
         "reduction.enabled",
         "retry.backoff_multiplier",
         "retry.initial_backoff_ms",
@@ -117,10 +115,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (17, 16));
+    assert_eq!((file.len(), default.len()), (17, 14));
     assert_eq!(
         lines.len(),
-        33,
+        31,
         "every line is tagged file or default, once"
     );
 }
@@ -295,7 +293,6 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
         "ModelEntry.reasoning_dialect",
         "inherit: the egress dialect",
     ),
-    ("ModelEntry.reported_model", "off: echo the requested model"),
     ("PricingConfig.cache_read_per_mtok", "inherit: price tables"),
     (
         "PricingConfig.cache_write_1h_per_mtok",

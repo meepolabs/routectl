@@ -353,8 +353,11 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `models.<name>.additional_request_fields` | use payload_extras |
 | `models.<name>.effort_levels` | refused effort levels are learned per lane |
 | `models.<name>.max_thinking_budget` | client thinking budgets are forwarded |
+| `models.<name>.reported_model` | the response model field echoes the requested model |
+| `models.<name>.selectable` | delete the block or comment it out |
 | `models.<name>.supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking |
 | `models.<name>.unsupported_features` | use `[capability.overrides."<provider>:<nickname>"] unsupported` |
+| `models.<name>.visible_routectl_provider` | responses carry no provider field |
 | `pools.<name>.seat_selection = "round-robin"` | use sticky-least-loaded |
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
 | `providers.<name>.anthropic_beta` | pin the flag in header_extras "anthropic-beta" |
@@ -593,8 +596,7 @@ depth-first, preserving the operator's stated order: with
 `A = ["B", "C"]` and `B = ["X", "Y"]`, `A` resolves to `[X, Y, C]`.
 Recursion is capped (depth 8) as a defensive net; genuine cycles and
 unknown targets are caught at startup by `config check`, which also
-rejects an empty chain and a chain referencing a `selectable = false`
-model.
+rejects an empty chain. A chain may name any `[models]` nickname.
 
 **Header override.** A client may send `x-routectl-alias: <key>`, which
 wins over the body's `model` field entirely. `[aliases]` is
@@ -611,7 +613,6 @@ nickname; nothing else in the config does.
 provider   = "anthropic-api-key"          # required; a [providers] or
                                           # [pools] key
 upstream   = "claude-opus-4-20250514"     # required; the upstream wire id
-selectable = true                         # default true
 ```
 
 - **`provider`** (string, required) -- the `[providers.X]` entry or
@@ -621,14 +622,14 @@ selectable = true                         # default true
   upstream verbatim. For Bedrock this is the inference-profile id (e.g.
   `us.anthropic.claude-haiku-4-5-20251001-v1:0`); for OpenAI-shaped
   egresses it is the wire `model` field.
-- **`selectable`** (bool, default true) -- set `false` to keep an entry
-  around while wiring without making it servable. A disabled entry still
-  loads, but `config check` errors if an alias chain references it.
+
+Every `[models]` entry is servable and is listed by `GET /v1/models`. To
+keep an entry out while wiring it, delete the block or comment it out.
 
 **Reserved names.** Model nicknames, pool seats, and provider entries
 share one runtime-state namespace (circuit breaker, rate limit, probes,
 learned capability state), so the rules below apply to every `[models]`
-and `[providers]` key, selectable or not, referenced or not. `config check`,
+and `[providers]` key, referenced or not. `config check`,
 `serve`, and hot reload all refuse a config that breaks any of them:
 
 - `#` is reserved. It separates a pool nickname from its member in a
@@ -642,7 +643,7 @@ and `[providers]` key, selectable or not, referenced or not. `config check`,
   refused; the error states the length without echoing the name.
 
 Everything else on `[models.X]` is a per-model behavior knob -- reasoning
-declaration, output caps, header and payload extras, response labels --
+declaration, output caps, header and payload extras --
 documented under [Per-model knobs](#per-model-knobs), with the full merge
 semantics in the [field-assignment table](#field-assignment-table).
 `[models]` is hot-reloadable.
@@ -653,15 +654,12 @@ semantics in the [field-assignment table](#field-assignment-table).
 |--------------------------------|---------------------|------------------------------------------------------------------------|
 | `provider`                     | `[models.X]`        | required; refs a `[providers]` key                                     |
 | `upstream`                     | `[models.X]`        | required                                                               |
-| `selectable`                   | `[models.X]`        | default true                                                           |
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > pool > global > default (`0` on a model is ignored) |
 | `context_window`               | `[models.X]`        | Option<u32>, `0` refused; total context window for the window gate and `/v1/models` `context_length` |
 | `max_output_tokens`            | `[models.X]`        | Option<u32>, `0` refused; `max_tokens` sent when the client omits it (anthropic-api, bedrock-invoke), else 64000 |
 | `pricing`                      | `[models.X]`        | Option<table>, per-Mtok prices, each field optional; non-finite or negative refused; per-field precedence in [Model prices](#model-prices-modelsxpricing) |
-| `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
-| `visible_routectl_provider`    | `[models.X]`        | bool; accepted with no effect (responses never carry a `routectl_provider` field) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
@@ -2469,50 +2467,22 @@ the remedy is for the caller to lower its `max_tokens`. Chat Completions
 `reasoning_effort` is a known gap there: its refusal wording has no
 reader, so it is forwarded.
 
-#### `reported_model` (Option<String>, default None) -- response `model` label
+#### The response `model` field
 
 The `model` field routectl echoes back in responses (and on every
-streaming chunk, including the terminal usage-only chunk) is the
-*client-visible label*, decoupled from the upstream wire model id:
+streaming chunk, including the terminal usage-only chunk) is the model
+or alias the client requested, verbatim: the exact string the client
+sent, or the `x-routectl-alias` header override. A client asking for
+`deepseek-chat` and routed to upstream `deepseek-v3` sees
+`"model": "deepseek-chat"`, not the upstream id, across every hop of a
+fallback chain and every chunk of a stream. Internal accounting and
+observability (usage capture, pricing) key off the served model and
+upstream recorded in dispatch metadata.
 
-- **Default (no `reported_model` set):** the response `model` echoes the
-  client's requested alias verbatim -- the exact string the client sent
-  (or the `x-routectl-alias` header override). A client asking for
-  `deepseek-chat` and routed to upstream `deepseek-v3` sees
-  `"model": "deepseek-chat"` in the response, not the upstream id.
-
-- **Override (`reported_model = "label"`):** the served model's
-  `reported_model` wins, pinning a fixed public-facing string regardless
-  of which alias the client used. An empty string (`reported_model = ""`)
-  is treated as unset and falls through to the requested alias.
-
-The label is computed once per request from the model that actually
-served it, so a fallback chain or a multi-chunk stream carries one stable
-label across every hop and chunk.
-
-```toml
-[models.deepseek]
-provider       = "deepseek"
-upstream       = "deepseek-v3"
-# Clients see "fast-chat" no matter which alias routed here.
-reported_model = "fast-chat"
-```
-
-This affects only the client-visible `model` field. Internal accounting
-and observability (usage capture, pricing) key off the served model and
-upstream recorded in dispatch metadata, not the response `model` field,
-and are unchanged. The provider that answered is reported through the
-usage ledger, the request logs and the status surfaces, never on the
-response body.
-
-#### `visible_routectl_provider` (bool) -- accepted, no effect
-
-Client responses never carry a `routectl_provider` field, on any ingress
-dialect or streaming mode. The key is still parsed so an existing config
-keeps loading, but neither value changes the response. To see which
-provider served a request, read the `provider` column of the usage ledger
-(`routectl usage`), the request's finished log line, or the status
-dashboard.
+Client responses never carry a provider field, on any ingress dialect or
+streaming mode. To see which provider served a request, read the
+`provider` column of the usage ledger (`routectl usage`), the request's
+finished log line, or the status dashboard.
 
 Two other per-model overrides live on `[models.X]`:
 

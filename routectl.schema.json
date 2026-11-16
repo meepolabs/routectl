@@ -451,18 +451,6 @@
           ],
           "description": "Per-model openai-compat reasoning dialect. Lives ONLY on\n`[models.X]` (no provider fallback) -- v0.6.0 moved the field\noff `[providers.X]` so two models on one provider can speak\ndifferent dialects (DeepSeek's `reasoning_content` vs\nOpenAI's `reasoning_effort` vs OpenRouter's\n`reasoning_details`). Ignored by non-openai-compat egresses."
         },
-        "reported_model": {
-          "description": "Operator-declared label echoed back in the response `model`\nfield for this model. `None` (the default) makes the response\necho the client's requested alias (`req.model`); `Some(label)`\noverrides that with a fixed public-facing string. An empty\nstring is treated as unset (falls through to `req.model`). Does\nnot affect internal accounting / observability, which key off\n`DispatchMeta.served_model` / `served_upstream`, not `resp.model`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "selectable": {
-          "default": true,
-          "description": "Whether this model is selectable from the `[aliases]` table.\nDefaults to `true`; flip to `false` to keep an entry around\nwhile wiring without making it servable. Disabled entries\nstill load but `Router::new` errors when an alias chain\nreferences one.",
-          "type": "boolean"
-        },
         "stream_first_byte_timeout_ms": {
           "description": "Per-model first-content timeout for streaming responses. Resolved\nwith precedence per-model > per-provider > per-pool > global\n(`RetryPolicy::stream_first_byte_timeout_ms`) > shipped default.\n`0` is ignored with a warning and falls through to the next tier.\n\nUse case: opus xhigh adaptive thinking on large prompts can\ntake >90s to emit the first token while non-thinking models\n(haiku, llama) start responding in <5s. A per-model override\nlets opus sit at 300s without forcing every other model to\nwait 5 min on a dead upstream.",
           "format": "uint64",
@@ -475,11 +463,6 @@
         "upstream": {
           "description": "Upstream model id. Forwarded to the provider verbatim. For\nBedrock this becomes the `BedrockConfig.model_id` value (the\nAWS inference profile id, e.g.\n`us.anthropic.claude-haiku-4-5-20251001-v1:0`). For OpenAI-\ncompatible egresses it is the wire `model` field.",
           "type": "string"
-        },
-        "visible_routectl_provider": {
-          "default": true,
-          "description": "Accepted with no effect. Responses never carry a `routectl_provider`\nfield; the served provider is reported through usage records, logs\nand status instead.",
-          "type": "boolean"
         }
       },
       "required": [

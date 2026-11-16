@@ -20,7 +20,7 @@ use super::ModelWiring;
 use crate::commands::edit_pipeline::{RelockValidationError, gate, render_write_error};
 
 /// Insert every `[models.<nick>]` block (`provider` + `upstream` only;
-/// serde defaults like `selectable` are omitted) and set
+/// serde defaults are omitted) and set
 /// `aliases.default = <default_alias>`, descending into (or creating) the
 /// `models` and `aliases` tables via `as_table_like_mut` so existing
 /// providers', models', and aliases' comments and ordering survive. A model
@@ -70,7 +70,7 @@ fn set_default_alias(doc: &mut DocumentMut, default_alias: &str) -> Result<()> {
 }
 
 /// The minimal `[models.<nick>]` block: the two required fields as string
-/// values, nothing else, so no serde default (`selectable`, empty overlays)
+/// values, nothing else, so no serde default (empty overlays, unset caps)
 /// lands in the written config. The re-validate gate backstops the shape.
 fn model_table(wiring: &ModelWiring) -> Table {
     let mut table = Table::new();
@@ -196,8 +196,16 @@ default = \"gpt\"
         assert!(out.contains("upstream = \"gpt-4o\""), "{out}");
         assert!(out.contains("[aliases]"), "{out}");
         assert!(out.contains("default = \"gpt\""), "{out}");
-        assert!(
-            !out.contains("selectable"),
+        let doc: DocumentMut = out.parse().expect("the written candidate is TOML");
+        let written: Vec<&str> = doc["models"]["gpt"]
+            .as_table()
+            .expect("[models.gpt] is a table")
+            .iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(
+            written,
+            ["provider", "upstream"],
             "serde defaults must be omitted: {out}"
         );
         parse_config(&out).expect("the written candidate parses and validates");

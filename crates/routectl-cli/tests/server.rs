@@ -263,6 +263,54 @@ async fn models_includes_alias_keys_and_nicknames() {
     );
 }
 
+/// Every `[models]` nickname is listed, whether or not an alias names it,
+/// beside every routable alias key; the list holds nothing else.
+#[tokio::test]
+async fn models_lists_every_configured_nickname() {
+    // Arrange
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".into(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", common::file_ref("k")),
+    );
+    let mut models = BTreeMap::new();
+    for (nickname, upstream) in [
+        ("aliased", "gpt-4o"),
+        ("staged", "gpt-4o-mini"),
+        ("spare", "o3"),
+    ] {
+        models.insert(nickname.to_string(), ModelEntry::new("p", upstream));
+    }
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".into(), AliasValue::Single("aliased".into()));
+    aliases.insert("default".into(), AliasValue::Single("aliased".into()));
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        ..Default::default()
+    });
+    let base = helpers::spawn_test_server(config).await;
+
+    // Act
+    let body: Value = reqwest::get(format!("{base}/v1/models"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Assert
+    let mut ids: Vec<&str> = body["data"]
+        .as_array()
+        .expect("data must be an array")
+        .iter()
+        .map(|e| e["id"].as_str().expect("id is a string"))
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["aliased", "fast", "spare", "staged"], "{body}");
+}
+
 /// The `context_length` of the `/v1/models` entry whose `id` is `id`.
 /// `None` means the entry OMITS the key -- the contract's
 /// window-is-unknown signal. The entry itself must exist; a missing one is

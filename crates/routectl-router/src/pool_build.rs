@@ -47,7 +47,7 @@ pub struct PoolPlaceholder {
 pub struct PoolReport {
     /// The `[pools]` table key.
     pub pool: String,
-    /// Every selectable `[models]` nickname that resolved against this pool.
+    /// Every `[models]` nickname that resolved against this pool.
     pub models: Vec<String>,
     /// How many members the block declared.
     pub configured_members: usize,

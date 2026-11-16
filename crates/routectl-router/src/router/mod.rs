@@ -2032,12 +2032,6 @@ struct DispatchTarget {
     /// `ResolvedModel.max_output_tokens`. Zero means none configured: an
     /// egress that sends the field then selects its own baseline.
     max_output_tokens: u32,
-    /// Operator-declared label echoed back in the response `model`
-    /// field. Threaded from `ResolvedModel.reported_model`. `None`
-    /// (or an empty string) makes the response echo the client's
-    /// requested alias; `Some(non-empty)` overrides it. Does not
-    /// affect `DispatchMeta` accounting.
-    reported_model: Option<String>,
 }
 
 impl DispatchTarget {
@@ -3357,7 +3351,7 @@ impl LiveSampleSink {
 }
 
 #[cfg(test)]
-use chain::{dispatch_target_for_seat, into_one_dispatch_target};
+use chain::into_one_dispatch_target;
 #[cfg(test)]
 use class_observe::DispatchSurface;
 #[cfg(test)]

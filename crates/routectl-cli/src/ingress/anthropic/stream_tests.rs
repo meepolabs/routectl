@@ -1692,7 +1692,9 @@ fn message_start_defaults_input_tokens_to_zero_without_estimate() {
     assert_eq!(payload["message"]["usage"]["input_tokens"], 0);
     assert_eq!(payload["message"]["usage"]["output_tokens"], 0);
 }
-/// label (requested alias by default, or a `reported_model` override).
+
+/// The router rewrites every chunk's `model` to the client's requested
+/// alias.
 /// The Anthropic stream ingress caches the first chunk's model into
 /// `msg_model` and surfaces it on `message_start`, so the rendered SSE
 /// reflects the rewritten label rather than the upstream wire id.

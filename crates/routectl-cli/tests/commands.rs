@@ -2267,6 +2267,74 @@ fn config_set_refuses_the_retired_cloak_tool_rename_with_the_loaders_line() {
     );
 }
 
+/// A model's `reported_model`, `visible_routectl_provider` and `selectable`
+/// are retired; `config set` on each prints the loader's line for a file
+/// carrying it and writes nothing, while a live key on the same model
+/// writes.
+#[test]
+fn config_set_refuses_the_retired_model_label_and_listing_keys_with_the_loaders_line() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = high_consequence_config(tmp.path());
+    let base = std::fs::read_to_string(&config_path).expect("read config");
+    let path = config_path.to_str().unwrap();
+    let set = |key: &str, value: &str| {
+        run_routectl_with_xdg(tmp.path(), &["--config", path, "config", "set", key, value])
+    };
+
+    for (key, value, replacement) in [
+        (
+            "reported_model",
+            "\"public-label\"",
+            "the response model field echoes the requested model",
+        ),
+        (
+            "visible_routectl_provider",
+            "false",
+            "responses carry no provider field",
+        ),
+        ("selectable", "false", "delete the block or comment it out"),
+    ] {
+        let loader_line = routectl_router::preflight_raw_config(&base.replace(
+            "upstream = \"gpt-4o\"\n",
+            &format!("upstream = \"gpt-4o\"\n{key} = {value}\n"),
+        ))
+        .expect_err("the loader refuses a file carrying the key")
+        .to_string();
+
+        // Act
+        let (code, stdout, stderr) = set(&format!("models.gpt.{key}"), value);
+
+        // Assert
+        assert_ne!(code, 0, "{key} refused: {stdout} / {stderr}");
+        assert_eq!(
+            loader_line,
+            format!("`models.gpt.{key}` is retired: {replacement}; delete it")
+        );
+        assert!(
+            stderr.contains(&loader_line),
+            "config set prints the loader's line: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config"),
+            base,
+            "a refused edit must not write"
+        );
+    }
+
+    let (code, stdout, stderr) = set("models.gpt.context_window", "200000");
+    assert_eq!(
+        code, 0,
+        "control: a live key on the same model writes: {stdout} / {stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .expect("read config")
+            .contains("context_window = 200000"),
+        "the control edit must land on disk"
+    );
+}
+
 // -- config check's secret-ref validation: read-only by construction, and
 // control-char-filtered at the one point it prints operator-written keys.
 

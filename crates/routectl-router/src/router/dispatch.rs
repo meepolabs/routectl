@@ -116,10 +116,9 @@ impl SurfaceAdapter for CompleteAdapter {
         // Overwrites the provider's own pre-stamp so a chain records the
         // configured provider name that actually served.
         resp.routectl_provider = Some(target.provider_name.clone());
-        // Client-visible label: the serving target's `reported_model`
-        // override when set (and non-empty), else the client's requested
-        // alias. Internal accounting keys off `DispatchMeta`, not this field.
-        resp.model = resolve_reported_model(target, &client_req.model);
+        // The response echoes the client's requested model or alias, never
+        // the served upstream id. Internal accounting keys off `DispatchMeta`.
+        resp.model.clone_from(&client_req.model);
         declare_model_relabel(wire_tap);
         router.carry_response_check(target, attempt_req, wire_tap, meta);
         // A 2xx proves the capability is not rejected: clear any learned
@@ -265,7 +264,7 @@ impl SurfaceAdapter for StreamAdapter {
         // Stamp the client-visible label on every Ok chunk (including the
         // terminal / usage-only chunk) before the breaker wrap. `Err` passes
         // through byte-for-byte unchanged.
-        let label = resolve_reported_model(target, &client_req.model);
+        let label = client_req.model.clone();
         declare_model_relabel(wire_tap);
         router.carry_response_check(target, attempt_req, wire_tap, meta);
         let relabeled = stream
@@ -924,19 +923,6 @@ pub(super) fn would_trim_k_floor_for_meta(
         Some(estimate.k_floor)
     } else {
         None
-    }
-}
-
-/// Resolve the client-visible response `model` label for a served
-/// dispatch target. Returns the target's `reported_model` override
-/// when set to a non-empty string, otherwise the client's requested
-/// alias (`req_model`). An empty override string is treated as unset.
-/// Computed once per request so a fallback chain / multi-chunk stream
-/// carries one stable label.
-pub(super) fn resolve_reported_model(target: &DispatchTarget, req_model: &str) -> String {
-    match target.reported_model.as_deref() {
-        Some(label) if !label.is_empty() => label.to_string(),
-        _ => req_model.to_string(),
     }
 }
 

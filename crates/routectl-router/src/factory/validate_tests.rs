@@ -669,19 +669,28 @@ mod validate_alias_chain_targets_tests {
     }
 
     #[test]
-    fn validate_alias_chain_targets_rejects_disabled_nickname() {
+    fn validate_alias_chain_targets_accepts_every_configured_model() {
+        let models = vec![
+            ("haiku", ModelEntry::new("anthropic", "claude-haiku")),
+            ("staged", ModelEntry::new("anthropic", "claude-staged")),
+        ];
         let cfg = config_with(
-            vec![(
-                "shelved",
-                ModelEntry::new("anthropic", "claude-shelved").with_selectable(false),
-            )],
-            vec![("fast", AliasValue::Single("shelved".into()))],
+            models.clone(),
+            vec![
+                ("fast", AliasValue::Single("staged".into())),
+                (
+                    "both",
+                    AliasValue::Chain(vec!["staged".into(), "haiku".into()]),
+                ),
+            ],
         );
-        let err = validate_alias_chain_targets(&cfg).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("alias `fast`"), "msg: {msg}");
-        assert!(msg.contains("shelved"), "msg: {msg}");
-        assert!(msg.contains("selectable = false"), "msg: {msg}");
+        validate_alias_chain_targets(&cfg).expect("an alias may name any configured model");
+
+        let control = config_with(models, vec![("fast", AliasValue::Single("absent".into()))]);
+        assert!(
+            validate_alias_chain_targets(&control).is_err(),
+            "control: the same fixture refuses a target outside [models]"
+        );
     }
 
     #[test]
@@ -698,22 +707,16 @@ mod validate_alias_chain_targets_tests {
 
     #[test]
     fn validate_alias_chain_targets_accumulates_multiple_errors() {
-        // Two unrelated misconfigurations -- one alias references an
-        // unknown nickname, another references a disabled one. The
+        // Two unrelated misconfigurations -- aliases reference unknown
+        // nicknames, another alias has an empty chain. The
         // validator must surface BOTH in a single error so the
         // operator doesn't fix one and discover the other on the
         // next run.
         let cfg = config_with(
-            vec![
-                ("haiku", ModelEntry::new("anthropic", "claude-haiku")),
-                (
-                    "shelved",
-                    ModelEntry::new("anthropic", "claude-shelved").with_selectable(false),
-                ),
-            ],
+            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku"))],
             vec![
                 ("alpha", AliasValue::Single("missing-1".into())),
-                ("beta", AliasValue::Single("shelved".into())),
+                ("beta", AliasValue::Chain(vec![])),
                 (
                     "gamma",
                     AliasValue::Chain(vec!["haiku".into(), "missing-2".into()]),
@@ -724,7 +727,7 @@ mod validate_alias_chain_targets_tests {
         let msg = err.to_string();
         assert!(msg.contains("missing-1"), "msg: {msg}");
         assert!(msg.contains("missing-2"), "msg: {msg}");
-        assert!(msg.contains("shelved"), "msg: {msg}");
+        assert!(msg.contains("alias `beta`: chain is empty"), "msg: {msg}");
     }
 
     // ----- Recursive alias-chain validation (Task #5) -----

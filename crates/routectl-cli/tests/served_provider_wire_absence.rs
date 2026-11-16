@@ -1,5 +1,7 @@
 //! The served provider never reaches a client response body, on any
-//! ingress, while the usage ledger still records which provider served.
+//! ingress, while the usage ledger still records which provider served; and
+//! every `model` the client sees is the alias it requested, never the
+//! upstream id the mock answers with.
 //!
 //! Each row drives a real routectl server against one openai-compat mock
 //! upstream, asserts the client body carries no `routectl_provider` key,
@@ -20,13 +22,14 @@ mod common;
 const PROVIDER: &str = "served-upstream";
 const ALIAS: &str = "mock-model";
 const FIELD: &str = "routectl_provider";
+const UPSTREAM_MODEL: &str = "upstream-model";
 
 fn completion_body() -> Value {
     json!({
         "id": "chatcmpl-1",
         "object": "chat.completion",
         "created": 0,
-        "model": "upstream-model",
+        "model": UPSTREAM_MODEL,
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": "ok"},
@@ -77,7 +80,7 @@ async fn routectl(upstream: &MockServer) -> (String, std::path::PathBuf) {
         ProviderEntry::openai_compat(upstream.uri(), common::file_ref("test-key")),
     );
     let mut models = BTreeMap::new();
-    models.insert("m".to_string(), ModelEntry::new(PROVIDER, "upstream-model"));
+    models.insert("m".to_string(), ModelEntry::new(PROVIDER, UPSTREAM_MODEL));
     let mut aliases = BTreeMap::new();
     aliases.insert(ALIAS.to_string(), AliasValue::Single("m".into()));
     let config = common::isolate_usage_db(Arc::new(Config {
@@ -131,6 +134,21 @@ fn client_documents(text: &str, is_stream: bool) -> Vec<Value> {
         .collect()
 }
 
+/// Every string value of a `model` key anywhere in `value`.
+fn model_labels(value: &Value) -> Vec<String> {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .flat_map(|(k, v)| {
+                let own = (k == "model").then(|| v.as_str().map(str::to_string));
+                own.flatten().into_iter().chain(model_labels(v))
+            })
+            .collect(),
+        Value::Array(items) => items.iter().flat_map(model_labels).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn has_field_anywhere(value: &Value) -> bool {
     match value {
         Value::Object(map) => map.iter().any(|(k, v)| k == FIELD || has_field_anywhere(v)),
@@ -146,7 +164,7 @@ struct Row {
     body: Value,
 }
 
-fn rows() -> [Row; 4] {
+fn rows() -> [Row; 6] {
     let messages = json!([{"role": "user", "content": "hi"}]);
     [
         Row {
@@ -168,11 +186,31 @@ fn rows() -> [Row; 4] {
             body: json!({"model": ALIAS, "max_tokens": 64, "messages": messages}),
         },
         Row {
+            name: "anthropic messages stream",
+            route: "/v1/messages",
+            is_stream: true,
+            body: json!({"model": ALIAS, "max_tokens": 64, "messages": messages, "stream": true}),
+        },
+        Row {
             name: "responses",
             route: "/v1/responses",
             is_stream: false,
             body: json!({
                 "model": ALIAS,
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}]
+                }]
+            }),
+        },
+        Row {
+            name: "responses stream",
+            route: "/v1/responses",
+            is_stream: true,
+            body: json!({
+                "model": ALIAS,
+                "stream": true,
                 "input": [{
                     "type": "message",
                     "role": "user",
@@ -213,6 +251,16 @@ async fn row_failures(
             .iter()
             .filter(|doc| has_field_anywhere(doc))
             .map(|doc| format!("{}: provider key on the wire: {doc}", row.name)),
+    );
+    let labels: Vec<String> = documents.iter().flat_map(model_labels).collect();
+    if labels.is_empty() {
+        failures.push(format!("{}: no model label in {text}", row.name));
+    }
+    failures.extend(
+        labels
+            .iter()
+            .filter(|label| label.as_str() != ALIAS)
+            .map(|label| format!("{}: model {label:?}, requested {ALIAS:?}", row.name)),
     );
     let recorded = ledger_provider(ledger, request_id).await;
     if recorded.as_deref() != Some(PROVIDER) {

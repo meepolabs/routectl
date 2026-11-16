@@ -35,10 +35,6 @@ use crate::server::AppState;
 ///     `/v1/models` ids as a picker -- listing `claude-opus-*`
 ///     would put a non-selectable pattern in front of the user.
 ///
-/// Models with `selectable = false` are also omitted -- they exist
-/// in the config (operator may be staging an entry) but the router
-/// refuses to route to them.
-///
 /// On the forwarded (pure-proxy) lane, this local list is a fallback,
 /// not the primary answer: when a `credential_source = "forwarded"`
 /// provider is configured AND this request arrived via the MITM
@@ -132,13 +128,7 @@ fn local_models_list(router: &routectl_router::Router, activation: &ActivationSt
         }
         emit(alias, &mut entries, &mut seen);
     }
-    // Skip `selectable = false` model nicknames -- they exist in the
-    // config (operator may be staging an entry) but the router refuses
-    // to route to them.
-    for (nickname, model) in &config.models {
-        if !model.selectable {
-            continue;
-        }
+    for nickname in config.models.keys() {
         emit(nickname, &mut entries, &mut seen);
     }
 

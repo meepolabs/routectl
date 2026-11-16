@@ -51,7 +51,7 @@ fn oauth_member(provider: &str) -> ProviderEntry {
 }
 
 /// A config whose `[pools.anthropic-pool]` groups `members`, with one
-/// selectable model routed at it.
+/// model routed at it.
 fn pooled_config(members: &[&str]) -> Config {
     let mut providers = BTreeMap::new();
     for member in members {

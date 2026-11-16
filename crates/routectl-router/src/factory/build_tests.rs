@@ -8,7 +8,7 @@ mod build_resolved_models_tests {
     //!     share one cached `Arc<dyn Provider>`.
     //!   - Bedrock models each get a distinct `Arc<dyn Provider>` with
     //!     `BedrockConfig.model_id` set from the model's `upstream`.
-    //!   - Disabled `[models.X] selectable = false` entries are skipped.
+    //!   - Every `[models.X]` entry is built.
     //!   - Models referencing an unknown provider are reported in the
     //!     `failed` return.
 
@@ -65,7 +65,7 @@ mod build_resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn disabled_models_are_skipped() {
+    async fn every_configured_model_is_built() {
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
             vec![(
@@ -74,18 +74,17 @@ mod build_resolved_models_tests {
             )],
             vec![
                 ("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5")),
-                (
-                    "shelved",
-                    ModelEntry::new("anthropic", "claude-shelved").with_selectable(false),
-                ),
+                ("staged", ModelEntry::new("anthropic", "claude-staged")),
             ],
         );
         let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
             .await
             .expect("ok");
         assert!(failed.is_empty());
-        assert!(models.contains_key("haiku"));
-        assert!(!models.contains_key("shelved"));
+        assert_eq!(
+            models.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["haiku", "staged"]
+        );
     }
 
     #[tokio::test]
@@ -721,9 +720,7 @@ mod build_resolved_models_tests {
         let mut cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["opus"]);
         cfg.models.insert(
             "opus".into(),
-            ModelEntry::new("anthropic-pool", "claude-opus-4-7")
-                .with_reported_model("public-label")
-                .with_visible_routectl_provider(false),
+            ModelEntry::new("anthropic-pool", "claude-opus-4-7").with_context_window(200_000),
         );
 
         let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
@@ -731,8 +728,7 @@ mod build_resolved_models_tests {
             .expect("a healthy pool builds");
 
         let opus = &built.models["opus"];
-        assert_eq!(opus.reported_model.as_deref(), Some("public-label"));
-        assert!(!opus.visible_routectl_provider);
+        assert_eq!(opus.context_window, Some(200_000));
         assert_eq!(
             opus.provider_name, "anthropic-pool",
             "the model keeps the operator-written pool name"

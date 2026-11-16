@@ -627,14 +627,6 @@ pub struct ModelEntry {
     /// compatible egresses it is the wire `model` field.
     pub upstream: String,
 
-    /// Whether this model is selectable from the `[aliases]` table.
-    /// Defaults to `true`; flip to `false` to keep an entry around
-    /// while wiring without making it servable. Disabled entries
-    /// still load but `Router::new` errors when an alias chain
-    /// references one.
-    #[serde(default = "default_true")]
-    pub selectable: bool,
-
     /// Per-model openai-compat reasoning dialect. Lives ONLY on
     /// `[models.X]` (no provider fallback) -- v0.6.0 moved the field
     /// off `[providers.X]` so two models on one provider can speak
@@ -684,22 +676,6 @@ pub struct ModelEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
 
-    /// Operator-declared label echoed back in the response `model`
-    /// field for this model. `None` (the default) makes the response
-    /// echo the client's requested alias (`req.model`); `Some(label)`
-    /// overrides that with a fixed public-facing string. An empty
-    /// string is treated as unset (falls through to `req.model`). Does
-    /// not affect internal accounting / observability, which key off
-    /// `DispatchMeta.served_model` / `served_upstream`, not `resp.model`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reported_model: Option<String>,
-
-    /// Accepted with no effect. Responses never carry a `routectl_provider`
-    /// field; the served provider is reported through usage records, logs
-    /// and status instead.
-    #[serde(default = "default_true")]
-    pub visible_routectl_provider: bool,
-
     /// The model's total context window in tokens (input plus output).
     /// The proactive window gate skips this model when a request cannot
     /// fit, and `GET /v1/models` reports it as `context_length`. Unset
@@ -733,14 +709,11 @@ impl ModelEntry {
         Self {
             provider: provider.into(),
             upstream: upstream.into(),
-            selectable: true,
             reasoning_dialect: None,
             history_reasoning: None,
             header_extras: BTreeMap::new(),
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
-            reported_model: None,
-            visible_routectl_provider: true,
             context_window: None,
             max_output_tokens: None,
             pricing: None,
@@ -757,12 +730,9 @@ impl ModelEntry {
             payload_extras,
             provider: _,
             upstream: _,
-            selectable: _,
             reasoning_dialect: _,
             history_reasoning: _,
             stream_first_byte_timeout_ms: _,
-            reported_model: _,
-            visible_routectl_provider: _,
             context_window: _,
             max_output_tokens: _,
             pricing: _,
@@ -794,12 +764,6 @@ impl ModelEntry {
         self
     }
 
-    /// Set the model's selectability flag.
-    pub const fn with_selectable(mut self, b: bool) -> Self {
-        self.selectable = b;
-        self
-    }
-
     /// Set the per-model `stream_first_byte_timeout_ms`. Wins over
     /// the per-provider and global resolution. A value of 0 is an
     /// operator-error sentinel (every stream would time out before its
@@ -810,21 +774,6 @@ impl ModelEntry {
             "stream_first_byte_timeout_ms must be > 0; 0 would time out every stream",
         );
         self.stream_first_byte_timeout_ms = Some(ms);
-        self
-    }
-
-    /// Set the client-visible label echoed in the response `model`
-    /// field. Free-form string; an empty string is treated as unset
-    /// at stamp time (falls through to the client's requested alias).
-    pub fn with_reported_model(mut self, label: impl Into<String>) -> Self {
-        self.reported_model = Some(label.into());
-        self
-    }
-
-    /// Set `visible_routectl_provider`. The key has no effect on the
-    /// response. Defaults to `true`.
-    pub const fn with_visible_routectl_provider(mut self, b: bool) -> Self {
-        self.visible_routectl_provider = b;
         self
     }
 

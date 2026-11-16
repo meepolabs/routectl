@@ -529,7 +529,7 @@ async fn config_reload_accepts_a_candidate_whose_pool_members_are_all_unreadable
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let router_before = swap.load_full();
 
-    // Act: rewrite the config so a selectable model routes at a pool whose one
+    // Act: rewrite the config so a model routes at a pool whose one
     // member cannot resolve a credential (a MemoryStore refuses oauth:// refs,
     // which is the same shape as a logged-out account).
     std::fs::write(

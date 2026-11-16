@@ -1300,8 +1300,7 @@ mod tests {
     /// Ingress-layer serialization pin: the OpenAI ingress renders
     /// `chunk.model` verbatim into each streaming frame. The relabel
     /// itself happens upstream in the router (which rewrites `chunk.model`
-    /// to the client-visible label -- requested alias by default, or a
-    /// per-model `reported_model` override). This test proves only that
+    /// to the client's requested alias). This test proves only that
     /// whatever label the chunk carries is passed through unchanged into
     /// the serialized body; router-integration coverage lives in
     /// tests/router.rs and src/router.rs.
@@ -2641,9 +2640,8 @@ mod tests {
     }
 
     /// The OpenAI ingress renders `resp.model` verbatim. Since the
-    /// router rewrites `resp.model` to the client-visible label
-    /// (requested alias by default, or the per-model `reported_model`
-    /// override), the rendered body surfaces that label rather than the
+    /// router rewrites `resp.model` to the client's requested alias, the
+    /// rendered body surfaces that label rather than the
     /// upstream wire id. Pin that the ingress passes it through.
     #[test]
     fn render_response_surfaces_router_model_label_verbatim() {

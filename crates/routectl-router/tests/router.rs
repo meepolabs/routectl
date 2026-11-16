@@ -30,8 +30,6 @@ mod dispatch_fallback;
 mod dispatch_meta;
 #[path = "router/gate_per_attempt.rs"]
 mod gate_per_attempt;
-#[path = "router/reported_model.rs"]
-mod reported_model;
 #[path = "router/retry.rs"]
 mod retry;
 #[path = "router/runtime_policy.rs"]
@@ -369,13 +367,9 @@ fn router_with_config_providers(
     build_router_v6_full(aliases, models, providers, retry, runtime)
 }
 
-/// Build a single-model router whose resolved model carries an optional
-/// `reported_model` override. The alias `fast` routes to nickname `m1`.
-fn router_with_reported_model(
-    upstream: &str,
-    reported: Option<&str>,
-    provider: Arc<dyn Provider>,
-) -> Router {
+/// Build a single-model router whose one model `m1` sends `upstream` on the
+/// wire. The alias `fast` routes to nickname `m1`.
+fn router_with_single_model(upstream: &str, provider: Arc<dyn Provider>) -> Router {
     let mut aliases = BTreeMap::new();
     aliases.insert("fast".into(), AliasValue::Single("m1".into()));
     let cfg = Config {
@@ -384,10 +378,7 @@ fn router_with_reported_model(
         ..Default::default()
     };
     let mut router = Router::new(Arc::new(cfg));
-    let mut model = ResolvedModel::new("m1", "p1", provider, upstream);
-    if let Some(label) = reported {
-        model = model.with_reported_model(label);
-    }
+    let model = ResolvedModel::new("m1", "p1", provider, upstream);
     let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     resolved.insert("m1".into(), Arc::new(model));
     router.install_resolved_models(resolved);

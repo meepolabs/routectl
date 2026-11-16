@@ -79,37 +79,6 @@ fn router_with_resolved(table: Vec<(&str, &str, &str, Arc<dyn Provider>)>) -> Ro
 }
 
 #[test]
-fn reported_model_survives_config_resolved_dispatch_relay() {
-    // Structural-relay sanity check: a configured `reported_model`
-    // rides the 4-hop relay (ModelEntry -> ResolvedModel ->
-    // DispatchTarget) including the seat-pinned dispatch path used by
-    // pooled-OAuth models. The end-to-end BEHAVIOR coverage (that the
-    // override actually surfaces in resp.model) lives in
-    // `seat_backed_complete_honors_reported_model_override`.
-    let entry =
-        crate::config::ModelEntry::new("p1", "wire-model").with_reported_model("public-label");
-    assert_eq!(entry.reported_model.as_deref(), Some("public-label"));
-
-    let p: Arc<dyn Provider> = Arc::new(CountedProvider {
-        id: "p1".into(),
-        calls: AtomicUsize::new(0),
-    });
-    let mut resolved = ResolvedModel::new("m1", "p1", p.clone(), "wire-model");
-    if let Some(label) = entry.reported_model.as_ref() {
-        resolved = resolved.with_reported_model(label.clone());
-    }
-    assert_eq!(resolved.reported_model.as_deref(), Some("public-label"));
-
-    let m = Arc::new(resolved);
-    let direct = into_one_dispatch_target(m.clone());
-    assert_eq!(direct.reported_model.as_deref(), Some("public-label"));
-
-    let seat = crate::seat_pool::SeatTarget::new("seat-a".to_string(), p.clone(), None, false);
-    let via_seat = dispatch_target_for_seat(&m, &seat, None);
-    assert_eq!(via_seat.reported_model.as_deref(), Some("public-label"));
-}
-
-#[test]
 fn seat_dispatch_target_carries_provider_kind() {
     // A seat-backed target must classify errors against the seat
     // provider's OWN kind, not the union table. `provider_kind` is
@@ -181,54 +150,56 @@ impl Provider for PrestampProvider {
 }
 
 #[tokio::test]
-async fn visible_routectl_provider_has_no_effect_on_wire_body_or_stamp() {
-    let mut observed = Vec::new();
-    for visible in [true, false] {
-        // Arrange
-        let p: Arc<dyn Provider> = Arc::new(PrestampProvider {
-            id: "provider-own-id".into(),
-        });
-        let mut router = Router::new(Arc::new(Config::default()));
-        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-        models.insert(
-            "haiku".to_string(),
-            Arc::new(
-                ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
-                    .with_visible_routectl_provider(visible),
-            ),
-        );
-        router.install_resolved_models(models);
-        let req = ChatRequest {
-            model: "haiku".into(),
-            messages: vec![].into(),
-            ..Default::default()
-        };
+async fn the_served_provider_is_stamped_internally_and_never_serialized() {
+    // Arrange
+    let p: Arc<dyn Provider> = Arc::new(PrestampProvider {
+        id: "provider-own-id".into(),
+    });
+    let mut router = Router::new(Arc::new(Config::default()));
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "haiku".to_string(),
+        Arc::new(ResolvedModel::new(
+            "haiku",
+            "anthropic",
+            p,
+            "claude-haiku-4-5",
+        )),
+    );
+    router.install_resolved_models(models);
+    let req = ChatRequest {
+        model: "haiku".into(),
+        messages: vec![].into(),
+        ..Default::default()
+    };
 
-        // Act
-        let dispatched = router
-            .complete_with_options(req, RouterOptions::default())
-            .await;
-        let resp = dispatched.result.expect("ok");
+    // Act
+    let dispatched = router
+        .complete_with_options(req, RouterOptions::default())
+        .await;
+    let resp = dispatched.result.expect("ok");
 
-        // Assert
-        let body = serde_json::to_value(&resp).expect("serialize");
-        assert_eq!(
-            resp.routectl_provider.as_deref(),
-            Some("anthropic"),
-            "visible={visible}: the router stamps the configured served provider"
-        );
-        assert_eq!(
-            dispatched.meta.served_provider.as_deref(),
-            Some("anthropic"),
-            "visible={visible}"
-        );
-        assert!(
-            body.get("routectl_provider").is_none(),
-            "visible={visible}: {body}"
-        );
-        observed.push((body, resp.routectl_provider));
-    }
-    assert_eq!(observed[0], observed[1]);
+    // Assert
+    assert_eq!(
+        resp.routectl_provider.as_deref(),
+        Some("anthropic"),
+        "the router stamps the configured served provider on the response it returns"
+    );
+    assert_eq!(
+        dispatched.meta.served_provider.as_deref(),
+        Some("anthropic")
+    );
+    let body = serde_json::to_value(&resp).expect("serialize");
+    let keys: Vec<&str> = body
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        !keys.iter().any(|k| k.contains("provider")),
+        "no provider field reaches the serialized response: {body}"
+    );
 }
 
 /// Minimal streaming-capable provider for the seat-path end-to-end
@@ -313,15 +284,13 @@ impl Provider for StreamingProvider {
 /// Build a router whose single model nickname is pooled onto a fixed
 /// set of seats. Mirrors the factory's seat-expansion path
 /// (`ResolvedModel::with_seats`) so dispatch walks the seat-pinned
-/// `DispatchTarget`s, the path used by pooled-OAuth models. An
-/// optional `reported_model` override is threaded onto the model.
+/// `DispatchTarget`s, the path used by pooled-OAuth models.
 fn router_with_pooled_model(
     nickname: &str,
     pool_name: &str,
     upstream: &str,
     provider: Arc<dyn Provider>,
     members: &[&str],
-    reported_model: Option<&str>,
 ) -> Router {
     let cfg = Arc::new(Config::default());
     let mut router = Router::new(cfg);
@@ -333,11 +302,8 @@ fn router_with_pooled_model(
         })
         .collect();
 
-    let mut resolved =
+    let resolved =
         ResolvedModel::new(nickname, pool_name, provider, upstream).with_seats(seats.into());
-    if let Some(label) = reported_model {
-        resolved = resolved.with_reported_model(label);
-    }
 
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(nickname.to_string(), Arc::new(resolved));
@@ -347,8 +313,7 @@ fn router_with_pooled_model(
 
 #[tokio::test]
 async fn seat_backed_complete_echoes_client_alias_by_default() {
-    // A pooled (seat-backed) model with no `reported_model` override
-    // must echo the client's requested alias in resp.model, even
+    // A pooled (seat-backed) model must echo the client's requested alias in resp.model, even
     // though dispatch went through a seat-pinned DispatchTarget whose
     // upstream wire id differs from the alias.
     let p: Arc<dyn Provider> = Arc::new(CountedProvider {
@@ -361,7 +326,6 @@ async fn seat_backed_complete_echoes_client_alias_by_default() {
         "claude-opus-4-7-wire",
         p.clone(),
         &["seat-a", "seat-b"],
-        None,
     );
     let req = ChatRequest {
         model: "opus".into(),
@@ -375,35 +339,9 @@ async fn seat_backed_complete_echoes_client_alias_by_default() {
 }
 
 #[tokio::test]
-async fn seat_backed_complete_honors_reported_model_override() {
-    // A pooled model WITH a `reported_model` override must surface
-    // that override in resp.model on the seat-served path.
-    let p: Arc<dyn Provider> = Arc::new(CountedProvider {
-        id: "oauth-pool".into(),
-        calls: AtomicUsize::new(0),
-    });
-    let router = router_with_pooled_model(
-        "opus",
-        "anthropic-oauth",
-        "claude-opus-4-7-wire",
-        p.clone(),
-        &["seat-a", "seat-b"],
-        Some("public-opus"),
-    );
-    let req = ChatRequest {
-        model: "opus".into(),
-        messages: vec![].into(),
-        ..Default::default()
-    };
-    let resp = router.complete(req).await.expect("ok");
-    assert_eq!(resp.model, "public-opus");
-}
-
-#[tokio::test]
 async fn seat_backed_stream_relabels_chunk_model() {
     // The seat-served streaming path must relabel every chunk.model
-    // to the client-visible label. Default (no override) echoes the
-    // requested alias.
+    // to the requested alias.
     let p: Arc<dyn Provider> = Arc::new(StreamingProvider {
         id: "oauth-pool".into(),
     });
@@ -413,7 +351,6 @@ async fn seat_backed_stream_relabels_chunk_model() {
         "claude-opus-4-7-wire",
         p.clone(),
         &["seat-a", "seat-b"],
-        None,
     );
     let req = ChatRequest {
         model: "opus".into(),
@@ -509,7 +446,6 @@ async fn status_targets_one_entry_per_seat_for_pooled() {
         "claude-opus-4-7-wire",
         p.clone(),
         &["anthropic-a", "anthropic-b"],
-        None,
     );
     let targets = router.status_targets(Instant::now());
     assert_eq!(targets.len(), 2, "one entry per seat of a pooled model");
@@ -622,7 +558,6 @@ async fn status_targets_does_not_claim_half_open_probe_slot() {
         "claude-opus-4-7-wire",
         p.clone(),
         &["seat-a", "seat-b"],
-        None,
     ));
 
     // Park seat-a's breaker; compute an instant past its cooldown so the

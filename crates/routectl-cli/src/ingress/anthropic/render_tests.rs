@@ -53,8 +53,7 @@ fn render_response_emits_messages_shape() {
 /// Ingress-layer serialization pin: the Anthropic ingress renders
 /// `resp.model` verbatim into the non-streaming response body. The
 /// relabel itself happens upstream in the router (which rewrites
-/// `resp.model` to the client-visible label -- requested alias by
-/// default, or a per-model `reported_model` override). This test proves
+/// `resp.model` to the client's requested alias). This test proves
 /// only that whatever label the response carries is passed through
 /// unchanged into the rendered `model` field; router-integration
 /// coverage lives in tests/router.rs and src/router.rs.

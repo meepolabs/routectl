@@ -943,7 +943,7 @@ const fn refusal_for_build_error(e: &routectl_core::Error) -> MemberRefusal {
     }
 }
 
-/// Build every member of every pool a selectable model routes at, exactly as
+/// Build every member of every pool a model routes at, exactly as
 /// [`build_resolved_models_reported`] does, and return each pool's refusal.
 ///
 /// This is how `config check` refuses the configs serve and reload refuse at
@@ -966,15 +966,14 @@ pub async fn pool_member_refusals(
     refusals
 }
 
-/// The pools a selectable, buildable model names: the set
+/// The pools a buildable model names: the set
 /// [`build_resolved_models_reported`] compiles.
 fn routed_pools(config: &Config) -> BTreeMap<&str, &PoolEntry> {
     config
         .models
         .iter()
-        .filter(|(nickname, entry)| {
-            entry.selectable
-                && crate::seat_pool::check_state_key_name("model nickname", nickname).is_ok()
+        .filter(|(nickname, _)| {
+            crate::seat_pool::check_state_key_name("model nickname", nickname).is_ok()
         })
         .filter_map(|(_, entry)| config.pools.get_key_value(&entry.provider))
         .map(|(name, pool)| (name.as_str(), pool))
@@ -1152,9 +1151,6 @@ fn install_resolved_codex_identity(config: &Config) {
 /// provider is referenced by an alias chain (mirrors the existing
 /// `serve` / `test` "fail loudly when route is broken" guard).
 ///
-/// `[models.X].selectable = false` entries are skipped; the returned
-/// map does not contain them.
-///
 /// The tuple-returning shape for callers that do not consume the per-pool
 /// build reports. [`build_resolved_models_reported`] is the same build with
 /// the reports retained; this wrapper discards them.
@@ -1181,14 +1177,13 @@ pub struct ResolvedModelBuild {
     pub models: BTreeMap<String, Arc<ResolvedModel>>,
     /// `(nickname, error)` for each model whose provider failed to build.
     pub failed: Vec<(String, String)>,
-    /// One sanitized report per pool that at least one selectable model
-    /// named, in pool-name order.
+    /// One sanitized report per pool that at least one model named, in pool-name order.
     pub pool_reports: Vec<PoolReport>,
 }
 
 /// [`build_resolved_models`] with the per-pool build reports retained.
 ///
-/// Fails with `Error::Config` when any pool that a selectable model names has
+/// Fails with `Error::Config` when any pool that a model names has
 /// a member that refuses the config, or no member at all (see
 /// `compile_pool`). A pool whose members are all placeholders builds: it
 /// answers a local refusal until a credential recovers. On a hot reload the
@@ -1235,9 +1230,6 @@ pub async fn build_resolved_models_reported(
     let mut pool_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for (nickname, entry) in &config.models {
-        if !entry.selectable {
-            continue;
-        }
         // A `#` in a model nickname would collide with a labeled seat's
         // runtime-state key (`{nickname}#{label}`), letting two distinct
         // dispatch identities share one circuit breaker. Config validation
@@ -1483,16 +1475,13 @@ pub fn apply_model_knobs(
             resolved = resolved.with_stream_first_byte_timeout_ms(ms);
         }
     }
-    if let Some(label) = entry.reported_model.as_ref() {
-        resolved = resolved.with_reported_model(label.clone());
-    }
     if let Some(tokens) = entry.max_output_tokens {
         resolved = resolved.with_max_output_tokens(tokens);
     }
     if let Some(tokens) = entry.context_window {
         resolved = resolved.with_context_window(tokens);
     }
-    resolved.with_visible_routectl_provider(entry.visible_routectl_provider)
+    resolved
 }
 
 /// Assemble the `ResolvedModel` for a pool-backed model from the pool's
@@ -1530,7 +1519,7 @@ fn resolved_pool_model(
 }
 
 /// The sanitized per-pool build reports, one per pool that at least one
-/// selectable model named. A pool no model routes at is not reported: it was
+/// model named. A pool no model routes at is not reported: it was
 /// never compiled, so there is nothing observed to report.
 fn pool_reports(
     outcomes: &BTreeMap<String, PoolOutcome>,

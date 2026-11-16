@@ -3,7 +3,7 @@
 //! Model nicknames, pooled seats (`nickname#member`), and provider names all
 //! key ONE runtime-state map (breaker, RPM bucket, probe slot, learned state).
 //! The grammar lives in [`crate::seat_pool`]; this pass enforces it over EVERY
-//! `[models]` and `[providers]` key -- selectable or not, referenced or not --
+//! `[models]` and `[providers]` key -- referenced or not --
 //! so no entry can reach that map under a key another identity also composes.
 //! Provider names also carry a byte ceiling.
 

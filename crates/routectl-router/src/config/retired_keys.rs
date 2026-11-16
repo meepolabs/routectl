@@ -94,6 +94,16 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         replacement: "client thinking budgets are forwarded",
     },
     RetiredKey {
+        path: &["models", ANY_ENTRY, "reported_model"],
+        refused_value: None,
+        replacement: "the response model field echoes the requested model",
+    },
+    RetiredKey {
+        path: &["models", ANY_ENTRY, "selectable"],
+        refused_value: None,
+        replacement: "delete the block or comment it out",
+    },
+    RetiredKey {
         path: &["models", ANY_ENTRY, "supports_adaptive_thinking"],
         refused_value: None,
         replacement: "client thinking is forwarded; effort alone adds no thinking",
@@ -102,6 +112,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         path: &["models", ANY_ENTRY, "unsupported_features"],
         refused_value: None,
         replacement: "use `[capability.overrides.\"<provider>:<nickname>\"] unsupported`",
+    },
+    RetiredKey {
+        path: &["models", ANY_ENTRY, "visible_routectl_provider"],
+        refused_value: None,
+        replacement: "responses carry no provider field",
     },
     RetiredKey {
         path: &["pools", ANY_ENTRY, "seat_selection"],

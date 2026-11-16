@@ -40,10 +40,6 @@ pub struct ResolvedLearnedLane {
     /// The lane's provider kind (`kind_str`), empty when its provider entry
     /// is not configured.
     pub provider_kind: &'static str,
-    /// Whether dispatch reaches the lane: at least one of its models is
-    /// selectable. A lane only `selectable = false` models map to is still
-    /// projected, so its learned history keeps a home, but is not routed.
-    pub routed: bool,
 }
 
 impl ResolvedLearnedLane {
@@ -73,7 +69,7 @@ impl LearnedLaneProjection {
             for provider_entry in egress_entries(config, &model.provider) {
                 if let Some(lane) = StateKey::new(provider_entry, &model.upstream) {
                     let kind = provider_kind(config, provider_entry);
-                    lanes.add(lane, nickname, kind, model.selectable);
+                    lanes.add(lane, nickname, kind);
                 }
             }
         }
@@ -184,7 +180,7 @@ impl Router {
             for target in self.projection_targets(model) {
                 if let Some(lane) = target.learned_lane {
                     let kind = provider_kind(&self.config, &target.provider_name);
-                    lanes.add(lane, &model.nickname, kind, true);
+                    lanes.add(lane, &model.nickname, kind);
                 }
             }
         }
@@ -250,7 +246,7 @@ struct LaneCollector {
 }
 
 impl LaneCollector {
-    fn add(&mut self, lane: StateKey, nickname: &str, provider_kind: &'static str, routed: bool) {
+    fn add(&mut self, lane: StateKey, nickname: &str, provider_kind: &'static str) {
         let entry = self
             .lanes
             .entry(lane.as_lane_key().to_string())
@@ -258,9 +254,7 @@ impl LaneCollector {
                 lane,
                 nicknames: Vec::new(),
                 provider_kind,
-                routed: false,
             });
-        entry.routed |= routed;
         if !entry.nicknames.iter().any(|n| n == nickname) {
             entry.nicknames.push(nickname.to_string());
         }

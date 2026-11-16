@@ -79,17 +79,6 @@ pub struct ResolvedModel {
     /// tokens, or `None` when the operator configured none. Read through
     /// [`Self::context_window_tokens`].
     pub context_window: Option<u32>,
-    /// Operator-declared label echoed back in the response `model`
-    /// field. `None` makes the response echo the client's requested
-    /// alias (`req.model`); `Some(label)` overrides with a fixed
-    /// public-facing string. An empty string is treated as unset at
-    /// stamp time. Projected from `[models.X] reported_model`. Does
-    /// not affect internal accounting / observability.
-    pub reported_model: Option<String>,
-    /// Projected from `[models.X] visible_routectl_provider`. Accepted
-    /// with no effect: responses never carry a `routectl_provider` field,
-    /// and the served provider is always recorded internally.
-    pub visible_routectl_provider: bool,
     /// Source `SecretRef` used to resolve this model's primary auth
     /// credential at provider-build time. Retained on the resolved
     /// model so the router can wire 401 self-heal back through the
@@ -127,8 +116,6 @@ impl ResolvedModel {
             stream_first_byte_timeout_ms: None,
             max_output_tokens: 0,
             context_window: None,
-            reported_model: None,
-            visible_routectl_provider: true,
             auth_secret_ref: None,
             seats: None,
         }
@@ -184,21 +171,6 @@ impl ResolvedModel {
     /// Set the per-model total context window in tokens.
     pub const fn with_context_window(mut self, tokens: u32) -> Self {
         self.context_window = Some(tokens);
-        self
-    }
-
-    /// Set the client-visible label echoed in the response `model`
-    /// field. `None` echoes the client's requested alias; an empty
-    /// string is treated as unset at stamp time.
-    pub fn with_reported_model(mut self, label: impl Into<String>) -> Self {
-        self.reported_model = Some(label.into());
-        self
-    }
-
-    /// Set the projected `visible_routectl_provider` value. It has no
-    /// effect on dispatch or on the response. Defaults to `true`.
-    pub const fn with_visible_routectl_provider(mut self, b: bool) -> Self {
-        self.visible_routectl_provider = b;
         self
     }
 
@@ -281,8 +253,6 @@ impl std::fmt::Debug for ResolvedModel {
             )
             .field("max_output_tokens", &self.max_output_tokens)
             .field("context_window", &self.context_window)
-            .field("reported_model", &self.reported_model)
-            .field("visible_routectl_provider", &self.visible_routectl_provider)
             .field(
                 "auth_secret_ref",
                 &self

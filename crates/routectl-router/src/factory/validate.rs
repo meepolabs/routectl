@@ -337,7 +337,7 @@ pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
 ///
 /// This validates the alias KEYS (the patterns). It is distinct from
 /// `validate_alias_chain_targets`, which validates the alias VALUES
-/// (chain targets resolve to known, selectable models). Both must run.
+/// (chain targets resolve to known models). Both must run.
 ///
 /// Every key is parsed -- exact keys parse as `AliasPattern::Exact` and
 /// always pass, so there is no need to gate on `contains('*')`.
@@ -351,8 +351,8 @@ pub fn validate_alias_patterns(config: &crate::config::Config) -> Result<()> {
     Ok(())
 }
 
-/// Validate that every entry in `[aliases]` resolves to a known and
-/// selectable `[models.X]` nickname OR another alias key (recursive
+/// Validate that every entry in `[aliases]` resolves to a known
+/// `[models.X]` nickname OR another alias key (recursive
 /// expansion). Walks both `AliasValue::Single` and `AliasValue::Chain`;
 /// accumulates every offending nickname into one consolidated startup
 /// error so the operator gets the full list in one shot.
@@ -362,10 +362,6 @@ pub fn validate_alias_patterns(config: &crate::config::Config) -> Result<()> {
 ///   - alias references a nickname that doesn't exist in `[models]`
 ///     and is not another alias key. Common cause: typo, or the
 ///     operator deleted a model row but forgot to update the alias.
-///
-///   - alias references a `selectable = false` nickname. The model
-///     parses but the router refuses to dispatch to it; passing it
-///     through as a route silently breaks at request time.
 ///
 ///   - empty `AliasValue::Chain([])`. An alias with no targets
 ///     resolves to `UnknownAlias` at request time, which is identical
@@ -407,21 +403,11 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
             if config.aliases.contains_key(nickname) {
                 continue;
             }
-            match config.models.get(nickname) {
-                None => {
-                    errors.push(format!(
-                        "alias `{alias}`: target `{nickname}` is not a known \
-                         model nickname in [models] and is not an alias key"
-                    ));
-                }
-                Some(model) if !model.selectable => {
-                    errors.push(format!(
-                        "alias `{alias}`: target `{nickname}` is declared but \
-                         `selectable = false`; alias chains must reference \
-                         selectable models"
-                    ));
-                }
-                Some(_) => {}
+            if !config.models.contains_key(nickname) {
+                errors.push(format!(
+                    "alias `{alias}`: target `{nickname}` is not a known \
+                     model nickname in [models] and is not an alias key"
+                ));
             }
         }
     }

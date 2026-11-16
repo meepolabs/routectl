@@ -20,7 +20,6 @@ upstream = "claude-haiku-4-5-20251001"
     let m = cfg.models.get("haiku").expect("haiku entry");
     assert_eq!(m.provider, "anthropic");
     assert_eq!(m.upstream, "claude-haiku-4-5-20251001");
-    assert!(m.selectable, "default selectable = true");
     assert!(m.reasoning_dialect.is_none());
     assert!(m.history_reasoning.is_none());
     assert!(m.header_extras.is_empty());
@@ -266,26 +265,18 @@ api_key_ref = "literal:k"
     assert!(cfg.providers.contains_key("deepseek"));
 }
 
-#[test]
-fn model_entry_disabled_field() {
-    let toml_text = r#"
-[models.shelved]
-provider = "p"
-upstream = "u"
-selectable = false
-"#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse");
-    let m = cfg.models.get("shelved").expect("entry");
-    assert!(!m.selectable);
-}
-
-/// `ModelEntry::new` defaults match the TOML defaults: selectable=true.
+/// `ModelEntry::new` defaults match the TOML defaults.
 #[test]
 fn model_entry_builder_defaults_match_toml_defaults() {
-    let m = ModelEntry::new("p", "u");
-    assert_eq!(m.provider, "p");
-    assert_eq!(m.upstream, "u");
-    assert!(m.selectable);
+    let toml_text = r#"
+[models.m]
+provider = "p"
+upstream = "u"
+"#;
+    let cfg: Config = toml::from_str(toml_text).expect("parse");
+    let parsed = serde_json::to_value(cfg.models.get("m").expect("entry")).expect("serialize");
+    let built = serde_json::to_value(ModelEntry::new("p", "u")).expect("serialize");
+    assert_eq!(parsed, built);
 }
 
 #[test]

@@ -593,7 +593,6 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         max_output_tokens: m.max_output_tokens,
-        reported_model: m.reported_model.clone(),
         model: m,
     }
 }
@@ -652,7 +651,6 @@ pub(super) fn dispatch_target_for_seat(
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         max_output_tokens: m.max_output_tokens,
-        reported_model: m.reported_model.clone(),
         model: m.clone(),
     }
 }

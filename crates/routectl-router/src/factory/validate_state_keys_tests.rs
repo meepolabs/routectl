@@ -10,11 +10,8 @@ const PROVIDER: &str = "[providers.anthropic-work]\n\
      kind = \"anthropic-api\"\n\
      api_key_ref = \"oauth://anthropic#work\"\n";
 
-fn model(nickname: &str, provider: &str, selectable: bool) -> String {
-    format!(
-        "[models.\"{nickname}\"]\nprovider = \"{provider}\"\nupstream = \"u\"\n\
-         selectable = {selectable}\n"
-    )
+fn model(nickname: &str, provider: &str) -> String {
+    format!("[models.\"{nickname}\"]\nprovider = \"{provider}\"\nupstream = \"u\"\n")
 }
 
 fn errors(config: &Config) -> String {
@@ -26,10 +23,7 @@ fn errors(config: &Config) -> String {
 #[test]
 fn a_model_nickname_carrying_the_separator_is_refused() {
     // Arrange
-    let config = parse(&format!(
-        "{PROVIDER}{}",
-        model("a#b", "anthropic-work", true)
-    ));
+    let config = parse(&format!("{PROVIDER}{}", model("a#b", "anthropic-work")));
 
     // Act
     let err = errors(&config);
@@ -40,24 +34,10 @@ fn a_model_nickname_carrying_the_separator_is_refused() {
 }
 
 #[test]
-fn an_unselectable_model_nickname_carrying_the_separator_is_refused() {
-    // The factory skips unselectable entries before its own `#` check, so
-    // config validation is the only boundary that sees this one.
-    let config = parse(&format!(
-        "{PROVIDER}{}",
-        model("off#line", "anthropic-work", false)
-    ));
-
-    let err = errors(&config);
-
-    assert!(err.contains("model nickname `off#line`"), "{err}");
-}
-
-#[test]
 fn an_unreferenced_model_nickname_carrying_the_separator_is_refused() {
     // No alias names it and its provider does not exist: nothing else in the
     // suite would ever look at this entry.
-    let config = parse(&model("orphan#seat", "missing", true));
+    let config = parse(&model("orphan#seat", "missing"));
 
     let err = errors(&config);
 
@@ -91,7 +71,7 @@ fn a_model_nickname_equal_to_another_providers_name_is_refused() {
     // model dispatches through `other`: one key, two different gates.
     let config = parse(&format!(
         "{PROVIDER}{OTHER}{}",
-        model("anthropic-work", "other", true)
+        model("anthropic-work", "other")
     ));
 
     let err = errors(&config);
@@ -108,7 +88,7 @@ fn a_model_named_after_its_own_provider_passes() {
     // the model dispatches through, so no second identity shares it.
     let config = parse(&format!(
         "{PROVIDER}{}",
-        model("anthropic-work", "anthropic-work", true)
+        model("anthropic-work", "anthropic-work")
     ));
 
     assert!(validate_state_key_names(&config).is_ok());
@@ -120,8 +100,8 @@ fn every_offending_key_is_reported_in_one_pass() {
     let config = parse(&format!(
         "[providers.\"p#1\"]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n\
          {PROVIDER}{OTHER}{}{}",
-        model("m#1", "anthropic-work", false),
-        model("anthropic-work", "other", true),
+        model("m#1", "anthropic-work"),
+        model("anthropic-work", "other"),
     ));
 
     // Act
@@ -139,12 +119,9 @@ fn each_refusal_surfaces_through_the_collected_suite() {
     // Wiring proof: serve, reload, `config check` and doctor all read the
     // one collected suite.
     let cases = [
-        format!("{PROVIDER}{}", model("x#y", "anthropic-work", false)),
+        format!("{PROVIDER}{}", model("x#y", "anthropic-work")),
         "[providers.\"p#q\"]\nkind = \"anthropic-api\"\napi_key_ref = \"env://K\"\n".to_string(),
-        format!(
-            "{PROVIDER}{OTHER}{}",
-            model("anthropic-work", "other", true)
-        ),
+        format!("{PROVIDER}{OTHER}{}", model("anthropic-work", "other")),
     ];
     for text in cases {
         let config = parse(&text);
@@ -167,8 +144,8 @@ fn ordinary_direct_and_pooled_configs_pass() {
          [providers.anthropic-default]\nkind = \"anthropic-api\"\napi_key_ref = \"oauth://anthropic\"\n\
          [pools.anthropic]\nmembers = [\"anthropic-default\", \"anthropic-work\"]\n\
          {}{}",
-        model("opus", "anthropic", true),
-        model("haiku-pinned", "anthropic-work", false),
+        model("opus", "anthropic"),
+        model("haiku-pinned", "anthropic-work"),
     ));
 
     assert!(
@@ -195,7 +172,7 @@ fn a_model_nickname_equal_to_a_provider_name_dispatching_through_a_pool_is_refus
         "{PROVIDER}\
          [pools.anthropic]\nmembers = [\"anthropic-work\"]\n\
          {}",
-        model("anthropic-work", "anthropic", true),
+        model("anthropic-work", "anthropic"),
     ));
 
     // Act

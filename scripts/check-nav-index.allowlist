@@ -56,7 +56,6 @@ crates/routectl-router/tests/router/default_alias.rs
 crates/routectl-router/tests/router/dispatch_fallback.rs
 crates/routectl-router/tests/router/dispatch_meta.rs
 crates/routectl-router/tests/router/gate_per_attempt.rs
-crates/routectl-router/tests/router/reported_model.rs
 crates/routectl-router/tests/router/retry.rs
 crates/routectl-router/tests/router/runtime_policy.rs
 crates/routectl-router/tests/router/window_gate.rs

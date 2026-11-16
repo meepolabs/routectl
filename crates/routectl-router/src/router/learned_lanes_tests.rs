@@ -19,7 +19,7 @@ fn entry() -> ProviderEntry {
 }
 
 /// Two nicknames on one upstream of `p`, a third on another upstream, a
-/// pooled model over members `m1` / `m2`, and a disabled model on its own
+/// pooled model over members `m1` / `m2`, and a fourth model on its own
 /// upstream of `p`.
 fn config() -> Config {
     let mut config = Config::default();
@@ -35,14 +35,12 @@ fn config() -> Config {
         ("beta", "p", "up"),
         ("gamma", "p", "other"),
         ("pooled", "pool", "seat-up"),
+        ("delta", "p", "parked"),
     ] {
         config
             .models
             .insert(nickname.to_string(), ModelEntry::new(provider, upstream));
     }
-    let mut disabled = ModelEntry::new("p", "parked");
-    disabled.selectable = false;
-    config.models.insert("delta".to_string(), disabled);
     config
 }
 
@@ -57,7 +55,7 @@ async fn built_router(config: Config) -> Router {
     router
 }
 
-fn summary(projection: &LearnedLaneProjection) -> Vec<(String, Vec<String>, &'static str, bool)> {
+fn summary(projection: &LearnedLaneProjection) -> Vec<(String, Vec<String>, &'static str)> {
     projection
         .lanes()
         .iter()
@@ -66,18 +64,16 @@ fn summary(projection: &LearnedLaneProjection) -> Vec<(String, Vec<String>, &'st
                 l.lane.as_lane_key().to_string(),
                 l.nicknames.clone(),
                 l.provider_kind,
-                l.routed,
             )
         })
         .collect()
 }
 
-fn row(lane: &str, nicknames: &[&str], routed: bool) -> (String, Vec<String>, &'static str, bool) {
+fn row(lane: &str, nicknames: &[&str]) -> (String, Vec<String>, &'static str) {
     (
         lane.to_string(),
         nicknames.iter().map(|n| (*n).to_string()).collect(),
         KIND,
-        routed,
     )
 }
 
@@ -88,11 +84,11 @@ fn the_config_projection_names_each_lane_once_with_the_nicknames_on_it() {
     assert_eq!(
         summary(&projection),
         [
-            row("m1#seat-up", &["pooled"], true),
-            row("m2#seat-up", &["pooled"], true),
-            row("p#other", &["gamma"], true),
-            row("p#parked", &["delta"], false),
-            row("p#up", &["alpha", "beta"], true),
+            row("m1#seat-up", &["pooled"]),
+            row("m2#seat-up", &["pooled"]),
+            row("p#other", &["gamma"]),
+            row("p#parked", &["delta"]),
+            row("p#up", &["alpha", "beta"]),
         ]
     );
     assert_eq!(
@@ -112,11 +108,7 @@ async fn the_router_projection_matches_the_config_projection_for_every_dispatche
     let router = built_router(config).await;
     let from_router = router.learned_lane_projection();
 
-    let routed: Vec<_> = summary(&from_config)
-        .into_iter()
-        .filter(|(_, _, _, routed)| *routed)
-        .collect();
-    assert_eq!(summary(&from_router), routed);
+    assert_eq!(summary(&from_router), summary(&from_config));
 }
 
 #[tokio::test]
@@ -126,7 +118,11 @@ async fn every_status_target_carries_the_lane_dispatch_mints_for_it() {
 
     let targets = router.status_targets(std::time::Instant::now());
 
-    assert_eq!(targets.len(), 5, "alpha, beta, gamma and two pooled seats");
+    assert_eq!(
+        targets.len(),
+        6,
+        "alpha, beta, gamma, delta and two pooled seats"
+    );
     for target in &targets {
         let lane = target
             .learned_lane

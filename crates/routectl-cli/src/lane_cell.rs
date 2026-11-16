@@ -66,7 +66,7 @@ pub fn lane_metas<'a>(config: &'a Config, entries: &[LearnedRegistryEntry]) -> V
                 .filter_map(|nickname| config.models.get_key_value(nickname))
                 .map(|(nickname, entry)| LaneModel { nickname, entry })
                 .collect(),
-            routed: projected.routed,
+            routed: true,
         })
         .collect();
 

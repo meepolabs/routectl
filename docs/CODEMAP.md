@@ -1856,9 +1856,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   mantle lane, deriving the endpoint from `region`); `OpenaiCompat.base_url`
   is `#[serde(default)]` (empty) so the mantle lane may omit it (validation
   still requires it non-empty on the standard lane); `ModelEntry`
-  (`reported_model: Option<String>` response model-label echo override,
-  `visible_routectl_provider: bool`, accepted with no effect, and the model facts
-  `context_window` / `max_output_tokens` / `pricing: Option<PricingConfig>`);
+  (the model facts `context_window` / `max_output_tokens` /
+  `pricing: Option<PricingConfig>`);
   `ProviderEntry`/`ModelEntry`/`ServerAuth::redact_secrets` for display; `AliasValue`, `ServerAuth`,
   `PricingConfig` per-model prices (the legacy 5m/1h write keys
   plus `cache_write_per_mtok`, a duration-keyed write-price map;
@@ -2506,8 +2505,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per usable pool member, shared by Arc across every model
   naming that pool, `None` when `provider` names a plain `[providers]` entry);
-  `reported_model: Option<String>` (per-model response-echo override);
-  `visible_routectl_provider` (projected, no effect);
   `context_window_tokens()` -- THE shared read of the configured
   `[models.X] context_window` (`Some(0)` degrades to `None`), consumed by both
   the proactive window gate and `/v1/models` discovery
@@ -2684,7 +2681,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `dispatch_loop::run_walk` through its adapter, then calls
   `dispatch_loop::finish_dispatch`.
   `CompleteAdapter`: `request_timeout_ms` per attempt, then the
-  internal (never serialized) served-provider stamp / relabel (`resolve_reported_model`) / evidence / quota
+  internal (never serialized) served-provider stamp / requested-model relabel / evidence / quota
   commit. `StreamAdapter`: the first-content timeout
   (`stream_first_content_timed_out`) per attempt, `invoke` through
   `stream_commit::try_stream_with_first_content` (first CONTENT, not
@@ -2767,8 +2764,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   with no client bearer BEFORE egress and ends the request (the one terminal
   pre-dispatch refusal: a rolled-back strip hazard and the Gemini pairing
   refusal leave the target unsent and walk on),
-  `resolve_reported_model` (here, used by both adapters' commits) keeps the
-  client's requested model verbatim, and `dispatch_loop::forwarded_terminal_status` +
+  both adapters' commits stamp the client's requested model verbatim on the
+  response and every chunk, and `dispatch_loop::forwarded_terminal_status` +
   `log_forwarded_auth_terminal` surface a 401/403/429 on a forwarded
   credential verbatim (no refresh, no fallback). The pure
   classification/observability labels (`DispatchSurface`,
@@ -3425,7 +3422,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   forgetting in `src/router/learn_revert_warning_tests.rs`
 - `src/router/learned_lanes.rs` -- the ONE projection of resolved learned
   lanes for operator surfaces: `LearnedLaneProjection` of
-  `ResolvedLearnedLane { lane: StateKey, nicknames, provider_kind, routed }`,
+  `ResolvedLearnedLane { lane: StateKey, nicknames, provider_kind }`,
   built by `Router::learned_lane_projection` (read off the dispatch targets
   the chain-expansion constructors build) or
   `LearnedLaneProjection::from_config` (the factory's static resolution
@@ -5393,8 +5390,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `tests/router.rs` -- coordinator for the router integration test binary:
   shared mock-`Provider` fixtures plus `#[path]` wiring of the per-scenario
   submodules under `tests/router/` (`default_alias`, `dispatch_fallback`,
-  `dispatch_meta`, `gate_per_attempt`, `reported_model`, `retry`,
-  `runtime_policy`); one binary covering fallback-chain semantics and
+  `dispatch_meta` (also the requested-model echo on complete and stream),
+  `gate_per_attempt`, `retry`, `runtime_policy`); one binary covering fallback-chain semantics and
   runtime-gate behavior
 - `tests/learned_capability_loop.rs` -- coordinator for the learned-capability
   loop end-to-end binary: shared upstream/router fixtures plus `#[path]`
@@ -6584,7 +6581,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `purged: false` and writes nothing
 - `src/handlers/health.rs` -- `GET /health` returning version + status
 - `src/handlers/models.rs` -- `GET /v1/models` listing aliases + `[models]`
-  keys (skips `default`, skips `selectable=false`), each entry emitted through
+  keys (skips `default` and glob keys; every nickname is listed), each entry emitted through
   the private `ModelListEntry` serialize struct carrying `context_length` read
   off the resolved table via `Router::context_window_for` (omitted when no
   `context_window` is configured, or when the first target's `oauth://`

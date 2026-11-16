@@ -143,7 +143,7 @@ impl SecretStore for OfflineCheckStore {
     }
 }
 
-/// Build every pool member a selectable model routes at with the options
+/// Build every pool member a model routes at with the options
 /// serve builds with, minus installation-id minting, and return each pool's
 /// refusal as a `config: `-prefixed error line, the text serve and reload
 /// report for the same config.
