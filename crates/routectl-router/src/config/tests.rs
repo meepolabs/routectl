@@ -565,6 +565,120 @@ auth = "x-api-key"
     assert!(cap.cache_hit_observable);
 }
 
+struct CacheOverrideRow {
+    name: &'static str,
+    /// The entry's identity keys, without `cache_capability`.
+    identity: &'static str,
+    default: CacheCapability,
+    over: CacheCapability,
+}
+
+fn cache_override_toml(identity: &str, cap: Option<CacheCapability>) -> String {
+    let mut text = format!("[providers.p]\n{identity}");
+    if let Some(cap) = cap {
+        text.push_str(&format!(
+            "cache_capability = {{ supports_top_level_cache_control = {}, cache_hit_observable = {} }}\n",
+            cap.supports_top_level_cache_control, cap.cache_hit_observable,
+        ));
+    }
+    text
+}
+
+fn parsed_cache_capability(
+    row: &CacheOverrideRow,
+    cap: Option<CacheCapability>,
+) -> CacheCapability {
+    let text = cache_override_toml(row.identity, cap);
+    let cfg: Config =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("{}: parse failed: {e}\n{text}", row.name));
+    cfg.providers
+        .get("p")
+        .unwrap_or_else(|| panic!("{}: entry missing", row.name))
+        .cache_capability()
+}
+
+/// `cache_capability` is one tuning key for every format: on each format
+/// family an explicit value replaces the family default, and omitting the key
+/// leaves that default in place.
+#[test]
+fn cache_capability_override_wins_for_every_format_family() {
+    let rows = [
+        CacheOverrideRow {
+            name: "anthropic-messages on the Anthropic API host",
+            identity: "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"literal:k\"\nauth = \"x-api-key\"\n",
+            default: CacheCapability::new(true, true),
+            over: CacheCapability::new(false, false),
+        },
+        CacheOverrideRow {
+            name: "anthropic-messages over the AWS cloud",
+            identity: "format = \"anthropic-messages\"\ncloud = { name = \"aws\", region = \"us-east-1\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
+            default: CacheCapability::new(true, true),
+            over: CacheCapability::new(false, true),
+        },
+        CacheOverrideRow {
+            name: "openai-chat",
+            identity: "format = \"openai-chat\"\nbase_url = \"https://example.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
+            default: CacheCapability::new(false, false),
+            over: CacheCapability::new(true, true),
+        },
+        #[cfg(feature = "openai-responses")]
+        CacheOverrideRow {
+            name: "openai-responses",
+            identity: "format = \"openai-responses\"\nbase_url = \"https://api.openai.com/v1\"\ncredential = \"literal:k\"\nauth = \"bearer\"\n",
+            default: CacheCapability::new(false, true),
+            over: CacheCapability::new(true, false),
+        },
+        #[cfg(feature = "bedrock")]
+        CacheOverrideRow {
+            name: "bedrock-invoke",
+            identity: "format = \"bedrock-invoke\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
+            default: CacheCapability::new(true, true),
+            over: CacheCapability::new(false, false),
+        },
+        #[cfg(feature = "bedrock")]
+        CacheOverrideRow {
+            name: "bedrock-converse",
+            identity: "format = \"bedrock-converse\"\ncloud = { name = \"aws\", region = \"us-west-2\" }\ncredential = \"aws://chain\"\nauth = \"aws-sigv4\"\n",
+            default: CacheCapability::new(false, true),
+            over: CacheCapability::new(true, false),
+        },
+        #[cfg(feature = "gemini")]
+        CacheOverrideRow {
+            name: "gemini",
+            identity: "format = \"gemini\"\nbase_url = \"https://generativelanguage.googleapis.com/v1beta\"\ncredential = \"literal:k\"\nauth = \"x-goog-api-key\"\n",
+            default: CacheCapability::new(false, true),
+            over: CacheCapability::new(true, false),
+        },
+        #[cfg(feature = "gemini")]
+        CacheOverrideRow {
+            name: "gemini-cloud-code",
+            identity: "format = \"gemini-cloud-code\"\nbase_url = \"https://daily-cloudcode-pa.googleapis.com\"\ncredential = \"oauth://antigravity\"\nauth = \"bearer\"\n",
+            default: CacheCapability::new(false, true),
+            over: CacheCapability::new(true, false),
+        },
+    ];
+
+    for row in &rows {
+        assert_ne!(
+            row.default, row.over,
+            "{}: override must differ from the default",
+            row.name
+        );
+        assert_eq!(
+            parsed_cache_capability(row, None),
+            row.default,
+            "{}: default",
+            row.name
+        );
+        assert_eq!(
+            parsed_cache_capability(row, Some(row.over)),
+            row.over,
+            "{}: override",
+            row.name
+        );
+    }
+}
+
 /// An `anthropic-api` entry on a NON-default base_url (an Anthropic-
 /// compatible third party), with no operator override, fails closed:
 /// auto-emit must never break a host that may not honor cache_control.
