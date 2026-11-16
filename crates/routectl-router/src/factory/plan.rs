@@ -1,6 +1,7 @@
 //! The one decision taken about a provider entry before any of its
 //! credentials is read.
 
+use crate::config::entry_shape::{carrier_refusal, shape_refusals};
 use crate::config::provider_descriptor::{
     Auth, Carrier, Format, client_identity, containment, format_row, is_vendor_host,
     managed_vendor_of,
@@ -55,8 +56,9 @@ const FORWARDED_HOST_VENDOR: &str = "anthropic";
 /// the credential is an `aws://` form; `forwarded` only on
 /// `anthropic-messages` to the Anthropic API host with `bearer`;
 /// `gemini-cloud-code` only with a managed `oauth://antigravity` login;
-/// managed-login containment over every reference slot. Then it computes the
-/// client-identity verdict.
+/// managed-login containment over every reference slot; then the entry's
+/// shape (`base_url` a plain http(s) URL, no key its format does not take).
+/// Then it computes the client-identity verdict.
 ///
 /// Every build path calls this first and passes the plan down: no
 /// `SecretStore` read (token, probe, account id, session id, project id) and
@@ -64,6 +66,16 @@ const FORWARDED_HOST_VENDOR: &str = "anthropic";
 /// Errors name the provider and the keys involved, never the base URL,
 /// credential or seat label.
 pub fn plan_provider(name: &str, entry: &ProviderEntry) -> Result<ProviderPlan> {
+    let plan = plan_coherent_entry(name, entry)?;
+    if let Some(refusal) = shape_refusals(name, entry).into_iter().next() {
+        return Err(Error::Config(refusal));
+    }
+    Ok(plan)
+}
+
+/// [`plan_provider`] without the entry-shape rules past the carrier. Only
+/// for a caller that reports every [`shape_refusals`] message itself.
+pub(super) fn plan_coherent_entry(name: &str, entry: &ProviderEntry) -> Result<ProviderPlan> {
     let credential = parse_credential(name, &entry.credential)?;
     let destination = destination(name, entry)?;
     let egress = route(name, entry)?;
@@ -100,11 +112,7 @@ fn destination(name: &str, entry: &ProviderEntry) -> Result<Destination> {
         (None, Some(Cloud::Aws { region })) => Ok(Destination::Aws {
             region: region.clone(),
         }),
-        (Some(_), Some(_)) => Err(refuse(
-            name,
-            "set exactly one of `base_url` or `cloud`, not both",
-        )),
-        (None, None) => Err(refuse(name, "set exactly one of `base_url` or `cloud`")),
+        _ => Err(Error::Config(carrier_refusal(name, entry))),
     }
 }
 

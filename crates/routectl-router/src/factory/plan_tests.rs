@@ -303,10 +303,21 @@ const POOL_PLAN_REFUSAL: &str = "is refused by its provider plan";
 /// Build `entry` on all three paths over counting stores; every path must
 /// refuse it with the plan's own reason and reach no store method.
 async fn assert_refused_before_any_store_call(case: &str, entry: &ProviderEntry, upstream: &str) {
+    assert_refused_on_every_path(case, entry, upstream, PLAN_REFUSAL).await;
+}
+
+/// Build `entry` on all three paths over counting stores; every path must
+/// refuse it with a message carrying `rule` and reach no store method.
+async fn assert_refused_on_every_path(
+    case: &str,
+    entry: &ProviderEntry,
+    upstream: &str,
+    rule: &str,
+) {
     let (direct, store) = counting();
     let built = build_provider("p", entry, store).await;
     let err = built.err().map(|e| e.to_string()).unwrap_or_default();
-    assert!(err.contains(PLAN_REFUSAL), "{case}: build_provider: {err}");
+    assert!(err.contains(rule), "{case}: build_provider: {err}");
     assert_eq!(direct.calls(), 0, "{case}: build_provider");
 
     let (pooled, store) = counting();
@@ -327,7 +338,7 @@ async fn assert_refused_before_any_store_call(case: &str, entry: &ProviderEntry,
     assert!(models.is_empty(), "{case}: no model built");
     assert_eq!(failed.len(), 1, "{case}: one failure");
     assert!(
-        failed[0].1.contains(PLAN_REFUSAL),
+        failed[0].1.contains(rule),
         "{case}: build_resolved_models: {failed:?}"
     );
     assert_eq!(resolved.calls(), 0, "{case}: build_resolved_models");
@@ -759,5 +770,52 @@ fn client_identity_per_lane() {
                 "{label}: plan carries the verdict"
             );
         }
+    }
+}
+
+/// The entry-shape rules hold on every build path, not only in config
+/// validation: a misplaced key or a base_url that is not a plain URL refuses
+/// the managed Anthropic login on its own host before any store call, where
+/// the clean entry reads the store at build.
+#[tokio::test]
+async fn an_entry_shape_refusal_holds_on_every_build_path() {
+    let own = || anthropic("oauth://anthropic", VENDOR_BASES[0]);
+    let mut rows: Vec<(&str, ProviderEntry, &str)> = vec![
+        (
+            "base_url query",
+            anthropic("oauth://anthropic", "https://api.anthropic.com/?beta=1"),
+            "base_url carries a query",
+        ),
+        (
+            "base_url fragment",
+            anthropic("oauth://anthropic", "https://api.anthropic.com/#frag"),
+            "base_url carries a fragment",
+        ),
+        (
+            "account_id_ref on anthropic-messages",
+            {
+                let mut entry = own();
+                entry.account_id_ref = Some("oauth://anthropic".to_string());
+                entry
+            },
+            "`account_id_ref` does not apply to format `anthropic-messages`",
+        ),
+    ];
+    rows.push((
+        "cloud_project_id on anthropic-messages",
+        {
+            let mut entry = own();
+            entry.cloud_project_id = Some(String::new());
+            entry
+        },
+        "`cloud_project_id` does not apply to format `anthropic-messages`",
+    ));
+
+    let (control, store) = counting();
+    let built = build_provider("p", &own(), store).await;
+    assert!(built.is_ok(), "control: {:?}", built.err());
+    assert!(control.calls() > 0, "control reads the store at build");
+    for (case, entry, rule) in rows {
+        assert_refused_on_every_path(case, &entry, "claude-opus-4-7", rule).await;
     }
 }

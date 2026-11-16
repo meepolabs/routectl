@@ -1951,6 +1951,18 @@ mod managed_credential_factory_tests {
                     .with_auth_kind(AuthKind::OauthBearer)
                     .with_base_url("http://127.0.0.1:18080"),
             ),
+            ("forwarded on the host with the ref in its second slot", {
+                let mut entry = ProviderEntry::anthropic_api("forwarded")
+                    .with_auth(crate::config::Auth::Bearer);
+                entry.account_id_ref = Some(r.to_string());
+                entry
+            }),
+            ("own login on the host with the ref in its second slot", {
+                let mut entry =
+                    ProviderEntry::anthropic_api(r).with_auth_kind(AuthKind::OauthBearer);
+                entry.account_id_ref = Some(r.to_string());
+                entry
+            }),
             ("forwarded off the host with the ref in its second slot", {
                 let mut entry = ProviderEntry::anthropic_api("forwarded")
                     .with_auth(crate::config::Auth::Bearer)

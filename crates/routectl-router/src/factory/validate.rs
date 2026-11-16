@@ -1,7 +1,8 @@
 //! Config-row validation family + validation collection.
 
 use super::build::ipv4_compatible_embedded;
-use super::plan::plan_provider;
+use super::plan::plan_coherent_entry;
+use crate::config::entry_shape::{parse_base_url, shape_refusals};
 use crate::config::provider_descriptor::{Format, vendor_containment, vendor_row};
 use crate::config::{Config, PoolEntry, PoolKey, PoolKeyField, ProviderEntry};
 use routectl_core::Result;
@@ -19,42 +20,8 @@ use std::collections::BTreeMap;
 /// regardless of scheme: they cover cloud-metadata services, and egress
 /// there would forward credentials to an untrusted endpoint.
 pub(super) fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
-    let trimmed = base_url.trim();
-    if trimmed.is_empty() {
-        // A present-but-empty base_url is an operator typo; there is no
-        // per-format default to fall back on. Reject here as
-        // defense-in-depth for direct library consumers.
-        return Err(routectl_core::Error::Config(format!(
-            "provider `{provider_name}`: base_url is set but empty; set an explicit endpoint"
-        )));
-    }
-    let url = match url::Url::parse(trimmed) {
-        Ok(u) => u,
-        Err(e) => {
-            return Err(routectl_core::Error::Config(format!(
-                "provider `{provider_name}`: base_url is not a valid URL: {e}"
-            )));
-        }
-    };
+    let url = parse_base_url(provider_name, base_url).map_err(routectl_core::Error::Config)?;
     let scheme = url.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(routectl_core::Error::Config(format!(
-            "provider `{provider_name}`: base_url scheme `{scheme}` is not allowed; \
-             use https:// (or http:// for loopback only)"
-        )));
-    }
-
-    // Require a non-empty host. A hostless authority cannot name a real
-    // egress, and this is defense in depth against a malformed authority
-    // entering config at all. The Anthropic host predicate does NOT rely on
-    // this guard (core/provider APIs have direct callers) -- the two are
-    // independent.
-    if url.host_str().is_none_or(str::is_empty) {
-        return Err(routectl_core::Error::Config(format!(
-            "provider `{provider_name}`: base_url has no host; \
-             set an explicit http(s) endpoint with a hostname"
-        )));
-    }
 
     // Link-local rejection (regardless of scheme). Covers cloud
     // metadata services. `Ipv4Addr::is_link_local` is stable since
@@ -569,24 +536,6 @@ fn validate_float_fields(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Reject a present-but-empty (or whitespace-only) `base_url` on any
-/// provider entry. An explicit `base_url = ""` is an operator typo; there is
-/// no per-format default to fall back on.
-fn validate_base_urls(config: &Config) -> Result<()> {
-    for (name, entry) in &config.providers {
-        if entry
-            .base_url
-            .as_deref()
-            .is_some_and(|s| s.trim().is_empty())
-        {
-            return Err(routectl_core::Error::Config(format!(
-                "provider `{name}`: base_url is set but empty; set an explicit endpoint"
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Reject a `payload_extras.store` key on an `openai-responses` entry over
 /// the AWS cloud: the Responses `store` flag is forced off on Bedrock's
 /// managed surface and cannot be configured there.
@@ -985,6 +934,20 @@ fn bare_validation_message(e: routectl_core::Error) -> String {
     }
 }
 
+/// Every refusal for one provider entry: each broken shape rule, then the
+/// first refusal of its plan unless that is one of the shape messages
+/// already collected.
+fn provider_entry_errors(name: &str, entry: &ProviderEntry) -> Vec<String> {
+    let mut errors = shape_refusals(name, entry);
+    if let Err(e) = plan_coherent_entry(name, entry) {
+        let message = bare_validation_message(e);
+        if !errors.contains(&message) {
+            errors.push(message);
+        }
+    }
+    errors
+}
+
 /// Run the whole `validate_*` suite in ONE deterministic order and
 /// collect every error + warning. This is the single ordered invocation
 /// point every config surface (`config check`, `test`, `prompt-size`, and
@@ -1021,9 +984,7 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(bare_validation_message(e));
     }
     for (name, entry) in &config.providers {
-        if let Err(e) = plan_provider(name, entry) {
-            errors.push(bare_validation_message(e));
-        }
+        errors.extend(provider_entry_errors(name, entry));
     }
     if let Err(e) = validate_cloud_responses_store(config) {
         errors.push(bare_validation_message(e));
@@ -1039,9 +1000,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(e);
     }
     if let Err(e) = validate_float_fields(config) {
-        errors.push(bare_validation_message(e));
-    }
-    if let Err(e) = validate_base_urls(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_codex_version(config) {

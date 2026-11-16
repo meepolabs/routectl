@@ -980,9 +980,11 @@ credential = "forwarded"
 auth = "bearer"
 "#,
         );
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        let msg = &errors[0];
-
+        assert_eq!(
+            errors.len(),
+            2,
+            "forwarded pin and plain-URL rule: {errors:?}"
+        );
         for secret in [
             "sk-live-LEAKED",
             "sk-query-LEAKED",
@@ -991,11 +993,17 @@ auth = "bearer"
             "user:",
             "https://user",
         ] {
-            assert!(
-                !msg.contains(secret),
-                "operator-supplied `{secret}` must not surface; got: {msg}"
-            );
+            for msg in &errors {
+                assert!(
+                    !msg.contains(secret),
+                    "operator-supplied `{secret}` must not surface; got: {msg}"
+                );
+            }
         }
+        let msg = errors
+            .iter()
+            .find(|e| e.contains("forwarded"))
+            .expect("the forwarded pin refuses the entry");
 
         assert!(
             msg.contains("sneaky"),
@@ -1011,13 +1019,14 @@ auth = "bearer"
         );
     }
 
-    /// Structural tripwire over the whole of `validate.rs` and `plan.rs`: no
+    /// Structural tripwire over the whole of `validate.rs`, `plan.rs` and
+    /// `config/entry_shape.rs`: no
     /// error message may interpolate the operator-supplied `base_url`. That
     /// value can carry a credential in userinfo, a path, or a query, and every
     /// validator error string reaches `/status/doctor` as a serialized
     /// `Finding.detail`.
     ///
-    /// Both files keep their tests in sibling `#[path]` files, so the scan
+    /// Each file keeps its tests in a sibling `#[path]` file, so the scan
     /// needs no production/test slicing. The needle is assembled from
     /// fragments so this test's own source line cannot satisfy the scan it
     /// performs; the premise rows prove each scanned text is the real file.
@@ -1030,6 +1039,11 @@ auth = "bearer"
                 "pub fn collect_config_validation",
             ),
             ("plan.rs", include_str!("plan.rs"), "pub fn plan_provider"),
+            (
+                "entry_shape.rs",
+                include_str!("../config/entry_shape.rs"),
+                "pub fn shape_refusals",
+            ),
         ] {
             assert!(src.contains(premise), "premise: {file} is the real source");
             assert!(

@@ -1796,6 +1796,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `tuning` + `validate` submodules so every internal `crate::config::X` path
   AND every
   crate-root `routectl_router::` re-export resolves unchanged
+- `src/config/entry_shape.rs` -- the shape rules one `[providers.X]` entry
+  meets on its own: exactly one carrier, `base_url` a plain http(s) URL (no
+  userinfo, query or fragment), and the per-format applicability table for
+  format-specific keys. `shape_refusals` returns every broken rule at once;
+  the provider plan applies it on every build path and
+  `collect_config_validation` reports all of it in one pass
 - `src/config/pool.rs` -- the `[pools.<name>]` block: `PoolEntry` (`members:
   Vec<String>` of provider entry names, `seat_selection: SeatSelection`,
   `accepts_new_logins: bool` growth marker, the pool tier of the tiered

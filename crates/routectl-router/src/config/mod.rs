@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod entry_shape;
 mod pool;
 mod pool_key;
 pub(crate) mod provider_descriptor;

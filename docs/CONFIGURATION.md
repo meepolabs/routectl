@@ -121,6 +121,19 @@ an entry holding the plain family name makes `[pools.anthropic]`
 unnameable, and a later `routectl login anthropic` then has nowhere to
 put a second subscription seat.
 
+A provider entry sets exactly one of `base_url` or `cloud`. `base_url` is a
+plain http(s) URL: a host and an optional path prefix (a trailing slash is
+fine), with no `user@` userinfo, no `?query` and no `#fragment`; `http://`
+is accepted for loopback hosts only. Some keys apply to one format only,
+and setting one on another format is refused, even with an empty or
+`false` value: `anthropic_version`, `forward_client_headers`,
+`context_management`, `cloak_mode` and `cloak_strict_mode` belong to
+`anthropic-messages`; `codex_version` and `account_id_ref` to
+`openai-responses`; `cloud_project_id` to `gemini-cloud-code`. Every other
+key applies to every format. `config check`, daemon start and reload report
+every such problem in the file at once, naming the provider and the key and
+never printing the value.
+
 Save as `~/.config/routectl/config.toml` (or
 `$XDG_CONFIG_HOME/routectl/config.toml`) on every OS, including macOS, then
 `routectl config check` and `routectl serve`. `XDG_CONFIG_HOME` is used only
