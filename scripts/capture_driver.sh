@@ -839,6 +839,13 @@ fi
 # multi-turn body is not truncated mid-escape (the replay loader refuses
 # a cap-truncated body).
 #
+# Every attempt is wire-checked, not the 1-in-100 sample a production
+# daemon uses: a driven run is a few dozen attempts per cell, so the
+# default rate would leave most of them unchecked and a wire loss would
+# surface only by luck. Set here for every lane rather than in a lane
+# config (routectl has no config key for it), and assigned rather than
+# inherited so a caller's own value cannot lower the rate.
+#
 # Both ports arrive on the command line rather than as a rewrite of the
 # copied config: the committed bytes stay the identity the sha names, and
 # there is one less file mutation between the hash and the boot.
@@ -864,6 +871,7 @@ fi
   ROUTECTL_LOG="routectl=info,routectl_core::log_safe=trace" \
   ROUTECTL_TRACE_HEADERS=1 \
   ROUTECTL_TRACE_BODY_BYTES=2097152 \
+  ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1 \
     exec "$ROUTECTL_BIN" "${serve_args[@]}"
 ) 2> "$TRACE" &
 DAEMON_PID=$!

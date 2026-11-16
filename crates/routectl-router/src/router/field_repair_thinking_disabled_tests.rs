@@ -737,8 +737,7 @@ mod bedrock_thinking_off {
             config
                 .aliases
                 .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-            let mut router =
-                Router::new(Arc::new(config)).with_wire_check_params_for_tests(WIRE_CHECK_EVERY);
+            let mut router = Router::new(Arc::new(config)).with_wire_check_params(WIRE_CHECK_EVERY);
             router.install_resolved_models(BTreeMap::from([(
                 "m0".to_string(),
                 Arc::new(ResolvedModel::new(

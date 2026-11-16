@@ -126,8 +126,10 @@ as `meta.config_variant`; `config_sha` identifies its exact bytes. A
 wire-affecting per-deployment value lives INSIDE the file, where
 `config_sha` covers it.
 
-Every lane config sets `[wire_check] sample_one_in = 1`, so the daemon a
-driven run boots checks every attempt rather than a production sample.
+The runner boots every lane's daemon with
+`ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1` in its environment, so a driven run
+checks every attempt rather than a production sample; no lane config sets
+anything for it (routectl refuses a `[wire_check]` table).
 On the Bedrock lanes (`bedrock-invoke`, `bedrock-converse`,
 `bedrock-mantle`) the model is a matrix dimension: each candidate is a
 `[models.<nick>]` entry, listed with its tier and source doc in

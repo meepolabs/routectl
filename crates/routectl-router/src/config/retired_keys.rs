@@ -200,6 +200,13 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
         refused_value: None,
         replacement: "usage recording is always on",
     },
+    RetiredKey {
+        path: &["wire_check"],
+        refused_value: None,
+        replacement: "sampling is fixed: first 8 per lane and version, then 1 in 100; 24 h \
+                      status window; set ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN in the environment \
+                      to change the 1-in-100 rate",
+    },
 ];
 
 /// One retired key found in a config: its concrete key path and the

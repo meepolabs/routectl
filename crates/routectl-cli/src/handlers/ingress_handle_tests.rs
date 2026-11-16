@@ -3056,7 +3056,7 @@ async fn dispatched_chat_stream(
     let router = Arc::new(
         build_test_router(Arc::new(config))
             .await
-            .with_wire_check_params_for_tests(
+            .with_wire_check_params(
                 routectl_router::wire_check_state::WireCheckParams::sampling_for_tests(
                     first_n,
                     sample_one_in,

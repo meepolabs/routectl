@@ -256,9 +256,6 @@ default = "planted"
 
 [retry]
 max_attempts = 1
-
-[wire_check]
-sample_one_in = 1
 TOML
 }
 write_lane chat "[providers.mock]

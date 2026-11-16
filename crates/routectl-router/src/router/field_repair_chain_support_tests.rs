@@ -155,8 +155,7 @@ fn chain_router(seats: &[(&str, &Arc<ChainSeat>)], extra_toml: &str) -> Router {
         ALIAS.to_string(),
         AliasValue::Chain((0..seats.len()).map(|idx| format!("m{idx}")).collect()),
     );
-    let mut router =
-        Router::new(Arc::new(config)).with_wire_check_params_for_tests(WIRE_CHECK_EVERY);
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params(WIRE_CHECK_EVERY);
     router.install_resolved_models(
         seats
             .iter()

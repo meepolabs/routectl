@@ -3214,6 +3214,37 @@ else
 fi
 rm -rf "$work"
 
+# --- Case 20: every lane's daemon checks every attempt ---------------------
+# The runner assigns ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1 on the daemon it
+# boots, for the base-url and the front-proxy lane alike. A caller's own
+# value is planted first: the daemon must still hold 1, which a runner that
+# merely inherited the variable would fail.
+for lane_case in "anthropic-api base-url" "anthropic-api.front-proxy front-proxy"; do
+    read -r wc_lane wc_mode <<<"$lane_case"
+    work="$(make_work)"
+    if [ "$wc_mode" = front-proxy ]; then
+        canned_trace_front_proxy >"$work/canned-trace.log"
+        port_s="$(free_port_pair)"
+        window=(ROUTECTL_DRIVER_PORT_MIN="$port_s" ROUTECTL_DRIVER_PORT_MAX="$((port_s + 1))")
+    else
+        port_s="$(free_port)"
+        window=(ROUTECTL_DRIVER_PORT_MIN="$port_s" ROUTECTL_DRIVER_PORT_MAX="$port_s")
+    fi
+    rc=0
+    env ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=100 "${window[@]}" \
+        STUB_ENV_DUMP="$work/daemon.env" PROBE_ENV_DUMP="$work/driver.env" \
+        bash -c "$(declare -f runner_run); runner_run \"\$1\" --lane \"\$2\" --connection-mode \"\$3\" --case driver-selftest-18" \
+        _ "$work" "$wc_lane" "$wc_mode" || rc=$?
+    check "$wc_lane: a run exits 0" "0" "$rc"
+    check "$wc_lane: the daemon env holds ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1 over the caller's 100" "yes" \
+        "$(tr '\0' '\n' <"$work/daemon.env" 2>/dev/null | grep -qxF 'ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1' && echo yes || echo no)"
+    check "$wc_lane: the daemon env carries no other ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN" "1" \
+        "$(tr '\0' '\n' <"$work/daemon.env" 2>/dev/null | grep -c '^ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=' || true)"
+    check "$wc_lane: the driven client env does not hold the daemon's rate" "0" \
+        "$(tr '\0' '\n' <"$work/driver.env" 2>/dev/null | grep -cxF 'ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1' || true)"
+    rm -rf "$work"
+done
+
 # Without --aws-config the daemon gets neither variable from the runner.
 work="$(make_work)"
 port_s="$(free_port)"

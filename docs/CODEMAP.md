@@ -1885,11 +1885,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   drives the learned-capability registry and is hot-reloadable;
   `WindowGateConfig` (global `[window_gate]`: `enabled`, default false; a
   missing block is off) is the hot-reloadable switch for the proactive
-  context-window gate;
-  `WireCheckConfig` (global
-  `[wire_check]`: `first_n` 8, `sample_one_in` 100, `window_secs` 86400; the
-  latter two non-zero by type) is the live wire check's sampler and status
-  window. The re-verification
+  context-window gate. The re-verification
   cadence and the confirmation quorums are the code constants
   `CANARY_INTERVAL` (100), `ENVELOPE_QUORUM` (1) and `PREFIX_QUORUM` (2), never
   read from the environment. The whole
@@ -4501,10 +4497,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   upstream): one constructor and one first-`#` parser over the serialized
   `provider_entry#upstream` ledger `lane_key`; no `Display`, only the
   sanitized `for_log`. Distinct from the runtime breaker `state_key`
+- `src/wire_check_env.rs` -- `resolve_wire_check_params(env)`: the
+  wire check's one environment override, `ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN`
+  (a positive `u32` replaces the 1-in-100 rate; any other set value is
+  `SampleRateEnvError`, which never renders the value), returning
+  `ResolvedWireCheckParams` with its `SampleRateSource` and the startup INFO
+  `log_status`; `serve` resolves it once and `Router::with_wire_check_params`
+  applies it, carried across reloads by `carry_over_metrics_from`
 - `src/wire_check_state.rs` -- `WireCheckState`, the live wire check's
   process-lifetime state shared by `Arc` across hot reloads: the sampler
   (`admit`: first `first_n` per (lane, client version), at most 8 versions
-  per lane, then 1 in `sample_one_in`), the closed-label counters
+  per lane, then 1 in `sample_one_in`; `WireCheckParams`, whose `Default`
+  is the consts `DEFAULT_FIRST_N` 8 / `DEFAULT_SAMPLE_ONE_IN` 100 /
+  `DEFAULT_WINDOW_SECS` 86400), the closed-label counters
   `rc_wire_loss_total{lane,path_class}` / `rc_wire_check_total{lane,outcome}`
   / `rc_request_refused_local_total{lane,reason}` with last-seen seconds, a
   content-free findings ring of 128 entries per kind (loss, rejection;
@@ -8837,6 +8842,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   recorder, prices one `/status/query`, and asserts neither recorder saw a
   connection; the control runs `prices refresh` under the same env and asserts
   exactly one `CONNECT`
+- `tests/wire_check_sample_env.rs` -- real-binary boot tests of
+  `ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN`, set on the hermetic child only: `1`
+  checks every successful attempt against a loopback mock and logs the INFO
+  status line with `source="env"`; unset samples only first-N past 8; an
+  invalid value refuses start naming the variable, never the value
 - `tests/serve_shutdown.rs` -- real-binary signal integration tests (graceful
   SIGTERM shutdown, SIGHUP reload-trigger log line); signals and reaps a
   hermetic child process; also boots the shipped example

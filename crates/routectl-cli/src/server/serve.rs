@@ -243,6 +243,11 @@ async fn serve_inner(
     #[cfg(not(test))] _seams: Option<()>,
 ) -> Result<()> {
     crate::derived_path::require_serve_paths(&config).map_err(|e| Error::Config(e.to_string()))?;
+    // Resolved once per process: reloads carry this router's params forward
+    // through `carry_over_metrics_from` and never read the variable again.
+    let wire_check =
+        routectl_router::wire_check_env::resolve_wire_check_params(routectl_core::process_env)
+            .map_err(|e| Error::Config(e.to_string()))?;
 
     // Composite resolver: oauth:// refs flow through OAuthStore (the
     // routectl-managed credentials.json), everything else through
@@ -284,6 +289,7 @@ async fn serve_inner(
         let _ = _seams;
         build_router_from_config(config.clone(), secrets.clone()).await?
     };
+    let router = router.with_wire_check_params(wire_check.params);
     log_advisory_warnings(&config);
     router.log_placeholder_seats();
 
@@ -431,6 +437,7 @@ async fn serve_inner(
     routectl_core::log_redaction_status();
     routectl_core::log_trace_body_cap_status();
     routectl_core::log_header_trace_status();
+    wire_check.log_status();
 
     let max_body_bytes = compute_max_body_bytes(&config);
     // The capability-persistence health read, installed on the OWNED Router: after

@@ -22,6 +22,7 @@ The first half is for operators (filtering, triage, redaction); the
   [usage accounting](#usage-accounting-log-shapes),
   [config-edit audit](#config-edit-audit-shape),
   [prompt-cache auto-emission](#prompt-cache-auto-emission-log-shapes),
+  [startup env-knob status](#startup-env-knob-status-lines),
   [activation inventory](#auto-activation-inventory-audit-events),
   [context reduction](#context-reduction-log-shapes),
   [config-reload transitions](#config-reload-transition-fields),
@@ -1578,6 +1579,29 @@ The human message reads `cache policy: auto-emit top-level breakpoint
 <enabled|disabled>, context reduction <enabled|disabled>`. It lets an
 operator confirm at a glance which cache behaviors are live for this
 process without grepping the config.
+
+## Startup env-knob status lines
+
+`serve` reads these environment variables once, before it serves, and
+logs one INFO line per variable with the value the process will keep.
+Changing a variable after launch has no effect until the next restart,
+and a config reload never reads them again.
+
+| Variable | Default | Message | Fields |
+|---|---|---|---|
+| `ROUTECTL_LOG_REDACT_PROMPTS` | off | `ROUTECTL_LOG_REDACT_PROMPTS resolved (frozen for the rest of this process)` | `redact_prompts` |
+| `ROUTECTL_TRACE_BODY_BYTES` | 16384 | `ROUTECTL_TRACE_BODY_BYTES resolved (frozen for the rest of this process)` | `trace_body_cap`, `default` |
+| `ROUTECTL_TRACE_HEADERS` | off | `ROUTECTL_TRACE_HEADERS resolved (frozen for the rest of this process)` | `trace_headers` |
+| `ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN` | 100 | `ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN resolved (frozen for the rest of this process)` | `sample_one_in`, `source` (`env` / `default`), `default` |
+
+`ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN` sets the live wire check's 1-in-M rate
+past the first 8 checked attempts per lane and client version (see
+[CONFIGURATION.md](CONFIGURATION.md#live-wire-check)). Unlike the log
+knobs, a set value that is not a whole number from 1 to 4294967295
+(including an empty one) is not ignored: `serve` refuses to start with
+`config: ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN must be a whole number from 1
+to 4294967295; unset it to check 1 in 100 successful attempts`, which
+never includes the value.
 
 ## Auto-activation inventory audit events
 

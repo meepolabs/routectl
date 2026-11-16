@@ -2150,7 +2150,7 @@ fn responses_chatgpt_oauth_router(base: &str) -> Router {
 }
 
 const fn check_every_request(router: Router) -> Router {
-    router.with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(u32::MAX, 1))
+    router.with_wire_check_params(WireCheckParams::sampling_for_tests(u32::MAX, 1))
 }
 
 /// One finding the walk saw, with the case that produced it.

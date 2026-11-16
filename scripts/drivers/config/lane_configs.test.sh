@@ -64,28 +64,34 @@ fresh_copy() {
 }
 
 lane_configs=("$HERE"/*.toml)
+RUNNER="$REPO_ROOT/scripts/capture_driver.sh"
 
-# --- every lane config checks every attempt -----------------------------
-expect_rc "every committed lane config carries [wire_check] sample_one_in = 1" 0 \
-    python3 -I "$CHECKER" wire-check "${lane_configs[@]}"
+# --- every lane's daemon checks every attempt ----------------------------
+expect_rc "the runner boots every lane with ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1 and no lane config carries [wire_check]" 0 \
+    python3 -I "$CHECKER" wire-check "$RUNNER" "${lane_configs[@]}"
+
+grep -v '^  ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1 \\$' "$RUNNER" >"$WORK/runner-unset.sh"
+expect_rc "a runner whose daemon exec lost the variable fails" 1 \
+    python3 -I "$CHECKER" wire-check "$WORK/runner-unset.sh" "${lane_configs[@]}"
+expect_output "the failure names the missing variable" "sets ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN to None"
+
+sed 's/^  ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1 \\$/  ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=100 \\/' "$RUNNER" \
+    >"$WORK/runner-sampled.sh"
+expect_rc "a runner sampling 1 in 100 fails" 1 \
+    python3 -I "$CHECKER" wire-check "$WORK/runner-sampled.sh" "${lane_configs[@]}"
+expect_output "the failure names the wrong rate" "to '100', want '1'"
+
+awk '/^  ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1 \\$/ { held = $0; next }
+     /^    exec "\$ROUTECTL_BIN"/ { print; if (held) print held; next } { print }' \
+    "$RUNNER" >"$WORK/runner-after-exec.sh"
+expect_rc "a variable set after the daemon exec, not on it, fails" 1 \
+    python3 -I "$CHECKER" wire-check "$WORK/runner-after-exec.sh" "${lane_configs[@]}"
 
 fresh_copy
-grep -v '^sample_one_in = 1$' "$HERE/openai-responses.toml" >"$WORK/cfg/openai-responses.toml"
-expect_rc "a config whose [wire_check] lost sample_one_in fails" 1 \
-    python3 -I "$CHECKER" wire-check "$WORK/cfg/openai-responses.toml"
-expect_output "the failure names the missing rate" "sample_one_in is None"
-
-fresh_copy
-awk '/^\[wire_check\]$/ { skip = 1; next } /^\[/ { skip = 0 } !skip' \
-    "$HERE/bedrock-mantle.toml" >"$WORK/cfg/bedrock-mantle.toml"
-expect_rc "a config with no [wire_check] table fails" 1 \
-    python3 -I "$CHECKER" wire-check "$WORK/cfg/bedrock-mantle.toml"
-expect_output "the failure names the missing table" "no [wire_check] table"
-
-fresh_copy
-sed 's/^sample_one_in = 1$/sample_one_in = 100/' "$HERE/anthropic-api.toml" >"$WORK/cfg/anthropic-api.toml"
-expect_rc "a config sampling 1 in 100 fails" 1 \
-    python3 -I "$CHECKER" wire-check "$WORK/cfg/anthropic-api.toml"
+printf '\n[wire_check]\nsample_one_in = 1\n' >>"$WORK/cfg/openai-responses.toml"
+expect_rc "a lane config carrying [wire_check] fails" 1 \
+    python3 -I "$CHECKER" wire-check "$RUNNER" "$WORK/cfg/openai-responses.toml"
+expect_output "the failure names the retired table" "carries a [wire_check] table"
 
 # --- the anthropic-api twins differ only by [mitm] -----------------------
 # Comments and blank lines carry no wire meaning; the [mitm] table is
@@ -108,12 +114,12 @@ else
     fail "the anthropic-api twins differ outside [mitm]"
 fi
 fresh_copy
-sed 's/^sample_one_in = 1$/sample_one_in = 2/' "$HERE/anthropic-api.front-proxy.toml" \
+sed 's/^upstream = "claude-opus-4-8"$/upstream = "claude-opus-4-7"/' "$HERE/anthropic-api.front-proxy.toml" \
     >"$WORK/cfg/anthropic-api.front-proxy.toml"
 if twins_agree "$HERE/anthropic-api.toml" "$WORK/cfg/anthropic-api.front-proxy.toml"; then
-    fail "the twin comparison missed a [wire_check] drift on one twin"
+    fail "the twin comparison missed an upstream drift on one twin"
 else
-    pass "the twin comparison catches a [wire_check] drift on one twin"
+    pass "the twin comparison catches an upstream drift on one twin"
 fi
 
 # --- models.tsv and the Bedrock lane configs are welded ------------------

@@ -241,7 +241,7 @@ mod converse_temperature {
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
         let mut router = Router::new(Arc::new(config))
-            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
+            .with_wire_check_params(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(BTreeMap::from([(
             "m0".to_string(),
             Arc::new(ResolvedModel::new(
@@ -574,7 +574,7 @@ mod openai_compat_sampling {
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
         let mut router = Router::new(Arc::new(config))
-            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
+            .with_wire_check_params(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(BTreeMap::from([(
             "m0".to_string(),
             Arc::new(ResolvedModel::new(

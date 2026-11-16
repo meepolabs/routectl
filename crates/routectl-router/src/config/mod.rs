@@ -26,8 +26,7 @@ pub use schema::{
     CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, HistoryReasoning, MitmConfig, ModelEntry,
     NicknameIter, OverrideEntry, PREFIX_QUORUM, PricingConfig, ProviderEntry,
     ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RetryPolicy, SeatSelection,
-    ServerAuth, ServerConfig, UsageConfig, WindowGateConfig, WireCheckConfig,
-    is_config_provider_kind,
+    ServerAuth, ServerConfig, UsageConfig, WindowGateConfig, is_config_provider_kind,
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
@@ -147,14 +146,6 @@ pub struct Config {
     /// resolution, so a live config swap applies without a restart.
     #[serde(default)]
     pub window_gate: WindowGateConfig,
-
-    /// Operator-facing `[wire_check]` block. Sampling knobs for the live
-    /// wire check on successful attempts, plus the status window. A missing
-    /// block keeps `WireCheckConfig::default()`. Hot-reloadable: each router
-    /// build reads its own copy, while the per-(lane, version) counts the
-    /// sampler keeps survive a reload.
-    #[serde(default)]
-    pub wire_check: WireCheckConfig,
 
     /// Optional `[mitm]` block for the MITM front-proxy (TLS-terminating
     /// local listener that fronts a first-party upstream, e.g. Claude

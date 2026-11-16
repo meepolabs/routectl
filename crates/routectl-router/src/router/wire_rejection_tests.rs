@@ -66,7 +66,7 @@ fn router(params: WireCheckParams, chain: Vec<Arc<dyn Provider>>) -> Router {
         nicknames.join(", ")
     ));
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(params);
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params(params);
     let models: BTreeMap<String, Arc<ResolvedModel>> = chain
         .into_iter()
         .enumerate()

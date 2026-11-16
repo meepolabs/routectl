@@ -45,7 +45,7 @@ fn config() -> Config {
 
 fn router(provider: Arc<dyn Provider>) -> Router {
     let mut router = Router::new(Arc::new(config()))
-        .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(0, 1000));
+        .with_wire_check_params(WireCheckParams::sampling_for_tests(0, 1000));
     let model = ResolvedModel::new(NICKNAME, PROVIDER, provider, "upstream");
     router.install_resolved_models(BTreeMap::from([(NICKNAME.to_string(), Arc::new(model))]));
     router

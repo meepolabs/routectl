@@ -994,7 +994,9 @@ a file named in `missing` was not produced at all.
 `scripts/wire_watch/planted_drop.test.sh` drives three cells through the
 real runner and the REAL routectl binary against a python mock upstream
 (`scripts/wire_watch/planted_drop.py`) on a probed free loopback port, in a
-copy of `scripts/` with two throwaway lane configs (`sample_one_in = 1`):
+copy of `scripts/` with two throwaway lane configs (the runner boots each
+daemon with `ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1`, so every attempt is
+checked):
 
 | Cell | Lane | Plant | Expected finding |
 |---|---|---|---|
@@ -1041,15 +1043,17 @@ a fixture whose `config_sha` names a file nobody chose. Both directions are
 pinned in `scripts/capture_driver.test.sh` -- the dotted name resolves to
 the dotted file's sha, and the hyphenated spelling resolves to neither.
 
-Every committed lane config also sets `[wire_check] sample_one_in = 1`, so
-a driven run checks every attempt. The Bedrock lanes (`bedrock-invoke`,
+The runner boots every lane's daemon with
+`ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1`, so a driven run checks every attempt;
+no lane config sets it. The Bedrock lanes (`bedrock-invoke`,
 `bedrock-converse` in us-west-2; `bedrock-mantle` in us-east-1) carry one
 `[models.<nick>]` entry per candidate model, and
 `scripts/wire_watch/models.tsv` lists the same nicknames with a tier
 (`primary` runs every case, `sweep` a small set), a thinking flag, and the
 AWS doc each upstream id came from. `scripts/drivers/config/lane_configs.test.sh`
 (stdlib Python checker `lane_configs.py`) enforces all of it with a planted
-failing copy per rule: the sampling rate, the anthropic-api twins, the
+failing copy per rule: the runner's daemon sampling rate and no lane
+config carrying `[wire_check]`, the anthropic-api twins, the
 models.tsv weld in both directions, one primary per lane that `default`
 points at, no alias glob shadowing a nickname, a doc citation per id, and
 each Bedrock lane naming only its key's region. Add or drop a candidate in

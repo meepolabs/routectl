@@ -459,8 +459,9 @@ pub struct Router {
     /// sampler's per-(lane, version) counts must not restart their first-N
     /// window on every config swap.
     wire_check: Arc<crate::wire_check_state::WireCheckState>,
-    /// Sampling counts and status window the wire check runs on, derived
-    /// from `config.wire_check` at construction.
+    /// Sampling counts and status window the wire check runs on: the consts
+    /// until `with_wire_check_params` sets the boot-resolved values, which
+    /// `carry_over_metrics_from` hands to every rebuild.
     wire_check_params: crate::wire_check_state::WireCheckParams,
     /// Warn-once dedup for `routectl_edit_rejected`, keyed by lane, path
     /// pattern and attribution. Reset on a Router rebuild, which re-warns once.
@@ -2156,7 +2157,6 @@ impl Router {
             .values()
             .any(|entry| entry.forwarded_base_url().is_some());
         let override_registry = crate::override_registry::OverrideRegistry::build(&config);
-        let wire_check_params = wire_check::params_from_config(&config.wire_check);
         Self {
             config,
             providers: Default::default(),
@@ -2194,7 +2194,7 @@ impl Router {
             pool_reports: Vec::new(),
             metrics: Arc::new(RouterMetrics::default()),
             wire_check: Arc::default(),
-            wire_check_params,
+            wire_check_params: crate::wire_check_state::WireCheckParams::default(),
             edit_rejected_warned: learn_revert::edit_rejected_warned(),
             #[cfg(any(test, feature = "test-utils"))]
             wire_tap_drop: None,
@@ -2646,9 +2646,14 @@ impl Router {
     /// this Router is about to discard. (`invalidations_total` stays 0 while
     /// the ledger revision stamps are frozen; the learned registry is attached
     /// across every reload.)
+    ///
+    /// The wire-check params ride along by value: the sampler they drive is
+    /// shared here, and they were resolved once at boot, so a rebuild keeps
+    /// the boot values instead of falling back to the consts.
     pub fn carry_over_metrics_from(&mut self, previous: &Self) {
         self.metrics = Arc::clone(&previous.metrics);
         self.wire_check = Arc::clone(&previous.wire_check);
+        self.wire_check_params = previous.wire_check_params;
     }
 
     /// Carry the previous Router's per-lane token-estimate correction
@@ -3173,18 +3178,16 @@ impl Router {
     }
 
     /// The sampling params this router's wire check runs on.
-    #[cfg(test)]
-    pub(crate) const fn wire_check_params_for_tests(
-        &self,
-    ) -> crate::wire_check_state::WireCheckParams {
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub const fn wire_check_params_for_tests(&self) -> crate::wire_check_state::WireCheckParams {
         self.wire_check_params
     }
 
     /// This router, sampling wire checks and reporting the status window per
-    /// `params` instead of the values its config derives.
-    #[cfg(any(test, feature = "test-utils"))]
+    /// `params` instead of the built-in consts.
     #[must_use]
-    pub const fn with_wire_check_params_for_tests(
+    pub const fn with_wire_check_params(
         mut self,
         params: crate::wire_check_state::WireCheckParams,
     ) -> Self {

@@ -71,7 +71,7 @@ fn router_over(provider_block: &str, cache: bool, providers: &[Arc<dyn Provider>
         nicknames.join(", ")
     ));
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(NEVER_SAMPLED);
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params(NEVER_SAMPLED);
     let models = providers
         .iter()
         .enumerate()

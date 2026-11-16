@@ -69,6 +69,7 @@ pub(crate) mod seat_pool;
 pub(crate) mod state_key;
 #[cfg(test)]
 pub(crate) mod test_secret;
+pub mod wire_check_env;
 pub mod wire_check_state;
 
 pub use activation::{
@@ -110,7 +111,7 @@ pub use config::{
     ConfigVersionError, HistoryReasoning, MitmConfig, ModelEntry, OverrideEntry, PoolEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, RawConfigPreflightError, ReasoningDialect,
     ReductionConfig, Resolved, ResolvedTuning, RetiredKeysError, RetryPolicy, ServerAuth,
-    ServerConfig, TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig, WireCheckConfig,
+    ServerConfig, TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig,
     is_config_provider_kind, preflight_config_version, preflight_raw_config, resolve_tuning,
     retired_key_message,
 };

@@ -109,7 +109,7 @@ fn chain_router_with_retry(
          [aliases]\n{ALIAS} = [\"m0\", \"m1\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(NEVER_SAMPLED);
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params(NEVER_SAMPLED);
     // Anthropic-family upstream ids, so a Bedrock seat is admitted to count
     // tokens.
     router.install_resolved_models(BTreeMap::from([

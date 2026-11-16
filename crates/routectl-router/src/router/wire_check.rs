@@ -16,8 +16,7 @@ use routectl_core::wire_check::{
 use routectl_core::{ChatRequest, RequestObservation};
 use serde_json::Value;
 
-use crate::config::WireCheckConfig;
-use crate::wire_check_state::{WireCheckParams, WireCheckState};
+use crate::wire_check_state::WireCheckState;
 
 use super::{DispatchTarget, Router};
 
@@ -283,15 +282,6 @@ pub(super) fn compare_parsed_request(
         record.canonical().routectl_internal.observation.as_ref(),
         &outcome,
     );
-}
-
-/// The sampler params a router runs on, read from its `[wire_check]` block.
-pub(super) const fn params_from_config(config: &WireCheckConfig) -> WireCheckParams {
-    WireCheckParams {
-        first_n: config.first_n,
-        sample_one_in: config.sample_one_in,
-        window_secs: config.window_secs,
-    }
 }
 
 /// Add `outcome`'s findings to a request's observation slot, one per

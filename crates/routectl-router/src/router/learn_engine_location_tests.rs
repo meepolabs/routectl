@@ -52,7 +52,7 @@ fn router(provider_block: &str, provider: Arc<dyn Provider>) -> Router {
          [aliases]\n{ALIAS} = [\"m0\"]\n"
     );
     let config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(NEVER_SAMPLED);
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params(NEVER_SAMPLED);
     let model = ResolvedModel::new("m0", "p0", provider, "upstream");
     router.install_resolved_models(BTreeMap::from([("m0".to_string(), Arc::new(model))]));
     router

@@ -351,6 +351,67 @@ async fn config_reload_ignores_a_leftover_overlay_file() {
     drain_usage_writer_strict(writer).await;
 }
 
+/// A config reload keeps the wire-check params `serve` resolved at boot: it
+/// neither resolves the sample-rate variable again nor falls back to the
+/// built-in defaults, even when the variable now says something else.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_config_reload_keeps_the_boot_wire_check_params_and_never_rereads_the_variable() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
+    )
+    .unwrap();
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let mut initial_config = Config::default();
+    let _usage_dir = isolate_usage_db(&mut initial_config);
+    let initial_config = Arc::new(initial_config);
+    let (usage, writer) = build_usage_writer(&initial_config);
+    let boot = routectl_router::wire_check_env::resolve_wire_check_params(|var| {
+        (var == routectl_router::wire_check_env::SAMPLE_ONE_IN_ENV).then(|| "3".to_string())
+    })
+    .expect("a positive rate resolves")
+    .params;
+    let router = build_router_from_config(initial_config.clone(), secrets.clone())
+        .await
+        .expect("initial router build")
+        .with_wire_check_params(boot);
+    let swap = Arc::new(ArcSwap::from_pointee(router));
+    let before = swap.load_full();
+    let _changed = ScopedEnv::set(routectl_router::wire_check_env::SAMPLE_ONE_IN_ENV, "7");
+
+    // Act
+    let result = handle_config_reload(
+        Some(&cfg_path),
+        &initial_config,
+        secrets,
+        &swap,
+        &usage,
+        &mut never_shutdown(),
+    )
+    .await;
+
+    // Assert
+    assert!(
+        matches!(result, Ok(Some(_))),
+        "reload accepted: {:?}",
+        result.err()
+    );
+    let after = swap.load_full();
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "the reload published a new router"
+    );
+    assert_eq!(after.wire_check_params_for_tests().sample_one_in.get(), 3);
+    assert_eq!(after.wire_check_params_for_tests(), boot);
+    drop(usage);
+    drain_usage_writer_strict(writer).await;
+}
+
 /// Config text for one openai-compat model whose prompt-shaping policy
 /// (`history_reasoning`) is the only thing a test varies.
 #[cfg(test)]

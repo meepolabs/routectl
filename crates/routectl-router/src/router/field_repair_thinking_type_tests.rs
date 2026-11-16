@@ -206,7 +206,7 @@ fn thinking_chain(seats: &[(&str, Arc<ThinkingTypeSeat>)], params: WireCheckPara
         ALIAS.to_string(),
         AliasValue::Chain((0..seats.len()).map(|idx| format!("m{idx}")).collect()),
     );
-    let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(params);
+    let mut router = Router::new(Arc::new(config)).with_wire_check_params(params);
     router.install_resolved_models(
         seats
             .iter()

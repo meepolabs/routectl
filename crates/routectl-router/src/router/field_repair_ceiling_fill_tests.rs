@@ -177,7 +177,7 @@ mod ceiling_fill {
             &config.models["m0"],
         );
         let mut router = Router::new(Arc::new(config))
-            .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(8, 1));
+            .with_wire_check_params(WireCheckParams::sampling_for_tests(8, 1));
         router.install_resolved_models(BTreeMap::from([("m0".to_string(), Arc::new(model))]));
         router.with_capability_writes_assumed_durable_for_tests()
     }

@@ -7,7 +7,7 @@ line, so a construct it does not understand fails the check instead of
 being silently skipped.
 
 Usage:
-  lane_configs.py wire-check CONFIG...
+  lane_configs.py wire-check RUNNER CONFIG...
   lane_configs.py weld MODELS_TSV CONFIG_DIR
   lane_configs.py regions CONFIG_DIR
 
@@ -116,16 +116,41 @@ def read_models_tsv(path: str) -> Tuple[List[Row], Set[str]]:
     return rows, cited
 
 
-def check_wire_check(paths: List[str]) -> List[str]:
+SAMPLE_RATE_VAR = "ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN"
+DAEMON_EXEC = 'exec "$ROUTECTL_BIN"'
+ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(\S*)\s*\\$")
+
+
+def daemon_env_assignments(runner: str) -> Dict[str, str]:
+    """The NAME=value prefix of the runner's one daemon exec: the
+    backslash-continued lines directly above `exec "$ROUTECTL_BIN"`."""
+    with open(runner, encoding="utf-8") as handle:
+        lines = [line.strip() for line in handle]
+    execs = [i for i, line in enumerate(lines) if line.startswith(DAEMON_EXEC)]
+    if len(execs) != 1:
+        raise ParseError(f"{runner}: want exactly one '{DAEMON_EXEC}' line, found {len(execs)}")
+    assignments: Dict[str, str] = {}
+    index = execs[0] - 1
+    while index >= 0:
+        match = ASSIGNMENT_RE.match(lines[index])
+        if not match:
+            break
+        assignments.setdefault(match.group(1), match.group(2))
+        index -= 1
+    return assignments
+
+
+def check_wire_check(runner: str, paths: List[str]) -> List[str]:
+    """Every lane's daemon checks every attempt: the runner assigns the
+    sample-rate variable 1 on the daemon it boots for any lane, and no lane
+    config carries the retired table, which would refuse to start."""
     failures: List[str] = []
+    value = daemon_env_assignments(runner).get(SAMPLE_RATE_VAR)
+    if value != "1":
+        failures.append(f"{runner}: the daemon exec sets {SAMPLE_RATE_VAR} to {value!r}, want '1'")
     for path in paths:
-        section = read_config(path).get("wire_check")
-        if section is None:
-            failures.append(f"{path}: no [wire_check] table")
-        elif section.get("sample_one_in") != "1":
-            failures.append(
-                f"{path}: [wire_check] sample_one_in is {section.get('sample_one_in')!r}, want 1"
-            )
+        if "wire_check" in read_config(path):
+            failures.append(f"{path}: carries a [wire_check] table, which routectl refuses at load")
     return failures
 
 
@@ -227,8 +252,8 @@ def main(argv: List[str]) -> int:
         return 2
     command, args = argv[1], argv[2:]
     try:
-        if command == "wire-check" and args:
-            failures = check_wire_check(args)
+        if command == "wire-check" and len(args) >= 2:
+            failures = check_wire_check(args[0], args[1:])
         elif command == "weld" and len(args) == 2:
             failures = check_weld(args[0], args[1])
         elif command == "regions" and len(args) == 1:

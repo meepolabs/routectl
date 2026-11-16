@@ -2054,6 +2054,23 @@ fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
 }
 
 #[test]
+fn carry_over_metrics_from_hands_the_wire_check_params_to_the_rebuild() {
+    let params = crate::wire_check_state::WireCheckParams::sampling_for_tests(3, 7);
+    let config = Arc::new(Config::default());
+    let before = Router::new(config.clone()).with_wire_check_params(params);
+    let mut after = Router::new(config);
+    assert_eq!(
+        after.wire_check_params,
+        crate::wire_check_state::WireCheckParams::default(),
+        "control: a fresh router samples by the consts"
+    );
+
+    after.carry_over_metrics_from(&before);
+
+    assert_eq!(after.wire_check_params, params);
+}
+
+#[test]
 fn log_snapshot_carries_the_wire_check_counters() {
     use routectl_core::wire_check::{EgressKind, IngressDialect, Lane, Leg, PathClass, WirePath};
 

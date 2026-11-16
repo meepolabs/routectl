@@ -65,7 +65,7 @@ overlays merge, what's reserved.
 **Operating the daemon**
 - [Log knobs (environment only)](#log-knobs-environment-only)
 - [Usage accounting (`[usage]`)](#usage-accounting-usage)
-- [Live wire check (`[wire_check]`)](#live-wire-check-wire_check)
+- [Live wire check](#live-wire-check)
 - [Reading usage (`routectl usage`)](#reading-usage-routectl-usage)
 - [Diagnostics (doctor / probe)](#diagnostics-routectl-doctor-and-routectl-provider-probe)
 - [Inspecting a request offline (`prompt-size`)](#inspecting-a-request-offline-routectl-prompt-size)
@@ -188,10 +188,6 @@ version = 5           # config schema version; see "Config schema version"
 
 [usage]               # usage-accounting subsystem: db_path,
                       # retention_days. Optional.
-
-[wire_check]          # live wire-check sampling (first_n, sample_one_in,
-                      # window_secs). Optional; default 8 / 100 / 86400.
-                      # Observe-only -- never changes a request.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting api.anthropic.com.
@@ -374,6 +370,12 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `server.strict_translation` | lossy seams forward and count |
 | `trim` | the advisory trim uses fixed defaults |
 | `usage.enabled` | usage recording is always on |
+| `wire_check` | sampling is fixed: first 8 per lane and version, then 1 in 100; 24 h status window; set ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN in the environment to change the 1-in-100 rate |
+
+The one value the retired `wire_check` table set that can still change is
+the 1-in-100 rate: `ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN` in the environment
+that launches `routectl serve` (a whole number from 1 up; see
+[Live wire check](#live-wire-check)).
 
 ## Editor autocomplete (JSON Schema)
 
@@ -2798,45 +2800,42 @@ NULL in these columns and adds 0. The counts sit beside the block's
 the window lost rows, so each count is a lower bound. They are not part of
 the skip counts and never reconcile against attempt counts.
 
-## Live wire check (`[wire_check]`)
+## Live wire check
 
 routectl can compare the body a client sent with the body it sent upstream
 on the same attempt, and count every difference no routectl transform
-declared. The optional `[wire_check]` block sets how often a successful
-attempt is checked and how long a finding stays current on the status
-surface. A missing block deserializes to the defaults below.
+declared. It has no config table (a `wire_check` table is refused, see
+[Retired config keys](#retired-config-keys)); sampling is fixed:
 
-```toml
-[wire_check]
-# Successful attempts checked per (lane, client version) since boot
-# before sampling starts. Default 8.
-first_n = 8
-# After that, one successful attempt in this many is checked. Must be
-# at least 1. Default 100.
-sample_one_in = 100
-# How far back, in seconds, a counter's last sighting still counts as
-# current on the status surface. Must be greater than 0. Default 86400.
-window_secs = 86400
-```
-
-- **`first_n`** (integer, default `8`) -- a lane is one ingress dialect
+- **First 8 per lane and client version.** A lane is one ingress dialect
   feeding one egress kind (for example `anthropic->anthropic-api`). Each
-  lane checks its first `first_n` successful attempts per client version
-  after boot, so a new client release is checked straight away. At most
-  8 client versions are tracked per lane; attempts from any further
-  version are checked at the 1-in-`sample_one_in` rate only. `0` skips
-  the first-N window entirely.
-- **`sample_one_in`** (integer >= 1, default `100`) -- past `first_n`,
-  one successful attempt in this many is checked. `1` checks every
-  successful attempt. `0` fails config load.
-- **`window_secs`** (integer > 0, default `86400`) -- the status surface
-  shows a loss or local-refusal counter only while its last sighting is
-  inside this window. The counters themselves are cumulative since boot
-  and survive a config reload. `0` fails config load.
-- **There is no on/off key.** The check never changes what is sent and
-  never fails a request; the only operator choice is how much it costs.
-  An attempt the upstream rejects is always checked, whatever these
-  knobs say.
+  lane checks its first 8 successful attempts per client version after
+  boot, so a new client release is checked straight away. At most 8
+  client versions are tracked per lane; attempts from any further version
+  are checked at the sample rate only.
+- **Then 1 in 100.** Past the first 8, one successful attempt in 100 is
+  checked. The environment variable `ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN`
+  replaces the 100 (`1` checks every successful attempt):
+
+  ```sh
+  ROUTECTL_WIRE_CHECK_SAMPLE_ONE_IN=1   # default 100
+  ```
+
+  It is read once when `serve` starts and kept for the life of the
+  process; a config reload does not read it again. Surrounding whitespace
+  is ignored. A value that is set but is not a whole number from 1 to
+  4294967295 (empty, `0`, negative, not a number, too large) refuses to
+  start with an error naming the variable; the value itself is not
+  printed. `serve` logs the resolved rate and whether it came from the
+  variable or the default once at boot, at INFO (see
+  [LOGGING.md](LOGGING.md#startup-env-knob-status-lines)).
+- **24 h status window.** The status surface shows a loss or local-refusal
+  counter only while its last sighting is inside the last 86400 seconds.
+  The counters themselves are cumulative since boot and survive a config
+  reload.
+- **There is no on/off switch.** The check never changes what is sent and
+  never fails a request; the only choice is how much it costs. An attempt
+  the upstream rejects is always checked, whatever the sample rate.
 - **What it reports.** Three counters ride the router's metrics snapshot
   log line: `rc_wire_loss_total{lane,path_class}`,
   `rc_wire_check_total{lane,outcome}` (outcome `clean`, `loss`, `budget`
@@ -2847,9 +2846,8 @@ window_secs = 86400
   rejection field repair could not fix, logs one WARN per (lane, path,
   kind) at target `routectl_router::wire_check`. Every label and path is
   content-free: paths are sanitized JSON pointers, never body values.
-- **Hot-reloadable.** A config swap applies the new values to the next
-  admit decision; the per-(lane, version) counts and every counter carry
-  across the reload.
+- **Reloads.** The per-(lane, version) counts and every counter carry
+  across a config reload.
 
 ## MITM front-proxy (`[mitm]`)
 

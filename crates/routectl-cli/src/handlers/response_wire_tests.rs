@@ -278,10 +278,7 @@ pub(super) async fn router(
     crate::server::build_router_from_config(Arc::new(config), secrets)
         .await
         .expect("build router")
-        .with_wire_check_params_for_tests(WireCheckParams::sampling_for_tests(
-            first_n,
-            sample_one_in,
-        ))
+        .with_wire_check_params(WireCheckParams::sampling_for_tests(first_n, sample_one_in))
 }
 
 /// What the client-facing renderer does to the response in a test run.
@@ -1768,9 +1765,8 @@ mod codex_lane_mixed_output {
             slots: Arc::clone(slots),
         };
         let (first_n, sample_one_in) = CHECK_EVERY;
-        let mut router = Router::new(Arc::new(config)).with_wire_check_params_for_tests(
-            WireCheckParams::sampling_for_tests(first_n, sample_one_in),
-        );
+        let mut router = Router::new(Arc::new(config))
+            .with_wire_check_params(WireCheckParams::sampling_for_tests(first_n, sample_one_in));
         router.install_resolved_models(BTreeMap::from([(
             "m".to_string(),
             Arc::new(ResolvedModel::new("m", "p", Arc::new(provider), "upstream")),
