@@ -703,6 +703,34 @@ mod parse_error_scheme_wording_tests {
         );
     }
 
+    /// A relative `file://` ref is refused naming the scheme and the
+    /// absolute-path rule, and the line carries no byte of the ref body.
+    #[test]
+    fn a_relative_file_ref_is_refused_without_echoing_it() {
+        // Arrange
+        let toml_text = "[providers.compat]\n\
+                         format = \"openai-chat\"\n\
+                         base_url = \"https://example.invalid/v1\"\n\
+                         credential = \"file://sk-ant-SENTINEL\"\n\
+                         auth = \"bearer\"\n";
+        let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+        // Act
+        let errors = secret_ref_parse_errors(&config, Some(toml_text));
+
+        // Assert
+        let error = errors
+            .iter()
+            .find(|e| e.contains("compat"))
+            .unwrap_or_else(|| panic!("expected a parse error for the entry: {errors:?}"));
+        assert!(
+            error.contains("secret-ref parse failed (scheme `file://`)"),
+            "{error}"
+        );
+        assert!(error.contains("absolute path"), "{error}");
+        assert!(!error.contains("SENTINEL"), "{error}");
+    }
+
     /// A ref with no recognizable scheme still renders `unknown` -- the
     /// fallthrough is what keeps an unprefixed, possibly-secret value out
     /// of the message.

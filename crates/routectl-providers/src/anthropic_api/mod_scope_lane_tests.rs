@@ -3,13 +3,15 @@
 //! `stream` and `count_tokens` there, and every other lane or near-miss
 //! response stays unrecognized (target scope).
 //!
-//! The base URL is the exact Anthropic host resolved to the mock, so the
-//! forwarded client-bearer leg is reachable; every provider is built the
-//! same way and differs only in the field a row names.
+//! The base URL keeps the exact Anthropic host, resolved to the mock; every
+//! provider is built the same way and differs only in the field a row names.
+//! The forwarded client-bearer leg needs an `https` base with no port, so
+//! that lane reaches the mock through a TLS front.
 
 use super::*;
 use crate::upstream_scope::tests::bare_429;
 use routectl_core::{ChatRequest, Message, MessageContent, Role, ScopeRow, StaticToken};
+use routectl_testkit::tls_front::TlsFront;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -70,15 +72,27 @@ fn oauth_row(name: &'static str, headers: Vec<(&'static str, &'static str)>, bod
     }
 }
 
-#[cfg_attr(not(feature = "bedrock"), allow(clippy::unused_async))]
-async fn provider_on(server: &MockServer, lane: Lane) -> AnthropicApiProvider {
+const ANTHROPIC_HOST: &str = "api.anthropic.com";
+
+/// The provider for `lane`, and the TLS front it reaches the mock through
+/// when the lane needs one (dropping the front stops it).
+async fn provider_on(server: &MockServer, lane: Lane) -> (AnthropicApiProvider, Option<TlsFront>) {
     #[cfg(feature = "bedrock")]
     let mantle = match lane {
         Lane::Mantle => Some(mantle_auth().await),
         _ => None,
     };
-    let addr = *server.address();
-    let base_url = format!("http://api.anthropic.com:{}", addr.port());
+    let front = match lane {
+        Lane::Forwarded => Some(TlsFront::start(ANTHROPIC_HOST, *server.address()).await),
+        _ => None,
+    };
+    let (base_url, addr) = match &front {
+        Some(front) => (format!("https://{ANTHROPIC_HOST}"), front.addr),
+        None => {
+            let addr = *server.address();
+            (format!("http://{ANTHROPIC_HOST}:{}", addr.port()), addr)
+        }
+    };
     let cfg = AnthropicApiConfig {
         id: "scope-lane-test".into(),
         auth: std::sync::Arc::new(StaticToken::new("oat-token")),
@@ -100,13 +114,16 @@ async fn provider_on(server: &MockServer, lane: Lane) -> AnthropicApiProvider {
         mantle,
     };
     let mut provider = AnthropicApiProvider::new(cfg);
-    provider.client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .resolve("api.anthropic.com", addr)
-        .build()
-        .expect("test client");
-    provider
+        .resolve(ANTHROPIC_HOST, addr);
+    if let Some(front) = &front {
+        let root = reqwest::Certificate::from_pem(&front.ca_pem).expect("the front's root");
+        builder = builder.add_root_certificate(root);
+    }
+    provider.client = builder.build().expect("test client");
+    (provider, front)
 }
 
 #[cfg(feature = "bedrock")]
@@ -164,7 +181,7 @@ async fn scope_row_for(row: &Row) -> Option<ScopeRow> {
         .respond_with(template)
         .mount(&server)
         .await;
-    let provider = provider_on(&server, row.lane).await;
+    let (provider, _front) = provider_on(&server, row.lane).await;
     let req = request(row.lane);
     let err = match row.call {
         Call::Complete => provider.complete(req).await.err(),

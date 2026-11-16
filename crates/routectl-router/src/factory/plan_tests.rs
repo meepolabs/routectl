@@ -475,6 +475,81 @@ fn a_refused_plan_names_the_provider_and_withholds_the_entry() {
     );
 }
 
+/// A credential that does not parse is refused naming the provider, the key
+/// and the scheme rule, never the text after the scheme.
+#[test]
+fn an_unusable_credential_is_refused_without_echoing_it() {
+    let entry = ProviderEntry::anthropic_api("file://sk-ant-SENTINEL");
+
+    let err = plan_provider("p", &entry)
+        .expect_err("relative file path")
+        .to_string();
+
+    assert!(err.contains("provider `p`"), "{err}");
+    assert!(err.contains("`credential`"), "{err}");
+    assert!(
+        err.contains("file:// URI must be an absolute path"),
+        "{err}"
+    );
+    assert!(!err.contains("SENTINEL"), "{err}");
+}
+
+/// The forwarded credential obeys the managed Anthropic login's host rule:
+/// https, exact host, no userinfo, no port. Each refused base is planted with
+/// a sentinel where the URL allows one, and the refusal names the key and
+/// the rule without echoing the base. The accepted rows are the forms the
+/// URL parser normalizes onto the canonical base.
+#[test]
+fn the_forwarded_credential_plans_only_over_https_to_the_anthropic_host() {
+    let refused = [
+        ("plain http", "http://api.anthropic.com/sentinel-path"),
+        (
+            "plain http, uppercase scheme",
+            "HTTP://api.anthropic.com/sentinel-path",
+        ),
+        (
+            "http on port 443",
+            "http://api.anthropic.com:443/sentinel-path",
+        ),
+        (
+            "non-default port",
+            "https://api.anthropic.com:8443/sentinel-path",
+        ),
+        ("userinfo", "https://sentinel-user:pw@api.anthropic.com"),
+        (
+            "trailing-dot host",
+            "https://api.anthropic.com./sentinel-path",
+        ),
+        (
+            "non-ASCII look-alike host",
+            "https://api.anthrop\u{131}c.com/sentinel-path",
+        ),
+    ];
+    let accepted = [
+        ("canonical", "https://api.anthropic.com"),
+        ("uppercase scheme", "HTTPS://api.anthropic.com"),
+        ("explicit default port", "https://api.anthropic.com:443"),
+    ];
+
+    for (label, base) in refused {
+        let entry = ProviderEntry::anthropic_api("forwarded")
+            .with_auth(Auth::Bearer)
+            .with_base_url(base);
+        let err = plan_provider("fwd", &entry).expect_err(label).to_string();
+        assert!(err.contains("provider `fwd`"), "{label}: {err}");
+        assert!(err.contains("credential = \"forwarded\""), "{label}: {err}");
+        assert!(err.contains("https base_url"), "{label}: {err}");
+        assert!(err.contains("withheld"), "{label}: {err}");
+        assert!(!err.contains("sentinel"), "{label}: echoes the base: {err}");
+    }
+    for (label, base) in accepted {
+        let entry = ProviderEntry::anthropic_api("forwarded")
+            .with_auth(Auth::Bearer)
+            .with_base_url(base);
+        assert!(plan_provider("fwd", &entry).is_ok(), "{label}: {base}");
+    }
+}
+
 /// The api-key form of a managed Anthropic login is refused with a message
 /// that names the auth it needs and withholds the seat label.
 #[test]

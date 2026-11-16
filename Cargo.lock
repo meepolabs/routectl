@@ -2904,10 +2904,13 @@ name = "routectl-testkit"
 version = "0.9.0"
 dependencies = [
  "nix",
+ "rcgen",
  "routectl-core",
+ "rustls",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "uuid",
  "wiremock",

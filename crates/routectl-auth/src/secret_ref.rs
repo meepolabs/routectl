@@ -63,9 +63,9 @@ impl SecretRef {
             }
             let path = PathBuf::from(rest);
             if !path.is_absolute() {
-                return Err(Error::Auth(format!(
-                    "file:// URI must be an absolute path (got `{rest}`); use `file:///abs/path/to/key`"
-                )));
+                return Err(Error::Auth(
+                    "file:// URI must be an absolute path; use `file:///abs/path/to/key`".into(),
+                ));
             }
             return Ok(Self::File(path));
         }

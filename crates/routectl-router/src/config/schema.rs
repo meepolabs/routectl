@@ -14,7 +14,9 @@ use serde_json::Value;
 
 use crate::class_policy::ConfigFailureClass;
 
-use super::provider_descriptor::{Auth, Carrier, Format, format_row, is_vendor_host};
+use super::provider_descriptor::{
+    Auth, Carrier, Format, format_row, is_vendor_host, vendor_default_base,
+};
 
 #[cfg(test)]
 use super::Config;
@@ -1104,13 +1106,6 @@ pub fn is_config_provider_kind(kind: &str) -> bool {
     CONFIG_PROVIDER_KINDS.contains(&kind)
 }
 
-/// The Anthropic API base a code-built `anthropic-messages` entry starts on.
-const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
-
-/// The ChatGPT Codex base a code-built `openai-responses` entry starts on.
-#[cfg(feature = "openai-responses")]
-const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
-
 /// The OpenAI API base the `api-key` Responses builder selects.
 #[cfg(feature = "openai-responses")]
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
@@ -1118,10 +1113,6 @@ const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 /// The public Gemini REST base a code-built `gemini` entry starts on.
 #[cfg(feature = "gemini")]
 const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
-
-/// The daily Cloud Code base the `cloud-code` Gemini builder selects.
-#[cfg(feature = "gemini")]
-const CLOUD_CODE_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
 
 /// The `anthropic-version` header value when the entry sets none.
 pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -1370,7 +1361,7 @@ impl ProviderEntry {
     pub fn anthropic_api(credential: impl Into<String>) -> Self {
         Self::over_base_url(
             Format::AnthropicMessages,
-            ANTHROPIC_BASE,
+            vendor_default_base("anthropic"),
             credential.into(),
             Auth::XApiKey,
         )
@@ -1382,7 +1373,7 @@ impl ProviderEntry {
     pub fn openai_responses(credential: impl Into<String>) -> Self {
         Self::over_base_url(
             Format::OpenaiResponses,
-            CODEX_BASE,
+            vendor_default_base("codex"),
             credential.into(),
             Auth::Bearer,
         )
@@ -1446,14 +1437,14 @@ impl ProviderEntry {
             GeminiAuthMode::ApiKey => (
                 Format::Gemini,
                 Auth::XGoogApiKey,
-                CLOUD_CODE_BASE,
+                vendor_default_base("antigravity"),
                 GEMINI_BASE,
             ),
             GeminiAuthMode::CloudCode => (
                 Format::GeminiCloudCode,
                 Auth::Bearer,
                 GEMINI_BASE,
-                CLOUD_CODE_BASE,
+                vendor_default_base("antigravity"),
             ),
         };
         self.format = format;
@@ -1502,9 +1493,11 @@ impl ProviderEntry {
         );
         match kind {
             OpenaiResponsesAuthKind::ChatgptOauth => {
-                self.swap_builder_base(OPENAI_API_BASE, CODEX_BASE);
+                self.swap_builder_base(OPENAI_API_BASE, vendor_default_base("codex"));
             }
-            OpenaiResponsesAuthKind::ApiKey => self.swap_builder_base(CODEX_BASE, OPENAI_API_BASE),
+            OpenaiResponsesAuthKind::ApiKey => {
+                self.swap_builder_base(vendor_default_base("codex"), OPENAI_API_BASE)
+            }
             OpenaiResponsesAuthKind::BedrockMantle => {
                 panic!("the Bedrock managed surface is a cloud; build it with cloud_aws")
             }

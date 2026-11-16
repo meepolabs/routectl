@@ -22,6 +22,7 @@
 
 use crate::config::ProviderEntry;
 use routectl_auth::{CredentialRef, SecretRef};
+use routectl_core::identity::is_exact_https_host_in;
 use routectl_core::provider_kind::config as kind;
 use routectl_core::wire_check::EgressKind;
 use serde::{Deserialize, Serialize};
@@ -321,6 +322,36 @@ pub fn vendor_row(vendor: &str) -> Option<&'static VendorRow> {
     VENDOR_ROWS.iter().find(|row| row.vendor == vendor)
 }
 
+/// The [`default_base`](VendorRow::default_base) of a vendor in
+/// [`VENDOR_ROWS`]. Total over the table: an id outside it fails to compile
+/// where it is used in a const, and panics otherwise.
+#[must_use]
+pub const fn vendor_default_base(vendor: &str) -> &'static str {
+    let mut i = 0;
+    while i < VENDOR_ROWS.len() {
+        if const_str_eq(VENDOR_ROWS[i].vendor, vendor) {
+            return VENDOR_ROWS[i].default_base;
+        }
+        i += 1;
+    }
+    panic!("vendor_default_base: not a managed vendor");
+}
+
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Text every containment refusal carries, whatever the vendor.
 pub const CONTAINMENT_REFUSAL_MARKER: &str = "the managed ";
 
@@ -447,27 +478,6 @@ fn is_on_vendor_lane(row: &VendorRow, entry: &ProviderEntry) -> bool {
 /// manage.
 pub fn is_vendor_host(vendor: &str, base_url: &str) -> bool {
     vendor_row(vendor).is_some_and(|row| is_exact_https_host_in(base_url, row.hosts))
-}
-
-/// True when `base_url` is an `https` URL with no userinfo, no explicit
-/// non-default port, and a host exactly equal (ASCII case-insensitive) to
-/// one of `hosts`. Parsed with the same WHATWG URL parser the egress uses,
-/// so a backslash or `@` smuggle resolves to the host the request would
-/// actually reach. Invalid URLs and URLs with no host return `false`.
-fn is_exact_https_host_in(base_url: &str, hosts: &[&str]) -> bool {
-    let Ok(url) = url::Url::parse(base_url) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && hosts
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(host))
 }
 
 #[cfg(test)]

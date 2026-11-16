@@ -62,6 +62,15 @@ fn parse_refuses_malformed_credentials_without_echoing_them() {
         ("forwarded with suffix", format!("forwarded{SENTINEL}")),
         ("empty", String::new()),
         ("bare token", SENTINEL.to_string()),
+        ("relative file path", format!("file://sk-ant-{SENTINEL}")),
+        (
+            "relative file path, non-ASCII",
+            format!("file://cl\u{e9}-{SENTINEL}"),
+        ),
+        (
+            "oauth with a blank seat label",
+            "oauth://anthropic# ".to_string(),
+        ),
     ];
 
     for (name, input) in cases {
@@ -74,6 +83,19 @@ fn parse_refuses_malformed_credentials_without_echoing_them() {
             "{name}: error echoed input: {msg}"
         );
     }
+}
+
+/// The relative-path refusal keeps naming the scheme rule once it stops
+/// echoing the value: the message stays actionable.
+#[test]
+fn a_relative_file_path_is_refused_naming_the_absolute_path_rule() {
+    let err = CredentialRef::parse(&format!("file://sk-ant-{SENTINEL}"))
+        .expect_err("relative file path refused");
+
+    let msg = err.to_string();
+    assert!(msg.contains("file://"), "{msg}");
+    assert!(msg.contains("absolute path"), "{msg}");
+    assert!(!msg.contains(SENTINEL), "{msg}");
 }
 
 #[test]

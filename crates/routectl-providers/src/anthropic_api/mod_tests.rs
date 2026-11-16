@@ -2536,7 +2536,8 @@ async fn own_provider_ignores_floating_forwarded_bearer_on_anthropic_host() {
 /// The pure `should_use_forwarded_bearer` predicate shared by
 /// `resolve_effective_token` and the `build_headers` forwarded leg.
 /// Baseline: TRUE only when all three legs hold (configured forwarded +
-/// bearer present + exact anthropic host). Each case below flips
+/// bearer present + https on the exact anthropic host, no userinfo, no
+/// port). Each case below flips
 /// exactly one leg off the baseline and must land on false --
 /// including the two coexistence cases: a forwarded provider on a
 /// non-anthropic host, and an own-mode provider with a bearer present
@@ -2556,6 +2557,9 @@ fn should_use_forwarded_bearer_gate_matrix() {
         (true, false, "https://proxy.example.com", false),
         (false, false, "https://proxy.example.com", false),
         (true, true, "https://api.anthropic.com.evil.example", false),
+        (true, true, "http://api.anthropic.com", false),
+        (true, true, "https://api.anthropic.com:8443", false),
+        (true, true, "https://user:pw@api.anthropic.com", false),
     ];
 
     for (use_forwarded_bearer, has_bearer, base_url, expected) in cases {

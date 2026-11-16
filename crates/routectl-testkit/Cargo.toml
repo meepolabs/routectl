@@ -11,13 +11,19 @@ description = "Shared in-process tracing-capture test double for routectl's dev-
 [dependencies]
 routectl-core.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
 tracing.workspace = true
 # `redirect_pin` drives two live mock servers, so wiremock is a regular
 # (not dev-) dependency: this crate IS the dev-dependency of everything
 # that consumes it, and its public API hands back `MockServer`s.
 wiremock.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+# `tls_front` mints a test root and leaf and terminates TLS in front of a
+# mock server. All four packages are already in the lockfile through the
+# CLI's MITM proxy and reqwest's rustls backend.
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 
 # `temp_reaper` probes whether a dir's owning pid is still live.
 [target.'cfg(unix)'.dependencies]

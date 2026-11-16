@@ -315,10 +315,22 @@ fn assert_round_trips(role: &Role, text: &str, config: &Config) {
     );
 }
 
-#[tokio::test]
+/// Runs `body` on a fresh current-thread runtime. The caller sets the
+/// process environment before calling, so no runtime thread exists while it
+/// changes, and drops its guards after this returns, once the runtime (and
+/// any thread it started) is gone.
+fn block_on<F: std::future::Future>(body: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(body)
+}
+
+#[test]
 #[serial_test::serial]
-async fn every_provider_role_parses_validates_builds_and_round_trips() {
-    // Arrange
+fn every_provider_role_parses_validates_builds_and_round_trips() {
+    // Arrange: environment first, before any runtime exists
     let aws_dir = tempfile::tempdir().expect("temp aws dir");
     let xdg = tempfile::tempdir().expect("temp config dir");
     let _aws = hermetic_aws_profile(aws_dir.path());
@@ -327,12 +339,14 @@ async fn every_provider_role_parses_validates_builds_and_round_trips() {
     assert_eq!(ROLES.len(), EXPECTED_ROLES, "one row per role");
 
     // Act + Assert, one role per row
-    for role in ROLES {
-        let text = config_text(role);
-        let config =
-            parse_config(&text).unwrap_or_else(|e| panic!("`{}` must parse: {e}", role.name));
-        assert_validates(role, &config);
-        assert_builds(role, &config).await;
-        assert_round_trips(role, &text, &config);
-    }
+    block_on(async {
+        for role in ROLES {
+            let text = config_text(role);
+            let config =
+                parse_config(&text).unwrap_or_else(|e| panic!("`{}` must parse: {e}", role.name));
+            assert_validates(role, &config);
+            assert_builds(role, &config).await;
+            assert_round_trips(role, &text, &config);
+        }
+    });
 }

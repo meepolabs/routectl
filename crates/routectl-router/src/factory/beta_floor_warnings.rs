@@ -17,7 +17,7 @@
 
 use routectl_core::identity::anthropic::{
     EFFORT_BETA, OAUTH_ANTHROPIC_BETA, REDACT_THINKING_BETA, STRUCTURED_OUTPUTS_BETA,
-    default_claude_code_anthropic_betas, is_anthropic_api_host,
+    default_claude_code_anthropic_betas, is_anthropic_api_host, is_anthropic_api_https_base,
 };
 use routectl_providers::anthropic_api::{CONTEXT_MANAGEMENT_BETA, CloakMode};
 
@@ -215,7 +215,7 @@ impl EgressLane {
             .is_some_and(is_anthropic_api_host);
         let forwarded = provider.forwarded_base_url();
         Some(Self {
-            forwarded: forwarded.is_some_and(is_anthropic_api_host),
+            forwarded: forwarded.is_some_and(is_anthropic_api_https_base),
             own_oauth: provider.auth == Auth::Bearer && forwarded.is_none() && on_anthropic_host,
             client_identity: client_identity(provider),
             cloak_mode: provider.cloak_mode.unwrap_or_default(),

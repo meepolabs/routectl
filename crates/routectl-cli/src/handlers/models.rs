@@ -169,7 +169,8 @@ fn is_oauth_activated(activation: &ActivationState, oauth_id: &str) -> bool {
 ///   - no inbound `Authorization: Bearer` to relay -- routectl never
 ///     mints or substitutes a credential for this call;
 ///   - the configured forwarded provider's `base_url` is not (still,
-///     defense-in-depth) pinned to `api.anthropic.com`. Config
+///     defense-in-depth) `https` on exactly `api.anthropic.com` with no
+///     userinfo and no port. Config
 ///     validation already enforces this at load time; this is a
 ///     second checkpoint, mirroring the WIRE gate, so the full-scope
 ///     token is never sent anywhere else regardless.
@@ -190,7 +191,7 @@ fn forwarded_proxy_target(
     }
     crate::handlers::ingress_handle::extract_authorization_bearer(headers)?;
     let base_url = forwarded_provider_base_url(router)?;
-    if !routectl_core::identity::anthropic::is_anthropic_api_host(&base_url) {
+    if !routectl_core::identity::anthropic::is_anthropic_api_https_base(&base_url) {
         return None;
     }
 
@@ -203,7 +204,7 @@ fn forwarded_proxy_target(
 /// if any. Config validation already requires this be unique-enough for
 /// the pin to matter (only an `anthropic-messages` entry sent as `bearer`
 /// may set `credential = "forwarded"` at all, and it must be pinned to
-/// `api.anthropic.com`) -- the first match is authoritative.
+/// `https://api.anthropic.com`) -- the first match is authoritative.
 fn forwarded_provider_base_url(router: &routectl_router::Router) -> Option<String> {
     router
         .config
@@ -534,11 +535,16 @@ mod tests {
     }
 
     fn router_with_forwarded_provider() -> Arc<Router> {
+        router_with_forwarded_provider_on("https://api.anthropic.com")
+    }
+
+    fn router_with_forwarded_provider_on(base_url: &str) -> Arc<Router> {
         let mut providers = BTreeMap::new();
         providers.insert(
             "forwarded".to_string(),
             ProviderEntry::anthropic_api("forwarded")
-                .with_auth(routectl_router::config::Auth::Bearer),
+                .with_auth(routectl_router::config::Auth::Bearer)
+                .with_base_url(base_url),
         );
         let config = Arc::new(Config {
             providers,
@@ -624,6 +630,32 @@ mod tests {
             "Bearer sk-ant-oat01-tok",
             "the client's Authorization header must reach the outbound request untouched"
         );
+    }
+
+    /// The relay re-checks the forwarded base on its own: a base the plan
+    /// would refuse never receives the client's bearer, even when the
+    /// configured entry reached the router. The canonical base is the
+    /// positive control.
+    #[test]
+    fn forwarded_proxy_target_relays_only_to_the_https_anthropic_base() {
+        let nonce = MitmSeamNonce::generate();
+        let headers = headers_with(Some(&nonce), Some("sk-ant-oat01-tok"));
+        let refused = [
+            ("plain http", "http://api.anthropic.com"),
+            ("non-default port", "https://api.anthropic.com:8443"),
+            ("userinfo", "https://user:pw@api.anthropic.com"),
+            ("trailing-dot host", "https://api.anthropic.com."),
+        ];
+
+        for (label, base) in refused {
+            let router = router_with_forwarded_provider_on(base);
+            assert!(
+                forwarded_proxy_target(&headers, &router, &nonce).is_none(),
+                "{label}: {base}"
+            );
+        }
+        let router = router_with_forwarded_provider_on("https://api.anthropic.com");
+        assert!(forwarded_proxy_target(&headers, &router, &nonce).is_some());
     }
 
     // ---- proxy_models_through: forward mechanics, injected origin ----

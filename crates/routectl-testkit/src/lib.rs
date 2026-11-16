@@ -49,6 +49,8 @@ pub use secret_file::secret_file_ref;
 
 pub mod temp_reaper;
 
+pub mod tls_front;
+
 /// One captured `tracing` event: its level, target (module path), the
 /// special `message` field, and every other structured field rendered
 /// to a string.

@@ -2,11 +2,11 @@
 //! credentials is read.
 
 use crate::config::provider_descriptor::{
-    Auth, Carrier, Format, client_identity, containment, format_row, managed_vendor_of,
+    Auth, Carrier, Format, client_identity, containment, format_row, is_vendor_host,
+    managed_vendor_of,
 };
 use crate::config::{Cloud, ProviderEntry};
 use routectl_auth::{CredentialRef, SecretRef};
-use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_core::wire_check::EgressKind;
 use routectl_core::{Error, Result};
 
@@ -42,6 +42,9 @@ const FORWARDED_FORMAT: Format = Format::AnthropicMessages;
 
 /// The only managed login the Cloud Code surface accepts.
 const CLOUD_CODE_VENDOR: &str = "antigravity";
+
+/// The managed vendor whose host rule the forwarded credential obeys.
+const FORWARDED_HOST_VENDOR: &str = "anthropic";
 
 /// Plan the build of `entry` (configured as provider `name`) without reading
 /// any credential.
@@ -166,7 +169,9 @@ fn check_sigv4_pairing(name: &str, auth: Auth, credential: &CredentialRef) -> Re
 }
 
 /// The client's forwarded credential is a full-scope claude.ai bearer: it may
-/// only go to the Anthropic API host, on the Anthropic format, as a bearer.
+/// only go to the Anthropic API host, over https with no userinfo and no
+/// port (the managed Anthropic login's own host rule), on the Anthropic
+/// format, as a bearer.
 fn check_forwarded_pin(
     name: &str,
     entry: &ProviderEntry,
@@ -176,8 +181,7 @@ fn check_forwarded_pin(
     if !matches!(credential, CredentialRef::Forwarded) {
         return Ok(());
     }
-    let on_anthropic_host =
-        matches!(destination, Destination::BaseUrl(base) if is_anthropic_api_host(base));
+    let on_anthropic_host = matches!(destination, Destination::BaseUrl(base) if is_vendor_host(FORWARDED_HOST_VENDOR, base));
     let is_pinned = entry.format() == FORWARDED_FORMAT && entry.auth == Auth::Bearer;
     if on_anthropic_host && is_pinned {
         return Ok(());
@@ -185,9 +189,9 @@ fn check_forwarded_pin(
     Err(refuse(
         name,
         "credential = \"forwarded\" is accepted only with format = \"anthropic-messages\", \
-         auth = \"bearer\" and a base_url whose host is exactly api.anthropic.com. The \
-         forwarded credential is the client's full-scope claude.ai bearer and never leaves \
-         that host. The configured base_url is withheld",
+         auth = \"bearer\" and an https base_url whose host is exactly api.anthropic.com, \
+         with no userinfo and no port. The forwarded credential is the client's full-scope \
+         claude.ai bearer and never leaves that host. The configured base_url is withheld",
     ))
 }
 

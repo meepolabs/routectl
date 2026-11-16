@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::identity::anthropic as beta_flags;
-use routectl_core::identity::anthropic::is_anthropic_api_host;
+use routectl_core::identity::anthropic::{is_anthropic_api_host, is_anthropic_api_https_base};
 use routectl_core::{ChatRequest, Result, StaticToken, TokenSource, sanitize_for_log};
 
 use super::cloak::{self, CloakConfig};
@@ -225,8 +225,8 @@ pub(super) struct BetaDecision {
 /// bearer (`resolve_effective_token` and the `build_headers` forwarded leg):
 /// the forwarded credential is used EXACTLY when the provider entry was
 /// explicitly configured `credential_source = "forwarded"`, a captured
-/// bearer is present on this request, AND the egress host is exactly
-/// `api.anthropic.com`. Any one leg false means "not the forwarded path" --
+/// bearer is present on this request, AND the base URL is
+/// `https://api.anthropic.com` (exact host, no userinfo, no port). Any one leg false means "not the forwarded path" --
 /// in particular an own-mode provider (`use_forwarded_bearer` false) never
 /// consumes a floating bearer captured for a sibling forwarded provider on
 /// the same router. Pure and host-check-free of any live network state so
@@ -237,7 +237,7 @@ pub(super) fn should_use_forwarded_bearer(
     has_bearer: bool,
     base_url: &str,
 ) -> bool {
-    use_forwarded_bearer && has_bearer && is_anthropic_api_host(base_url)
+    use_forwarded_bearer && has_bearer && is_anthropic_api_https_base(base_url)
 }
 
 /// Union the single OAuth gate flag into an under-composition beta set,
@@ -494,8 +494,8 @@ impl AnthropicApiProvider {
     /// `api.anthropic.com`. So the forwarded token becomes the effective
     /// credential EXACTLY when `should_use_forwarded_bearer` holds:
     /// `cfg.use_forwarded_bearer` is true, `forwarded_bearer` is `Some`
-    /// (ingress ran in forwarded mode for this request), AND `base_url`'s
-    /// host is exactly `api.anthropic.com` (`is_anthropic_api_host`). On
+    /// (ingress ran in forwarded mode for this request), AND `base_url` is
+    /// https on exactly `api.anthropic.com` (`is_anthropic_api_https_base`). On
     /// that path `self.cfg.auth.token()` is NOT called: the synthetic
     /// pure-proxy provider carries no live routectl credential, so
     /// resolving it would error.

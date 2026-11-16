@@ -404,9 +404,22 @@ pub fn is_anthropic_api_host(base_url: &str) -> bool {
     match url::Url::parse(base_url) {
         Ok(url) => url
             .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com")),
+            .is_some_and(|host| host.eq_ignore_ascii_case(ANTHROPIC_API_HOST)),
         Err(_) => false,
     }
+}
+
+/// The Anthropic API host.
+pub const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
+
+/// True when `base_url` may carry a credential to the Anthropic API:
+/// [`super::is_exact_https_host_in`] over [`ANTHROPIC_API_HOST`] (https, no
+/// userinfo, no explicit port, exact host).
+///
+/// Stricter than [`is_anthropic_api_host`], which answers only "is this the
+/// host" and keeps answering it for a plain-http base.
+pub fn is_anthropic_api_https_base(base_url: &str) -> bool {
+    super::is_exact_https_host_in(base_url, &[ANTHROPIC_API_HOST])
 }
 
 #[cfg(test)]

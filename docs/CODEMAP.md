@@ -9257,6 +9257,10 @@ Dev-dependency crate: shared test doubles and harnesses every other crate's
   cross-host-redirect pin every credentialed egress lane's redirect regression
   test drives (`start` / `origin_uri` / `assert_not_followed` /
   `assert_target_untouched`)
+- `src/tls_front.rs` -- `TlsFront`, a TLS listener with a freshly minted
+  test root and leaf for one host that relays each connection to a plain-http
+  mock, so a test can reach an egress decision that holds only for an
+  `https` base with no port
 - `src/bench_alloc.rs` -- `CountingAllocator` global allocator plus the
   deterministic `BenchCase` / `run_alloc_count` measurement harness the perf
   benches share (simple and batched case shapes, wall-time via criterion or
