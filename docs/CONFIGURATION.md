@@ -4967,11 +4967,13 @@ There is no override.
 
    The `oauth://anthropic` ref resolves at request time against the
    credentials store; the `auth_kind = "oauth-bearer"` flag emits
-   `Authorization: Bearer <token>` instead of `x-api-key`. Against
-   `api.anthropic.com` it also emits the built-in Claude Code identity
-   (stainless header pack, default `user_agent`, session and request ids);
-   against any other host that identity is withheld, and only what you set
-   explicitly in `header_extras` or `user_agent` is sent.
+   `Authorization: Bearer <token>` instead of `x-api-key`. Because the
+   credential is the managed login and the host is `api.anthropic.com`,
+   the entry also emits the built-in Claude Code identity (stainless header
+   pack, default `user_agent`, session and request ids, the body cloak).
+   Any other credential (an `env://` or `file://` bearer included) or any
+   other host gets none of it, and only what you set explicitly in
+   `header_extras` or `user_agent` is sent.
 
    For the claude-code client identity (`user_agent`, forwarded session
    headers, the full stainless header pack) the offered entry is a

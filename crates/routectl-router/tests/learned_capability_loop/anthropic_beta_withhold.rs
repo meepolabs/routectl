@@ -119,6 +119,7 @@ impl Lane {
             session_id: None,
             cloak: CloakConfig::default(),
             use_forwarded_bearer: false,
+            client_identity: true,
             #[cfg(feature = "bedrock")]
             mantle: None,
         };

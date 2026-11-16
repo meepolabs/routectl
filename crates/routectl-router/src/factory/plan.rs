@@ -31,3 +31,7 @@ pub fn plan_provider(name: &str, entry: &ProviderEntry) -> Result<ProviderPlan> 
 #[cfg(test)]
 #[path = "plan_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "plan_identity_wire_tests.rs"]
+mod identity_wire_tests;

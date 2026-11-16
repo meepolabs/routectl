@@ -9,7 +9,7 @@
 //! sampling, and the caller's own canonical request survives the walk
 //! unmutated.
 //!
-//! REACHABLE SUBSET. The OAuth lane is host-pinned: `is_cloak_lane`
+//! REACHABLE SUBSET. The OAuth lane is host-pinned: `is_own_oauth_lane`
 //! requires the exact `api.anthropic.com` host, so no mock server can
 //! serve the fallback hop and a REAL 2xx from it is unreachable in-tree.
 //! The hop is therefore driven with a failing token source, which halts
@@ -227,9 +227,10 @@ impl TokenSource for FailingTokenSource {
 
 /// The REAL anthropic-api provider on the own-OAuth lane: `OauthBearer`
 /// plus the exact `api.anthropic.com` host and no forwarded bearer, which
-/// is precisely `is_cloak_lane`. Built through the public constructor so
-/// the lane predicate reads production defaults, not a hand-assembled
-/// struct.
+/// is precisely the credential lane the sampling strip is gated on (the
+/// client identity is not part of it). Built through the public
+/// constructor so the lane predicate reads production defaults, not a
+/// hand-assembled struct.
 fn oauth_lane_provider(id: &str) -> Arc<AnthropicApiProvider> {
     let mut cfg = AnthropicApiConfig::new_with_auth(id, Arc::new(FailingTokenSource));
     cfg.auth_kind = AuthKind::OauthBearer;

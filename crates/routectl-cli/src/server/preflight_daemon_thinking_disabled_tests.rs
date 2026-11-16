@@ -83,6 +83,7 @@ mod thinking_disabled {
             session_id: None,
             cloak: CloakConfig::default(),
             use_forwarded_bearer: false,
+            client_identity: false,
             mantle: None,
         };
         let provider = AnthropicApiProvider::new(cfg).with_host_resolved_to_for_tests(addr);

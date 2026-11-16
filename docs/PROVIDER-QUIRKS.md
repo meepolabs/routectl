@@ -188,7 +188,7 @@ Both unions run after the floor and after every other beta step: they are capabi
 
 Anthropic's OAuth seat 400s a `/v1/messages` body carrying either `temperature` or `top_p` (both confirmed). routectl drops them as the last mutation before the request goes out, on both the streaming and non-streaming paths, and emits one structured `DEBUG` event per affected request naming only the dropped keys (never their values).
 
-The gate is the LANE (`oauth-bearer` + exact `api.anthropic.com` host + not the forwarded leg), NOT the cloak setting. `cloak.mode = "never"` on an OAuth provider therefore STILL drops these params -- the 400 is a property of the credential, not of the disguise. Point the request at an API-key provider (or any non-Anthropic host) if you need `temperature` honoured. The `count_tokens` path is unaffected: its body allowlist already excludes sampling.
+The gate is the credential LANE (`oauth-bearer` + exact `api.anthropic.com` host + not the forwarded leg), NOT the Claude Code identity or the cloak setting. An env-held OAuth bearer, or `cloak.mode = "never"` on an OAuth provider, therefore STILL drops these params -- the 400 is a property of the credential, not of the disguise. Point the request at an API-key provider (or any non-Anthropic host) if you need `temperature` honoured. The `count_tokens` path is unaffected: its body allowlist already excludes sampling.
 
 ### claude-code attribution headers (`X-Claude-Code-*`)
 

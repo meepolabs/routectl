@@ -14,11 +14,11 @@
 //! |---|---|---|
 //! | S1 | provider `header_extras["anthropic-beta"]` pin | always, every leg |
 //! | S2 | model pin (`operator_betas`) | always, every leg |
-//! | S3 | OAuth gate | cloak lane: own oauth-bearer on the Anthropic API host, any cloak mode |
-//! | S4 | Claude Code floor | cloak lane AND classified non-Claude-Code (cloak.mode never -> never) |
+//! | S3 | OAuth gate | own oauth-bearer on the Anthropic API host, with or without client identity, any cloak mode |
+//! | S4 | Claude Code floor | client identity, not forwarded, AND classified non-Claude-Code (cloak.mode never -> never) |
 //! | S5 | context-management strip | removed whenever the provider sets `context_management` |
 //! | S6 | structured outputs | not the forwarded leg AND body carries `output_config.format` |
-//! | S7 | effort | cloak lane AND body carries `output_config.effort` |
+//! | S7 | effort | client identity, not forwarded, AND body carries `output_config.effort` |
 //! | S8 | redaction drop | removed off the forwarded leg when the body carries `thinking.display` |
 //!
 //! Off the forwarded leg the client sends the flag and the router withholds
@@ -53,6 +53,7 @@ fn cfg(base_url: &str, auth_kind: AuthKind) -> AnthropicApiConfig {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     }
@@ -64,7 +65,12 @@ enum Lane {
     ApiKey,
     /// api-key auth on the Anthropic API host: the cloak lane needs oauth.
     ApiKeyOnHost,
+    /// The managed login on its own host: the factory's verdict grants the
+    /// client identity.
     OwnOauth,
+    /// An oauth-bearer on the Anthropic API host whose credential is not
+    /// the managed login, so the verdict withholds the client identity.
+    OwnOauthNoIdentity,
     OffHostOauth,
     Forwarded,
 }
@@ -105,7 +111,11 @@ impl Row {
         let mut config = match self.lane {
             Lane::ApiKey => cfg("http://127.0.0.1:18080", AuthKind::ApiKey),
             Lane::ApiKeyOnHost => cfg(OAUTH_HOST, AuthKind::ApiKey),
-            Lane::OwnOauth => cfg(OAUTH_HOST, AuthKind::OauthBearer),
+            Lane::OwnOauth => AnthropicApiConfig {
+                client_identity: true,
+                ..cfg(OAUTH_HOST, AuthKind::OauthBearer)
+            },
+            Lane::OwnOauthNoIdentity => cfg(OAUTH_HOST, AuthKind::OauthBearer),
             Lane::OffHostOauth => cfg(OFF_HOST, AuthKind::OauthBearer),
             Lane::Forwarded => cfg(OAUTH_HOST, AuthKind::OauthBearer),
         };
@@ -253,6 +263,12 @@ fn oauth_gate_rows() -> Vec<Row> {
             gate,
             false,
         ),
+        row(
+            "S3 OAuth gate, own oauth-bearer without client identity",
+            Lane::OwnOauthNoIdentity,
+            gate,
+            true,
+        ),
         row("S3 OAuth gate, forwarded", Lane::Forwarded, gate, false),
     ]
 }
@@ -319,6 +335,21 @@ fn claude_code_floor_rows() -> Vec<Row> {
             cc,
             false,
         ),
+        row(
+            "S4 Claude Code floor, own oauth-bearer without client identity",
+            Lane::OwnOauthNoIdentity,
+            cc,
+            false,
+        ),
+        Row {
+            cloak_mode: CloakMode::Always,
+            ..row(
+                "S4 Claude Code floor, own oauth-bearer without client identity, cloak always",
+                Lane::OwnOauthNoIdentity,
+                cc,
+                false,
+            )
+        },
         row(
             "S4 Claude Code floor, forwarded",
             Lane::Forwarded,
@@ -424,6 +455,15 @@ fn body_union_rows() -> Vec<Row> {
             ..row(
                 "S7 effort, own oauth-bearer, no effort",
                 Lane::OwnOauth,
+                EFFORT_BETA,
+                false,
+            )
+        },
+        Row {
+            body: Some(effort.clone()),
+            ..row(
+                "S7 effort, own oauth-bearer without client identity, effort",
+                Lane::OwnOauthNoIdentity,
                 EFFORT_BETA,
                 false,
             )

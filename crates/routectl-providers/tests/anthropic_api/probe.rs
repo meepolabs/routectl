@@ -108,6 +108,7 @@ async fn probe_oauth_bearer_is_unsupported_with_zero_token_calls() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,

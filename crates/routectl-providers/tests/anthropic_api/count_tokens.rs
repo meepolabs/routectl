@@ -31,6 +31,7 @@ async fn count_tokens_proxies_to_v1_messages_count_tokens_endpoint() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,

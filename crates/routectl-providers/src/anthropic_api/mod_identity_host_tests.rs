@@ -1,7 +1,8 @@
-//! The minted Claude Code identity is emitted only when the configured base
-//! URL is exactly the Anthropic API host. The auth kind alone never
-//! authorizes it; explicit operator `header_extras` and `user_agent` values
-//! stay host-independent.
+//! The minted Claude Code identity is emitted only when the provider is
+//! configured with `client_identity`. Neither the auth kind nor the host
+//! authorizes it (whether an entry earns the identity is the factory's
+//! verdict); explicit operator `header_extras` and `user_agent` values stay
+//! independent of it.
 
 use super::client::resolve_user_agent;
 use super::*;
@@ -11,15 +12,11 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const GENUINE_HOST: &str = "https://api.anthropic.com";
 
-const NON_ANTHROPIC_HOSTS: &[&str] = &[
+const OTHER_HOSTS: &[&str] = &[
     "http://127.0.0.1:18080",
     "https://api.anthropic.com.evil.test",
     "https://evil.test/api.anthropic.com",
-    "https://api.anthropic.com@evil.test",
-    "https://anthropic.com",
-    "https://console.anthropic.com",
-    "https://eu.api.anthropic.com",
-    "https://api.anthropic.com.anthropic.com",
+    "https://openrouter.ai/api",
     "https://gateway.example/api",
 ];
 
@@ -40,6 +37,7 @@ const SESSION_IDENTITY: &[&str] = &["x-claude-code-session-id", "x-client-reques
 fn cfg(
     base_url: &str,
     auth_kind: AuthKind,
+    client_identity: bool,
     header_extras: Vec<(String, String)>,
     user_agent: Option<String>,
 ) -> AnthropicApiConfig {
@@ -56,13 +54,55 @@ fn cfg(
         session_id: Some("session-stable-123".into()),
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity,
         #[cfg(feature = "bedrock")]
         mantle: None,
     }
 }
 
-fn oauth_provider(base_url: &str) -> AnthropicApiProvider {
-    AnthropicApiProvider::new(cfg(base_url, AuthKind::OauthBearer, Vec::new(), None))
+/// Every configuration that must present no identity: the bearer and the
+/// api key on the genuine host without the verdict, and a bearer on every
+/// other host.
+fn no_identity_providers() -> Vec<(String, AnthropicApiProvider)> {
+    let mut out = vec![
+        (
+            "bearer on the genuine host".to_string(),
+            AnthropicApiProvider::new(cfg(
+                GENUINE_HOST,
+                AuthKind::OauthBearer,
+                false,
+                Vec::new(),
+                None,
+            )),
+        ),
+        (
+            "api key on the genuine host".to_string(),
+            AnthropicApiProvider::new(cfg(GENUINE_HOST, AuthKind::ApiKey, false, Vec::new(), None)),
+        ),
+    ];
+    for base_url in OTHER_HOSTS {
+        out.push((
+            format!("bearer on {base_url}"),
+            AnthropicApiProvider::new(cfg(
+                base_url,
+                AuthKind::OauthBearer,
+                false,
+                Vec::new(),
+                None,
+            )),
+        ));
+    }
+    out
+}
+
+fn identity_provider() -> AnthropicApiProvider {
+    AnthropicApiProvider::new(cfg(
+        GENUINE_HOST,
+        AuthKind::OauthBearer,
+        true,
+        Vec::new(),
+        None,
+    ))
 }
 
 fn outbound_header_names(provider: &AnthropicApiProvider) -> Vec<String> {
@@ -87,78 +127,76 @@ fn outbound_header_value(provider: &AnthropicApiProvider, name: &str) -> Option<
 }
 
 #[test]
-fn genuine_anthropic_host_emits_the_full_minted_identity() {
-    let names = outbound_header_names(&oauth_provider(GENUINE_HOST));
+fn client_identity_emits_the_full_minted_identity() {
+    let names = outbound_header_names(&identity_provider());
     for expected in STAINLESS_PACK.iter().chain(SESSION_IDENTITY) {
         assert!(
             names.iter().any(|n| n == expected),
-            "{expected} must be emitted on the genuine host; got {names:?}"
+            "{expected} must be emitted with client_identity; got {names:?}"
         );
     }
     assert_eq!(
-        resolve_user_agent(None, AuthKind::OauthBearer, GENUINE_HOST).as_deref(),
+        resolve_user_agent(None, true).as_deref(),
         Some(routectl_core::identity::anthropic::default_claude_code_user_agent()),
     );
 }
 
 #[test]
-fn non_anthropic_hosts_receive_no_stainless_pack() {
-    for base_url in NON_ANTHROPIC_HOSTS {
-        let names = outbound_header_names(&oauth_provider(base_url));
+fn a_provider_without_client_identity_receives_no_stainless_pack() {
+    for (label, provider) in no_identity_providers() {
+        let names = outbound_header_names(&provider);
         for absent in STAINLESS_PACK {
             assert!(
                 !names.iter().any(|n| n == absent),
-                "{absent} must not be emitted to {base_url}; got {names:?}"
+                "{label}: {absent} must not be emitted; got {names:?}"
             );
         }
     }
 }
 
 #[test]
-fn non_anthropic_hosts_receive_no_session_or_request_identity() {
-    for base_url in NON_ANTHROPIC_HOSTS {
-        let names = outbound_header_names(&oauth_provider(base_url));
+fn a_provider_without_client_identity_receives_no_session_or_request_identity() {
+    for (label, provider) in no_identity_providers() {
+        let names = outbound_header_names(&provider);
         for absent in SESSION_IDENTITY {
             assert!(
                 !names.iter().any(|n| n == absent),
-                "{absent} must not be emitted to {base_url}; got {names:?}"
+                "{label}: {absent} must not be emitted; got {names:?}"
             );
         }
     }
 }
 
 #[test]
-fn non_anthropic_hosts_resolve_no_default_claude_code_user_agent() {
-    for base_url in NON_ANTHROPIC_HOSTS {
-        assert_eq!(
-            resolve_user_agent(None, AuthKind::OauthBearer, base_url),
-            None,
-            "no default Claude Code UA for {base_url}"
-        );
-    }
+fn without_client_identity_no_default_claude_code_user_agent_resolves() {
+    assert_eq!(resolve_user_agent(None, false), None);
 }
 
 #[test]
-fn non_anthropic_hosts_keep_the_protocol_headers() {
-    for base_url in NON_ANTHROPIC_HOSTS {
-        let provider = oauth_provider(base_url);
+fn every_provider_keeps_the_protocol_headers() {
+    for (label, provider) in no_identity_providers() {
         assert_eq!(
             outbound_header_value(&provider, "anthropic-version").as_deref(),
             Some("2023-06-01"),
-            "anthropic-version must survive on {base_url}"
+            "{label}: anthropic-version must survive"
         );
     }
 }
 
 #[test]
-fn operator_header_extras_still_reach_non_anthropic_hosts() {
+fn operator_header_extras_still_reach_a_provider_without_client_identity() {
     let extras = vec![
         ("x-stainless-timeout".to_string(), "999".to_string()),
         ("x-app".to_string(), "operator-app".to_string()),
     ];
-    for base_url in NON_ANTHROPIC_HOSTS {
-        let provider =
-            AnthropicApiProvider::new(cfg(base_url, AuthKind::OauthBearer, extras.clone(), None));
+    for base_url in std::iter::once(&GENUINE_HOST).chain(OTHER_HOSTS) {
+        let provider = AnthropicApiProvider::new(cfg(
+            base_url,
+            AuthKind::OauthBearer,
+            false,
+            extras.clone(),
+            None,
+        ));
         assert_eq!(
             outbound_header_value(&provider, "x-stainless-timeout").as_deref(),
             Some("999"),
@@ -177,17 +215,17 @@ fn operator_header_extras_still_reach_non_anthropic_hosts() {
 }
 
 #[test]
-fn operator_user_agent_still_resolves_on_non_anthropic_hosts() {
-    for base_url in NON_ANTHROPIC_HOSTS {
+fn operator_user_agent_resolves_with_or_without_client_identity() {
+    for client_identity in [false, true] {
         assert_eq!(
-            resolve_user_agent(Some("op-ua/9.9"), AuthKind::OauthBearer, base_url).as_deref(),
+            resolve_user_agent(Some("op-ua/9.9"), client_identity).as_deref(),
             Some("op-ua/9.9"),
-            "operator UA must win on {base_url}"
+            "operator UA must win (client_identity = {client_identity})"
         );
     }
 }
 
-async fn observed_user_agent(user_agent: Option<String>) -> Option<String> {
+async fn observed_user_agent(client_identity: bool, user_agent: Option<String>) -> Option<String> {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(wm_path("/v1/messages"))
@@ -205,6 +243,7 @@ async fn observed_user_agent(user_agent: Option<String>) -> Option<String> {
     let provider = AnthropicApiProvider::new(cfg(
         &server.uri(),
         AuthKind::OauthBearer,
+        client_identity,
         Vec::new(),
         user_agent,
     ));
@@ -223,18 +262,25 @@ async fn observed_user_agent(user_agent: Option<String>) -> Option<String> {
 }
 
 #[tokio::test]
-async fn loopback_wire_carries_no_default_claude_code_user_agent() {
-    let observed = observed_user_agent(None).await;
+async fn the_wire_user_agent_follows_client_identity() {
+    let with = observed_user_agent(true, None).await;
     assert!(
-        !observed
+        with.as_deref()
+            .is_some_and(|ua| ua.starts_with("claude-cli/")),
+        "client_identity must present the Claude Code UA; got {with:?}"
+    );
+
+    let without = observed_user_agent(false, None).await;
+    assert!(
+        !without
             .as_deref()
             .is_some_and(|ua| ua.starts_with("claude-cli/")),
-        "a loopback base must not present the Claude Code UA; got {observed:?}"
+        "a bearer without client_identity must not present the Claude Code UA; got {without:?}"
     );
 }
 
 #[tokio::test]
-async fn loopback_wire_carries_the_operator_user_agent() {
-    let observed = observed_user_agent(Some("op-ua/9.9".into())).await;
+async fn the_wire_carries_the_operator_user_agent() {
+    let observed = observed_user_agent(false, Some("op-ua/9.9".into())).await;
     assert_eq!(observed.as_deref(), Some("op-ua/9.9"));
 }

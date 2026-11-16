@@ -152,6 +152,20 @@ fn native_bedrock(key_ref: &str) -> ProviderEntry {
     ))
 }
 
+/// Native Bedrock with static AWS keys: `secret_key_ref` and
+/// `session_token_ref` are the two optional-shape slots a managed reference
+/// could ride.
+#[cfg(feature = "bedrock")]
+fn native_bedrock_static(secret_key_ref: &str, session_token_ref: &str) -> ProviderEntry {
+    entry_from_toml(&format!(
+        "[providers.p]\n\
+         kind = \"bedrock\"\n\
+         region = \"us-east-1\"\n\
+         creds = {{ kind = \"static\", access_key_ref = \"env://ROUTECTL_PLAN_TEST_ACCESS\", \
+         secret_key_ref = \"{secret_key_ref}\", session_token_ref = \"{session_token_ref}\" }}\n"
+    ))
+}
+
 const VENDOR_BASES: [&str; 4] = [
     "https://api.anthropic.com",
     "https://chatgpt.com/backend-api/codex",
@@ -244,7 +258,16 @@ fn refused_entries(lane: &VendorLane, r: &str) -> Vec<(String, ProviderEntry)> {
     #[cfg(feature = "bedrock")]
     {
         v.push(("mantle carrier".to_string(), mantle_chat(r)));
+        v.push(("anthropic mantle carrier".to_string(), mantle_anthropic(r)));
         v.push(("native bedrock creds".to_string(), native_bedrock(r)));
+        v.push((
+            "native bedrock static secret key".to_string(),
+            native_bedrock_static(r, "env://ROUTECTL_PLAN_TEST_TOKEN"),
+        ));
+        v.push((
+            "native bedrock static session token".to_string(),
+            native_bedrock_static("env://ROUTECTL_PLAN_TEST_SECRET", r),
+        ));
     }
     #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
     v.push(("responses mantle carrier".to_string(), mantle_responses(r)));

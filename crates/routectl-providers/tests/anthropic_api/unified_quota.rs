@@ -363,6 +363,7 @@ async fn oauth_bearer_populates_upstream_meta_from_unified_headers() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,

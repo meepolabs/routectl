@@ -95,6 +95,7 @@ async fn provider_on(server: &MockServer, lane: Lane) -> AnthropicApiProvider {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: matches!(lane, Lane::Forwarded),
+        client_identity: false,
         #[cfg(feature = "bedrock")]
         mantle,
     };

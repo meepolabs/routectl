@@ -106,6 +106,7 @@ fn cloak_lane_provider(server: &MockServer) -> AnthropicApiProvider {
         session_id: Some("session-stable".into()),
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     });

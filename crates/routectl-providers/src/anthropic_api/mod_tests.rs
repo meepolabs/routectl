@@ -123,6 +123,7 @@ fn cfg_with_allowlist(forward_client_headers: Vec<String>) -> AnthropicApiConfig
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -256,6 +257,7 @@ fn client_forwarded_headers_override_header_extras_on_collision() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -289,6 +291,7 @@ fn operator_header_extras_beta_unions_with_client_betas() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -323,6 +326,7 @@ fn client_betas_pass_through_to_header() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -364,6 +368,7 @@ fn model_level_operator_beta_always_reaches_header() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -401,6 +406,7 @@ fn oauth_cfg(
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: true,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -481,32 +487,36 @@ fn api_key_path_emits_no_stainless_defaults() {
     }
 }
 
-/// On OauthBearer against the exact Anthropic host with `user_agent = None`,
-/// the resolved client UA falls back to the Claude Code SDK default. An
-/// operator override always wins; the ApiKey surface keeps reqwest's
-/// default (`None`). We assert the resolver directly: reqwest applies a
-/// client-level default UA only at send time, not at
-/// `RequestBuilder::build()`, so the value is not observable on a
-/// non-executed request (the wire-level check lives in
+/// With `client_identity` and `user_agent = None`, the resolved client UA
+/// falls back to the Claude Code SDK default. An operator override always
+/// wins; a provider without the identity keeps reqwest's default (`None`).
+/// We assert the resolver directly: reqwest applies a client-level default
+/// UA only at send time, not at `RequestBuilder::build()`, so the value is
+/// not observable on a non-executed request (the wire-level check lives in
 /// `mod_identity_host_tests.rs`).
 #[test]
-fn oauth_bearer_user_agent_defaults_to_claude_cli() {
-    const HOST: &str = "https://api.anthropic.com";
+fn client_identity_user_agent_defaults_to_claude_cli() {
     assert_eq!(
-        resolve_user_agent(None, AuthKind::OauthBearer, HOST).as_deref(),
+        resolve_user_agent(None, true).as_deref(),
         Some("claude-cli/2.1.294 (external, cli)"),
-        "oauth-bearer on the Anthropic host with no override must default to the Claude Code SDK UA",
+        "client_identity with no override must default to the Claude Code SDK UA",
     );
     assert_eq!(
-        resolve_user_agent(None, AuthKind::ApiKey, HOST),
+        resolve_user_agent(None, false),
         None,
-        "api-key with no override must keep reqwest's default UA",
+        "no client identity and no override must keep reqwest's default UA",
     );
     assert_eq!(
-        resolve_user_agent(Some("op-ua/9.9"), AuthKind::OauthBearer, HOST).as_deref(),
+        resolve_user_agent(Some("op-ua/9.9"), true).as_deref(),
         Some("op-ua/9.9"),
         "operator override must win over the SDK default",
     );
+}
+
+/// The factory's client-identity verdict for a managed Anthropic login
+/// (`oauth://anthropic`) on this base: own credential, exact host.
+fn managed_login_verdict(base_url: &str, use_forwarded_bearer: bool) -> bool {
+    !use_forwarded_bearer && is_anthropic_api_host(base_url)
 }
 
 /// Build an oauth-bearer config with an explicit base_url and an
@@ -533,6 +543,7 @@ fn oauth_cfg_with_session(
         session_id,
         cloak: CloakConfig::default(),
         use_forwarded_bearer,
+        client_identity: managed_login_verdict(base_url, use_forwarded_bearer),
         #[cfg(feature = "bedrock")]
         mantle: None,
     }
@@ -861,6 +872,7 @@ fn beta_floor_context_management_stripped_when_emulation_active() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: true,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -898,6 +910,7 @@ fn beta_floor_absent_on_non_anthropic_host() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -928,6 +941,7 @@ fn beta_floor_absent_on_api_key_auth() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -959,6 +973,7 @@ fn api_key_cfg_for_betas() -> AnthropicApiConfig {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -1955,6 +1970,7 @@ fn oauth_provider_with_cloak(cloak: CloakConfig) -> AnthropicApiProvider {
         session_id: Some("session-stable-123".into()),
         cloak,
         use_forwarded_bearer: false,
+        client_identity: true,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -2347,6 +2363,7 @@ fn oauth_cfg_with_auth(
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer,
+        client_identity: managed_login_verdict(base_url, use_forwarded_bearer),
         #[cfg(feature = "bedrock")]
         mantle: None,
     }
@@ -3344,14 +3361,18 @@ async fn mantle_build_headers_emit_no_claude_code_fingerprint() {
     );
 }
 
-/// The mantle lane is api-key (OauthBearer is rejected at config
-/// validation), so the Claude-Code SDK User-Agent never fires: reqwest
-/// keeps its default UA.
+/// The mantle lane never carries the client identity, so the Claude-Code
+/// SDK User-Agent never fires: reqwest keeps its default UA.
 #[cfg(feature = "bedrock")]
-#[test]
-fn mantle_lane_resolves_no_claude_code_user_agent() {
+#[tokio::test]
+async fn mantle_lane_resolves_no_claude_code_user_agent() {
+    let cfg = mantle_cfg_bearer().await;
+    assert!(
+        !cfg.client_identity,
+        "premise: the mantle lane has no identity"
+    );
     assert_eq!(
-        resolve_user_agent(None, AuthKind::ApiKey, "https://api.anthropic.com"),
+        resolve_user_agent(cfg.user_agent.as_deref(), cfg.client_identity),
         None
     );
 }

@@ -97,6 +97,7 @@ fn oauth_seat() -> Arc<AnthropicApiProvider> {
     let mut cfg = AnthropicApiConfig::new_with_auth("p-oauth", Arc::new(NetworkFailingTokenSource));
     cfg.auth_kind = AuthKind::OauthBearer;
     cfg.base_url = "https://api.anthropic.com".into();
+    cfg.client_identity = true;
     Arc::new(AnthropicApiProvider::new(cfg))
 }
 

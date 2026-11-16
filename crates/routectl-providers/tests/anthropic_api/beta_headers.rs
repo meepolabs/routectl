@@ -33,6 +33,7 @@ async fn oauth_bearer_does_not_auto_inject_beta_gate() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -73,6 +74,7 @@ async fn api_key_auth_can_set_beta_via_extra_headers() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -113,6 +115,7 @@ async fn client_requested_thinking_display_beta_passes_through() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,
@@ -165,6 +168,7 @@ async fn user_agent_override_reaches_outbound() {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
 
         #[cfg(feature = "bedrock")]
         mantle: None,

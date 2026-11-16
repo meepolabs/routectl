@@ -22,11 +22,15 @@ use routectl_core::identity::anthropic::{
 use routectl_providers::anthropic_api::{AuthKind, CONTEXT_MANAGEMENT_BETA, CloakMode};
 
 use crate::beta_capability::{beta_flag_of, beta_override_key};
+use crate::config::provider_descriptor::client_identity;
 use crate::config::{Config, CredentialSource, OverrideEntry, ProviderEntry};
 use crate::override_registry::split_target_spec;
 
 const OWN_OAUTH_LANE: &str =
     "on an oauth-bearer provider on api.anthropic.com using its own credential";
+
+const CLIENT_IDENTITY_LANE: &str = "on a provider presenting the Claude Code identity (a managed Anthropic login on \
+     api.anthropic.com)";
 
 /// One warning per `unsupported` `beta:<flag>` entry whose flag some site
 /// re-adds for a target of that override cell, naming every such site.
@@ -187,9 +191,12 @@ struct EgressLane {
     /// Every dispatched request takes the forwarded leg: the router refuses a
     /// forwarded target with no captured bearer, and validation pins the host.
     forwarded: bool,
-    /// The cloak lane: oauth-bearer, own credential, on the Anthropic API
-    /// host. A mantle entry has no such host (the factory derives its URL).
+    /// The own-OAuth credential lane: oauth-bearer, own credential, on the
+    /// Anthropic API host. A mantle entry has no such host (the factory
+    /// derives its URL).
     own_oauth: bool,
+    /// The cloak lane: the factory's client-identity verdict for the entry.
+    client_identity: bool,
     cloak_mode: CloakMode,
     context_management: bool,
 }
@@ -216,6 +223,7 @@ impl EgressLane {
             own_oauth: *auth_kind == AuthKind::OauthBearer
                 && *credential_source == CredentialSource::Own
                 && on_anthropic_host,
+            client_identity: client_identity(provider),
             cloak_mode: cloak.mode,
             context_management: *context_management,
         })
@@ -229,13 +237,15 @@ impl EgressLane {
                 OAUTH_ANTHROPIC_BETA,
                 format!("OAuth gate: always re-added {OWN_OAUTH_LANE}"),
             ));
-            if let Some(when) = self.claude_code_floor_condition() {
-                out.extend(
-                    default_claude_code_anthropic_betas().iter().map(|flag| {
-                        reassertion(flag, format!("Claude Code floor: re-added {when}"))
-                    }),
-                );
-            }
+        }
+        if self.client_identity
+            && let Some(when) = self.claude_code_floor_condition()
+        {
+            out.extend(
+                default_claude_code_anthropic_betas()
+                    .iter()
+                    .map(|flag| reassertion(flag, format!("Claude Code floor: re-added {when}"))),
+            );
         }
         if !self.forwarded {
             out.push(reassertion(
@@ -245,12 +255,12 @@ impl EgressLane {
                     .to_string(),
             ));
         }
-        if self.own_oauth {
+        if self.client_identity {
             out.push(reassertion(
                 EFFORT_BETA,
                 format!(
                     "effort: re-added whenever the request carries output_config.effort, \
-                     {OWN_OAUTH_LANE}"
+                     {CLIENT_IDENTITY_LANE}"
                 ),
             ));
         }
@@ -261,11 +271,11 @@ impl EgressLane {
         match self.cloak_mode {
             CloakMode::Never => None,
             CloakMode::Always => Some(format!(
-                "always, {OWN_OAUTH_LANE} with cloak.mode = \"always\""
+                "always, {CLIENT_IDENTITY_LANE} with cloak.mode = \"always\""
             )),
             CloakMode::Auto => Some(format!(
                 "on requests routectl classifies as non-Claude-Code (normally: no Claude Code \
-                 session header), {OWN_OAUTH_LANE}"
+                 session header), {CLIENT_IDENTITY_LANE}"
             )),
         }
     }

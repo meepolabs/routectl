@@ -60,9 +60,10 @@ enum Target {
     /// A provider entry built through the production factory, aimed at the
     /// mock upstream.
     Built(fn(&str) -> ProviderEntry),
-    /// An own-OAuth anthropic-api seat on api.anthropic.com, the lane the
-    /// identity cloak runs on. Installed directly: an OAuth secret ref
-    /// needs a stored login the factory would resolve.
+    /// A managed-login anthropic-api seat on api.anthropic.com, the lane the
+    /// identity cloak runs on. Installed directly with the client-identity
+    /// verdict the factory gives that login: an OAuth secret ref needs a
+    /// stored login the factory would resolve.
     CloakSeat,
 }
 
@@ -290,6 +291,7 @@ async fn router_for(target: Target, base: &str) -> Router {
             let mut cfg =
                 AnthropicApiConfig::new_with_auth(PROVIDER, Arc::new(StaticToken::new("t")));
             cfg.auth_kind = AuthKind::OauthBearer;
+            cfg.client_identity = true;
             let provider = Arc::new(AnthropicApiProvider::new(cfg));
             router.install_resolved_models(BTreeMap::from([(
                 NICKNAME.to_string(),

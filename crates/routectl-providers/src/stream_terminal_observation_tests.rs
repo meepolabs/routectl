@@ -149,6 +149,7 @@ async fn open_anthropic(
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
         mantle: None,
     });
     let stream = provider.stream(req).await.expect("stream opens");

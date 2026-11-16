@@ -70,6 +70,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
         mantle: Some(MantleAuth {
             region: region.clone(),
             creds: resolved,

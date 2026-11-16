@@ -240,6 +240,7 @@ fn anthropic_mantle(region: &str, resolved: ResolvedCreds) -> AnthropicApiProvid
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
         mantle: Some(MantleAuth {
             region: region.into(),
             creds: resolved,

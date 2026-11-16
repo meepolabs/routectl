@@ -32,6 +32,9 @@ fn cfg(base_url: &str, auth_kind: AuthKind, use_forwarded_bearer: bool) -> Anthr
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer,
+        client_identity: auth_kind == AuthKind::OauthBearer
+            && routectl_core::identity::anthropic::is_anthropic_api_host(base_url)
+            && !use_forwarded_bearer,
         #[cfg(feature = "bedrock")]
         mantle: None,
     }

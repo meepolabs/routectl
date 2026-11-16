@@ -99,6 +99,8 @@ fn anthropic_cfg(base_url: &str, auth_kind: AuthKind) -> AnthropicApiConfig {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: auth_kind == AuthKind::OauthBearer
+            && routectl_core::identity::anthropic::is_anthropic_api_host(base_url),
         mantle: None,
     }
 }
@@ -166,6 +168,7 @@ fn shipped_betas(lane: Lane, req: &mut ChatRequest) -> Vec<String> {
         Lane::Forwarded => {
             let mut cfg = anthropic_cfg(OAUTH_HOST, AuthKind::OauthBearer);
             cfg.use_forwarded_bearer = true;
+            cfg.client_identity = false;
             let provider = AnthropicApiProvider::new(cfg);
             req.routectl_internal.forwarded_bearer = Some(routectl_core::ForwardedBearer::new(
                 "sk-ant-oat01-forwarded".into(),

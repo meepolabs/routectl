@@ -36,6 +36,7 @@ async fn mantle_provider_bearer(base_url: &str) -> AnthropicApiProvider {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
         mantle: Some(MantleAuth {
             region: "us-west-2".into(),
             creds,
@@ -320,6 +321,7 @@ async fn mantle_provider_sigv4(base_url: &str) -> AnthropicApiProvider {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: false,
         mantle: Some(MantleAuth {
             region: "us-west-2".into(),
             creds,

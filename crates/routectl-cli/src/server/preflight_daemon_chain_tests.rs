@@ -97,6 +97,7 @@ mod chain {
             session_id: None,
             cloak: CloakConfig::default(),
             use_forwarded_bearer: false,
+            client_identity: false,
             mantle: None,
         }
     }

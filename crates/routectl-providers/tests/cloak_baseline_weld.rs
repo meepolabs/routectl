@@ -281,14 +281,15 @@ const TIER_ONE: &[TierOneRow] = &[
 
 /// The CLOSED gate vocabulary both registers draw from. Each variant spells the
 /// predicate the code actually evaluates, including the asymmetries -- an
-/// [`Gate::OauthBearerAnthropicHost`] transform (no forwarded-leg term) is NOT
-/// the same population as a [`Gate::CloakLane`] one, and normalizing the two to
-/// a tidy "oauth lane" name would erase the very difference a reviewer needs to
-/// see.
+/// [`Gate::ClientIdentity`] transform (no forwarded-leg term) is NOT the same
+/// population as a [`Gate::CloakLane`] one, and neither is the same as an
+/// [`Gate::OwnOauthLane`] one (the credential, not the identity); normalizing
+/// them to a tidy "oauth lane" name would erase the very difference a reviewer
+/// needs to see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Gate {
-    /// Runs on every cloaked request: past the forwarded-leg, auth-kind, host,
-    /// `CloakMode::Never`, and identity gates, on both classification arms.
+    /// Runs on every cloaked request: past the cloak-lane, `CloakMode::Never`,
+    /// and minted-identity gates, on both classification arms.
     CloakPathAlways,
     /// The cloaked path AND the non-CC classification arm.
     CloakPathNonCc,
@@ -297,25 +298,30 @@ enum Gate {
     CloakPathNonCcNormalizeTools,
     /// Provider construction / config deserialization, not a per-request path.
     ProviderConstruction,
-    /// The lane predicate: OauthBearer auth kind AND exactly the
-    /// `api.anthropic.com` host AND not the forwarded leg. Independent of the
-    /// classification and of `CloakMode`.
+    /// The cloak lane predicate: the provider's `client_identity` (the
+    /// factory's verdict) AND not the forwarded leg. Independent of the
+    /// classification, of `CloakMode`, of the auth kind and of the host.
     ///
-    /// The two dispatch sites that spell those three terms INLINE rather than
+    /// The two dispatch sites that spell those two terms INLINE rather than
     /// calling the lane helper ride this same variant: the predicate is what a
     /// gate identifies, and two extensionally identical predicates given two
     /// names would read as two different populations. Where a row's gate is
     /// evaluated is a fact about that row, so it lives in the row's reason.
     CloakLane,
+    /// The own-OAuth credential predicate: OauthBearer auth kind AND exactly
+    /// the `api.anthropic.com` host AND not the forwarded leg. It is about how
+    /// the credential is sent, not the presented identity, so an OAuth bearer
+    /// without `client_identity` rides it too.
+    OwnOauthLane,
     /// The lane predicate AND the non-CC classification arm.
     CloakLaneNonCc,
     /// The lane predicate AND the assembled body carrying the field the beta
     /// gates.
     CloakLaneBodyCarriesEffort,
-    /// OauthBearer auth kind AND exactly the `api.anthropic.com` host, with no
-    /// forwarded-leg term. The auth kind alone never authorizes a row on this
-    /// gate: the minted client identity is scoped to the exact host.
-    OauthBearerAnthropicHost,
+    /// The provider's `client_identity` alone, with no forwarded-leg term:
+    /// decided once at construction. Neither the auth kind nor the host
+    /// authorizes a row on this gate.
+    ClientIdentity,
     /// The forwarded-system-turn policy: this lane targets the Anthropic wire
     /// role AND a canonical system survived the billing filter, so the
     /// `role: "system"` turns ride in place rather than being lift-consumed.
@@ -337,9 +343,10 @@ impl Gate {
         Self::CloakPathNonCcNormalizeTools,
         Self::ProviderConstruction,
         Self::CloakLane,
+        Self::OwnOauthLane,
         Self::CloakLaneNonCc,
         Self::CloakLaneBodyCarriesEffort,
-        Self::OauthBearerAnthropicHost,
+        Self::ClientIdentity,
         Self::ForwardedSystemTurnPolicy,
         Self::AlwaysOn,
     ];
@@ -355,7 +362,7 @@ const TIER_TWO_ROWS: usize = 12;
 /// predicates into one shared name, which is the specific erasure recording a
 /// per-row gate exists to prevent -- and it is satisfied by adding a variant
 /// nothing needed. Re-derive this when a row moves; do not widen it.
-const TIER_TWO_DISTINCT_GATES: usize = 6;
+const TIER_TWO_DISTINCT_GATES: usize = 7;
 
 /// The number of crates the tier-2 rows span, asserted exactly. Two: this
 /// providers crate and the shared core identity module. `routectl-auth` carries
@@ -434,11 +441,11 @@ const TIER_TWO: &[TierTwoRow] = &[
         file: "anthropic_api/extras.rs",
         anchor: "normalize_claude_sampling",
         crate_root: CrateRoot::Providers,
-        gate: Gate::CloakLane,
+        gate: Gate::OwnOauthLane,
         reason: "the OAuth seat rejects a body carrying `temperature` or `top_p`, so both are \
-                 removed as the last body mutation before egress; gated on the LANE rather than \
-                 the classification, so a `mode = never` provider on this credential still ships \
-                 an accepted body",
+                 removed as the last body mutation before egress; gated on the CREDENTIAL lane \
+                 rather than the identity or the classification, so an OAuth bearer without the \
+                 client identity, or a `mode = never` provider, still ships an accepted body",
         test: "complete_and_stream_both_strip_sampling_on_the_cloak_lane",
         known_loss: Some(
             "the caller's sampling intent is discarded outright with a WARN naming the dropped \
@@ -450,10 +457,11 @@ const TIER_TWO: &[TierTwoRow] = &[
         file: "anthropic_api/client.rs",
         anchor: "union_oauth_gate_beta",
         crate_root: CrateRoot::Providers,
-        gate: Gate::CloakLane,
+        gate: Gate::OwnOauthLane,
         reason: "the OAuth gate flag is required for OAuth to function on this host, so it is \
-                 unioned on BOTH classification arms -- unlike the floor below, one flag is not \
-                 a fingerprint widening",
+                 unioned for every own OAuth bearer, with or without the client identity, and \
+                 on BOTH classification arms -- unlike the floor below, one flag is not a \
+                 fingerprint widening",
         test: "oauth_beta_present_for_both_genuine_cc_and_non_cc",
         known_loss: None,
     },
@@ -503,7 +511,7 @@ const TIER_TWO: &[TierTwoRow] = &[
         reason: "routectl mutates the body after the client computed its billing-header checksum, \
                  so the checksum is recomputed over the exact transmitted bytes; skipped on the \
                  forwarded leg, where the client's own checksum must reach the upstream verbatim. \
-                 The two dispatch sites spell the lane's three terms INLINE rather than calling \
+                 The two dispatch sites spell the lane's two terms INLINE rather than calling \
                  the lane helper, so a change to the helper does not reach them",
         test: "resign_gate_false_on_forwarded_leg_true_in_own_mode",
         known_loss: None,
@@ -513,13 +521,13 @@ const TIER_TWO: &[TierTwoRow] = &[
         file: "identity/anthropic.rs",
         anchor: "default_claude_code_identity_headers",
         crate_root: CrateRoot::Core,
-        gate: Gate::OauthBearerAnthropicHost,
-        reason: "stamps the full minted SDK client fingerprint only when the configured base is \
-                 exactly the Anthropic API host, so an oauth-bearer provider pointed at a \
-                 loopback, lookalike, or third-party host receives none of it; explicit operator \
-                 header entries stay host-independent, and on the forwarded leg the client's own \
-                 captured values replace the mint",
-        test: "non_anthropic_hosts_receive_no_stainless_pack",
+        gate: Gate::CloakLane,
+        reason: "stamps the full minted SDK client fingerprint only on the cloak lane, so a \
+                 provider without the client identity (an api key, an env or file bearer on the \
+                 Anthropic host, any other host) receives none of it; explicit operator header \
+                 entries stay independent of it, and on the forwarded leg the client's own \
+                 captured values ship instead",
+        test: "a_provider_without_client_identity_receives_no_stainless_pack",
         known_loss: None,
     },
     TierTwoRow {
@@ -527,11 +535,11 @@ const TIER_TWO: &[TierTwoRow] = &[
         file: "anthropic_api/client.rs",
         anchor: "stamp_claude_code_session_identity",
         crate_root: CrateRoot::Providers,
-        gate: Gate::OauthBearerAnthropicHost,
-        reason: "stamps a stable minted session id and a fresh per-request client-request id, \
-                 host-checked so a non-Anthropic base never receives the session identity; on \
-                 the forwarded leg the client's own captured pair is inserted afterwards and \
-                 replaces both",
+        gate: Gate::CloakLane,
+        reason: "stamps a stable minted session id and a fresh per-request client-request id \
+                 only on the cloak lane, so a provider without the client identity never \
+                 receives the session identity; on the forwarded leg the client's own captured \
+                 pair ships instead",
         test: "oauth_anthropic_base_stamps_stable_session_and_fresh_request_id",
         known_loss: None,
     },
@@ -592,13 +600,13 @@ const TIER_TWO: &[TierTwoRow] = &[
         file: "anthropic_api/client.rs",
         anchor: "resolve_user_agent",
         crate_root: CrateRoot::Providers,
-        gate: Gate::OauthBearerAnthropicHost,
+        gate: Gate::ClientIdentity,
         reason: "the client-level User-Agent is part of the minted fingerprint, not transport \
-                 detail: with no operator override the OauthBearer surface presents the Claude \
-                 Code CLI UA only when the configured base is exactly the Anthropic API host, \
-                 like the Stainless header set it travels with; an explicit operator User-Agent \
-                 is host-independent",
-        test: "non_anthropic_hosts_resolve_no_default_claude_code_user_agent",
+                 detail: with no operator override only a provider with the client identity \
+                 presents the Claude Code CLI UA; it is fixed when the HTTP client is built, so \
+                 it has no forwarded-leg term; an explicit operator User-Agent is independent \
+                 of it",
+        test: "without_client_identity_no_default_claude_code_user_agent_resolves",
         known_loss: Some(
             "the minted version string is a pinned literal, so it drifts behind the real client as \
              that client updates; the drift is invisible on this row and is what the corpus-derived \
@@ -1970,12 +1978,16 @@ fn tier_two_spans_the_derived_crate_and_gate_counts_exactly() {
          re-deriving the count.",
         gates.len()
     );
-    // The minted client identity (Stainless pack, User-Agent, session stamp)
-    // rides the exact-host gate; no identity row may fall back to the auth
-    // kind alone.
+    // The minted User-Agent rides the construction-time identity gate, and the
+    // credential rows ride their own lane; no identity row may fall back to the
+    // auth kind or the host.
     assert!(
-        gates.contains(&Gate::OauthBearerAnthropicHost),
-        "the minted client identity rows must stay enumerated on the exact-host gate: {gates:?}"
+        gates.contains(&Gate::ClientIdentity),
+        "the minted User-Agent row must stay enumerated on the client-identity gate: {gates:?}"
+    );
+    assert!(
+        gates.contains(&Gate::OwnOauthLane),
+        "the credential rows must stay on the own-OAuth lane, apart from the identity: {gates:?}"
     );
     // And an always-on row, which no lane-predicate scan would ever find --
     // the reason a partial derived side was rejected rather than approximated.

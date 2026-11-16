@@ -103,6 +103,15 @@ pub struct AnthropicApiConfig {
     /// never consumes a floating forwarded bearer, even one captured for
     /// a sibling forwarded provider on the same router.
     pub use_forwarded_bearer: bool,
+    /// Whether this provider presents the Claude Code client identity: the
+    /// Stainless header pack, the Claude Code User-Agent, the session and
+    /// client request ids, the cloak body transforms, the billing re-sign
+    /// and the Claude Code beta floor. The caller decides it; the provider
+    /// never infers it from the auth kind or the host. Default `false`. It
+    /// never applies on the forwarded leg, where the client's own identity
+    /// ships verbatim. How the credential is sent (the OAuth gate beta, the
+    /// OAuth scope lane) follows `auth_kind` and the host, not this flag.
+    pub client_identity: bool,
     /// Bedrock mantle authentication. `Some` selects the mantle lane
     /// (SigV4/bearer signing under the `bedrock-mantle` scope, no
     /// first-party `x-api-key`/Claude-Code plumbing, a no-redirect
@@ -136,7 +145,8 @@ impl std::fmt::Debug for AnthropicApiConfig {
             .field("session_id", &self.session_id.is_some())
             .field("cloak_mode", &self.cloak.mode)
             .field("cloak_strict_mode", &self.cloak.strict_mode)
-            .field("use_forwarded_bearer", &self.use_forwarded_bearer);
+            .field("use_forwarded_bearer", &self.use_forwarded_bearer)
+            .field("client_identity", &self.client_identity);
         // Mantle lane presence + its own redacting Debug (region + auth
         // shape only, never credential material).
         #[cfg(feature = "bedrock")]
@@ -171,6 +181,7 @@ impl AnthropicApiConfig {
             session_id: None,
             cloak: CloakConfig::default(),
             use_forwarded_bearer: false,
+            client_identity: false,
             #[cfg(feature = "bedrock")]
             mantle: None,
         }
@@ -258,8 +269,7 @@ pub struct AnthropicApiProvider {
     pub(super) client: Client,
     pub(super) thinking_cache: std::sync::Arc<std::sync::RwLock<context_management::ThinkingCache>>,
     /// Stable Claude Code identity minted once per provider instance.
-    /// `Some` only on the OauthBearer + api.anthropic.com surface (the
-    /// cloak target); `None` for every other auth kind or host. The
+    /// `Some` only when `cfg.client_identity` is set; `None` otherwise. The
     /// minted `session_id` (which prefers `cfg.session_id`) drives the
     /// `x-claude-code-session-id` header, and the device/account fields
     /// feed the minted metadata `user_id` on the non-CC cloak path.
@@ -295,7 +305,7 @@ pub struct AnthropicApiProvider {
 impl AnthropicApiProvider {
     /// Build a provider from its configuration.
     pub fn new(cfg: AnthropicApiConfig) -> Self {
-        let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind, &cfg.base_url);
+        let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.client_identity);
         // Both the mantle and first-party lanes use a no-redirect client.
         // Mantle: a signed POST must never be auto-followed across a 3xx,
         // since replaying the SigV4 signature against a different host
@@ -309,11 +319,11 @@ impl AnthropicApiProvider {
         let cap = std::num::NonZeroUsize::new(context_management::THINKING_CACHE_CAP)
             .expect("THINKING_CACHE_CAP is non-zero");
         let thinking_cache = std::sync::Arc::new(std::sync::RwLock::new(lru::LruCache::new(cap)));
-        // Mint the cloak identity once, only on the OAuth anthropic-api
-        // surface. The minted session_id prefers cfg.session_id (the
+        // Mint the Claude Code identity once, only when the provider
+        // presents it. The minted session_id prefers cfg.session_id (the
         // login-minted value) and falls back to a fresh uuid so a
         // credential without one still presents a stable session.
-        let identity = if emits_claude_code_identity(cfg.auth_kind, &cfg.base_url) {
+        let identity = if cfg.client_identity {
             Some(cloak::ClaudeCodeIdentity::mint(cfg.session_id.as_deref()))
         } else {
             None
@@ -395,11 +405,7 @@ impl AnthropicApiProvider {
             .ok()
             .and_then(|url| url.host_str().map(str::to_string))
             .expect("the base URL must carry a host");
-        let ua = resolve_user_agent(
-            self.cfg.user_agent.as_deref(),
-            self.cfg.auth_kind,
-            &self.cfg.base_url,
-        );
+        let ua = resolve_user_agent(self.cfg.user_agent.as_deref(), self.cfg.client_identity);
         let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -518,24 +524,28 @@ impl AnthropicApiProvider {
         )
     }
 
-    /// The cloak LANE predicate: this request egresses on routectl's own
-    /// OAuth credential to `api.anthropic.com`, so routectl -- not the
-    /// client -- owns the outbound fingerprint and must present one
-    /// Anthropic accepts for an OAuth seat.
-    ///
-    /// Three stable conditions, composed from the existing helpers so a new
-    /// lane-gated site cannot copy them and drift: `OauthBearer` auth kind,
-    /// exact `api.anthropic.com` host, and NOT the forwarded (pure-proxy)
-    /// leg (there the client's own identity must reach Anthropic verbatim
-    /// per the FORWARDING TRANSPARENCY CONTRACT).
+    /// The cloak LANE predicate: this request presents the Claude Code
+    /// client identity, so routectl -- not the client -- owns the outbound
+    /// fingerprint. True exactly when the provider was configured with
+    /// `client_identity` and the request is NOT on the forwarded
+    /// (pure-proxy) leg, where the client's own identity must reach
+    /// Anthropic verbatim per the FORWARDING TRANSPARENCY CONTRACT. The auth
+    /// kind and the host never decide it.
     ///
     /// Deliberately INDEPENDENT of `is_non_cc` and of `CloakMode`: this is
     /// the lane, not the cloak state. Sites that additionally depend on the
     /// cloak state keep their own inner gate (e.g. the pinned beta floor is
-    /// `is_cloak_lane && is_non_cc`) -- folding either into the lane would
-    /// let a `cloak.mode = never` provider escape lane-wide requirements
-    /// that exist for the credential, not for the disguise.
+    /// `is_cloak_lane && is_non_cc`).
     pub(super) fn is_cloak_lane(&self, req: &ChatRequest) -> bool {
+        self.cfg.client_identity && !self.forwarded_leg(req)
+    }
+
+    /// The own-OAuth credential lane: this request sends routectl's own
+    /// OAuth bearer to `api.anthropic.com` (`OauthBearer` auth kind, exact
+    /// host, not the forwarded leg). It decides what the credential itself
+    /// requires (the OAuth gate beta and the seat's sampling rule), whether
+    /// or not the provider presents the Claude Code identity.
+    pub(super) fn is_own_oauth_lane(&self, req: &ChatRequest) -> bool {
         self.cfg.auth_kind == AuthKind::OauthBearer
             && is_anthropic_api_host(&self.cfg.base_url)
             && !self.forwarded_leg(req)
@@ -636,33 +646,31 @@ impl AnthropicApiProvider {
         let mut beta_seen: std::collections::BTreeSet<String> =
             merged_betas.iter().cloned().collect();
 
-        // OAuth gate for the OauthBearer + api.anthropic.com surface.
+        // OAuth gate for the own OauthBearer + api.anthropic.com credential.
         // `oauth-2025-04-20` is REQUIRED for OAuth to function on
         // api.anthropic.com, so a zero-config oauth-bearer provider works
-        // without the operator hand-declaring it. Unioned UNCONDITIONALLY
-        // (independent of `is_non_cc`) so both a genuine-CC request and a
-        // non-CC request stay authenticated -- unlike the floor below,
-        // this single flag is not a fingerprint-widening pin. Composed
-        // BEFORE the context_management strip below so the emulation path
-        // can still remove `context-management-2025-06-27` when active.
+        // without the operator hand-declaring it, with or without the Claude
+        // Code identity. Unioned independent of `is_non_cc` -- unlike the
+        // floor below, this single flag is not a fingerprint-widening pin.
+        // Composed BEFORE the context_management strip below so the
+        // emulation path can still remove `context-management-2025-06-27`.
         //
         // SUPPRESSED on the forwarded leg: there the client supplies its
         // own real beta set (on `req.anthropic_beta`), which must reach
-        // Anthropic verbatim rather than being widened by routectl's minted
-        // floor -- that would be a fingerprint the client never sent.
-        if self.is_cloak_lane(req) {
+        // Anthropic verbatim rather than being widened by routectl.
+        if self.is_own_oauth_lane(req) {
             union_oauth_gate_beta(&mut beta_seen, &mut merged_betas);
+        }
 
-            // Pinned Claude Code beta floor. These are operator-equivalent
-            // pins (not client-requested). GATED on `is_non_cc`: a
-            // genuine Claude Code client already sent its own real beta
-            // set above, and force-widening it with capability betas CC
-            // never asked for (e.g. `context-1m` on a haiku request) makes
-            // Anthropic 400 the request. Only a non-CC client -- one
-            // routectl is cloaking as Claude Code -- gets the full floor.
-            if is_non_cc {
-                union_claude_code_beta_floor(&mut beta_seen, &mut merged_betas);
-            }
+        // Pinned Claude Code beta floor, part of the presented identity.
+        // These are operator-equivalent pins (not client-requested). GATED
+        // on `is_non_cc`: a genuine Claude Code client already sent its own
+        // real beta set above, and force-widening it with capability betas
+        // CC never asked for (e.g. `context-1m` on a haiku request) makes
+        // Anthropic 400 the request. Only a non-CC client -- one routectl is
+        // cloaking as Claude Code -- gets the full floor.
+        if self.is_cloak_lane(req) && is_non_cc {
+            union_claude_code_beta_floor(&mut beta_seen, &mut merged_betas);
         }
 
         // When context_management emulation is active, strip the
@@ -760,15 +768,13 @@ impl AnthropicApiProvider {
         let mut header_map = reqwest::header::HeaderMap::new();
 
         // Minted Claude Code identity: the compiled Stainless SDK header
-        // pack plus the session id and client request id. Emitted only when
-        // the configured base URL is exactly the Anthropic API host, so a
-        // third-party or loopback base never receives the fingerprint.
-        // Inserted FIRST so the header_extras loop below OVERRIDES any
-        // matching key (HeaderMap::insert replaces) and a forwarded client
-        // header overrides after that. ApiKey gets no defaults (it is the
-        // raw-API surface, not the SDK client). Note `anthropic-beta` is
-        // NOT among these -- it is composed above.
-        if emits_claude_code_identity(self.cfg.auth_kind, &self.cfg.base_url) {
+        // pack plus the session id and client request id. Emitted only on
+        // the cloak lane, so a provider not configured with
+        // `client_identity` never receives the fingerprint whatever its
+        // auth kind or host. Inserted FIRST so the header_extras loop below
+        // OVERRIDES any matching key (HeaderMap::insert replaces). Note
+        // `anthropic-beta` is NOT among these -- it is composed above.
+        if self.is_cloak_lane(req) {
             for (k, v) in routectl_core::identity::anthropic::default_claude_code_identity_headers()
             {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
@@ -869,9 +875,10 @@ impl AnthropicApiProvider {
     }
 
     /// The flags this egress itself adds to the header for `req`: the
-    /// provider and operator pins, and on the cloak lane the OAuth gate plus
-    /// (for a non-CC request) the pinned Claude Code floor. A client flag in
-    /// this set is never withheld, so it keeps its client position.
+    /// provider and operator pins, the OAuth gate on the own-OAuth lane, and
+    /// on the cloak lane (for a non-CC request) the pinned Claude Code floor.
+    /// A client flag in this set is never withheld, so it keeps its client
+    /// position.
     fn beta_floor(&self, req: &ChatRequest, is_non_cc: bool) -> Vec<String> {
         let mut floor: Vec<String> = self
             .config_betas()
@@ -886,15 +893,15 @@ impl AnthropicApiProvider {
             .filter(|t| !t.is_empty())
             .map(str::to_string)
             .collect();
-        if self.is_cloak_lane(req) {
+        if self.is_own_oauth_lane(req) {
             floor.push(routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA.to_string());
-            if is_non_cc {
-                floor.extend(
-                    routectl_core::identity::anthropic::default_claude_code_anthropic_betas()
-                        .iter()
-                        .map(|f| (*f).to_string()),
-                );
-            }
+        }
+        if self.is_cloak_lane(req) && is_non_cc {
+            floor.extend(
+                routectl_core::identity::anthropic::default_claude_code_anthropic_betas()
+                    .iter()
+                    .map(|f| (*f).to_string()),
+            );
         }
         floor
     }
@@ -931,13 +938,10 @@ impl AnthropicApiProvider {
     ///     minted identity's `session_id`, which prefers `cfg.session_id` and
     ///     falls back to a stable minted uuid).
     ///
-    /// Called ONLY from the OauthBearer + api.anthropic.com path, where
-    /// `self.identity` is always `Some` -- so a non-Anthropic base (a
-    /// third-party `/anthropic` surface, a proxy) never receives the Claude-Code
-    /// session id.
-    ///
-    /// Both values are minted, not the client's. On the forwarded leg the
-    /// client's own captured pair is inserted after this and replaces them.
+    /// Called ONLY on the cloak lane, where `self.identity` is always
+    /// `Some` -- so a provider not configured with `client_identity` never
+    /// receives the Claude-Code session id. Both values are minted, not the
+    /// client's.
     fn stamp_claude_code_session_identity(&self, header_map: &mut reqwest::header::HeaderMap) {
         let request_id = uuid::Uuid::new_v4().to_string();
         crate::http_client::insert_header(
@@ -1073,9 +1077,8 @@ impl AnthropicApiProvider {
     }
 
     /// Apply the Claude Code identity cloak to the outgoing body on the
-    /// OAuth anthropic-api surface. Gated on `OauthBearer +
-    /// is_anthropic_api_host` -- the same surface where `self.identity` is
-    /// `Some`; a no-op on every other path. `is_non_cc` is true when the
+    /// cloak lane (`client_identity`, not the forwarded leg) -- the same
+    /// surface where `self.identity` is `Some`; a no-op on every other path. `is_non_cc` is true when the
     /// inbound request did NOT carry an `x-claude-code-session-id` capture
     /// (a genuine Claude Code client always does), so a non-CC client
     /// gets the identity block + minted metadata while a genuine CC client
@@ -1083,7 +1086,7 @@ impl AnthropicApiProvider {
     ///
     /// Returns `Some(CloakResult)` on the cloak path (carrying the
     /// per-request tool-name reverse map) and `None` on every non-cloak
-    /// path (non-OAuth / non-anthropic-host / identity absent). Errors
+    /// path (no client identity / forwarded leg / identity absent). Errors
     /// when the client system has nowhere legal to land; complete, stream,
     /// and count_tokens all propagate it before any network I/O (see
     /// `RelocationRefusal::into_error` for how it routes).
@@ -1098,14 +1101,12 @@ impl AnthropicApiProvider {
         body: &mut Value,
         req: &ChatRequest,
     ) -> Result<Option<cloak::CloakResult>> {
-        // Forwarded (pure-proxy) leg: the egress is a byte-transparent
-        // forwarder (see the FORWARDING TRANSPARENCY CONTRACT), so no cloak
-        // transform runs and the client's body reaches Anthropic verbatim.
-        if self.forwarded_leg(req) {
-            return Ok(None);
-        }
-        if self.cfg.auth_kind != AuthKind::OauthBearer || !is_anthropic_api_host(&self.cfg.base_url)
-        {
+        // Off the cloak lane no transform runs: a provider without the
+        // client identity ships its own body, and on the forwarded leg the
+        // egress is a byte-transparent forwarder (see the FORWARDING
+        // TRANSPARENCY CONTRACT), so the client's body reaches Anthropic
+        // verbatim.
+        if !self.is_cloak_lane(req) {
             return Ok(None);
         }
         // `Never` must short-circuit BEFORE `is_non_cc` is consulted: it
@@ -1139,8 +1140,8 @@ impl AnthropicApiProvider {
         //
         // Counted here rather than inside `cloak_oauth_egress`: this is the
         // one point that runs exactly once per cloaked request, AFTER every
-        // gate that makes the cloak a no-op (forwarded leg, non-OAuth,
-        // non-Anthropic host, `mode = never`, absent identity) has already
+        // gate that makes the cloak a no-op (forwarded leg, no client
+        // identity, `mode = never`, absent identity) has already
         // returned. A record placed past the transforms would miss nothing
         // today but would silently start counting whichever gate moved above
         // it.
@@ -1282,27 +1283,18 @@ impl AnthropicApiProvider {
     }
 }
 
-/// True when the minted Claude Code identity (Stainless header pack,
-/// default User-Agent, session id, client request id) may be emitted: an
-/// OauthBearer provider whose configured base URL is exactly the Anthropic
-/// API host. The auth kind alone never authorizes it.
-pub(super) fn emits_claude_code_identity(auth_kind: AuthKind, base_url: &str) -> bool {
-    auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(base_url)
-}
-
 /// Resolve the client-level `User-Agent` for an anthropic-api provider.
 /// An operator override always wins, on any host. With no override, the
-/// Claude Code SDK UA is used only where the minted identity is emitted
-/// (see [`emits_claude_code_identity`]); every other provider keeps
-/// reqwest's default UA (`None`).
+/// Claude Code SDK UA is used only by a provider that presents the Claude
+/// Code client identity; every other provider keeps reqwest's default UA
+/// (`None`).
 pub(super) fn resolve_user_agent(
     user_agent: Option<&str>,
-    auth_kind: AuthKind,
-    base_url: &str,
+    client_identity: bool,
 ) -> Option<String> {
     match user_agent {
         Some(ua) => Some(ua.to_string()),
-        None if emits_claude_code_identity(auth_kind, base_url) => {
+        None if client_identity => {
             Some(routectl_core::identity::anthropic::default_claude_code_user_agent().to_string())
         }
         None => None,

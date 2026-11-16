@@ -237,6 +237,7 @@ async fn wire_header(
             ..CloakConfig::default()
         },
         use_forwarded_bearer: false,
+        client_identity: false,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };

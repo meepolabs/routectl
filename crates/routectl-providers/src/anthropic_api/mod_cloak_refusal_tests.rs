@@ -27,6 +27,7 @@ impl TokenSource for CountingTokenSource {
 fn oauth_provider(auth: Arc<CountingTokenSource>) -> AnthropicApiProvider {
     let mut cfg = AnthropicApiConfig::new_with_auth("cloak-refusal", auth);
     cfg.auth_kind = AuthKind::OauthBearer;
+    cfg.client_identity = true;
     AnthropicApiProvider::new(cfg)
 }
 

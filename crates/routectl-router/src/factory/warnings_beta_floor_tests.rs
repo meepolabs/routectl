@@ -13,10 +13,12 @@
 //! takes it: validation pins its host (factory/validate.rs:745) and the
 //! router refuses a forwarded target with no captured bearer
 //! (router/dispatch.rs:386, :1384, router/count_tokens.rs:376). An own
-//! provider never takes it. `cloak lane` (client.rs:535) is oauth-bearer AND
-//! Anthropic API host AND not the forwarded leg -- statically, an own
-//! oauth-bearer provider on that host (a mantle entry is api-key only and has
-//! no configured host).
+//! provider never takes it. `own-OAuth lane` (`is_own_oauth_lane`) is
+//! oauth-bearer AND Anthropic API host AND not the forwarded leg --
+//! statically, an own oauth-bearer provider on that host (a mantle entry is
+//! api-key only and has no configured host). `cloak lane` (`is_cloak_lane`)
+//! is the factory's client-identity verdict AND not the forwarded leg --
+//! statically, a managed Anthropic login (`oauth://anthropic`) on that host.
 //!
 //! The override filter itself:
 //!
@@ -38,11 +40,11 @@
 //! |---|---|---|---|---|
 //! | S1 provider pin | 620 | adds `header_extras["anthropic-beta"]` of the provider | always, every leg | warns |
 //! | S2 model pin | 630 | adds `operator_betas` (provider + model pins, beta_capability.rs `operator_betas`) | always, every leg; per model | warns, per model a provider cell reaches |
-//! | S3 OAuth gate | 651-652 | adds `oauth-2025-04-20` | cloak lane | warns on own oauth-bearer on the host only |
-//! | S4 Claude Code floor | 661-662 | adds the 9-flag floor | cloak lane AND `is_non_cc` (client.rs:1057: cloak.mode always -> true, never -> false, auto -> classified non-Claude-Code: `routectl_internal.originating_claude_code_session` when set, else no Claude Code session header) | warns on own oauth-bearer on the host unless cloak.mode = never |
+//! | S3 OAuth gate | `union_oauth_gate_beta` | adds `oauth-2025-04-20` | own-OAuth lane | warns on own oauth-bearer on the host only, managed login or not |
+//! | S4 Claude Code floor | `union_claude_code_beta_floor` | adds the 9-flag floor | cloak lane AND `is_non_cc` (cloak.mode always -> true, never -> false, auto -> classified non-Claude-Code: `routectl_internal.originating_claude_code_session` when set, else no Claude Code session header) | warns on a managed login on the host unless cloak.mode = never |
 //! | S5 context-management strip | 671-672 | removes `context-management-2025-06-27` (exact spelling) | provider `context_management = true`, every leg | that flag is never reported there |
 //! | S6 structured outputs | 699-700 | adds `structured-outputs-2025-12-15` | not forwarded leg AND body carries `output_config.format` | warns "whenever the request carries", off the forwarded leg |
-//! | S7 effort | 714-717 | adds `effort-2025-11-24` | cloak lane AND body carries `output_config.effort` | warns "whenever the request carries", own oauth-bearer on the host only |
+//! | S7 effort | `union_body_implied_betas` | adds `effort-2025-11-24` | cloak lane AND body carries `output_config.effort` | warns "whenever the request carries", managed login on the host only |
 //! | S8 redaction drop | 724-725 | removes `redact-thinking-2026-02-12` (exact spelling) | not forwarded leg AND body carries `thinking.display` | the reason names the display exception, off the forwarded leg |
 //!
 //! No other site writes the header: the composed list is emitted once
@@ -72,6 +74,11 @@ const PIN: &str = "pinned-beta-2026-01-01";
 const UNPINNED: &str = "context-1m-2025-08-07";
 
 const API_KEY: &str = "api_key_ref = \"env://KEY\"\n";
+/// The managed Anthropic login on its own host: the client-identity lane.
+const MANAGED_LOGIN: &str = "api_key_ref = \"oauth://anthropic\"\nauth_kind = \"oauth-bearer\"\n\
+                             base_url = \"https://api.anthropic.com\"\n";
+/// An env-held bearer on the same host: the own-OAuth credential lane
+/// without the client identity.
 const OWN_OAUTH: &str = "api_key_ref = \"env://KEY\"\nauth_kind = \"oauth-bearer\"\n\
                          base_url = \"https://api.anthropic.com\"\n";
 const OFF_HOST_OAUTH: &str = "api_key_ref = \"env://KEY\"\nauth_kind = \"oauth-bearer\"\n\
@@ -204,7 +211,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
         (
             "S2 model pin through a pool, provider-scoped cell",
             config(
-                OWN_OAUTH,
+                MANAGED_LOGIN,
                 &format!(
                     "[pools.pl]\nmembers = [\"p\"]\n{}{}",
                     model("pl", Some(PIN)),
@@ -252,13 +259,21 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
     vec![
         (
             "S3 OAuth gate, own oauth-bearer on the host",
-            config(OWN_OAUTH, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
+            config(MANAGED_LOGIN, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
             warns(&["OAuth gate", "Claude Code floor", "its own credential"]),
+        ),
+        (
+            "S3 OAuth gate, env bearer on the host",
+            config(OWN_OAUTH, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
+            Expect::Warns {
+                contains: &["OAuth gate", "its own credential"],
+                lacks: &["Claude Code floor"],
+            },
         ),
         (
             "S3 OAuth gate, own oauth-bearer on the host, cloak never",
             config(
-                OWN_OAUTH,
+                MANAGED_LOGIN,
                 &format!(
                     "[providers.p.cloak]\nmode = \"never\"\n{}",
                     unsupported("p", OAUTH_ANTHROPIC_BETA)
@@ -286,7 +301,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
         ),
         (
             "S4 Claude Code floor, cloak auto",
-            config(OWN_OAUTH, &unsupported("p", cc)),
+            config(MANAGED_LOGIN, &unsupported("p", cc)),
             warns(&[
                 "Claude Code floor",
                 "classifies as non-Claude-Code (normally: no Claude Code session header)",
@@ -295,7 +310,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
         (
             "S4 Claude Code floor, cloak always",
             config(
-                OWN_OAUTH,
+                MANAGED_LOGIN,
                 &format!(
                     "[providers.p.cloak]\nmode = \"always\"\n{}",
                     unsupported("p", cc)
@@ -306,12 +321,17 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
         (
             "S4 Claude Code floor, cloak never",
             config(
-                OWN_OAUTH,
+                MANAGED_LOGIN,
                 &format!(
                     "[providers.p.cloak]\nmode = \"never\"\n{}",
                     unsupported("p", cc)
                 ),
             ),
+            Expect::Silent,
+        ),
+        (
+            "S4 Claude Code floor, env bearer on the host",
+            config(OWN_OAUTH, &unsupported("p", cc)),
             Expect::Silent,
         ),
         (
@@ -321,7 +341,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
         ),
         (
             "S7 effort, own oauth-bearer on the host",
-            config(OWN_OAUTH, &unsupported("p", EFFORT_BETA)),
+            config(MANAGED_LOGIN, &unsupported("p", EFFORT_BETA)),
             Expect::Warns {
                 contains: &[
                     "effort:",
@@ -333,7 +353,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
         (
             "S7 effort, own oauth-bearer on the host, cloak never",
             config(
-                OWN_OAUTH,
+                MANAGED_LOGIN,
                 &format!(
                     "[providers.p.cloak]\nmode = \"never\"\n{}",
                     unsupported("p", EFFORT_BETA)
@@ -343,6 +363,11 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
                 "effort:",
                 "whenever the request carries output_config.effort",
             ]),
+        ),
+        (
+            "S7 effort, env bearer on the host",
+            config(OWN_OAUTH, &unsupported("p", EFFORT_BETA)),
+            Expect::Silent,
         ),
         (
             "S7 effort, forwarded oauth-bearer",
@@ -388,7 +413,7 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
         (
             "S5 context-management Claude Code floor, emulation on",
             config(
-                &format!("{OWN_OAUTH}context_management = true\n"),
+                &format!("{MANAGED_LOGIN}context_management = true\n"),
                 &unsupported("p", CONTEXT_MANAGEMENT_BETA),
             ),
             Expect::Silent,
@@ -407,7 +432,7 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
         ),
         (
             "S8 redaction beta, Claude Code floor",
-            config(OWN_OAUTH, &unsupported("p", REDACT_THINKING_BETA)),
+            config(MANAGED_LOGIN, &unsupported("p", REDACT_THINKING_BETA)),
             warns(&[
                 "Claude Code floor",
                 "unless the request carries thinking.display",
@@ -462,7 +487,8 @@ fn each_egress_reassertion_site_warns_exactly_where_it_fires() {
 fn a_case_variant_floor_flag_warns_naming_the_spelling_written() {
     let variant = EFFORT_BETA.to_ascii_uppercase();
 
-    let warnings = beta_floor_override_warnings(&config(OWN_OAUTH, &unsupported("p", &variant)));
+    let warnings =
+        beta_floor_override_warnings(&config(MANAGED_LOGIN, &unsupported("p", &variant)));
 
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains(&variant), "{}", warnings[0]);

@@ -213,10 +213,11 @@ impl Provider for AnthropicApiProvider {
         // Sampling strip, LAST word on the JSON before the outgoing trace:
         // on the OAuth own-anthropic lane the seat 400s a body carrying
         // `temperature` / `top_p`, so drop them here -- after cloak, after
-        // every assembly pass. Gated on the LANE (not `is_non_cc`, not the
-        // cloak flag) so a `cloak.mode = never` provider on this credential
-        // still ships an accepted body. See `extras::normalize_claude_sampling`.
-        if self.is_cloak_lane(&req) {
+        // every assembly pass. Gated on the credential lane (not the client
+        // identity, not `is_non_cc`, not the cloak flag) so an OAuth bearer
+        // without the identity, or a `cloak.mode = never` provider, still
+        // ships an accepted body. See `extras::normalize_claude_sampling`.
+        if self.is_own_oauth_lane(&req) {
             let dropped = extras::normalize_claude_sampling(&self.cfg.id, &mut body);
             wire_edits::declare_removed_keys(tap, EditSite::ClaudeSamplingNormalize, &dropped);
         }
@@ -244,14 +245,12 @@ impl Provider for AnthropicApiProvider {
         // over the exact bytes transmitted. routectl mutates the canonical
         // body upstream of this point (effort injection, tool-id sanitize,
         // signature strip), which invalidates any checksum the ingress
-        // client computed. Re-sign only on the Claude-Code OauthBearer
-        // api.anthropic.com surface; every other path is a no-op.
+        // client computed. Re-sign only when the provider presents the
+        // Claude Code identity off the forwarded leg; every other path is a
+        // no-op.
         let mut body_bytes = serde_json::to_vec(&body)
             .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
-        if !forwarded_leg
-            && self.cfg.auth_kind == AuthKind::OauthBearer
-            && is_anthropic_api_host(&self.cfg.base_url)
-        {
+        if self.cfg.client_identity && !forwarded_leg {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
         let body_bytes = bytes::Bytes::from(body_bytes);
@@ -464,9 +463,9 @@ impl Provider for AnthropicApiProvider {
         let cloak_result = self.cloak_body(&mut body, &req)?;
 
         // See complete(): strip caller/thinking-forced sampling the OAuth
-        // seat rejects, gated on the lane, as the last body mutation before
-        // the trace. See `extras::normalize_claude_sampling`.
-        if self.is_cloak_lane(&req) {
+        // seat rejects, gated on the credential lane, as the last body
+        // mutation before the trace. See `extras::normalize_claude_sampling`.
+        if self.is_own_oauth_lane(&req) {
             let dropped = extras::normalize_claude_sampling(&self.cfg.id, &mut body);
             wire_edits::declare_removed_keys(tap, EditSite::ClaudeSamplingNormalize, &dropped);
         }
@@ -479,14 +478,11 @@ impl Provider for AnthropicApiProvider {
         let token = self.resolve_effective_token(&req).await?;
 
         // See the complete() path: re-sign the billing-header checksum
-        // over the exact transmitted bytes on the Claude-Code OauthBearer
-        // api.anthropic.com surface; a no-op everywhere else.
+        // over the exact transmitted bytes when the provider presents the
+        // Claude Code identity; a no-op everywhere else.
         let mut body_bytes = serde_json::to_vec(&body)
             .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
-        if !forwarded_leg
-            && self.cfg.auth_kind == AuthKind::OauthBearer
-            && is_anthropic_api_host(&self.cfg.base_url)
-        {
+        if self.cfg.client_identity && !forwarded_leg {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
         let body_bytes = bytes::Bytes::from(body_bytes);

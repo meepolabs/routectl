@@ -117,6 +117,7 @@ fn build_provider_for_kind(
                 session_id: None,
                 cloak: CloakConfig::default(),
                 use_forwarded_bearer: false,
+                client_identity: false,
 
                 mantle: None,
             },

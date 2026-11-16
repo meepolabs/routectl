@@ -35,6 +35,8 @@ fn cfg(base_url: &str, auth_kind: AuthKind) -> AnthropicApiConfig {
         session_id: None,
         cloak: CloakConfig::default(),
         use_forwarded_bearer: false,
+        client_identity: auth_kind == AuthKind::OauthBearer
+            && routectl_core::identity::anthropic::is_anthropic_api_host(base_url),
         #[cfg(feature = "bedrock")]
         mantle: None,
     }
@@ -178,6 +180,7 @@ fn withheld_body_implied_flag_is_re_added_by_the_union() {
 fn forwarded_leg_ships_every_client_flag() {
     let mut config = cfg(OAUTH_HOST, AuthKind::OauthBearer);
     config.use_forwarded_bearer = true;
+    config.client_identity = false;
     let provider = AnthropicApiProvider::new(config);
     let mut req = req(&[KEPT, NEVER, OTHER], &[NEVER]);
     req.routectl_internal.forwarded_bearer = Some(routectl_core::ForwardedBearer::new(

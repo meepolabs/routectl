@@ -1,6 +1,6 @@
 //! Per-kind provider construction from config rows.
 
-use super::plan::plan_provider;
+use super::plan::{ProviderPlan, plan_provider};
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
 use super::validate::{ModelProviderTarget, resolve_model_provider, validate_base_url_scheme};
@@ -183,7 +183,6 @@ async fn build_provider_inner(
     #[cfg(feature = "bedrock")] bedrock_model_id: Option<String>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    #[cfg_attr(not(feature = "openai-responses"), allow(unused_variables))]
     let plan = plan_provider(name, entry)?;
     match entry {
         ProviderEntry::OpenaiCompat {
@@ -267,147 +266,8 @@ async fn build_provider_inner(
             };
             Ok(Arc::new(OpenAiCompatProvider::new(cfg)))
         }
-        ProviderEntry::AnthropicApi {
-            api_key_ref,
-            base_url,
-            anthropic_version,
-            auth_kind,
-            credential_source,
-            header_extras,
-            payload_extras: _,
-            user_agent,
-            forward_client_headers,
-            context_management,
-            cache_capability: _,
-            reduction_enabled: _,
-            cloak,
-            #[cfg(feature = "bedrock")]
-            bedrock_mantle,
-            runtime: _,
-        } => {
-            // Bedrock mantle lane. Its presence flips this provider onto
-            // region-derived, SigV4/bearer-signed egress under the
-            // `bedrock-mantle` scope. Config validation guarantees
-            // auth_kind = api-key, an empty api_key_ref,
-            // credential_source = own, and base_url at its default -- so
-            // the region is the single source of truth for the endpoint
-            // (never the operator base_url) and no first-party token is
-            // presented. Credentials resolve here, fail-fast probing
-            // Profile/DefaultChain exactly as the Bedrock provider does.
-            #[cfg(feature = "bedrock")]
-            if let Some(m) = bedrock_mantle {
-                debug_assert_eq!(
-                    base_url,
-                    &crate::config::default_anthropic_base(),
-                    "mantle lane requires base_url at its default; validation must reject a manual base_url"
-                );
-                let mantle_base = routectl_providers::mantle::mantle_anthropic_base(&m.region)?;
-                let bedrock_creds = resolve_bedrock_creds(&*secrets, &m.creds).await?;
-                let resolved =
-                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
-                let cfg = AnthropicApiConfig {
-                    id: format!("anthropic-api:{name}"),
-                    auth: Arc::new(routectl_core::StaticToken::new(String::new())),
-                    base_url: mantle_base,
-                    anthropic_version: anthropic_version.clone(),
-                    // Force api-key on the lane rather than copying the
-                    // config value: the mantle credential rides the signed
-                    // request, and OauthBearer would re-engage the
-                    // first-party `Authorization: Bearer` / Claude-Code
-                    // header plumbing this lane must bypass. Validation
-                    // already rejects a non-api-key mantle entry; this is
-                    // the factory-side belt-and-braces.
-                    auth_kind: routectl_providers::anthropic_api::AuthKind::ApiKey,
-                    header_extras: header_extras
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                    user_agent: user_agent.clone(),
-                    forward_client_headers: forward_client_headers.clone(),
-                    context_management: *context_management,
-                    session_id: None,
-                    cloak: cloak_with_normalize(cloak, opts.normalize_tools),
-                    use_forwarded_bearer: false,
-                    mantle: Some(MantleAuth {
-                        region: m.region.clone(),
-                        creds: resolved,
-                    }),
-                };
-                return Ok(Arc::new(AnthropicApiProvider::new(cfg)));
-            }
-            validate_base_url_scheme(name, base_url)?;
-            let is_forwarded = *credential_source == CredentialSource::Forwarded;
-            // OAuth-aware: for `oauth://<provider>` refs the provider
-            // gets a `ManagedToken` that re-enters `SecretStore::get`
-            // per request, so token rotation in credentials.json is
-            // picked up live without restart. For env / file / literal
-            // the value is resolved once and wrapped in `StaticToken`
-            // (semantically equivalent to the pre-v0.7 `api_key:
-            // String` field).
-            //
-            // `credential_source = "forwarded"` is the exception:
-            // `validate_provider_credential_sources` guarantees
-            // `api_key_ref` is empty for a forwarded entry (there is no
-            // configured secret to resolve -- the provider authenticates
-            // with the client's captured bearer instead), so calling
-            // `resolve_token_source` here would always fail with an
-            // "unrecognized secret URI scheme" error. Wire a sentinel
-            // `StaticToken` instead: it is unreachable by construction --
-            // `resolve_effective_token` / `build_headers` never call
-            // `cfg.auth.token()` on the forwarded leg (gated by
-            // `should_use_forwarded_bearer`, which reads
-            // `req.routectl_internal.forwarded_bearer` instead), and the
-            // router's `missing_forwarded_bearer_error` guard refuses any
-            // request with no captured bearer before this provider is
-            // ever dispatched to.
-            let auth: Arc<dyn routectl_core::TokenSource> = if is_forwarded {
-                Arc::new(routectl_core::StaticToken::new(String::new()))
-            } else {
-                resolve_token_source(&secrets, api_key_ref).await?
-            };
-            // Resolve the stable per-credential Claude Code session id
-            // for the OauthBearer surface only. `api_key_ref` already
-            // carries the seat label (`build_seat_targets` rebuilds each
-            // labeled seat with its own `oauth://anthropic#label` ref), so
-            // `peek_session_id` resolves THIS seat's session_id with no
-            // extra fallback. ApiKey providers (and a non-oauth ref) get
-            // None. The ref already parsed cleanly inside
-            // `resolve_token_source` above, so a parse error here is
-            // unreachable; treat it as "no session id" rather than fail
-            // the build. A forwarded entry is excluded up front even if
-            // `auth_kind` happens to be `OauthBearer` -- its `api_key_ref`
-            // is always empty, so there is no seat to resolve a session
-            // id for.
-            let session_id = if !is_forwarded
-                && *auth_kind == routectl_providers::anthropic_api::AuthKind::OauthBearer
-            {
-                match SecretRef::parse(api_key_ref) {
-                    Ok(sr) => secrets.peek_session_id(&sr).await,
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-            let cfg = AnthropicApiConfig {
-                id: format!("anthropic-api:{name}"),
-                auth,
-                base_url: base_url.clone(),
-                anthropic_version: anthropic_version.clone(),
-                auth_kind: *auth_kind,
-                header_extras: header_extras
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-                user_agent: user_agent.clone(),
-                forward_client_headers: forward_client_headers.clone(),
-                context_management: *context_management,
-                session_id,
-                cloak: cloak_with_normalize(cloak, opts.normalize_tools),
-                use_forwarded_bearer: is_forwarded,
-
-                #[cfg(feature = "bedrock")]
-                mantle: None,
-            };
+        ProviderEntry::AnthropicApi { .. } => {
+            let cfg = anthropic_api_config(name, entry, plan, &secrets, &opts).await?;
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }
         #[cfg(feature = "openai-responses")]
@@ -1539,6 +1399,160 @@ fn pool_reports(
             })
         })
         .collect()
+}
+
+/// The provider config for an `anthropic-api` entry. `plan` is the entry's
+/// plan; its client-identity verdict is passed through unchanged, and the
+/// login session id is read only when that verdict holds.
+pub(super) async fn anthropic_api_config(
+    name: &str,
+    entry: &ProviderEntry,
+    plan: ProviderPlan,
+    secrets: &Arc<dyn SecretStore>,
+    opts: &BuildOptions,
+) -> Result<AnthropicApiConfig> {
+    let ProviderEntry::AnthropicApi {
+        api_key_ref,
+        base_url,
+        anthropic_version,
+        auth_kind,
+        credential_source,
+        header_extras,
+        payload_extras: _,
+        user_agent,
+        forward_client_headers,
+        context_management,
+        cache_capability: _,
+        reduction_enabled: _,
+        cloak,
+        #[cfg(feature = "bedrock")]
+        bedrock_mantle,
+        runtime: _,
+    } = entry
+    else {
+        return Err(routectl_core::Error::Internal(
+            "anthropic_api_config called with a non-anthropic-api entry".to_string(),
+        ));
+    };
+    // Bedrock mantle lane. Its presence flips this provider onto
+    // region-derived, SigV4/bearer-signed egress under the
+    // `bedrock-mantle` scope. Config validation guarantees
+    // auth_kind = api-key, an empty api_key_ref,
+    // credential_source = own, and base_url at its default -- so
+    // the region is the single source of truth for the endpoint
+    // (never the operator base_url) and no first-party token is
+    // presented. Credentials resolve here, fail-fast probing
+    // Profile/DefaultChain exactly as the Bedrock provider does.
+    #[cfg(feature = "bedrock")]
+    if let Some(m) = bedrock_mantle {
+        debug_assert_eq!(
+            base_url,
+            &crate::config::default_anthropic_base(),
+            "mantle lane requires base_url at its default; validation must reject a manual base_url"
+        );
+        let mantle_base = routectl_providers::mantle::mantle_anthropic_base(&m.region)?;
+        let bedrock_creds = resolve_bedrock_creds(&**secrets, &m.creds).await?;
+        let resolved =
+            routectl_providers::bedrock::auth::resolve(&bedrock_creds, &m.region).await?;
+        let cfg = AnthropicApiConfig {
+            id: format!("anthropic-api:{name}"),
+            auth: Arc::new(routectl_core::StaticToken::new(String::new())),
+            base_url: mantle_base,
+            anthropic_version: anthropic_version.clone(),
+            // Force api-key on the lane rather than copying the
+            // config value: the mantle credential rides the signed
+            // request, and OauthBearer would re-engage the
+            // first-party `Authorization: Bearer` / Claude-Code
+            // header plumbing this lane must bypass. Validation
+            // already rejects a non-api-key mantle entry; this is
+            // the factory-side belt-and-braces.
+            auth_kind: routectl_providers::anthropic_api::AuthKind::ApiKey,
+            header_extras: header_extras
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            user_agent: user_agent.clone(),
+            forward_client_headers: forward_client_headers.clone(),
+            context_management: *context_management,
+            session_id: None,
+            cloak: cloak_with_normalize(cloak, opts.normalize_tools),
+            use_forwarded_bearer: false,
+            client_identity: false,
+            mantle: Some(MantleAuth {
+                region: m.region.clone(),
+                creds: resolved,
+            }),
+        };
+        return Ok(cfg);
+    }
+    validate_base_url_scheme(name, base_url)?;
+    let is_forwarded = *credential_source == CredentialSource::Forwarded;
+    // OAuth-aware: for `oauth://<provider>` refs the provider
+    // gets a `ManagedToken` that re-enters `SecretStore::get`
+    // per request, so token rotation in credentials.json is
+    // picked up live without restart. For env / file / literal
+    // the value is resolved once and wrapped in `StaticToken`
+    // (semantically equivalent to the pre-v0.7 `api_key:
+    // String` field).
+    //
+    // `credential_source = "forwarded"` is the exception:
+    // `validate_provider_credential_sources` guarantees
+    // `api_key_ref` is empty for a forwarded entry (there is no
+    // configured secret to resolve -- the provider authenticates
+    // with the client's captured bearer instead), so calling
+    // `resolve_token_source` here would always fail with an
+    // "unrecognized secret URI scheme" error. Wire a sentinel
+    // `StaticToken` instead: it is unreachable by construction --
+    // `resolve_effective_token` / `build_headers` never call
+    // `cfg.auth.token()` on the forwarded leg (gated by
+    // `should_use_forwarded_bearer`, which reads
+    // `req.routectl_internal.forwarded_bearer` instead), and the
+    // router's `missing_forwarded_bearer_error` guard refuses any
+    // request with no captured bearer before this provider is
+    // ever dispatched to.
+    let auth: Arc<dyn routectl_core::TokenSource> = if is_forwarded {
+        Arc::new(routectl_core::StaticToken::new(String::new()))
+    } else {
+        resolve_token_source(secrets, api_key_ref).await?
+    };
+    // Resolve the stable per-credential Claude Code session id
+    // only for a provider that presents the Claude Code identity.
+    // `api_key_ref` already carries the seat label
+    // (`build_seat_targets` rebuilds each labeled seat with its own
+    // `oauth://anthropic#label` ref), so `peek_session_id` resolves
+    // THIS seat's session_id with no extra fallback. The ref already
+    // parsed cleanly inside `resolve_token_source` above, so a parse
+    // error here is unreachable; treat it as "no session id" rather
+    // than fail the build.
+    let session_id = if plan.client_identity {
+        match SecretRef::parse(api_key_ref) {
+            Ok(sr) => secrets.peek_session_id(&sr).await,
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let cfg = AnthropicApiConfig {
+        id: format!("anthropic-api:{name}"),
+        auth,
+        base_url: base_url.clone(),
+        anthropic_version: anthropic_version.clone(),
+        auth_kind: *auth_kind,
+        header_extras: header_extras
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        user_agent: user_agent.clone(),
+        forward_client_headers: forward_client_headers.clone(),
+        context_management: *context_management,
+        session_id,
+        cloak: cloak_with_normalize(cloak, opts.normalize_tools),
+        use_forwarded_bearer: is_forwarded,
+        client_identity: plan.client_identity,
+        #[cfg(feature = "bedrock")]
+        mantle: None,
+    };
+    Ok(cfg)
 }
 
 /// Clone a provider entry's `CloakConfig` and stamp the global
