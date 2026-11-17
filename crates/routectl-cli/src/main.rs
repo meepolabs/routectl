@@ -404,6 +404,10 @@ enum ConfigCmd {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process from argv; boxing the flag set saves nothing"
+)]
 enum ProviderCmd {
     /// Add a provider block to `config.toml` (or overwrite one with
     /// `--overwrite`). The credential is given by reference only.
@@ -435,6 +439,11 @@ enum ProviderCmd {
             value_parser = PossibleValuesParser::new(commands::provider_add::LOGIN_VALUES)
         )]
         login: Option<String>,
+        /// Seat label for `--login`: logs in that seat and writes
+        /// `credential = "oauth://<vendor>#<label>"`. Omit for the default
+        /// seat.
+        #[arg(long, requires = "login", conflicts_with = "format")]
+        label: Option<String>,
         /// Replaced by `--format` / `--login`; refused when given.
         #[arg(long, hide = true)]
         kind: Option<String>,
@@ -729,6 +738,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 format,
                 auth,
                 login,
+                label,
                 kind,
                 name,
                 base_url,
@@ -747,6 +757,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let args = commands::provider_add::ProviderAddArgs {
                     format,
                     login,
+                    label,
                     auth,
                     name,
                     base_url,
@@ -1211,7 +1222,8 @@ mod tests {
     }
 
     /// `--format`, `--auth` and `--login` take only the values `provider add`
-    /// builds, and `--format` with `--login` is a clap-layer rejection.
+    /// builds; `--format` with `--login`, and `--label` without `--login`,
+    /// are clap-layer rejections.
     #[test]
     fn provider_add_target_flags_parse_only_supported_values() {
         let base = ["routectl", "provider", "add", "--name", "x"];
@@ -1223,6 +1235,9 @@ mod tests {
             (&["--format", "openai-responses"], true),
             (&["--format", "gemini", "--auth", "x-goog-api-key"], true),
             (&["--login", "codex"], true),
+            (&["--login", "codex", "--label", "work"], true),
+            (&["--format", "gemini", "--label", "work"], false),
+            (&["--label", "work"], false),
             (&["--format", "bedrock-invoke"], false),
             (&["--format", "openai-chat", "--auth", "aws-sigv4"], false),
             (&["--login", "xai"], false),

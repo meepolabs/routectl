@@ -16,6 +16,7 @@ use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::config_effective::{tuning_cells, tuning_kind};
 use crate::commands::pricing::{CacheWriteSpellingConflict, missing_equivalence_dimensions};
 use crate::commands::probe::{login_id_for, probe_finding};
+use crate::commands::seat::shell_word;
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
 };
@@ -468,20 +469,6 @@ pub(super) fn oauth_login_command(provider: &str, label: Option<&str>) -> String
             shell_word(&safe(label))
         ),
         None => format!("routectl login {}", safe(provider)),
-    }
-}
-
-/// `word` as one POSIX shell word: bare when every character is in
-/// `[A-Za-z0-9_.-]`, else single-quoted with each `'` written as `'\''`.
-fn shell_word(word: &str) -> String {
-    let is_plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-    if is_plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 

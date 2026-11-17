@@ -36,6 +36,7 @@ fn format_args(format: &str, credential: Option<&str>) -> ProviderAddArgs {
     ProviderAddArgs {
         format: Some(format.to_string()),
         login: None,
+        label: None,
         auth: None,
         name: "added".to_string(),
         base_url: None,
@@ -56,6 +57,13 @@ fn login_args(vendor: &str) -> ProviderAddArgs {
     }
 }
 
+fn labelled_login_args(vendor: &str, label: &str) -> ProviderAddArgs {
+    ProviderAddArgs {
+        label: Some(label.to_string()),
+        ..login_args(vendor)
+    }
+}
+
 fn with_base_url(mut args: ProviderAddArgs, url: &str) -> ProviderAddArgs {
     args.base_url = Some(url.to_string());
     args
@@ -72,10 +80,11 @@ fn forwarded_args() -> ProviderAddArgs {
     args
 }
 
-/// A login stub: records each vendor and succeeds, touching nothing.
+/// A login stub: records each vendor and seat label and succeeds, touching
+/// nothing.
 #[derive(Default)]
 struct LoginIo {
-    logins: std::sync::Mutex<Vec<String>>,
+    logins: std::sync::Mutex<Vec<(String, Option<String>)>>,
 }
 
 #[async_trait]
@@ -92,8 +101,11 @@ impl AddIo for LoginIo {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         Ok(String::new())
     }
-    async fn login(&self, provider: &str) -> Result<()> {
-        self.logins.lock().unwrap().push(provider.to_string());
+    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
+        self.logins
+            .lock()
+            .unwrap()
+            .push((provider.to_string(), label.map(str::to_string)));
         Ok(())
     }
 }
@@ -104,15 +116,13 @@ fn as_json(entry: &ProviderEntry) -> serde_json::Value {
 
 const KEY: &str = "env://ROUTECTL_FORMAT_TEST_KEY";
 
+/// The login (vendor, seat label) a row expects the command to run.
+type ExpectedLogin = Option<(&'static str, Option<&'static str>)>;
+
 /// Each row: name, args, the entry those args must write (built here from
 /// the router's constructors, independently of the command), and the login
 /// the command must run.
-fn shape_rows() -> Vec<(
-    &'static str,
-    ProviderAddArgs,
-    ProviderEntry,
-    Option<&'static str>,
-)> {
+fn shape_rows() -> Vec<(&'static str, ProviderAddArgs, ProviderEntry, ExpectedLogin)> {
     vec![
         (
             "anthropic-messages, default host",
@@ -163,13 +173,25 @@ fn shape_rows() -> Vec<(
             "--login anthropic",
             login_args("anthropic"),
             ProviderEntry::for_managed_login("anthropic", "oauth://anthropic").unwrap(),
-            Some("anthropic"),
+            Some(("anthropic", None)),
         ),
         (
             "--login codex",
             login_args("codex"),
             ProviderEntry::for_managed_login("codex", "oauth://codex").unwrap(),
-            Some("codex"),
+            Some(("codex", None)),
+        ),
+        (
+            "--login anthropic --label work",
+            labelled_login_args("anthropic", "work"),
+            ProviderEntry::for_managed_login("anthropic", "oauth://anthropic#work").unwrap(),
+            Some(("anthropic", Some("work"))),
+        ),
+        (
+            "--login codex --label work",
+            labelled_login_args("codex", "work"),
+            ProviderEntry::for_managed_login("codex", "oauth://codex#work").unwrap(),
+            Some(("codex", Some("work"))),
         ),
     ]
 }
@@ -191,7 +213,10 @@ async fn each_format_and_login_writes_a_gated_entry_equal_to_the_built_one() {
         let config = gate(&text).unwrap_or_else(|e| panic!("row `{row}`: gate refused: {e:?}"));
         let written = config.providers.get("added").expect("entry written");
         assert_eq!(as_json(written), as_json(&expected), "row `{row}`");
-        let logins: Vec<String> = login.into_iter().map(str::to_string).collect();
+        let logins: Vec<(String, Option<String>)> = login
+            .into_iter()
+            .map(|(vendor, label)| (vendor.to_string(), label.map(str::to_string)))
+            .collect();
         assert_eq!(*io.logins.lock().unwrap(), logins, "row `{row}`");
     }
 }
@@ -293,6 +318,61 @@ async fn format_and_login_select_exactly_one_target() {
             "--auth",
         ),
         ("unknown login", login_args("xai"), "supported logins"),
+        (
+            "login with --api-key-env",
+            ProviderAddArgs {
+                api_key_env: Some("ROUTECTL_FORMAT_TEST_KEY".to_string()),
+                ..login_args("anthropic")
+            },
+            "drop the `--api-key-env`",
+        ),
+        (
+            "login with --secret-ref",
+            ProviderAddArgs {
+                secret_ref: Some(KEY.to_string()),
+                ..login_args("anthropic")
+            },
+            "drop the `--api-key-env`",
+        ),
+        (
+            "login with --api-key-stdin",
+            ProviderAddArgs {
+                api_key_stdin: true,
+                ..login_args("anthropic")
+            },
+            "drop the `--api-key-env`",
+        ),
+        (
+            "login with --credential-source",
+            ProviderAddArgs {
+                credential_source: Some("own".to_string()),
+                ..login_args("anthropic")
+            },
+            "`--credential-source` is not supported",
+        ),
+        (
+            "--label with --format",
+            ProviderAddArgs {
+                label: Some("work".to_string()),
+                api_key_stdin: true,
+                ..format_args("anthropic-messages", None)
+            },
+            "only valid with `--login",
+        ),
+        (
+            "--label with neither target",
+            ProviderAddArgs {
+                format: None,
+                label: Some("work".to_string()),
+                ..format_args("anthropic-messages", Some(KEY))
+            },
+            "only valid with `--login",
+        ),
+        (
+            "blank --label with --login",
+            labelled_login_args("anthropic", "  "),
+            "--label must not be empty",
+        ),
     ];
     for (row, args, needle) in rows {
         let dir = tempfile::tempdir().unwrap();

@@ -3567,6 +3567,7 @@ routectl provider add --format anthropic-messages --name claude-key \
 routectl provider add --format anthropic-messages --name claude-fwd \
   --credential-source forwarded
 routectl provider add --login codex --name codex
+routectl provider add --login anthropic --label work --name anthropic-work
 ```
 
 - **`--format`** is `anthropic-messages`, `openai-chat`,
@@ -3582,7 +3583,13 @@ routectl provider add --login codex --name codex
 - **`--login`** is `anthropic` or `codex`. It runs the `login` flow after
   the confirmation and writes the vendor's own `format`, `base_url` and
   `auth` with `credential = "oauth://<vendor>"`; it takes no secret
-  flag, `--base-url` or `--auth`.
+  flag, `--base-url`, `--auth` or `--credential-source`.
+- **`--label`** (only with `--login`) logs in that seat and writes
+  `credential = "oauth://<vendor>#<label>"`. Without it the login is the
+  default seat. If the config write fails after the login (another writer
+  changed the file), the login is kept, nothing is written, and the error
+  names the exact `routectl provider add --login ... --label ...` command
+  to run again, with any value the shell would split single-quoted.
 - The credential comes from `--api-key-env`, `--secret-ref`,
   `--api-key-stdin` (captured to the managed `file://` store) or, on a
   terminal, the matching conventional environment variable or a hidden

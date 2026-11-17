@@ -3,7 +3,7 @@
 use super::*;
 
 use routectl_auth::SecretRef;
-use routectl_router::{CURRENT_CONFIG_VERSION, ProviderEntry};
+use routectl_router::{CURRENT_CONFIG_VERSION, Format, ProviderEntry};
 
 use super::build::resolve_secret;
 use super::capture::{capture_value, execute_pending};
@@ -46,6 +46,7 @@ fn args(format: &str, name: &str) -> ProviderAddArgs {
     ProviderAddArgs {
         format: Some(format.to_string()),
         login: None,
+        label: None,
         auth: None,
         name: name.to_string(),
         base_url: None,
@@ -90,8 +91,13 @@ fn resolve_secret_env_yields_scheme_ref_not_the_value() {
 
     let mut a = args("anthropic-messages", "x");
     a.api_key_env = Some(key.to_string());
-    let (ref_str, class, _pending) =
-        resolve_secret(&a, "anthropic-api", &FakeIo::default()).unwrap();
+    let (ref_str, class, _pending) = resolve_secret(
+        &a,
+        Format::AnthropicMessages,
+        "anthropic-api",
+        &FakeIo::default(),
+    )
+    .unwrap();
 
     assert_eq!(ref_str, format!("env://{key}"));
     assert_eq!(class, "env");
@@ -109,7 +115,7 @@ fn resolve_secret_rejects_literal_ref() {
     // steer to the safe paths and never echo the key value.
     let mut a = args("openai-chat", "x");
     a.secret_ref = Some("literal:keep-me-exactly".to_string());
-    let err = match resolve_secret(&a, "openai-compat", &FakeIo::default()) {
+    let err = match resolve_secret(&a, Format::OpenaiChat, "openai-compat", &FakeIo::default()) {
         Ok(_) => panic!("a literal: secret-ref must be rejected"),
         Err(e) => e,
     };
@@ -686,7 +692,7 @@ struct FakeIo {
     /// Side effect the stub login performs before returning, standing in
     /// for whatever the real login flow does to the filesystem.
     login_hook: Option<Box<dyn Fn() + Send + Sync>>,
-    login_calls: std::sync::Mutex<Vec<String>>,
+    login_calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
     stdin_reads: std::sync::Mutex<u32>,
     prompt_calls: std::sync::Mutex<u32>,
 }
@@ -727,8 +733,11 @@ impl AddIo for FakeIo {
         *self.prompt_calls.lock().unwrap() += 1;
         Ok(self.prompt_value.clone())
     }
-    async fn login(&self, provider: &str) -> Result<()> {
-        self.login_calls.lock().unwrap().push(provider.to_string());
+    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
+        self.login_calls
+            .lock()
+            .unwrap()
+            .push((provider.to_string(), label.map(str::to_string)));
         if let Some(hook) = &self.login_hook {
             hook();
         }
@@ -838,6 +847,9 @@ async fn missing_key_without_tty_errors_actionably_and_never_prompts() {
     let msg = err.to_string();
     assert!(msg.contains("--api-key-env"), "{msg}");
     assert!(msg.contains("--api-key-stdin"), "{msg}");
+    assert!(msg.contains("`--format openai-chat`"), "{msg}");
+    assert!(!msg.contains("provider kind"), "{msg}");
+    assert!(!msg.contains("openai-compat"), "{msg}");
     assert_eq!(
         *io.prompt_calls.lock().unwrap(),
         0,
@@ -1094,7 +1106,7 @@ async fn login_delegates_to_the_login_flow_and_writes_the_oauth_ref() {
     assert_eq!(result, AddResult::Written);
     assert_eq!(
         *io.login_calls.lock().unwrap(),
-        vec!["anthropic".to_string()],
+        vec![("anthropic".to_string(), None)],
         "the login flow must be delegated exactly once for `anthropic`"
     );
 
@@ -1102,6 +1114,79 @@ async fn login_delegates_to_the_login_flow_and_writes_the_oauth_ref() {
     let entry = config.providers.get("claude-sub").unwrap();
     assert_eq!(entry.kind_str(), "anthropic-api");
     assert_eq!(entry.api_key_ref(), Some("oauth://anthropic"));
+}
+
+/// A config write that fails after a labelled login names the exact command
+/// that finishes the wiring, so the rerun lands in the same seat.
+#[tokio::test]
+async fn a_conflict_after_a_labelled_login_names_the_exact_rerun_command() {
+    // Arrange: the stub login lands another writer's bytes between this
+    // command's snapshot and its commit.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &current_base());
+    let other_writer = format!("{}# another writer\n", current_base());
+    let racing_path = path.clone();
+    let racing_bytes = other_writer.clone();
+    let io = FakeIo {
+        login_hook: Some(Box::new(move || {
+            std::fs::write(&racing_path, &racing_bytes).unwrap();
+        })),
+        ..Default::default()
+    };
+    let mut a = login_args("anthropic", "claude-work");
+    a.label = Some("work".to_string());
+
+    // Act
+    let err = run_with_io(&path, a, &io)
+        .await
+        .expect_err("a snapshot conflict after the login must error");
+
+    // Assert
+    let msg = err.to_string();
+    assert!(
+        msg.contains(
+            "re-run `routectl provider add --login anthropic --label work --name claude-work --yes`"
+        ),
+        "{msg}"
+    );
+    assert_eq!(
+        *io.login_calls.lock().unwrap(),
+        vec![("anthropic".to_string(), Some("work".to_string()))]
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), other_writer);
+}
+
+/// Every operator-written word of the rerun command is one shell word: a
+/// plain value is bare, any other is single-quoted.
+#[test]
+fn the_login_rerun_command_quotes_values_the_shell_would_split() {
+    let rows = [
+        ("plain", "seat-a.1_b", "--label seat-a.1_b"),
+        ("space", "my seat", "--label 'my seat'"),
+        ("single quote", "seat'a", "--label 'seat'\\''a'"),
+        ("expansion", "$(id)", "--label '$(id)'"),
+    ];
+    for (row, label, shown) in rows {
+        let mut a = login_args("codex", "my codex");
+        a.label = Some(label.to_string());
+
+        let command = login_rerun_command(&a).expect("a login names a rerun");
+
+        assert_eq!(
+            command,
+            format!("routectl provider add --login codex {shown} --name 'my codex' --yes"),
+            "row `{row}`"
+        );
+    }
+}
+
+#[test]
+fn a_rerun_without_a_label_or_a_login_names_neither() {
+    assert_eq!(
+        login_rerun_command(&login_args("codex", "codex")).as_deref(),
+        Some("routectl provider add --login codex --name codex --yes")
+    );
+    assert_eq!(login_rerun_command(&args("gemini", "g")), None);
 }
 
 #[tokio::test]

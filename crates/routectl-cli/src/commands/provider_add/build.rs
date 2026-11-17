@@ -6,6 +6,7 @@ use routectl_router::{Auth, Format, ProviderEntry};
 
 use super::capture::{PendingSecret, capture_from_stdin, ref_class, resolve_interactive};
 use super::{AUTH_VALUES, AddIo, FORMAT_VALUES, LOGIN_VALUES, ProviderAddArgs};
+use crate::commands::seat::validate_label;
 
 /// The formats this command builds over a base URL. The Bedrock formats ride
 /// a cloud carrier and `gemini-cloud-code` takes only a managed login, so
@@ -115,6 +116,11 @@ pub(super) fn build_entry(
     args: &ProviderAddArgs,
     io: &dyn AddIo,
 ) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
+    if args.label.is_some() && args.login.is_none() {
+        return Err(Error::Config(
+            "`--label` names a login seat; it is only valid with `--login <VENDOR>`".into(),
+        ));
+    }
     let forwarded = wants_forwarded(args)?;
     let format = match target(args)? {
         Target::Login(vendor) => return build_login(args, vendor),
@@ -128,7 +134,7 @@ pub(super) fn build_entry(
     if forwarded {
         return build_forwarded(args, shape);
     }
-    let (ref_str, cred_class, pending) = resolve_secret(args, shape.kind_str(), io)?;
+    let (ref_str, cred_class, pending) = resolve_secret(args, format, shape.kind_str(), io)?;
     Ok((shape.with_credential(ref_str), cred_class, pending))
 }
 
@@ -202,8 +208,9 @@ fn build_forwarded(
 }
 
 /// Build the entry consuming a managed login of `vendor` and defer the
-/// login. The credential is `oauth://<vendor>`; no key is captured to the
-/// file store, and the login runs post-confirm via `execute_pending`.
+/// login. The credential is `oauth://<vendor>`, or `oauth://<vendor>#<label>`
+/// for a `--label` seat; no key is captured to the file store, and the login
+/// runs post-confirm via `execute_pending`.
 fn build_login(
     args: &ProviderAddArgs,
     vendor: &'static str,
@@ -227,9 +234,10 @@ fn build_login(
              supported with it"
         )));
     }
+    let label = validate_label(args.label.as_deref())?.map(str::to_string);
     let credential = SecretRef::OAuth {
         provider: vendor.to_string(),
-        label: None,
+        label: label.clone(),
     }
     .to_string();
     let entry = ProviderEntry::for_managed_login(vendor, credential).ok_or_else(|| {
@@ -240,6 +248,7 @@ fn build_login(
         "oauth",
         PendingSecret::OAuth {
             provider: vendor.to_string(),
+            label,
         },
     ))
 }
@@ -257,9 +266,10 @@ const fn has_secret_flag(args: &ProviderAddArgs) -> bool {
 /// captures the piped value to the managed store; with no flag on a TTY, an
 /// already-resolvable conventional env var for the `family` token is
 /// OFFERED, else a hidden prompt captures the value. A missing key with no
-/// TTY errors actionably rather than hanging.
+/// TTY errors actionably, naming `format`, rather than hanging.
 pub(super) fn resolve_secret(
     args: &ProviderAddArgs,
+    format: Format,
     family: &str,
     io: &dyn AddIo,
 ) -> Result<(String, &'static str, PendingSecret)> {
@@ -279,5 +289,5 @@ pub(super) fn resolve_secret(
     if args.api_key_stdin {
         return capture_from_stdin(args, io);
     }
-    resolve_interactive(args, family, io)
+    resolve_interactive(args, format, family, io)
 }

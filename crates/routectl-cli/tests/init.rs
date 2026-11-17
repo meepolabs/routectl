@@ -164,7 +164,7 @@ impl AddIo for StubInitIo {
         *self.prompt_hidden_calls.lock().unwrap() += 1;
         Ok(self.prompt_value.clone())
     }
-    async fn login(&self, provider: &str) -> Result<()> {
+    async fn login(&self, provider: &str, _label: Option<&str>) -> Result<()> {
         *self.login_calls.lock().unwrap() += 1;
         provision_login_token(provider);
         Ok(())
@@ -242,6 +242,7 @@ fn oauth_add_args(name: &str) -> ProviderAddArgs {
     ProviderAddArgs {
         format: None,
         login: Some("anthropic".to_string()),
+        label: None,
         auth: None,
         name: name.to_string(),
         base_url: None,

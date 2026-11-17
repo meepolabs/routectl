@@ -180,6 +180,7 @@ fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
     ProviderAddArgs {
         format: offer.provider_add_format().map(str::to_string),
         login: offer.provider_add_login().map(str::to_string),
+        label: None,
         auth: None,
         name: offer.provider_name.clone(),
         base_url: None,

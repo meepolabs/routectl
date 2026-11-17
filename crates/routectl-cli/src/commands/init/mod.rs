@@ -195,8 +195,8 @@ impl AddIo for RealInitIo {
     fn prompt_hidden(&self, provider_name: &str) -> Result<String> {
         RealAddIo.prompt_hidden(provider_name)
     }
-    async fn login(&self, provider: &str) -> Result<()> {
-        RealAddIo.login(provider).await
+    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
+        RealAddIo.login(provider, label).await
     }
 }
 

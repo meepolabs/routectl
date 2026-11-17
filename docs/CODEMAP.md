@@ -7911,7 +7911,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the locked write, so a declined confirm captures nothing and the advisory
   lock is never held across a prompt/login/env-probe/put. A post-capture write
   conflict reports an explicit recovery (secret/login persists, config
-  unchanged). Emits ONE value-free audit event
+  unchanged); after a login it names the exact `provider add --login
+  [--label]` rerun command. Emits ONE value-free audit event
   (surface/verb/name/kind/credential class -- never the value or full ref);
   owns `AddResult` {Written/NoChange/Aborted/Rotated} and the pinned
   `credential rotated; config unchanged` line. Also owns the accepted
@@ -7921,7 +7922,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   args: `build_entry` resolves exactly one of `--format`
   (anthropic-messages / openai-chat / openai-responses / gemini over a base
   URL, `--auth` or its `default_auth`) or `--login` (anthropic / codex via
-  `ProviderEntry::for_managed_login`, `oauth://<vendor>`, login deferred),
+  `ProviderEntry::for_managed_login`, `oauth://<vendor>[#<label>]` with
+  `--label` only valid here, login deferred),
   then the direct api-key path (`resolve_secret` -> `env://` /
   `--secret-ref` verbatim / stdin / interactive, keyed on the entry's family
   token) or `build_forwarded` (`anthropic-messages` with
@@ -8213,9 +8215,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   grouped by provider (default seat as `<provider> (default)`, labeled seats
   as `<provider>#<label>`), each with its own expiry; exits 0 when at least
   one seat is logged in, 2 otherwise
-- `src/commands/seat.rs` -- shared `--label` validation for the seat-aware
-  OAuth commands (rejects empty/whitespace labels, mirroring the `oauth://`
-  ref parser)
+- `src/commands/seat.rs` -- shared `--label` handling for the seat-aware
+  OAuth commands: `validate_label` (rejects empty/whitespace labels,
+  mirroring the `oauth://` ref parser) and `shell_word` (one POSIX shell
+  word for a printed command; used by doctor's login remediation and
+  `provider add`'s rerun line)
 - `src/commands/seat_report.rs` -- shared OAuth seat-pool report: pure
   `pool_rows(config, Option<&[seat_key]>)` joins every `[pools.<name>]` block
   against its members' refs (`PoolRow`/`PoolMember`/`PoolHealth`

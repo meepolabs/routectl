@@ -7,7 +7,8 @@
 //! capture), `--api-key-stdin` (piped value captured to the managed
 //! `file://` store), an interactive hidden prompt (missing key + a TTY),
 //! `--credential-source forwarded` (no secret at all), and `--login
-//! <vendor>` (delegated to the `login` flow, ref `oauth://<vendor>`).
+//! <vendor>` (delegated to the `login` flow, ref `oauth://<vendor>`, or
+//! `oauth://<vendor>#<label>` with `--label`).
 //!
 //! Every step runs IN MEMORY before any byte touches disk, so any refusal
 //! (a stale/legacy version, an unknown secret scheme, a candidate that fails
@@ -50,7 +51,7 @@ use std::io::{IsTerminal, Read};
 use std::path::Path;
 
 use async_trait::async_trait;
-use routectl_core::{Error, Result};
+use routectl_core::{Error, Result, render_operator_text};
 use routectl_router::{EditOutcome, parse_config};
 
 use super::edit_pipeline::{
@@ -58,6 +59,7 @@ use super::edit_pipeline::{
     render_gate_errors,
 };
 use super::provider_entry::render_provider_block;
+use super::seat::shell_word;
 use crate::config_classify::collect_high_consequence_changes;
 
 mod build;
@@ -100,6 +102,8 @@ pub const KIND_REPLACED_MESSAGE: &str = "`--kind` was replaced: use `--format \
 pub struct ProviderAddArgs {
     pub format: Option<String>,
     pub login: Option<String>,
+    /// The seat a `login` writes; only valid with `login`.
+    pub label: Option<String>,
     /// How the credential is sent; `None` writes the format's default.
     pub auth: Option<String>,
     pub name: String,
@@ -129,8 +133,9 @@ pub trait AddIo: Send + Sync {
     fn confirm_env_offer(&self, var: &str) -> bool;
     /// Prompt for the API key without echoing it (interactive path).
     fn prompt_hidden(&self, provider_name: &str) -> Result<String>;
-    /// Run the oauth login flow for `provider`, persisting its tokens.
-    async fn login(&self, provider: &str) -> Result<()>;
+    /// Run the oauth login flow for `provider` into the seat `label` names
+    /// (`None` is the default seat), persisting its tokens.
+    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()>;
 }
 
 /// Production [`AddIo`]: std stdin + `rpassword` for the hidden prompt +
@@ -170,7 +175,7 @@ impl AddIo for RealAddIo {
             .map_err(|e| Error::Config(format!("failed to read the API key prompt: {e}")))
     }
 
-    async fn login(&self, provider: &str) -> Result<()> {
+    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
         // `ConfigSurface::Skip` is load-bearing, not a default: this call
         // sits BETWEEN this command's byte snapshot and its commit, so a
         // config-writing login would invalidate the snapshot and make every
@@ -180,7 +185,7 @@ impl AddIo for RealAddIo {
             provider,
             false,
             None,
-            None,
+            label,
             super::login::ConfigSurface::Skip,
         )
         .await
@@ -211,6 +216,43 @@ pub enum AddResult {
 /// This exact text is an operator-scriptable contract, pinned by a test:
 /// downstream tooling may match on it, so it must not drift silently.
 const ROTATED_MESSAGE: &str = "credential rotated; config unchanged";
+
+/// The error for a config write that failed after the secret capture or the
+/// login already ran: the side effect persists and the file is unchanged. A
+/// login names the exact command that finishes the wiring, so the rerun lands
+/// in the same seat.
+fn post_side_effect_error(args: &ProviderAddArgs, cause: &Error) -> Error {
+    match login_rerun_command(args) {
+        Some(command) => Error::Config(format!(
+            "the login succeeded, but the config was NOT changed ({cause}). config.toml is \
+             unchanged; the login persists -- re-run `{command}` to complete the wiring"
+        )),
+        None => Error::Config(format!(
+            "the credential was captured/logged in successfully, but the config was \
+             NOT changed ({cause}). config.toml is unchanged; the captured credential \
+             persists -- re-run `provider add` to complete the wiring"
+        )),
+    }
+}
+
+/// The `provider add --login` command line these args came from, with every
+/// operator-written value as one shell word; `None` when no login was asked.
+fn login_rerun_command(args: &ProviderAddArgs) -> Option<String> {
+    let word = |value: &str| shell_word(&render_operator_text(value));
+    let vendor = args.login.as_deref()?;
+    let mut words = vec!["routectl provider add --login".to_string(), word(vendor)];
+    if let Some(label) = args.label.as_deref() {
+        words.extend(["--label".to_string(), word(label)]);
+    }
+    words.extend(["--name".to_string(), word(&args.name)]);
+    if args.overwrite {
+        words.push("--overwrite".to_string());
+    }
+    if args.yes {
+        words.push("--yes".to_string());
+    }
+    Some(words.join(" "))
+}
 
 /// Run the `provider add` pipeline against `config_path` with the
 /// production I/O seams ([`RealAddIo`]). Thin wrapper over
@@ -325,16 +367,8 @@ pub async fn run_with_io(
 
     let outcome = match commit(config_path, &snapshot, &snapshot_text, name, block) {
         Ok(outcome) => outcome,
-        Err(e) => {
-            if did_side_effect {
-                return Err(Error::Config(format!(
-                    "the credential was captured/logged in successfully, but the config was \
-                     NOT changed ({e}). config.toml is unchanged; the captured credential \
-                     persists -- re-run `provider add` to complete the wiring"
-                )));
-            }
-            return Err(e);
-        }
+        Err(e) if did_side_effect => return Err(post_side_effect_error(&args, &e)),
+        Err(e) => return Err(e),
     };
 
     if outcome == EditOutcome::Unchanged {

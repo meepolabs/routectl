@@ -571,7 +571,7 @@ mod tests {
             *self.prompt_hidden_calls.lock().unwrap() += 1;
             Ok(self.prompt_value.clone())
         }
-        async fn login(&self, _provider: &str) -> Result<()> {
+        async fn login(&self, _provider: &str, _label: Option<&str>) -> Result<()> {
             *self.login_calls.lock().unwrap() += 1;
             if self.login_ok {
                 Ok(())
@@ -635,7 +635,9 @@ mod tests {
         // The inherited AddIo half resolves through the same fake.
         let add: &dyn AddIo = &fake;
         assert!(!add.stdin_is_terminal());
-        add.login("anthropic").await.expect("default login ok");
+        add.login("anthropic", None)
+            .await
+            .expect("default login ok");
     }
 
     // -----------------------------------------------------------------

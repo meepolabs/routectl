@@ -1,5 +1,6 @@
-//! Shared `--label` validation for the seat-aware OAuth commands
-//! (`login` / `logout` / `refresh`). Mirrors the `SecretRef` parser's
+//! Shared `--label` handling for the seat-aware OAuth commands
+//! (`login` / `logout` / `refresh` / `provider add --login`): validation that
+//! mirrors the `SecretRef` parser's
 //! rule so a label accepted on the CLI round-trips through an
 //! `oauth://<provider>#<label>` ref: an empty or whitespace-only label
 //! is rejected, anything else is accepted verbatim.
@@ -19,6 +20,20 @@ pub fn validate_label(label: Option<&str>) -> Result<Option<&str>> {
             "--label must not be empty or whitespace-only".into(),
         )),
         other => Ok(other),
+    }
+}
+
+/// `word` as one POSIX shell word: bare when every character is in
+/// `[A-Za-z0-9_.-]`, else single-quoted with each `'` written as `'\''`.
+pub fn shell_word(word: &str) -> String {
+    let is_plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if is_plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 

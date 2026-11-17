@@ -2,6 +2,7 @@
 
 use routectl_auth::{ManagedSecretStore, SecretRef, SecretScheme, default_secret_dir, env_ref};
 use routectl_core::{Error, Result};
+use routectl_router::Format;
 
 use super::{AddIo, ProviderAddArgs};
 use crate::commands::provider_env::env_var_for_kind;
@@ -23,8 +24,12 @@ pub(super) enum PendingSecret {
         name: String,
         value: String,
     },
-    /// An oauth provider to log in against post-confirm.
-    OAuth { provider: String },
+    /// An oauth provider to log in against post-confirm, into the seat
+    /// `label` names (`None` is the default seat).
+    OAuth {
+        provider: String,
+        label: Option<String>,
+    },
 }
 
 impl PendingSecret {
@@ -57,7 +62,7 @@ pub(super) async fn execute_pending(pending: PendingSecret, io: &dyn AddIo) -> R
             store.put(&name, &value)?;
             Ok(())
         }
-        PendingSecret::OAuth { provider } => io.login(&provider).await,
+        PendingSecret::OAuth { provider, label } => io.login(&provider, label.as_deref()).await,
     }
 }
 
@@ -94,18 +99,20 @@ pub(super) fn capture_from_stdin(
 
 /// Interactive resolution for a missing key: on a TTY, offer the
 /// already-resolvable conventional env var of the entry's `family` token,
-/// else prompt hidden and capture; off a TTY, error actionably rather than
-/// hang.
+/// else prompt hidden and capture; off a TTY, error actionably (naming the
+/// selected `format`) rather than hang.
 pub(super) fn resolve_interactive(
     args: &ProviderAddArgs,
+    format: Format,
     family: &str,
     io: &dyn AddIo,
 ) -> Result<(String, &'static str, PendingSecret)> {
     if !io.stdin_is_terminal() {
         return Err(Error::Config(format!(
-            "provider kind `{family}` needs a credential and stdin is not a TTY; pass \
+            "`--format {}` needs a credential and stdin is not a TTY; pass \
              `--api-key-env <VAR>`, `--secret-ref <REF>`, or pipe one with \
-             `--api-key-stdin`"
+             `--api-key-stdin`",
+            format.as_str()
         )));
     }
     if let Some(var) = env_var_for_kind(family)
