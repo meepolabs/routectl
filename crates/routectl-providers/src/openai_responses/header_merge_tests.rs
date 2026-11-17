@@ -16,6 +16,7 @@ fn oauth_provider_with_extras(extras: Vec<(String, String)>) -> OpenAiResponsesP
         session_id: None,
         installation_id: None,
         client_identity: true,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -36,6 +37,7 @@ fn oauth_provider_with_session(session_id: Option<String>) -> OpenAiResponsesPro
         session_id,
         installation_id: None,
         client_identity: true,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -116,6 +118,7 @@ fn api_key_header_extras_not_blocked_by_fingerprint_filter() {
         session_id: None,
         installation_id: None,
         client_identity: false,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -308,6 +311,7 @@ fn api_key_path_stamps_no_session_header() {
         session_id: Some("session-stable-123".into()),
         installation_id: None,
         client_identity: false,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -344,6 +348,7 @@ fn api_key_path_omits_generated_identity_headers() {
         session_id: None,
         installation_id: None,
         client_identity: false,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -386,6 +391,7 @@ fn oauth_provider_with_installation(installation_id: Option<String>) -> OpenAiRe
         session_id: None,
         installation_id,
         client_identity: true,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -470,6 +476,7 @@ fn api_key_path_stamps_no_installation_header() {
         session_id: None,
         installation_id: Some("install-stable-abc".into()),
         client_identity: false,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };
@@ -511,6 +518,7 @@ fn header_extras_overrides_installation_id() {
         session_id: None,
         installation_id: Some("factory-install".into()),
         client_identity: true,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     };

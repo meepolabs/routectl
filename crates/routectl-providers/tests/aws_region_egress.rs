@@ -276,6 +276,7 @@ fn responses_mantle(region: &str, resolved: ResolvedCreds) -> OpenAiResponsesPro
         session_id: None,
         installation_id: None,
         client_identity: false,
+        persist_cookie_jar: true,
         mantle: Some(MantleAuth {
             region: region.into(),
             creds: resolved,

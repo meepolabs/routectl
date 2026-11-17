@@ -65,6 +65,11 @@ pub struct OpenAiResponsesConfig {
     /// `auth_kind` or the host, which select only the wire dialect.
     /// Default `false`, and always `false` on the Bedrock mantle lane.
     pub client_identity: bool,
+    /// Whether the provider writes its Cloudflare cookie jar back to disk
+    /// when it is dropped. The jar is still read at construction either
+    /// way. `false` is the posture of a read-only command, which must leave
+    /// no cookie file behind. Default `true`.
+    pub persist_cookie_jar: bool,
     /// Bedrock mantle authentication. `Some` selects the mantle lane
     /// (SigV4/bearer signing under the `bedrock-mantle` scope, no bearer
     /// `Authorization` from the provider, a no-redirect client, and no
@@ -96,7 +101,8 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             // Presence only: the installation-id is a stable machine
             // fingerprint; keep its value out of logs.
             .field("installation_id", &self.installation_id.is_some())
-            .field("client_identity", &self.client_identity);
+            .field("client_identity", &self.client_identity)
+            .field("persist_cookie_jar", &self.persist_cookie_jar);
         // Mantle lane presence + its own redacting Debug (region + auth
         // shape only, never credential material).
         #[cfg(feature = "bedrock")]
@@ -128,6 +134,7 @@ impl OpenAiResponsesConfig {
             session_id: None,
             installation_id: None,
             client_identity: false,
+            persist_cookie_jar: true,
             #[cfg(feature = "bedrock")]
             mantle: None,
         }
@@ -227,6 +234,7 @@ impl OpenAiResponsesProvider {
                 (client, None)
             }
         };
+        let cookie_path = cookie_path.filter(|_| cfg.persist_cookie_jar);
         Self {
             cfg,
             client,

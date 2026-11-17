@@ -1000,6 +1000,7 @@ mod through_the_provider {
             session_id: None,
             installation_id: None,
             client_identity: false,
+            persist_cookie_jar: true,
             #[cfg(feature = "bedrock")]
             mantle: None,
         })

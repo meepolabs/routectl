@@ -5408,8 +5408,9 @@ be built from its entry (for example a Codex login with no stored
 account id) refuses the config too: `serve` refuses to start, a hot
 reload is rejected, and `config check` reports it, because check runs
 the same member build offline (it reads the stored credentials as they
-are and never refreshes or writes one, and adopts an existing
-installation id without creating a missing one). Each refusal names the
+are and never refreshes or writes one, adopts an existing installation
+id without creating a missing one, and reads the ChatGPT cookie jar
+without writing it back). Each refusal names the
 pool, the member and the rule, never a credential value or path. A rejected
 hot reload leaves the running router serving the previous config. A
 member that is only logged out or whose credential cannot be read is

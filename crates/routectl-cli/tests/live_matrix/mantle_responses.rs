@@ -65,6 +65,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
         session_id: None,
         installation_id: None,
         client_identity: false,
+        persist_cookie_jar: true,
         mantle: Some(MantleAuth {
             region: region.clone(),
             creds: resolved,

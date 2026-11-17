@@ -6,8 +6,9 @@
 //! same configs, but over [`OfflineCheckStore`]: a store that answers every
 //! read from the credentials file as it stands and never refreshes, so the
 //! check dials no token endpoint and rewrites no credential. The build also
-//! runs with installation-id minting off: an existing id is adopted, a
-//! missing one is left missing.
+//! runs with installation-id minting off (an existing id is adopted, a
+//! missing one is left missing) and with cookie-jar persistence off (an
+//! existing ChatGPT cookie jar is read, none is written).
 
 use std::sync::Arc;
 
@@ -144,13 +145,15 @@ impl SecretStore for OfflineCheckStore {
 }
 
 /// Build every pool member a model routes at with the options
-/// serve builds with, minus installation-id minting, and return each pool's
+/// serve builds with, minus installation-id minting and cookie-jar
+/// persistence, and return each pool's
 /// refusal as a `config: `-prefixed error line, the text serve and reload
 /// report for the same config.
 pub async fn member_build_errors(config: &Config, secrets: Arc<dyn SecretStore>) -> Vec<String> {
     let opts = BuildOptions::new()
         .with_normalize_tools(config.cache.normalize_tools)
-        .with_mint_installation_id(false);
+        .with_mint_installation_id(false)
+        .with_persist_cookie_jar(false);
     routectl_router::pool_member_refusals(config, secrets, opts)
         .await
         .into_iter()

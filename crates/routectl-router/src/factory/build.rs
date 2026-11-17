@@ -58,6 +58,10 @@ pub struct BuildOptions {
     /// existing valid id and otherwise builds without one, writing nothing:
     /// the posture of a read-only command. Default `true`.
     pub mint_installation_id: bool,
+    /// Whether an openai-responses build writes the ChatGPT cookie jar back
+    /// to disk when the provider drops. `false` reads an existing jar and
+    /// writes none: the posture of a read-only command. Default `true`.
+    pub persist_cookie_jar: bool,
 }
 
 impl Default for BuildOptions {
@@ -65,6 +69,7 @@ impl Default for BuildOptions {
         Self {
             normalize_tools: true,
             mint_installation_id: true,
+            persist_cookie_jar: true,
         }
     }
 }
@@ -84,6 +89,12 @@ impl BuildOptions {
     /// Set whether the build may mint a missing installation id.
     pub const fn with_mint_installation_id(mut self, mint: bool) -> Self {
         self.mint_installation_id = mint;
+        self
+    }
+
+    /// Set whether built providers write the cookie jar back on drop.
+    pub const fn with_persist_cookie_jar(mut self, persist: bool) -> Self {
+        self.persist_cookie_jar = persist;
         self
     }
 }
@@ -425,6 +436,7 @@ async fn openai_responses_provider(ctx: &BuildContext<'_>) -> Result<Arc<dyn Pro
     cfg.session_id = session_id;
     cfg.installation_id = installation_id;
     cfg.client_identity = client_identity;
+    cfg.persist_cookie_jar = ctx.opts.persist_cookie_jar;
     Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
 }
 

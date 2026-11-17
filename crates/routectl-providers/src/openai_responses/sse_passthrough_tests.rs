@@ -198,6 +198,7 @@ fn provider(base_url: &str) -> OpenAiResponsesProvider {
         session_id: None,
         installation_id: None,
         client_identity: false,
+        persist_cookie_jar: true,
         #[cfg(feature = "bedrock")]
         mantle: None,
     })

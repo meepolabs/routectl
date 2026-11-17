@@ -254,3 +254,73 @@ async fn the_check_build_mints_no_installation_id_while_the_serve_build_does() {
     assert!(id_file.exists(), "control: the serve build mints the id");
     assert_eq!(rig.flow.post_count(), 0, "a fresh seat needs no refresh");
 }
+
+/// A runtime whose blocking pool has one thread, so a blocking task spawned
+/// last runs only after every blocking task queued before it has finished.
+fn single_blocking_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("test runtime")
+}
+
+/// Wait until every blocking task already queued (a dropped provider's jar
+/// save among them) has run.
+async fn drain_blocking_pool() {
+    tokio::task::spawn_blocking(|| ())
+        .await
+        .expect("drain task");
+}
+
+/// Poll for `path` for up to five seconds.
+async fn appears_within_bound(path: &Path) -> bool {
+    for _ in 0..100 {
+        if path.exists() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    path.exists()
+}
+
+#[test]
+#[serial_test::serial]
+fn the_check_build_writes_no_cookie_jar_while_the_serve_build_does() {
+    single_blocking_thread_runtime().block_on(async {
+        // Arrange: a Codex seat logged in with an account id, so its
+        // provider builds and carries a cookie jar. The jar path resolves
+        // under the scratch config folder.
+        let _cookie_file = ScopedEnv::unset("ROUTECTL_COOKIE_FILE");
+        let rig = Rig::new(&[(
+            "codex#seat-c",
+            record("tok-c", unix_now() + 3600, Some("acct-seat-c")),
+        )])
+        .await;
+        let config = parse(CODEX_POOL);
+        let cookies_dir = rig._dir.path().join("routectl").join("cookies");
+        let jar_file = cookies_dir.join("chatgpt.json");
+
+        // Act: the check build drops its providers before it returns.
+        let refusals = member_build_errors(&config, rig.offline()).await;
+        drain_blocking_pool().await;
+        let after_check = cookies_dir.exists();
+        let served = build_resolved_models_reported(&config, rig.live(), BuildOptions::new())
+            .await
+            .expect("serve builds the pool");
+        let serve_failures = served.failed.len();
+        drop(served);
+        drain_blocking_pool().await;
+        let jar_written = appears_within_bound(&jar_file).await;
+
+        // Assert: the check built the member and left no cookies folder;
+        // the serve build over the same fixture writes the jar when its
+        // provider drops, so the absence is the check's posture and not a
+        // provider that never reaches the save.
+        assert!(refusals.is_empty(), "{refusals:?}");
+        assert!(!after_check, "config check must not write the cookie jar");
+        assert_eq!(serve_failures, 0);
+        assert!(jar_written, "control: the serve build persists the jar");
+    });
+}
