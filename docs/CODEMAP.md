@@ -659,7 +659,9 @@ license.
 - `src/retry_after.rs` -- parser for the upstream reset hint: the standard HTTP
   `Retry-After` header (RFC 9110 delta-seconds or HTTP-date) plus the
   non-standard `retry-after-ms` header (integer milliseconds, preferred when
-  present so a sub-second hint survives), plus `is_rate_limit_status`;
+  present so a sub-second hint survives), plus `is_rate_limit_status`; the
+  HTTP-date form is read by an in-module RFC 2822 parser
+  (`http_date_unix_ms`) and its delay computed in integer milliseconds;
   every egress lifts the hint on a 429/503/529 and carries it on
   `Error::Upstream.retry_after` for the router to honor (the Codex
   `usage_limit_reached` `resets_at` / `resets_in_seconds` reset is parsed in
@@ -6919,8 +6921,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>
   `data`/`as_of` `None`; `now_utc_rfc3339` (RFC3339-UTC `as_of` helper) and
-  `utc_rfc3339` (same format over a caller-pinned instant, for a panel deriving
-  `as_of` and a relative age from ONE clock read);
+  `utc_rfc3339(epoch_ms)` (same format over a caller-pinned Unix-ms instant,
+  `epoch ms <n>` outside the calendar, for a panel deriving `as_of` and a
+  relative age from ONE clock read);
   `vocabulary` const module -- the fixed snake_case tokens the wire DTOs reuse
   from the event surface (`state_key`/`capability_key`/`signal_tier`,
   provenance tokens `override`/`learned`, signal-tier
@@ -6954,11 +6957,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   fall below that bound -- an identical row set, so groups/totals match the
   non-series path), then handed to the leaf as a plain
   `BucketSpec`; an all-time window over an empty ledger has no anchor and answers
-  with an EMPTY series at the requested unit's width rather than an error. All
-  local-calendar math stays here, keeping `routectl-usage` chrono-free.
-  `spec_from_body` is `pub(super)` so the dashboard's drift test can validate
-  the request shapes the page declares against THIS parser instead of a second
-  copy of the vocabulary
+  with an EMPTY series at the requested unit's width rather than an error.
+  `parse_body` validates the body into a `ParsedQuery` before any zone load;
+  `ParsedQuery::resolve(zone, now)` resolves its window on the blocking worker
+  in that request's one `LocalZone::load`. `spec_from_body` (`cfg(test)`)
+  chains the two so the dashboard's drift test validates the page's request
+  shapes against THIS parser
 - `src/handlers/status/router_view.rs` -- the read-only router facade that
   STRUCTURALLY enforces the `/status` read-only seam. `StatusRouterHandle`
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
@@ -7211,7 +7215,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/doctor.rs` -- `/status/doctor`, strictly NO network.
   Runs only the no-network doctor sections via
   `commands::doctor::gather_context_no_network(config_path,
-  GatherSources::Served(..), &legacy_dirs)` (inputs from the facade's
+  GatherSources::Served(..), &legacy_dirs, &zone)` (one `LocalZone::load` per
+  request; inputs from the facade's
   `served_doctor_inputs(*state.warm_report(), prices)`, so a poll parses no
   config and replays no ledger; `legacy_dirs` are the old
   folders `StatusState` carries) +
@@ -8067,13 +8072,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   instants to epoch ms through the pinned `(now, now_ms)` anchor, and
   `lapse_deadline_ms` gives a negative's runtime lapse instant (decay
   deadline, or `RECHECK_BACKSTOP` past it when re-check owned)
-- `src/local_time.rs` -- `LocalZone` (`load`, `utc`, `from_posix_tz` (Unix),
-  `offset_at`, `to_local`, `now`, `at_unix_ms`, `resolve` -> `CivilInstant`),
-  `format_seconds`, `format_minutes`, `midnight`, `unix_ms`: the one owner of
-  instant <-> local wall-clock conversion for usage windows and local
-  timestamp text. Zone rules from tz-rs on Unix (TZ, then /etc/localtime),
-  the OS per instant on Windows; loaded per command or request; a load failure
-  is UTC plus one WARN
+- `src/local_time.rs` -- `LocalZone` (`load`, `utc`, `offset_at`, `to_local`,
+  `now`, `at_unix_ms`, `resolve` -> `CivilInstant`; `from_posix_tz` is
+  `cfg(all(test, unix))` and returns `Option`), `TextLayout`, `calendar_text`,
+  `local_text`, `format_seconds`, `format_minutes`, `midnight`, `unix_ms`: the
+  one owner of instant <-> local wall-clock conversion and of the date-time
+  text layouts (local and UTC). Zone rules from tz-rs on Unix, the OS per
+  instant on Windows; loaded once per command or request
 - `src/log_sink.rs` -- the production tracing sink: `subscriber` (the one
   builder `main` installs via `init`) and `EscapingFields`, the field
   formatter that escapes control, format, separator and default-ignorable
@@ -8081,7 +8086,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/test_tz.rs` -- `in_zone(tz, module, test, body)` (`cfg(test)`): runs a
   test body in a child copy of the test binary with `TZ` set, so a local-time
   assertion is pinned to a named zone without touching the shared process
-  environment
+  environment; `eastern`, `midnight_dst` and `posix_tz` build the POSIX TZ
+  strings the zone-pinned tests use
 - `src/test_usage_dir.rs` -- `usage_dir()` (`cfg(test)`): a fresh usage-ledger
   dir under the testkit temp reaper's per-process dir, for fixtures whose
   writer thread may open the DB after the test's own scope has ended
@@ -8257,8 +8263,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB
   (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO
   week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges
-  computed in LOCAL time against an injectable `now` (testable window-math
-  fns); no flag + no `--since` prints a multi-window summary.
+  computed in LOCAL time against an injected `&LocalZone` and
+  `OffsetDateTime` `now` (`window_bounds`, `since_bounds`); no flag + no `--since` prints a multi-window summary.
   `build_window_report` aggregates, rolls fine `AggRow`s up to `--by
   model|provider|alias` (or a single total), and bifurcates cost: a provider
   whose `[providers.X] credential` starts `oauth://` is subscription (`n/a
@@ -8319,8 +8325,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   can never show two contradictory hit%. Footer also reports the total error
   count. `OpenError::NoData` -> friendly stdout + exit 0; `VersionTooNew` ->
   hard error. Also the project's LOCAL-CALENDAR AUTHORITY for the read surfaces:
-  beside the window math it owns `MAX_BUCKETS` and `resolve_bucket(unit, from,
-  to, first_row, now)`, the pure DB-free resolver `/status/query`'s series mode
+  beside the window math it owns `MAX_BUCKETS` and `resolve_bucket(zone, unit,
+  from_ms, to_ms, first_row_ms, now)`, the pure DB-free resolver `/status/query`'s series mode
   calls -- it re-anchors an all-time window to the earliest row's local midnight
   (clamped never below the window's own lower bound), then widens the requested
   `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
@@ -8508,7 +8514,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `derive_knob_rows(config, view, matrix)` maps each cell's
   `fill` to a `KnobRow`, lowered by the learned ceilings `LearnedFills`
   resolves from the same capability matrix source the panel shows.
-  `gather_context_no_network(config_path, sources, legacy_dirs)` is the SINGLE shared
+  `gather_context_no_network(config_path, sources, legacy_dirs, zone)` is the SINGLE shared
   gather body; `sources` (`served.rs`) picks the config / learned / price
   layers: `Disk` -> `disk_layers` (`server::parse_config_only`, the default
   price book pinned once, plus the read-only ledger replay: `rebuild_capabilities_with_values`, each
@@ -8519,7 +8525,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   scan, would-trim panel, `gather_leftover_catalog_files` over the config
   folder, and `gather_legacy_folder` per old folder, where a folder holding the config in use reads as `Absent`; the
   version preflight that never stamps the file is applied in `sections.rs`
-  from `accepted_config_version`); `gather_context(config_path, legacy_dirs)` =
+  from `accepted_config_version`); `gather_context(config_path, legacy_dirs, zone)` =
   that body PLUS one `gather_probe_results` `probe_all` pass (the only
   `CompositeStore` dial), so the two entry points cannot drift. `gather_auth`
   takes read-only oauth probes + seats; `sanitize_store_open_error` reduces a
@@ -8635,8 +8641,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `routectl usage` report
 - `src/commands/doctor_panels.rs` -- doctor's read-only would-trim opportunity
   panel, kept apart from the aggregator so the compute/map/render seam is
-  unit-testable against a temp DB. `compute_would_trim_panel(config, now) ->
-  Option<WouldTrimPanel>` opens the usage DB via `open_readonly_fastfail` and
+  unit-testable against a temp DB. `compute_would_trim_panel(config, zone, now)
+  -> Option<WouldTrimPanel>` opens the usage DB via `open_readonly_fastfail` and
   summarizes the all-time window (best-effort: a missing/unmigrated DB or any
   read failure -> `None`, never fails the surrounding diagnostic; a present DB
   with zero candidates -> a `Some` all-zero panel); `now` is injected for
