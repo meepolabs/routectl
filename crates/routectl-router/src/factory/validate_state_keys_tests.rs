@@ -1,6 +1,7 @@
-use super::{MAX_PROVIDER_NAME_BYTES, validate_state_key_names};
+use super::validate_state_key_names;
 use crate::config::{Config, LEAN_EXAMPLE_CONFIG};
 use crate::factory::collect_config_validation;
+use routectl_core::MAX_PROVIDER_NAME_BYTES;
 
 fn parse(toml_text: &str) -> Config {
     toml::from_str(toml_text).expect("fixture must parse")

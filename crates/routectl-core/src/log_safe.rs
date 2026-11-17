@@ -114,6 +114,58 @@ pub fn sanitize_for_log_with_cap(s: &str, cap: usize) -> String {
     sanitize_capped(s, cap)
 }
 
+/// Longest accepted provider name, in bytes. It sits far above any name a
+/// config author writes by hand. Config validation refuses a longer name, and
+/// [`render_operator_name`] never prints one.
+pub const MAX_PROVIDER_NAME_BYTES: usize = 128;
+
+const ESC: char = '\u{1b}';
+const C1_CSI: char = '\u{9b}';
+
+/// Render an operator-written name (a provider, pool or model key) for a
+/// terminal line: C0, C1 and DEL characters are removed, and an ESC or C1 CSI
+/// takes the control sequence it introduces with it, so the name cannot move
+/// the cursor or recolor the rest of the line. Printable characters, non-ASCII
+/// included, pass through unchanged.
+///
+/// A name longer than [`MAX_PROVIDER_NAME_BYTES`] (counted on the raw bytes)
+/// renders as a placeholder stating its length and none of its content.
+pub fn render_operator_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.len() > MAX_PROVIDER_NAME_BYTES {
+        return std::borrow::Cow::Owned(format!("<{}-byte name withheld>", name.len()));
+    }
+    if !name.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    std::borrow::Cow::Owned(strip_terminal_controls(name))
+}
+
+fn strip_terminal_controls(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
+        let opens_csi = match c {
+            ESC => chars.next_if_eq(&'[').is_some(),
+            C1_CSI => true,
+            _ => false,
+        };
+        if opens_csi {
+            skip_csi_body(&mut chars);
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Consume a CSI's parameter and intermediate bytes (0x20-0x3F) and its final
+/// byte (0x40-0x7E). A sequence cut short by any other character ends there,
+/// and that character is rendered on its own.
+fn skip_csi_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars.next_if(|c| matches!(c, ' '..='?')).is_some() {}
+    chars.next_if(|c| matches!(c, '@'..='~'));
+}
+
 /// Log-safe rendering for a client-controlled string that MAY embed raw
 /// request content -- e.g. a normalization-error `detail` that formats a
 /// malformed request fragment (a tool_use block, a content part) into its
@@ -2244,3 +2296,7 @@ mod knob_tests;
 #[cfg(test)]
 #[path = "log_safe_excerpt_scrub_tests.rs"]
 mod excerpt_scrub_tests;
+
+#[cfg(test)]
+#[path = "log_safe_operator_name_tests.rs"]
+mod operator_name_tests;

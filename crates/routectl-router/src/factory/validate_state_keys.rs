@@ -9,11 +9,7 @@
 
 use crate::config::Config;
 use crate::seat_pool::check_state_key_name;
-use routectl_core::{Error, Result};
-
-/// Longest accepted provider name, in bytes. It sits far above any name a
-/// config author writes by hand.
-const MAX_PROVIDER_NAME_BYTES: usize = 128;
+use routectl_core::{Error, MAX_PROVIDER_NAME_BYTES, Result};
 
 /// Reject a separator-bearing model nickname or provider name, a provider name
 /// longer than [`MAX_PROVIDER_NAME_BYTES`], and a model
