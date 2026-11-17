@@ -106,17 +106,16 @@ pub fn carrier_refusal(name: &str, entry: &ProviderEntry) -> String {
     format!("provider `{name}`: set exactly one of `base_url` or `cloud`{detail}")
 }
 
-/// Parse a configured base URL and require an http(s) URL with a host. The
-/// value is trimmed first. Refusals name the provider and `base_url`, never
-/// the value: it can carry a credential.
+/// Parse a configured base URL, as written, and require an http(s) URL with
+/// a host. Refusals name the provider and `base_url`, never the value: it
+/// can carry a credential.
 pub fn parse_base_url(name: &str, base_url: &str) -> Result<url::Url, String> {
-    let trimmed = base_url.trim();
-    if trimmed.is_empty() {
+    if base_url.trim().is_empty() {
         return Err(format!(
             "provider `{name}`: base_url is set but empty; set an explicit endpoint"
         ));
     }
-    let url = url::Url::parse(trimmed)
+    let url = url::Url::parse(base_url)
         .map_err(|e| format!("provider `{name}`: base_url is not a valid URL: {e}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!(
@@ -137,16 +136,18 @@ pub fn parse_base_url(name: &str, base_url: &str) -> Result<url::Url, String> {
 /// query and no fragment. Request paths are appended to the base, so a query
 /// or fragment there would end up inside the path.
 ///
-/// The text must also be the URL the client dials, written out: printable
-/// ASCII with no backslash, and equal to the parsed URL's serialization up
-/// to one trailing `/` and the case of the scheme and host. Anything the
-/// URL parser would rewrite (a stripped tab, a backslash read as `/`, a
+/// The text must also be written in its canonical form, the same text the
+/// client dials: no surrounding whitespace, printable ASCII with no
+/// backslash, and equal to the parsed URL's serialization up to one
+/// trailing `/` and the case of the scheme and host. Anything the URL
+/// parser would rewrite (a stripped tab, a backslash read as `/`, a
 /// non-ASCII host turned to punycode, a default port, a dot segment) is
 /// refused, so the destination an operator reads is the one requests go to.
 fn check_plain_base_url(name: &str, base_url: &str) -> Result<(), String> {
     let url = parse_base_url(name, base_url)?;
-    let trimmed = base_url.trim();
-    let part = if !trimmed.bytes().all(is_plain_url_byte) {
+    let part = if base_url != base_url.trim() {
+        "whitespace before or after the URL"
+    } else if !base_url.bytes().all(is_plain_url_byte) {
         "a character outside printable ASCII, or a backslash"
     } else if !url.username().is_empty() || url.password().is_some() {
         "userinfo (`user@`); put the secret in `credential`"
@@ -154,7 +155,7 @@ fn check_plain_base_url(name: &str, base_url: &str) -> Result<(), String> {
         "a query (`?`)"
     } else if url.fragment().is_some() {
         "a fragment (`#`)"
-    } else if !is_canonical_spelling(trimmed, url.as_str()) {
+    } else if !is_canonical_spelling(base_url, url.as_str()) {
         "text the URL parser rewrites (a default port, a dot segment, an escaped or \
          non-canonical host); write the URL the client dials"
     } else {

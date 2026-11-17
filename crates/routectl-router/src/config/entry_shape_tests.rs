@@ -247,6 +247,21 @@ fn a_base_url_that_is_not_a_plain_url_is_refused_without_echoing_it() {
             "http://2130706433/sk-SENTINEL",
             "rewrites",
         ),
+        (
+            "spaces around",
+            "  https://gw.example/sk-SENTINEL  ",
+            "whitespace before or after",
+        ),
+        (
+            "leading space",
+            " https://gw.example/sk-SENTINEL",
+            "whitespace before or after",
+        ),
+        (
+            "trailing no-break space after the path",
+            "https://gw.example/sk-SENTINEL\u{a0}",
+            "whitespace before or after",
+        ),
     ];
     for (label, base_url, rule) in rows {
         let refusals = base_url_refusals(base_url);
@@ -273,18 +288,28 @@ fn a_base_url_that_is_not_a_plain_url_is_refused_without_echoing_it() {
 /// the text must be the URL the client dials.
 #[test]
 fn a_base_url_that_reads_as_a_different_host_is_refused() {
-    for base_url in [
-        "https://evil.example\\@api.anthropic.com/",
-        "https://api.anthropic.com\u{3002}evil.example",
-        "https://api.anthropic.com\t.evil.example/",
-        "https://\u{0430}pi.anthropic.com/",
-    ] {
+    let rows = [
+        (
+            "backslash before userinfo",
+            "https://evil.example\\@api.anthropic.com/",
+        ),
+        (
+            "ideographic full stop in the host",
+            "https://api.anthropic.com\u{3002}evil.example",
+        ),
+        (
+            "tab in the host",
+            "https://api.anthropic.com\t.evil.example/",
+        ),
+        ("non-ASCII host", "https://\u{0430}pi.anthropic.com/"),
+    ];
+    for (label, base_url) in rows {
         let refusals = base_url_refusals(base_url);
 
-        assert_eq!(refusals.len(), 1, "{base_url:?}: {refusals:?}");
+        assert_eq!(refusals.len(), 1, "{label}: {refusals:?}");
         assert!(
             !refusals[0].contains("anthropic.com"),
-            "{base_url:?} echoes the host: {}",
+            "{label} echoes the host: {}",
             refusals[0]
         );
     }
@@ -302,7 +327,6 @@ fn a_plain_base_url_is_accepted() {
         "http://[::1]:8080/",
         "HTTPS://GW.Example/v1",
         "https://gw.example/v1/%7Euser",
-        "  https://gw.example/v1  ",
     ] {
         assert_eq!(
             base_url_refusals(base_url),

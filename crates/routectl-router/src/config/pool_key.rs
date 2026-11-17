@@ -119,7 +119,7 @@ fn normalized_destination(entry: &ProviderEntry) -> String {
     if let Some(cloud) = &entry.cloud {
         return format!("aws:{}", cloud.aws_region());
     }
-    let raw = entry.base_url.as_deref().unwrap_or_default().trim();
+    let raw = entry.base_url.as_deref().unwrap_or_default();
     let parsed = url::Url::parse(raw).map_or_else(|_| raw.to_owned(), String::from);
     parsed.trim_end_matches('/').to_owned()
 }

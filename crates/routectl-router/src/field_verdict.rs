@@ -1542,7 +1542,7 @@ const LOCAL_HOST_ALIASES: &[&str] = &[
 /// residual exposure is bounded: one spurious verdict on a target the operator
 /// deliberately aliased to a local listener.
 pub fn loopback_target_suppresses_minting(base_url: &str) -> bool {
-    let Ok(url) = url::Url::parse(base_url.trim()) else {
+    let Ok(url) = url::Url::parse(base_url) else {
         return true;
     };
     // Classified before the host: an egress is http(s), so any other scheme

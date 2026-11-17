@@ -286,13 +286,18 @@ Set exactly one; both or neither is refused.
 
 `base_url` is a plain http(s) URL: a host and an optional path prefix
 (a trailing `/` is fine), with no `user@` userinfo, no `?query` and no
-`#fragment`. Request paths are appended to it. Write it the way it is
-dialed: printable ASCII only (no spaces, tabs, backslashes or non-ASCII
-letters; give an internationalized host in its `xn--` form), no explicit
-default port (`:443` on https, `:80` on http), and no `.` or `..` path
-segments or percent-escapes in the host. Only the letter case of the
-scheme and host may differ. It must be `https://`, or
-`http://` on a loopback host only (see
+`#fragment`. Request paths are appended to it. Write it in its
+canonical form, the same text the client dials:
+
+- no whitespace before or after the URL, inside the quotes;
+- printable ASCII only: no spaces, tabs, backslashes or non-ASCII
+  letters (give an internationalized host in its `xn--` form);
+- no explicit default port (`:443` on https, `:80` on http);
+- no `.` or `..` path segments, and no percent-escapes in the host.
+
+Beyond one trailing `/`, only the letter case of the scheme and host may
+differ from what is dialed. It must be `https://`, or `http://` on a
+loopback host only (see
 [`base_url` scheme requirement](#field-assignment-table)). No format has a
 default: write the endpoint even for the vendor's public API.
 
