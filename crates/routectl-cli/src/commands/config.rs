@@ -1,7 +1,7 @@
 //! `routectl config <subcommand>` -- check, show, example.
 
 use routectl_auth::{OAuthStore, SecretRef, SecretScheme, SecretStore};
-use routectl_core::{Error, Result, sanitize_for_log_with_cap};
+use routectl_core::{Error, Result, render_operator_name, sanitize_for_log_with_cap};
 use routectl_router::{
     Config, collect_config_validation, locate_dotted_path, resolve_model_provider,
 };
@@ -181,9 +181,12 @@ async fn secret_ref_resolution_warnings(
                 }
                 continue;
             }
-            if let Err(e) = secrets.get(&parsed).await {
+            // The store's error names the variable or the file path, so the
+            // line carries the scheme alone.
+            if secrets.get(&parsed).await.is_err() {
                 warnings.push(format!(
-                    "provider `{name}`: cannot resolve secret-ref (scheme `{}`): {e}",
+                    "provider `{}`: cannot resolve secret-ref (scheme `{}`)",
+                    render_operator_name(name),
                     scheme_of(uri),
                 ));
             }
@@ -200,6 +203,7 @@ fn oauth_presence_warning(
     label: Option<&str>,
     stored_seat_keys: &Option<Vec<String>>,
 ) -> Option<String> {
+    let entry = render_operator_name(entry);
     match stored_seat_keys {
         // Unknowable, not absent: claiming "unresolved" here would send the
         // operator to `routectl login` for a credential that may well be
@@ -258,9 +262,10 @@ pub fn validation_report(config: &Config, raw_text: Option<&str>) -> CheckReport
             errors.push(locate(
                 raw_text,
                 format!(
-                    "model `{nickname}` references unknown provider or pool `{}` (not in \
+                    "model `{}` references unknown provider or pool `{}` (not in \
                      [providers] or [pools])",
-                    model.provider,
+                    render_operator_name(nickname),
+                    render_operator_name(&model.provider),
                 ),
             ));
         }
@@ -299,7 +304,8 @@ fn secret_ref_parse_errors(config: &Config, raw_text: Option<&str>) -> Vec<Strin
                 errors.push(locate(
                     raw_text,
                     format!(
-                        "provider `{name}`: secret-ref parse failed (scheme `{}`): {e}",
+                        "provider `{}`: secret-ref parse failed (scheme `{}`): {e}",
+                        render_operator_name(name),
                         scheme_of(uri),
                     ),
                 ));
@@ -425,6 +431,10 @@ fn scheme_of(uri: &str) -> &'static str {
 #[cfg(test)]
 #[path = "config_check_lines_tests.rs"]
 mod config_check_lines_tests;
+
+#[cfg(test)]
+#[path = "config_name_render_tests.rs"]
+mod config_name_render_tests;
 
 #[cfg(test)]
 mod emitted_example_tests {

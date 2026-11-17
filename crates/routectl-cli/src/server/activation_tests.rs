@@ -627,14 +627,11 @@ async fn startup_warn_sanitizes_entry_ids() {
     ))
     .await;
 
-    // Assert: the id is rendered through the log sanitizer.
+    // Assert: the id is rendered through the operator-name renderer, which
+    // drops the escape sequence whole.
     let warns = unresolved_at_boot_warns(&events);
     assert_eq!(warns.len(), 1, "got {warns:?}");
-    let expected = format!(
-        "{:?}",
-        [routectl_core::sanitize_for_log("evil\u{1b}[31mkey")]
-    );
-    assert_eq!(warns[0].field("entries"), Some(expected.as_str()));
+    assert_eq!(warns[0].field("entries"), Some(r#"["evilkey"]"#));
     assert!(!warns[0].field("entries").unwrap().contains('\u{1b}'));
 }
 

@@ -756,9 +756,9 @@ fn pool_mismatch_message(
          share format, destination, auth, OAuth vendor and cloak settings (only per-seat \
          tuning may differ) -- use an alias chain for ordered fallback across different \
          upstreams",
-        routectl_core::sanitize_for_log(pool_name),
-        routectl_core::sanitize_for_log(member),
-        routectl_core::sanitize_for_log(first_member),
+        routectl_core::render_operator_name(pool_name),
+        routectl_core::render_operator_name(member),
+        routectl_core::render_operator_name(first_member),
         field.as_str(),
     )
 }

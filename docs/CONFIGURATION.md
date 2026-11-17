@@ -5019,6 +5019,21 @@ the seat-pool readout ahead of its warnings and errors -- the same rows
 `doctor`'s `pools` section renders, documented under
 [The seat-pool readout](#the-seat-pool-readout-pools-shared-with-config-check).
 
+**How names appear in diagnostics.** One rule covers `config check`,
+`doctor`, the WARN a declined hot reload logs, and the daemon's activation
+log lines:
+
+- Names you write (provider entries, pools, pool members, model
+  nicknames) are shown filtered and capped: control characters are
+  removed, an ANSI escape sequence goes with its ESC, and a name longer
+  than 128 bytes is replaced by `<N-byte name withheld>`, so a name never
+  spans or recolors a line.
+- Seat labels are shown. A pool line names each member with the seat its
+  `credential` pins (`work-seat=work`), filtered the same way.
+- Credentials appear only by scheme (`env://`, `file://`, `oauth://`).
+  The variable name, file path or value behind a reference is never
+  printed.
+
 `config show` prints the post-merge view: `env://`, `file://`, and
 `oauth://` references remain as opaque URIs (they are non-secret
 pointers, not credential values); defaults are filled in; layered

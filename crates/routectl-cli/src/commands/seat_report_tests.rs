@@ -788,3 +788,69 @@ fn the_presence_answer_agrees_with_the_rendered_block() {
         describe_row(&row)
     );
 }
+
+/// Pool, member and seat-label names reach the pool line through the
+/// operator-name renderer first: ESC sequences and newlines are removed, not
+/// replaced with `?`, and the grammar pass still runs after it.
+#[test]
+fn hostile_pool_member_and_label_names_render_stripped_on_one_pool_line() {
+    // Arrange
+    let config: Config = toml::from_str(
+        "version = 3\n\
+         [providers.\"mem\\u001B[31mber\\nx\"]\n\
+         format = \"anthropic-messages\"\n\
+         base_url = \"https://api.anthropic.com\"\n\
+         credential = \"oauth://anthropic#la\\u001B[2Kbel\\n(y)\"\n\
+         auth = \"bearer\"\n\
+         [pools.\"po\\u001B[0mol\\nz\"]\n\
+         members = [\"mem\\u001B[31mber\\nx\"]\n",
+    )
+    .expect("hostile pool fixture parses");
+
+    // Act
+    let lines = seat_pool_lines(&pool_rows(&config, Some(&[])), &[]);
+
+    // Assert
+    assert_eq!(
+        lines.len(),
+        2,
+        "header plus exactly one pool line: {lines:?}"
+    );
+    let line = &lines[1];
+    assert!(!line.chars().any(char::is_control), "{line:?}");
+    assert!(
+        line.starts_with("  pool `poolz` has 1 member (memberx=label?y?)"),
+        "{line}"
+    );
+}
+
+/// A seat label past the byte ceiling is withheld like any operator name; a
+/// label at the ceiling is shown.
+#[test]
+fn a_seat_label_over_the_byte_ceiling_is_withheld_from_the_seat_summary() {
+    let at = "a".repeat(routectl_core::MAX_PROVIDER_NAME_BYTES);
+    let over = "b".repeat(routectl_core::MAX_PROVIDER_NAME_BYTES + 1);
+    for (label, shown) in [
+        (at.as_str(), at.clone()),
+        (
+            over.as_str(),
+            format!("<{}-byte name withheld>", over.len()),
+        ),
+    ] {
+        let config = config_with_ref(&format!("oauth://anthropic#{label}"), None);
+        let stored = keys(&[&format!("anthropic#{label}")]);
+
+        let lines = seat_pool_lines(
+            &pool_rows(&config, Some(&stored)),
+            &stored_seat_pool_rows(&config, Some(&stored)),
+        );
+
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[1].contains(&format!("#{shown} pins 1 seat")),
+            "{}",
+            lines[1]
+        );
+        assert!(!lines[1].contains(&over), "{}", lines[1]);
+    }
+}

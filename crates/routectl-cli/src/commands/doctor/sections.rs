@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use routectl_auth::oauth::types::TokenRecord;
-use routectl_core::sanitize_for_log_with_cap;
+use routectl_core::{render_operator_name, sanitize_for_log_with_cap};
 use routectl_router::{
     ActivationEntry, ActivationStatus, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
     ConfigVersionError, FillSource, Finding, PriceDimension, PriceTableDates, PricingConfig,
@@ -34,7 +34,13 @@ use super::{DoctorContext, KnobRow, LegacyFolder, PricingRow};
 pub(super) fn section_probe(ctx: &DoctorContext) -> Vec<Finding> {
     ctx.probe_results
         .iter()
-        .map(|(name, outcome)| probe_finding(name, outcome, login_id_for(&ctx.config, name)))
+        .map(|(name, outcome)| {
+            probe_finding(
+                &render_operator_name(name),
+                outcome,
+                login_id_for(&ctx.config, name),
+            )
+        })
         .collect()
 }
 
@@ -290,7 +296,7 @@ fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
 fn legacy_entries_detail(display: &str, names: &[String], more: usize, has_config: bool) -> String {
     let listed = names
         .iter()
-        .map(|name| sanitize_for_log_with_cap(name, MAX_REPORTED_LINE_CHARS))
+        .map(|name| render_operator_name(name))
         .collect::<Vec<_>>()
         .join(", ");
     let mut detail = format!("{display} still holds {listed}");
@@ -405,7 +411,7 @@ pub(super) fn secret_finding(check: &SecretCheck) -> Finding {
     };
     Finding {
         section: "config",
-        name: check.provider.clone(),
+        name: render_operator_name(&check.provider).into_owned(),
         status,
         detail,
         remediation,

@@ -293,7 +293,7 @@ pub(super) async fn apply_activation(
 /// One WARN naming the alias-referenced provider entries whose credential is
 /// unresolved at boot. The transition diff never reports these (they were
 /// never activated), so without this line a fallback onto such an entry
-/// stays silent. Names at most [`MAX_LOGGED_UNRESOLVED_ENTRIES`] sanitized
+/// stays silent. Names at most [`MAX_LOGGED_UNRESOLVED_ENTRIES`] rendered
 /// entry ids; nothing when `entries` is empty.
 fn warn_unresolved_at_startup(entries: &[&str]) {
     if entries.is_empty() {
@@ -302,7 +302,7 @@ fn warn_unresolved_at_startup(entries: &[&str]) {
     let named: Vec<String> = entries
         .iter()
         .take(MAX_LOGGED_UNRESOLVED_ENTRIES)
-        .map(|id| routectl_core::sanitize_for_log(id))
+        .map(|id| routectl_core::render_operator_name(id).into_owned())
         .collect();
     tracing::warn!(
         trigger = ActivationTrigger::Startup.as_str(),
@@ -333,7 +333,7 @@ fn emit_activation_delta(
     }
     for change in &delta.newly_activated {
         tracing::info!(
-            provider = %routectl_core::sanitize_for_log(&change.provider_id),
+            provider = %routectl_core::render_operator_name(&change.provider_id),
             kind = change.provider_kind,
             trigger = trigger.as_str(),
             transition = "activated",
@@ -343,7 +343,7 @@ fn emit_activation_delta(
     }
     for change in &delta.newly_deactivated {
         tracing::info!(
-            provider = %routectl_core::sanitize_for_log(&change.provider_id),
+            provider = %routectl_core::render_operator_name(&change.provider_id),
             kind = change.provider_kind,
             trigger = trigger.as_str(),
             transition = "deactivated",
@@ -816,6 +816,10 @@ fn loader_verdict(
 #[cfg(test)]
 #[path = "activation_tests.rs"]
 mod activation_tests;
+
+#[cfg(test)]
+#[path = "reload_name_render_tests.rs"]
+mod reload_name_render_tests;
 
 #[cfg(test)]
 #[path = "reload_tests.rs"]

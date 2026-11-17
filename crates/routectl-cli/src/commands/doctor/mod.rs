@@ -59,6 +59,10 @@ mod price_fill_section_tests;
 #[path = "leftover_catalog_files_tests.rs"]
 mod leftover_catalog_files_tests;
 
+#[cfg(test)]
+#[path = "name_render_tests.rs"]
+mod name_render_tests;
+
 use std::path::Path;
 use std::time::Instant;
 

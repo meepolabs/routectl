@@ -150,3 +150,42 @@ fn cold_start_reports_every_validator_finding() {
     assert!(lines[0].starts_with("config: provider name `x#1`"), "{err}");
     assert!(lines[1].starts_with("config: provider name `y#2`"), "{err}");
 }
+
+/// A provider entry under the TOML key `key` whose `base_url` scheme the
+/// shape rule refuses, so the refusal quotes the provider name.
+fn refused_provider_config(key: &str) -> String {
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n[providers.\"{key}\"]\n\
+         format = \"anthropic-messages\"\nbase_url = \"ftp://api.anthropic.com\"\n\
+         credential = \"env://K\"\nauth = \"x-api-key\"\n"
+    )
+}
+
+#[test]
+#[serial_test::serial]
+fn a_reload_warn_withholds_a_name_over_the_byte_ceiling_and_shows_one_at_it() {
+    let over = "p".repeat(routectl_core::MAX_PROVIDER_NAME_BYTES + 1);
+    let at = "q".repeat(routectl_core::MAX_PROVIDER_NAME_BYTES);
+
+    let over_warn = reload_failure_warn(&refused_provider_config(&over));
+    let at_warn = reload_failure_warn(&refused_provider_config(&at));
+
+    let over_error = over_warn.field("error").expect("the WARN carries `error`");
+    assert!(!over_error.contains(&over), "{over_error}");
+    assert!(
+        over_error.contains(&format!("<{}-byte name withheld>", over.len())),
+        "{over_error}"
+    );
+    let at_error = at_warn.field("error").expect("the WARN carries `error`");
+    assert!(at_error.contains(&format!("provider `{at}`")), "{at_error}");
+}
+
+#[test]
+#[serial_test::serial]
+fn a_reload_warn_strips_esc_and_newline_from_a_provider_name() {
+    let warn = reload_failure_warn(&refused_provider_config("bad\\u001b[31m\\nname"));
+
+    let error = warn.field("error").expect("the WARN carries `error`");
+    assert!(error.contains("provider `badname`"), "{error}");
+    assert!(!error.chars().any(char::is_control), "{error:?}");
+}

@@ -327,7 +327,7 @@ fn a_refusal_never_echoes_a_destination_region_or_credential_value() {
 }
 
 #[test]
-fn a_hostile_member_name_is_sanitized_in_the_mismatch_line() {
+fn a_hostile_member_name_is_rendered_stripped_in_the_mismatch_line() {
     // Arrange
     let text = format!(
         "{}{}[pools.team]\nmembers = [\"seat-a\", \"seat\\u001b[31m-b\"]\n",
@@ -341,8 +341,9 @@ fn a_hostile_member_name_is_sanitized_in_the_mismatch_line() {
 
     // Assert
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(!lines[0].contains('\u{1b}'), "{:?}", lines[0]);
-    assert!(lines[0].contains("seat?[31m-b"), "{:?}", lines[0]);
+    assert!(!lines[0].chars().any(char::is_control), "{:?}", lines[0]);
+    assert!(!lines[0].contains('?'), "{:?}", lines[0]);
+    assert!(lines[0].contains("member `seat-b`"), "{:?}", lines[0]);
 }
 
 #[test]

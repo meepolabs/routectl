@@ -16,11 +16,11 @@
 //! (`<provider>` / `<provider>#<label>`), never a `TokenRecord`, so no token,
 //! account identity, or storage path can reach the rendered text. Seat labels,
 //! pool names, and config entry names are operator-controlled input, so all
-//! three are rendered through the shared log-safe sanitizer -- a label bearing
-//! newlines or ANSI escapes cannot forge a finding line.
+//! three are rendered through the shared operator-name renderer -- a label
+//! bearing newlines or ANSI escapes cannot forge a finding line.
 
 use routectl_auth::SecretRef;
-use routectl_core::sanitize_for_log;
+use routectl_core::render_operator_name;
 use routectl_router::Config;
 use routectl_router::config::SeatSelection;
 
@@ -446,9 +446,10 @@ fn plural(count: usize, noun: &str) -> String {
     }
 }
 
-/// One-line, ASCII-safe rendering of an operator-controlled string.
+/// One-line rendering of an operator-controlled string.
 ///
-/// Beyond the control-byte/ANSI filtering the shared sanitizer performs, every
+/// The shared operator-name renderer removes control characters and ANSI
+/// sequences and withholds a name past its byte ceiling. Beyond that, every
 /// character this module's own grammar carries meaning with (`( ) , ; : =` and
 /// the backtick) is neutralized: a label such as `a); seat_selection
 /// fill-first (b` would otherwise close the member list and forge a
@@ -457,7 +458,7 @@ fn plural(count: usize, noun: &str) -> String {
 /// caller wraps the value in, and a `:`-bearing config entry key would forge a
 /// second `config check` row on the one line the block gives it.
 pub(crate) fn safe(s: &str) -> String {
-    sanitize_for_log(s).replace(['(', ')', ',', ';', ':', '=', '`'], "?")
+    render_operator_name(s).replace(['(', ')', ',', ';', ':', '=', '`'], "?")
 }
 
 #[cfg(test)]
