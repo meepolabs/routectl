@@ -880,6 +880,8 @@ list with more narrative.
 
 ### Fixed
 
+- **Each config validation finding gets its own line.** When one check found several problems at once (two bad provider names, two broken pools, two zero token limits), `config check` and `routectl doctor` printed them as one line with `?` where the line breaks were, and the edit gate counted them as one error. Each finding is now its own line and its own count. A config that fails to load at startup lists every finding, not just the first, and a declined hot reload names them all in its WARN with `reasons` counting each. A single finding reads exactly as before.
+
 - **A forwarded client credential is sent only over https to the Anthropic API.** An entry with `credential = "forwarded"` now needs `base_url` to be `https` on exactly `api.anthropic.com`, with no userinfo and no port: the same host rule a managed Anthropic login follows. `config check`, daemon start and reload refuse any other base and name the key without printing the URL. The request path and the `/v1/models` relay re-check the same rule before relaying the client's bearer. The `credential` parse refusal for a relative `file://` path no longer repeats the configured value.
 
 - **Returned calls to a Responses client's namespaced tools carry their namespace.** A `function_call` output item for a tool the client declared inside a `type:"namespace"` container now carries that container's `namespace`, on complete responses, on streamed `output_item` events and in the `response.completed` body; before, the client resolved the call against its default namespace. Calls to flat tools carry no `namespace`. When such a call is replayed in history to a Responses upstream, its `namespace` is sent back with it. Other ingress dialects are unchanged.

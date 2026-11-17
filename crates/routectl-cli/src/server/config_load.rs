@@ -99,19 +99,21 @@ pub struct LoadedConfig {
 /// The startup validators shared by [`load_effective_config`] and
 /// `build_router_from_config`'s own validation pass (intentionally
 /// redundant: this is the cheap fail-fast gate before the heavier router
-/// rebuild).
+/// rebuild). Reports every finding, one per line: cold start prints them
+/// all, and the reload WARN counts them as its `reasons`.
 fn validate_effective_config(config: &Config) -> Result<(), String> {
-    // The suite returns bare messages; re-add the `config: ` prefix so the
-    // surfaced error reads the same as when these validators propagated
-    // through `Error::Config`'s Display on this path.
-    match routectl_router::collect_config_validation(config)
-        .errors
-        .into_iter()
-        .next()
-    {
-        Some(first) => Err(format!("config: {first}")),
-        None => Ok(()),
+    // The suite returns one bare message per finding; each line re-adds the
+    // `config: ` prefix so a single finding reads the same as when these
+    // validators propagated through `Error::Config`'s Display on this path.
+    let errors = routectl_router::collect_config_validation(config).errors;
+    if errors.is_empty() {
+        return Ok(());
     }
+    Err(errors
+        .iter()
+        .map(|finding| format!("config: {finding}"))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// Hot-reload entry to [`load_effective_config`]: emits a warn on any failure so the

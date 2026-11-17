@@ -914,7 +914,7 @@ pub fn resolve_model_provider<'a>(
 /// means no caller has to normalize the prefix itself.
 #[derive(Debug, Default, Clone)]
 pub struct ConfigValidation {
-    /// Hard-fail conditions, each a bare message.
+    /// Hard-fail conditions, one bare message per finding.
     pub errors: Vec<String>,
     /// Advisory conditions, each a bare message.
     pub warnings: Vec<String>,
@@ -930,6 +930,13 @@ fn bare_validation_message(e: routectl_core::Error) -> String {
         routectl_core::Error::Config(msg) => msg,
         other => other.to_string(),
     }
+}
+
+/// Push each line of `joined` as its own entry. The validators that report
+/// several findings at once join them one per line; the collection keeps
+/// one entry per finding so every consumer can count and render them.
+fn push_each_finding(errors: &mut Vec<String>, joined: &str) {
+    errors.extend(joined.lines().map(str::to_owned));
 }
 
 /// Every refusal for one provider entry: each broken shape rule, then the
@@ -960,20 +967,20 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     let mut errors: Vec<String> = Vec::new();
 
     if let Err(e) = crate::config::validate_model_token_limits(config) {
-        errors.push(e);
+        push_each_finding(&mut errors, &e);
     }
     if let Err(e) = crate::config::validate_server_body_limit(config) {
         errors.push(e);
     }
     if let Err(e) = crate::config::validate_model_pricing(config) {
-        errors.push(e);
+        push_each_finding(&mut errors, &e);
     }
     #[cfg(feature = "bedrock")]
     if let Err(e) = validate_bedrock_invoke_model_family(config) {
-        errors.push(bare_validation_message(e));
+        push_each_finding(&mut errors, &bare_validation_message(e));
     }
     if let Err(e) = validate_alias_chain_targets(config) {
-        errors.push(bare_validation_message(e));
+        push_each_finding(&mut errors, &bare_validation_message(e));
     }
     if let Err(e) = validate_alias_patterns(config) {
         errors.push(bare_validation_message(e));
@@ -1008,10 +1015,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_pools(config) {
-        errors.push(bare_validation_message(e));
+        push_each_finding(&mut errors, &bare_validation_message(e));
     }
     if let Err(e) = super::validate_state_keys::validate_state_key_names(config) {
-        errors.push(bare_validation_message(e));
+        push_each_finding(&mut errors, &bare_validation_message(e));
     }
 
     let mut warnings = super::warnings::codex_identity_warnings(config);
@@ -1027,6 +1034,10 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
 #[cfg(test)]
 #[path = "validate_tests.rs"]
 mod validate_tests;
+
+#[cfg(test)]
+#[path = "validate_one_per_finding_tests.rs"]
+mod one_per_finding_tests;
 
 #[cfg(test)]
 #[path = "validate_loopback_vectors_tests.rs"]

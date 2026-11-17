@@ -102,3 +102,51 @@ fn cold_start_keeps_the_multi_line_error() {
 
     assert_eq!(err.lines().count(), 2, "{err}");
 }
+
+/// Two providers whose names carry the seat separator: the shared validator
+/// suite reports two findings for one config.
+fn two_validator_findings_config() -> String {
+    let provider = |name: &str| {
+        format!(
+            "[providers.\"{name}\"]\nformat = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\ncredential = \"env://K\"\n\
+             auth = \"x-api-key\"\n"
+        )
+    };
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n{}{}",
+        provider("x#1"),
+        provider("y#2")
+    )
+}
+
+#[test]
+#[serial_test::serial]
+fn a_reload_declined_for_two_validator_findings_names_both() {
+    let warn = reload_failure_warn(&two_validator_findings_config());
+
+    let error = warn.field("error").expect("the WARN carries `error`");
+    assert!(!error.contains('\n'), "error must be one line: {error:?}");
+    assert!(error.contains("`x#1`"), "{error}");
+    assert!(error.contains("`y#2`"), "{error}");
+    assert_eq!(warn.field("reasons"), Some("2"));
+}
+
+#[test]
+#[serial_test::serial]
+fn cold_start_reports_every_validator_finding() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, two_validator_findings_config()).expect("write config.toml");
+
+    let err = match load_effective_config(&path) {
+        Ok(_) => panic!("the fixture must not load"),
+        Err(e) => e,
+    };
+
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 2, "{err}");
+    assert!(lines[0].starts_with("config: provider name `x#1`"), "{err}");
+    assert!(lines[1].starts_with("config: provider name `y#2`"), "{err}");
+}

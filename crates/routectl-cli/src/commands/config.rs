@@ -423,6 +423,10 @@ fn scheme_of(uri: &str) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "config_check_lines_tests.rs"]
+mod config_check_lines_tests;
+
+#[cfg(test)]
 mod emitted_example_tests {
     use super::*;
 
