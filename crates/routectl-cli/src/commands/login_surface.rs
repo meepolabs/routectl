@@ -57,11 +57,10 @@ use super::edit_pipeline::{
     RelockValidationError, confirm_high_consequence, gate, insert_provider_block, parse_document,
     preflight, render_gate_errors, upsert_pool_members as upsert_pool,
 };
-use super::login_provider_block::{
-    ProviderBlock, provider_block, required_auth_fields, toml_key, toml_string,
-};
+use super::login_provider_block::{ProviderBlock, provider_block, required_auth_fields};
 use super::login_surface_availability::availability_gap;
 use super::parse_error_redaction::{CONFIG_UNREADABLE, redact_parse_error};
+use super::provider_entry::{toml_key, toml_string};
 use crate::config_classify::collect_high_consequence_changes;
 
 /// The config delta a freshly minted seat implies.

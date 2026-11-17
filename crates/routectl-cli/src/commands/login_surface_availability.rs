@@ -15,7 +15,7 @@
 
 use routectl_router::Config;
 
-use super::login_provider_block::{toml_key, toml_string};
+use super::provider_entry::{toml_key, toml_string};
 
 /// The placeholder written where an upstream model id belongs. Not a
 /// guessable value: the ids differ per account tier and change per release,

@@ -17,6 +17,8 @@ use routectl_router::seat_naming::account_entry_name;
 use routectl_router::{Auth, Format, ProviderEntry};
 use toml_edit::Table;
 
+use super::provider_entry::{provider_entry_table, render_provider_block};
+
 /// A rendered `[providers.<name>]` entry for one logged-in seat.
 ///
 /// `Debug` is safe here: every field is a static token, a name, or a
@@ -61,7 +63,7 @@ pub fn provider_block(oauth_id: &str, label: Option<&str>) -> Option<ProviderBlo
 /// printable suggestion -- the block is a hint an operator edits, and
 /// printing nothing would leave a successful login with no output at all
 /// -- so they fall back to the plain label-suffixed derivation, whose
-/// TOML-key quoting [`toml_key`] already handles.
+/// TOML-key quoting the renderer already handles.
 fn block_name(oauth_id: &str, label: Option<&str>) -> String {
     account_entry_name(oauth_id, label).unwrap_or_else(|_| match label {
         Some(l) => format!("{oauth_id}-{l}"),
@@ -107,99 +109,29 @@ impl ProviderBlock {
     }
 
     /// The entry as a `toml_edit` table, ready for
-    /// `edit_pipeline::insert_provider_block`.
-    ///
-    /// Built from the SAME `rows` the printed block renders, so the
-    /// written entry and the printed one can never carry different fields.
-    /// No render-then-parse round trip: nothing here needs quoting or
-    /// escaping decisions made twice.
+    /// `edit_pipeline::insert_provider_block`. [`Self::render`] prints this
+    /// same table, so the written entry and the printed one cannot differ.
     #[must_use]
     pub fn entry_table(&self) -> Table {
-        let mut table = Table::new();
-        table.set_implicit(false);
-        for (key, value) in self.rows() {
-            table.insert(key, toml_edit::value(value));
-        }
-        table
+        // A managed-login entry holds only strings and enum tokens; the one
+        // value TOML cannot carry (a null inside `payload_extras`) never
+        // appears on it.
+        provider_entry_table(&self.entry)
+            .expect("a managed-login provider entry always serializes to TOML")
     }
 
     /// Render the entry as pasteable TOML: a table header plus one
-    /// `key = "value"` line per field, `=` aligned.
+    /// `key = value` line per field, `=` aligned.
     #[must_use]
     pub fn render(&self) -> String {
-        let rows = self.rows();
-        let width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-        let mut out = format!("[providers.{}]\n", toml_key(&self.name));
-        for (key, value) in rows {
-            out.push_str(&format!("{key:<width$} = {}\n", toml_string(&value)));
-        }
-        out
+        render_provider_block(&self.name, &self.entry_table())
     }
-
-    /// Fields in the entry's documented key order: `format`, `base_url`,
-    /// `credential`, `auth`.
-    fn rows(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("format", self.entry.format.as_str().to_string()),
-            ("base_url", self.entry.base_url.clone().unwrap_or_default()),
-            ("credential", self.entry.credential.clone()),
-            ("auth", self.entry.auth.as_str().to_string()),
-        ]
-    }
-}
-
-/// Render `name` as a TOML table key: bare when it is made only of
-/// characters a bare key permits, quoted otherwise. An operator label is
-/// only checked for non-emptiness upstream, so it can carry a space or a
-/// dot that would split the key path if written bare.
-pub(crate) fn toml_key(name: &str) -> String {
-    let is_bare = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if is_bare {
-        name.to_string()
-    } else {
-        toml_string(name)
-    }
-}
-
-/// Render `value` as a TOML basic string.
-///
-/// TOML forbids raw control characters inside a basic string outright, not
-/// just the quote and backslash that would terminate or reinterpret it. A
-/// member or label name carrying a newline is reachable -- pool member names
-/// come from operator-written config, and only non-emptiness is checked
-/// upstream -- and a raw one would make the PRINTED delta unparseable while
-/// the committed file (written through `toml_edit`, which escapes properly)
-/// stayed valid. An operator pasting the shown block would then hit a syntax
-/// error routectl appeared to have authored.
-///
-/// The three whitespace controls get their short escapes; every other C0
-/// control plus DEL takes the `\uXXXX` form.
-pub(crate) fn toml_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{block_name, provider_block, toml_key};
+    use super::{block_name, provider_block};
+    use crate::commands::provider_entry::toml_key;
 
     fn rendered(oauth_id: &str, label: Option<&str>) -> String {
         provider_block(oauth_id, label)
@@ -474,26 +406,27 @@ mod tests {
         assert_eq!(block_name("anthropic", Some("seat b")), "anthropic-seat b");
     }
 
-    /// The WRITTEN entry and the PRINTED entry come from one row set, so a
-    /// field added to the auth table cannot reach one and miss the other.
+    /// The PRINTED block parses back to exactly the table that is WRITTEN,
+    /// for both logins the CLI offers: a field cannot reach one and miss
+    /// the other.
     #[test]
-    fn the_entry_table_carries_exactly_the_fields_the_rendered_block_prints() {
-        for id in routectl_auth::oauth::known_provider_ids() {
+    fn the_rendered_block_parses_back_to_the_entry_table() {
+        for id in ["anthropic", "codex"] {
+            // Arrange
             let block = provider_block(id, Some("work")).expect("block");
 
-            let table = block.entry_table();
-            let printed: routectl_router::Config =
-                toml::from_str(&block.render()).expect("rendered block parses");
-            let written: routectl_router::Config =
-                toml::from_str(&format!("[providers.x]\n{table}")).expect("entry table parses");
+            // Act
+            let printed: toml::Table = toml::from_str(&block.render()).expect("rendered parses");
+            let written: toml::Table =
+                toml::from_str(&block.entry_table().to_string()).expect("table parses");
 
-            let printed_entry = printed.providers.get(&block.name).expect("printed entry");
-            let written_entry = written.providers.get("x").expect("written entry");
-            assert_eq!(
-                format!("{printed_entry:?}"),
-                format!("{written_entry:?}"),
-                "id `{id}`"
-            );
+            // Assert
+            let printed_entry = printed["providers"]
+                .get(&block.name)
+                .and_then(toml::Value::as_table)
+                .expect("printed entry");
+            assert!(written.contains_key("credential"), "id `{id}`: {written:?}");
+            assert_eq!(printed_entry, &written, "id `{id}`");
         }
     }
 
@@ -503,7 +436,7 @@ mod tests {
     fn with_entry_name_renames_the_key_and_keeps_the_auth_fields() {
         // Arrange
         let original = provider_block("anthropic", None).expect("block");
-        let original_rows = original.rows();
+        let original_fields = original.entry_table().to_string();
 
         // Act
         let renamed = provider_block("anthropic", None)
@@ -511,7 +444,7 @@ mod tests {
             .with_entry_name("claude-sub".into());
 
         // Assert
-        assert_eq!(renamed.rows(), original_rows);
+        assert_eq!(renamed.entry_table().to_string(), original_fields);
         assert!(
             renamed.render().starts_with("[providers.claude-sub]\n"),
             "{}",

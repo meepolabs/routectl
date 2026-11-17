@@ -7886,6 +7886,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   so every mutating command refuses
   stale/legacy files, re-validates candidates, and prompts on egress-defining
   edits identically
+- `src/commands/provider_entry.rs` -- the one emitter for `[providers.<name>]`
+  blocks the CLI creates: `provider_entry_table` serializes a `ProviderEntry`
+  with serde, drops empty collections, and rebuilds it with identity keys first
+  (`format`, `base_url` or an inline `cloud`, `credential`, `auth`,
+  `account_id_ref`, `cloud_project_id`) then the rest in declaration order;
+  `render_provider_block` prints that same table. Also owns `toml_key` /
+  `toml_string`. Never rewrites an existing block
 - `src/commands/provider_env.rs` -- conventional per-provider-kind credential
   env-var table (`env_var_for_kind`), gated on
   `routectl_router::is_config_provider_kind`; a drift test forces every
@@ -7926,8 +7933,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ManagedSecretStore::ref_path` so the pre-confirm ref string and the
   post-confirm `put` share one canonical base
 - `src/commands/provider_add/toml_edit.rs` -- config.toml provider-block edit
-  + commit: `provider_table` serializes a `ProviderEntry` to a minimal
-  non-inline table (prunes serde-default empties), and `commit` re-reads under
+  + commit: `provider_table` delegates to `provider_entry::provider_entry_table`,
+  and `commit` re-reads under
   the advisory lock + revision check and writes the same deterministic insert
   atomically through `routectl_router::edit_config_toml` (re-gated; a stale
   snapshot or gate failure writes nothing). The document parse and the
@@ -8124,25 +8131,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   only prints the pasteable entry -- a config-writing login there would
   invalidate provider add's own byte snapshot. `Auto` carries the path, so a
   `Skip` caller cannot supply a placeholder one
-- `src/commands/login_provider_block.rs` -- renders the ready-to-paste
-  `[providers.<name>]` entry for a logged-in seat (`format`, `auth` and
-  `base_url` from the one local per-vendor shape table, which mirrors the
-  router's provider descriptor; `credential` via `SecretRef::Display` so a
-  `--label` seat keeps its `#<label>`). The entry NAME delegates to
+- `src/commands/login_provider_block.rs` -- the ready-to-paste
+  `[providers.<name>]` entry for a logged-in seat, built by
+  `ProviderEntry::for_managed_login` (`credential` via `SecretRef::Display` so
+  a `--label` seat keeps its `#<label>`). The entry NAME delegates to
   `seat_naming::account_entry_name`, so the printed name and the name a config
   write picks are one string (falling back to the plain label-suffixed
-  derivation only when the convention refuses a token). `ProviderBlock::render`
-  prints the block, `entry_table` returns the same fields as a `toml_edit`
-  table for the write path (one row set, no render-then-parse round trip), and
-  `with_entry_name` renames the key when the config being edited is the naming
-  authority. `required_auth_fields(oauth_id) -> RequiredAuthFields { format,
-  auth }` exposes what an entry MUST carry, for the auto-surface's drift
-  check. `toml_key` /
-  `toml_string` render operator-written names as TOML: `toml_string` escapes the
-  full control set TOML forbids in a basic string (not just quote/backslash), so
-  a member or label carrying a newline cannot make the PRINTED delta
-  unparseable while the `toml_edit`-written file stays valid. Mutates no
-  config and emits no credential material
+  derivation only when the convention refuses a token). `entry_table` and
+  `render` both go through `provider_entry`, so the printed block is the
+  written table; `with_entry_name` renames the key when the config being
+  edited is the naming authority. `required_auth_fields(oauth_id) ->
+  RequiredAuthFields { format, auth }` exposes what an entry MUST carry, for
+  the auto-surface's drift check. Mutates no config and emits no credential
+  material
 - `src/commands/login_surface.rs` -- login's config auto-surface, pure planner
   plus the confirmed write. `ref_matches(&Config, &SecretRef)` finds the
   entries already

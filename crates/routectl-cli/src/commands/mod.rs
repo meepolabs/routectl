@@ -26,6 +26,7 @@ pub mod pricing;
 pub mod probe;
 pub mod prompt_size;
 pub mod provider_add;
+pub mod provider_entry;
 pub mod provider_env;
 pub mod rc;
 pub mod refresh;

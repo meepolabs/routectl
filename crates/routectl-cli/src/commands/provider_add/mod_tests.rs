@@ -237,6 +237,51 @@ default = \"gpt\"
     assert!(text.contains("[providers.grok]"), "{text}");
 }
 
+/// A hand-written block whose keys are out of the emitter's order and carry
+/// comments is the operator's: adding another provider leaves its bytes
+/// exactly as written, while the new block takes the emitter's order.
+#[tokio::test]
+async fn a_scrambled_commented_block_keeps_its_bytes_when_another_is_added() {
+    // Arrange
+    let hand_block = "\
+[providers.fast]
+auth = \"bearer\"   # sent as a bearer
+# the local stub
+base_url = \"http://127.0.0.1:1\"
+credential = \"env://ROUTECTL_TEST_KEY\"
+format = \"openai-chat\"
+";
+    let body = format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
+         [server]\nhost = \"127.0.0.1\"\nport = 8787\n\n\
+         {hand_block}\n\
+         [models.gpt]\nprovider = \"fast\"\nupstream = \"gpt-4o\"\n\n\
+         [aliases]\ndefault = \"gpt\"\n"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &body);
+    let mut a = args("openai-compat", "grok");
+    a.base_url = Some("https://api.x.example/v1".to_string());
+    a.secret_ref = Some("file:///abs/key".to_string());
+
+    // Act
+    run(&path, a).await.expect("add");
+
+    // Assert
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains(hand_block), "{text}");
+    assert!(
+        text.contains(
+            "[providers.grok]\n\
+             format = \"openai-chat\"\n\
+             base_url = \"https://api.x.example/v1\"\n\
+             credential = \"file:///abs/key\"\n\
+             auth = \"bearer\"\n"
+        ),
+        "{text}"
+    );
+}
+
 // -----------------------------------------------------------------
 // Idempotent re-add: a byte-identical re-add writes nothing.
 // -----------------------------------------------------------------
