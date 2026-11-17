@@ -58,7 +58,8 @@ license.
   withholds and the body-implied set it re-adds); last record wins; the
   router installs a fresh one on every complete, stream and count_tokens call
 - `src/provider_kind.rs` -- the two provider-kind vocabularies: `config::*`
-  (the `kind = "..."` token the usage ledger persists) and `trace::*` (the
+  (the family token a `[providers.X]` entry's `format` derives, which the
+  usage ledger persists) and `trace::*` (the
   `provider_kind=` token providers log), plus `trace_kind` mapping each
   `EgressKind` to its trace token
 - `src/translation_report.rs` -- `TranslationReport`: clone-shared per-attempt
@@ -396,7 +397,10 @@ license.
   `routectl-cli/tests/common/mod.rs`
 - `src/identity/mod.rs` -- provider identity-header module root; one canonical
   home for the compiled HTTP-fingerprint constants and default-header builders
-  (`pub mod codex; pub mod anthropic; pub mod antigravity;`)
+  (`pub mod codex; pub mod anthropic; pub mod antigravity;`), plus
+  `is_exact_https_host_in(base_url, hosts)`, the https / no-userinfo /
+  no-explicit-port / exact-host test the provider descriptor's vendor host
+  rows read
 - `src/identity/codex.rs` -- shared codex CLI HTTP fingerprint (UA,
   originator, residency) + `default_identity_headers()`
   (originator/residency/version trio); consumed by both the openai-responses
@@ -412,17 +416,18 @@ license.
   (unset = the pinned default, byte-identical to before the knob)
 - `src/identity/anthropic.rs` -- compiled Claude Code SDK (Stainless)
   identity-header defaults (`default_claude_code_identity_headers`,
-  `default_claude_code_user_agent`); consumed by the anthropic-api egress only
-  when the provider is OauthBearer AND its configured base URL is exactly the
-  Anthropic API host (`emits_claude_code_identity`), so a zero-config provider
-  there emits the Claude Code fingerprint and no other host receives it.
+  `default_claude_code_user_agent`); sent by the anthropic-api egress only
+  when its config sets `client_identity` (decided by the router's provider
+  descriptor: a managed `oauth://anthropic` login on the Anthropic API host)
+  and the request is off the forwarded leg.
   Also `is_anthropic_api_host(base_url) -> bool`, the shared
   exact-host predicate (`api.anthropic.com` only,
-  credentials/path/query/fragment-smuggle-proof) gating the pure-proxy
-  forwarded-credential and forwarded-identity paths in `anthropic_api/mod.rs`,
-  the `credential_source = "forwarded"` provider-config validation
-  (`factory::validate_provider_credential_sources`), and the `/v1/models`
-  forwarded-lane proxy-through decision
+  credentials/path/query/fragment-smuggle-proof) read by the anthropic-api
+  egress (own-OAuth lane, terminal-host and vendor-opening decisions) and the
+  router's cache defaults, and its stricter twin
+  `is_anthropic_api_https_base` (over `is_exact_https_host_in`) gating the
+  forwarded-bearer path in `anthropic_api/client.rs`, the beta-floor
+  forwarded leg, and the `/v1/models` forwarded-lane proxy-through decision
   (`handlers::models::forwarded_proxy_target`). Also the Claude Code
   anthropic-beta floor: `default_claude_code_anthropic_betas()` (the 9-flag
   model-agnostic CC beta base) plus the shared single-source-of-truth const
@@ -491,7 +496,7 @@ license.
   classification BETWEEN classes in the SAME policy row (a lift never changes
   retry / fallback / debit); per-provider-family token tables (`anthropic-api`
   / `openai-compat` / `bedrock` + a `UNION` fallback for an absent or
-  unrecognized kind) keyed by the config `kind` string; reads only the
+  unrecognized kind) keyed by the config family token; reads only the
   structured `Error::Upstream` fields, zero config / router / provider
   coupling; never returns `Timeout`. Non-`Upstream` variants classify by
   variant alone (`Streaming` -> `NetworkError`, `Auth` / `Credential` -> `Auth`), a
@@ -849,7 +854,9 @@ license.
   (credential-resolve, no inference-host dial) instead of the `x-api-key`
   `/v1/models` GET
 - `src/anthropic_api/client.rs` -- `AnthropicApiConfig`, `AuthKind`,
-  `AnthropicApiProvider` (`build_headers`, `cloak_body`, `is_cloak_lane`),
+  `AnthropicApiProvider` (`build_headers`, `cloak_body`, the lane predicates
+  `is_cloak_lane` (config `client_identity`, off the forwarded leg),
+  `is_own_oauth_lane` and `resigns_cch`),
   `BetaDecision`: provider construction, auth and header composition;
   `with_host_resolved_to_for_tests` / `with_host_resolved_to_and_root_ca_for_tests`
   (behind `test-utils`) pin the host to a stub, the latter trusting an extra
@@ -1174,8 +1181,9 @@ license.
   -> the `ReplayScheme` this lane ACCEPTS (a revisable judgment; both
   first-party lanes share `Codex`, mantle is `Mantle`), and the crate-internal
   `AuthKind::is_codex_lane` (true only for the ChatGPT-subscription OAuth
-  lane), the one predicate request, extras and client read for the codex
-  wire shape (no `max_output_tokens`, codex identity headers).
+  lane), the one predicate request and extras read for the codex wire
+  dialect (no `max_output_tokens`); the codex identity headers follow the
+  config's `client_identity` instead.
   `gate_unmodeled_output_items` drops unmodeled output items from a complete
   response unless the client speaks Responses
   (`client_carries_unmodeled_items`)
@@ -1194,13 +1202,14 @@ license.
   the serialized body's `input` to `mantle::refuse_unforwardable_media_urls`
 - `src/openai_responses/client.rs` -- provider construction, config, and auth
   wiring: `OpenAiResponsesConfig` (incl. `session_id` and `installation_id:
-  Option<String>`, plus cfg `bedrock` `mantle: Option<MantleAuth>`),
+  Option<String>`, `client_identity: bool`, plus cfg `bedrock` `mantle:
+  Option<MantleAuth>`, which forces `client_identity` off),
   `OpenAiResponsesProvider` (client build + cookie-jar Drop persistence),
-  header assembly. `build_headers` stamps the ChatgptOauth-only `session-id`
-  and `x-codex-installation-id` headers in the compiled-defaults phase (before
+  header assembly. `build_headers` stamps the codex identity defaults and the
+  `session-id` / `x-codex-installation-id` headers only when
+  `client_identity` is set, in the compiled-defaults phase (before
   the `header_extras` loop, so an operator override still wins; per-request
-  UUIDs win after); both are omitted when unset and never appear on the ApiKey
-  / BedrockMantle paths. Mantle lane (cfg `bedrock`): `cfg.mantle` `Some`
+  UUIDs win after); both ids are omitted when unset. Mantle lane (cfg `bedrock`): `cfg.mantle` `Some`
   builds a no-redirect client (`http_client::build_no_redirect`) with no
   Cloudflare cookie jar, `sign_mantle` post-build signs via
   `crate::mantle::sign`, and `record_mantle_span_fields` stamps
@@ -1306,8 +1315,8 @@ license.
   `provider_extras["reasoning"]`; summary/context/mode are independently
   emission-worthy, an explicit `enabled:false` (no effort) still omits.
   `apply_installation_id` stamps the resolved installation id into the body's
-  `client_metadata` under `x-codex-installation-id` on the ChatgptOauth lane
-  only (the resolved id wins over any request-carried `client_metadata` value,
+  `client_metadata` under `x-codex-installation-id` only when the config's
+  `client_identity` is set (the resolved id wins over any request-carried `client_metadata` value,
   which a non-object value is replaced by)
 - `src/openai_responses/empty_optional.rs` -- `EmptyOptionalFilter`: removes
   a returned function call's top-level `""` arguments that the called tool's
@@ -1317,7 +1326,7 @@ license.
   (output walk, finish_reason from status, usage; `cache_details` reads
   `input_tokens_details` cached / `cache_write_tokens` and a duration-named
   per-lifetime split, shared with the streaming path); stamps
-  `lane_format_tag(auth_kind)` on every emitted reasoning detail; carries the
+  `lane_format_tag` (keyed on the `AuthKind`) on every emitted reasoning detail; carries the
   first non-empty `message` item id on `upstream_meta` as a
   `ResponsesEnvelope`; `translate_for_request` runs the codex-lane
   `EmptyOptionalFilter` against the request's tools
@@ -1351,8 +1360,9 @@ license.
 ### gemini
 
 Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
-  v1beta REST); auth is an API key sent as `x-goog-api-key`, OR (when
-  `auth_mode = "cloud-code"`) an OAuth bearer against the Cloud Code surface.
+  v1beta REST); auth is an API key sent as `x-goog-api-key`, OR (a
+  `format = "gemini-cloud-code"` entry) an OAuth bearer against the Cloud
+  Code surface.
   Gated on the `gemini` cargo feature.
 
 - `src/gemini/mod.rs` -- `GeminiProvider` + `GeminiConfig` (fields: `id`,
@@ -1624,7 +1634,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and its User-Agent equals the refresh client's `codex_user_agent()`
 - `tests/bedrock_default_chain_resolve.rs` -- isolated binary pinning
   `bedrock::auth::resolve(DefaultChain)` under a scrubbed `AWS_*` env with IMDS
-  off: no credential source -> `Error::Auth`, env creds -> SigV4 with those
+  off: no credential source -> `Error::Auth`, env credentials -> SigV4 with those
   values, never a panic while the chain builds; isolated because the chain
   reads process-global env
 - `tests/bedrock_rejected_betas.rs` -- Invoke + Converse egress pins for the
@@ -1730,15 +1740,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   probe), each id maps via the hardcoded `provider_kind_for_oauth_id` table
   (public, so the CLI's login output reads the same map)
   (`anthropic`->`anthropic-api`, `codex`->`openai-responses`,
-  `xai`->`openai-compat`, `antigravity`->`gemini`) gated by
+  `xai`->`openai-compat`, `antigravity`->`gemini`; read from the descriptor's
+  `VENDOR_ROWS`) gated by
   `is_config_provider_kind` -- a kind no `[providers.X]` block can declare in
   this build yields `Unresolved{NotCataloged}` regardless of probe outcome
   (today only when the owning cargo feature is off), otherwise
   `Present`->`Activated`, `Missing`/`Expired`/`StoreUnavailable`->the matching
   `UnresolvedReason` (snake_case reason codes; a future `#[non_exhaustive]`
   `LocalProbe` variant maps conservatively to `Unknown`).
-  `referenced_by_aliases` is true iff a configured provider's `api_key_ref()`
-  names `oauth://<id>` (bare or `#seat-label`) AND that provider is reachable
+  `referenced_by_aliases` is true iff a configured provider's `credential`
+  (read through `api_key_ref()`) names `oauth://<id>` (bare or
+  `#seat-label`) AND that provider is reachable
   through the alias->nickname->model->provider walk
   (`reachable_model_nicknames` follows every alias value recursively,
   alias-key-wins-over-model shadowing, glob-key values included). `diff(prev,
@@ -1750,8 +1762,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ActivationState` is a read-only newtype over a `BTreeMap<String,
   ActivationEntry>` (iter/get/len/is_empty; no mutation surface, honoring the
   immutability invariant); growth types are `#[non_exhaustive]`. The
-  bare-vs-seat-labeled `oauth://<id>` parse is factored into
-  `oauth_id_from_api_key_ref` (crate-public), shared with
+  bare-vs-seat-labeled `oauth://<id>` parse is factored into the
+  crate-public `oauth_id_from_api_key_ref` (named for the `api_key_ref()`
+  reader it parses), shared with
   `router/chain.rs`'s discovery-time `context_window_for`
 - `src/alloc_probe.rs` -- TEST-ONLY (`#[cfg(test)]`) `#[global_allocator]`
   installed by `lib.rs`: `ProbeAllocator` forwards to `System` and tallies
@@ -1792,10 +1805,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (all
   `[server]`/`[providers]`/`[models]`/`[aliases]`/`[retry]`/`[cache]`/`[capability]`/`[mitm]`/...
   tables) with `version: u32` schema stamp and `pools: BTreeMap<String,
-  PoolEntry>` (the `[pools.<name>]` account-grouping table). Re-exports the `pool` + `schema` +
-  `tuning` + `validate` submodules so every internal `crate::config::X` path
-  AND every
-  crate-root `routectl_router::` re-export resolves unchanged
+  PoolEntry>` (the `[pools.<name>]` account-grouping table). Declares the
+  `entry_shape`, `pool_key` and `provider_descriptor` submodules (public
+  re-exports `Format`, `Auth`, `Cloud`, `is_bare_key`) and re-exports the
+  `pool` + `schema` + `tuning` + `validate` submodules so every internal
+  `crate::config::X` path and crate-root `routectl_router::` re-export
+  resolves
 - `src/config/entry_shape.rs` -- the shape rules one `[providers.X]` entry
   meets on its own: exactly one carrier, `base_url` a plain http(s) URL (no
   userinfo, query or fragment), and the per-format applicability table for
@@ -1826,8 +1841,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   family token and, per carrier (base URL or AWS), the `EgressKind` and accepted
   `Auth` values; `VENDOR_ROWS` gives per managed OAuth vendor its format,
   writer default base, allowed hosts and client-identity flag. Lookups
-  `format_row` / `vendor_row`; read by `ProviderEntry::kind_str` /
-  `egress_kind` and `provider_kind_for_oauth_id`
+  `format_row` / `vendor_row`, and the two pure predicates over the vendor
+  rows: `containment` (may this entry carry a managed vendor token) and
+  `client_identity` (does it present the vendor's generated identity); read
+  by `ProviderEntry::kind_str` / `egress_kind`, the provider plan and
+  `provider_kind_for_oauth_id`
 - `src/config/tuning.rs` -- the ONE precedence for the tiered tuning keys
   (`circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`,
   `stream_first_byte_timeout_ms`): `resolve_tuning(config, entry, model_ms)`
@@ -1840,79 +1858,33 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (render tokens model / provider / pool / global / default); the shipped
   defaults live only here. `gate()` yields the crate-internal `GateTuning`
   every runtime-state slot is seeded from
-- `src/config/schema.rs` -- Config value types: `ProviderEntry` (one variant
-  per provider kind incl. the `gemini`-feature-gated `Gemini { api_key_ref,
-  base_url, header_extras, payload_extras, user_agent, auth_mode,
-  cloud_project_id, ... }`;
-  constructor `ProviderEntry::gemini`, `with_gemini_auth_mode` sets
-  `GeminiAuthMode` {ApiKey default, CloudCode}, `kind_str() == "gemini"`;
-  `ProviderEntry::egress_kind` (entry -> `EgressKind`, Bedrock shape and
-  Mantle sub-lanes distinct; stamped on each `DispatchTarget` at chain
-  expansion);
-  the `CONFIG_PROVIDER_KINDS` slice + `is_config_provider_kind` predicate name
-  the whole `kind = "..."` vocabulary under the build's feature set (welded to
-  the `kind_str()` discriminants by a drift test), for callers that must bound
-  a kind string against what a config can DECLARE;
-  `api_key_ref()` exposes the primary key ref, `None` for Bedrock, so the
-  usage CLI can detect `oauth://` subscription providers;
-  `classifiable_egress_base_url()` is the base URL an entry actually egresses
-  to when its configured fields alone determine it (`anthropic-api` and
-  standard-lane `openai-compat`: the configured base URL; native `bedrock`: the
-  runtime URL derived from `region`; `openai-responses`: the configured base URL,
-  else `default_responses_base(auth_kind)`; a `bedrock_mantle` block on any of
-  the three Mantle lanes: the Mantle base its region derives,
-  `mantle_anthropic_base` or `mantle_openai_base`; a bare `bedrock-mantle`
-  auth-kind marker or a region that fails admission: `None`; `gemini`: the
-  configured base URL, or the daily Cloud Code host for a `cloud-code` entry
-  left at the api-key default base URL; any other kind: `None`),
-  read by the field stages' attributability decision; `cache_capability()`
-  fails closed for anthropic-api on a non-default base URL, plus the
-  per-block front-marker pair `per_block_breakpoints_enabled()` (kind
-  default: true only for default-base anthropic-api) /
-  `supports_per_block_breakpoints()` (wire capability: anthropic-api and
-  Bedrock Converse only -- placement requires BOTH)); the
-  cfg(`bedrock`) `BedrockMantleConfig
-  { region, creds }` sub-config is reused verbatim across the mantle lanes --
-  `bedrock_mantle: Option<BedrockMantleConfig>` on `AnthropicApi`,
-  `OpenaiCompat`, and `OpenaiResponses` (its presence selects the Bedrock
-  mantle lane, deriving the endpoint from `region`); `OpenaiCompat.base_url`
-  is `#[serde(default)]` (empty) so the mantle lane may omit it (validation
-  still requires it non-empty on the standard lane); `ModelEntry`
-  (the model facts `context_window` / `max_output_tokens` /
-  `pricing: Option<PricingConfig>`);
-  `ProviderEntry`/`ModelEntry`/`ServerAuth::redact_secrets` for display; `AliasValue`, `ServerAuth`,
-  `PricingConfig` per-model prices (the legacy 5m/1h write keys
-  plus `cache_write_per_mtok`, a duration-keyed write-price map;
-  `cache_write_rates()` folds them to seconds -> rate, the legacy key winning a
-  shared lifetime, and `set_cache_write_rate` writes one); `CacheConfig` (global
-  `[cache]`: `auto_emit_top_level_breakpoint: bool`, default true;
-  `k_gated_emission: bool`, default FALSE -- the hot-reloadable switch for
-  withholding auto-emitted markers below the emission break-even) and
-  `CacheCapability` (`supports_top_level_cache_control` +
-  `cache_hit_observable`, conservative `for_provider_kind` per-kind defaults
-  incl. `gemini` -> implicit prefix cache) with per-`ProviderEntry` overrides;
-  `MitmConfig` transport-only (bind port, cert dir; the upstream host and
-  origin are pinned in routectl-cli's `proxy::pin`) -- a
-  forwarded credential is a per-provider choice
-  (`ProviderEntry::AnthropicApi.credential_source: CredentialSource`, `Own`
-  default / `Forwarded`), not a `[mitm]` one (a hot-reloaded `[mitm]` edit is
-  restart-required via `config_classify::collect_restart_required_changes` in
-  routectl-cli); `RetryPolicy` carries `classes: BTreeMap<ConfigFailureClass,
-  ClassPolicy>` (per-class retry/fallback overlay resolved by
-  `class_policy::RetryPolicy::resolved_class`, empty by default, defined in
-  `src/class_policy.rs`); `CapabilityConfig` (global `[capability]`:
-  `enabled`, `decay_hours`, `inferred_window_hours`, plus the global `essential` capability-key list that reclassifies a
-  droppable's learned negative from strip to route-away -- tightening-only,
-  validated against the known-key set minus `reasoning_replay`)
-  drives the learned-capability registry and is hot-reloadable;
-  `WindowGateConfig` (global `[window_gate]`: `enabled`, default false; a
-  missing block is off) is the hot-reloadable switch for the proactive
-  context-window gate. The re-verification
-  cadence and the confirmation quorums are the code constants
-  `CANARY_INTERVAL` (100), `ENVELOPE_QUORUM` (1) and `PREFIX_QUORUM` (2), never
-  read from the environment. The whole
-  `Config` tree derives `schemars::JsonSchema` alongside serde so
-  `schema_gen.rs` can render the committed `routectl.schema.json`
+- `src/config/schema.rs` -- Config value types: `ProviderEntry`, one flat
+  `[providers.X]` struct for every provider (`format: Format`, exactly one of
+  `base_url` or `cloud: Option<Cloud>`, one `credential` string, `auth: Auth`,
+  then companions and tuning; `deny_unknown_fields`, runtime policy
+  flattened); `Cloud::Aws { region }` is the cloud carrier. Readers:
+  `format()`, `kind_str()` / `egress_kind()` (from the descriptor row),
+  `api_key_ref()` (the credential when it is a store reference, `None` for
+  the `aws://` forms and `forwarded`), `forwarded_base_url()`,
+  `anthropic_api_base_url()`, `classifiable_egress_base_url()` (the configured
+  base URL, or the endpoint a cloud entry's region derives; `None` for a
+  region that fails admission), `cache_capability()` and the per-block pair
+  `per_block_breakpoints_enabled()` / `supports_per_block_breakpoints()`;
+  code-built constructors (`openai_compat`, `anthropic_api`,
+  `openai_responses`, `gemini`, `cloud_aws`) plus `with_*` builders.
+  `CONFIG_PROVIDER_KINDS` + `is_config_provider_kind` bound a kind string to
+  what this build's formats can resolve to. Also `ModelEntry` (model facts and
+  `pricing`), `AliasValue`, `ServerConfig` / `ServerAuth`, `PricingConfig`
+  (`cache_write_rates` / `set_cache_write_rate`), `CacheConfig`,
+  `CacheCapability`, `MitmConfig` (transport only; a forwarded credential is
+  a provider's `credential = "forwarded"`), `CapabilityConfig`,
+  `WindowGateConfig`, `UsageConfig`, `ProviderRuntimePolicy`, `SeatSelection`,
+  `ReasoningDialect` / `HistoryReasoning`, and `RetryPolicy` (`classes:
+  BTreeMap<ConfigFailureClass, u32>`, the `[retry.classes] <class> = <n>`
+  same-target retry counts; `hard_retry_cap`, `max_honored_retry_after`);
+  `redact_secrets` / `secret_uris` for display. The whole `Config` tree
+  derives `schemars::JsonSchema` so `schema_gen.rs` can render the committed
+  `routectl.schema.json`
 - `src/config/validate.rs` -- Config version preflight + non-schema
   validation: `version: u32` schema-stamps the file (`CURRENT_CONFIG_VERSION
   == 5`); `preflight_config_version(raw_toml)` reads `version` off the RAW
@@ -2014,7 +1986,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `resolved_class`; `AliasChain` flattens each `[aliases]` entry into its
   ORDERED fallback chain via `AliasValue::nicknames` (Single -> one element,
   Chain verbatim -- the order IS the sequence dispatch walks) and
-  `providers` lists the `[providers.X]` rows, so a read surface counts
+  `providers` lists the `[providers.X]` rows (`ProviderCell`: kind,
+  `format`, endpoint origin, `cloud`, credential scheme via
+  `CredentialRef::scheme_label`, `auth`), so a read surface counts
   aliases/providers off the same view it renders; `tuning` holds one
   `TuningRow` (`TuningTargetKind`) per provider plus one per model
   first-content override (per seat for a pooled model), via
@@ -2026,10 +2000,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (userinfo/path/query/fragment dropped, unparseable or ambiguous-`@` input
   fail-safe to `None`); a second consumer is `ProviderEntry::redact_secrets`
   via `redact_base_url`, so its `None` must never be softened into a
-  raw-string fallback. `configured_base_url` reports config verbatim with one
-  exception: an unset-`base_url` `cloud-code` gemini entry reports the daily
-  Cloud Code host, because the api-key public default is a host that lane
-  never talks to
+  raw-string fallback. A provider cell's endpoint origin reads the configured
+  `base_url` only; a cloud entry reports its `cloud` cell instead
 - `src/config_effective_tests.rs` -- `#[path]` sidecar unit coverage of the
   effective-view derivation, including the guard that scans the whole of
   `config_effective.rs` for a call into the router build path
@@ -2044,183 +2016,97 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `bedrock`+`openai-responses`+`gemini` features) diffs the committed file
   byte-for-byte against this function's output so the two cannot silently
   diverge
-- `src/class_policy.rs` -- config-facing failure-class policy overlay + the
-  adapters to/from the canonical `routectl_core::failure_class::FailureClass`.
-  `ConfigFailureClass` is the closed, kebab-case-serialized, operator-nameable
-  subset (the ten classes; omits `Unknown`, flattens `FeatureUnsupported`'s
-  upstream `capability` token away); `to_failure_class` re-synthesizes
-  `FeatureUnsupported` with an empty `capability`, `from_failure_class` returns `None` for
-  `Unknown` and (fail-closed) any future `#[non_exhaustive]` variant.
-  `ClassPolicy { retry: Option<u32>, fallback: Option<bool> }`
-  (`deny_unknown_fields`, each leaf independently optional) is the per-class
-  overlay. `RetryPolicy::resolved_class(&FailureClass) -> (retry_cap,
-  fallback)` lives here as an `impl RetryPolicy` extension (the router's
-  `retry_cap_for` reads it): baked row from `max_attempts`, then the
-  deprecated `retry_on_*` compat cap, then any `ClassPolicy` leaf. Both
-  `ConfigFailureClass` and `ClassPolicy` derive `schemars::JsonSchema` so they
-  surface in the committed `routectl.schema.json`
+- `src/class_policy.rs` -- `ConfigFailureClass`, the closed kebab-case set of
+  ten operator-nameable failure classes (no `Unknown`), with
+  `to_failure_class` / `from_failure_class` adapters to the canonical
+  `FailureClass`, and `RetryPolicy::resolved_class(&FailureClass) ->
+  (retry_cap, fallback)`: the baked class default with the retry cap replaced
+  by a `[retry.classes]` count when one is set (fallback is never
+  configurable)
 - `src/factory/mod.rs` -- provider-factory module root; declares the private
-  `build`/`inert_provider`/`validate`/`warnings` submodules (plus the
-  cfg(`openai-responses`) `installation_id` submodule) and re-exports the
+  `beta_floor_warnings`/`build`/`inert_provider`/`plan`/`validate`/
+  `validate_state_keys`/`warnings` submodules (plus cfg(`openai-responses`)
+  `installation_id` and cfg(`bedrock`) `validate_region`) and re-exports the
   crate-facing surface (`build_provider`, `build_provider_with_options`,
   `build_resolved_models`, `build_resolved_models_reported`,
-  `pool_member_refusals`, `ResolvedModelBuild`,
-  `BuildOptions` (`normalize_tools`,
-  `mint_installation_id`; `config check` builds with minting off), the
-  `validate_*` family,
-  `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,
-  `validate_bedrock_invoke_model_family`,
-  `class_policy_warnings`,
-  `codex_identity_warnings`, `cloudcode_host_warnings`,
-  `cloudcode_model_warnings`, `auth_reserved_header_warnings`) so
-  `crate::factory::X` and the `lib.rs` `pub use factory::{...}` block resolve
-  unchanged
+  `pool_member_refusals`, `ResolvedModelBuild`, `BuildOptions`
+  (`normalize_tools`, `mint_installation_id`; `config check` builds with
+  minting off), the `validate_*` family, `resolve_model_provider`,
+  `resolved_codex_version` / `configured_codex_version`,
+  `collect_config_validation`, `ConfigValidation`, `MAX_POOL_MEMBERS`,
+  `validate_aws_regions`, and the advisory `codex_identity_warnings`,
+  `cloudcode_host_warnings`, `cloudcode_model_warnings`,
+  `auth_reserved_header_warnings`)
 - `src/factory/build.rs` -- secret resolution +
-  `build_provider`/`build_resolved_models`; one build arm per `ProviderEntry`
-  kind (incl. the `gemini`-feature-gated arm: the `ApiKey` mode resolves the
-  `x-goog-api-key` source, the `CloudCode` mode requires an `oauth://` ref,
-  resolves the bearer, and wires an `OAuthStoreProjectCache` into
-  `GeminiConfig::new_cloud_code`, forwarding `cloud_project_id` with an empty
-  string normalized to unset; the openai-compat arm resolves its
-  `api_key_ref` through `resolve_token_source`, so `oauth://<provider>` yields
-  a refreshing `ManagedToken` read per request and env / file / literal refs a
-  `StaticToken` resolved once); provider-or-pool resolution -- a
-  `[models.X] provider` naming a `[pools]` block compiles through
-  `compile_pool` into one seat per member (built from that member's own
-  `api_key_ref`, credential probed first so a logged-out member is kept as an
-  unusable placeholder seat rather than lazily failing at first traffic; a
-  member that cannot be built for any other reason refuses the build, naming
-  pool, member and rule), computed ONCE per pool and shared by Arc, with
-  `build_resolved_models_reported` returning the sanitized `PoolReport` set;
-  `pool_member_refusals` runs the same member walk alone for `config check`. A bare `oauth://<provider>` on a plain provider
-  entry resolves to that account's DEFAULT seat only -- no `list_seats`
-  enumeration on either path; each `[models.X]` entry's configured
-  `max_output_tokens` / `context_window` is copied onto its `ResolvedModel`
-  as built; calls the row-reading `validate_*`
-  guards from `validate.rs` at construction time; the `AnthropicApi` arm, when
-  `bedrock_mantle` is `Some` (cfg `bedrock`), derives `base_url` from
-  `mantle::mantle_anthropic_base(region)`, resolves the AWS credential via
-  `resolve_bedrock_creds` + `bedrock::auth::resolve` (fail-fast probe for
-  Profile/DefaultChain, shared with the `Bedrock` arm), and builds the config
-  with `mantle: Some(MantleAuth)` and an empty api-key token; the
-  `OpenaiCompat` and `OpenaiResponses` arms mirror this against
-  `mantle::mantle_openai_base(region)` (the Responses arm also sets the
-  `BedrockMantle` runtime auth-kind marker), so all three mantle lanes derive
-  their endpoint from `region` alone -- the legacy us-east-1 default-endpoint
-  fallback (and its WARN) is gone, unreachable behind the validation rejects
+  `build_provider`/`build_resolved_models`: every path runs `plan_provider`
+  first, then dispatches on `format` (one builder per format family). A
+  base-URL entry resolves its `credential` through `resolve_token_source`
+  (`oauth://` -> a refreshing `ManagedToken`, env / file -> a `StaticToken`);
+  a `cloud` entry resolves its AWS credential (`aws://profile/<name>`,
+  `aws://chain`, or a bearer key) via `bedrock::auth::resolve` and derives its
+  endpoint from `cloud.region` (Bedrock runtime for the `bedrock-*` formats,
+  the managed surface via `mantle_anthropic_base` / `mantle_openai_base` with
+  a `MantleAuth` for the others). The `gemini-cloud-code` builder wires an
+  `OAuthStoreProjectCache` and forwards `cloud_project_id`. Provider-or-pool
+  resolution: a `[models.X] provider` naming a `[pools]` block compiles
+  through `compile_pool` into one seat per member (credential probed first, so
+  a logged-out member is an unusable placeholder seat; a member the plan
+  refuses refuses the build, naming pool, member and rule), computed once per
+  pool and shared by Arc; `build_resolved_models_reported` returns the
+  sanitized `PoolReport` set and `pool_member_refusals` runs the member walk
+  alone for `config check`. A bare `oauth://<vendor>` resolves to that
+  account's default seat only. Installs the resolved codex identity and the
+  client-identity verdict from the plan
 - `src/factory/inert_provider.rs` -- the provider a pool-backed model
   projects when none of its seats built (every member a placeholder); never
   dialed, every method refuses a local `credential_unusable`
-- `src/factory/plan.rs` -- `plan_provider` -> `ProviderPlan { client_identity }`:
-  the descriptor's containment and identity verdict for one entry, run by
-  every build path before any credential read
-- `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
-  rejection of a non-canonical native `region` / `bedrock_mantle.region`
+- `src/factory/plan.rs` -- `plan_provider(name, entry) -> ProviderPlan`
+  (parsed `CredentialRef`, `Destination::{BaseUrl, Aws}`, `EgressKind`,
+  `client_identity`): the one decision about an entry taken before any
+  credential read (credential parse, carrier, descriptor route, sigv4
+  pairing, forwarded pin, Cloud Code login, managed-login containment, entry
+  shape), run by every build path and, via `plan_coherent_entry`, by config
+  validation
+- `src/factory/validate_region.rs` -- (cfg `bedrock`) `validate_aws_regions`:
+  config-load rejection of a non-canonical `cloud.region`
 - `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:
   config-load check of `[models]` and `[providers]` names that key runtime state
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation
-  collection; public `resolve_model_provider` ->
-  `Option<ModelProviderTarget{Pool, Provider}>`, the one lookup of a
-  `[models.X] provider` value in the shared `[pools]` / `[providers]`
-  namespace (pool wins on an unvalidated config), read by the factory build
-  and `config check`; `validate_class_policy` HARD-rejects an
-  operator override of the reserved `[retry.classes.feature-unsupported]` key;
-  `validate_managed_anthropic_credential` (public; also called by the
-  factory) confines an `oauth://anthropic` ref, and the
-  `MANAGED_OAUTH_FAMILIES` table (anthropic, codex, xai, antigravity) drives
-  `check_managed_oauth_family`, confining each managed token to its allowed lane
-  and host set (`validate_managed_oauth_credentials` runs every row, in validation
-  and the factory);
-  `class_token` renders a `ConfigFailureClass` as its kebab-case TOML
-  spelling; `collect_config_validation(&Config) -> ConfigValidation` is the
-  single ordered invocation of the whole `validate_*` suite (bare-message
-  contract: each error stripped to its inner `Error::Config` text), routed
-  through by all four config surfaces -- `config check`, `test`,
-  `prompt-size`, and the `serve` pre-parse gate -- so a validator can never be
-  silently present on one path and missing from another; the suite also runs
-  `validate_capability_essential` (rejects a `[capability] essential` entry
-  that is neither a well-known capability key nor a `capability_strip`
-  `STRIP_ACTIONS` member per `is_strippable`, quoting the raw key in
-  backticks so an invisible defect shows its bounds and appending a
-  `did you mean `Y`?` hint via `essential_key_near_miss` when the entry is an
-  exact whitespace/case variant of an `essential_accept_set` member, and
-  rejects `reasoning_replay` naming the lane-managed replay carve-out) and
-  `validate_float_fields` (rejects a non-positive/non-finite
-  `retry.backoff_multiplier`) and `validate_base_urls` (rejects an
-  `openai-compat` entry with no/empty `base_url` -- it is now defaulted-empty
-  in the schema but REQUIRED non-empty on the standard lane, skipped only when
-  `bedrock_mantle` selects the mantle lane; rejects a present-but-empty
-  `base_url` on the other kinds, whose omitted field keeps its kind default,
-  mirroring `validate_base_url_scheme`'s own empty-string rejection); the
-  cfg(`bedrock`) `validate_provider_bedrock_mantle` (anthropic-api lane) and
-  `validate_provider_openai_mantle` (openai-compat + openai-responses lanes)
-  reject an incoherent mantle sub-config -- with `bedrock_mantle` set,
-  `api_key_ref`/`base_url` must be empty and `region` non-empty; the
-  openai-responses lane additionally rejects a set `account_id_ref` and a
-  `store` key in `payload_extras`, and CLOSES the legacy bearer-only surface
-  (`auth_kind = "bedrock-mantle"` without the block is a hard error naming the
-  block form, regardless of base_url); the cfg(`bedrock`)
-  `validate_bedrock_creds_refs` rejects a present-but-empty required creds ref
-  (after trim) via one shared per-descriptor check across the native Bedrock
-  lane (`creds`) and all three `bedrock_mantle.creds` lanes --
-  `BearerKey.key_ref`, `Static.access_key_ref`/`secret_key_ref` must be
-  non-empty and a present-but-empty `Static.session_token_ref` (`Some("")`) is
-  rejected while an omitted one is fine, closing the config-check hole the
-  secret-ref parse walk's empty-slot skip left open (`Profile`/`DefaultChain`
-  have no ref to check); `validate_codex_version` rejects a syntactically
-  illegal `codex_version` (empty, > 64 bytes, or a non-printable-ASCII byte --
-  never sanitized) and ERRORS when two openai-responses entries set DIFFERENT
-  values (the codex identity is process-global; the error names both
-  providers), with `resolved_codex_version(&Config)` returning the single
-  agreed value (None -> pinned) for the factory's `set_resolved` and
-  `configured_codex_version` naming the entry that sets it; the
-  cfg(`bedrock`) `validate_bedrock_invoke_model_family` walks `[models]` and
-  JOINS each entry to its `[providers]` row (the model id lives at `[models.X]
-  upstream`, not on the provider entry), rejecting a model whose `upstream`
-  classifies `No` via `anthropic_family` while its Bedrock provider's
-  `api_shape` is Invoke (defaulted or explicit) -- that lane assembles AND
-  parses the Anthropic wire shape, so the entry cannot work; `Unknown` (an
-  inference-profile ARN) and any `api_shape = "converse"` entry pass, and the
-  message names the model id plus both lane options. Rejects rather than
-  auto-selecting Converse, since the shape also selects the response
-  translation and would otherwise split `api_shape` into a configured vs
-  effective value; `validate_pools` rejects every incoherent `[pools.<name>]`
-  block in ONE collecting pass (each class its own named message): unknown
-  member, mixed-kind members (compared by `kind_str`), a member claimed by two
-  pools, a non-`oauth://` member (milestone-scoped wording), a pool name held
-  by a provider entry or a model nickname, an empty `members`, and more than
-  `MAX_POOL_MEMBERS` (32) members; the `[mitm]` validator is deliberately
-  excluded (router-build-specific)
-- `src/factory/warnings.rs` -- non-fatal config warnings;
-  `class_policy_warnings` is the advisory twin of `validate_class_policy` over
-  the same surface (never fails): an empty `[retry.classes.<c>]` block (both leaves `None`), and
-  each set deprecated `[retry] retry_on_*` key (`retry_on_deprecation_warnings`);
-  `warn_context_management_needs_preserve` flags the `context_management` +
-  `history_reasoning != "preserve"` inconsistency once at build time;
-  `codex_identity_warnings` flags a chatgpt-oauth openai-responses provider
-  whose `header_extras` overrides `version` or `user-agent` with a value
-  diverging from the derived codex identity (the override still WINS --
-  advisory only);
-  `cloudcode_host_warnings` flags a `cloud-code` gemini entry whose `base_url`
-  pins the PRODUCTION cloud-code host (exact parsed-host match via
-  `routectl_providers::gemini::is_prod_host`, lookalike-safe) while the lane
-  default is the daily host (advisory only; the pin is honored verbatim);
-  `cloudcode_model_warnings` joins each `[models.X]` entry to its
-  `[providers.X]` row and flags a cloud-code-lane entry whose `upstream` hits
-  `routectl_providers::gemini::deprecated_alias_replacement`, naming the
-  verified replacement -- the auth-mode gate is load-bearing, since the same
-  ids stay current on the api-key lane (advisory only);
-  `auth_reserved_header_warnings` flags each auth-reserved key in a
-  `[models.X] header_extras` (dropped from every request). Units live in the
-  `#[path]`-included `warnings_tests.rs` (gemini-gated)
+  collection. `collect_config_validation(&Config) -> ConfigValidation` is the
+  single ordered invocation of the suite (bare-message contract), routed
+  through by `config check`, `test`, `prompt-size`, and the `serve` pre-parse
+  gate; per provider it reports every `shape_refusals` message plus the
+  plan's refusal. Also public `resolve_model_provider` ->
+  `Option<ModelProviderTarget{Pool, Provider}>` (the shared `[pools]` /
+  `[providers]` namespace lookup); `validate_class_policy` (rejects a
+  `[retry.classes] feature-unsupported` count);
+  `validate_managed_anthropic_credential` (the descriptor's anthropic vendor
+  containment); `validate_codex_version` (syntax, and one agreed value across
+  entries) with `resolved_codex_version` / `configured_codex_version`;
+  cfg(`bedrock`) `validate_bedrock_invoke_model_family` (a non-Anthropic
+  `upstream` on a `bedrock-invoke` provider); `validate_pools` (one collecting
+  pass: unknown member, members differing on any `PoolKey` field, double
+  claim, non-OAuth member, name collisions, empty, over `MAX_POOL_MEMBERS`);
+  plus the private capability-essential, float-field, cloud Responses
+  `store` and account-id checks; the `[mitm]` validator stays on the router
+  build path
+- `src/factory/warnings.rs` -- non-fatal config warnings:
+  `warn_context_management_needs_preserve` (build-time WARN);
+  `codex_identity_warnings` (a codex-host openai-responses entry whose
+  `header_extras` overrides `version` / `user-agent` away from the derived
+  identity); `cloudcode_host_warnings` (a `gemini-cloud-code` entry pinned to
+  the production host, exact parsed-host match); `cloudcode_model_warnings`
+  (a `gemini-cloud-code` model `upstream` with a deprecated alias);
+  `auth_reserved_header_warnings` (an auth-reserved key in `[models.X]
+  header_extras`). Units in the `#[path]`-included `warnings_tests.rs`
 - `src/factory/beta_floor_warnings.rs` -- `beta_floor_override_warnings`,
   the `config check` advisory for an `unsupported` `beta:<flag>` override on
   an anthropic-api provider naming a flag the egress re-adds after the
   override filter. `EgressLane` models each `build_headers` site from static
-  config (forwarded leg, own-OAuth cloak lane, `cloak.mode`,
-  `context_management`): the OAuth gate, Claude Code floor (unless
-  `cloak.mode = "never"`) and body-dependent effort union on an own-credential
-  oauth-bearer provider on the Anthropic API host only, the body-dependent
+  config (forwarded leg, own-OAuth credential lane, the client-identity
+  verdict, `cloak_mode`, `context_management`): the OAuth gate and
+  body-dependent effort union on the own-OAuth lane, the Claude Code floor on
+  the client-identity lane (unless `cloak_mode = "never"`), the body-dependent
   structured-outputs union off the forwarded leg, the provider pin, and the
   model pin of every model a cell reaches (a provider cell walks every model
   dispatching to the provider directly or through a pool, skipping one whose
@@ -2240,8 +2126,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   on the minting path any read/write failure yields `None` + a structured WARN naming the error
   class (never the UUID), so the egress simply omits the
   `x-codex-installation-id` header and the next construction retries; the
-  openai-responses `build` arm resolves it for the ChatgptOauth surface only
-  and stamps it on `OpenAiResponsesConfig::installation_id`
+  openai-responses builder resolves it only when the plan's
+  `client_identity` verdict is set and stamps it on
+  `OpenAiResponsesConfig::installation_id`
 - `src/glob.rs` -- `[aliases]` table suffix-glob parser + longest-prefix
   lookup index (`AliasPattern`, `PrefixIndex`)
 - `src/bin/gen_schema.rs` -- `cargo run --bin gen_schema` (re)writes the
@@ -3930,13 +3817,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and under `bedrock` a Mantle sub-lane; refusing: loopback, forwarded
   credential, a reload-removed entry), each row driven through every stage on its own
   fresh router. Catches a stage narrowing or widening its verdict on a fact the
-  table VARIES: base URL, credential source, entry presence, Mantle sub-lane. The
-  Mantle row is the one a raw base-url read gets WRONG, since its configured
-  base IS the Anthropic default while it egresses to the Mantle endpoint its
-  region derives; its fixture clears `api_key_ref` and
-  runs the production `validate_provider_bedrock_mantle` so the entry is one an
-  operator could write, then pins the base as non-loopback so the row cannot
-  collapse into the loopback row.
+  table VARIES: base URL, forwarded credential, entry presence, Mantle
+  sub-lane. The Mantle row is the one a raw base-url read gets WRONG, since it
+  sets no base URL and egresses to the Mantle endpoint its region derives; its
+  fixture rebuilds the entry on the `cloud` carrier and runs production
+  validation so the entry is one an operator could write, then pins the base
+  as non-loopback so the row cannot collapse into the loopback row.
   `the_mantle_sub_lane_is_attributable_and_reads_its_own_allowlist` pins that
   lane's attributed base and its view (`max_tokens` alone, not the direct
   sibling's re-check row), and
@@ -5442,16 +5328,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   against the real openai-compat provider at `ROUTECTL_LIVE_BASE_URL`;
   `test = false` behind `live-integration`, so it runs only when named
 - `tests/delta_config.rs` -- pins the delta-config contract through real TOML
-  loads: a sparse `[retry.classes.<class>]` single-leaf override inherits
-  every other baked default via `resolved_class`; Vec fields replace whole;
-  map fields merge per-key; an empty class table equals absent. Test-only --
+  loads: one `[retry.classes] <class> = <n>` count changes only that class
+  and every other class keeps its baked default via `resolved_class`; Vec
+  fields replace whole; map fields merge per-key; an empty class table equals
+  absent. Test-only --
   the semantics live in `class_policy`/serde, not a merge module
-- `tests/codex_identity_fingerprint_coherence.rs` -- single-test binary
-  pinning the codex fingerprint-coherence invariant end to end: with
-  `codex_version` configured, `build_resolved_models` + a wiremock upstream
-  prove the SAME version reaches the egress `User-Agent`, the egress `version`
-  identity header, and the UA the OAuth refresh client stamps
-  (`codex_user_agent()`, composed with the auth-crate stamping unit test)
 - `tests/codex_identity_build.rs` -- single-test binary pinning that
   `build_resolved_models` installs the configured `codex_version` into the
   process-global resolved identity (set-once OnceLock; isolated binary so no
@@ -5477,11 +5358,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   target surfaces verbatim (no refresh, no fallback) with a bounded,
   credential-free log shape (pre-dates the codex-identity work; listed here to
   close a tests-inventory gap)
-- `tests/codex_installation_id_boot_stability.rs` -- single-test binary
-  pinning installation-id stability across two `build_resolved_models` boots
-  over one temp XDG config dir (mint then adopt): the same id reaches the
-  egress wire on both boots, and boot 2 leaves the persisted file's content
-  and mtime untouched (adoption is read-only)
 - `tests/config_folder_defaults.rs` -- single-test binary: with
   `XDG_CONFIG_HOME` and `HOME` unset, relative or empty, the `[usage]
   db_path` and `[mitm] cert_dir` defaults are empty paths (never relative to
@@ -5528,7 +5404,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/lib.rs` -- crate root; the public facade. `memory_store`,
   `secret_capture`, `secret_ref`, and `store` are crate-internal modules
   surfaced only through root re-exports: `MemoryStore`, `SecretRef`,
-  `SecretScheme`, `SecretStore`, and the secret-capture surface (`ManagedSecretStore`,
+  `CredentialRef`, `SecretScheme`, `SecretStore`, and the secret-capture surface (`ManagedSecretStore`,
   `SecretCaptureError`, `SecretCaptureResult`, `default_secret_dir`,
   `env_ref`); feature-gated re-exports of `LocalProbe`, `LoginOptions`,
   `OAuthError`, `OAuthStore`, `OAuthStoreProjectCache`, `OpenOutcome` under
@@ -5543,7 +5419,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   scheme allowlist (`ALL`, `classify`, `as_prefix`, `as_token`, `From<&SecretRef>`)
   every leak-safe ref label renders from (router build, effective view, seat
   pool; cli `config`, `doctor`, `provider add`), an off-list ref rendering as
-  `unknown`
+  `unknown`; plus `CredentialRef` (root re-export), the parse of a provider's
+  one `credential` string into a `SecretRef`, `aws://profile/<name>`,
+  `aws://chain` or `forwarded`, with a closed `scheme_label` vocabulary
 - `src/memory_store.rs` -- default in-process `SecretStore` resolving
   env/file/literal references at read-time
 - `src/atomic_write.rs` -- crate-internal (`pub(crate)`), unconditional (not
@@ -6125,9 +6003,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   its module doc for the writer-ordering exception). Router construction is
   delegated to `router_build`. Boot seeds the initial activation inventory and
   spawns the reload pipeline (both owned by the `reload` submodule). A
-  forwarded (pure-proxy) egress is an explicit `[providers.X]
-  credential_source = "forwarded"` block -- no zero-config synthetic-egress
-  injection
+  forwarded (pure-proxy) egress is an explicit `[providers.X]` entry with
+  `credential = "forwarded"` -- no zero-config synthetic-egress injection
 - `src/server/warm_open.rs` -- `migrate_before_warm(db_path, warm,
   consequence)`, the migrating open EVERY ledger-reading bootstrap warm performs
   synchronously before its first query, shared by `k_rebuild` and
@@ -7313,9 +7190,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `route-away`/`force-supported` verdict + `override` provenance (the only
   config-derived source) reusing the shared vocabulary; `aliases` carrying each alias's
   ORDERED fallback chain; `providers` carrying one routing-shape row per
-  `[providers.X]` -- `provider_id`/`provider_kind`/`endpoint_origin` (the
-  derivation's ORIGIN reduction, never widened here)/`credential_ref_scheme`/
-  `auth_token`/`rpm_limit`, the last serialized WITHOUT
+  `[providers.X]` -- `provider_id`/`provider_kind`/`format`/`endpoint_origin`
+  (the derivation's ORIGIN reduction, never widened here; `null` for a cloud
+  entry)/`cloud` (name plus a canonical region)/`credential_ref_scheme` (the
+  closed `CredentialRef` scheme label)/`auth_token`/`rpm_limit`, the last serialized WITHOUT
   `skip_serializing_if` so an explicit `0` (immediately rate-limited) stays
   distinct from an explicit `null` (not set on this entry) and from an absent field; a
   `source` strip with
@@ -7932,15 +7810,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per provider entry no pool claims), reading seat presence through a direct
   `OAuthStore::open_default` (never the composite, whose absent oauth arm
   would fabricate a present-seat reading); the block never enters `CheckReport`
-  and never moves the exit code. `validation_report` also carries
-  `oauth_auth_selector_warnings`, the one config-check finding that cannot live
-  in the router's shared suite: it reads `login_provider_block::
-  auth_selector_gap` (the CLI-side auth-shape authority) to WARN when an entry's
-  `api_key_ref` names a managed OAuth seat while its auth selector still points
-  at the API-key surface -- a 401-on-first-dispatch shape that predates
-  auth-selector enforcement, so it warns rather than errors (only `check`
-  renders the warning half; the gate callers read `errors` alone, so it never
-  blocks a write). Once validation passes, `check` also runs the pool-member
+  and never moves the exit code. `validation_report` carries the shared
+  suite's errors and warnings unchanged (only `check` and `doctor` render the
+  warning half; the gate callers read `errors` alone). Once validation passes, `check` also runs the pool-member
   build over `config_member_build::OfflineCheckStore`, so it refuses the same
   member configs serve and reload refuse. `EXAMPLE_CONFIG`
   is the ONE `include_str!` of `examples/config.toml`, named by `config
@@ -8035,9 +7907,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   args: `build_entry` validates the kind against the supported set and
   dispatches to the direct api-key path (`resolve_secret` -> `env://` /
   `--secret-ref` verbatim / stdin / interactive), `build_forwarded`
-  (anthropic-api only; no secret, base pinned to api.anthropic.com), or
-  `build_oauth` (`anthropic` -> `oauth://<provider>` + oauth-bearer, login
-  deferred). Returns the `ProviderEntry` + credential CLASS label + the
+  (`anthropic-messages` with `credential = "forwarded"` and `auth = "bearer"`,
+  base pinned to api.anthropic.com), or `build_oauth` (`anthropic` ->
+  `oauth://<provider>` sent as `bearer`, login deferred). Returns the `ProviderEntry` + credential CLASS label + the
   `PendingSecret` owed post-confirm
 - `src/commands/provider_add/capture.rs` -- interactive/stdin secret capture +
   deferred execution: the `PendingSecret` enum {None/File/OAuth} and
@@ -8145,8 +8017,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `usage.retention_days`, `[mitm]`, and per-provider `codex_version` -- all
   startup-only state; `codex_version` is stamped into the process-global codex
   identity once at boot) and `collect_high_consequence_changes(prev, next)`
-  (provider `base_url`, `credential_source`, pool `members` -- a membership
-  edit repoints traffic onto a different account's credential; the
+  (each provider's egress-defining projection `ProviderIdentity`: `format`,
+  `base_url`, `cloud`, `credential`, `auth`, `account_id_ref`,
+  `cloud_project_id`; plus pool `members` -- a membership edit repoints
+  traffic onto a different account's credential; the
   confirm-before-write set. `[mitm]` names no egress. A pool's `seat_selection`
   reorders members without changing which credentials are in play, so it is
   not in the set). A coverage-tripwire test walks the schema's
@@ -8234,24 +8108,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   invalidate provider add's own byte snapshot. `Auto` carries the path, so a
   `Skip` caller cannot supply a placeholder one
 - `src/commands/login_provider_block.rs` -- renders the ready-to-paste
-  `[providers.<name>]` entry for a logged-in seat (`kind` from
-  `provider_kind_for_oauth_id`, auth selector + endpoint from the one local
-  shape table, `api_key_ref` via `SecretRef::Display` so a `--label` seat keeps
-  its `#<label>`). The entry NAME delegates to
+  `[providers.<name>]` entry for a logged-in seat (`format`, `auth` and
+  `base_url` from the one local per-vendor shape table, which mirrors the
+  router's provider descriptor; `credential` via `SecretRef::Display` so a
+  `--label` seat keeps its `#<label>`). The entry NAME delegates to
   `seat_naming::account_entry_name`, so the printed name and the name a config
   write picks are one string (falling back to the plain label-suffixed
   derivation only when the convention refuses a token). `ProviderBlock::render`
   prints the block, `entry_table` returns the same fields as a `toml_edit`
   table for the write path (one row set, no render-then-parse round trip), and
   `with_entry_name` renames the key when the config being edited is the naming
-  authority. `required_auth_fields(oauth_id)` exposes just the `kind` + auth
-  selector an entry MUST carry, for the auto-surface's drift check;
-  `auth_selector_gap(&ProviderEntry)` reads the same table from the other
-  direction -- given an entry whose `api_key_ref` is an `oauth://` seat, whether
-  its auth selector still points at the API-key surface -- which is what
-  `config check` warns on (silent on a foreign `kind`, where the selector key
-  may not exist on that variant at all). `entry_field_str` is the shared
-  read-through-serialization accessor both checks compare with. `toml_key` /
+  authority. `required_auth_fields(oauth_id) -> RequiredAuthFields { format,
+  auth }` exposes what an entry MUST carry, for the auto-surface's drift
+  check. `toml_key` /
   `toml_string` render operator-written names as TOML: `toml_string` escapes the
   full control set TOML forbids in a basic string (not just quote/backslash), so
   a member or label carrying a newline cannot make the PRINTED delta
@@ -8355,7 +8224,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per-million, so it is a field-for-field carry with `reasoning_per_mtok` left
   unset for the caller that knows a row's reasoning structure.
   `is_subscription(config, target)` is THE managed-subscription predicate
-  (`api_key_ref` starts `oauth://`; `auth_kind` deliberately not consulted).
+  (`credential` starts `oauth://`; `auth` deliberately not consulted).
   `target` may be a provider entry OR a pool -- `[models.X] provider` resolves
   against both in one namespace -- and a pool answers from its members, so a
   pooled model is not misreported as unpriced. Checked FIRST by
@@ -8381,7 +8250,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   fns); no flag + no `--since` prints a multi-window summary.
   `build_window_report` aggregates, rolls fine `AggRow`s up to `--by
   model|provider|alias` (or a single total), and bifurcates cost: a provider
-  whose `[providers.X] api_key_ref` starts `oauth://` is subscription (`n/a
+  whose `[providers.X] credential` starts `oauth://` is subscription (`n/a
   (subscription)`, no $), an API-key provider prices its summed tokens via
   `routectl_router::prices::effective_pricing` -> `rates_from_pricing` ->
   `estimate_cost_tokens` (`$X.XX` or `n/a` when unpriced) through
@@ -8505,10 +8374,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   read-only, free-only reachability report. `probe_all(config, store,
   deadline)` is THE shared orchestration (reused by the doctor aggregator) --
   the per-credential branch lives here once so both surfaces classify a
-  provider identically: `credential_source = forwarded` -> `Skipped` (no
+  provider identically: `credential = "forwarded"` -> `Skipped` (no
   build, no upstream call); an `oauth://` ref -> the in-memory-only
   `OAuthStore::probe_local` (never a resolving `get`, so no near-expiry
-  refresh, credentials byte-identical); `env://`/`file://`/`literal:`/bedrock
+  refresh, credentials byte-identical); `env://`/`file://`/`literal:`/`aws://`
   -> `build_provider` + its free `probe()`. Bounded by one shared wall-clock
   deadline (`PROBE_DEADLINE = 20s`, above the 10s per-probe timeout) with an
   8-way concurrency cap; an overrun collapses to `Unreachable`.
@@ -8645,8 +8514,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   takes read-only oauth probes + seats; `sanitize_store_open_error` reduces a
   store-open failure to a path-free class message. Secret presence:
   `gather_secret_checks`/`classify_secret_ref`/`classify_file`/`scheme_label`
-  (SCHEME label only, never a value/path/env var) -> discriminant-only
-  `SecretCheck`/`SecretPresence`.
+  (SCHEME label only, never a value/path/env var/AWS profile name; the
+  `aws://` forms and `forwarded` read through `CredentialRef`) ->
+  discriminant-only `SecretCheck`/`SecretPresence`.
   `gather_orphan_secrets`/`referenced_secret_files` is a read-only
   managed-secret-dir vs `file://`-refs diff (never deletes).
   `gather_orphan_seats`/`referenced_seat_coverage` is the STORED-OAuth-seat
@@ -9032,8 +8902,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   fenced `toml` block in `docs/CONFIGURATION.md`, `README.md`,
   `docs/PROVIDER-QUIRKS.md` and `docs/REMOTE-CONTROL.md`, plus all of
   `examples/config.toml`, must deserialize into `Config` (every section, not
-  just `[providers.X]`) with each provider entry parsing as the variant its
-  own `kind` names, so a key documented on a table that has none fails here
+  just `[providers.X]`), so a key documented on a table that has none fails here
   (`deny_unknown_fields`) instead of at an operator's next startup. A block
   carrying `version` is a WHOLE config an operator can save, so it also runs
   the version preflight plus `commands::config::validation_report` (alias
@@ -9205,7 +9074,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/live_matrix/bedrock_invoke.rs` -- Anthropic-on-Bedrock via
   InvokeModel + bearer key, plus ingress-through-bedrock end-to-end rows
 - `tests/live_matrix/bedrock_converse.rs` -- Bedrock Converse matrix
-  (api_shape = Converse)
+  (`format = "bedrock-converse"`)
 - `tests/live_matrix/mantle_anthropic.rs` -- Bedrock mantle lane matrix
   (Anthropic Messages vocabulary over
   `bedrock-mantle.<region>.api.aws/anthropic`, bearer-signed): sync complete,
