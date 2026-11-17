@@ -15,7 +15,14 @@
 
 use routectl_router::{CURRENT_CONFIG_VERSION, parse_config};
 
-use super::{SkipReason, SurfaceOutcome, render_delta, skip_line, surface, surface_against};
+use std::path::{Path, PathBuf};
+
+use routectl_testkit::ScopedEnv;
+
+use super::{
+    SkipReason, SurfaceOutcome, login_rerun_command, render_delta, rerun_instruction, skip_line,
+    surface, surface_against,
+};
 
 /// A minimal config at the version this build writes, rendered from the
 /// const so the next schema bump needs no fixture edit.
@@ -54,6 +61,19 @@ fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 
 fn read(path: &std::path::Path) -> Vec<u8> {
     std::fs::read(path).expect("read config")
+}
+
+/// Point the default config resolution at `root` (no `ROUTECTL_CONFIG`) and
+/// write `body` where a bare `routectl login` would read it. Callers run
+/// under `#[serial_test::serial]`.
+fn write_default_config(root: &Path, body: &str) -> (PathBuf, [ScopedEnv; 2]) {
+    let env = [
+        ScopedEnv::set("XDG_CONFIG_HOME", root),
+        ScopedEnv::unset("ROUTECTL_CONFIG"),
+    ];
+    let folder = routectl_core::config_dir::config_dir().expect("an absolute XDG_CONFIG_HOME");
+    std::fs::create_dir_all(&folder).expect("mkdir config folder");
+    (write_config(&folder, body), env)
 }
 
 // -----------------------------------------------------------------
@@ -480,11 +500,12 @@ fn an_unparseable_config_is_skipped_and_the_parse_error_carries_no_config_value(
 /// handing `surface_against` bytes the file no longer holds exercises
 /// exactly that arm -- no thread race, no flake.
 #[test]
+#[serial_test::serial]
 fn a_conflict_after_acceptance_is_nonzero_says_the_credential_is_kept_and_keeps_the_other_writer() {
     // Arrange: the snapshot describes a file state that another writer has
-    // already replaced.
+    // already replaced, in the file a bare `routectl login` resolves.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_config(dir.path(), &base());
+    let (path, _env) = write_default_config(dir.path(), &base());
     let stale_snapshot = read(&path);
 
     let other_writer = format!("{}# the other writer's bytes\n", base());
@@ -557,6 +578,256 @@ fn a_conflict_never_retries_against_the_fresh_bytes() {
     assert!(
         config.providers.is_empty() && config.pools.is_empty(),
         "a conflict must write nothing, not retry: {config:?}"
+    );
+}
+
+/// The delta `surface` shows for a `label`led anthropic login against
+/// `config_text`, rendered by the planner itself.
+fn labelled_delta(config_text: &str, label: &str) -> String {
+    render_delta(
+        &super::plan(
+            &parse_config(config_text).expect("parses"),
+            "anthropic",
+            Some(label),
+        )
+        .expect("plans"),
+    )
+}
+
+/// A labelled login's conflict names the exact rerun, label included, next
+/// to the delta it showed, and leaves the other writer's bytes in place.
+#[test]
+#[serial_test::serial]
+fn a_labelled_conflict_names_the_exact_rerun_and_keeps_the_other_writer() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, _env) = write_default_config(dir.path(), &base());
+    let stale_snapshot = read(&path);
+    let other_writer = format!("{}# the other writer's bytes\n", base());
+    std::fs::write(&path, &other_writer).expect("out-of-band write");
+
+    // Act
+    let msg = surface_against(&path, stale_snapshot, "anthropic", Some("work"), true)
+        .expect_err("a conflict after acceptance must be nonzero")
+        .to_string();
+
+    // Assert
+    assert!(
+        msg.contains("re-run `routectl login anthropic --label work`"),
+        "the failure must name the exact rerun: {msg}"
+    );
+    assert!(
+        msg.contains(labelled_delta(&base(), "work").trim_end()),
+        "the failure must carry the delta it showed: {msg}"
+    );
+    assert_eq!(
+        String::from_utf8(read(&path)).expect("utf8"),
+        other_writer,
+        "a conflict must not overwrite the other writer"
+    );
+}
+
+/// A login against a file other than the default one -- chosen with
+/// `--config` or with `ROUTECTL_CONFIG` -- names that file in the rerun, so
+/// the pasted command writes where the failed one meant to.
+#[test]
+#[serial_test::serial]
+fn a_conflict_on_a_chosen_config_names_that_file_in_the_rerun() {
+    let rows = [("--config flag", false), ("ROUTECTL_CONFIG", true)];
+    for (row, via_env) in rows {
+        // Arrange: the default resolves elsewhere; the login's file sits in
+        // a folder whose name the shell would split.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path().join("default"));
+        let chosen = dir.path().join("my configs");
+        std::fs::create_dir(&chosen).expect("mkdir");
+        let path = write_config(&chosen, &base());
+        let _env = if via_env {
+            ScopedEnv::set("ROUTECTL_CONFIG", &path)
+        } else {
+            ScopedEnv::unset("ROUTECTL_CONFIG")
+        };
+        let stale_snapshot = read(&path);
+        std::fs::write(&path, format!("{}# raced\n", base())).expect("out-of-band write");
+
+        // Act
+        let msg = surface_against(&path, stale_snapshot, "anthropic", Some("work"), true)
+            .expect_err("a conflict is nonzero")
+            .to_string();
+
+        // Assert
+        let expected = format!(
+            "re-run `routectl --config '{}' login anthropic --label work`",
+            path.display()
+        );
+        assert!(msg.contains(&expected), "row `{row}`: {msg}");
+    }
+}
+
+/// A publish that fails (the config folder refuses new files) is the same
+/// post-acceptance failure: nonzero, the credential-kept wording, the delta
+/// and the rerun, and the file byte-identical.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn a_publish_failure_names_the_exact_rerun_and_leaves_the_file_unchanged() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Arrange: the lock file already exists, so the write gets past the
+    // lock and fails where it publishes the new bytes.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, _env) = write_default_config(dir.path(), &base());
+    let folder = path.parent().expect("config folder").to_path_buf();
+    std::fs::write(folder.join("config.toml.lock"), b"").expect("lock file");
+    let before = read(&path);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+    // Where a 0500 folder still takes new files (running as root), the
+    // publish cannot fail, so there is nothing to observe.
+    if std::fs::File::create(folder.join(".probe")).is_ok() {
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod back");
+        return;
+    }
+
+    // Act
+    let result = surface(&path, "anthropic", Some("work"), true);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).expect("chmod back");
+
+    // Assert
+    let msg = result
+        .expect_err("a failed publish after acceptance must be nonzero")
+        .to_string();
+    for needle in [
+        "credential is stored",
+        "could not be written",
+        "re-run `routectl login anthropic --label work`",
+    ] {
+        assert!(msg.contains(needle), "missing `{needle}`: {msg}");
+    }
+    assert!(
+        msg.contains(labelled_delta(&base(), "work").trim_end()),
+        "the failure must carry the delta it showed: {msg}"
+    );
+    assert_eq!(
+        read(&path),
+        before,
+        "a failed publish must leave the file unchanged"
+    );
+}
+
+/// Each value of the rerun is one shell word, written exactly: a plain
+/// value stays bare and any other is single-quoted. A value holding a
+/// control character has no exact printable form, so no command is built.
+#[test]
+fn the_login_rerun_is_exact_or_absent() {
+    struct Row {
+        name: &'static str,
+        path: Option<&'static str>,
+        label: Option<&'static str>,
+        shown: Option<&'static str>,
+    }
+    let row = |name, path, label, shown| Row {
+        name,
+        path,
+        label,
+        shown,
+    };
+    let rows = [
+        row("no label", None, None, Some("routectl login anthropic")),
+        row(
+            "plain",
+            None,
+            Some("seat-a.1_b"),
+            Some("routectl login anthropic --label seat-a.1_b"),
+        ),
+        row(
+            "space",
+            None,
+            Some("my seat"),
+            Some("routectl login anthropic --label 'my seat'"),
+        ),
+        row(
+            "single quote",
+            None,
+            Some("seat'a"),
+            Some("routectl login anthropic --label 'seat'\\''a'"),
+        ),
+        row(
+            "expansion",
+            None,
+            Some("$(id)"),
+            Some("routectl login anthropic --label '$(id)'"),
+        ),
+        row(
+            "path",
+            Some("/srv/my cfg/config.toml"),
+            Some("work"),
+            Some("routectl --config '/srv/my cfg/config.toml' login anthropic --label work"),
+        ),
+        row("escape in label", None, Some("a\u{1b}[31mb"), None),
+        row("newline in label", None, Some("a\nb"), None),
+        row(
+            "control in path",
+            Some("/srv/a\u{7}b/config.toml"),
+            None,
+            None,
+        ),
+    ];
+    for r in rows {
+        assert_eq!(
+            login_rerun_command(r.path.map(Path::new), "anthropic", r.label).as_deref(),
+            r.shown,
+            "row `{}`",
+            r.name
+        );
+    }
+}
+
+/// The default file is left unnamed only when a bare rerun reaches it: with
+/// `ROUTECTL_CONFIG` set elsewhere, `--config <default file>` must be kept.
+#[test]
+#[serial_test::serial]
+fn the_default_file_is_named_when_routectl_config_points_elsewhere() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, _env) = write_default_config(dir.path(), &base());
+    let elsewhere = dir.path().join("other.toml");
+
+    // Act
+    let bare = rerun_instruction(&path, "anthropic", None);
+    let _redirect = ScopedEnv::set("ROUTECTL_CONFIG", &elsewhere);
+    let redirected = rerun_instruction(&path, "anthropic", None);
+
+    // Assert
+    assert_eq!(bare, "re-run `routectl login anthropic`");
+    assert_eq!(
+        redirected,
+        format!(
+            "re-run `routectl --config {} login anthropic`",
+            crate::commands::seat::shell_word(path.to_str().expect("utf8 tempdir"))
+        )
+    );
+}
+
+/// When no exact command exists, the recovery names only the vendor and
+/// prints no `--label` or `--config` word at all.
+#[test]
+#[serial_test::serial]
+fn a_control_character_label_prints_no_literal_rerun() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, _env) = write_default_config(dir.path(), &base());
+
+    // Act
+    let printable = rerun_instruction(&path, "anthropic", Some("work"));
+    let control = rerun_instruction(&path, "anthropic", Some("wo\u{1b}[2Jrk"));
+
+    // Assert: the printable label gets the literal command; the control one
+    // gets the vendor-only instruction.
+    assert_eq!(printable, "re-run `routectl login anthropic --label work`");
+    assert_eq!(
+        control,
+        "re-run the same `routectl login anthropic` command"
     );
 }
 
