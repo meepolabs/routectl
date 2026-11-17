@@ -15,8 +15,10 @@
 use std::io::{IsTerminal as _, Write as _};
 
 use routectl_core::{Error, Result};
-use routectl_router::{Config, ConfigWriteError, parse_config, preflight_raw_config};
-use toml_edit::{Array, DocumentMut, Item, Table};
+use routectl_router::{
+    Config, ConfigWriteError, ProviderEntry, parse_config, preflight_raw_config,
+};
+use toml_edit::{Array, DocumentMut, Item, Table, TableLike};
 
 use super::config::validation_report;
 use super::parse_error_redaction::redact_parse_error;
@@ -150,39 +152,100 @@ pub(crate) fn insert_provider_block(doc: &mut DocumentMut, name: &str, block: Ta
 /// Nothing else on the block is touched: an existing `seat_selection` or
 /// `accepts_new_logins` marker is an operator statement and survives
 /// verbatim.
-pub(crate) fn upsert_pool_members(doc: &mut DocumentMut, pool: &str, members: &[&str]) {
+///
+/// # Errors
+///
+/// `pools`, the `[pools.<pool>]` block or its `members` exists with a shape
+/// that cannot hold the edit (not a table, not an array). The caller asked
+/// for a pool edit; leaving the document unchanged would confirm a write
+/// that never happened.
+pub(crate) fn upsert_pool_members(
+    doc: &mut DocumentMut,
+    pool: &str,
+    members: &[&str],
+) -> Result<()> {
+    let block = pool_block_mut(doc, pool)?;
+    if !block.contains_key("members") {
+        block.insert("members", toml_edit::value(Array::new()));
+    }
+    let arr = block
+        .get_mut("members")
+        .and_then(Item::as_array_mut)
+        .ok_or_else(|| {
+            Error::Config(format!("`pools.{pool}.members` exists but is not an array"))
+        })?;
+    let mut seen: std::collections::BTreeSet<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    for member in members {
+        // Insert BEFORE the push, so a duplicate within `members`
+        // itself is dropped too -- a caller assembling a list from two
+        // sources must not be able to write `["a", "a"]`.
+        if seen.insert((*member).to_string()) {
+            arr.push(*member);
+        }
+    }
+    Ok(())
+}
+
+/// Mark `[pools.<pool>]` as one future logins may grow, creating the block
+/// when absent. Only a writer that CREATES the pool calls this: an existing
+/// pool's marker, or its absence, is the operator's statement.
+///
+/// # Errors
+///
+/// `pools` or the pool block exists but is not a table.
+pub(crate) fn set_accepts_new_logins(doc: &mut DocumentMut, pool: &str) -> Result<()> {
+    pool_block_mut(doc, pool)?.insert("accepts_new_logins", toml_edit::value(true));
+    Ok(())
+}
+
+/// The `[pools.<pool>]` block, creating `pools` and the block when absent.
+/// Descends through `as_table_like_mut`, so an inline `pools = { ... }`
+/// is walked like a standard table.
+fn pool_block_mut<'a>(doc: &'a mut DocumentMut, pool: &str) -> Result<&'a mut dyn TableLike> {
     let root = doc.as_table_mut();
     if !root.contains_key("pools") {
         let mut table = Table::new();
         table.set_implicit(true);
         root.insert("pools", Item::Table(table));
     }
-    let Some(pools) = root.get_mut("pools").and_then(Item::as_table_like_mut) else {
-        return;
-    };
+    let pools = root
+        .get_mut("pools")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| Error::Config("`pools` exists but is not a table".into()))?;
     if !pools.contains_key(pool) {
         pools.insert(pool, Item::Table(Table::new()));
     }
-    let Some(block) = pools.get_mut(pool).and_then(Item::as_table_like_mut) else {
+    pools
+        .get_mut(pool)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| Error::Config(format!("`pools.{pool}` exists but is not a table")))
+}
+
+/// Give `entry`, which is about to join `pool`, the cloak keys the pool's
+/// FIRST member (in declared `members` order) sets explicitly: both
+/// `cloak_mode` and `cloak_strict_mode` are copied as written, so a key
+/// that member leaves unset stays unset here.
+///
+/// Explicit keys only, never the effective defaults: a copied default
+/// would become an override that silently changes meaning when the
+/// default does. A validated config already holds every member to one
+/// effective cloak, so matching the first member matches them all.
+///
+/// A pool or first member `config` does not hold leaves `entry` untouched.
+pub(crate) fn inherit_pool_cloak(config: &Config, pool: &str, entry: &mut ProviderEntry) {
+    let Some(first) = config
+        .pools
+        .get(pool)
+        .and_then(|pool| pool.members.first())
+        .and_then(|member| config.providers.get(member))
+    else {
         return;
     };
-    if !block.contains_key("members") {
-        block.insert("members", toml_edit::value(Array::new()));
-    }
-    if let Some(arr) = block.get_mut("members").and_then(Item::as_array_mut) {
-        let mut seen: std::collections::BTreeSet<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        for member in members {
-            // Insert BEFORE the push, so a duplicate within `members`
-            // itself is dropped too -- a caller assembling a list from two
-            // sources must not be able to write `["a", "a"]`.
-            if seen.insert((*member).to_string()) {
-                arr.push(*member);
-            }
-        }
-    }
+    entry.cloak_mode = first.cloak_mode;
+    entry.cloak_strict_mode = first.cloak_strict_mode;
 }
 
 #[cfg(test)]
@@ -302,11 +365,11 @@ mod tests {
         let mut doc = doc_of("version = 4\n");
 
         // Act
-        upsert_pool_members(&mut doc, "anthropic", &["a", "b"]);
+        upsert_pool_members(&mut doc, "anthropic", &["a", "b"]).expect("upsert");
         let after_first = doc.to_string();
-        upsert_pool_members(&mut doc, "anthropic", &["b", "c"]);
+        upsert_pool_members(&mut doc, "anthropic", &["b", "c"]).expect("upsert");
         let after_second = doc.to_string();
-        upsert_pool_members(&mut doc, "anthropic", &["a", "b", "c"]);
+        upsert_pool_members(&mut doc, "anthropic", &["a", "b", "c"]).expect("upsert");
 
         // Assert
         assert!(
@@ -330,7 +393,7 @@ mod tests {
         let mut doc = doc_of("version = 4\n");
 
         // Act
-        upsert_pool_members(&mut doc, "anthropic", &["a", "a", "b", "a"]);
+        upsert_pool_members(&mut doc, "anthropic", &["a", "a", "b", "a"]).expect("upsert");
 
         // Assert
         assert!(doc.to_string().contains(r#"members = ["a", "b"]"#), "{doc}");
@@ -351,7 +414,7 @@ mod tests {
         );
 
         // Act
-        upsert_pool_members(&mut doc, "anthropic", &["b"]);
+        upsert_pool_members(&mut doc, "anthropic", &["b"]).expect("upsert");
 
         // Assert
         let out = doc.to_string();
@@ -371,9 +434,154 @@ mod tests {
         let mut doc = doc_of("version = 4\npools = { anthropic = { members = [\"a\"] } }\n");
 
         // Act
-        upsert_pool_members(&mut doc, "anthropic", &["b"]);
+        upsert_pool_members(&mut doc, "anthropic", &["b"]).expect("upsert");
 
         // Assert
         assert!(doc.to_string().contains(r#""a", "b""#), "{doc}");
+    }
+
+    /// A pool target whose shape cannot hold the edit is an error, never a
+    /// silent no-op that would confirm a write which did not happen. The
+    /// well-formed control shows the same call succeeding.
+    #[test]
+    fn a_pool_edit_on_a_malformed_pool_target_is_an_error() {
+        let rows = [
+            ("pools is a number", "version = 4\npools = 5\n"),
+            ("the pool is a string", "version = 4\n[pools]\np = \"x\"\n"),
+            (
+                "members is a number",
+                "version = 4\n[pools.p]\nmembers = 5\n",
+            ),
+        ];
+        let mut control = doc_of("version = 4\n[pools.p]\nmembers = [\"a\"]\n");
+        upsert_pool_members(&mut control, "p", &["b"]).expect("control: a well-formed pool grows");
+
+        for (row, text) in rows {
+            // Arrange
+            let mut doc = doc_of(text);
+
+            // Act
+            let result = upsert_pool_members(&mut doc, "p", &["b"]);
+
+            // Assert
+            assert!(result.is_err(), "row `{row}` must be an error");
+            assert_eq!(
+                doc.to_string(),
+                text,
+                "row `{row}` must leave the document alone"
+            );
+        }
+    }
+
+    #[test]
+    fn marking_a_pool_whose_target_is_not_a_table_is_an_error() {
+        let mut control = doc_of("version = 4\n");
+        set_accepts_new_logins(&mut control, "p").expect("control: an absent pool is created");
+        assert!(
+            control.to_string().contains("accepts_new_logins = true"),
+            "{control}"
+        );
+
+        for text in [
+            "version = 4\npools = 5\n",
+            "version = 4\n[pools]\np = \"x\"\n",
+        ] {
+            let mut doc = doc_of(text);
+
+            assert!(set_accepts_new_logins(&mut doc, "p").is_err(), "{text}");
+        }
+    }
+
+    fn pool_config(members: &[(&str, &str)]) -> Config {
+        let mut text = String::new();
+        for (name, cloak_lines) in members {
+            text.push_str(&format!(
+                "[providers.{name}]\n\
+                 format = \"anthropic-messages\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"oauth://anthropic#{name}\"\n\
+                 auth = \"bearer\"\n\
+                 {cloak_lines}"
+            ));
+        }
+        let names: Vec<String> = members.iter().map(|(n, _)| format!("\"{n}\"")).collect();
+        text.push_str(&format!("[pools.p]\nmembers = [{}]\n", names.join(", ")));
+        toml::from_str(&text).expect("fixture config parses")
+    }
+
+    fn joining_entry() -> ProviderEntry {
+        ProviderEntry::for_managed_login("anthropic", "oauth://anthropic#new".to_string())
+            .expect("anthropic is a managed login")
+    }
+
+    /// Only the keys the FIRST declared member writes are copied, as
+    /// written. A later member's explicit key, even one that equals the
+    /// effective default the first member inherits, is never copied: it
+    /// would become an override the operator did not write on this pool's
+    /// leading seat.
+    #[test]
+    fn a_joining_entry_takes_exactly_the_first_members_explicit_cloak_keys() {
+        use routectl_providers::anthropic_api::CloakMode;
+        type Row<'a> = (
+            &'a str,
+            Vec<(&'a str, &'a str)>,
+            Option<CloakMode>,
+            Option<bool>,
+        );
+        let rows: [Row<'_>; 4] = [
+            (
+                "both keys set",
+                vec![("a", "cloak_mode = \"never\"\ncloak_strict_mode = true\n")],
+                Some(CloakMode::Never),
+                Some(true),
+            ),
+            (
+                "mode only",
+                vec![("a", "cloak_mode = \"always\"\n")],
+                Some(CloakMode::Always),
+                None,
+            ),
+            ("no keys", vec![("a", "")], None, None),
+            (
+                "a later member spells out the default",
+                vec![
+                    ("a", ""),
+                    ("b", "cloak_mode = \"auto\"\ncloak_strict_mode = false\n"),
+                ],
+                None,
+                None,
+            ),
+        ];
+
+        for (row, members, mode, strict) in rows {
+            // Arrange
+            let config = pool_config(&members);
+            let mut entry = joining_entry();
+
+            // Act
+            inherit_pool_cloak(&config, "p", &mut entry);
+
+            // Assert
+            assert_eq!(entry.cloak_mode, mode, "row `{row}`");
+            assert_eq!(entry.cloak_strict_mode, strict, "row `{row}`");
+        }
+    }
+
+    /// Declared order, not map order: the first member is the one listed
+    /// first, even when its name sorts last.
+    #[test]
+    fn the_first_member_is_the_first_one_the_pool_lists() {
+        // Arrange
+        let config = pool_config(&[
+            ("z", "cloak_strict_mode = true\n"),
+            ("a", "cloak_strict_mode = false\n"),
+        ]);
+        let mut entry = joining_entry();
+
+        // Act
+        inherit_pool_cloak(&config, "p", &mut entry);
+
+        // Assert
+        assert_eq!(entry.cloak_strict_mode, Some(true));
     }
 }

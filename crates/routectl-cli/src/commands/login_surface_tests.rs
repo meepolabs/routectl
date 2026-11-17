@@ -690,7 +690,8 @@ fn the_multi_seat_pool_shape_plans_nothing_for_either_of_its_seats() {
         &mut doc,
         "anthropic",
         &["anthropic-managed", "anthropic-work"],
-    );
+    )
+    .expect("upsert");
     let pinned: Config = toml::from_str(&doc.to_string()).expect("multi-seat config parses");
     let grown: Config = toml::from_str(&doc.to_string().replace(
         "[pools.anthropic]",
@@ -738,7 +739,8 @@ fn a_new_label_over_a_pinned_pool_plans_the_entry_only_and_notes_the_pinned_pool
         &mut doc,
         "anthropic",
         &["anthropic-managed"],
-    );
+    )
+    .expect("upsert");
     let config: Config = toml::from_str(&doc.to_string()).expect("multi-seat config parses");
 
     // Act: a label the config carries no entry for.

@@ -743,29 +743,88 @@ fn joining_a_pool_never_adds_the_growth_marker_the_delta_does_not_show() {
     );
 }
 
-/// A gate-rejected candidate is a REPORTED value, not a nonzero exit: the
-/// operator was never offered anything and nothing was written. Driven by a
-/// config whose own `[models]` table names a provider that does not exist,
-/// so the candidate fails the shared validator for a reason the delta did
-/// not cause and cannot fix.
+/// A snapshot that parses but fails validation is a REPORTED skip, not a
+/// nonzero exit and not a plan: a join derived from it would be planned
+/// around its defects. Driven by a `[models]` table naming a provider that
+/// does not exist, a defect the delta neither caused nor could fix.
 #[test]
-fn a_candidate_the_gate_rejects_is_reported_and_is_not_an_error() {
-    // Arrange: a config that PARSES but does not validate.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_config(
-        dir.path(),
-        &format!(
-            "{}[models.ghost]\n\
-             provider = \"nobody\"\n\
-             upstream = \"x\"\n",
-            base()
-        ),
+fn a_snapshot_that_fails_validation_is_skipped_unwritten_and_is_not_an_error() {
+    // Arrange: a config that PARSES but does not validate, and its valid
+    // control.
+    let invalid = format!(
+        "{}[models.ghost]\n\
+         provider = \"nobody\"\n\
+         upstream = \"x\"\n",
+        base()
     );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), &invalid);
     let before = read(&path);
+    let control_dir = tempfile::tempdir().expect("tempdir");
+    let control = write_config(control_dir.path(), &base());
 
     // Act
     let outcome =
-        surface(&path, "anthropic", None, true).expect("a gate rejection must not be an error");
+        surface(&path, "anthropic", None, true).expect("an invalid snapshot must not be an error");
+
+    // Assert
+    assert!(
+        matches!(
+            surface(&control, "anthropic", None, true).expect("control writes"),
+            SurfaceOutcome::Written { .. }
+        ),
+        "control: the same login against the valid base writes"
+    );
+    let SurfaceOutcome::Skipped(reason @ SkipReason::Invalid { errors }) = &outcome else {
+        panic!("expected an invalid-snapshot skip, got {outcome:?}");
+    };
+    assert_eq!(read(&path), before, "an invalid snapshot writes nothing");
+    assert!(
+        errors.iter().any(|e| e.contains("`nobody`")),
+        "the validator's finding is carried: {errors:?}"
+    );
+    let shown = skip_line(reason);
+    assert!(shown.contains("`nobody`"), "{shown}");
+    assert!(shown.contains("add the entry below"), "{shown}");
+    assert!(shown.ends_with("Nothing was written."), "{shown}");
+}
+
+/// A candidate the gate rejects for a reason the DELTA causes is a
+/// reported value, not a nonzero exit: a valid pool already at the member
+/// ceiling, which the join would push past it.
+#[test]
+fn a_candidate_the_gate_rejects_is_reported_and_is_not_an_error() {
+    // Arrange: a valid snapshot whose growth pool is full.
+    let mut body = base();
+    let names: Vec<String> = (0..routectl_router::MAX_POOL_MEMBERS)
+        .map(|i| format!("anthropic-s{i}"))
+        .collect();
+    for name in &names {
+        let label = name.trim_start_matches("anthropic-");
+        body.push_str(&format!(
+            "[providers.{name}]\n\
+             format = \"anthropic-messages\"\n\
+             base_url = \"https://api.anthropic.com\"\n\
+             credential = \"oauth://anthropic#{label}\"\n\
+             auth = \"bearer\"\n"
+        ));
+    }
+    let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+    body.push_str(&format!(
+        "[pools.anthropic]\nmembers = [{}]\naccepts_new_logins = true\n",
+        quoted.join(", ")
+    ));
+    assert!(
+        super::gate(&body).is_ok(),
+        "control: the full pool itself is valid"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), &body);
+    let before = read(&path);
+
+    // Act
+    let outcome = surface(&path, "anthropic", Some("work"), true)
+        .expect("a gate rejection must not be an error");
 
     // Assert
     assert_eq!(outcome, SurfaceOutcome::Rejected);
@@ -911,7 +970,8 @@ fn a_login_over_an_explicit_pinned_pool_writes_the_entry_and_leaves_the_pool_alo
         &mut doc,
         "anthropic",
         &["anthropic-managed"],
-    );
+    )
+    .expect("upsert");
     let pinned = doc.to_string();
     assert!(
         !pinned.contains("accepts_new_logins"),
@@ -1034,7 +1094,8 @@ fn a_control_character_in_a_member_name_keeps_the_shown_delta_parseable() {
         &mut doc,
         "anthropic",
         &["anthropic-default", hostile],
-    );
+    )
+    .expect("upsert");
     let body = doc.to_string();
     let config = parse_config(&body).expect("the fixture config parses");
 
@@ -1106,5 +1167,167 @@ fn no_config_surface_message_echoes_the_config_path() {
     assert!(
         !rendered.contains("someoperator") && !rendered.contains('/'),
         "the skip message must not disclose the path: {rendered}"
+    );
+}
+
+// -----------------------------------------------------------------
+// A join carries the pool's explicit cloak keys onto the new entry.
+// Pool members must share their effective cloak, so a join that
+// dropped them would be refused by the gate.
+// -----------------------------------------------------------------
+
+/// `base_with_default_seat()` with `cloak_lines` on the pool's first (and
+/// only) member.
+fn growth_pool_with_first_member_cloak(cloak_lines: &str) -> String {
+    base_with_default_seat().replace(
+        "auth = \"bearer\"\n",
+        &format!("auth = \"bearer\"\n{cloak_lines}"),
+    )
+}
+
+/// The `[providers.<name>]` block of `text`, up to the next table header.
+fn provider_section<'a>(text: &'a str, name: &str) -> &'a str {
+    let header = format!("[providers.{name}]\n");
+    let start = text
+        .find(&header)
+        .unwrap_or_else(|| panic!("no `{header}` in:\n{text}"));
+    let body = &text[start + header.len()..];
+    let end = body.find("\n[").map_or(body.len(), |i| i + 1);
+    &text[start..start + header.len() + end]
+}
+
+#[test]
+fn a_join_copies_the_first_members_cloak_keys_onto_the_new_entry_and_shows_them() {
+    // Arrange
+    let body =
+        growth_pool_with_first_member_cloak("cloak_mode = \"never\"\ncloak_strict_mode = true\n");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), &body);
+    let shown = render_delta(
+        &super::plan(
+            &parse_config(&body).expect("parses"),
+            "anthropic",
+            Some("work"),
+        )
+        .expect("plans"),
+    );
+
+    // Act
+    let outcome = surface(&path, "anthropic", Some("work"), true).expect("the join writes");
+
+    // Assert
+    assert_eq!(
+        outcome,
+        SurfaceOutcome::Written {
+            entry_name: "anthropic-work".to_string()
+        }
+    );
+    let shown_entry = provider_section(&shown, "anthropic-work");
+    assert!(
+        shown_entry.contains("cloak_mode        = \"never\""),
+        "{shown}"
+    );
+    assert!(shown_entry.contains("cloak_strict_mode = true"), "{shown}");
+    let text = String::from_utf8(read(&path)).expect("utf8");
+    let written = parse_config(&text).expect("parses");
+    let entry = written.providers.get("anthropic-work").expect("entry");
+    assert_eq!(
+        entry.cloak_mode,
+        Some(routectl_providers::anthropic_api::CloakMode::Never)
+    );
+    assert_eq!(entry.cloak_strict_mode, Some(true));
+    assert_eq!(
+        written.pools.get("anthropic").expect("pool").members,
+        ["anthropic-default", "anthropic-work"]
+    );
+}
+
+/// No explicit key on the first member means none on the new entry, even
+/// when a later member spells out the default: copying an effective
+/// default would write an override no operator chose.
+#[test]
+fn a_join_writes_no_cloak_key_the_first_member_does_not_set() {
+    let rows = [
+        ("no member sets one", base_with_default_seat()),
+        (
+            "a later member spells out the defaults",
+            format!(
+                "{}\n\
+                 [providers.anthropic-team]\n\
+                 format = \"anthropic-messages\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 credential = \"oauth://anthropic#team\"\n\
+                 auth = \"bearer\"\n\
+                 cloak_mode = \"auto\"\n\
+                 cloak_strict_mode = false\n",
+                base_with_default_seat().replace(
+                    "members = [\"anthropic-default\"]",
+                    "members = [\"anthropic-default\", \"anthropic-team\"]",
+                )
+            ),
+        ),
+    ];
+
+    for (row, body) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), &body);
+
+        // Act
+        let outcome = surface(&path, "anthropic", Some("work"), true).expect("the join writes");
+
+        // Assert
+        assert_eq!(
+            outcome,
+            SurfaceOutcome::Written {
+                entry_name: "anthropic-work".to_string()
+            },
+            "row `{row}`"
+        );
+        let text = String::from_utf8(read(&path)).expect("utf8");
+        let entry = provider_section(&text, "anthropic-work");
+        assert!(entry.contains("credential"), "row `{row}`: {entry}");
+        assert!(!entry.contains("cloak"), "row `{row}`: {entry}");
+    }
+}
+
+/// The pool's hand-written first member, keys out of the emitter's order
+/// and commented, keeps its exact bytes while a login joins its pool.
+#[test]
+fn a_scrambled_commented_member_block_keeps_its_bytes_across_a_login_join() {
+    // Arrange
+    let hand_block = "\
+[providers.anthropic-default]
+cloak_strict_mode = true # keep the system prompt out
+auth = \"bearer\"   # subscription token
+# the default seat
+credential = \"oauth://anthropic\"
+cloak_mode = \"always\"
+base_url = \"https://api.anthropic.com\"
+format = \"anthropic-messages\"
+";
+    let body = format!(
+        "{}\n{hand_block}\n\
+         [pools.anthropic]\n\
+         members = [\"anthropic-default\"]\n\
+         accepts_new_logins = true\n",
+        base()
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), &body);
+
+    // Act
+    let outcome = surface(&path, "anthropic", Some("work"), true).expect("the join writes");
+
+    // Assert
+    assert!(
+        matches!(outcome, SurfaceOutcome::Written { .. }),
+        "{outcome:?}"
+    );
+    let text = String::from_utf8(read(&path)).expect("utf8");
+    assert!(text.contains(hand_block), "{text}");
+    assert!(
+        text.contains(r#"members = ["anthropic-default", "anthropic-work"]"#),
+        "{text}"
     );
 }

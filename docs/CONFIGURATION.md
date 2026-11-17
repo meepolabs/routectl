@@ -5501,8 +5501,13 @@ selects among the seats already stored; it never creates one. What the
 login DOES do to this file is offer the provider entry (and, on a first
 login for the family, the pool) that consumes the new seat -- printed
 before anything is written, applied on confirmation or with `--yes`,
-skipped entirely when there is no config file to edit. A pool without
-`accepts_new_logins = true` is never grown that way. `routectl
+skipped entirely when there is no config file to edit or the file fails
+the validation `config check` runs (the errors are printed instead). A
+pool without `accepts_new_logins = true` is never grown that way. A login
+that joins a pool copies the `cloak_mode` and `cloak_strict_mode` keys its
+first listed member sets onto the new entry, and the printed entry shows
+them; a key that member leaves unset stays unset, so no default is
+written as an override. `routectl
 config check` and `routectl doctor` both report each pool -- its members
 and the seat each names, its strategy, whether it accepts new logins, and
 any member the credential store holds no seat for -- plus one line per

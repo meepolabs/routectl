@@ -51,11 +51,13 @@ use routectl_router::seat_naming::{
 use routectl_router::{
     CONFIG_VERSION_REMEDIATION, Config, ConfigWriteError, EditOutcome, parse_config,
 };
-use toml_edit::{DocumentMut, Item};
+use toml_edit::DocumentMut;
 
+use super::config::validation_report;
 use super::edit_pipeline::{
-    RelockValidationError, confirm_high_consequence, gate, insert_provider_block, parse_document,
-    preflight, render_gate_errors, upsert_pool_members as upsert_pool,
+    RelockValidationError, confirm_high_consequence, gate, inherit_pool_cloak,
+    insert_provider_block, parse_document, preflight, render_gate_errors, set_accepts_new_logins,
+    upsert_pool_members as upsert_pool,
 };
 use super::login_provider_block::{ProviderBlock, provider_block, required_auth_fields};
 use super::login_surface_availability::availability_gap;
@@ -283,7 +285,7 @@ fn plan_fresh_entry(
     // here means a future divergence cannot write one name and print
     // another.
     let entry_name = placement.account.entry_name.clone();
-    let block = block.with_entry_name(entry_name.clone());
+    let mut block = block.with_entry_name(entry_name.clone());
 
     // `plan_new_seat` reports a pool ONLY when it is growth-marked, so a
     // `None` here means either no pool at all or a PINNED one -- and those
@@ -291,7 +293,12 @@ fn plan_fresh_entry(
     // `pool_action_for_new_entry` does; conflating them is how a pinned pool
     // silently grows and gains a marker it never had.
     let (pool, note) = match placement.pool_name {
-        Some(pool) => (Some(join_action(config, &pool, &entry_name)), None),
+        Some(pool) => {
+            // Pool members must share cloak settings, so a join carries the
+            // pool's explicit cloak keys onto the entry it writes and prints.
+            inherit_pool_cloak(config, &pool, block.entry_mut());
+            (Some(join_action(config, &pool, &entry_name)), None)
+        }
         None => match pool_action_for_new_entry(config, family, &entry_name) {
             Ok(pair) => pair,
             Err(e) => return Ok(SurfacePlan::Refuse(RefuseReason::Naming(e))),
@@ -549,7 +556,7 @@ pub enum SurfaceOutcome {
     Declined,
     /// The auto-surface did not run against this config at all: no file, a
     /// file this build must not edit (version out of bounds, a legacy key),
-    /// or one that does not parse.
+    /// or one that does not parse or validate.
     Skipped(SkipReason),
 }
 
@@ -588,6 +595,13 @@ pub enum SkipReason {
         /// The redacted parse error.
         detail: String,
     },
+    /// The file parses but fails the validation `config check` runs, so a
+    /// delta planned against it would be planned around its defects.
+    Invalid {
+        /// The validator's findings, one per entry, as `config check`
+        /// prints them.
+        errors: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for SkipReason {
@@ -615,6 +629,19 @@ impl std::fmt::Display for SkipReason {
                 "the current config does not parse, so no config change was proposed \
                  ({detail}); fix it, then add the entry below. Nothing was written"
             ),
+            Self::Invalid { errors } => {
+                write!(
+                    f,
+                    "the current config fails validation ({} error(s)), so no config change \
+                     was proposed; fix it (`routectl config check` lists the same errors), \
+                     then add the entry below:",
+                    errors.len()
+                )?;
+                for error in errors {
+                    write!(f, "\n  - {error}")?;
+                }
+                f.write_str("\nNothing was written")
+            }
         }
     }
 }
@@ -623,7 +650,7 @@ impl std::fmt::Display for SkipReason {
 /// of `family` labelled `label` implies.
 ///
 /// Sequence: read the file's bytes as the write snapshot -> raw preflights
-/// -> parse -> [`plan`] -> print [`render_delta`] -> confirm (`yes`
+/// -> parse -> validate -> [`plan`] -> print [`render_delta`] -> confirm (`yes`
 /// bypasses the PROMPT, never the print) -> commit through
 /// `edit_config_toml` against that exact snapshot.
 ///
@@ -632,7 +659,7 @@ impl std::fmt::Display for SkipReason {
 /// EXACTLY ONE condition: the commit failed after the confirmation was
 /// accepted (a snapshot conflict, a candidate that fails re-validation under
 /// the lock, an IO failure). Every pre-acceptance condition -- no config
-/// file, an unreadable or unwritable or unparseable one, a plan refusal, a
+/// file, an unreadable, unwritable, unparseable or invalid one, a plan refusal, a
 /// candidate the gate rejects, a decline -- is an `Ok` VALUE, because login
 /// already succeeded and the credential is stored. A nonzero exit there
 /// would fail every credential-only login run against a config routectl was
@@ -701,6 +728,13 @@ fn surface_against(
             ));
         }
     };
+    // A join is derived from the snapshot's pools and members, so a snapshot
+    // the validator refuses would have its defects planned around and
+    // copied forward rather than reported.
+    let invalid = validation_report(&prev, Some(&snapshot_text)).errors;
+    if !invalid.is_empty() {
+        return Ok(skip(SkipReason::Invalid { errors: invalid }, family, label));
+    }
 
     // `plan`'s only `Err` is an oauth id with no known provider shape, which
     // the CLI's accepted set (the login registry) cannot produce. It is still
@@ -883,23 +917,11 @@ fn apply_delta(doc: &mut DocumentMut, write: &SurfaceWrite) -> Result<()> {
             members.iter().map(String::as_str).collect()
         }
     };
-    upsert_pool(doc, action.pool(), &members);
+    upsert_pool(doc, action.pool(), &members)?;
     if matches!(action, PoolAction::Create { .. }) {
-        set_accepts_new_logins(doc, action.pool());
+        set_accepts_new_logins(doc, action.pool())?;
     }
     Ok(())
-}
-
-/// Mark a pool this edit created as one future logins may grow.
-fn set_accepts_new_logins(doc: &mut DocumentMut, pool: &str) {
-    if let Some(block) = doc
-        .get_mut("pools")
-        .and_then(Item::as_table_like_mut)
-        .and_then(|pools| pools.get_mut(pool))
-        .and_then(Item::as_table_like_mut)
-    {
-        block.insert("accepts_new_logins", toml_edit::value(true));
-    }
 }
 
 /// The candidate config text, for the pre-lock gate.

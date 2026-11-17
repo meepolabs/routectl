@@ -108,6 +108,12 @@ impl ProviderBlock {
         self
     }
 
+    /// The entry this block writes and prints, for a planner that must
+    /// adjust it to the config it joins (a pool's shared cloak keys).
+    pub(crate) fn entry_mut(&mut self) -> &mut ProviderEntry {
+        &mut self.entry
+    }
+
     /// The entry as a `toml_edit` table, ready for
     /// `edit_pipeline::insert_provider_block`. [`Self::render`] prints this
     /// same table, so the written entry and the printed one cannot differ.
