@@ -4847,6 +4847,15 @@ volume. The `/status/usage` panel (schema 6) carries the same two fields,
 with the same meaning, on its `totals` and on every group, and the
 dashboard's cache-write figures read `cache_write_tokens`.
 
+Every metric set also carries `errors_by_class`, an object mapping each
+failure class to its count of error requests. Its counts sum exactly to
+that set's `errors`, under the same `alias` / `provider` narrowing and in
+each series bucket. An error request with no recorded class counts under
+`unclassified`, and a class token this build does not know keeps its own
+key. A set with no errors carries `{}`. The class is a measure, never a
+`group_by` token. The `/status/usage` panel's `errors_by_class` uses the
+same class vocabulary.
+
 ### `provider probe [<name>]` -- reachability, free-only
 
 `routectl provider probe` reports one reachability outcome per configured

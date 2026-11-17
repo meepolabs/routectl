@@ -1,6 +1,8 @@
 //! Aggregate + breakdown queries.
 
-use rusqlite::{Connection, Row};
+use std::collections::{BTreeMap, HashMap};
+
+use rusqlite::{Connection, Row, Transaction};
 
 use crate::db::UsageDb;
 
@@ -56,6 +58,16 @@ pub struct QuotaSnapshot {
 /// what it actually was. `seat` is in the grain so a seat grouping reads the
 /// persisted column. Callers that report at a coarser external grain coalesce
 /// these partitions back together after pricing.
+/// The outcomes that count as an error: every outcome but a success, a client
+/// hangup and a cancellation. Shared by the aggregate's `errors` column and the
+/// error-class read, so the class counts of a fine row always sum to its
+/// `errors`.
+macro_rules! error_rows {
+    () => {
+        "outcome NOT IN ('ok', 'client_disconnect', 'cancelled')"
+    };
+}
+
 macro_rules! agg_base_columns {
     () => {
         concat!(
@@ -63,7 +75,9 @@ macro_rules! agg_base_columns {
     provider_kind, seat,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
-    SUM(CASE WHEN outcome NOT IN ('ok', 'client_disconnect', 'cancelled')
+    SUM(CASE WHEN ",
+            error_rows!(),
+            "
         THEN 1 ELSE 0 END)                              AS errors,
     COALESCE(SUM(input_tokens), 0)                      AS input_tokens,
     COALESCE(SUM(output_tokens), 0)                     AS output_tokens,
@@ -444,32 +458,116 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
     })
 }
 
-/// A SECOND flat query beside [`AGG_SQL`], deliberately NOT folded into it:
-/// the aggregate stays one row per group, while this breakdown fans a group
-/// into one row per failure class. It shares `AGG_SQL`'s window predicate and
-/// group-key expressions and adds the SAME `errors` filter (`outcome NOT IN
-/// ('ok', 'client_disconnect', 'cancelled')`), so the per-group class counts sum EXACTLY to
-/// that group's `AggRow::errors`. NULL `resolved_class` (pre-dispatch or
-/// never-classified rows) buckets under `unclassified` via the COALESCE; a
-/// forward-compat token written by a newer binary passes through verbatim as
-/// its own class rather than being folded into `unclassified`.
-pub(super) const ERRORS_BY_CLASS_SQL: &str = concat!(
-    "\
-SELECT
+/// The error-class statement: one result row per `(fine group, bucket, class)`
+/// over the error rows, with the same window, inference predicate, filters and
+/// bucket index as the aggregate it is merged into, so the class counts of a
+/// fine row sum EXACTLY to that row's `errors`. A side read beside the
+/// aggregate rather than a column of it: grouping the main scan by class too
+/// would fan every group out per class.
+///
+/// The class is the `resolved_class` column (the canonical failure class), not
+/// `outcome` or `error_class`. NULL (pre-dispatch or never-classified rows)
+/// counts as `unclassified`; a token written by a newer binary passes through
+/// verbatim as its own class.
+///
+/// `$bucket` is the bucket expression and `$group_bucket` the GROUP BY suffix
+/// that splits by it; the unbucketed form selects a constant and adds nothing,
+/// since a constant GROUP BY term would read as a column ordinal.
+macro_rules! errors_by_class_sql {
+    ($bucket:literal, $group_bucket:literal) => {
+        concat!(
+            "SELECT
     COALESCE(model, requested_model) AS model, provider, upstream, alias,
-    provider_kind, seat,
+    provider_kind, seat, ",
+            $bucket,
+            " AS bucket,
     COALESCE(resolved_class, 'unclassified')            AS class,
     COUNT(*)                                            AS count
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
-  AND outcome NOT IN ('ok', 'client_disconnect', 'cancelled')
   AND ",
-    inference_rows!(),
-    "
+            error_rows!(),
+            "
+  AND ",
+            inference_rows!(),
+            "
+  AND (?3 IS NULL OR alias = ?3)
+  AND (?4 IS NULL OR provider = ?4)
 GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
-         provider_kind, seat,
-         COALESCE(resolved_class, 'unclassified')"
-);
+         provider_kind, seat",
+            $group_bucket,
+            ", COALESCE(resolved_class, 'unclassified')"
+        )
+    };
+}
+
+/// [`errors_by_class_sql`] over the whole window: every row in bucket 0.
+pub(super) const ERRORS_BY_CLASS_SQL: &str = errors_by_class_sql!("0", "");
+
+/// [`ERRORS_BY_CLASS_SQL`] split further by the bucket index the series
+/// aggregate groups on (`?5` is the bucket width, `?1` its anchor).
+pub(super) const ERRORS_BY_CLASS_BUCKETED_SQL: &str =
+    errors_by_class_sql!("(ts_start - ?1) / ?5", ", bucket");
+
+/// The window and filters a side read (error classes, cache-write lifetimes)
+/// applies beside the aggregate it is merged into; the same bind values that
+/// aggregate used.
+pub(super) struct SideReadWindow<'a> {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub alias_filter: Option<&'a str>,
+    pub provider_filter: Option<&'a str>,
+}
+
+/// Error counts per class, keyed by fine group and bucket index. The
+/// unbucketed read puts every row in bucket 0.
+pub(super) type ClassesByRow = HashMap<(GroupKey, i64), BTreeMap<String, i64>>;
+
+/// Read the error-class counts of every fine group in the window. With
+/// `bucket_width_ms`, each group is further split by bucket index.
+pub(super) fn read_error_classes(
+    tx: &Transaction<'_>,
+    window: &SideReadWindow<'_>,
+    bucket_width_ms: Option<i64>,
+) -> Result<ClassesByRow, QueryError> {
+    let mut out = ClassesByRow::new();
+    let mut fold = |row: &Row<'_>| -> rusqlite::Result<()> {
+        let key = read_group_key(row)?;
+        let bucket: i64 = row.get(GROUP_KEY_COLUMNS)?;
+        let class: String = row.get(GROUP_KEY_COLUMNS + 1)?;
+        let count: i64 = row.get(GROUP_KEY_COLUMNS + 2)?;
+        out.entry((key, bucket)).or_default().insert(class, count);
+        Ok(())
+    };
+    match bucket_width_ms {
+        None => {
+            let mut stmt = tx.prepare(ERRORS_BY_CLASS_SQL)?;
+            let mut rows = stmt.query(rusqlite::params![
+                window.from_ms,
+                window.to_ms,
+                window.alias_filter,
+                window.provider_filter,
+            ])?;
+            while let Some(row) = rows.next()? {
+                fold(row)?;
+            }
+        }
+        Some(width_ms) => {
+            let mut stmt = tx.prepare(ERRORS_BY_CLASS_BUCKETED_SQL)?;
+            let mut rows = stmt.query(rusqlite::params![
+                window.from_ms,
+                window.to_ms,
+                window.alias_filter,
+                window.provider_filter,
+                width_ms,
+            ])?;
+            while let Some(row) = rows.next()? {
+                fold(row)?;
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// Windowed per-group error breakdown, grouped by the `resolved_class` column
 /// (the canonical failure class), not by `outcome` or `error_class`, so a row
@@ -491,13 +589,16 @@ pub fn errors_by_class(
 ) -> Result<Vec<(GroupKey, String, i64)>, QueryError> {
     let mut stmt = db.conn().prepare(ERRORS_BY_CLASS_SQL)?;
     let rows = stmt
-        .query_map([from_ms, to_ms], |row| {
-            Ok((
-                read_group_key(row)?,
-                row.get::<_, String>(GROUP_KEY_COLUMNS)?,
-                row.get::<_, i64>(GROUP_KEY_COLUMNS + 1)?,
-            ))
-        })?
+        .query_map(
+            rusqlite::params![from_ms, to_ms, None::<&str>, None::<&str>],
+            |row| {
+                Ok((
+                    read_group_key(row)?,
+                    row.get::<_, String>(GROUP_KEY_COLUMNS + 1)?,
+                    row.get::<_, i64>(GROUP_KEY_COLUMNS + 2)?,
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }

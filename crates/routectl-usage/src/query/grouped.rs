@@ -22,8 +22,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::UsageDb;
 
-use super::aggregate::{QUERY_AGG_SQL, SERIES_AGG_SQL, map_fine_row, map_fine_row_bucketed};
-use super::cache_lifetimes::{LifetimeWindow, attach, read_lifetimes};
+use super::aggregate::{
+    ClassesByRow, QUERY_AGG_SQL, SERIES_AGG_SQL, SideReadWindow, map_fine_row,
+    map_fine_row_bucketed, read_error_classes,
+};
+use super::cache_lifetimes::{attach, read_lifetimes};
 use super::deadline::DeadlineGuard;
 use super::{AggRow, GroupKey, QueryError};
 
@@ -247,6 +250,11 @@ pub struct QueryMetrics {
     pub cancelled_total: i64,
     /// Count of requests served only after a fallback (`fallback_count > 0`).
     pub fallback_served: i64,
+    /// `errors` split by failure class: class token -> count, summing exactly
+    /// to `errors`. An error row with no recorded class counts as
+    /// `unclassified`; a token this build does not know stays its own key.
+    /// Empty (`{}`) when there are no errors.
+    pub errors_by_class: BTreeMap<String, i64>,
     /// Approximate p50 time-to-first-token (request-weighted mean) over
     /// streaming successes, ms. Same population as `ttft_p95_ms`.
     pub ttft_p50_ms: Option<i64>,
@@ -412,7 +420,9 @@ fn fold_groups(
     price: &impl Fn(&AggRow) -> RowCost,
     groups: &mut BTreeMap<String, GroupAcc>,
 ) -> Result<(), QueryError> {
-    let mut lifetimes = read_lifetimes(tx, &lifetime_window(spec), None)?;
+    let window = side_read_window(spec);
+    let mut lifetimes = read_lifetimes(tx, &window, None)?;
+    let mut classes = read_error_classes(tx, &window, None)?;
     let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
     let rows = stmt.query_map(
         rusqlite::params![
@@ -426,10 +436,15 @@ fn fold_groups(
     for row in rows {
         let mut fine = row?;
         attach(&mut fine.agg, 0, &mut lifetimes);
+        let row_classes = take_classes(&fine.agg.key, 0, &mut classes);
         let cost = price(&fine.agg);
         let label = spec.group_by.label(&fine.agg.key);
-        groups.entry(label).or_default().add(&fine, cost);
+        groups
+            .entry(label)
+            .or_default()
+            .add(&fine, cost, &row_classes);
     }
+    debug_assert_classes_attached(&classes);
     Ok(())
 }
 
@@ -450,7 +465,9 @@ fn fold_groups_and_buckets(
     groups: &mut BTreeMap<String, GroupAcc>,
     buckets: &mut BTreeMap<i64, GroupAcc>,
 ) -> Result<(), QueryError> {
-    let mut lifetimes = read_lifetimes(tx, &lifetime_window(spec), Some(bucket.width_ms))?;
+    let window = side_read_window(spec);
+    let mut lifetimes = read_lifetimes(tx, &window, Some(bucket.width_ms))?;
+    let mut classes = read_error_classes(tx, &window, Some(bucket.width_ms))?;
     let mut stmt = tx.prepare(SERIES_AGG_SQL)?;
     let rows = stmt.query_map(
         rusqlite::params![
@@ -468,17 +485,41 @@ fn fold_groups_and_buckets(
             return Err(QueryError::InvalidBucket);
         }
         attach(&mut fine.agg, bucket_ix, &mut lifetimes);
+        let row_classes = take_classes(&fine.agg.key, bucket_ix, &mut classes);
         let cost = price(&fine.agg);
         let label = spec.group_by.label(&fine.agg.key);
-        groups.entry(label).or_default().add(&fine, cost);
-        buckets.entry(bucket_ix).or_default().add(&fine, cost);
+        groups
+            .entry(label)
+            .or_default()
+            .add(&fine, cost, &row_classes);
+        buckets
+            .entry(bucket_ix)
+            .or_default()
+            .add(&fine, cost, &row_classes);
     }
+    debug_assert_classes_attached(&classes);
     Ok(())
 }
 
-/// The window and filters of `spec`, as the lifetime read binds them.
-fn lifetime_window(spec: &QuerySpec) -> LifetimeWindow<'_> {
-    LifetimeWindow {
+/// The error-class counts of one fine row in one bucket, taken out of
+/// `classes`; empty when the row has no error.
+fn take_classes(key: &GroupKey, bucket: i64, classes: &mut ClassesByRow) -> BTreeMap<String, i64> {
+    classes.remove(&(key.clone(), bucket)).unwrap_or_default()
+}
+
+/// Every error row belongs to a fine row read under the same predicate in the
+/// same snapshot, so a class count left unattached means the two statements
+/// disagree on the window, a filter or the grain: a reader bug, caught in tests.
+fn debug_assert_classes_attached(classes: &ClassesByRow) {
+    debug_assert!(
+        classes.is_empty(),
+        "error-class rows matched no fine row: {classes:?}"
+    );
+}
+
+/// The window and filters of `spec`, as the side reads bind them.
+fn side_read_window(spec: &QuerySpec) -> SideReadWindow<'_> {
+    SideReadWindow {
         from_ms: spec.from_ms,
         to_ms: spec.to_ms,
         alias_filter: spec.alias_filter.as_deref(),
@@ -542,6 +583,7 @@ struct GroupAcc {
     client_disconnect_total: i64,
     cancelled_total: i64,
     fallback_served: i64,
+    errors_by_class: BTreeMap<String, i64>,
     ttft_sum: i64,
     ttft_count: i64,
     ttfb_max: Option<i64>,
@@ -565,8 +607,13 @@ struct GroupAcc {
 }
 
 impl GroupAcc {
-    /// Fold one priced fine row in.
-    fn add(&mut self, fine: &super::aggregate::FineRow, cost: RowCost) {
+    /// Fold one priced fine row and its error-class counts in.
+    fn add(
+        &mut self,
+        fine: &super::aggregate::FineRow,
+        cost: RowCost,
+        classes: &BTreeMap<String, i64>,
+    ) {
         let agg = &fine.agg;
         self.requests += agg.requests;
         self.ok += agg.ok;
@@ -584,6 +631,7 @@ impl GroupAcc {
         self.client_disconnect_total += agg.client_disconnect_total;
         self.cancelled_total += agg.cancelled_total;
         self.fallback_served += fine.fallback_served;
+        add_classes(&mut self.errors_by_class, classes);
         self.ttft_sum += fine.ttft_sum;
         self.ttft_count += fine.ttft_count;
         self.ttfb_max = max_opt(self.ttfb_max, fine.ttfb_max);
@@ -639,6 +687,7 @@ impl GroupAcc {
         self.client_disconnect_total += other.client_disconnect_total;
         self.cancelled_total += other.cancelled_total;
         self.fallback_served += other.fallback_served;
+        add_classes(&mut self.errors_by_class, &other.errors_by_class);
         self.ttft_sum += other.ttft_sum;
         self.ttft_count += other.ttft_count;
         self.ttfb_max = max_opt(self.ttfb_max, other.ttfb_max);
@@ -663,6 +712,7 @@ impl GroupAcc {
     /// `None` instead of a divide or a misleading zero.
     fn finish(self) -> QueryMetrics {
         let (cost_usd, cost_status) = self.cost();
+        let equivalent_cost_usd = self.equivalent_cost();
         QueryMetrics {
             requests: self.requests,
             ok: self.ok,
@@ -680,6 +730,7 @@ impl GroupAcc {
             client_disconnect_total: self.client_disconnect_total,
             cancelled_total: self.cancelled_total,
             fallback_served: self.fallback_served,
+            errors_by_class: self.errors_by_class,
             ttft_p50_ms: mean_i64(self.ttft_sum, self.ttft_count),
             ttft_p95_ms: self.ttfb_max,
             latency_p50_ms: mean_i64(self.latency_sum, self.requests),
@@ -689,7 +740,7 @@ impl GroupAcc {
             ctx_peak: self.input_tokens_max,
             cache_hit_pct: mean_f64(self.cache_hit_sum, self.cache_hit_count).map(|r| r * 100.0),
             cost_usd,
-            equivalent_cost_usd: self.equivalent_cost(),
+            equivalent_cost_usd,
             cost_status,
         }
     }
@@ -734,6 +785,13 @@ impl GroupAcc {
             return (None, CostStatus::Subscription);
         }
         (None, CostStatus::Unpriced)
+    }
+}
+
+/// Add each class count of `from` into `into`.
+fn add_classes(into: &mut BTreeMap<String, i64>, from: &BTreeMap<String, i64>) {
+    for (class, count) in from {
+        *into.entry(class.clone()).or_default() += count;
     }
 }
 

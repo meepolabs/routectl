@@ -336,19 +336,36 @@ fn errors_by_class_uses_ts_start_index() {
         );
     }
 
-    let plan: Vec<String> = db
-        .conn()
-        .prepare(&format!("EXPLAIN QUERY PLAN {ERRORS_BY_CLASS_SQL}"))
-        .expect("prepare explain")
-        .query_map([0_i64, 1000_i64], |row| row.get::<_, String>(3))
-        .expect("query explain")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("collect explain");
+    for (name, sql) in [
+        ("unbucketed", ERRORS_BY_CLASS_SQL),
+        ("bucketed", ERRORS_BY_CLASS_BUCKETED_SQL),
+    ] {
+        let mut stmt = db
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare explain");
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(0_i64),
+            Box::new(1000_i64),
+            Box::new(None::<String>),
+            Box::new(None::<String>),
+        ];
+        if stmt.parameter_count() == 5 {
+            binds.push(Box::new(100_i64));
+        }
+        let plan: Vec<String> = stmt
+            .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("query explain")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect explain");
 
-    assert!(
-        plan.iter().any(|d| d.contains("idx_requests_ts_start")),
-        "breakdown query must use idx_requests_ts_start; plan was {plan:?}"
-    );
+        assert!(
+            plan.iter().any(|d| d.contains("idx_requests_ts_start")),
+            "{name} breakdown query must use idx_requests_ts_start; plan was {plan:?}"
+        );
+    }
 }
 
 #[test]

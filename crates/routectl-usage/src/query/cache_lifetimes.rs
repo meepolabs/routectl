@@ -24,7 +24,7 @@ use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Vis
 use crate::cache_writes::{LEGACY_1H_SECONDS, LEGACY_5M_SECONDS};
 use crate::db::UsageDb;
 
-use super::aggregate::{GROUP_KEY_COLUMNS, read_group_key};
+use super::aggregate::{GROUP_KEY_COLUMNS, SideReadWindow, read_group_key};
 use super::{AggRow, GroupKey, QueryError};
 
 /// The cache writes of one fine aggregate row, split by how long the written
@@ -98,22 +98,13 @@ const CACHE_LIFETIMES_BUCKETED_SQL: &str = cache_lifetimes_sql!("(ts_start - ?1)
 /// group and bucket index. The unbucketed read puts every row in bucket 0.
 pub(super) type LifetimesByRow = HashMap<(GroupKey, i64), CacheWriteLifetimes>;
 
-/// The window and filters a lifetime read applies; the same bind values the
-/// aggregate it is merged into used.
-pub(super) struct LifetimeWindow<'a> {
-    pub from_ms: i64,
-    pub to_ms: i64,
-    pub alias_filter: Option<&'a str>,
-    pub provider_filter: Option<&'a str>,
-}
-
 /// Read the per-lifetime writes of the rows carrying a positive write total,
 /// for every fine group in the window. With `bucket_width_ms`, each group is
 /// further split by bucket index. Legacy writes are not read here; see
 /// [`attach`].
 pub(super) fn read_lifetimes(
     tx: &Transaction<'_>,
-    window: &LifetimeWindow<'_>,
+    window: &SideReadWindow<'_>,
     bucket_width_ms: Option<i64>,
 ) -> Result<LifetimesByRow, QueryError> {
     let mut out = LifetimesByRow::new();
@@ -338,7 +329,7 @@ pub fn aggregate_with_cache_lifetimes(
 ) -> Result<Vec<AggRow>, QueryError> {
     let tx = db.conn().unchecked_transaction()?;
     let mut rows = super::aggregate::aggregate_in(&tx, from_ms, to_ms)?;
-    let window = LifetimeWindow {
+    let window = SideReadWindow {
         from_ms,
         to_ms,
         alias_filter: None,

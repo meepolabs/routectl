@@ -296,7 +296,7 @@ pub struct AggRow {
 #[cfg(test)]
 use crate::db::UsageDb;
 #[cfg(test)]
-use aggregate::ERRORS_BY_CLASS_SQL;
+use aggregate::{ERRORS_BY_CLASS_BUCKETED_SQL, ERRORS_BY_CLASS_SQL};
 
 #[cfg(test)]
 #[path = "tests.rs"]

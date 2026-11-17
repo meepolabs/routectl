@@ -66,6 +66,7 @@ const TO_MS: i64 = FROM_MS + 86_400_000;
 //                           so (3 + 2) + (10 + 20)                        = 35
 // cache_write_present     = rows reporting a write: B + I                 = 2
 // stream_count            = SUM(stream) = B + E + F + H + I               = 5
+// errors_by_class         = F records no class                            = {unclassified: 1}
 
 const EXPECTED_REQUESTS: i64 = 8;
 const EXPECTED_OK: i64 = 5;
@@ -84,9 +85,9 @@ const EXPECTED_CACHE_WRITE_PRESENT: i64 = 2;
 const EXPECTED_STREAM_COUNT: i64 = 5;
 
 /// The metric vocabulary BOTH surfaces carry -- the projection this guard
-/// asserts equal. Every token is a contracts sec-15 wire name and an `i64` on
-/// both sides.
-const SHARED: [&str; 15] = [
+/// asserts equal. Every token is a contracts sec-15 wire name with the same
+/// type on both sides.
+const SHARED: [&str; 16] = [
     "requests",
     "ok",
     "errors",
@@ -102,6 +103,7 @@ const SHARED: [&str; 15] = [
     "cache_write_tokens",
     "cache_write_present",
     "stream_count",
+    "errors_by_class",
 ];
 
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
@@ -124,14 +126,13 @@ const QUERY_ONLY: [&str; 12] = [
 
 /// Panel metric-surface fields with NO `/status/query` counterpart: the group
 /// key the panel reports at its own fine grain, plus the panel-only figures.
-const PANEL_ONLY: [&str; 7] = [
+const PANEL_ONLY: [&str; 6] = [
     "alias",
     "provider",
     "model",
     "upstream",
     "cache_read_peak",
     "cache_read_present",
-    "errors_by_class",
 ];
 
 /// One ledger row's tunable columns. Defaults describe a minimal
@@ -439,7 +440,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
 }
 
 /// Sum one per-group panel field across every rollup group. Three of the
-/// fifteen shared tokens are panel-side per-group only, so their window-wide
+/// sixteen shared tokens are panel-side per-group only, so their window-wide
 /// value is the sum over the groups the panel reports.
 fn panel_group_sum(panel: &UsagePanel, field: impl Fn(&UsageGroup) -> i64) -> i64 {
     panel.groups.iter().map(field).sum()
@@ -468,6 +469,7 @@ fn shared_projection_agrees_between_query_and_usage_panel() {
     assert_eq!(p.requests, q.requests, "requests");
     assert_eq!(p.ok, q.ok, "ok");
     assert_eq!(p.errors, q.errors, "errors");
+    assert_eq!(p.errors_by_class, q.errors_by_class, "errors_by_class");
     assert_eq!(p.input_tokens, q.input_tokens, "input_tokens");
     assert_eq!(p.output_tokens, q.output_tokens, "output_tokens");
     assert_eq!(p.reasoning_tokens, q.reasoning_tokens, "reasoning_tokens");
@@ -587,6 +589,17 @@ fn both_paths_match_the_hand_computed_window_oracle() {
         assert_eq!(
             stu, EXPECTED_SERVER_TOOL_CALLS,
             "{label}: server_tool_calls"
+        );
+    }
+
+    for (label, by_class) in [
+        ("usage panel", &panel.totals.errors_by_class),
+        ("status query", &result.totals.errors_by_class),
+    ] {
+        assert_eq!(
+            by_class,
+            &std::collections::BTreeMap::from([("unclassified".to_string(), EXPECTED_ERRORS)]),
+            "{label}: errors_by_class"
         );
     }
 
