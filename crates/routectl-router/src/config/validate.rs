@@ -266,9 +266,14 @@ const MAX_MESSAGE_KEY_CHARS: usize = 256;
 /// An operator-written TOML key (or a dotted path built from one) made safe
 /// to interpolate into an error message. A quoted key may carry an ESC, CR or
 /// LF byte; rendered raw, it would split the message or forge a terminal
-/// escape. Printable ASCII passes through unchanged.
+/// escape. Control characters go by the operator-name rule (an escape
+/// sequence leaves with its ESC), printable characters pass through, and the
+/// result is cut at [`MAX_MESSAGE_KEY_CHARS`] characters.
 pub fn message_safe_key(key: &str) -> String {
-    routectl_core::sanitize_for_log_with_cap(key, MAX_MESSAGE_KEY_CHARS)
+    routectl_core::render_operator_text(key)
+        .chars()
+        .take(MAX_MESSAGE_KEY_CHARS)
+        .collect()
 }
 
 /// Whether one key segment is a strict TOML bare key: non-empty and drawn

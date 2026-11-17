@@ -91,13 +91,13 @@ pub use log_safe::{
     TRACE_HEADERS_ENV, body_trace_enabled, debug_upstream_error_body, extract_upstream_message,
     header_trace_enabled, headers_to_json, log_header_trace_status, log_redaction_status,
     log_trace_body_cap_status, process_env, redact_error_body_text, redact_prompts_enabled,
-    redact_prompts_in, render_operator_name, resolve_redact_prompts, resolve_trace_body_bytes,
-    resolve_trace_headers, sanitize_detail_for_log, sanitize_for_log, sanitize_for_log_with_cap,
-    sanitize_upstream_body, sanitize_upstream_body_with_byte_cap, sanitize_upstream_body_with_cap,
-    trace_body_cap, trace_egress_body, trace_egress_headers, trace_ingress_body,
-    trace_ingress_headers, trace_outgoing_body, trace_outgoing_headers, trace_stream_summary,
-    trace_structural_summary, trace_upstream_response_headers, trace_upstream_success_body,
-    upstream_excerpt_for_log, wrap_stream_with_summary,
+    redact_prompts_in, render_operator_name, render_operator_text, resolve_redact_prompts,
+    resolve_trace_body_bytes, resolve_trace_headers, sanitize_detail_for_log, sanitize_for_log,
+    sanitize_for_log_with_cap, sanitize_upstream_body, sanitize_upstream_body_with_byte_cap,
+    sanitize_upstream_body_with_cap, trace_body_cap, trace_egress_body, trace_egress_headers,
+    trace_ingress_body, trace_ingress_headers, trace_outgoing_body, trace_outgoing_headers,
+    trace_stream_summary, trace_structural_summary, trace_upstream_response_headers,
+    trace_upstream_success_body, upstream_excerpt_for_log, wrap_stream_with_summary,
 };
 pub use message_extras::split_message_extras;
 pub use parsed_error_body::{ParsedErrorBody, UpstreamBody, upstream_message_or_excerpt};

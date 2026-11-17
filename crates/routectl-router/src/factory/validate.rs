@@ -5,8 +5,8 @@ use super::plan::plan_coherent_entry;
 use crate::config::entry_shape::{parse_base_url, shape_refusals};
 use crate::config::provider_descriptor::{Format, vendor_containment, vendor_row};
 use crate::config::{Config, PoolEntry, PoolKey, PoolKeyField, ProviderEntry};
-use routectl_core::Result;
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
+use routectl_core::{Result, render_operator_name};
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use std::collections::BTreeMap;
@@ -664,15 +664,16 @@ pub fn validate_pools(config: &Config) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     let mut claimed_by: BTreeMap<&str, &str> = BTreeMap::new();
 
-    for (pool_name, pool) in &config.pools {
-        if config.providers.contains_key(pool_name) {
+    for (pool_key_name, pool) in &config.pools {
+        let pool_name = render_operator_name(pool_key_name);
+        if config.providers.contains_key(pool_key_name) {
             errors.push(format!(
                 "pool `{pool_name}`: a provider entry of the same name exists; a model's \
                  `provider` value resolves against providers and pools in ONE namespace, so \
                  a name matching both is ambiguous -- rename the pool or the provider entry"
             ));
         }
-        if config.models.contains_key(pool_name) {
+        if config.models.contains_key(pool_key_name) {
             errors.push(format!(
                 "pool `{pool_name}`: a model nickname of the same name exists; session \
                  affinity is keyed by pool name or model nickname, so a name matching both \
@@ -696,16 +697,18 @@ pub fn validate_pools(config: &Config) -> Result<()> {
         }
 
         let mut pool_key: Option<(&str, PoolKey)> = None;
-        for member in &pool.members {
-            if let Some(previous) = claimed_by.insert(member.as_str(), pool_name.as_str())
-                && previous != pool_name.as_str()
+        for member_key in &pool.members {
+            let member = render_operator_name(member_key);
+            if let Some(previous) = claimed_by.insert(member_key.as_str(), pool_key_name.as_str())
+                && previous != pool_key_name.as_str()
             {
+                let previous = render_operator_name(previous);
                 errors.push(format!(
                     "provider `{member}` is a member of both pool `{previous}` and pool \
                      `{pool_name}`; a provider entry belongs to at most one pool"
                 ));
             }
-            let Some(entry) = config.providers.get(member) else {
+            let Some(entry) = config.providers.get(member_key) else {
                 errors.push(format!(
                     "pool `{pool_name}`: member `{member}` is not a known provider entry in \
                      [providers]"
@@ -714,13 +717,12 @@ pub fn validate_pools(config: &Config) -> Result<()> {
             };
             let key = PoolKey::of(entry);
             match &pool_key {
-                None => pool_key = Some((member.as_str(), key)),
-                Some((first_member, first_key)) => errors.extend(
-                    first_key
-                        .differing_fields(&key)
-                        .into_iter()
-                        .map(|field| pool_mismatch_message(pool_name, first_member, member, field)),
-                ),
+                None => pool_key = Some((member_key.as_str(), key)),
+                Some((first_member, first_key)) => {
+                    errors.extend(first_key.differing_fields(&key).into_iter().map(|field| {
+                        pool_mismatch_message(pool_key_name, first_member, member_key, field)
+                    }))
+                }
             }
             if !member_authenticates_with_oauth(entry) {
                 errors.push(format!(
@@ -943,8 +945,9 @@ fn push_each_finding(errors: &mut Vec<String>, joined: &str) {
 /// first refusal of its plan unless that is one of the shape messages
 /// already collected.
 fn provider_entry_errors(name: &str, entry: &ProviderEntry) -> Vec<String> {
-    let mut errors = shape_refusals(name, entry);
-    if let Err(e) = plan_coherent_entry(name, entry) {
+    let name = render_operator_name(name);
+    let mut errors = shape_refusals(&name, entry);
+    if let Err(e) = plan_coherent_entry(&name, entry) {
         let message = bare_validation_message(e);
         if !errors.contains(&message) {
             errors.push(message);
@@ -1038,6 +1041,10 @@ mod validate_tests;
 #[cfg(test)]
 #[path = "validate_one_per_finding_tests.rs"]
 mod one_per_finding_tests;
+
+#[cfg(test)]
+#[path = "validate_name_render_tests.rs"]
+mod name_render_tests;
 
 #[cfg(test)]
 #[path = "validate_loopback_vectors_tests.rs"]

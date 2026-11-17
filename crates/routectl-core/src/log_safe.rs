@@ -134,10 +134,17 @@ pub fn render_operator_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name.len() > MAX_PROVIDER_NAME_BYTES {
         return std::borrow::Cow::Owned(format!("<{}-byte name withheld>", name.len()));
     }
-    if !name.chars().any(char::is_control) {
-        return std::borrow::Cow::Borrowed(name);
+    render_operator_text(name)
+}
+
+/// The character rule of [`render_operator_name`] with no length ceiling,
+/// for a caller that bounds the rendered text itself (a dotted key path
+/// built from several names).
+pub fn render_operator_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
     }
-    std::borrow::Cow::Owned(strip_terminal_controls(name))
+    std::borrow::Cow::Owned(strip_terminal_controls(text))
 }
 
 fn strip_terminal_controls(name: &str) -> String {

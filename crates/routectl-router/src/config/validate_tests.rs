@@ -728,3 +728,32 @@ mod server_body_limit_tests {
         );
     }
 }
+
+mod message_safe_key_tests {
+    use super::message_safe_key;
+
+    #[test]
+    fn control_characters_follow_the_operator_name_rule() {
+        let rows: &[(&str, &str, &str)] = &[
+            ("ansi color", "models.m\u{1b}[31m.knob", "models.m.knob"),
+            ("newline", "models.a\nb.knob", "models.ab.knob"),
+            (
+                "non-ascii",
+                "models.caf\u{e9}.knob",
+                "models.caf\u{e9}.knob",
+            ),
+        ];
+        for (label, key, expected) in rows {
+            assert_eq!(message_safe_key(key), *expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn a_long_path_is_cut_at_256_characters_not_withheld() {
+        let key = format!("models.{}", "n".repeat(400));
+
+        let shown = message_safe_key(&key);
+
+        assert_eq!(shown, key.chars().take(256).collect::<String>());
+    }
+}

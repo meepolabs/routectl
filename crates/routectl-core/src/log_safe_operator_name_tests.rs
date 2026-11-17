@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use super::{MAX_PROVIDER_NAME_BYTES, render_operator_name};
+use super::{MAX_PROVIDER_NAME_BYTES, render_operator_name, render_operator_text};
 
 fn has_terminal_control(s: &str) -> bool {
     s.chars().any(char::is_control)
@@ -83,4 +83,13 @@ fn a_clean_name_is_borrowed_and_a_dirty_one_is_owned() {
         Cow::Borrowed(_)
     ));
     assert!(matches!(render_operator_name("dirty\nname"), Cow::Owned(_)));
+}
+
+#[test]
+fn operator_text_strips_controls_and_keeps_its_length() {
+    let long = format!("{}\u{1b}[31m", "p".repeat(MAX_PROVIDER_NAME_BYTES * 2));
+
+    let rendered = render_operator_text(&long);
+
+    assert_eq!(rendered, "p".repeat(MAX_PROVIDER_NAME_BYTES * 2));
 }
