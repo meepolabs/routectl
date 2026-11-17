@@ -2,15 +2,17 @@
 //!
 //! Two spellings exist and must not be mixed:
 //!
-//! - [`config`]: the `kind = "..."` token of a `[providers.X]` block. The
-//!   usage ledger persists it per row, so its values are a storage format.
+//! - [`config`]: the family token of a `[providers.X]` entry, derived from
+//!   its `format` (several formats share one token). No config key spells
+//!   it. The usage ledger persists it per row, so its values are a storage
+//!   format.
 //! - [`trace`]: the `provider_kind=` field a provider writes on its own
 //!   tracing lines (`anthropic`, never `anthropic-api`; each Bedrock shape
 //!   apart). Fixture captures and log evidence key on these values.
 
 use crate::wire_check::EgressKind;
 
-/// Config-key provider kinds, as a `[providers.X]` block spells them.
+/// Family tokens of `[providers.X]` entries, one per provider family.
 pub mod config {
     /// The direct Anthropic Messages API.
     pub const ANTHROPIC_API: &str = "anthropic-api";

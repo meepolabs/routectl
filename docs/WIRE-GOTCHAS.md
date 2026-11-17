@@ -260,11 +260,11 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   plan per request, so a request sending both could never be repaired.
   Three notes for whoever debugs this next:
   - The gate is the credential LANE predicate `is_own_oauth_lane`
-    (oauth-bearer + exact `api.anthropic.com` host + not the forwarded
-    leg), deliberately NOT the client identity or the cloak mode. Gating
-    on either would let an env-held bearer or `cloak.mode = "never"`
-    re-introduce a lane-wide 400 -- the rejection is a property of the
-    credential, not of the disguise.
+    (`auth = "bearer"` + exact `api.anthropic.com` host + not the
+    forwarded leg), deliberately NOT the client identity or the cloak
+    mode. Gating on either would let an env-held bearer or
+    `cloak_mode = "never"` re-introduce a lane-wide 400 -- the rejection
+    is a property of the credential, not of the disguise.
   - `stop_sequences` is NOT stripped: probed and accepted (200). Only
     the two alternative-continuation sampling knobs are rejected.
   - `top_k` is the sibling hole. `reserved.rs` treats it as
@@ -1059,7 +1059,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 
 - **The Responses egress stamps the lane's own tag, and never the legacy
   shared one.** Both the non-streaming translator and the SSE state machine
-  take the provider's `auth_kind` and stamp `lane_format_tag(auth_kind)` on
+  take the provider's resolved Responses lane (its `AuthKind`, chosen from
+  the entry's destination) and stamp that lane's `lane_format_tag` on
   every reasoning detail they emit, so the two paths agree tag-for-tag for a
   given lane -- a divergence there would make a streamed artifact
   unreplayable on the lane that minted it. `openai-responses-v1` is read

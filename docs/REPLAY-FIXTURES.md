@@ -404,7 +404,7 @@ Fields:
   translator from this. It is also the API-SHAPE carrier: `lane`
   collapses `bedrock-invoke` and `bedrock-converse` onto the single
   `bedrock` token, while this raw provider token keeps them apart. There
-  is deliberately no separate `api_shape` field, because the raw token
+  is deliberately no separate Bedrock-format field, because the raw token
   already carries the distinction and `egress_lane_from_token`
   (`common/replay/lane.rs`) resolves both Bedrock spellings straight
   from it -- a second field would be a duplicate of a fact this one
@@ -413,7 +413,7 @@ Fields:
   `ProviderEntry` (`crates/routectl-router/src/config/schema.rs`),
   which is the vocabulary a lane's class derives from. The rig
   NORMALIZES at write time (`anthropic` -> `anthropic-api`; both
-  Bedrock api_shapes -> `bedrock`, which `kind_str()` does not split).
+  Bedrock formats -> `bedrock`, which `kind_str()` does not split).
   An unmapped provider kind leaves this EMPTY and warns, rather than
   passing an unknown spelling through as if it were a lane token.
 

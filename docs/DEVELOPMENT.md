@@ -1604,14 +1604,14 @@ apart in intent, and this is the confusion that costs an afternoon:
 | Variable | What it is |
 |---|---|
 | `ROUTECTL_DRIVER_CLIENT_API_KEY`, `ROUTECTL_DRIVER_CLIENT_BEARER` | PLACEHOLDERS. What the driven CLIENT presents to the LOCAL daemon; never reaches an upstream. Defaulted to obviously-fake values in `scripts/drivers/lib/common.sh`, and correctly so -- the MITM seam only checks that a bearer is PRESENT. |
-| `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | The REAL upstream credential routectl injects on egress. A lane config names it as `api_key_ref = "env://..."`. Never defaulted, never placeheld: an absent one refuses the run. |
+| `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | The REAL upstream credential routectl injects on egress. A lane config names it as `credential = "env://..."`. Never defaulted, never placeheld: an absent one refuses the run. |
 
 A provider whose egress needs more than a bearer gets one additional
 variable per extra field, same keying:
 `ROUTECTL_DRIVER_<PROVIDER>_ACCOUNT_ID`. Today exactly one provider needs
-it -- `openai-responses` with `auth_kind = "chatgpt-oauth"` REQUIRES the
-seat's ChatGPT account id, so a codex lane config pairs
-`api_key_ref = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"` with
+it -- an `openai-responses` entry on the `chatgpt.com` Codex host with a
+static credential REQUIRES the seat's ChatGPT account id, so a codex lane
+config pairs `credential = "env://ROUTECTL_DRIVER_OPENAI_API_KEY"` with
 `account_id_ref = "env://ROUTECTL_DRIVER_OPENAI_ACCOUNT_ID"`.
 
 **Residual credential exposure in a cell.** The runner strips every
@@ -1648,9 +1648,10 @@ provider:
   (`ROUTECTL_DRIVER_GEMINI_API_KEY`, `ROUTECTL_DRIVER_OLLAMA_API_KEY`) can
   only arrive as an env passthrough.
 - **`bedrock` is an AWS profile**, never a forwarded key. The Bedrock lane
-  configs use `creds = { kind = "profile", name = "routectl-cell" }`, a
-  fixed placeholder. `--provider bedrock` requires `--aws-profile <name>
-  --aws-config <file> --aws-credential-file <file>`: the wrapper parses the
+  configs use `credential = "aws://profile/routectl-cell"` with
+  `auth = "aws-sigv4"`, a fixed placeholder. `--provider bedrock`
+  requires `--aws-profile <name> --aws-config <file>
+  --aws-credential-file <file>`: the wrapper parses the
   operator's whole config and emits only that profile's allowlisted keys
   (`scripts/container/aws_profile.py`, strict, fails closed on duplicates,
   ambiguity, keys outside `credential_process` / `region` / `output`, or any

@@ -190,14 +190,17 @@ big              = ["heavy", "fast"]   # fallback chain
 default          = "fast"
 ```
 
-Credentials resolve through URI schemes; inline literals are rejected
-outright:
+Every provider entry writes `format`, then `base_url` (or `cloud` for
+AWS), then `credential` and `auth`. A `credential` is a reference, never
+the secret; inline literals are rejected outright:
 
 | Scheme | Meaning |
 |---|---|
 | `env://VAR` | Process env var |
 | `file:///abs/path` | File contents (refused on Unix unless owner-only, `chmod 600`) |
-| `oauth://<provider>` | routectl-managed OAuth credential, populated by `routectl login <provider>` |
+| `oauth://<vendor>` | routectl-managed OAuth credential, populated by `routectl login <vendor>` |
+| `aws://profile/<name>`, `aws://chain` | An AWS profile, or the AWS default credential chain |
+| `forwarded` | The client's own Anthropic credential, passed through |
 
 The full config surface -- retry policy, capability overrides, cache
 knobs, per-model prices, hot-reload, managed OAuth -- lives in
@@ -206,13 +209,15 @@ JSON Schema (`routectl.schema.json`) for editor completion.
 
 ## Provider classes
 
-| Kind | Speaks | Auth |
+Seven `format` values feed the five egress provider classes:
+
+| `format` | Speaks | Auth |
 |---|---|---|
-| `openai-compat` | Any OpenAI-shape host (OpenAI, DeepSeek, OpenRouter, Groq, NIM, vLLM, llama.cpp, ...), six reasoning dialects | API key |
-| `anthropic-api` | Native Anthropic Messages, incl. Claude Code gateway support | API key, OAuth, or forwarded client credential |
-| `bedrock` | AWS Bedrock InvokeModel + Converse, plus bearer-key lanes | SigV4 credential chain or bearer key |
-| `openai-responses` | OpenAI Responses API / ChatGPT Codex | ChatGPT OAuth, API key, or Bedrock bearer |
-| `gemini` | Native Google Gemini `generateContent` | API key or Cloud Code OAuth |
+| `openai-chat` | Any OpenAI-shape host (OpenAI, DeepSeek, OpenRouter, Groq, NIM, vLLM, llama.cpp, ...), six reasoning dialects; also Bedrock's managed OpenAI surface | API key; AWS SigV4 or Bedrock API key on AWS |
+| `anthropic-messages` | Native Anthropic Messages, incl. Claude Code gateway support; also Bedrock's managed Anthropic surface | API key, OAuth, or forwarded client credential; AWS SigV4 or Bedrock API key on AWS |
+| `bedrock-invoke`, `bedrock-converse` | AWS Bedrock InvokeModel and Converse | AWS SigV4 (profile or default chain) or Bedrock API key |
+| `openai-responses` | OpenAI Responses API / ChatGPT Codex; also Bedrock's managed OpenAI surface | ChatGPT OAuth or API key; AWS SigV4 or Bedrock API key on AWS |
+| `gemini`, `gemini-cloud-code` (untested) | Native Google Gemini `generateContent` | API key, or Cloud Code OAuth |
 
 Per-provider knobs and per-model tips live in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) and

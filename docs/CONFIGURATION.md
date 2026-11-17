@@ -19,6 +19,7 @@ overlays merge, what's reserved.
 **Basics**
 - [Getting started: provider + model + alias](#getting-started-provider--model--alias)
 - [Top-level shape](#top-level-shape)
+- [Provider entries (`[providers.X]`)](#provider-entries-providersx)
 - [Config schema version (`version`)](#config-schema-version-version)
 - [Retired config keys](#retired-config-keys)
 - [Editor autocomplete (JSON Schema)](#editor-autocomplete-json-schema)
@@ -29,16 +30,16 @@ overlays merge, what's reserved.
 - [Per-provider runtime gates](#per-provider-runtime-gates) (RPM, circuit breaker, timeouts) -
   [local refusals](#local-refusals)
 - [Per-provider capability filter](#per-provider-capability-filter)
-- [Gemini](#providersx-gemini-kind--gemini) -
+- [Gemini](#gemini-gemini-gemini-cloud-code) -
   [ChatGPT / Codex](#chatgpt--codex-provider) -
   [xAI (Grok)](#xai-grok-provider)
-- Bedrock: [api_shape](#providersx-api_shape----bedrock-api-selector) -
+- Bedrock: [formats](#bedrock-formats-bedrock-invoke-bedrock-converse) -
   [beta-flag controls](#bedrock-and-anthropic-api-beta-flag-controls) -
   [body fields](#bedrock-body-fields) -
   [mantle Anthropic lane](#bedrock-mantle-anthropic-lane) -
   [mantle OpenAI lanes](#bedrock-mantle-openai-lanes)
-- anthropic-api flags: [context_management](#context_management-anthropic-api-provider-flag) -
-  [credential_source (forwarded)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
+- anthropic-messages: [context_management](#context_management-anthropic-messages-only) -
+  [forwarded credential](#forwarded-credential)
 
 **Models and routing**
 - [Model routing (`[aliases]`)](#model-routing-aliases)
@@ -121,18 +122,14 @@ an entry holding the plain family name makes `[pools.anthropic]`
 unnameable, and a later `routectl login anthropic` then has nowhere to
 put a second subscription seat.
 
-A provider entry sets exactly one of `base_url` or `cloud`. `base_url` is a
-plain http(s) URL: a host and an optional path prefix (a trailing slash is
-fine), with no `user@` userinfo, no `?query` and no `#fragment`; `http://`
-is accepted for loopback hosts only. Some keys apply to one format only,
-and setting one on another format is refused, even with an empty or
-`false` value: `anthropic_version`, `forward_client_headers`,
-`context_management`, `cloak_mode` and `cloak_strict_mode` belong to
-`anthropic-messages`; `codex_version` and `account_id_ref` to
-`openai-responses`; `cloud_project_id` to `gemini-cloud-code`. Every other
-key applies to every format. `config check`, daemon start and reload report
-every such problem in the file at once, naming the provider and the key and
-never printing the value.
+A provider entry writes its keys in one order: `format` (the API it
+speaks), then exactly one of `base_url` or `cloud` (where requests go),
+then `credential` (which secret) and `auth` (how it goes on the wire).
+[Provider entries](#provider-entries-providersx) lists every value of
+those keys, which keys apply to which format, and the rules an entry must
+meet. `config check`, daemon start and reload report every problem in the
+file at once, naming the provider and the key and never printing the
+value.
 
 Save as `~/.config/routectl/config.toml` (or
 `$XDG_CONFIG_HOME/routectl/config.toml`) on every OS, including macOS, then
@@ -152,10 +149,12 @@ The first that holds a `config.toml` or cannot be inspected stops every
 command that reads or writes the config until you move its files or pass
 `--config` (or set `ROUTECTL_CONFIG`); `logout`, `refresh`, `whoami`,
 `config example`, `prices refresh` and `doctor` still run, and `doctor`
-lists the old folder. Credentials always arrive as references --
-`env://VAR`, `file:///abs/path` (owner-only, 0600), or
-`oauth://<provider>` (populated by `routectl login <provider>`);
-inline `literal:` values are rejected at parse and resolve. To add a
+lists the old folder. A `credential` is always a reference:
+`env://VAR`, `file:///abs/path` (owner-only, 0600),
+`oauth://<vendor>` (populated by `routectl login <vendor>`), an AWS
+form, or `forwarded` (see
+[Provider entries](#provider-entries-providersx)); inline `literal:`
+values are rejected at parse and resolve. To add a
 provider interactively (with secret capture) use
 `routectl provider add`; the rest of this document is the full
 reference for everything the wizard does not cover.
@@ -171,8 +170,9 @@ version = 5           # config schema version; see "Config schema version"
 [server]              # listener: host, port, body limit
 [server.auth]         # listener auth tokens (when binding non-loopback)
 
-[providers.X]         # transport + auth: how to reach an upstream
-[providers.Y]         # one block per upstream (multiple Y allowed)
+[providers.X]         # one upstream: format, base_url or cloud,
+[providers.Y]         # credential, auth, then tuning (see "Provider
+                      # entries"); one block per upstream
 
 [pools.X]             # a group of interchangeable provider entries (OAuth
                       # accounts) dispatch spreads across: members,
@@ -215,6 +215,205 @@ check` exactly as shipped, but it is NOT boot-ready: every credential in
 it is a REFERENCE, and none resolves until the named env var is set or
 the matching `routectl login` has run (an unresolved ref is a warning,
 never an error). Copy and edit; do not re-derive.
+
+## Provider entries (`[providers.X]`)
+
+Every `[providers.X]` entry answers the same questions with the same keys,
+written in this order:
+
+1. `format` -- the API the upstream speaks.
+2. Exactly one of `base_url` (an explicit endpoint) or `cloud` (a cloud
+   whose endpoint routectl derives).
+3. `credential` -- the one credential reference.
+4. `auth` -- how that credential goes on the wire.
+5. Companions, only where the format needs them: `account_id_ref`,
+   `cloud_project_id`.
+6. Tuning keys, each optional with a default.
+
+The four identity keys (`format`, the carrier, `credential`, `auth`) are
+always written; nothing defaults them. An unknown key is refused.
+
+```toml
+[providers.openrouter]
+format     = "openai-chat"
+base_url   = "https://openrouter.ai/api/v1"
+credential = "env://OPENROUTER_API_KEY"
+auth       = "bearer"
+
+[providers.bedrock-east]
+format     = "bedrock-converse"
+cloud      = { name = "aws", region = "us-east-1" }
+credential = "aws://profile/bedrock"
+auth       = "aws-sigv4"
+```
+
+### `format`
+
+| `format` | API | Carriers | `auth` values | Family token |
+|---|---|---|---|---|
+| `anthropic-messages` | Anthropic Messages | `base_url`; `cloud` (AWS Bedrock's managed Anthropic surface) | `base_url`: `x-api-key`, `bearer`; `cloud`: `bearer`, `aws-sigv4` | `anthropic-api` |
+| `openai-chat` | OpenAI-compatible Chat Completions | `base_url`; `cloud` (Bedrock's managed OpenAI surface) | `base_url`: `bearer`; `cloud`: `bearer`, `aws-sigv4` | `openai-compat` |
+| `openai-responses` | OpenAI Responses (the OpenAI API, or ChatGPT Codex on `chatgpt.com`) | `base_url`; `cloud` (Bedrock's managed OpenAI surface) | `base_url`: `bearer`; `cloud`: `bearer`, `aws-sigv4` | `openai-responses` |
+| `bedrock-invoke` | AWS Bedrock InvokeModel (Anthropic Messages body) | `cloud` only | `bearer`, `aws-sigv4` | `bedrock` |
+| `bedrock-converse` | AWS Bedrock Converse | `cloud` only | `bearer`, `aws-sigv4` | `bedrock` |
+| `gemini` (untested) | Google Gemini `generateContent` with an API key | `base_url` only | `x-goog-api-key` | `gemini` |
+| `gemini-cloud-code` (untested) | Gemini through the Cloud Code surface | `base_url` only | `bearer` | `gemini` |
+
+A format with an `auth` value its carrier does not accept is refused,
+naming the accepted values. A format over a carrier it does not list, or
+whose provider is not compiled into the binary, is refused as not
+available over that carrier in this build.
+
+The family token is not a config key. It is the provider kind routectl
+derives from `format` and stores with each usage row, learned capability,
+calibration lane and price lookup, and it is what diagnostics print as
+the provider `kind`. Several formats share one token. Learned capabilities
+belong to the entry name and its token, so switching an entry between
+`bedrock-invoke` and `bedrock-converse` keeps them, while a reload that
+moves the entry to a format with another token drops them (the
+`owner_sweep` line in [LOGGING.md](LOGGING.md)). Usage rows keep the
+token they were written with.
+
+**Untested formats.** `gemini` and `gemini-cloud-code` parse and route,
+and so does the managed xAI login on `openai-chat` (see
+[xAI (Grok) provider](#xai-grok-provider)), but none of the three has
+been validated against its live upstream for this release. Treat them as
+best-effort.
+
+### `base_url` and `cloud`
+
+Set exactly one; both or neither is refused.
+
+`base_url` is a plain http(s) URL: a host and an optional path prefix
+(a trailing `/` is fine), with no `user@` userinfo, no `?query` and no
+`#fragment`. Request paths are appended to it. It must be `https://`, or
+`http://` on a loopback host only (see
+[`base_url` scheme requirement](#field-assignment-table)). No format has a
+default: write the endpoint even for the vendor's public API.
+
+`cloud` names a cloud by `name` plus that cloud's location keys, and
+routectl derives the endpoint host and the signing scope from them. The
+one cloud this build accepts is `aws`, located by `region`:
+
+```toml
+[providers.bedrock-west]
+format     = "bedrock-invoke"
+cloud      = { name = "aws", region = "us-west-2" }
+credential = "aws://chain"
+auth       = "aws-sigv4"
+```
+
+`region` must be a canonical AWS region (see
+[AWS region values](#aws-region-values)). For `bedrock-invoke` and
+`bedrock-converse` the endpoint is Bedrock runtime; for the other three
+formats it is Bedrock's managed surface (see
+[Bedrock mantle Anthropic lane](#bedrock-mantle-anthropic-lane) and
+[Bedrock mantle OpenAI lanes](#bedrock-mantle-openai-lanes)).
+
+Other clouds are planned as further `name` values, each with its own
+location keys (not settled yet). They are NOT supported: this build
+refuses any `name` other than `aws`, so the shapes below show the
+direction only and are not config to copy:
+
+```text
+# Not supported yet; refused at load.
+cloud = { name = "google-vertex", <Vertex location keys> }
+cloud = { name = "azure", <Azure location keys> }
+```
+
+### `credential`
+
+One string, always a reference, never the secret itself:
+
+| Value | Meaning |
+|---|---|
+| `env://VAR` | The value of an environment variable. |
+| `file:///abs/path` | The contents of a file (refused on Unix unless owner-only, `chmod 600`). |
+| `oauth://<vendor>` or `oauth://<vendor>#<label>` | A routectl-managed login stored by `routectl login <vendor> [--label <label>]`. The bare form is the vendor's default seat; `#<label>` picks one labeled seat. |
+| `aws://profile/<name>` | A named profile from the shared AWS config. |
+| `aws://chain` | The AWS SDK default credential chain (environment, profile, SSO, container and instance roles). |
+| `forwarded` | The client's own credential, passed through (see [Forwarded credential](#forwarded-credential)). |
+
+`literal:` values are refused. An AWS access key pair goes in a profile or
+the environment and is reached through `aws://profile/<name>` or
+`aws://chain`. A Bedrock API key is an ordinary `env://` or `file://`
+reference with `auth = "bearer"`.
+
+### `auth`
+
+| Value | On the wire |
+|---|---|
+| `x-api-key` | `x-api-key: <credential>` |
+| `bearer` | `Authorization: Bearer <credential>` |
+| `x-goog-api-key` | `x-goog-api-key: <credential>` |
+| `aws-sigv4` | AWS SigV4 request signing with the `aws://` credential |
+
+### Rules an entry must meet
+
+Each rule is checked before any credential is read, at `config check`,
+daemon start, hot reload and on every config edit. A refusal names the
+provider and the keys, never the base URL or the credential.
+
+- `aws-sigv4` is used exactly when the credential is `aws://profile/<name>`
+  or `aws://chain`.
+- `forwarded` is accepted only with `format = "anthropic-messages"`,
+  `auth = "bearer"` and an https `base_url` whose host is exactly
+  `api.anthropic.com`, with no userinfo and no explicit non-default port.
+- `gemini-cloud-code` takes only a managed `oauth://antigravity[#label]`
+  login.
+- A managed `oauth://<vendor>` login is accepted only on its vendor's own
+  lane: the vendor's format, `auth = "bearer"`, and an https `base_url` on
+  one of the vendor's first-party hosts with no userinfo and no explicit
+  non-default port (see
+  "Managed token host containment" under
+  [Why route claude-code through routectl](#why-route-claude-code-through-routectl)).
+  The same check covers `account_id_ref`.
+- A key that applies to one format only (table below) is refused on any
+  other format, even when written as `false`, an empty string or an empty
+  list.
+- `base_url` is a plain URL as described above.
+
+**Client identity.** routectl presents a vendor's generated client
+identity (the Claude Code header pack, user agent, session ids and body
+cloak for Anthropic; the codex CLI headers and ids for Codex; the
+Antigravity identity for Cloud Code) only when the entry's `credential`
+is that vendor's managed login (`oauth://anthropic`, `oauth://codex` or
+`oauth://antigravity`, any label) AND the entry is the vendor's own lane
+as defined above. An API key or a pasted token in `env://` or `file://`
+never gets one, even on the vendor's host, and neither does the managed
+xAI login. Set `user_agent` or `header_extras` yourself where such an
+upstream needs them.
+
+### Companions
+
+- `account_id_ref` (`openai-responses` only) -- a reference to the
+  ChatGPT account id, for a `base_url` on the Codex host. Optional with an
+  `oauth://codex` login (read from the login), required with a static
+  credential there, refused anywhere else. See
+  [ChatGPT / Codex provider](#chatgpt--codex-provider).
+- `cloud_project_id` (`gemini-cloud-code` only) -- the Cloud Code project
+  id. See [Gemini](#gemini-gemini-gemini-cloud-code).
+
+### Which keys apply to which format
+
+| Key | Formats |
+|---|---|
+| `anthropic_version`, `forward_client_headers`, `context_management`, `cloak_mode`, `cloak_strict_mode` | `anthropic-messages` |
+| `codex_version`, `account_id_ref` | `openai-responses` |
+| `cloud_project_id` | `gemini-cloud-code` |
+| `header_extras`, `payload_extras`, `user_agent`, `cache_capability`, `reduction_enabled`, `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`, `stream_first_byte_timeout_ms` | every format |
+
+Each key is described in its own section: `anthropic_version` defaults
+to `2023-06-01` (see [Field-assignment table](#field-assignment-table));
+`forward_client_headers` and the cloak keys under
+[claude-code as a gateway client](#claude-code-as-a-gateway-client);
+[context_management](#context_management-anthropic-messages-only);
+[`codex_version`](#codex_version-client-identity-override);
+[header_extras](#header_extras-merge) and
+[payload_extras](#payload_extras-merge);
+[`cache_capability`](#per-provider-capability-cache_capability);
+[`reduction_enabled`](#per-provider-switch-reduction_enabled); the five
+runtime keys under [Per-provider runtime gates](#per-provider-runtime-gates).
 
 ## Config schema version (`version`)
 
@@ -696,16 +895,16 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `pricing`                      | `[models.X]`        | Option<table>, per-Mtok prices, each field optional; non-finite or negative refused; per-field precedence in [Model prices](#model-prices-modelsxpricing) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
-| `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
-| `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only; `anthropic_version` default `2023-06-01` (anthropic-api only) |
-| `credential_source`            | `[providers.X]` AnthropicApi    | string, default `"own"`; `"forwarded"` requires empty `api_key_ref` + `base_url` pinned to `api.anthropic.com` (see "credential_source" below) |
+| `format`, `base_url` or `cloud`, `credential`, `auth` | `[providers.X]` | provider-only; required (see [Provider entries](#provider-entries-providersx)) |
+| `account_id_ref`, `cloud_project_id` | `[providers.X]` | provider-only companions; one format each (see [Provider entries](#provider-entries-providersx)) |
+| `anthropic_version`            | `[providers.X]`     | provider-only, `anthropic-messages` only; default `2023-06-01`         |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
 | `runtime` (RPM, breaker, timeouts) | `[providers.X]`, `[pools.X]` | provider > pool; the two timeouts then fall back to `[retry]`          |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
 | `normalize_tools`              | `[cache]` global                | bool, default true; stable-sorts the tool array on the OAuth Anthropic path for cache stability (see `[cache]`) |
 | `k_gated_emission`             | `[cache]` global                | bool, default **false**; when true, withholds auto-emitted markers on a session whose measured reuse sits below the marker's break-even (see `[cache]`) |
-| `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
+| `cache_capability`             | `[providers.X]`                 | see [Per-provider capability](#per-provider-capability-cache_capability) |
 | `enabled`                      | `[reduction]` global            | bool, default true; master switch for dispatch-path context reduction (see `[reduction]`)         |
 | `reduction_enabled`            | `[providers.X]`                 | `Option<bool>`, default None (inherits global); `false` disables reduction for this provider      |
 | `enabled`                      | `[window_gate]` global          | bool, default false; master switch for the proactive context-window gate (see `[window_gate]`)    |
@@ -774,7 +973,7 @@ vocabulary:
 |---|---|
 | `anthropic-api` (Mantle's Anthropic lane included), Bedrock Invoke, the Bedrock Converse bag | the Anthropic Messages ingress |
 | `openai-compat` (Mantle's OpenAI-compatible lane included) | the OpenAI Chat Completions ingress |
-| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress, and on `bedrock-mantle` only as a captured value (`prompt_cache_retention` `"in_memory"` or `"24h"`, `prompt_cache_options` `{"mode": "explicit"}` with an optional `"ttl": "30m"`), any other value withheld whole. From the Responses ingress, `auth_kind = "api-key"` also forwards any other key except one routectl writes itself; `chatgpt-oauth` and `bedrock-mantle` withhold every other key and count the request once as `unknown_member_withheld`. Any other key from another ingress counts the request once as `foreign_dialect_extra` |
+| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress, and on the AWS `cloud` only as a captured value (`prompt_cache_retention` `"in_memory"` or `"24h"`, `prompt_cache_options` `{"mode": "explicit"}` with an optional `"ttl": "30m"`), any other value withheld whole. From the Responses ingress, an entry whose `base_url` is not on the ChatGPT Codex host also forwards any other key except one routectl writes itself; the Codex host and the AWS `cloud` withhold every other key and count the request once as `unknown_member_withheld`. Any other key from another ingress counts the request once as `foreign_dialect_extra` |
 | `gemini` | no ingress: only the operator layer |
 
 A library caller that builds its own `ChatRequest` keeps forwarding its
@@ -804,8 +1003,9 @@ on `gemini` the top-level keys count as their own `ingress_extra_withheld`
 policy action). Each dropped top-level key and member is declared
 removed at its own path. A Responses client's members, a function tool's
 included, are withheld in two more cases, counted once per request as
-`unknown_member_withheld` instead: on `auth_kind = "bedrock-mantle"`,
-which forwards no carried member, and, on any auth kind, the members of
+`unknown_member_withheld` instead: on an `openai-responses` entry over the
+AWS `cloud`, which forwards no carried member, and, on any destination,
+the members of
 a `function_call` or `reasoning` item that does not ship with the
 identity the client gave it.
 
@@ -817,7 +1017,7 @@ Claude, say), set it in `payload_extras`.
 Gemini forwards the operator layer alone for all ingress traffic, so a
 swept client value never reaches it, even underneath an operator value
 at the same key. See the
-[Gemini `payload_extras`](#providersx-gemini-kind--gemini) entry.
+[Gemini `payload_extras`](#gemini-gemini-gemini-cloud-code) entry.
 
 Whatever the source, openai-compat never sends `mcp_servers`: its
 entries can carry a token issued for a remote MCP server, so the field
@@ -847,7 +1047,7 @@ policy action. Only an operator `payload_extras` value for
 per-provider and per-model values via `header_extras`; the list-valued
 post-pass unions them with the ingress lift.
 
-Auth secrets belong in `api_key_ref` / `auth_kind` on the provider, not
+Auth secrets belong in `credential` / `auth` on the provider, not
 `header_extras`. An auth-reserved key never reaches the wire, but where
 it is configured decides how the drop is logged:
 
@@ -920,7 +1120,7 @@ strongest first:
    [pinned](#pinning-a-bedrock-beta-floor) through provider or model
    `header_extras["anthropic-beta"]` is always sent and never withheld.
 2. **A non-Anthropic model on Converse withholds every client flag.** On
-   `api_shape = "converse"`, a model whose upstream id is provably not
+   `format = "bedrock-converse"`, a model whose upstream id is provably not
    Anthropic (`openai.*`, `amazon.nova-*`, `meta.llama*`, ..., with or
    without a region prefix, or a `foundation-model/` ARN embedding one)
    refuses the `anthropic_beta` field itself, so no client flag is sent
@@ -943,7 +1143,7 @@ strongest first:
 
 A request on a forwarded credential withholds nothing: the client owns
 that credential and its beta choices. Each withheld flag is logged at
-`debug` on both `api_shape = "invoke"` and `"converse"`, and each carrier
+`debug` on both `bedrock-invoke` and `bedrock-converse`, and each carrier
 counts the withhold once per request as the `anthropic_beta_rejected_by_bedrock`
 drop class.
 
@@ -994,7 +1194,8 @@ ledger, and the flag is sent from then on, across restarts. The lift is
 accepted only for a lane some configured model routes to, and it lasts
 until the upstream rejects the flag again on that lane (the rejection is
 learned as usual and the seed's withhold returns with it) or the lane's
-provider entry is removed or changes `kind`.
+provider entry is removed or moves to a `format` with another family
+token (see [`format`](#format)).
 To send a flag permanently, use a `force_supported` override on
 `beta:<flag>` instead.
 
@@ -1074,8 +1275,8 @@ A flag in a Bedrock provider's or model's
 `header_extras["anthropic-beta"]` (comma-separated) is always sent on
 requests destined for that provider or model, regardless of what the
 caller sent. It rides where Bedrock reads betas: the top-level
-`anthropic_beta` array on `api_shape = "invoke"`, the
-`additionalModelRequestFields` bag on `"converse"`. The pin is unioned
+`anthropic_beta` array on `bedrock-invoke`, the
+`additionalModelRequestFields` bag on `bedrock-converse`. The pin is unioned
 after the client's flags, each flag appears once on the wire (a client
 flag repeating a pinned flag is not sent twice), and no withholding or
 repair ever removes a pinned flag.
@@ -1132,19 +1333,24 @@ targets can reach is reported:
   `[pools]` block, except a model whose own `"<provider>:<nickname>"` cell
   also names the flag (that cell decides it).
 - `structured-outputs-2025-12-15`, re-added whenever the request carries
-  `output_config.format`; not on a `credential_source = "forwarded"`
-  provider, whose client betas pass through verbatim.
-- On an `auth_kind = "oauth-bearer"` provider whose `base_url` host is
-  `api.anthropic.com` and whose `credential_source` is `own` (the default)
-  only: `oauth-2025-04-20` (OAuth gate, always), `effort-2025-11-24`
-  (re-added whenever the request carries `output_config.effort`) and the
-  Claude Code floor listed below (re-added on requests routectl classifies as
-  non-Claude-Code -- normally those without a Claude Code session header -- or
-  on every request under `cloak.mode = "always"`; never under
-  `cloak.mode = "never"`). An `api-key` provider or one on another host is not
-  warned about these, and there the override does withhold the flag. A
-  forwarded provider is not warned either, but there no `beta:` override
-  withholds anything: the client's beta set is forwarded as sent.
+  `output_config.format`; not on a `credential = "forwarded"` provider,
+  whose client betas pass through verbatim.
+- On an `auth = "bearer"` provider whose `base_url` host is
+  `api.anthropic.com` and whose credential is its own (not `forwarded`):
+  `oauth-2025-04-20` (OAuth gate, always).
+- On a provider presenting the Claude Code identity (a managed
+  `oauth://anthropic` login on `api.anthropic.com`, see
+  [Provider entries](#rules-an-entry-must-meet)) only:
+  `effort-2025-11-24` (re-added whenever the request carries
+  `output_config.effort`) and the Claude Code floor listed below (re-added
+  on requests routectl classifies as non-Claude-Code -- normally those
+  without a Claude Code session header -- or on every request under
+  `cloak_mode = "always"`; never under `cloak_mode = "never"`).
+
+  An `x-api-key` provider or one on another host is not warned about
+  these, and there the override does withhold the flag. A forwarded
+  provider is not warned either, but there no `beta:` override withholds
+  anything: the client's beta set is forwarded as sent.
 
 Two removals run after every re-add and are reflected in the warning:
 `context-management-2025-06-27` is never reported on a provider with
@@ -1170,8 +1376,8 @@ rejected with 400. A request that drops any flag logs exactly one warning,
 carrying the number of dropped flags and the length of the longest one, never
 the flag values; this holds when the same request is also rejected for the cap.
 
-On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
-routectl also injects a 9-flag model-agnostic floor
+On a provider presenting the Claude Code identity, routectl also injects,
+on requests it classifies as non-Claude-Code, a 9-flag model-agnostic floor
 (`default_claude_code_anthropic_betas()`: `claude-code-20250219`,
 `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`,
 `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`,
@@ -1199,7 +1405,7 @@ runs earlier can remove them:
 | Body field | Beta force-added | Lanes |
 | --- | --- | --- |
 | `output_config.format` (structured outputs) | `structured-outputs-2025-12-15` | `anthropic-api` (`anthropic-beta` header) and Bedrock (body `anthropic_beta` array) |
-| `output_config.effort` (adaptive thinking) | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
+| `output_config.effort` (adaptive thinking) | `effort-2025-11-24` | a provider presenting the Claude Code identity only |
 
 Neither is a client-opted beta: each is a routectl-derived capability
 signal implied by the feature the request is already using. A 2026-08-11
@@ -1228,25 +1434,29 @@ trying to withhold the beta.
 ### OAuth lane: `temperature` and `top_p` are dropped
 
 Anthropic's OAuth seat rejects a `/v1/messages` body carrying
-`temperature` or `top_p`. On an `auth_kind = "oauth-bearer"` provider
-talking to `api.anthropic.com` (excluding the forwarded / pure-proxy
-leg), routectl removes both from the outbound body and logs one
+`temperature` or `top_p`. On an `auth = "bearer"` provider whose
+`base_url` host is `api.anthropic.com` (excluding the forwarded /
+pure-proxy leg), routectl removes both from the outbound body and logs one
 structured `WARN` per affected request naming the dropped keys.
 `stop_sequences` is unaffected.
 
-This gate is the LANE, not the cloak setting: **`cloak.mode = "never"` on
-such a provider STILL drops these params.** That is intended -- the 400 is
+This gate is the LANE, not the client identity or the cloak setting: **an
+`env://` bearer, or `cloak_mode = "never"`, on such a provider STILL drops
+these params.** That is intended -- the 400 is
 a property of the credential, not of the disguise, so honouring the knob
 would mean failing the request instead. If you need `temperature` or
-`top_p` honoured, route the request to an API-key provider or a
+`top_p` honoured, route the request to an `x-api-key` provider or a
 non-Anthropic host.
 
-## `[providers.X] api_shape` -- Bedrock API selector
+## Bedrock formats (`bedrock-invoke`, `bedrock-converse`)
 
-A Bedrock provider picks its wire shape with `format`:
+A native Bedrock provider picks its wire shape with `format`, and always
+reaches AWS through `cloud`:
 
 - `"bedrock-invoke"` -- vendor-specific InvokeModel body (the Anthropic
-  Messages payload).
+  Messages payload). Every model routed to it must be an Anthropic-family
+  model; an upstream id that provably names another vendor is refused at
+  load (an inference-profile ARN proves nothing and passes).
 - `"bedrock-converse"` -- vendor-neutral Converse API.
 
 ```toml
@@ -1257,14 +1467,17 @@ credential = "aws://chain"
 auth       = "aws-sigv4"
 ```
 
-Both shapes are wired for Anthropic models on Bedrock; see
+The credential is `aws://profile/<name>` or `aws://chain` with
+`auth = "aws-sigv4"`, or a Bedrock API key as an `env://` / `file://`
+reference with `auth = "bearer"`. Both formats share the `bedrock`
+family token. Both shapes are wired for Anthropic models on Bedrock; see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region) for the
 adaptive-thinking interaction.
 
 ### AWS region values
 
-Every region-derived lane -- native `bedrock` `region` and each
-`bedrock_mantle.region` -- builds its endpoint host from the region and
+Every `cloud = { name = "aws", region = "..." }` entry, native Bedrock
+and the managed surface alike, builds its endpoint host from the region and
 signs under it, so the value must be a canonical AWS region identifier:
 lowercase `a-z`, `0-9` and `-` only, at most 32 bytes, in the commercial
 (`us-west-2`, `eu-central-1`), GovCloud (`us-gov-west-1`) or China
@@ -1299,65 +1512,51 @@ provider = "bedrock-mantle"
 upstream = "claude-haiku-4-5-20251001-v1:0"   # bare model id, no "us." prefix
 ```
 
-Fields:
+The keys, in order:
 
-- `region` (required, a canonical AWS region -- see
-  [AWS region values](#aws-region-values)) -- the AWS region the mantle
-  endpoint lives in (e.g. `us-east-1`). It is the SINGLE source of truth: the
-  factory derives both the endpoint host
+- `format = "anthropic-messages"`.
+- `cloud = { name = "aws", region = "<region>" }` (a canonical AWS region,
+  see [AWS region values](#aws-region-values)) -- the SINGLE source of
+  truth for the endpoint: the factory derives both the host
   (`https://bedrock-mantle.<region>.api.aws/anthropic`) and the SigV4
-  signing scope from it. Do NOT set `base_url` on a mantle provider.
-- `creds` (required) -- the credential descriptor. A `kind` tag selects
-  one of four shapes:
-  - `{ kind = "bearer-key", key_ref = "<secret-uri>" }` -- a long-term
-    Bedrock API key sent as `Authorization: Bearer`. `key_ref` resolves a
-    secret URI (`env://`, `file://`).
-  - `{ kind = "static", access_key_ref = "<uri>", secret_key_ref = "<uri>", session_token_ref = "<uri>" }`
-    -- static AWS access/secret keys signed with SigV4. `session_token_ref`
-    is optional (set it for short-term STS credentials).
-  - `{ kind = "profile", name = "<profile>" }` -- a named profile from the
-    AWS shared-credentials file; SigV4-signed.
-  - `{ kind = "default-chain" }` -- the AWS default credential provider
-    chain (environment, profile, SSO, container/instance roles);
-    SigV4-signed.
+  signing scope from it. There is no `base_url` on a cloud entry.
+- `credential` and `auth`, one of:
+  - a long-term Bedrock API key, `credential = "env://VAR"` (or
+    `file://`) with `auth = "bearer"`, sent as `Authorization: Bearer`;
+  - `credential = "aws://profile/<name>"` with `auth = "aws-sigv4"` -- a
+    named profile from the shared AWS config, SigV4-signed;
+  - `credential = "aws://chain"` with `auth = "aws-sigv4"` -- the AWS
+    default credential chain (environment, profile, SSO, container and
+    instance roles), SigV4-signed.
 
-Validation (enforced on build, reload, and `config check`) rejects an
-incoherent mantle entry:
-
-- `auth_kind = "oauth-bearer"` -- REJECTED. The lane never carries a
-  Claude Code OAuth token (whose identity headers and User-Agent must
-  never reach AWS); leave `auth_kind` at its `"api-key"` default.
-- `credential_source` not `"own"` -- REJECTED. The credential comes from
-  `bedrock_mantle.creds`; `own` (the default) is the only coherent value.
-- a non-empty `api_key_ref` -- REJECTED. `creds` is the single credential
-  source, so a stray `api_key_ref` is dead config.
-- a non-default `base_url` -- REJECTED. `region` derives the endpoint, so a
-  manual `base_url` would drift from it.
-- a `region` that is not a canonical AWS region identifier (including an
-  empty or whitespace-only value) -- REJECTED.
+Validation (enforced on build, reload, and `config check`) refuses any
+other pairing: `x-api-key`, an `oauth://` login (managed logins are
+contained to their vendor's first-party host, so no subscription token
+and no Claude Code identity ever reaches AWS), `forwarded`, an `aws://`
+credential without `aws-sigv4` or the reverse, and a region that is not a
+canonical AWS region.
 
 The mantle lane uses a no-redirect client: any 3xx from the upstream is a
 fault to surface, never followed (auto-following a signed POST would
 replay the SigV4 signature cross-host). AWS-shaped error envelopes
 (`SignatureDoesNotMatch`, `ThrottlingException`, `RequestTimeTooSkewed`)
 are lifted into the classified failure so a bad credential surfaces as an
-auth failure and a throttle as rate-limited. The first-party lane (no
-`bedrock_mantle` sub-table) uses the same no-redirect client: `x-api-key`
+auth failure and a throttle as rate-limited. A `base_url` Anthropic entry
+uses the same no-redirect client: `x-api-key`
 and the Claude-Code identity headers are not covered by reqwest's
 default cross-host header strip list, so a 3xx from the configured host
 is likewise surfaced as a fault rather than chased to a different host.
 Every credentialed egress lane in routectl (Anthropic, OpenAI-compat,
 OpenAI Responses, Gemini, native Bedrock) shares this posture.
 
-Production credential guidance: use a SigV4 source (`static` with
-long-term keys, `profile`, or `default-chain`) or a long-term Bedrock API
-key (`bearer-key`). Short-term keys (a `bearer-key` from the console or
-`static` with a `session_token_ref`) expire and are DEV-ONLY -- the lane
+Production credential guidance: use a SigV4 source (`aws://profile/<name>`
+backed by long-term keys or a credential process, or `aws://chain`) or a
+long-term Bedrock API key. Short-term keys (a Bedrock API key from the
+console, or STS session credentials) expire and are DEV-ONLY -- the lane
 does not refresh them, so they are unsuitable for a long-running daemon.
 
-`bedrock_mantle` requires the `bedrock` build feature. If the key is
-present in TOML but the binary was built without `bedrock`, config load
-fails with a clean feature-gated-field error.
+The `cloud` carrier requires the `bedrock` build feature. A binary built
+without it refuses a `cloud` entry at config load, naming the provider.
 
 The client's `metadata` block never reaches AWS on this lane; the
 operator's own `payload_extras` `metadata`, if any, is sent in its place
@@ -1374,9 +1573,8 @@ client must send adaptive thinking to such a model (routectl forwards the
 client's `thinking` object as sent). Learned
 field-repair history is keyed on the provider entry name and upstream
 model, not on the region or host, so a `region` change, or switching an
-entry between a direct endpoint and this sub-table under the same name,
-keeps that history exactly like a `base_url` repoint; decay re-checks each
-verdict.
+entry between `base_url` and `cloud` under the same name, keeps that
+history exactly like a `base_url` repoint; decay re-checks each verdict.
 
 ## Bedrock mantle OpenAI lanes
 
@@ -1388,9 +1586,9 @@ scope, NO first-party `Authorization:
 Bearer` is sent, and the client follows no redirects. `region` is the
 single source of truth -- the factory derives the endpoint host
 (`https://bedrock-mantle.<region>.api.aws/openai/v1`) and the SigV4 scope
-from it; do NOT set `base_url`. The `creds` descriptor takes the same four
-`kind` shapes documented for the Anthropic lane above (`bearer-key`,
-`static`, `profile`, `default-chain`).
+from it. `credential` and `auth` take the same three pairings documented
+for the Anthropic lane above (a Bedrock API key with `bearer`,
+`aws://profile/<name>` or `aws://chain` with `aws-sigv4`).
 
 ### `openai-responses` mantle lane
 
@@ -1428,48 +1626,21 @@ such item (for example `custom_tool_call`, `custom_tool_call_output`,
 carried on a message, content part, function call or reasoning item are
 withheld too. Each withheld tool, item or member is declared as a removal
 and the request counts once as the `unknown_member_withheld` drop class
-(see [LOGGING.md](LOGGING.md)). The API-key and ChatGPT-OAuth lanes
-forward all of these as the client sent them, except a `cache_control`
-member on a non-function tool, which every Responses lane removes.
+(see [LOGGING.md](LOGGING.md)). A `base_url` Responses entry (the OpenAI
+API or ChatGPT Codex) forwards all of these as the client sent them,
+except a `cache_control` member on a non-function tool, which every
+Responses lane removes.
 
 Validation (build, reload, `config check`) rejects an incoherent entry:
 
-- a non-empty `api_key_ref` -- REJECTED (`creds` is the single credential
-  source). The key is REQUIRED on this variant, so write it as an empty
-  string rather than omitting it -- an omitted key fails the parse with
-  `missing field api_key_ref` before validation runs.
+- a credential and `auth` outside the three pairings above -- REJECTED.
 - a set `account_id_ref` -- REJECTED (a ChatGPT-account id has no meaning
   on the mantle lane).
-- a non-default `base_url` -- REJECTED (`region` derives the endpoint).
 - a `region` that is not a canonical AWS region identifier (including an
   empty or whitespace-only value) -- REJECTED.
 - a `store` key in `payload_extras` -- REJECTED (see above).
-- `auth_kind = "bedrock-mantle"` WITHOUT the sub-table -- REJECTED with a
-  hard error naming the block form. See the migration note below.
 
-Migration from the legacy `auth_kind = "bedrock-mantle"` form: earlier
-builds selected a bearer-only mantle Responses lane with
-`auth_kind = "bedrock-mantle"` plus an `api_key_ref`. That form is closed
--- it silently defaulted the region and could not meet the SigV4 posture.
-Replace it with `cloud = { name = "aws", region = "..." }` and the
-bearer key as `credential` with `auth = "bearer"`:
-
-```toml
-# OLD (rejected):
-# [providers.mantle-responses]
-# kind        = "openai-responses"
-# auth_kind   = "bedrock-mantle"
-# api_key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
-
-# NEW:
-[providers.mantle-responses]
-format     = "openai-responses"
-cloud      = { name = "aws", region = "us-east-1" }
-credential = "env://AWS_BEARER_TOKEN_BEDROCK"
-auth       = "bearer"
-```
-
-### `openai-compat` mantle lane
+### `openai-chat` mantle lane
 
 ```toml
 [providers.mantle-compat]
@@ -1490,22 +1661,15 @@ This example uses the default `openai` reasoning dialect, so the
 by the `openai` and `deepseek` dialects, and the `deepseek` dialect keeps
 `max_tokens`.
 
-`base_url` is optional on an `openai-compat` provider only when the
-mantle sub-table is present (the region derives the endpoint). A
-non-mantle `openai-compat` provider still requires a non-empty `base_url`.
-Learned field repair does not act on a standard-lane provider whose
+Learned field repair does not act on an `openai-chat` provider whose
 `base_url` names a loopback host; that refusal is lexical, so an `https://`
 name that resolves to a loopback address is treated as remote.
 
-Validation rejects an incoherent entry:
+Validation rejects a credential and `auth` outside the three pairings
+above and a `region` that is not a canonical AWS region identifier
+(including an empty or whitespace-only value).
 
-- a non-empty `api_key_ref` -- REJECTED (`creds` is the single credential
-  source).
-- a non-empty `base_url` -- REJECTED (`region` derives the endpoint).
-- a `region` that is not a canonical AWS region identifier (including an
-  empty or whitespace-only value) -- REJECTED.
-
-`count_tokens` on the mantle compat lane returns a deterministic 501
+`count_tokens` on the mantle `openai-chat` lane returns a deterministic 501
 (`NotImplemented`): the router never walks the compat lane for token
 counting, so it never dials the signed endpoint for it.
 
@@ -1520,14 +1684,13 @@ is scrubbed to the IAM action only -- the principal ARN, account id, and
 resource ARN never reach the client body or the logs.
 
 Production credential guidance matches the Anthropic lane: use a SigV4
-source (`static` with long-term keys, `profile`, or `default-chain`) or a
-long-term Bedrock API key (`bearer-key`). Short-term credentials (a
-console `bearer-key` or a `static` entry with `session_token_ref`) expire
-and are DEV-ONLY -- the lane does not refresh them.
+source (`aws://profile/<name>` or `aws://chain`) or a long-term Bedrock
+API key. Short-term credentials (a console Bedrock API key or STS session
+credentials) expire and are DEV-ONLY -- the lane does not refresh them.
 
-Both lanes require the `bedrock` build feature; the `bedrock_mantle` key
-on an OpenAI provider fails config load with a clean feature-gated-field
-error when the binary was built without it.
+Both lanes require the `bedrock` build feature (the Responses lane also
+needs `openai-responses`); a binary built without it refuses a `cloud`
+entry on these formats at config load.
 
 Field repair on these lanes acts only on the rows a refusal captured on
 that lane grounds. The Chat Completions lane drops `top_p`,
@@ -1541,18 +1704,22 @@ wording has no reader). The Responses lane rewrites a refused
 lists, and learns it; its sampling refusals name a parameter the Responses
 reader does not localize, so they are forwarded. Learned field-repair history
 is keyed on the provider entry name and upstream model, not on the region
-or host, so a `region` change, or switching an entry between a direct
-endpoint and this sub-table under the same name, keeps that history
-exactly like a `base_url` repoint; decay re-checks each verdict.
+or host, so a `region` change, or switching an entry between `base_url`
+and `cloud` under the same name, keeps that history exactly like a
+`base_url` repoint; decay re-checks each verdict.
 
-## `[providers.X]` Gemini (`kind = "gemini"`)
+## Gemini (`gemini`, `gemini-cloud-code`)
 
-A `gemini`-kind provider talks to the native Google Gemini REST API
-(`generateContent` / `streamGenerateContent`), NOT the openai-compat
+UNTESTED in this release: both formats parse, route and build, but neither
+has been validated against its live upstream for this release. Keep a
+fallback chain entry behind any model you route here.
+
+A `gemini` provider talks to the native Google Gemini REST API
+(`generateContent` / `streamGenerateContent`), NOT the openai-chat
 shim. It wins native fidelity on `systemInstruction`, `contents`/`parts`,
 `functionDeclarations`, `generationConfig` (incl. `thinkingConfig`), and
 the `usageMetadata` cached-content + thoughts token accounting. See
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#gemini-native-kind--gemini) for
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#gemini-native-format--gemini) for
 the per-feature mapping and the before/after fidelity note.
 
 ```toml
@@ -1570,19 +1737,19 @@ upstream = "gemini-2.5-flash"
 "gemini-*" = "gemini-flash"
 ```
 
-Fields:
+The keys, in order:
 
-- `api_key_ref` (required) -- secret-URI (`env://`, `file://`,
-  `oauth://`) resolving to a Google AI Studio API key. The
-  resolved key is sent as the `x-goog-api-key` request header. A
-  routectl-managed token source may rotate the key without a daemon
-  restart.
-- `base_url` (optional, default
-  `https://generativelanguage.googleapis.com/v1beta`) -- the API base.
-  The provider appends `/models/{model}:generateContent` (non-stream)
-  and `/models/{model}:streamGenerateContent?alt=sse` (stream). Point
-  this at a Vertex AI endpoint to reach Gemini through Vertex once that
-  surface is exercised; the path shape is the documented seam.
+- `format = "gemini"` -- the API-key surface. `format =
+  "gemini-cloud-code"` is the Cloud Code surface described below.
+- `base_url` (required) -- the API base; write
+  `https://generativelanguage.googleapis.com/v1beta` for the public API.
+  The provider appends `/models/{model}:generateContent` (non-stream) and
+  `/models/{model}:streamGenerateContent?alt=sse` (stream).
+- `credential` -- a reference (`env://`, `file://`) resolving to a Google
+  AI Studio API key. It is resolved per request, so a rotated file is
+  picked up without a daemon restart.
+- `auth = "x-goog-api-key"` -- the key is sent as the `x-goog-api-key`
+  request header; it is the only value this format accepts.
 - `header_extras` (optional) -- provider-level extra request headers,
   merged per the [header_extras merge](#header_extras-merge) rules.
 - `payload_extras` (optional) -- provider-level JSON merged into the
@@ -1610,61 +1777,23 @@ Fields:
   still sent. A library caller that builds its own `ChatRequest` without
   an ingress keeps forwarding its explicit `provider_extras`.
 - `user_agent` (optional) -- override the outbound `User-Agent`.
-- `auth_mode` (optional, default `"api-key"`) -- selects how the
-  provider authenticates:
-  - `"api-key"` (default) -- the API-key path described above:
-    `api_key_ref` resolves to a Google AI Studio key, sent as
-    `x-goog-api-key` against the `generativelanguage` base.
-  - `"cloud-code"` -- the Cloud Code ("antigravity") OAuth-bearer path:
-    `api_key_ref` MUST be an `oauth://` ref, the resolved bearer is sent
-    as `Authorization: Bearer` (NOT `x-goog-api-key`), and the base
-    defaults to the DAILY Cloud Code host
-    (`https://daily-cloudcode-pa.googleapis.com`), whose `/v1internal:*`
-    methods are what a consumer (non-GCP-ToS) seat is served on. The
-    Cloud Code project id is auto-resolved on first use and cached in the
-    credential record. This lane is EXPERIMENTAL / best-effort: it speaks
-    an internal surface with no published contract, so a change upstream
-    can break it between routectl releases. See the cloud-code stanza
-    below and
-    [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code).
 
-    `base_url` is the override for the PRODUCTION host
-    (`https://cloudcode-pa.googleapis.com`). The managed
-    `oauth://antigravity` credential is accepted only on the production
-    or daily Cloud Code host over `https://`, and this mode takes no
-    static credential, so an enterprise mirror or a staging host is not
-    reachable on the cloud-code lane (see "Managed token host
-    containment" under
-    [Why route claude-code through routectl](#why-route-claude-code-through-routectl)).
-    There is exactly ONE base for the lane, and it moves every Cloud Code
-    call together -- `generateContent`, `loadCodeAssist`, and
-    `onboardUser` -- so a pin can never split inference onto one host and
-    onboarding onto another. An explicitly set `base_url` is forwarded
-    verbatim, never rewritten; `config check` and startup emit a WARNING
-    when a cloud-code entry pins the production host, since the lane
-    default is the daily one.
-- `cloud_project_id` (optional, `cloud-code` mode only) -- the Cloud Code
-  project id for this seat, as the BARE id (`my-project-1234`), never the
-  `projects/`-prefixed resource name. Set it to skip discovery entirely:
-  it is consulted BEFORE the credential store's cached project id and
-  before `loadCodeAssist` / `onboardUser`, so even a cold request goes
-  straight to `generateContent`. The value writes through to the seat's
-  persisted project id, so later requests -- and other entries on the
-  same seat -- read it from the cache; if two entries name the same seat
-  with different ids, last writer wins (routectl does not reconcile
-  them). If the upstream rejects the configured id as not applying to
-  this seat (a `PERMISSION_DENIED` or `NOT_FOUND` project verdict), that
-  request fails, routectl logs one WARNING naming the entry and the
-  rejected id, and the entry falls back to ordinary discovery for the
-  rest of the process (the warning is emitted once per process, and a
-  restart re-trusts the configured value). Quota, auth, and 5xx failures
-  are not project verdicts and never trigger the fallback. Unset or empty
-  leaves discovery as the only source; ignored in `api-key` mode.
+### Cloud Code (`gemini-cloud-code`)
 
-Cloud Code (OAuth) stanza. `routectl login antigravity` offers this entry
-under the convention's name (`antigravity-default`) plus its pool, so the
-hand-written form below is for an entry you want to name or tune
-yourself:
+`format = "gemini-cloud-code"` is the Cloud Code ("antigravity")
+OAuth-bearer surface. Its `credential` MUST be a managed
+`oauth://antigravity[#label]` login (a one-time `routectl login
+antigravity`, live Google consent in a browser); any other credential is
+refused. The resolved bearer is sent with `auth = "bearer"` as
+`Authorization: Bearer` (NOT `x-goog-api-key`). This lane is EXPERIMENTAL
+/ best-effort beyond being untested: it speaks an internal surface with no
+published contract, so a change upstream can break it between routectl
+releases. See
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-format--gemini-cloud-code).
+
+`routectl login antigravity` offers this entry under the convention's
+name (`antigravity-default`) plus its pool, so the hand-written form below
+is for an entry you want to name or tune yourself:
 
 ```toml
 [providers.gemini-cloud-code]
@@ -1684,30 +1813,52 @@ provider = "gemini-cloud-code"
 upstream = "gemini-3.1-flash-lite"
 ```
 
+- `base_url` (required) -- the DAILY Cloud Code host
+  (`https://daily-cloudcode-pa.googleapis.com`), whose `/v1internal:*`
+  methods are what a consumer (non-GCP-ToS) seat is served on, or the
+  PRODUCTION host (`https://cloudcode-pa.googleapis.com`) for a seat
+  served there. The managed `oauth://antigravity` credential is accepted
+  only on those two hosts over `https://`, and this format takes no static
+  credential, so an enterprise mirror or a staging host is not reachable
+  (see "Managed token host containment" under
+  [Why route claude-code through routectl](#why-route-claude-code-through-routectl)).
+  There is exactly ONE base for the lane, and it moves every Cloud Code
+  call together -- `generateContent`, `loadCodeAssist`, and
+  `onboardUser` -- so a pin can never split inference onto one host and
+  onboarding onto another. The value is forwarded verbatim, never
+  rewritten; `config check` and startup emit a WARNING when an entry pins
+  the production host, since consumer seats are served on the daily one.
+- `cloud_project_id` (optional, `gemini-cloud-code` only) -- the Cloud
+  Code project id for this seat, as the BARE id (`my-project-1234`), never
+  the `projects/`-prefixed resource name. Set it to skip discovery
+  entirely: it is consulted BEFORE the credential store's cached project
+  id and before `loadCodeAssist` / `onboardUser`, so even a cold request
+  goes straight to `generateContent`. The value writes through to the
+  seat's persisted project id, so later requests -- and other entries on
+  the same seat -- read it from the cache; if two entries name the same
+  seat with different ids, last writer wins (routectl does not reconcile
+  them). If the upstream rejects the configured id as not applying to
+  this seat (a `PERMISSION_DENIED` or `NOT_FOUND` project verdict), that
+  request fails, routectl logs one WARNING naming the entry and the
+  rejected id, and the entry falls back to ordinary discovery for the
+  rest of the process (the warning is emitted once per process, and a
+  restart re-trusts the configured value). Quota, auth, and 5xx failures
+  are not project verdicts and never trigger the fallback. Unset or empty
+  leaves discovery (via loadCodeAssist, falling back to onboardUser) as
+  the only source; the resolved id is cached in the credential record.
+
+`header_extras`, `payload_extras` and `user_agent` work as on `gemini`.
+
 Cloud-code model ids are the upstream's own, and it churns them; pick one
 verified against the live lane (see
-[TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-kind--gemini-auth_mode--cloud-code-antigravity-oauth))
-rather than reusing a name from the api-key lane. The `gemini-2.5-*` ids
+[TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-format--gemini-cloud-code-antigravity-oauth))
+rather than reusing a name from the API-key lane. The `gemini-2.5-*` ids
 still resolve here as server-side aliases, but routectl no longer documents
 them and WARNs when one is configured on this lane.
 
-Auth decision: by default Gemini auth is API-key only, via the
-`x-goog-api-key` header. Setting `auth_mode = "cloud-code"` adds an
-OAuth-bearer path against the Cloud Code ("antigravity") surface: it
-requires a one-time `routectl login antigravity` (live Google consent in
-a browser) and an `oauth://antigravity` `api_key_ref`. In that mode the
-base defaults to the daily Cloud Code host
-(`https://daily-cloudcode-pa.googleapis.com`) -- consumer seats are
-served there -- and the Cloud Code project id is auto-resolved (via
-loadCodeAssist, falling back to onboardUser) and cached in the credential
-record, unless `cloud_project_id` names it outright. Pin `base_url` to
-`https://cloudcode-pa.googleapis.com` for a production seat; that single
-value carries the whole lane, and no other host is accepted for the
-managed credential. Treat this
-lane as EXPERIMENTAL / best-effort -- it is an internal surface with no
-published contract. Vertex AI / Google service-account ADC is still NOT
-implemented; it is reachable later by pointing `base_url` at a Vertex
-endpoint without a new provider kind.
+Vertex AI / Google service-account ADC is NOT implemented: no format
+reaches Vertex today, and a Vertex `cloud` value is documentation only
+(see [`base_url` and `cloud`](#base_url-and-cloud)).
 
 ## Per-provider capability filter
 
@@ -2544,7 +2695,7 @@ upstream          = "gpt-oss-120b"
 reasoning_dialect = "vllm"
 ```
 
-For gpt-5.6 and later, prefer a Responses lane (`kind = "openai-responses"`)
+For gpt-5.6 and later, prefer a Responses lane (`format = "openai-responses"`)
 over chat completions. An id outside the rule that refuses a sampling
 parameter is handled by learned field repair instead; see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#openai--o-series--gpt-5).
@@ -2572,7 +2723,7 @@ Three values:
   history (DeepSeek v4+, recent vLLM that 400 without echo-back).
 - **anthropic-api** -- keeps UNSIGNED `thinking` blocks on replay
   instead of stripping them. DeepSeek's `/anthropic` endpoint
-  (`kind = "anthropic-api"`, base_url `https://api.deepseek.com/anthropic`)
+  (`format = "anthropic-messages"`, base_url `https://api.deepseek.com/anthropic`)
   emits thinking without a signature yet 400s the next turn unless it is
   echoed back: `The content[].thinking in the thinking mode must be
   passed back to the API.` Set `preserve` for those models.
@@ -2587,14 +2738,15 @@ independent of this knob and always applies.
 See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for full per-upstream
 recipes.
 
-## context_management (anthropic-api provider flag)
+## context_management (`anthropic-messages` only)
 
-`context_management` on `[providers.X]` (kind = "anthropic-api") tells routectl
-to emulate Anthropic's context-management-2025-06-27 beta server-side for that
-provider. Set it for non-Anthropic anthropic-api endpoints that do not honor the
-beta natively (e.g. DeepSeek's `/anthropic` surface). Default is `false`:
-routectl forwards the body verbatim and the real Anthropic server handles the
-beta itself.
+`context_management` is a tuning key on an `anthropic-messages` entry (any
+other format refuses it). `true` tells routectl to emulate Anthropic's
+context-management-2025-06-27 beta server-side for that provider. Set it
+for non-Anthropic `anthropic-messages` endpoints that do not honor the beta
+natively (e.g. DeepSeek's `/anthropic` surface). Default is `false`:
+routectl forwards the body verbatim and the real Anthropic server handles
+the beta itself.
 
 ```toml
 # DeepSeek /anthropic provider: routectl emulates context management because
@@ -2625,17 +2777,12 @@ worst-case memory footprint is 10000 * 1 MiB ~ 10 GiB. The TTL is sliding
 (every hit refreshes `expires_at`); idle entries die after the hardcoded
 60-minute window.
 
-## credential_source (anthropic-api provider flag) -- forwarded credential
+## Forwarded credential
 
-`credential_source` on `[providers.X]` (kind = "anthropic-api") picks which
-credential that provider's Anthropic egress authenticates with. Default
-`"own"` -- the provider authenticates with `api_key_ref`/`auth_kind` exactly
-as every provider always has; this default is byte-for-byte unchanged
-behavior.
-
-Set `credential = "forwarded"` with `auth = "bearer"` to make the provider a
-pure passthrough for the client's own captured claude.ai bearer instead of a
-routectl-managed credential:
+`credential = "forwarded"` makes an `anthropic-messages` provider a pure
+passthrough for the client's own captured claude.ai bearer instead of a
+credential routectl holds. Every other credential value is the provider's
+own: it authenticates exactly as configured.
 
 ```toml
 [providers.anthropic-forwarded]
@@ -2645,17 +2792,15 @@ credential = "forwarded"
 auth       = "bearer"
 ```
 
-- Omit `api_key_ref` entirely -- a forwarded provider has no configured
-  credential of its own. Validation REJECTS a forwarded entry that
-  carries a non-empty `api_key_ref` (the two are mutually exclusive: a
-  forwarded provider's credential comes from the client, never from config).
-- `base_url`'s host must be exactly `api.anthropic.com` (case-insensitive;
-  a path, port, or `user:pass@` prefix on the URL is ignored by the
-  check and does not smuggle in a different host). Validation REJECTS
-  `credential_source = "forwarded"` on any other host -- a hard
-  containment guarantee: the forwarded credential carries the client's
-  full-scope claude.ai bearer, which must never be sent to a non-Anthropic
-  egress.
+- `forwarded` is the whole credential -- the provider holds no secret of
+  its own; the client supplies it on each request.
+- The entry is accepted only with `format = "anthropic-messages"`,
+  `auth = "bearer"` and a `base_url` that is `https://` on exactly
+  `api.anthropic.com` (case-insensitive), with no `user:pass@` userinfo
+  and no explicit non-default port. Any other format, auth, scheme, host or port is
+  REJECTED -- a hard containment guarantee: the forwarded credential is
+  the client's full-scope claude.ai bearer, which must never be sent to a
+  non-Anthropic egress. The error withholds the configured `base_url`.
 - On this leg the dispatched request keeps the client's requested
   model verbatim instead of being rewritten to the target's configured
   upstream model, and `GET /v1/models` proxies through to Anthropic's
@@ -2875,15 +3020,14 @@ The whole `[mitm]` block is read once at startup -- editing it takes
 effect only on the next restart, since there is no reload path that
 respawns the proxy listener.
 
-`[mitm]` is transport-only: it carries no credential knob. Which
-credential a forwarded egress uses is a per-provider choice -- see
-[credential_source (anthropic-api provider flag)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
-above.
+`[mitm]` is transport-only: it carries no credential knob. Whether an
+egress uses the client's own credential is a per-provider choice -- see
+[Forwarded credential](#forwarded-credential) above.
 
-**Migrating an old config.** A `[mitm]` block that still carries
-`credential_source = "forwarded"` (or `"own"`) is REJECTED at startup
-with an actionable error naming the exact replacement. Delete the key
-and add a provider block instead:
+**Migrating an old config.** A `[mitm]` block that still carries its
+retired credential key is refused at load with a line naming the exact
+replacement (see [Retired config keys](#retired-config-keys)). Delete
+the key and add a provider block instead:
 
 ```toml
 [providers.anthropic-forwarded]
@@ -2893,8 +3037,8 @@ credential = "forwarded"
 auth       = "bearer"
 ```
 
-No `api_key_ref` line -- a forwarded provider has no configured
-credential of its own.
+`credential = "forwarded"` is the whole credential -- a forwarded
+provider has no configured secret of its own.
 
 ## Inspecting a request offline (`routectl prompt-size`)
 
@@ -3191,11 +3335,12 @@ to `routectl prices refresh` and `[models.X.pricing]` and exits 2.
 
 `routectl config show` dumps `config.toml` with secrets redacted:
 
-- every secret reference (`api_key_ref`, `account_id_ref`, the
-  `creds` refs of a `bedrock` entry or a `bedrock_mantle` block, and each
-  `[server.auth] tokens` entry) prints as written only when it is an
-  `env://`, `file://` or `oauth://` pointer; a `literal:` value prints as
-  `literal:[REDACTED]` and any other value as `[REDACTED]`;
+- every secret reference (a provider's `credential` and `account_id_ref`,
+  and each `[server.auth] tokens` entry) prints as written only when it
+  is an `env://`, `file://` or `oauth://` pointer; a provider
+  `credential` of `aws://profile/<name>`, `aws://chain` or `forwarded`
+  also prints as written (it names no secret); a `literal:` value prints
+  as `literal:[REDACTED]` and any other value as `[REDACTED]`;
 - every `header_extras` value, on providers and models, prints as
   `[REDACTED]` (header names still print);
 - every string inside `payload_extras` (providers and models), at any
@@ -3339,8 +3484,9 @@ a rejected edit leaves the file byte-identical:
   incoherent cross-field combination) is rendered and the write is
   abandoned.
 - **High-consequence confirmation.** An egress-defining change -- a
-  provider `base_url` or `credential_source`, or a pool's members
-  -- prompts for confirmation first. `--yes` bypasses the prompt for
+  provider's `format`, `base_url`, `cloud`, `credential`, `auth`,
+  `account_id_ref` or `cloud_project_id`, or a pool's members -- prompts
+  for confirmation first. `--yes` bypasses the prompt for
   scripting. With no terminal on stdin the prompt is DECLINED rather
   than read, so an automated caller neither hangs nor applies the edit
   by accident: the field list still prints, naming what was declined,
@@ -3404,9 +3550,9 @@ skipped entirely whenever the caller already supplied any breakpoint
 is re-validated before dispatch and rolled back on any doubt.
 
 The optional `[cache]` block is the only operator switch for
-auto-emission; past it, each provider kind's capability and default
-decide. A missing block keeps the default: auto-emit enabled, and the
-break-even emission gate off.
+auto-emission; past it, each provider's `cache_capability` decides. A
+missing block keeps the default: auto-emit enabled, and the break-even
+emission gate off.
 
 ```toml
 [cache]
@@ -3430,19 +3576,24 @@ writes a cache entry.
 ### Per-provider capability (`cache_capability`)
 
 routectl only auto-emits a breakpoint to a provider it knows honors one.
-Each provider kind has a **conservative** default capability:
+`cache_capability` is a tuning key every format takes; an entry that
+omits it gets its format's **conservative** default:
 
-| `kind`              | `supports_top_level_cache_control` | `cache_hit_observable` |
-|---------------------|------------------------------------|------------------------|
-| `anthropic-api`     | true (default base URL only -- see below) | true            |
-| `bedrock`           | true on `api_shape = "invoke"`, false on `"converse"` -- see below | true  |
-| `openai-responses`  | false (server-side auto-cache; no explicit breakpoint) | true |
-| `openai-compat`     | false                              | false                  |
-| any unknown kind    | false                              | false                  |
+| `format` | `supports_top_level_cache_control` | `cache_hit_observable` |
+|---|---|---|
+| `anthropic-messages`, `base_url` on `api.anthropic.com` or the AWS `cloud` | true | true |
+| `anthropic-messages`, any other `base_url` | false | false |
+| `bedrock-invoke` | true -- see below | true |
+| `bedrock-converse` | false -- see below | true |
+| `openai-responses` | false (server-side auto-cache; no explicit breakpoint) | true |
+| `gemini`, `gemini-cloud-code` | false (implicit prefix caching; no explicit breakpoint) | true |
+| `openai-chat` | false | false |
 
 When `supports_top_level_cache_control` is false, auto-emit of the
-terminal marker is skipped for that provider. An operator can
-override the default per entry with an explicit `cache_capability`:
+terminal marker is skipped for that provider. `cache_hit_observable`
+says whether the upstream reports cache reads back, which the
+cache-ignore report needs. An explicit `cache_capability` replaces the
+default whole, on any format and any destination:
 
 ```toml
 # An anthropic-compatible third-party host that DOES honor a top-level
@@ -3455,25 +3606,24 @@ auth = "x-api-key"
 cache_capability = { supports_top_level_cache_control = true, cache_hit_observable = true }
 ```
 
-**anthropic-api custom base URL fails closed.** A `kind =
-"anthropic-api"` entry pointed at the default `https://api.anthropic.com`
-base URL gets the optimistic `true/true` default -- the real Anthropic
-server honors a top-level breakpoint. But a `kind = "anthropic-api"`
-entry pointed at any **other** base URL is treated as an
-Anthropic-compatible third party that may 400 on or silently drop a
-top-level breakpoint. With no operator override, such an entry fails
+Both keys of the inline table are required.
+
+**anthropic-messages on another host fails closed.** An
+`anthropic-messages` entry whose `base_url` is on `api.anthropic.com`
+(or that reaches Bedrock's managed Anthropic surface through `cloud`)
+gets the optimistic `true/true` default -- those servers honor a
+top-level breakpoint. An entry pointed at any **other** host is treated
+as an Anthropic-compatible third party that may 400 on or silently drop
+a top-level breakpoint. With no operator override, such an entry fails
 closed (`false/false`) and is never auto-cached. An operator who knows
-their custom-base host supports caching must set `cache_capability`
-explicitly to opt in (an explicit override always wins, even on a custom
-base URL).
+their host supports caching sets `cache_capability` explicitly to opt in.
 
-**bedrock defaults split by `api_shape`.** Bedrock honors prompt caching
-only via per-block markers -- a `cachePoint` block on Converse, a
+**The two Bedrock formats default differently.** Bedrock honors prompt
+caching only via per-block markers -- a `cachePoint` block on Converse, a
 per-block `cache_control` on Invoke -- never a routectl-injected
-top-level marker on the wire. The two shapes therefore default
-differently:
+top-level marker on the wire:
 
-- `api_shape = "invoke"` (the default) gets `true/true`, so auto-emit
+- `bedrock-invoke` gets `true/true`, so auto-emit
   runs. The bedrock-invoke egress lowers a routectl-injected top-level
   `cache_control` onto the last cache-eligible content block -- the
   per-block form Invoke honors -- and re-validates the resulting
@@ -3483,34 +3633,34 @@ differently:
   arrangement would break the breakpoint rules (more than four, or a 5m
   ahead of a 1h), the target refuses the request locally
   (`cache-breakpoint-cap` / `cache-ttl-order`) and the chain moves to its
-  next target, as anthropic-api does. Only a caller's own top-level marker
-  can reach that refusal: routectl auto-emits its marker only when the
-  request carries no breakpoint at all.
-- `api_shape = "converse"` gets `false/true`: a top-level marker lands
+  next target, as anthropic-messages does. Only a caller's own top-level
+  marker can reach that refusal: routectl auto-emits its marker only when
+  the request carries no breakpoint at all.
+- `bedrock-converse` gets `false/true`: a top-level marker lands
   in `additionalModelRequestFields` and never becomes a `cachePoint`, so
   auto-emit is skipped (`auto_skipped:no_capability`) rather than
   silently no-op'd, while hit usage is still reported back
   (`cache_hit_observable = true`).
 
-Caller-supplied per-block markers are unaffected on either shape and
-still cache normally; an operator may override per entry.
+Caller-supplied per-block markers are unaffected on either format and
+still cache normally.
 
 ### Per-block front marker
 
 Besides the terminal top-level marker, the dispatch path can place a
 **per-block** cache breakpoint at the FRONT of the cacheable prefix (the
 last wire-eligible system block, else the last custom tool definition).
-Whether it does is fixed by the provider kind; there is no per-provider
-setting:
+Whether it does is fixed by the entry's format and destination; there is
+no per-provider setting:
 
-| Provider entry                            | Front marker |
-|-------------------------------------------|--------------|
-| `anthropic-api` on the default base URL   | emitted      |
-| `anthropic-api` on any other base URL     | not emitted  |
-| `bedrock`, either `api_shape`             | not emitted  |
-| every other kind                          | not emitted  |
+| Provider entry | Front marker |
+|---|---|
+| `anthropic-messages` on `api.anthropic.com` or the AWS `cloud` | emitted |
+| `anthropic-messages` on any other `base_url` | not emitted |
+| `bedrock-invoke`, `bedrock-converse` | not emitted |
+| every other format | not emitted |
 
-Only default-base `anthropic-api` takes it: that is the population whose
+Only those `anthropic-messages` entries take it: that is the population whose
 terminal marker is already auto-emitted, so the front marker adds no new
 upstream shape. Everywhere else the front decision records
 `auto_skipped:provider_disabled`. The global `[cache]` switch withholds
@@ -3525,8 +3675,8 @@ withhold markers that would have cached -- so a small-prefix request may
 record `auto_emitted` while the upstream reports no cache write. Read the
 decision alongside the reported cache-write tokens, not on its own.
 
-A custom-base `anthropic-api` entry can opt in to the terminal marker
-with `cache_capability` (above); it never receives a front marker.
+An `anthropic-messages` entry on another host can opt in to the terminal
+marker with `cache_capability` (above); it never receives a front marker.
 
 ### Tool-array normalization (`normalize_tools`)
 
@@ -4211,7 +4361,7 @@ validation keeps the previous table. The dollar column has three states:
   **persisted with the row**, never by what the provider is configured as
   now, so re-kinding a provider in place cannot reprice history.
 - `n/a (subscription)` -- a managed-OAuth provider (its
-  `[providers.X] api_key_ref` starts with `oauth://`). Subscription usage
+  `[providers.X] credential` starts with `oauth://`). Subscription usage
   has no per-token dollar cost; the **quota line** under the table is the
   real spend signal.
 - `n/a` -- an API-key provider whose upstream no source prices: no
@@ -4281,8 +4431,7 @@ cache hits are observable, with its verdict (`ignoring`, `clear` or
 only what the ledger shows. When no lane had a qualifying turn (consecutive
 marked turns within the cache lifetime) the block says so in one line. A
 final line per reason names the providers that are not evaluated: those
-whose cache hits are not observable, and `bedrock` providers on
-`api_shape = "converse"`, where a caller's top-level-only cache marker is
+whose cache hits are not observable, and `bedrock-converse` providers, where a caller's top-level-only cache marker is
 forwarded inert. When the ledger cannot answer within 2 s the block shows
 `unavailable: <class>` and the command still exits 0.
 
@@ -4593,9 +4742,9 @@ it never makes a billed upstream call and never mutates a credential.
   with no cheap reachability check reports WARN with a "cannot verify
   without a billed call" reason -- routectl will not spend money to turn a
   WARN into a PASS. This is a warning (exit 0), not a failure.
-- **Forwarded providers are SKIPPED.** A `credential_source = "forwarded"`
+- **Forwarded providers are SKIPPED.** A `credential = "forwarded"`
   provider (see
-  [credential_source](#credential_source-anthropic-api-provider-flag----forwarded-credential))
+  [Forwarded credential](#forwarded-credential))
   short-circuits before any build or upstream call and renders an
   informational PASS line -- there is no routectl-managed credential to
   probe.
@@ -4654,7 +4803,7 @@ The battery sections, in render order:
 | Cost pricing (`pricing`) | One row per configured model listing its five prices (input, output, cache read, cache write 5m, cache write 1h), then a `cache write <duration>` price for each other cache-write lifetime a source prices (`cache write 30m`), each with the source that gave it: `model-config`, `refreshed`, `shipped`, `derived` or `unknown`, resolved as in [Model prices](#model-prices-modelsxpricing) and as `routectl usage` prices. An unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`. The row ends with the date of each price table read (`none` for an absent one). A model no source prices reads unpriced. A model on a pool is priced through the pool's first member, as usage bills it. When a `[models.X.pricing]` block sets the 5m or 1h write under both `cache_write_5m_per_mtok` / `cache_write_1h_per_mtok` and a `cache_write_per_mtok` key, at different values, the row notes that the legacy key's value is used; the row stays PASS. A managed subscription (`oauth://`) row is billed by seat; its prices are the basis of the API-equivalent value, and it adds whether that value is complete or which dimensions it lacks. The CLI reads `prices.json` once per run and `/status/doctor` uses the running daemon's. Nothing from a price table but its prices and date is shown. Never FAILs, so it can never move the exit code. |
 | Model knobs (`knobs`) | One row per configured model naming the `max_tokens` fill its egress sends when the caller omits one and WHERE it comes from, in the same `model-config`, `learned`, `default` vocabulary `config show --effective` and the status config panel use: `model-config` when `[models.X] max_output_tokens` is set, `learned` when the resident ceiling learned from an upstream refusal on one of its lanes lowers that value (or the egress baseline), else `default` (the Anthropic-shape egress baseline). A learned value is shown only when capability learning is enabled, the lane's kind is one field repair admits, and no `force_supported` override masks `max_tokens` for the model. An egress that forwards caller omission untouched has no fill: with `max_output_tokens` unset the row reads `unset`; with it set the row names the value as `model-config` and says it sizes the window-gate reserve (on `bedrock`, also the limit Converse sends under legacy `enabled` thinking), not a fill. The learned value is the resident ceiling; the pre-flight's per-request gates (writer health, verdict quorum) are not reflected, so a given request may still go unclamped. Every row names the model's `(kind, upstream)`. Never FAILs, so it can never move the exit code. |
 | Resolved tuning (`tuning`) | One PASS row per `[providers.X]` entry (pool members included), named `provider <id>`, then one per `[models.X]` entry that sets its own `stream_first_byte_timeout_ms`, named `model <nickname>` (one row per seat, named `model <nickname>#<member>`, for a model on a pool). The detail lists `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms` and `stream_first_byte_timeout_ms` as `key=value(source)`, the same cells and tier tokens (`model`, `provider`, `pool`, `global`, `default`) `config show --effective` prints; a breaker turned off renders `off`, an unlimited RPM or absent timeout `none`. Read from the config alone. Never WARNs or FAILs, so it can never move the exit code. |
-| Cache markers (`cache`) | Read-only from the usage ledger's last 6 hours, on the CLI and on the daemon's `/status/doctor` alike. A lane is a provider, seat and model on an `anthropic-api` or `bedrock` provider whose cache hits are observable. One WARN `lane <provider>[#<seat>] <model>` per lane where at least 3 turns carried the caller's own cache markers and none read or wrote any cache: "markers sent, no cache activity". That says only what the ledger shows; routectl does not claim the upstream ignored the markers. Then one PASS `cache markers` summary counting the lanes evaluated, or `unavailable: <class>` (`no_data`, `query_timeout`, `db_unavailable`, or an open class) when the ledger could not answer, one PASS `unobservable providers` naming each `anthropic-api` or `bedrock` provider whose cache hits are not observable (an `anthropic-api` provider on a custom `base_url` with no `cache_capability` override, for example), and one PASS `converse providers` naming each `bedrock` provider on `api_shape = "converse"`; the lanes of both are not evaluated. A remediation that sets `cache_capability` names both of its keys and keeps `supports_top_level_cache_control` at its current value (doctor prints it; `false` for an `anthropic-api` provider on a custom `base_url` with no override, whatever the kind's default). The daemon's read gives up after 250 ms, the CLI's after 2 s. Never FAILs, so it can never move the exit code. |
+| Cache markers (`cache`) | Read-only from the usage ledger's last 6 hours, on the CLI and on the daemon's `/status/doctor` alike. A lane is a provider, seat and model on an `anthropic-api` or `bedrock` provider whose cache hits are observable. One WARN `lane <provider>[#<seat>] <model>` per lane where at least 3 turns carried the caller's own cache markers and none read or wrote any cache: "markers sent, no cache activity". That says only what the ledger shows; routectl does not claim the upstream ignored the markers. Then one PASS `cache markers` summary counting the lanes evaluated, or `unavailable: <class>` (`no_data`, `query_timeout`, `db_unavailable`, or an open class) when the ledger could not answer, one PASS `unobservable providers` naming each `anthropic-api` or `bedrock` provider whose cache hits are not observable (an `anthropic-messages` provider on a `base_url` other than `api.anthropic.com` with no `cache_capability` override, for example), and one PASS `converse providers` naming each `bedrock-converse` provider; the lanes of both are not evaluated. A remediation that sets `cache_capability` names both of its keys and keeps `supports_top_level_cache_control` at its current value (doctor prints it; `false` for an `anthropic-messages` provider on another host with no override). The daemon's read gives up after 250 ms, the CLI's after 2 s. Never FAILs, so it can never move the exit code. |
 
 Two structured panels render after the sections:
 
@@ -4755,7 +4904,7 @@ surfaces can never disagree about a pool. Read them for the answer to
 "which account will actually serve this model, and is it logged in":
 
 - **One line per `[pools.<name>]` block** -- its members and the seat each
-  member's `api_key_ref` names (`<entry>=<seat>`, `=none` for a member
+  member's `credential` names (`<entry>=<seat>`, `=none` for a member
   declaring no `oauth://` ref), its `seat_selection`, and whether it
   `accepts_new_logins`. A member the credential store holds no seat for is
   named explicitly.
@@ -4864,22 +5013,22 @@ that resolves your token under other users' requests. routectl does
 not support or condone gateway usage beyond what the upstream
 provider permits -- see the README "Responsible use" section.
 
-**Managed token host containment.** An `api_key_ref` of
-`oauth://anthropic` or `oauth://anthropic#<label>` is the subscription
-token, and it is accepted only on an `anthropic-api` provider with
-`auth_kind = "oauth-bearer"`, `credential_source = "own"`, no
-`bedrock_mantle` block, and a `base_url`
-that is omitted or is `https://` on exactly `api.anthropic.com` with no
-`user:pass@` prefix and no explicit non-default port. Any other provider
-kind, and any other host (a gateway, a passthrough, a loopback address, a
-lookalike or subdomain of the Anthropic host), is rejected. Static `env://` and `file://` credentials are not affected, so
-an `anthropic-api` provider on `https://gateway.example/api` with an
-`env://` key, or on `http://127.0.0.1:18080` with a `file://` key, stays
-valid.
+**Managed token host containment.** A `credential` (or `account_id_ref`)
+of `oauth://anthropic` or `oauth://anthropic#<label>` is the subscription
+token, and it is accepted only on an entry with
+`format = "anthropic-messages"`, `auth = "bearer"`, and a `base_url` that
+is `https://` on exactly `api.anthropic.com` with no `user:pass@` prefix
+and no explicit non-default port. Any other format, a `cloud` carrier, and any other
+host (a gateway, a passthrough, a loopback address, a lookalike or
+subdomain of the Anthropic host) are rejected. Static `env://` and
+`file://` credentials are not affected, so an `anthropic-messages`
+provider on `https://gateway.example/api` with an `env://` key, or on
+`http://127.0.0.1:18080` with a `file://` key, stays valid.
 
 - **Symptom.** `routectl serve` refuses to start, and `routectl config
-  check` reports an error, naming the provider (`provider `<name>`: the
-  managed Anthropic credential ...`). The message withholds
+  check` reports an error, naming the provider and the vendor's rule
+  (`provider `<name>`: the managed `oauth://anthropic` credential is
+  accepted only with ...`). The message withholds
   the `base_url` and the credential ref; read them from your own
   `config.toml`. On a hot reload the same error makes the reload fail:
   the daemon logs `config reload failed; keeping previous config` at
@@ -4887,11 +5036,11 @@ valid.
   rebuilds the router against a config carrying the shape is likewise
   refused and keeps the previous router.
 - **Fix.** For a gateway or passthrough, give that provider its own
-  static credential (`api_key_ref = "env://VAR"` or `"file:///abs/path"`)
+  static credential (`credential = "env://VAR"` or `"file:///abs/path"`)
   issued for that destination. Never copy the subscription token into an
   env var or file to send it elsewhere. To use the subscription itself,
-  point the provider at the default Anthropic URL (omit `base_url`) and
-  set `auth_kind = "oauth-bearer"`, as `routectl login anthropic` prints.
+  set `base_url = "https://api.anthropic.com"` and `auth = "bearer"`, as
+  `routectl login anthropic` prints.
 - **No override.** There is no flag, config key, or loopback exception
   that relaxes this check; loopback is not treated as local because a
   loopback port can be a tunnel to another machine.
@@ -4899,29 +5048,29 @@ valid.
 The managed Codex, xAI, and Antigravity subscription tokens follow the
 same rule, each pinned to its own first-party lane:
 
-- `oauth://codex` or `oauth://codex#<label>` (in `api_key_ref` or
-  `account_id_ref`) is accepted only on an `openai-responses` provider
-  with `auth_kind = "chatgpt-oauth"`, no `bedrock_mantle` block, and a
-  `base_url` that is omitted or is `https://` on exactly `chatgpt.com`.
-- `oauth://xai` or `oauth://xai#<label>` is accepted only on an
-  `openai-compat` provider with no `bedrock_mantle` block and a `base_url`
-  that is `https://` on exactly `api.x.ai` (the path is free, so both
+- `oauth://codex` or `oauth://codex#<label>` (in `credential` or
+  `account_id_ref`) is accepted only with `format = "openai-responses"`,
+  `auth = "bearer"`, and a `base_url` that is `https://` on exactly
+  `chatgpt.com`.
+- `oauth://xai` or `oauth://xai#<label>` is accepted only with
+  `format = "openai-chat"`, `auth = "bearer"`, and a `base_url` that is
+  `https://` on exactly `api.x.ai` (the path is free, so both
   `https://api.x.ai/v1`, which `routectl login xai` writes, and
   `https://api.x.ai` are valid).
 - `oauth://antigravity` or `oauth://antigravity#<label>` is accepted only
-  on a `gemini` provider with `auth_mode = "cloud-code"` and a `base_url`
-  that is omitted or is `https://` on exactly
-  `cloudcode-pa.googleapis.com` or `daily-cloudcode-pa.googleapis.com`.
+  with `format = "gemini-cloud-code"`, `auth = "bearer"`, and a
+  `base_url` that is `https://` on exactly `cloudcode-pa.googleapis.com`
+  or `daily-cloudcode-pa.googleapis.com`.
 
 For each, a `user:pass@` prefix, an explicit non-default port, a trailing
 dot, a lookalike or subdomain host, `http://`, and loopback are all
 rejected. The error names the provider and the rule (`provider `<name>`:
-the managed Codex credential ...` / `... the managed xAI credential ...`
-/ `... the managed Antigravity credential ...`) and withholds the
+the managed `oauth://codex` credential is accepted only with ...`, and
+the same for `oauth://xai` and `oauth://antigravity`) and withholds the
 `base_url`, the ref, and the seat label; the startup, `config check`, and
 hot-reload behavior is the same as above. A staging shard, mirror, or
-mock for the Responses lane takes a static credential (`api_key_ref =
-"env://OPENAI_JWT"` plus `account_id_ref`), and an xAI-compatible gateway
+mock for the Responses lane takes a static credential (`credential =
+"env://OPENAI_JWT"`), and an xAI-compatible gateway
 or mock takes an `env://` or `file://` key; both stay valid on any host.
 There is no override.
 
@@ -5126,11 +5275,11 @@ alias -> model -> provider entry OR pool -> credential
 An `[aliases]` entry resolves to a `[models.X]` nickname; the model's
 `provider` value names EITHER one `[providers.X]` entry OR one
 `[pools.X]` block; a provider entry names exactly ONE credential through
-its `api_key_ref`; a pool names one credential per member. A pool is
+its `credential`; a pool names one credential per member. A pool is
 therefore the only multi-account dispatch target -- a provider entry has
 one credential and nothing to select between.
 
-**Seat refs.** A config `api_key_ref` names exactly one seat:
+**Seat refs.** A config `credential` names exactly one seat:
 
 - `oauth://anthropic` -- the DEFAULT (unlabeled) seat, and only that
   seat. It is not a set and carries no strategy.
@@ -5283,7 +5432,7 @@ with its own expiry.
 
 Seats are NOT declared in this file. They live in the credential store
 (`credentials.json`), and the only way to add one is to log in:
-`routectl login <provider> --label <name>`. The config's `api_key_ref`
+`routectl login <provider> --label <name>`. The config's `credential`
 selects among the seats already stored; it never creates one. What the
 login DOES do to this file is offer the provider entry (and, on a first
 login for the family, the pool) that consumes the new seat -- printed
@@ -5464,9 +5613,10 @@ What each family does (one line each):
 
 routectl can route to OpenAI's Responses API on the ChatGPT subscription
 backend (`https://chatgpt.com/backend-api/codex`) using a ChatGPT OAuth
-bearer JWT. Two ways to supply that bearer: routectl-managed OAuth
-(recommended) or a static bearer file (kept for backwards-compat with
-operators who already manage the JWT externally).
+bearer JWT. The entry is `format = "openai-responses"` with a `base_url`
+on `chatgpt.com` and `auth = "bearer"`; the destination selects the
+ChatGPT request dialect. Two ways to supply the bearer: routectl-managed
+OAuth (recommended) or a static bearer you manage yourself.
 
 ### routectl-managed OAuth for Codex (recommended)
 
@@ -5514,7 +5664,7 @@ upstream marks the refresh token expired, reused, or invalidated,
 routectl surfaces a "re-run `routectl login codex`" error -- re-run the
 login and traffic resumes.
 
-### Static bearer (backwards-compat)
+### Static bearer
 
 For operators who already manage the JWT externally, point routectl
 at the file or env var and supply the account UUID explicitly:
@@ -5534,9 +5684,10 @@ for both fields. routectl never refreshes a
 static bearer; rotation is the operator's job.
 
 `config check`, `serve` startup, and hot reload all enforce the
-`account_id_ref` rule without reading either secret: a `chatgpt-oauth`
-entry with a static bearer and no `account_id_ref` is refused, and so is
-an `account_id_ref` on `auth_kind = "api-key"`. `config check` does not
+`account_id_ref` rule without reading either secret: an entry on the
+Codex host with a static bearer and no `account_id_ref` is refused, and
+so is an `account_id_ref` on any other `openai-responses` entry (another
+host, or the AWS `cloud`) and on any other format. `config check` does not
 resolve the refs themselves; an env var that is unset or a file that is
 missing still surfaces only when the lane first dispatches.
 
@@ -5564,9 +5715,10 @@ auth          = "bearer"
 - **Only the managed codex login presents it.** The codex identity (the
   `User-Agent` default, `originator`, residency, `version`, session,
   installation, thread, request and window ids) is sent only by a provider
-  whose `api_key_ref` is `oauth://codex[#label]` on `chatgpt.com`. An
-  `api-key` entry, a Bedrock Mantle entry, or a `chatgpt-oauth` entry with
-  an `env://` / `file://` token sends none of it; set `user_agent` or
+  whose `credential` is `oauth://codex[#label]` with a `base_url` on
+  `chatgpt.com` (see [Client identity](#rules-an-entry-must-meet)). An
+  entry on another host, an AWS `cloud` entry, or a `chatgpt.com` entry
+  with an `env://` / `file://` token sends none of it; set `user_agent` or
   `header_extras` there if the upstream needs them.
 - **One derivation point.** The value flows into every codex fingerprint
   surface together -- the outbound `User-Agent`, the `version` identity
@@ -5589,11 +5741,15 @@ auth          = "bearer"
   validation) degrades a stray illegal value to the pinned default with a
   warning rather than crashing the diagnostic.
 - Overriding `version` or `user-agent` through `header_extras` still wins
-  the merge, but doing so on a chatgpt-oauth provider with a value that
+  the merge, but doing so on a `chatgpt.com` provider with a value that
   diverges from the derived identity logs a warning -- prefer
   `codex_version` to keep the fingerprint coherent.
 
 ## xAI (Grok) provider
+
+UNTESTED in this release: the managed xAI login parses, is host-contained
+and routes, but it has not been validated against the live upstream for
+this release.
 
 routectl can route to xAI's OpenAI-compatible API (`https://api.x.ai/v1`) using
 an xAI OAuth bearer. The credential is managed the same way as the Codex flow --

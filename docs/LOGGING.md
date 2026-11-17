@@ -49,7 +49,7 @@ escaped partial text followed by `[field formatting failed]`.
 
 The default directive is `info,aws_config=warn`: INFO for everything
 except the AWS SDK's `aws_config` crate, which is capped at WARN. On a
-Bedrock lane with `creds = { kind = "profile", ... }` that crate logs the
+Bedrock lane with `credential = "aws://profile/<name>"` that crate logs the
 resolved credentials at INFO, access key id included (the secret key is
 redacted, the key id is not). A `ROUTECTL_LOG` you set replaces the
 default whole and is honored as written, so a plain `ROUTECTL_LOG=info`
@@ -195,7 +195,8 @@ ROUTECTL_LOG=routectl_providers=debug ./routectl serve 2>&1 \
 
 # The anthropic_beta set a Bedrock request actually ships (one TRACE per
 # request on Invoke and Converse, after every withhold and union; flag
-# names sanitized, with `count=` and `api_shape=`):
+# names sanitized, with `count=` and `api_shape=`; that log field holds the
+# format, `bedrock-invoke` or `bedrock-converse`):
 ROUTECTL_LOG=routectl_providers::bedrock=trace ./routectl serve 2>&1 \
   | grep "bedrock final anthropic_beta set"
 ```
@@ -1109,13 +1110,13 @@ No secret values, ever:
 | Listener auth (wrong `x-api-key` / `Bearer`) | `WARN routectl_cli::server::auth has_x_api_key=<bool> has_bearer=<bool> route=<path> "listener auth rejected"` |
 | Bad secret ref (`env://NONEXISTENT`) | `WARN routectl_auth::memory_store scheme=env:// var=<NAME> reason="not set" "secret resolution failed"` |
 | Bad secret ref (file perm too open) | `WARN routectl_auth::memory_store scheme=file:// path=<P> mode=<oct> reason="group/other readable; chmod 600 or 400" "secret resolution failed"` |
-| Bedrock SigV4 / cred chain failed (Profile) | `WARN routectl_providers::bedrock::auth auth_kind=Profile profile=<name> region=<r> error=... "bedrock credential resolution failed"` |
-| Bedrock SigV4 / cred chain failed (DefaultChain) | `WARN routectl_providers::bedrock::auth auth_kind=DefaultChain region=<r> error=... "bedrock credential resolution failed"` |
+| Bedrock SigV4 / cred chain failed (Profile) | `WARN routectl_providers::bedrock::auth auth_kind=Profile profile=<name> region=<r> error=... "bedrock credential resolution failed"` -- `credential = "aws://profile/<name>"`; the `auth_kind` log field names the AWS credential source |
+| Bedrock SigV4 / cred chain failed (DefaultChain) | `WARN routectl_providers::bedrock::auth auth_kind=DefaultChain region=<r> error=... "bedrock credential resolution failed"` -- `credential = "aws://chain"` |
 | Bedrock upstream 401 | `WARN routectl_providers::bedrock provider=<id> status=401 body_excerpt=... "bedrock upstream auth rejected"` |
 | Bedrock SigV4 sign failure | `ERROR routectl_providers::bedrock::signing failure_kind=<kind> ... "bedrock auth failed"` -- where `<kind>` is one of `bearer_header_invalid`, `creds_unavailable`, `body_unbuffered`, `signing_params_build`, `non_ascii_header`, `signable_request_build`, `sigv4_sign`, `signed_header_name_invalid`, `signed_header_value_invalid`, `unexpected_query_params` |
 | Bedrock 403 (IAM denied) | `WARN routectl_providers::bedrock provider=<id> status=403 action=<bedrock-runtime:InvokeModel...> principal_present=<bool> "bedrock IAM access denied"` -- `action` extracted from the AWS error body so you immediately see WHICH IAM action your role lacks |
 | Bedrock in-stream auth event | `WARN routectl_providers::bedrock::eventstream provider=<id> event_type=accessDeniedException\|unauthorizedException\|authentication_error\|permission_error message=... "bedrock in-stream auth/permission exception"` |
-| Anthropic upstream 401/403 | `WARN routectl_providers::upstream_log provider=<id> status=<401\|403> auth_kind=<ApiKey\|OauthBearer> context=anthropic body_excerpt=... "upstream auth failed"` |
+| Anthropic upstream 401/403 | `WARN routectl_providers::upstream_log provider=<id> status=<401\|403> auth_kind=<ApiKey\|OauthBearer> context=anthropic body_excerpt=... "upstream auth failed"` -- the `auth_kind` log field is `ApiKey` for `auth = "x-api-key"` and `OauthBearer` for `auth = "bearer"` |
 | OpenAI-compat upstream 401/403 | `WARN routectl_providers::upstream_log provider=<id> status=<401\|403> context=openai-compat body_excerpt=... "upstream auth failed"` |
 
 Both rows share the message string `"upstream auth failed"` and the target `routectl_providers::upstream_log` (the openai-responses and gemini egresses log through it too); the `context` field distinguishes the call site.
@@ -1503,7 +1504,7 @@ The daemon re-reads the usage ledger every 15 minutes (target
 cache-ignore report as `routectl usage --detail` and `routectl doctor`: per
 lane (provider, seat, model) of each configured anthropic-api or bedrock
 provider whose cache hits are observable, over the last 6 hours. A bedrock
-provider on `api_shape = "converse"` is not evaluated: Converse forwards a
+provider on `format = "bedrock-converse"` is not evaluated: Converse forwards a
 caller's top-level-only cache marker inert, so its turns could read as
 ignored when no working marker was sent. It reads the ledger at the
 `usage.db_path` the daemon booted with (restart-required, like the writer's);
@@ -1542,8 +1543,8 @@ verdict, so an outage logs one `cache_ignore_unavailable` and one
 hit its lane cap keeps the verdict of any lane it no longer lists.
 
 **Converse to Invoke.** The ledger records a bedrock provider's turns under
-kind `bedrock` on both API shapes, so the evaluation cannot tell them apart.
-After a provider switches from `api_shape = "converse"` to invoke (a reload or
+kind `bedrock` on both formats, so the evaluation cannot tell them apart.
+After a provider switches from `bedrock-converse` to `bedrock-invoke` (a reload or
 a restart), turns it recorded under Converse can read as evidence until they
 leave the 6 h window or the lane reports cache activity. A
 `cache_markers_without_cache_activity` WARN for that lane inside that span is
@@ -1626,7 +1627,7 @@ refresh that keeps every provider activated is silent). Field vocabulary:
 | Field | Meaning |
 |---|---|
 | `provider` | OAuth provider id (`anthropic`, `codex`, `xai`, `antigravity`). |
-| `kind` | The provider's own-credential config kind (`anthropic-api`, `openai-responses`, `openai-compat`, `gemini`). |
+| `kind` | The provider's family token, derived from its `format` (`anthropic-api`, `openai-responses`, `openai-compat`, `gemini`). |
 | `trigger` | What caused the recompute: `startup`, `config_change`, or `credentials_change`. |
 | `transition` | `activated` or `deactivated`. |
 | `reason` | Deactivation reason code (deactivated only): `oauth_missing`, `oauth_expired`, `oauth_store_unavailable`, `not_cataloged`, or `unknown`. |
@@ -2435,8 +2436,9 @@ WARN routectl_router::router event=invalidation catalog_changed=true
 
 Emitted on a hot reload when learned capabilities were dropped because the
 provider entry their lane names was removed from `[providers]`, or now has a
-`kind` other than the one the entry was written under. A same-kind `base_url`
-change drops nothing. The sweep runs at the reload. Each dropped entry also
+`format` whose family token differs from the one the entry was written
+under. A same-token change (a `base_url` repoint, or `bedrock-invoke` to
+`bedrock-converse`) drops nothing. The sweep runs at the reload. Each dropped entry also
 emits a DEBUG `owner_sweep` line carrying `reason` (`owner_entry_removed` or
 `owner_kind_changed`), the sanitized `state_key`, and `capability_key`.
 
@@ -2589,7 +2591,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `activation inventory: alias-referenced provider entries have no usable credential`, `credentials reload failed`, `credentials reload needed a router rebuild, but it failed` (`seat_set_changed`), `config reload failed: ...` (the loader one carries `is_panic` / `is_cancelled`), `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader (`is_panic=true`; a cancelled loader is the runtime shutting down). |
 | WARN | `routectl_cli::server::reload_shutdown` | `reload task join failed during shutdown` (`event=reload_task_join_failed`), `reload task did not stop within deadline` (`event=reload_task_deadline_exceeded`, field `deadline_secs`) | A reload task panicked or hung at shutdown: file a bug with the preceding lines; check the usage DB if it recurs. Match on the `event` field, not the message. |
 | ERROR | `routectl_cli::server::seat_driver` | `seat driver stopped before shutdown; managed logins are no longer refreshed in the background`; field `exit` | The background refresh loop ended while the daemon kept serving. Seats still refresh on demand when a request uses them; restart the daemon to restore background refresh, and file a bug with the preceding lines. |
-| WARN | `routectl_cli::server::router_build` | `codex identity warning`, `cloud-code host warning`, `cloud-code model warning`, `auth-reserved header warning` (once per finding at serve startup and at each accepted config reload; a credentials seat-change rebuild repeats none) | A config advisory: adjust or remove the named knob, or accept it. `auth-reserved header warning`: a `[models.X] header_extras` key (`authorization`, `x-api-key`, `anthropic-version`) is dropped from every request; remove it and put credentials in `api_key_ref` / `auth_kind`. |
+| WARN | `routectl_cli::server::router_build` | `codex identity warning`, `cloud-code host warning`, `cloud-code model warning`, `auth-reserved header warning` (once per finding at serve startup and at each accepted config reload; a credentials seat-change rebuild repeats none) | A config advisory: adjust or remove the named knob, or accept it. `auth-reserved header warning`: a `[models.X] header_extras` key (`authorization`, `x-api-key`, `anthropic-version`) is dropped from every request; remove it and put credentials in the provider's `credential` / `auth`. |
 | WARN | `routectl_cli::server::secrets` | `OAuth credentials store unavailable ...`, `OAuth credentials store could not be constructed` | `oauth://` references will fail: set HOME/XDG, or fix the credentials directory per `error`. |
 | ERROR / WARN | `routectl_cli::server::serve` | `MITM proxy failed to start`, `usage writer drain task failed`, `usage writer panicked while draining` (ERROR); `graceful drain deadline elapsed`, `failed to install SIGTERM handler`, `usage writer stopped at its drain deadline` (WARN) | MITM down: fix its port or cert per `error`, restart. Drain task failed or writer panicked: queued usage rows may be lost; file a bug. Writer drain deadline: see the `routectl_usage::writer` deadline line just before it. Drain deadline: in-flight requests were cut, recurring means stuck requests. No SIGTERM handler: graceful stop is unavailable. |
 | WARN | `routectl::status::gate` | `status surface rejected a request with a disallowed authority claim`, `status surface overloaded; shed a request` (both sampled) | A foreign `Host` on `/status*` suggests DNS rebinding: find the page polling it. Shedding means a poller is hammering `/status`: slow it down. |
@@ -2600,7 +2602,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | Level | Target | Message prefix | Why actionable / operator action |
 |---|---|---|---|
 | WARN | `routectl_providers::mantle` | `mantle credential resolution failed` | Fix the AWS credential source named in `error` (expired SSO, missing profile, instance role). |
-| WARN | `routectl_providers::upstream_log` | `upstream auth failed`, `upstream error` | Auth: re-login or rotate the credential for `provider` (`auth_kind` names which). Other: read `status` and `body_excerpt` -- an outage, a quota, or a body shape the upstream rejects (file a bug for a 400). |
+| WARN | `routectl_providers::upstream_log` | `upstream auth failed`, `upstream error` | Auth: re-login or rotate the credential for `provider` (the `auth_kind` log field names the provider's wire auth form). Other: read `status` and `body_excerpt` -- an outage, a quota, or a body shape the upstream rejects (file a bug for a 400). |
 | WARN | `routectl_providers::http_client` | `upstream response body exceeded cap; truncated`, `skipping malformed header name/value`, `ignoring auth-reserved header from header_extras` | Oversized body: check `provider` for a runaway response. Header lines: fix `header_extras` in config; configure auth on the provider instead. |
 | WARN | `routectl_providers::{tool_calls,anthropic_api::messages}` | `tool_call.arguments not valid JSON; wrapping under _arguments` | The client sent malformed tool arguments; the upstream will likely reject them. Inspect the client. |
 | WARN | `routectl_providers::anthropic_api::parts` | `empty image_url.url`, `data: URI with empty base64 payload`, `data: URI with non-allowlisted media_type` | The request will 400: fix the client's image upload. |

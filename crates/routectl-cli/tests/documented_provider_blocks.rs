@@ -305,7 +305,7 @@ fn documented_config_blocks_parse_and_whole_configs_validate() {
 
     // A refactor that breaks the fence scanner or the block classifier
     // would otherwise leave this test vacuously green over zero blocks.
-    // Floors sit below today's counts (48 blocks, 70 units, 1 whole
+    // Floors sit below today's counts (46 blocks, 69 units, 1 whole
     // config) so ordinary doc edits do not trip them.
     assert!(
         checked.blocks >= 40,
@@ -373,7 +373,7 @@ fn readme_config_blocks_parse_and_whole_configs_validate() {
 fn provider_quirks_config_blocks_parse() {
     let checked = check_markdown_source("docs/PROVIDER-QUIRKS.md", PROVIDER_QUIRKS_MD);
 
-    // 14 of the 16 fenced blocks are checkable today (28 units); the other
+    // 12 of the 14 fenced blocks are checkable today (25 units); the other
     // two are the "...the fields above, plus:" provider snippets the skip
     // rule on `classify` covers. Floors sit below today's counts so
     // ordinary recipe edits do not trip them.

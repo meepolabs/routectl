@@ -133,7 +133,7 @@ and architectures. Lots of NIM models are guarded behind feature
 endpoints that 410 ("end of life") -- the matrix avoids those by using
 freshly-validated names.
 
-## Anthropic API direct (`kind = "anthropic-api"`)
+## Anthropic API direct (`format = "anthropic-messages"`)
 
 Hits `https://api.anthropic.com` with `x-api-key` (or
 `Authorization: Bearer` for OAuth-bearer auth) and
@@ -147,7 +147,7 @@ The OAuth-bearer auth path is exercised by a separate live test
 `ROUTECTL_TEST_CLAUDE_OAUTH_TOKEN_FILE=<path>` pointing to a file that
 contains a raw Anthropic OAuth bearer access token (one line).
 
-## AWS Bedrock (`kind = "bedrock"`, InvokeModel + Anthropic body)
+## AWS Bedrock (`format = "bedrock-invoke"`, InvokeModel + Anthropic body)
 
 Hits `bedrock-runtime.<region>.amazonaws.com` directly with SigV4
 signing or a short-term bearer key
@@ -180,7 +180,7 @@ hub-and-spoke seam end-to-end:
   frames, asserts the rendered SSE event sequence
   (`message_start` -> `content_block_*` -> `message_stop`).
 
-### Bedrock Converse (`api_shape = "converse"`)
+### Bedrock Converse (`format = "bedrock-converse"`)
 
 The Converse path runs as a separate sub-matrix against the AWS
 Converse API (`/model/{id}/converse`) rather than InvokeModel. Same
@@ -192,7 +192,7 @@ eventstream decoder.
 | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | complete + stream | |
 | `us.anthropic.claude-3-5-haiku-20241022-v1:0` | complete + stream | |
 
-## OpenAI Responses API (`kind = "openai-responses"`, chatgpt-oauth surface)
+## OpenAI Responses API (`format = "openai-responses"`, chatgpt-oauth surface)
 
 Hits `https://chatgpt.com/backend-api/codex/responses` with a ChatGPT
 subscription bearer JWT (`Authorization: Bearer <jwt>`) and
@@ -246,7 +246,7 @@ Wire-shape notes for the chatgpt-oauth surface:
 | `gpt-5.4-mini` | complete + stream | PASS | Faster/cheaper variant |
 | `gpt-5.4-mini` | complete (oauth://codex) | PASS | Bearer resolved through `OAuthStore` (tempdir credentials.json); ChatGPT account id auto-derived from the JWT `chatgpt_account_id` claim (no `account_id_ref`). Skipped when `OPENAI_OAUTH_ACCESS_TOKEN` is unset. |
 
-## Native Google Gemini (`kind = "gemini"`)
+## Native Google Gemini (`format = "gemini"`)
 
 Hits the public Gemini REST endpoint
 (`https://generativelanguage.googleapis.com/v1beta`) with an API key
@@ -283,10 +283,10 @@ Wire-shape notes for the native Gemini surface:
 - **usageMetadata**: `cachedContentTokenCount` ->
   `cache_read_input_tokens`, `thoughtsTokenCount` -> `reasoning_tokens`.
 
-See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#gemini-native-kind--gemini)
+See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#gemini-native-format--gemini)
 for the full mapping and the before/after fidelity note.
 
-## Cloud Code Gemini (`kind = "gemini"`, `auth_mode = "cloud-code"`, antigravity OAuth)
+## Cloud Code Gemini (`format = "gemini-cloud-code"`, antigravity OAuth)
 
 Hits the Cloud Code ("antigravity") surface: the daily Cloud Code host's
 `/v1internal:{generate,stream}Content` with an OAuth bearer
@@ -294,7 +294,7 @@ Hits the Cloud Code ("antigravity") surface: the daily Cloud Code host's
 the whole lane to the production host when a seat needs it. The inner
 Gemini translation is reused unchanged from the api-key path; only the
 transport wrapper, auth, base, and project resolution differ. See
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code)
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-format--gemini-cloud-code)
 for the wire details.
 
 Human gate (one-time): the operator runs `routectl login antigravity`
@@ -360,7 +360,7 @@ Verified as of 2026-08-22. The bulk of the table below was swept on
 2026-08-21; the three `gemini-3.7-flash-*` rows were added on 2026-08-22,
 when a client update moved the pinned `ideVersion` and the newest tier
 appeared in the catalog (the pinned version GATES the catalog -- see
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code)).
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-format--gemini-cloud-code)).
 Google churns these ids on a weekly cadence; this table is a point-in-time
 verification snapshot, NOT a registry -- re-verify before trusting any id.
 Each row below completed one end-to-end non-stream request through
@@ -399,7 +399,7 @@ model's family or tier from its label.
 `gemini-2.5-flash` also completed on this run, but the catalog's own label
 says the upstream serves flash-lite behind that id and routectl's docs
 previously recommended it -- it is treated as a deprecated alias (see
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code)),
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-format--gemini-cloud-code)),
 not as a row to copy.
 
 Present in the catalog but NOT verified on this run:
@@ -449,7 +449,7 @@ per-provider tables above; this table is the at-a-glance summary.
 | bedrock (invoke + converse) | yes | yes | Anthropic body on InvokeModel; vendor-neutral Converse |
 | openai-responses | stream-only (`complete` force-streams) | yes | Flat Responses tool shape, encrypted_content reasoning replay |
 | **gemini (native)** | yes | yes | Full on the four named features: systemInstruction, thinkingConfig, functionDeclarations, usageMetadata cached-content + thoughts tokens |
-| **gemini (Cloud Code, OAuth)** | yes | yes | `auth_mode = "cloud-code"`: Bearer against the daily Cloud Code host's `/v1internal`; `{project,request,model}` envelope + `response` unwrap; inner Gemini translation reused unchanged. Wiremock-pinned in CI; live rows require a bearer token and SKIP without one -- outcomes recorded above |
+| **gemini (Cloud Code, OAuth)** | yes | yes | `format = "gemini-cloud-code"`: Bearer against the daily Cloud Code host's `/v1internal`; `{project,request,model}` envelope + `response` unwrap; inner Gemini translation reused unchanged. Wiremock-pinned in CI; live rows require a bearer token and SKIP without one -- outcomes recorded above |
 
 ## Adding a new model
 

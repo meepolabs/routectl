@@ -21,9 +21,9 @@ matching per-model section.
 | **NVIDIA NIM hosting DeepSeek** | callers must send `reasoning_effort = "high"` per request (the operator-side `payload_extras` knob is deferred -- callers can still set effort via wire `reasoning.effort`) |
 | **NIM cold-start streaming** | `[providers.X] stream_first_byte_timeout_ms = 180000` (3 min) |
 | **Anthropic + 1M-context beta** | `[providers.X] header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }` |
-| **OAuth bearer to Anthropic** | `[providers.X] auth_kind = "oauth-bearer"` + the matching beta header |
+| **OAuth bearer to Anthropic** | `[providers.X] auth = "bearer"` on `base_url = "https://api.anthropic.com"`; routectl adds the `oauth-2025-04-20` beta itself |
 | **DeepSeek /anthropic endpoint + claude-code context-management** | `[providers.X] context_management = true` |
-| **Google Gemini (native)** | `[providers.X] kind = "gemini"` + `api_key_ref = "env://GEMINI_API_KEY"`; `safetySettings` flows through `payload_extras` (`generationConfig` does not -- it is routectl-managed and dropped with a WARN) |
+| **Google Gemini (native, untested)** | `[providers.X] format = "gemini"` + `credential = "env://GEMINI_API_KEY"` + `auth = "x-goog-api-key"`; `safetySettings` flows through `payload_extras` (`generationConfig` does not -- it is routectl-managed and dropped with a WARN) |
 
 ## Per-model config
 
@@ -171,7 +171,7 @@ credential = "file:///path/to/oauth-token"
 auth = "bearer"
 ```
 
-For `auth = "x-api-key"`, routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth = "bearer"` on `api.anthropic.com`, `default_claude_code_anthropic_betas()` auto-injects a 9-flag model-agnostic base -- `claude-code-20250219`, `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`, `redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28` -- so no manual `header_extras` beta list is needed for those.
+For `auth = "x-api-key"`, routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth = "bearer"` on `api.anthropic.com` with the provider's own credential (any scheme, not `forwarded`), routectl adds the OAuth gate `oauth-2025-04-20` on every request. Only a provider presenting the Claude Code identity -- a managed `oauth://anthropic` login, not a token in `file://` or `env://` as above -- additionally gets, on requests routectl classifies as non-Claude-Code (all of them under `cloak_mode = "always"`, none under `"never"`), the 9-flag model-agnostic base from `default_claude_code_anthropic_betas()` -- `claude-code-20250219`, `oauth-2025-04-20`, `interleaved-thinking-2025-05-14`, `context-management-2025-06-27`, `prompt-caching-scope-2026-01-05`, `structured-outputs-2025-12-15`, `fast-mode-2026-02-01`, `redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28` -- so no manual `header_extras` beta list is needed for those.
 
 The base is deliberately NOT the full set genuine Claude Code emits. Model-gated flags (`context-1m-2025-08-07`, `effort-2025-11-24`, `thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`, `advisor-tool-2026-03-01`) are excluded because forcing them 400s models that do not support them (haiku rejects `context-1m-2025-08-07`). They reach upstream only when the caller sends them, as client pass-through. If you need a model-gated flag on every request to a model that DOES support it, declare it in that `[models.X] header_extras`.
 
@@ -179,8 +179,8 @@ Two of the gated flags are additionally unioned ON DEMAND, keyed on what the ass
 
 | Body field on the wire | Beta unioned | Lane |
 | --- | --- | --- |
-| `output_config.format` | `structured-outputs-2025-12-15` | every auth kind (suppressed on the forwarded leg) |
-| `output_config.effort` | `effort-2025-11-24` | own-OAuth to `api.anthropic.com` only |
+| `output_config.format` | `structured-outputs-2025-12-15` | every `auth` value (suppressed on the forwarded leg) |
+| `output_config.effort` | `effort-2025-11-24` | a provider presenting the Claude Code identity only |
 
 Both unions run after the floor and after every other beta step: they are capability signals implied by the shipped body, not client-opted betas. `output_config.format` was measured 2026-08-11 (one lane, one seat, one model) to be accepted both with and without its beta, so its union is retained as belt-and-braces rather than a proven hard requirement; the `output_config.effort` case is unmeasured on `api.anthropic.com`. Bedrock Invoke and Converse accepted both fields without either flag when measured 2026-10-21 (one model), so Bedrock adds the structured-outputs flag only as the same belt-and-braces union and never adds an effort flag. Both are one-way -- the body's field adds the flag; a caller-supplied flag with no matching field is left untouched.
 
@@ -194,7 +194,7 @@ Both unions run after the floor and after every other beta step: they are capabi
 
 Anthropic's OAuth seat 400s a `/v1/messages` body carrying either `temperature` or `top_p` (both confirmed). routectl drops them as the last mutation before the request goes out, on both the streaming and non-streaming paths, and emits one structured `DEBUG` event per affected request naming only the dropped keys (never their values).
 
-The gate is the credential LANE (`oauth-bearer` + exact `api.anthropic.com` host + not the forwarded leg), NOT the Claude Code identity or the cloak setting. An env-held OAuth bearer, or `cloak.mode = "never"` on an OAuth provider, therefore STILL drops these params -- the 400 is a property of the credential, not of the disguise. Point the request at an API-key provider (or any non-Anthropic host) if you need `temperature` honoured. The `count_tokens` path is unaffected: its body allowlist already excludes sampling.
+The gate is the credential LANE (`auth = "bearer"` + exact `api.anthropic.com` host + not the forwarded leg), NOT the Claude Code identity or the cloak setting. An env-held OAuth bearer, or `cloak_mode = "never"` on an OAuth provider, therefore STILL drops these params -- the 400 is a property of the credential, not of the disguise. Point the request at an `auth = "x-api-key"` provider (or any non-Anthropic host) if you need `temperature` honoured. The `count_tokens` path is unaffected: its body allowlist already excludes sampling.
 
 ### claude-code attribution headers (`X-Claude-Code-*`)
 
@@ -231,8 +231,8 @@ identifier via `header_extras` if they want a static value.
 
 ### Bedrock (any region)
 
-Both `api_shape = "invoke"` (Anthropic Messages body) and
-`api_shape = "converse"` (AWS Converse) are wired for Anthropic
+Both `format = "bedrock-invoke"` (Anthropic Messages body) and
+`format = "bedrock-converse"` (AWS Converse) are wired for Anthropic
 models on Sonnet/Haiku/Opus. Both shapes forward the client's thinking
 object and repair and learn a refused thinking type per lane (see
 [Anthropic Opus 4.7+](#anthropic-opus-47-and-any-future-adaptive-thinking-models)).
@@ -247,7 +247,7 @@ The router withholds, per lane, a small shipped seed of betas Bedrock
 rejects (`advanced-tool-use-2025-11-20`, `advisor-tool-2026-03-01`,
 `prompt-caching-scope-2026-01-05`; applied even with `[capability]
 enabled = false`) plus every beta flag it learned that lane rejects. On
-`api_shape = "converse"` it withholds every client beta from a model
+`bedrock-converse` it withholds every client beta from a model
 whose id is provably not Anthropic (GPT, Nova, Llama, ...), since those
 models refuse the `anthropic_beta` field itself; the operator floor still
 ships. Those models refuse `output_config` too, so the Converse egress
@@ -262,7 +262,8 @@ across restarts, decaying after 48 hours into one re-probe, visible in
 `routectl doctor`, and removable with `routectl capability purge
 <provider#upstream> beta:<flag>`. The same purge lifts a seeded flag on a
 routed lane until the upstream rejects that flag again there, or the
-lane's provider entry is removed or changes `kind`. To pin a
+lane's provider entry is removed or moves to a `format` with another
+family token. To pin a
 decision, put the flag under `[capability.overrides.<provider>]`:
 `unsupported = ["beta:<flag>"]` never sends it, `force_supported`
 always does. The operator floor (betas pinned in provider or model
@@ -406,7 +407,7 @@ Default works. The OpenAI dialect maps canonical `reasoning.effort` -> wire `rea
 
 One rule picks the ids that get the modern chat-completions shape: the id, lowercased with at most one leading `openai.` removed, starts with `gpt-`, `o1`, `o3` or `o4`, or the lowercased id contains `reasoner`. Those ids leave with `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `logprobs` and `top_logprobs` dropped, and on the OpenAI dialect `max_tokens` is sent as `max_completion_tokens`. The rule covers every `gpt-` id, so older chat models (`gpt-4o`, `gpt-5-chat-latest`, `gpt-5.4`, `gpt-5.5`) and the open-weight `gpt-oss-*` lose sampling params on chat lanes too. Bedrock Mantle's `openai.gpt-5.6-terra` matches as `gpt-5.6-terra`; `openai/gpt-5` (an OpenRouter-style slug) and `openai.openai.gpt-5` do not.
 
-The rule reaches only the `openai` and `deepseek` reasoning dialects; the DeepSeek dialect drops the sampling params and does not rename `max_tokens`. `vllm`, `raw-think-tag`, `openrouter` and `passthrough` send the sampling params and `max_tokens` as the client sent them. `openai` is the default `reasoning_dialect`, so a self-hosted `gpt-oss-*` that should keep its sampling params needs `reasoning_dialect = "vllm"` set on its model. For gpt-5.6 and later, prefer a Responses lane (`kind = "openai-responses"`): sampling and output-limit handling there do not depend on this rule.
+The rule reaches only the `openai` and `deepseek` reasoning dialects; the DeepSeek dialect drops the sampling params and does not rename `max_tokens`. `vllm`, `raw-think-tag`, `openrouter` and `passthrough` send the sampling params and `max_tokens` as the client sent them. `openai` is the default `reasoning_dialect`, so a self-hosted `gpt-oss-*` that should keep its sampling params needs `reasoning_dialect = "vllm"` set on its model. For gpt-5.6 and later, prefer a Responses lane (`format = "openai-responses"`): sampling and output-limit handling there do not depend on this rule.
 
 For an id outside the rule, routectl learns the drop. An `openai-compat` upstream that answers `Unsupported parameter: '<name>' is not supported with this model.` (or names it in `error.param`) for `temperature`, `top_p`, `presence_penalty` or `frequency_penalty` gets one retry on the same target without that parameter. When the retry succeeds, or is refused for another parameter it still carries, the lane learns the drop and later requests to it go out without the parameter; a request carrying several refused parameters is repaired one parameter per retry, within the request's allowance of five repairs. `logprobs` and `top_logprobs` are not learned.
 
@@ -425,7 +426,7 @@ reasoning_dialect = "openai"
 
 ### chatgpt-oauth (`openai-responses` provider, `chatgpt.com/backend-api/codex` surface)
 
-The `openai-responses` provider **mimics the codex CLI client header contract** only when its credential is routectl's own codex login (`oauth://codex`) and its base URL is on `chatgpt.com`. Any other Responses provider (an `api-key` entry, Bedrock Mantle, or a `chatgpt-oauth` entry carrying an `env://` / `file://` token) sends no codex identity headers and no codex User-Agent; `auth_kind = "chatgpt-oauth"` still selects the ChatGPT request shape. The chatgpt.com backend requires requests to the Codex / ChatGPT-Pro responses API to match that contract: the User-Agent literal, the `originator` value, the per-process identity headers, and the OAuth refresh client's own header set must all match what the codex CLI sends. If any of these values drift, the upstream may reject requests or require re-authentication -- this is a client-compatibility constraint, not a recoverable build error.
+The chatgpt-oauth lane is an `openai-responses` entry whose `base_url` is on `chatgpt.com`; that destination selects the ChatGPT request shape. The provider **mimics the codex CLI client header contract** only when its credential is routectl's own codex login (`oauth://codex`) on that host. Any other Responses provider (an api-key entry on another host, Bedrock Mantle, or a `chatgpt.com` entry carrying an `env://` / `file://` token) sends no codex identity headers and no codex User-Agent; a `chatgpt.com` entry with such a token still speaks the ChatGPT request shape. The chatgpt.com backend requires requests to the Codex / ChatGPT-Pro responses API to match that contract: the User-Agent literal, the `originator` value, the per-process identity headers, and the OAuth refresh client's own header set must all match what the codex CLI sends. If any of these values drift, the upstream may reject requests or require re-authentication -- this is a client-compatibility constraint, not a recoverable build error.
 
 **Client version**: the codex CLI version routectl claims on the wire has a pinned default baked into the build, overridable WITHOUT a rebuild via the `codex_version` knob (see [CONFIGURATION.md](CONFIGURATION.md#codex_version-client-identity-override)). The knob only sets the version segment; the User-Agent and `version` identity header derive from it single-sourced, so egress and the OAuth refresh client can never diverge from each other. Use it to track a newer upstream codex release the moment it lands rather than waiting for a routectl release.
 
@@ -445,7 +446,9 @@ surface" -- that is contributor material; the two knobs above
 
 Every `openai-responses` lane speaks the same wire shape, but the lanes
 do NOT validate replayed reasoning the same way, and their validators
-reject each other's artifacts:
+reject each other's artifacts. The lane follows the entry's destination:
+`chatgpt-oauth` is a `base_url` on `chatgpt.com`, `api-key` is any other
+`base_url`, and `bedrock-mantle` is `cloud = { name = "aws", ... }`.
 
 | Lane | What its validator checks | What it ignores |
 |---|---|---|
@@ -501,20 +504,23 @@ mints it any more. Reintroducing it as an emitted value would put three
 mutually incompatible lanes back under one tag and make an artifact's
 origin unrecoverable.
 
-### Gemini (native, `kind = "gemini"`)
+### Gemini (native, `format = "gemini"`)
 
 The native Gemini egress (`generateContent` / `streamGenerateContent`)
 replaces the older openai-compat shim. It talks the Gemini REST wire
 shape directly, so it does not coerce requests through the OpenAI
 schema first.
 
-**Auth model (decision):** API key only, sent as the `x-goog-api-key`
-HTTP header (NOT `Authorization: Bearer`). The key is resolved per
-request from `api_key_ref`, so a routectl-managed `oauth://` or
-`file://` source can rotate it without a daemon restart. Vertex AI /
-Google OAuth (ADC, service accounts) is explicitly NOT implemented. It
-is reachable later by pointing `base_url` at a Vertex endpoint -- no
-new provider kind required.
+Untested in this release: the format parses and routes, but it has not
+been validated against the live upstream for this release.
+
+**Auth model (decision):** API key only (`auth = "x-goog-api-key"`), sent
+as the `x-goog-api-key` HTTP header (NOT `Authorization: Bearer`). The
+key is resolved per request from `credential`, so a `file://` source can
+rotate it without a daemon restart. Vertex AI / Google OAuth (ADC,
+service accounts) is explicitly NOT implemented; a Vertex `cloud` value
+is documented as a planned shape only (see
+[CONFIGURATION.md](CONFIGURATION.md#base_url-and-cloud)).
 
 **Model path shape:** the provider appends the model id and method to
 `base_url`:
@@ -522,7 +528,7 @@ new provider kind required.
 - non-stream: `{base_url}/models/{model}:generateContent`
 - stream:     `{base_url}/models/{model}:streamGenerateContent?alt=sse`
 
-`base_url` defaults to
+`base_url` has no default; the public API is
 `https://generativelanguage.googleapis.com/v1beta`.
 
 **thinkingConfig budget mapping:** the canonical `reasoning` controls
@@ -611,32 +617,34 @@ Net: the shim loses the system-prompt role distinction, all native
 thinking control, the exact tool schema, and the cache-read token
 count. Native gains all four, end to end.
 
-#### Cloud Code (antigravity) egress mode (`auth_mode = "cloud-code"`)
+#### Cloud Code (antigravity) egress mode (`format = "gemini-cloud-code"`)
 
-Setting `auth_mode = "cloud-code"` on a `gemini`-kind provider switches
-the egress from the API-key `generativelanguage` surface to the Cloud
-Code ("antigravity") surface. The inner Gemini request/response/SSE
+`format = "gemini-cloud-code"` (in place of `"gemini"`) switches the
+egress from the API-key `generativelanguage` surface to the Cloud Code
+("antigravity") surface. The inner Gemini request/response/SSE
 translation is REUSED UNCHANGED from the api-key path; only the
 transport wrapper, auth, base, and project resolution differ.
 
-EXPERIMENTAL / best-effort: this is an internal Google surface with no
-published contract or compatibility promise. It is exercised against
+UNTESTED in this release, and EXPERIMENTAL / best-effort: this is an
+internal Google surface with no published contract or compatibility
+promise. It is exercised against
 wiremock in CI and verified live only occasionally, so an upstream change
 can break the lane between routectl releases. Do not build a production
 dependency on it without a fallback chain entry.
 
 **Auth model:** OAuth bearer, sent as `Authorization: Bearer <token>`
-(NOT `x-goog-api-key`). The bearer is resolved per request from an
-`oauth://antigravity` `api_key_ref`, so a refreshed token rotates in
-without a daemon restart. A one-time `routectl login antigravity` (live
-Google consent in a browser) mints the credential; the factory rejects
-any non-`oauth://` ref in this mode.
+(NOT `x-goog-api-key`), with `auth = "bearer"`. The bearer is resolved
+per request from an `oauth://antigravity` `credential`, so a refreshed
+token rotates in without a daemon restart. A one-time `routectl login
+antigravity` (live Google consent in a browser) mints the credential;
+validation rejects any credential other than an `oauth://antigravity`
+login on this format.
 
-**Base + path shape:** the base defaults to the DAILY Cloud Code host,
-`https://daily-cloudcode-pa.googleapis.com` -- consumer (non-GCP-ToS)
-seats are served there, and serving them on production earns a
-permission or quota rejection. Set `base_url` to
-`https://cloudcode-pa.googleapis.com` for a production seat (the managed
+**Base + path shape:** `base_url` is required; write the DAILY Cloud Code
+host, `https://daily-cloudcode-pa.googleapis.com` (what `routectl login
+antigravity` writes) -- consumer (non-GCP-ToS) seats are served there,
+and serving them on production earns a permission or quota rejection.
+Write `https://cloudcode-pa.googleapis.com` instead for a production seat (the managed
 `oauth://antigravity` credential is accepted on no other host, so an
 enterprise mirror is not reachable on this lane); an explicit value is
 forwarded verbatim, never rewritten, and `config check` plus startup emit a WARNING when a
@@ -707,7 +715,7 @@ Ordered surfaces a version bump must touch:
    `crates/routectl-cli/tests/live_matrix/oauth_antigravity.rs` -- re-read
    the live catalog under the new pin and add whatever ids appeared.
 4. The servable-set snapshot rows and date in
-   [TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-kind--gemini-auth_mode--cloud-code-antigravity-oauth),
+   [TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-format--gemini-cloud-code-antigravity-oauth),
    with the live evidence for each new id.
 
 **Host-rejection diagnostic:** a wrong-host lane and a legitimately
@@ -729,7 +737,7 @@ Code host: no request is reissued against a different base, so switching
 hosts is always an explicit `base_url` edit.
 
 **Claude model ids:** the same cloud-code lane serves `claude-*` upstream
-ids on a `gemini`-kind entry -- the model name rides in the request
+ids on a `gemini-cloud-code` entry -- the model name rides in the request
 envelope, so no separate provider kind is involved.
 
 **Deprecated model aliases:** the `gemini-2.5-*` ids routectl's own docs
@@ -740,10 +748,10 @@ answering; the catalog's own labels show a different model behind them, and
 seats. They are no longer documented as cloud-code ids. An entry that still
 configures one on this lane earns a config-load WARNING naming a verified
 replacement (`gemini-3.1-flash-lite`); routing is unchanged and config load
-still succeeds. The same ids on an `api-key`-mode gemini entry are LIVE and
+still succeeds. The same ids on a `format = "gemini"` entry are LIVE and
 never warn -- the WARNING is scoped to the cloud-code lane. Verified
 replacements, and the fact that the id set churns weekly, are in
-[TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-kind--gemini-auth_mode--cloud-code-antigravity-oauth).
+[TESTED_MODELS.md](TESTED_MODELS.md#cloud-code-gemini-format--gemini-cloud-code-antigravity-oauth).
 
 **Reused unchanged from the api-key path:** `thinkingConfig` budget
 mapping, `thoughtSignature` reasoning replay, `functionDeclarations`

@@ -28,14 +28,14 @@ inference call:
 
 | Mode | Provider setting | Inference authenticated by |
 |---|---|---|
-| Remote Control (below) | `credential_source = "own"` (default) | routectl's own configured credential |
-| [Pure-proxy mode](#pure-proxy-mode) | `credential_source = "forwarded"` | the client's own claude.ai token; the provider holds no credential of its own |
+| Remote Control (below) | any `credential` routectl holds (`env://`, `file://`, `oauth://`, ...) | routectl's own configured credential |
+| [Pure-proxy mode](#pure-proxy-mode) | `credential = "forwarded"` | the client's own claude.ai token; the provider holds no credential of its own |
 
 In both modes, Claude Code's non-inference `api.anthropic.com` traffic
-passes through untouched. `credential_source` is a per-`[providers.X]`
-choice, not a `[mitm]`-level one -- `[mitm]` itself carries no
-credential knob (see [`docs/CONFIGURATION.md`](CONFIGURATION.md)
-"credential_source").
+passes through untouched. Which credential authenticates is a
+per-`[providers.X]` choice, not a `[mitm]`-level one -- `[mitm]` itself
+carries no credential knob (see [`docs/CONFIGURATION.md`](CONFIGURATION.md#forwarded-credential)
+"Forwarded credential").
 
 ## Prerequisites
 
@@ -124,7 +124,7 @@ that is the client's own token, not one of your configured listener
 tokens, so routectl's listener-auth middleware would reject it.
 
 This applies identically to [Pure-proxy mode](#pure-proxy-mode): the
-re-injection is the same regardless of `credential_source`, so a
+re-injection is the same whichever `credential` the target uses, so a
 populated `[server.auth].tokens` breaks pure-proxy mode the same way it
 breaks Remote Control.
 
@@ -158,7 +158,7 @@ existed.
 ### What it is
 
 Pure-proxy mode runs Claude Code through routectl with a
-`credential_source = "forwarded"` `anthropic-api` provider configured:
+`credential = "forwarded"` `anthropic-messages` provider configured:
 the client's own claude.ai session token authenticates the Anthropic
 inference call directly against `api.anthropic.com`, and that provider
 never holds or resolves an Anthropic credential of its own for that
@@ -170,12 +170,12 @@ credential changes: it lives in Claude Code, not in routectl's config
 or credentials store.
 
 Pure-proxy mode is a separate per-provider setting from Remote
-Control's default `credential_source = "own"`, but it rides the same
-`[mitm]` listener, CA, and re-injection plumbing described above.
-`credential_source = "forwarded"` is a per-target choice: it coexists
-freely with other `[providers.X]` entries, and a fallback chain may
-mix forwarded and own-credential targets -- only the targets actually
-marked `credential_source = "forwarded"` route on the client's bearer.
+Control's own-credential providers, but it rides the same `[mitm]`
+listener, CA, and re-injection plumbing described above.
+`credential = "forwarded"` is a per-target choice: it coexists freely
+with other `[providers.X]` entries, and a fallback chain may mix
+forwarded and own-credential targets -- only the targets whose
+`credential` is `"forwarded"` route on the client's bearer.
 
 ### How to enable
 
@@ -193,8 +193,10 @@ auth       = "bearer"
 `credential = "forwarded"` is the whole credential -- a forwarded
 provider has no configured credential of its own. Validation rejects a
 forwarded entry on any other format or auth, and rejects any `base_url`
-whose host is not exactly `api.anthropic.com` (see [`docs/CONFIGURATION.md`](CONFIGURATION.md)
-"credential_source"). Route an alias or model to this provider the
+that is not `https://` on exactly `api.anthropic.com` with no userinfo
+and no explicit non-default port (see
+[`docs/CONFIGURATION.md`](CONFIGURATION.md#forwarded-credential)
+"Forwarded credential"). Route an alias or model to this provider the
 same way you would any other. Unlike `[mitm]` itself, this is an
 ordinary provider edit -- it hot-reloads on the next config swap, no
 restart required. Launch
@@ -254,7 +256,7 @@ admitted untouched by this gate regardless of dialect or provider
 config.
 
 Past admission, a further per-target guard runs inside the dispatch
-chain walk: a `credential_source = "forwarded"` target with no
+chain walk: a `credential = "forwarded"` target with no
 captured client bearer (most commonly because this particular request
 never arrived via the MITM leg at all) is refused before egress with a
 local HTTP 400, per-target -- a chain that never reaches that target is
