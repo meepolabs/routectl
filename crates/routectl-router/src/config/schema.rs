@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::class_policy::ConfigFailureClass;
 
 use super::provider_descriptor::{
-    Auth, Carrier, Format, format_row, is_vendor_host, vendor_default_base,
+    Auth, Carrier, Format, format_row, is_vendor_host, vendor_default_base, vendor_row,
 };
 
 #[cfg(test)]
@@ -1345,6 +1345,21 @@ impl ProviderEntry {
         self.reduction_enabled
     }
 
+    /// Construct the entry that consumes a routectl-managed login of
+    /// `vendor`: the vendor's own format, auth and default base URL, with
+    /// `credential` (an `oauth://<vendor>[#label]` reference), every tuning
+    /// key unset. `None` for a vendor routectl does not manage.
+    #[must_use]
+    pub fn for_managed_login(vendor: &str, credential: impl Into<String>) -> Option<Self> {
+        let row = vendor_row(vendor)?;
+        Some(Self::over_base_url(
+            row.format,
+            row.default_base,
+            credential.into(),
+            row.auth,
+        ))
+    }
+
     /// Construct an `openai-chat` entry over `base_url` with the given
     /// credential sent as a bearer, every tuning key unset.
     pub fn openai_compat(base_url: impl Into<String>, credential: impl Into<String>) -> Self {
@@ -2088,3 +2103,7 @@ mod seat_selection_tests;
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
+
+#[cfg(test)]
+#[path = "managed_login_tests.rs"]
+mod managed_login_tests;

@@ -14,51 +14,8 @@
 
 use routectl_auth::SecretRef;
 use routectl_router::seat_naming::account_entry_name;
-use routectl_router::{Auth, Format};
+use routectl_router::{Auth, Format, ProviderEntry};
 use toml_edit::Table;
-
-/// The `format`, `auth` and `base_url` an `oauth://<id>` credential must be
-/// consumed with, keyed by login-provider id.
-///
-/// Each row is the vendor's own lane as the router's provider descriptor
-/// states it: config validation refuses a managed login on any other
-/// format, auth or host, so a row that drifts from the descriptor yields a
-/// block that fails at the operator's next startup.
-///
-/// - `anthropic`: `anthropic-messages` over `https://api.anthropic.com`,
-///   sent as `bearer` (a subscription token on `x-api-key` would 401).
-/// - `codex`: `openai-responses` over the ChatGPT Codex base, `bearer`;
-///   `account_id_ref` is derived from the login, so it is not written.
-/// - `xai`: `openai-chat` over `https://api.x.ai/v1`, `bearer`.
-/// - `antigravity`: `gemini-cloud-code` over the daily Cloud Code base,
-///   `bearer`.
-fn auth_shape_for_oauth_id(oauth_id: &str) -> Option<AuthShape> {
-    let (format, base_url) = match oauth_id {
-        "anthropic" => (Format::AnthropicMessages, "https://api.anthropic.com"),
-        "codex" => (
-            Format::OpenaiResponses,
-            "https://chatgpt.com/backend-api/codex",
-        ),
-        "xai" => (Format::OpenaiChat, "https://api.x.ai/v1"),
-        "antigravity" => (
-            Format::GeminiCloudCode,
-            "https://daily-cloudcode-pa.googleapis.com",
-        ),
-        _ => return None,
-    };
-    Some(AuthShape {
-        format,
-        auth: Auth::Bearer,
-        base_url,
-    })
-}
-
-/// The provider-shape facts [`auth_shape_for_oauth_id`] owns.
-struct AuthShape {
-    format: Format,
-    auth: Auth,
-    base_url: &'static str,
-}
 
 /// A rendered `[providers.<name>]` entry for one logged-in seat.
 ///
@@ -67,10 +24,7 @@ struct AuthShape {
 #[derive(Debug)]
 pub struct ProviderBlock {
     name: String,
-    format: Format,
-    auth: Auth,
-    base_url: &'static str,
-    credential: String,
+    entry: Box<ProviderEntry>,
 }
 
 /// Build the provider entry that consumes the seat `routectl login
@@ -85,18 +39,15 @@ pub struct ProviderBlock {
 /// unlabelled login would reference a seat that does not exist.
 #[must_use]
 pub fn provider_block(oauth_id: &str, label: Option<&str>) -> Option<ProviderBlock> {
-    let shape = auth_shape_for_oauth_id(oauth_id)?;
     let credential = SecretRef::OAuth {
         provider: oauth_id.to_string(),
         label: label.map(str::to_string),
     }
     .to_string();
+    let entry = ProviderEntry::for_managed_login(oauth_id, credential)?;
     Some(ProviderBlock {
         name: block_name(oauth_id, label),
-        format: shape.format,
-        auth: shape.auth,
-        base_url: shape.base_url,
-        credential,
+        entry: Box::new(entry),
     })
 }
 
@@ -137,10 +88,10 @@ pub struct RequiredAuthFields {
 /// no known provider shape.
 #[must_use]
 pub fn required_auth_fields(oauth_id: &str) -> Option<RequiredAuthFields> {
-    let shape = auth_shape_for_oauth_id(oauth_id)?;
+    let entry = ProviderEntry::for_managed_login(oauth_id, String::new())?;
     Some(RequiredAuthFields {
-        format: shape.format,
-        auth: shape.auth,
+        format: entry.format,
+        auth: entry.auth,
     })
 }
 
@@ -189,10 +140,10 @@ impl ProviderBlock {
     /// `credential`, `auth`.
     fn rows(&self) -> Vec<(&'static str, String)> {
         vec![
-            ("format", self.format.as_str().to_string()),
-            ("base_url", self.base_url.to_string()),
-            ("credential", self.credential.clone()),
-            ("auth", self.auth.as_str().to_string()),
+            ("format", self.entry.format.as_str().to_string()),
+            ("base_url", self.entry.base_url.clone().unwrap_or_default()),
+            ("credential", self.entry.credential.clone()),
+            ("auth", self.entry.auth.as_str().to_string()),
         ]
     }
 }
@@ -431,8 +382,8 @@ mod tests {
             for label in [None, Some("seat-b")] {
                 let block = provider_block(id, label).expect("block");
                 let name = block.name.clone();
-                let expected_format = block.format;
-                let expected_auth = block.auth;
+                let expected_format = block.entry.format;
+                let expected_auth = block.entry.auth;
 
                 let cfg: routectl_router::Config = toml::from_str(&block.render())
                     .unwrap_or_else(|e| panic!("block for `{id}` must parse: {e}"));
