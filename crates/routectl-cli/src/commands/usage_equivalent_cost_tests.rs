@@ -34,7 +34,7 @@ const EQUIV_COMPLETE_USD: f64 = 28.35;
 const EQUIV_PEAK_BASIS_USD: f64 = 28.05;
 
 /// What the same ledger totals with the cache dimensions dropped -- the
-/// base-token-only subtotal D1 exists to refuse. Asserted against, never for.
+/// base-token-only subtotal the complete-or-absent rule exists to refuse. Asserted against, never for.
 const EQUIV_BASE_ONLY_USD: f64 = 18.00;
 
 const EQUIV_PROVIDER: &str = "equiv";
@@ -196,7 +196,7 @@ fn an_operator_model_price_is_the_equivalence_basis_for_a_subscription_row() {
     );
 }
 
-// --- complete or absent (D1) --------------------------------------------
+// --- complete or absent -------------------------------------------------
 
 #[test]
 fn a_cache_active_row_without_a_cache_read_rate_reads_absent_not_base_only() {

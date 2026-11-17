@@ -236,3 +236,12 @@ mod tests;
 #[cfg(test)]
 #[path = "plan_identity_wire_tests.rs"]
 mod identity_wire_tests;
+
+#[cfg(all(
+    test,
+    feature = "bedrock",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+#[path = "plan_retired_guidance_tests.rs"]
+mod retired_guidance_tests;

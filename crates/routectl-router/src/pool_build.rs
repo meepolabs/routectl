@@ -2,7 +2,7 @@
 //!
 //! A pool compiles down at build time into the same `ResolvedModel.seats`
 //! shape a seat-pinned provider set has always used: one seat per member
-//! provider entry, built from that member's OWN `api_key_ref`. A member whose
+//! provider entry, built from that member's OWN `credential`. A member whose
 //! credential cannot be read is kept as a PLACEHOLDER seat (no provider, its
 //! account marked unusable); a member that cannot be built for any other
 //! reason refuses the config. The pool keeps serving through its built seats,

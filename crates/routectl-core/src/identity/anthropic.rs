@@ -1,8 +1,9 @@
 //! Compiled Claude Code SDK identity-header defaults -- the `anthropic`
 //! half of the provider identity module.
 //!
-//! These ship with routectl and fire by default on the `oauth-bearer`
-//! path so a zero-config operator (auth_kind + api_key_ref only) emits
+//! These ship with routectl and fire by default on a managed
+//! `oauth://anthropic` login on its own host, so an operator who writes
+//! only the identity keys (`format`, `base_url`, `credential`, `auth`) emits
 //! the Stainless SDK fingerprint that api.anthropic.com associates with
 //! a Claude Code subscription client, without hand-listing every header
 //! in `header_extras`. An operator `header_extras` entry for any of

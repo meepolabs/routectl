@@ -215,7 +215,7 @@ impl Provider for AnthropicApiProvider {
         // `temperature` / `top_p`, so drop them here -- after cloak, after
         // every assembly pass. Gated on the credential lane (not the client
         // identity, not `is_non_cc`, not the cloak flag) so an OAuth bearer
-        // without the identity, or a `cloak.mode = never` provider, still
+        // without the identity, or a `cloak_mode = "never"` provider, still
         // ships an accepted body. See `extras::normalize_claude_sampling`.
         if self.is_own_oauth_lane(&req) {
             let dropped = extras::normalize_claude_sampling(&self.cfg.id, &mut body);

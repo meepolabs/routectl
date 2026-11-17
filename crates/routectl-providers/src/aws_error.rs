@@ -2,7 +2,7 @@
 //!
 //! The native Bedrock lane (`bedrock/mod.rs`), the anthropic-api mantle lift
 //! (`anthropic_api/mod.rs`), and both OpenAI readers (`openai_compat` /
-//! `openai_responses`, when a `bedrock_mantle` upstream returns a flat AWS
+//! `openai_responses`, when an AWS mantle upstream returns a flat AWS
 //! envelope instead of the native error shape) all receive AWS error bodies.
 //! A 403 AccessDenied body names the caller principal ARN, the account id,
 //! and the resource ARN; none of that may reach a log line or a

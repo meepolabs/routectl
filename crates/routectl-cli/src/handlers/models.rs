@@ -319,7 +319,7 @@ mod tests {
     }
 
     /// A router with one installed model `claude` on a provider whose
-    /// `api_key_ref` is `api_key_ref`, plus an activation snapshot computed
+    /// `credential` is `api_key_ref`, plus an activation snapshot computed
     /// from a single `anthropic` probe outcome. Mirrors
     /// `compute_activation`'s real caller shape (one probe per known oauth
     /// id) rather than hand-building an `ActivationState`, which has no

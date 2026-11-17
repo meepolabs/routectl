@@ -84,7 +84,7 @@ impl Router {
     ///
     /// `oauth_activated` is asked about the bare OAuth provider id (any
     /// `#seat` label stripped) when the first target's provider
-    /// `api_key_ref` names one; an api-key or env-ref target never consults
+    /// `credential` names one; an api-key or env-ref target never consults
     /// it. The caller owns the live credential inventory, which is held
     /// beside `Router` rather than inside it. A pool-backed model's
     /// `provider_name` is the pool name rather than a `[providers]` key, so
@@ -123,7 +123,7 @@ impl Router {
         }
     }
 
-    /// The bare OAuth provider id `target`'s provider `api_key_ref` names,
+    /// The bare OAuth provider id `target`'s provider `credential` names,
     /// if it names one at all.
     fn oauth_id_of(&self, target: &ResolvedModel) -> Option<&str> {
         let provider_entry = self.config.providers.get(&target.provider_name)?;

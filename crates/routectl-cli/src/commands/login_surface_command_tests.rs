@@ -561,7 +561,7 @@ fn a_conflict_never_retries_against_the_fresh_bytes() {
 }
 
 // -----------------------------------------------------------------
-// Availability (D6): the routing gap, on the write and Nothing paths.
+// Availability: the routing gap, on the write and Nothing paths.
 // -----------------------------------------------------------------
 
 /// The scans run against the config that was just COMMITTED, not the
@@ -776,7 +776,7 @@ fn a_candidate_the_gate_rejects_is_reported_and_is_not_an_error() {
 /// and its helpers there must be exactly ONE construction of an `Err` that
 /// an operator can reach, and it must be the post-commit one. A new `?` on a
 /// pre-acceptance step would silently turn a stored credential into a
-/// nonzero exit -- the exact regression D5 forbids and no other test sees.
+/// nonzero exit -- the exact regression this guard forbids and no other test sees.
 ///
 /// The whole file is scanned with no `#[cfg(test)]` cut: both test modules
 /// here are SIDECARS, so none of their text is in this file, while cutting

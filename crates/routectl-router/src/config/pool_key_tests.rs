@@ -146,9 +146,9 @@ const CONTROL_ROWS: &[(&str, &[&str], &[&str])] = &[
         &["base_url = \"https://api.anthropic.com/v1/\""],
     ),
     (
-        "destination: host case and default port",
+        "destination: scheme and host case",
         &[],
-        &["base_url = \"HTTPS://API.Anthropic.COM:443\""],
+        &["base_url = \"HTTPS://API.Anthropic.COM\""],
     ),
     (
         "destination: same region",
@@ -361,6 +361,38 @@ fn the_oauth_only_restriction_still_applies_to_a_matching_pool() {
     // Assert
     assert!(err.contains("`oauth://` credential"), "{err}");
     assert!(mismatch_lines(&config).is_empty(), "{err}");
+}
+
+/// The OAuth-only rule reads the seat's `credential` alone: a static
+/// `account_id_ref` companion beside a managed login keeps it a pool seat.
+#[cfg(feature = "openai-responses")]
+#[test]
+fn managed_codex_seats_with_static_account_id_refs_pool_together() {
+    // Arrange
+    let codex = |label: &str, account_var: &str| {
+        vec![
+            "format = \"openai-responses\"".to_string(),
+            "base_url = \"https://chatgpt.com/backend-api/codex\"".to_string(),
+            format!("credential = \"oauth://codex#{label}\""),
+            format!("account_id_ref = \"env://{account_var}\""),
+        ]
+    };
+    let a = codex("a", "SEAT_A_ACCOUNT");
+    let b = codex("b", "SEAT_B_ACCOUNT");
+    let a_refs: Vec<&str> = a.iter().map(String::as_str).collect();
+    let b_refs: Vec<&str> = b.iter().map(String::as_str).collect();
+    let config = pool_config(&a_refs, &b_refs);
+
+    // Act
+    let verdict = validate_pools(&config);
+
+    // Assert
+    verdict.expect("two managed codex seats with static account ids pool");
+    assert_eq!(
+        entry(&config, "seat-a").account_id_ref.as_deref(),
+        Some("env://SEAT_A_ACCOUNT"),
+        "control: the fixture carries the companion"
+    );
 }
 
 /// The two pool roles a real install carries pass the whole collected

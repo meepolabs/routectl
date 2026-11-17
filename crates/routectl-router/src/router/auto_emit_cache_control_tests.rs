@@ -1077,7 +1077,7 @@ fn strategy_str_maps_every_variant_to_stable_token() {
     );
 }
 
-// ---- transactional front + terminal placement (D4) -------------------
+// ---- transactional front + terminal placement ------------------------
 
 /// A request whose system is a two-block `Blocks` array, so the front
 /// anchor resolves to `LastSystemBlock { block_index: 1 }`.
@@ -1436,7 +1436,7 @@ fn no_placement_region_survives_a_validation_rollback() {
 
 #[test]
 fn front_marker_lands_on_the_last_custom_tool_when_system_is_flat() {
-    // D3's tools fallback: no wire-eligible system block, so the anchor
+    // The tools fallback: no wire-eligible system block, so the anchor
     // resolves to the last custom tool definition.
     let mut req = tools_only_req();
     let p = plan(0, false, true, &req);
@@ -1639,7 +1639,7 @@ fn global_kill_switch_withholds_both_markers() {
 
 #[test]
 fn injected_front_marker_is_never_at_the_messages_position() {
-    // D1's ordering contract at the placement seam: the marker this
+    // The front-marker ordering contract at the placement seam: the marker this
     // helper writes always sits before the messages, so the reducer's
     // mutable-suffix domain is unchanged. Pinned for BOTH anchor shapes.
     for mut req in [blocks_system_req(), tools_only_req()] {

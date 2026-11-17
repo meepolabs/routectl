@@ -243,7 +243,7 @@ fn the_not_run_line_tracks_what_the_driver_walk_found() {
     assert_eq!(broken_run.asserted(), 0);
 
     // Populated: the line is withheld AND the run adjudicates something.
-    // This is the positive control D2.A requires -- `asserted` off zero
+    // This is the positive control the check needs -- `asserted` off zero
     // over a real walk, which no assertion on `driver_corpus_note` alone
     // can produce.
     let populated = tempfile::tempdir().unwrap();

@@ -12,8 +12,8 @@
 //! The egress facts this model relies on are pinned on the provider side by
 //! `client_beta_floor_site_tests.rs` in `routectl-providers`
 //! (`anthropic_api`), which drives `build_headers` per site with the
-//! condition true and false; its rows carry the same S1-S8 labels as the
-//! table here.
+//! condition true and false; its rows name the same sites as the table
+//! here.
 
 use routectl_core::identity::anthropic::{
     EFFORT_BETA, OAUTH_ANTHROPIC_BETA, REDACT_THINKING_BETA, STRUCTURED_OUTPUTS_BETA,

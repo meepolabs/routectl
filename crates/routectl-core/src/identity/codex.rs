@@ -286,8 +286,9 @@ pub const fn codex_default_headers() -> [(&'static str, &'static str); 2] {
 /// Compiled codex identity-header defaults for the openai-responses
 /// ChatgptOauth path: the two client-level defaults plus the `version`
 /// header keyed to the resolved codex identity. These ship with routectl
-/// and fire by default so a zero-config operator (auth_kind + api_key_ref
-/// only) emits a full codex fingerprint without hand-listing every
+/// and fire by default so an operator who writes only the identity keys
+/// (`format`, `base_url`, `credential`, `auth`) of a managed `oauth://codex`
+/// login on its own host emits a full codex fingerprint without hand-listing every
 /// header in `header_extras`. An operator `header_extras` entry for any
 /// of these keys OVERRIDES the default (the egress build_headers loop
 /// inserts after these). The per-request UUIDs (thread-id /

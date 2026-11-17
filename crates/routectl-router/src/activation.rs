@@ -111,7 +111,7 @@ pub struct ActivationEntry {
     /// Whether the credential is usable, and if not, why.
     pub status: ActivationStatus,
     /// True iff a configured provider references this OAuth credential
-    /// (`oauth://<id>` api_key_ref, bare or seat-labeled) AND that
+    /// (`oauth://<id>` credential, bare or seat-labeled) AND that
     /// provider is reachable through the alias table.
     pub referenced_by_aliases: bool,
 }

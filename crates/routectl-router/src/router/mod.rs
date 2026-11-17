@@ -486,7 +486,7 @@ pub struct Router {
     /// construction (a full `config.providers` scan) rather than re-scanned
     /// per request -- this is the "configured capability" half of the
     /// forwarded-mode CAPTURE gate (`forwarded_capture_armed` in
-    /// routectl-cli), replacing the removed `[mitm] credential_source` read.
+    /// routectl-cli).
     has_forwarded_provider: bool,
     /// Edge-trigger dedup for the `cache_volatile_in_caller_prefix` advisory
     /// WARN. Keyed by (structural component, volatile kind); a key admits at
@@ -1872,8 +1872,8 @@ impl DispatchMeta {
         self.served_forwarded_credential = target.use_forwarded_credential;
         // A forwarded target authenticates with the client's own bearer, so
         // routectl owns no seat for that row. Gated here rather than relying
-        // on the empty-`api_key_ref` validation that keeps such a target's
-        // ref unparseable, so the ledger guarantee holds locally.
+        // on `credential = "forwarded"` naming no store reference, so the
+        // ledger guarantee holds locally.
         self.served_seat = if target.use_forwarded_credential {
             None
         } else {
@@ -1960,7 +1960,7 @@ struct DispatchTarget {
     egress_kind: Option<routectl_core::wire_check::EgressKind>,
     /// Per-target replacement for the removed request-global forwarded
     /// check. `true` when this target's provider entry is an
-    /// `AnthropicApi` provider with `credential_source: Forwarded`;
+    /// `anthropic-messages` entry with `credential = "forwarded"`;
     /// populated ONCE at chain expansion in `expand_chain_to_targets`,
     /// the same pattern as `provider_kind`, for both seat and non-seat
     /// targets. Read in `run_walk`, which serves every surface, to bypass the

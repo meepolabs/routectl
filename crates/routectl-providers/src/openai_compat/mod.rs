@@ -111,12 +111,11 @@ pub struct OpenAiCompatConfig {
     /// request body is SigV4/bearer-signed under the `bedrock-mantle`
     /// scope, the first-party `Authorization: Bearer <token>` insert is
     /// skipped (the signer owns auth for both credential shapes; `auth`
-    /// is never read and the `api_key_ref` is empty by config
-    /// validation), a no-redirect client is
+    /// is never read), a no-redirect client is
     /// used, and the probe resolves the credential rather than dialing
     /// `/models`. `None` (default) keeps the first-party openai-compat
     /// behavior byte-for-byte. Resolved at the factory from a
-    /// `bedrock_mantle` sub-config.
+    /// `cloud = { name = "aws", ... }` carrier.
     #[cfg(feature = "bedrock")]
     pub mantle: Option<MantleAuth>,
 }

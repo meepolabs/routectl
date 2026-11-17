@@ -761,18 +761,16 @@ fn pool_mismatch_message(
     )
 }
 
-/// Whether a provider entry authenticates against a routectl-managed OAuth
-/// seat. An entry carrying no credential ref at all (the Bedrock lanes)
-/// does not, and neither does an `env://` / `file://` API key.
+/// Whether a provider entry's `credential` is a routectl-managed OAuth
+/// seat. Companion references such as `account_id_ref` do not decide it:
+/// they are not the credential the seat authenticates with.
 fn member_authenticates_with_oauth(entry: &ProviderEntry) -> bool {
-    let uris = entry.secret_uris();
-    !uris.is_empty()
-        && uris.iter().all(|uri| {
-            matches!(
-                routectl_auth::SecretRef::parse(uri),
-                Ok(routectl_auth::SecretRef::OAuth { .. })
-            )
-        })
+    matches!(
+        routectl_auth::CredentialRef::parse(&entry.credential),
+        Ok(routectl_auth::CredentialRef::Secret(
+            routectl_auth::SecretRef::OAuth { .. }
+        ))
+    )
 }
 
 /// The single `codex_version` value configured across the provider table,

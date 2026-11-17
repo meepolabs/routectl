@@ -25,7 +25,7 @@
 //! - `BedrockMantle`: the Mantle proxy at
 //!   `https://bedrock-mantle.<region>.api.aws/openai/v1`. Authorization:
 //!   Bearer `<bearer>` using the long-term Bedrock API key (resolved via
-//!   api_key_ref, typically env://AWS_BEARER_TOKEN_BEDROCK).
+//!   the entry's `credential`, typically env://AWS_BEARER_TOKEN_BEDROCK).
 
 use reqwest::RequestBuilder;
 
@@ -96,7 +96,7 @@ fn apply_chatgpt_oauth(
 /// <api_key>` is required; `ChatGPT-Account-Id` is ChatGPT-OAuth-
 /// specific and intentionally absent. The factory's
 /// `validate_openai_responses_account_id` already rejects an
-/// `account_id_ref` paired with `auth_kind = "api-key"`, so we never
+/// `account_id_ref` on any surface but the ChatGPT one, so we never
 /// see `cfg.account_id` set on this path. User-Agent is set at the
 /// client level (mirrors the chatgpt-oauth path). The bearer is
 /// resolved by the caller and passed in (see `apply`).

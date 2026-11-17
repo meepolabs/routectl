@@ -286,7 +286,12 @@ Set exactly one; both or neither is refused.
 
 `base_url` is a plain http(s) URL: a host and an optional path prefix
 (a trailing `/` is fine), with no `user@` userinfo, no `?query` and no
-`#fragment`. Request paths are appended to it. It must be `https://`, or
+`#fragment`. Request paths are appended to it. Write it the way it is
+dialed: printable ASCII only (no spaces, tabs, backslashes or non-ASCII
+letters; give an internationalized host in its `xn--` form), no explicit
+default port (`:443` on https, `:80` on http), and no `.` or `..` path
+segments or percent-escapes in the host. Only the letter case of the
+scheme and host may differ. It must be `https://`, or
 `http://` on a loopback host only (see
 [`base_url` scheme requirement](#field-assignment-table)). No format has a
 default: write the endpoint even for the vendor's public API.
@@ -574,19 +579,19 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `providers.<name>.allowed_betas` | nothing replaces it: client betas pass through, minus the flags the router withholds from the lane |
 | `providers.<name>.anthropic_beta` | pin the flag in header_extras "anthropic-beta" |
 | `providers.<name>.api_key_ref` | write the reference as `credential` |
-| `providers.<name>.api_shape` | the Bedrock API is the format: `format = "bedrock-invoke"` or `format = "bedrock-converse"` |
-| `providers.<name>.auth_kind` | set `auth`: `api-key` is `x-api-key`, `oauth-bearer` and `chatgpt-oauth` are `bearer`; the Bedrock managed surface is a `cloud` |
-| `providers.<name>.auth_mode` | set `format`: `api-key` is `format = "gemini"` with `auth = "x-goog-api-key"`, `cloud-code` is `format = "gemini-cloud-code"` with `auth = "bearer"` |
+| `providers.<name>.api_shape` | the Bedrock API is the format: `invoke` (the default) is `format = "bedrock-invoke"`, `converse` is `format = "bedrock-converse"` |
+| `providers.<name>.auth_kind` | set `auth`: `api-key` is `x-api-key` on `anthropic-messages` over `base_url` and `bearer` everywhere else; `oauth-bearer` and `chatgpt-oauth` are `bearer`; `bedrock-mantle` is `cloud = { name = "aws", region = "<region>" }` with `auth = "bearer"` for a key or `auth = "aws-sigv4"` for an `aws://` credential |
+| `providers.<name>.auth_mode` | set `format`: `api-key` is `format = "gemini"` with `auth = "x-goog-api-key"`, `cloud-code` is `format = "gemini-cloud-code"` with `auth = "bearer"` and `credential = "oauth://antigravity[#label]"` |
 | `providers.<name>.auto_emit_per_block_breakpoints` | use the global [cache] auto_emit_top_level_breakpoint switch |
 | `providers.<name>.auto_emit_top_level_breakpoint` | use the global [cache] auto_emit_top_level_breakpoint switch |
-| `providers.<name>.bedrock_mantle` | set `cloud = { name = "aws", region = "<region>" }` and write the credential as `credential` |
+| `providers.<name>.bedrock_mantle` | set `cloud = { name = "aws", region = "<region>" }` in place of `base_url`; a `bearer-key` `key_ref` becomes `credential` with `auth = "bearer"`, a profile is `credential = "aws://profile/<name>"` and the default chain `credential = "aws://chain"`, both with `auth = "aws-sigv4"` |
 | `providers.<name>.class_overrides` | per-class retry counts live in `[retry.classes]`; a status keeps its built-in class |
 | `providers.<name>.cloak` | set `cloak_mode` and `cloak_strict_mode` on the entry itself |
 | `providers.<name>.cloak_sensitive_words` | the sensitive-word scanner is removed; nothing replaces it |
 | `providers.<name>.cloak_tool_rename` | tool names are normalized to mcp__ only |
-| `providers.<name>.credential_source` | `forwarded` is `credential = "forwarded"` with `auth = "bearer"`; `own` is the entry's own `credential` |
-| `providers.<name>.creds` | write one `credential`: `aws://profile/<name>`, `aws://chain`, or a bearer key reference with `auth = "bearer"`; static key pairs move to a profile or the environment |
-| `providers.<name>.kind` | set `format`: `anthropic-api` is `anthropic-messages`, `openai-compat` is `openai-chat`, `bedrock` is `bedrock-invoke` or `bedrock-converse`, `gemini` is `gemini` or `gemini-cloud-code`, `openai-responses` stays |
+| `providers.<name>.credential_source` | `forwarded` is `credential = "forwarded"` with `auth = "bearer"` on `format = "anthropic-messages"` and `base_url = "https://api.anthropic.com"`; `own` is the entry's own `credential` |
+| `providers.<name>.creds` | write one `credential`: a `bearer-key` `key_ref` with `auth = "bearer"`, or `aws://profile/<name>` or `aws://chain` with `auth = "aws-sigv4"`; static key pairs move to a profile or the environment (read by `aws://chain`) |
+| `providers.<name>.kind` | set `format` and `auth`: `anthropic-api` is `anthropic-messages` with `x-api-key` (`bearer` for an `oauth://` login or over `cloud`), `openai-compat` is `openai-chat` with `bearer`, `openai-responses` stays and takes `bearer`, `gemini` is `gemini` with `x-goog-api-key` (`auth_mode = "cloud-code"`: `gemini-cloud-code` with `bearer`), `bedrock` is `bedrock-invoke` (`api_shape = "converse"`: `bedrock-converse`) over `cloud` with `aws-sigv4` for an `aws://` credential or `bearer` for a key |
 | `providers.<name>.max_thinking_entry_bytes` | the thinking-cache entry cap is fixed at 1 MiB |
 | `providers.<name>.region` | set `cloud = { name = "aws", region = "<region>" }` |
 | `providers.<name>.unsupported_features` | use `[capability.overrides.<provider>] unsupported` |
@@ -5329,7 +5334,7 @@ first member on:
 
 - `format`;
 - the destination: the `base_url`, compared after parsing (scheme and host
-  case and a default port do not matter) and without trailing `/`, or
+  case do not matter) and without trailing `/`, or
   for a `cloud` entry the cloud and its region;
 - `auth`;
 - the OAuth vendor of `credential` (`oauth://anthropic` and
@@ -5687,9 +5692,10 @@ static bearer; rotation is the operator's job.
 `account_id_ref` rule without reading either secret: an entry on the
 Codex host with a static bearer and no `account_id_ref` is refused, and
 so is an `account_id_ref` on any other `openai-responses` entry (another
-host, or the AWS `cloud`) and on any other format. `config check` does not
-resolve the refs themselves; an env var that is unset or a file that is
-missing still surfaces only when the lane first dispatches.
+host, or the AWS `cloud`) and on any other format. That rule itself reads no secret. Once the
+config has no errors, `config check` then resolves `env://` and
+`file://` refs locally and reports an env var that is unset or a file
+that is missing as a warning.
 
 ### `codex_version` (client-identity override)
 

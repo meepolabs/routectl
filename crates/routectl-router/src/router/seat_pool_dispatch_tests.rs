@@ -792,7 +792,7 @@ async fn two_sticky_pools_in_one_chain_keep_independent_stable_pins() {
     );
 }
 
-/// The D4 counterpart of the independence test above: two models on ONE pool
+/// The shared-pin counterpart of the independence test above: two models on ONE pool
 /// deliberately SHARE a pin, so a session stays on one account across every
 /// model of that pool.
 ///
@@ -919,7 +919,7 @@ async fn two_models_on_one_pool_share_one_session_pin() {
     );
 }
 
-// ---- D8 pool counters + the empty-pool dispatch refusal ----
+// ---- pool counters + the empty-pool dispatch refusal ----
 
 #[test]
 fn a_healthy_pool_dispatch_counts_once_and_is_not_degraded() {

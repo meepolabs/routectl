@@ -117,7 +117,7 @@ pub struct AnthropicApiConfig {
     /// first-party `x-api-key`/Claude-Code plumbing, a no-redirect
     /// client). `None` (default) keeps the first-party api.anthropic.com
     /// behavior byte-for-byte. Resolved at the factory from a
-    /// `bedrock_mantle` sub-config.
+    /// `cloud = { name = "aws", ... }` carrier.
     #[cfg(feature = "bedrock")]
     pub mantle: Option<MantleAuth>,
 }
@@ -224,7 +224,7 @@ pub(super) struct BetaDecision {
 /// The single three-way WIRE gate shared by both consumers of the forwarded
 /// bearer (`resolve_effective_token` and the `build_headers` forwarded leg):
 /// the forwarded credential is used EXACTLY when the provider entry was
-/// explicitly configured `credential_source = "forwarded"`, a captured
+/// explicitly configured `credential = "forwarded"`, a captured
 /// bearer is present on this request, AND the base URL is
 /// `https://api.anthropic.com` (exact host, no userinfo, no port). Any one leg false means "not the forwarded path" --
 /// in particular an own-mode provider (`use_forwarded_bearer` false) never
@@ -490,7 +490,7 @@ impl AnthropicApiProvider {
     /// first-party claude.ai bearer onto
     /// `req.routectl_internal.forwarded_bearer`. That token is a
     /// full-scope credential and MUST reach ONLY a provider explicitly
-    /// configured `credential_source = "forwarded"`, and even then ONLY
+    /// configured `credential = "forwarded"`, and even then ONLY
     /// `api.anthropic.com`. So the forwarded token becomes the effective
     /// credential EXACTLY when `should_use_forwarded_bearer` holds:
     /// `cfg.use_forwarded_bearer` is true, `forwarded_bearer` is `Some`
@@ -601,7 +601,7 @@ impl AnthropicApiProvider {
 
         // Forwarded (pure-proxy) leg: this request arrived carrying the
         // client's first-party bearer bound for api.anthropic.com, AND this
-        // provider was explicitly configured `credential_source =
+        // provider was explicitly configured `credential =
         // "forwarded"`. On this leg the egress is a TRANSPARENT forwarder --
         // Claude Code's REAL inbound identity (`x-stainless-*`,
         // `x-claude-code-*`, and its own `anthropic-beta` set) must reach

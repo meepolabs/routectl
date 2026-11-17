@@ -3,9 +3,9 @@
 //! Serialize-only structs for the request body sent to either:
 //!
 //!   - `https://chatgpt.com/backend-api/codex/responses`
-//!     (ChatGPT subscription / `auth_kind = "chatgpt-oauth"`)
+//!     (ChatGPT subscription, `AuthKind::ChatgptOauth`)
 //!   - `https://api.openai.com/v1/responses`
-//!     (standard API key / `auth_kind = "api-key"`)
+//!     (standard API key, `AuthKind::ApiKey`)
 //!
 //! Response-side types live in `response_types.rs`; this file
 //! covers only the egress request shape; the response side completes the

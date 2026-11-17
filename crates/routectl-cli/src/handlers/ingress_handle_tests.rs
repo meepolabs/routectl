@@ -4042,7 +4042,7 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     );
 }
 
-/// OpenAI dialect keeps the default no-op `early_frame` (Q5: both dialects
+/// OpenAI dialect keeps the default no-op `early_frame` (both dialects
 /// share the handler unforked). On warm-hold there is therefore nothing to
 /// flush ahead of content -- the SSE response still commits on grace expiry,
 /// and (checked directly against the render task, since a `pending_dispatch`

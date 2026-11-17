@@ -136,14 +136,27 @@ pub fn parse_base_url(name: &str, base_url: &str) -> Result<url::Url, String> {
 /// Require a plain base URL: [`parse_base_url`], plus no userinfo, no
 /// query and no fragment. Request paths are appended to the base, so a query
 /// or fragment there would end up inside the path.
+///
+/// The text must also be the URL the client dials, written out: printable
+/// ASCII with no backslash, and equal to the parsed URL's serialization up
+/// to one trailing `/` and the case of the scheme and host. Anything the
+/// URL parser would rewrite (a stripped tab, a backslash read as `/`, a
+/// non-ASCII host turned to punycode, a default port, a dot segment) is
+/// refused, so the destination an operator reads is the one requests go to.
 fn check_plain_base_url(name: &str, base_url: &str) -> Result<(), String> {
     let url = parse_base_url(name, base_url)?;
-    let part = if !url.username().is_empty() || url.password().is_some() {
+    let trimmed = base_url.trim();
+    let part = if !trimmed.bytes().all(is_plain_url_byte) {
+        "a character outside printable ASCII, or a backslash"
+    } else if !url.username().is_empty() || url.password().is_some() {
         "userinfo (`user@`); put the secret in `credential`"
     } else if url.query().is_some() {
         "a query (`?`)"
     } else if url.fragment().is_some() {
         "a fragment (`#`)"
+    } else if !is_canonical_spelling(trimmed, url.as_str()) {
+        "text the URL parser rewrites (a default port, a dot segment, an escaped or \
+         non-canonical host); write the URL the client dials"
     } else {
         return Ok(());
     };
@@ -151,6 +164,24 @@ fn check_plain_base_url(name: &str, base_url: &str) -> Result<(), String> {
         "provider `{name}`: base_url carries {part}. A base_url is a plain http(s) URL: a \
          host and an optional path prefix, nothing else. The configured base_url is withheld"
     ))
+}
+
+const fn is_plain_url_byte(byte: u8) -> bool {
+    byte.is_ascii_graphic() && byte != b'\\'
+}
+
+/// True when `text` is `serialized` up to one trailing `/` and the ASCII
+/// case of its scheme and authority. `text` is printable ASCII.
+fn is_canonical_spelling(text: &str, serialized: &str) -> bool {
+    let authority_end = text.find("://").map_or(0, |scheme_end| {
+        let rest = scheme_end + "://".len();
+        text[rest..]
+            .find('/')
+            .map_or(text.len(), |slash| rest + slash)
+    });
+    let (origin, path) = text.split_at(authority_end);
+    let spelled = format!("{}{path}", origin.to_ascii_lowercase());
+    serialized == spelled || serialized.strip_suffix('/') == Some(spelled.as_str())
 }
 
 #[cfg(test)]

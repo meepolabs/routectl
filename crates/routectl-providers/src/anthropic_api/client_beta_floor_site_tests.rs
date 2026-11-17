@@ -6,20 +6,20 @@
 //! `routectl-router` `factory/beta_floor_warnings.rs`) warns that an
 //! `unsupported` override is inert wherever one of these sites re-adds the
 //! flag. Its site table (module doc of `factory/warnings_beta_floor_tests.rs`)
-//! uses the same S1-S8 labels as the rows here; a row here pins the egress
-//! fact the advisory row of the same label relies on, so a change to either
-//! table updates the other.
+//! names the same sites as the rows here; a row here pins the egress fact
+//! the advisory row of the same site relies on, so a change to either table
+//! updates the other.
 //!
-//! | label | site | flag present when |
+//! | site | what it is | flag present when |
 //! |---|---|---|
-//! | S1 | provider `header_extras["anthropic-beta"]` pin | always, every leg |
-//! | S2 | model pin (`operator_betas`) | always, every leg |
-//! | S3 | OAuth gate | own oauth-bearer on the Anthropic API host, with or without client identity, any cloak mode |
-//! | S4 | Claude Code floor | client identity, not forwarded, AND classified non-Claude-Code (cloak.mode never -> never) |
-//! | S5 | context-management strip | removed whenever the provider sets `context_management` |
-//! | S6 | structured outputs | not the forwarded leg AND body carries `output_config.format` |
-//! | S7 | effort | client identity, not forwarded, AND body carries `output_config.effort` |
-//! | S8 | redaction drop | removed off the forwarded leg when the body carries `thinking.display` |
+//! | provider pin | provider `header_extras["anthropic-beta"]` | always, every leg |
+//! | model pin | model pin (`operator_betas`) | always, every leg |
+//! | OAuth gate | the OAuth beta | own oauth-bearer on the Anthropic API host, with or without client identity, any cloak mode |
+//! | Claude Code floor | the client-identity beta floor | client identity, not forwarded, AND classified non-Claude-Code (`cloak_mode = "never"` -> never) |
+//! | context-management strip | context-management removal | removed whenever the provider sets `context_management` |
+//! | structured outputs | structured-outputs beta | not the forwarded leg AND body carries `output_config.format` |
+//! | effort | effort beta | client identity, not forwarded, AND body carries `output_config.effort` |
+//! | redaction drop | redact-thinking removal | removed off the forwarded leg when the body carries `thinking.display` |
 //!
 //! Off the forwarded leg the client sends the flag and the router withholds
 //! it, so the flag is present only if the egress re-adds it -- the exact
@@ -175,7 +175,7 @@ impl Row {
     }
 }
 
-/// A Claude Code floor flag in no other site's class, so its rows pin S4 alone.
+/// A Claude Code floor flag in no other site's class, so its rows pin the Claude Code floor alone.
 fn claude_code_only_flag() -> &'static str {
     default_claude_code_anthropic_betas()
         .iter()
@@ -196,38 +196,33 @@ fn pin_rows() -> Vec<Row> {
     vec![
         Row {
             provider_pin: true,
-            ..row("S1 provider pin, api-key", Lane::ApiKey, PIN, true)
+            ..row("provider pin, api-key", Lane::ApiKey, PIN, true)
         },
         Row {
             provider_pin: true,
-            ..row("S1 provider pin, forwarded", Lane::Forwarded, PIN, true)
+            ..row("provider pin, forwarded", Lane::Forwarded, PIN, true)
         },
-        row("S1 no provider pin, api-key", Lane::ApiKey, PIN, false),
+        row("no provider pin, api-key", Lane::ApiKey, PIN, false),
         Row {
             model_pin: true,
-            ..row("S2 model pin, api-key", Lane::ApiKey, PIN, true)
+            ..row("model pin, api-key", Lane::ApiKey, PIN, true)
         },
         Row {
             model_pin: true,
-            ..row("S2 model pin, forwarded", Lane::Forwarded, PIN, true)
+            ..row("model pin, forwarded", Lane::Forwarded, PIN, true)
         },
-        row("S2 no model pin, forwarded", Lane::Forwarded, PIN, false),
+        row("no model pin, forwarded", Lane::Forwarded, PIN, false),
     ]
 }
 
 fn oauth_gate_rows() -> Vec<Row> {
     let gate = OAUTH_ANTHROPIC_BETA;
     vec![
-        row(
-            "S3 OAuth gate, own oauth-bearer",
-            Lane::OwnOauth,
-            gate,
-            true,
-        ),
+        row("OAuth gate, own oauth-bearer", Lane::OwnOauth, gate, true),
         Row {
             cloak_mode: CloakMode::Always,
             ..row(
-                "S3 OAuth gate, own oauth-bearer, cloak always",
+                "OAuth gate, own oauth-bearer, cloak always",
                 Lane::OwnOauth,
                 gate,
                 true,
@@ -236,7 +231,7 @@ fn oauth_gate_rows() -> Vec<Row> {
         Row {
             cloak_mode: CloakMode::Never,
             ..row(
-                "S3 OAuth gate, own oauth-bearer, cloak never",
+                "OAuth gate, own oauth-bearer, cloak never",
                 Lane::OwnOauth,
                 gate,
                 true,
@@ -245,31 +240,31 @@ fn oauth_gate_rows() -> Vec<Row> {
         Row {
             cc_session_header: true,
             ..row(
-                "S3 OAuth gate, own oauth-bearer, Claude Code session",
+                "OAuth gate, own oauth-bearer, Claude Code session",
                 Lane::OwnOauth,
                 gate,
                 true,
             )
         },
         row(
-            "S3 OAuth gate, api-key on the host",
+            "OAuth gate, api-key on the host",
             Lane::ApiKeyOnHost,
             gate,
             false,
         ),
         row(
-            "S3 OAuth gate, oauth-bearer off the host",
+            "OAuth gate, oauth-bearer off the host",
             Lane::OffHostOauth,
             gate,
             false,
         ),
         row(
-            "S3 OAuth gate, own oauth-bearer without client identity",
+            "OAuth gate, own oauth-bearer without client identity",
             Lane::OwnOauthNoIdentity,
             gate,
             true,
         ),
-        row("S3 OAuth gate, forwarded", Lane::Forwarded, gate, false),
+        row("OAuth gate, forwarded", Lane::Forwarded, gate, false),
     ]
 }
 
@@ -277,7 +272,7 @@ fn claude_code_floor_rows() -> Vec<Row> {
     let cc = claude_code_only_flag();
     vec![
         row(
-            "S4 Claude Code floor, cloak auto, no session",
+            "Claude Code floor, cloak auto, no session",
             Lane::OwnOauth,
             cc,
             true,
@@ -285,7 +280,7 @@ fn claude_code_floor_rows() -> Vec<Row> {
         Row {
             cc_session_header: true,
             ..row(
-                "S4 Claude Code floor, cloak auto, Claude Code session",
+                "Claude Code floor, cloak auto, Claude Code session",
                 Lane::OwnOauth,
                 cc,
                 false,
@@ -294,7 +289,7 @@ fn claude_code_floor_rows() -> Vec<Row> {
         Row {
             originating_cc_session: Some(true),
             ..row(
-                "S4 Claude Code floor, cloak auto, originating Claude Code session",
+                "Claude Code floor, cloak auto, originating Claude Code session",
                 Lane::OwnOauth,
                 cc,
                 false,
@@ -304,7 +299,7 @@ fn claude_code_floor_rows() -> Vec<Row> {
             cc_session_header: true,
             originating_cc_session: Some(false),
             ..row(
-                "S4 Claude Code floor, cloak auto, originating non-Claude-Code",
+                "Claude Code floor, cloak auto, originating non-Claude-Code",
                 Lane::OwnOauth,
                 cc,
                 true,
@@ -314,7 +309,7 @@ fn claude_code_floor_rows() -> Vec<Row> {
             cloak_mode: CloakMode::Always,
             cc_session_header: true,
             ..row(
-                "S4 Claude Code floor, cloak always, Claude Code session",
+                "Claude Code floor, cloak always, Claude Code session",
                 Lane::OwnOauth,
                 cc,
                 true,
@@ -322,21 +317,16 @@ fn claude_code_floor_rows() -> Vec<Row> {
         },
         Row {
             cloak_mode: CloakMode::Never,
-            ..row(
-                "S4 Claude Code floor, cloak never",
-                Lane::OwnOauth,
-                cc,
-                false,
-            )
+            ..row("Claude Code floor, cloak never", Lane::OwnOauth, cc, false)
         },
         row(
-            "S4 Claude Code floor, api-key on the host",
+            "Claude Code floor, api-key on the host",
             Lane::ApiKeyOnHost,
             cc,
             false,
         ),
         row(
-            "S4 Claude Code floor, own oauth-bearer without client identity",
+            "Claude Code floor, own oauth-bearer without client identity",
             Lane::OwnOauthNoIdentity,
             cc,
             false,
@@ -344,18 +334,13 @@ fn claude_code_floor_rows() -> Vec<Row> {
         Row {
             cloak_mode: CloakMode::Always,
             ..row(
-                "S4 Claude Code floor, own oauth-bearer without client identity, cloak always",
+                "Claude Code floor, own oauth-bearer without client identity, cloak always",
                 Lane::OwnOauthNoIdentity,
                 cc,
                 false,
             )
         },
-        row(
-            "S4 Claude Code floor, forwarded",
-            Lane::Forwarded,
-            cc,
-            false,
-        ),
+        row("Claude Code floor, forwarded", Lane::Forwarded, cc, false),
     ]
 }
 
@@ -364,23 +349,43 @@ fn context_management_rows() -> Vec<Row> {
     vec![
         Row {
             context_management: true,
-            ..row("S5 strip on, Claude Code floor", Lane::OwnOauth, cm, false)
+            ..row(
+                "context-management strip on, Claude Code floor",
+                Lane::OwnOauth,
+                cm,
+                false,
+            )
         },
-        row("S5 strip off, Claude Code floor", Lane::OwnOauth, cm, true),
+        row(
+            "context-management strip off, Claude Code floor",
+            Lane::OwnOauth,
+            cm,
+            true,
+        ),
         Row {
             context_management: true,
             provider_pin: true,
-            ..row("S5 strip on, provider pin", Lane::ApiKey, cm, false)
+            ..row(
+                "context-management strip on, provider pin",
+                Lane::ApiKey,
+                cm,
+                false,
+            )
         },
         Row {
             provider_pin: true,
-            ..row("S5 strip off, provider pin", Lane::ApiKey, cm, true)
+            ..row(
+                "context-management strip off, provider pin",
+                Lane::ApiKey,
+                cm,
+                true,
+            )
         },
         Row {
             context_management: true,
             provider_pin: true,
             ..row(
-                "S5 strip on, provider pin, forwarded",
+                "context-management strip on, provider pin, forwarded",
                 Lane::Forwarded,
                 cm,
                 false,
@@ -397,7 +402,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(format.clone()),
             ..row(
-                "S6 structured outputs, api-key, format",
+                "structured outputs, api-key, format",
                 Lane::ApiKey,
                 so,
                 true,
@@ -406,7 +411,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(json!({"model": "m"})),
             ..row(
-                "S6 structured outputs, api-key, no format",
+                "structured outputs, api-key, no format",
                 Lane::ApiKey,
                 so,
                 false,
@@ -415,7 +420,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(format),
             ..row(
-                "S6 structured outputs, forwarded, format",
+                "structured outputs, forwarded, format",
                 Lane::Forwarded,
                 so,
                 false,
@@ -424,7 +429,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(effort.clone()),
             ..row(
-                "S7 effort, own oauth-bearer, effort",
+                "effort, own oauth-bearer, effort",
                 Lane::OwnOauth,
                 EFFORT_BETA,
                 true,
@@ -434,7 +439,7 @@ fn body_union_rows() -> Vec<Row> {
             cloak_mode: CloakMode::Always,
             body: Some(effort.clone()),
             ..row(
-                "S7 effort, own oauth-bearer, cloak always, effort",
+                "effort, own oauth-bearer, cloak always, effort",
                 Lane::OwnOauth,
                 EFFORT_BETA,
                 true,
@@ -444,7 +449,7 @@ fn body_union_rows() -> Vec<Row> {
             cloak_mode: CloakMode::Never,
             body: Some(effort.clone()),
             ..row(
-                "S7 effort, own oauth-bearer, cloak never, effort",
+                "effort, own oauth-bearer, cloak never, effort",
                 Lane::OwnOauth,
                 EFFORT_BETA,
                 true,
@@ -453,7 +458,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(json!({"model": "m"})),
             ..row(
-                "S7 effort, own oauth-bearer, no effort",
+                "effort, own oauth-bearer, no effort",
                 Lane::OwnOauth,
                 EFFORT_BETA,
                 false,
@@ -462,7 +467,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(effort.clone()),
             ..row(
-                "S7 effort, own oauth-bearer without client identity, effort",
+                "effort, own oauth-bearer without client identity, effort",
                 Lane::OwnOauthNoIdentity,
                 EFFORT_BETA,
                 false,
@@ -471,7 +476,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(effort.clone()),
             ..row(
-                "S7 effort, api-key on the host, effort",
+                "effort, api-key on the host, effort",
                 Lane::ApiKeyOnHost,
                 EFFORT_BETA,
                 false,
@@ -480,7 +485,7 @@ fn body_union_rows() -> Vec<Row> {
         Row {
             body: Some(effort),
             ..row(
-                "S7 effort, forwarded, effort",
+                "effort, forwarded, effort",
                 Lane::Forwarded,
                 EFFORT_BETA,
                 false,
@@ -497,7 +502,7 @@ fn redaction_rows() -> Vec<Row> {
         Row {
             body: Some(no_display.clone()),
             ..row(
-                "S8 Claude Code floor, no display",
+                "redaction drop, Claude Code floor, no display",
                 Lane::OwnOauth,
                 redact,
                 true,
@@ -506,7 +511,7 @@ fn redaction_rows() -> Vec<Row> {
         Row {
             body: Some(display.clone()),
             ..row(
-                "S8 Claude Code floor, display",
+                "redaction drop, Claude Code floor, display",
                 Lane::OwnOauth,
                 redact,
                 false,
@@ -516,7 +521,7 @@ fn redaction_rows() -> Vec<Row> {
             provider_pin: true,
             body: Some(no_display),
             ..row(
-                "S8 provider pin, api-key, no display",
+                "redaction drop, provider pin, api-key, no display",
                 Lane::ApiKey,
                 redact,
                 true,
@@ -526,7 +531,7 @@ fn redaction_rows() -> Vec<Row> {
             provider_pin: true,
             body: Some(display.clone()),
             ..row(
-                "S8 provider pin, api-key, display",
+                "redaction drop, provider pin, api-key, display",
                 Lane::ApiKey,
                 redact,
                 false,
@@ -536,7 +541,7 @@ fn redaction_rows() -> Vec<Row> {
             provider_pin: true,
             body: Some(display),
             ..row(
-                "S8 provider pin, forwarded, display",
+                "redaction drop, provider pin, forwarded, display",
                 Lane::Forwarded,
                 redact,
                 true,

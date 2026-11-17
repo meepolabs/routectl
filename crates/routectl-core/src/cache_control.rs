@@ -1322,7 +1322,7 @@ mod tests {
         assert_eq!(slot, None);
     }
 
-    /// This test IS the D1 ordering contract: a front marker never lands on
+    /// This test IS the front-marker ordering contract: a front marker never lands on
     /// a message-part position, so `mutable_suffix_start`'s domain is
     /// byte-identical with and without front-marker injection.
     #[test]

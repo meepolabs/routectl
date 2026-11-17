@@ -15,7 +15,7 @@
 //!   - `bedrock-mantle`: AWS Mantle proxy at
 //!     `https://bedrock-mantle.<region>.api.aws/openai/v1`. Uses
 //!     Authorization: Bearer `<bearer>` using the long-term Bedrock API
-//!     key (resolved via api_key_ref, typically
+//!     key (resolved from the entry's `credential`, typically
 //!     env://AWS_BEARER_TOKEN_BEDROCK).
 //!
 //! Wire shape: OpenAI Responses API.
@@ -114,8 +114,8 @@ pub(crate) const LANE: &str = PROVIDER_KIND;
 
 /// How the provider authenticates to the Responses API.
 ///
-/// Kebab-case on the TOML wire so config writes look natural:
-///   `auth_kind = "chatgpt-oauth"`
+/// Kebab-case when serialized (`chatgpt-oauth`, `api-key`,
+/// `bedrock-mantle`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -128,7 +128,7 @@ pub enum AuthKind {
     ApiKey,
     /// AWS Bedrock Mantle proxy (OpenAI-shape):
     /// `Authorization: Bearer <bearer>` using the long-term Bedrock API
-    /// key (resolved via api_key_ref, typically
+    /// key (resolved from the entry's `credential`, typically
     /// env://AWS_BEARER_TOKEN_BEDROCK).
     BedrockMantle,
 }

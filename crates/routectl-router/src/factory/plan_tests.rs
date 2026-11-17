@@ -539,7 +539,6 @@ fn the_forwarded_credential_plans_only_over_https_to_the_anthropic_host() {
     let accepted = [
         ("canonical", "https://api.anthropic.com"),
         ("uppercase scheme", "HTTPS://api.anthropic.com"),
-        ("explicit default port", "https://api.anthropic.com:443"),
     ];
 
     for (label, base) in refused {
@@ -559,6 +558,17 @@ fn the_forwarded_credential_plans_only_over_https_to_the_anthropic_host() {
             .with_base_url(base);
         assert!(plan_provider("fwd", &entry).is_ok(), "{label}: {base}");
     }
+
+    let default_port = ProviderEntry::anthropic_api("forwarded")
+        .with_auth(Auth::Bearer)
+        .with_base_url("https://api.anthropic.com:443");
+    let err = plan_provider("fwd", &default_port)
+        .expect_err("an explicit default port is not the canonical spelling")
+        .to_string();
+    assert!(
+        err.contains("base_url carries text the URL parser rewrites"),
+        "{err}"
+    );
 }
 
 /// The api-key form of a managed Anthropic login is refused with a message

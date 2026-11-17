@@ -48,7 +48,7 @@ pub(super) fn warn_context_management_needs_preserve(
         "context_management = true on this anthropic-api provider but \
          history_reasoning is not 'preserve' on the model; thinking \
          echo-back is required for multi-turn continuity. See \
-         docs/PROVIDER-QUIRKS.md \"context_management\" for the \
+         docs/PROVIDER-QUIRKS.md \"context_management beta emulation\" for the \
          recommended config."
     );
 }

@@ -71,7 +71,7 @@ impl SecretRef {
         }
         if uri.strip_prefix("literal:").is_some() {
             // Rejected at parse so BOTH `--secret-ref literal:...` and a
-            // hand-written `api_key_ref = "literal:..."` fail. The error
+            // hand-written `credential = "literal:..."` fail. The error
             // never echoes the value (it is secret material that reaches
             // operator-facing stdout via `config check`) -- it only names
             // the safe alternatives.

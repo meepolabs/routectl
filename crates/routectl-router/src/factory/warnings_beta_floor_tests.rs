@@ -7,7 +7,7 @@
 //! inputs it reads. Line numbers are as of this writing; re-derive with
 //! `rg -n 'union_|retain|drop_redact|config_betas|operator_betas|withhold_client_betas'`
 //! over that file. `forwarded leg` is `should_use_forwarded_bearer`
-//! (client.rs:253): `credential_source = "forwarded"` (the factory sets
+//! (client.rs:253): `credential = "forwarded"` (the factory sets
 //! `use_forwarded_bearer` only then, factory/build.rs:432) AND a captured
 //! client bearer AND the Anthropic API host. A forwarded provider always
 //! takes it: validation pins its host (factory/validate.rs:745) and the
@@ -22,15 +22,15 @@
 //!
 //! The override filter itself:
 //!
-//! - F1 router/beta_withhold.rs:91 -- a forwarded target withholds nothing.
-//! - F2 router/beta_withhold.rs:132 -- a flag pinned in the provider or model
+//! - forwarded target, router/beta_withhold.rs:91 -- withholds nothing.
+//! - operator pin, router/beta_withhold.rs:132 -- a flag pinned in the provider or model
 //!   `header_extras["anthropic-beta"]` (`operator_betas`,
 //!   router/overlays.rs:181) is never withheld.
-//! - F3 router/beta_withhold.rs:138 -- the override lookup, model cell
+//! - override lookup, router/beta_withhold.rs:138 -- model cell
 //!   `provider:nickname` first, then the provider cell
 //!   (override_registry.rs:132); a pool-backed target carries the member
 //!   provider name and the model nickname (router/chain.rs:578).
-//! - F4 client.rs:607-610 -- the egress drops the withheld client flags,
+//! - egress withhold, client.rs:607-610 -- the egress drops the withheld client flags,
 //!   keeping any in its own `beta_floor` (client.rs:878); on the forwarded
 //!   leg it ships the client set untouched.
 //!
@@ -38,26 +38,27 @@
 //!
 //! | site | client.rs | adds / removes | condition | advisory |
 //! |---|---|---|---|---|
-//! | S1 provider pin | 620 | adds `header_extras["anthropic-beta"]` of the provider | always, every leg | warns |
-//! | S2 model pin | 630 | adds `operator_betas` (provider + model pins, beta_capability.rs `operator_betas`) | always, every leg; per model | warns, per model a provider cell reaches |
-//! | S3 OAuth gate | `union_oauth_gate_beta` | adds `oauth-2025-04-20` | own-OAuth lane | warns on own oauth-bearer on the host only, managed login or not |
-//! | S4 Claude Code floor | `union_claude_code_beta_floor` | adds the 9-flag floor | cloak lane AND `is_non_cc` (cloak_mode always -> true, never -> false, auto -> classified non-Claude-Code: `routectl_internal.originating_claude_code_session` when set, else no Claude Code session header) | warns on a managed login on the host unless cloak_mode = never |
-//! | S5 context-management strip | 671-672 | removes `context-management-2025-06-27` (exact spelling) | provider `context_management = true`, every leg | that flag is never reported there |
-//! | S6 structured outputs | 699-700 | adds `structured-outputs-2025-12-15` | not forwarded leg AND body carries `output_config.format` | warns "whenever the request carries", off the forwarded leg |
-//! | S7 effort | `union_body_implied_betas` | adds `effort-2025-11-24` | cloak lane AND body carries `output_config.effort` | warns "whenever the request carries", managed login on the host only |
-//! | S8 redaction drop | 724-725 | removes `redact-thinking-2026-02-12` (exact spelling) | not forwarded leg AND body carries `thinking.display` | the reason names the display exception, off the forwarded leg |
+//! | provider pin | 620 | adds `header_extras["anthropic-beta"]` of the provider | always, every leg | warns |
+//! | model pin | 630 | adds `operator_betas` (provider + model pins, beta_capability.rs `operator_betas`) | always, every leg; per model | warns, per model a provider cell reaches |
+//! | OAuth gate | `union_oauth_gate_beta` | adds `oauth-2025-04-20` | own-OAuth lane | warns on own oauth-bearer on the host only, managed login or not |
+//! | Claude Code floor | `union_claude_code_beta_floor` | adds the 9-flag floor | cloak lane AND `is_non_cc` (cloak_mode always -> true, never -> false, auto -> classified non-Claude-Code: `routectl_internal.originating_claude_code_session` when set, else no Claude Code session header) | warns on a managed login on the host unless cloak_mode = never |
+//! | context-management strip | 671-672 | removes `context-management-2025-06-27` (exact spelling) | provider `context_management = true`, every leg | that flag is never reported there |
+//! | structured outputs | 699-700 | adds `structured-outputs-2025-12-15` | not forwarded leg AND body carries `output_config.format` | warns "whenever the request carries", off the forwarded leg |
+//! | effort | `union_body_implied_betas` | adds `effort-2025-11-24` | cloak lane AND body carries `output_config.effort` | warns "whenever the request carries", managed login on the host only |
+//! | redaction drop | 724-725 | removes `redact-thinking-2026-02-12` (exact spelling) | not forwarded leg AND body carries `thinking.display` | the reason names the display exception, off the forwarded leg |
 //!
 //! No other site writes the header: the composed list is emitted once
 //! (client.rs:744), and the `header_extras` copy skips `anthropic-beta`
 //! (client.rs:794).
 //!
-//! Each label's egress fact is pinned independently against the real header
-//! composition by the rows of the same label in
+//! Each site's egress fact is pinned independently against the real header
+//! composition by the rows of the same site in
 //! `crates/routectl-providers/src/anthropic_api/client_beta_floor_site_tests.rs`
 //! (each site with its condition true and false, including cloak_mode =
-//! "never" for S3, S4 and S7). A change to this table updates that one.
+//! "never" for the OAuth gate, the Claude Code floor and effort). A change
+//! to this table updates that one.
 //!
-//! S6 and S7 are body-dependent and still warn: the override is meant to keep
+//! Structured outputs and effort are body-dependent and still warn: the override is meant to keep
 //! the flag off a lane, yet every request using the field ships it, so the
 //! operator's intent cannot hold for that traffic. The text says "whenever",
 //! never "always".
@@ -88,7 +89,7 @@ const OFF_HOST_OAUTH: &str = "base_url = \"https://anthropic-proxy.example.test\
 const FORWARDED_OAUTH: &str = "base_url = \"https://api.anthropic.com\"\n\
                                credential = \"forwarded\"\nauth = \"bearer\"\n";
 
-/// A Claude Code floor flag in no other class, so its row pins S4 alone.
+/// A Claude Code floor flag in no other class, so its row pins the Claude Code floor alone.
 fn claude_code_only_flag() -> &'static str {
     default_claude_code_anthropic_betas()
         .iter()
@@ -175,11 +176,11 @@ fn check(row: &str, config: &Config, expect: &Expect) {
     }
 }
 
-/// Rows for S1, S2 and the override-filter cells (F1-F3).
+/// Rows for the provider and model pins and the override-filter cells.
 fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
     vec![
         (
-            "S1 provider pin, api-key provider",
+            "provider pin, api-key provider",
             config(
                 API_KEY,
                 &format!("{}{}", provider_pin(PIN), unsupported("p", PIN)),
@@ -187,7 +188,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             warns(&["provider header_extras", PIN, "\"p\""]),
         ),
         (
-            "S1 provider pin, forwarded provider",
+            "provider pin, forwarded provider",
             config(
                 FORWARDED_OAUTH,
                 &format!("{}{}", provider_pin(PIN), unsupported("p", PIN)),
@@ -195,7 +196,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             warns(&["provider header_extras"]),
         ),
         (
-            "S2 model pin, model-scoped cell",
+            "model pin, model-scoped cell",
             config(
                 API_KEY,
                 &format!("{}{}", model("p", Some(PIN)), unsupported("p:m", PIN)),
@@ -203,7 +204,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             warns(&["model header_extras of `m`", "\"p:m\""]),
         ),
         (
-            "S2 model pin, provider-scoped cell",
+            "model pin, provider-scoped cell",
             config(
                 API_KEY,
                 &format!("{}{}", model("p", Some(PIN)), unsupported("p", PIN)),
@@ -211,7 +212,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             warns(&["model header_extras of `m`", "\"p\""]),
         ),
         (
-            "S2 model pin through a pool, provider-scoped cell",
+            "model pin through a pool, provider-scoped cell",
             config(
                 MANAGED_LOGIN,
                 &format!(
@@ -223,7 +224,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             warns(&["model header_extras of `m`"]),
         ),
         (
-            "S2 model pin, provider cell shadowed by the model's own cell",
+            "model pin, provider cell shadowed by the model's own cell",
             config(
                 API_KEY,
                 &format!(
@@ -236,7 +237,7 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             Expect::Silent,
         ),
         (
-            "S2 model pin on a model of another provider",
+            "model pin on a model of another provider",
             config(
                 API_KEY,
                 &format!(
@@ -248,24 +249,24 @@ fn pin_rows() -> Vec<(&'static str, Config, Expect)> {
             Expect::Silent,
         ),
         (
-            "F4 unpinned client flag on an api-key provider",
+            "egress withhold, unpinned client flag on an api-key provider",
             config(API_KEY, &unsupported("p", UNPINNED)),
             Expect::Silent,
         ),
     ]
 }
 
-/// Rows for the own-OAuth sites S3, S4 and S7.
+/// Rows for the own-OAuth sites: OAuth gate, Claude Code floor and effort.
 fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
     let cc = claude_code_only_flag();
     vec![
         (
-            "S3 OAuth gate, own oauth-bearer on the host",
+            "OAuth gate, own oauth-bearer on the host",
             config(MANAGED_LOGIN, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
             warns(&["OAuth gate", "Claude Code floor", "its own credential"]),
         ),
         (
-            "S3 OAuth gate, env bearer on the host",
+            "OAuth gate, env bearer on the host",
             config(OWN_OAUTH, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
             Expect::Warns {
                 contains: &["OAuth gate", "its own credential"],
@@ -273,7 +274,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             },
         ),
         (
-            "S3 OAuth gate, own oauth-bearer on the host, cloak never",
+            "OAuth gate, own oauth-bearer on the host, cloak never",
             config(
                 MANAGED_LOGIN,
                 &format!(
@@ -287,22 +288,22 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             },
         ),
         (
-            "S3 OAuth gate, forwarded oauth-bearer",
+            "OAuth gate, forwarded oauth-bearer",
             config(FORWARDED_OAUTH, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
             Expect::Silent,
         ),
         (
-            "S3 OAuth gate, api-key provider",
+            "OAuth gate, api-key provider",
             config(API_KEY, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
             Expect::Silent,
         ),
         (
-            "S3 OAuth gate, oauth-bearer off the host",
+            "OAuth gate, oauth-bearer off the host",
             config(OFF_HOST_OAUTH, &unsupported("p", OAUTH_ANTHROPIC_BETA)),
             Expect::Silent,
         ),
         (
-            "S4 Claude Code floor, cloak auto",
+            "Claude Code floor, cloak auto",
             config(MANAGED_LOGIN, &unsupported("p", cc)),
             warns(&[
                 "Claude Code floor",
@@ -310,7 +311,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             ]),
         ),
         (
-            "S4 Claude Code floor, cloak always",
+            "Claude Code floor, cloak always",
             config(
                 MANAGED_LOGIN,
                 &format!("cloak_mode = \"always\"\n{}", unsupported("p", cc)),
@@ -318,7 +319,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             warns(&["Claude Code floor", "cloak_mode = \"always\""]),
         ),
         (
-            "S4 Claude Code floor, cloak never",
+            "Claude Code floor, cloak never",
             config(
                 MANAGED_LOGIN,
                 &format!("cloak_mode = \"never\"\n{}", unsupported("p", cc)),
@@ -326,17 +327,17 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             Expect::Silent,
         ),
         (
-            "S4 Claude Code floor, env bearer on the host",
+            "Claude Code floor, env bearer on the host",
             config(OWN_OAUTH, &unsupported("p", cc)),
             Expect::Silent,
         ),
         (
-            "S4 Claude Code floor, forwarded oauth-bearer",
+            "Claude Code floor, forwarded oauth-bearer",
             config(FORWARDED_OAUTH, &unsupported("p", cc)),
             Expect::Silent,
         ),
         (
-            "S7 effort, own oauth-bearer on the host",
+            "effort, own oauth-bearer on the host",
             config(MANAGED_LOGIN, &unsupported("p", EFFORT_BETA)),
             Expect::Warns {
                 contains: &[
@@ -347,7 +348,7 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             },
         ),
         (
-            "S7 effort, own oauth-bearer on the host, cloak never",
+            "effort, own oauth-bearer on the host, cloak never",
             config(
                 MANAGED_LOGIN,
                 &format!("cloak_mode = \"never\"\n{}", unsupported("p", EFFORT_BETA)),
@@ -358,28 +359,29 @@ fn own_oauth_rows() -> Vec<(&'static str, Config, Expect)> {
             ]),
         ),
         (
-            "S7 effort, env bearer on the host",
+            "effort, env bearer on the host",
             config(OWN_OAUTH, &unsupported("p", EFFORT_BETA)),
             Expect::Silent,
         ),
         (
-            "S7 effort, forwarded oauth-bearer",
+            "effort, forwarded oauth-bearer",
             config(FORWARDED_OAUTH, &unsupported("p", EFFORT_BETA)),
             Expect::Silent,
         ),
         (
-            "S7 effort, api-key provider",
+            "effort, api-key provider",
             config(API_KEY, &unsupported("p", EFFORT_BETA)),
             Expect::Silent,
         ),
     ]
 }
 
-/// Rows for the body-dependent union S6 and the removals S5 and S8.
+/// Rows for the body-dependent structured-outputs union and the
+/// context-management and redaction removals.
 fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
     vec![
         (
-            "S6 structured outputs, api-key provider",
+            "structured outputs, api-key provider",
             config(API_KEY, &unsupported("p", STRUCTURED_OUTPUTS_BETA)),
             Expect::Warns {
                 contains: &["whenever the request carries output_config.format"],
@@ -387,12 +389,12 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
             },
         ),
         (
-            "S6 structured outputs, forwarded oauth-bearer",
+            "structured outputs, forwarded oauth-bearer",
             config(FORWARDED_OAUTH, &unsupported("p", STRUCTURED_OUTPUTS_BETA)),
             Expect::Silent,
         ),
         (
-            "S5 context-management pin, emulation on",
+            "context-management strip, pin, emulation on",
             config(
                 &format!("{API_KEY}context_management = true\n"),
                 &format!(
@@ -404,7 +406,7 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
             Expect::Silent,
         ),
         (
-            "S5 context-management Claude Code floor, emulation on",
+            "context-management strip, Claude Code floor, emulation on",
             config(
                 &format!("{MANAGED_LOGIN}context_management = true\n"),
                 &unsupported("p", CONTEXT_MANAGEMENT_BETA),
@@ -412,7 +414,7 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
             Expect::Silent,
         ),
         (
-            "S5 context-management pin, emulation off",
+            "context-management strip, pin, emulation off",
             config(
                 API_KEY,
                 &format!(
@@ -424,7 +426,7 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
             warns(&["provider header_extras"]),
         ),
         (
-            "S8 redaction beta, Claude Code floor",
+            "redaction drop, Claude Code floor",
             config(MANAGED_LOGIN, &unsupported("p", REDACT_THINKING_BETA)),
             warns(&[
                 "Claude Code floor",
@@ -432,7 +434,7 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
             ]),
         ),
         (
-            "S8 redaction beta, provider pin",
+            "redaction drop, provider pin",
             config(
                 API_KEY,
                 &format!(
@@ -447,7 +449,7 @@ fn body_and_removal_rows() -> Vec<(&'static str, Config, Expect)> {
             ]),
         ),
         (
-            "S8 redaction beta, provider pin on the forwarded leg",
+            "redaction drop, provider pin on the forwarded leg",
             config(
                 FORWARDED_OAUTH,
                 &format!(

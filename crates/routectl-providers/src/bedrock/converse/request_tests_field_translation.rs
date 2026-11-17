@@ -466,7 +466,7 @@ fn header_extras_pinned_beta_survives_its_withhold_on_converse() {
 }
 
 // ---------------------------------------------------------------------------
-// Q4: thinking + redacted_thinking translate to AWS reasoningContent
+// thinking + redacted_thinking translate to AWS reasoningContent
 // ---------------------------------------------------------------------------
 
 #[test]

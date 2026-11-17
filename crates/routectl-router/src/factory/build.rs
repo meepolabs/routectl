@@ -531,7 +531,7 @@ async fn gemini_provider(ctx: &BuildContext<'_>) -> Result<Arc<dyn Provider>> {
 /// A SIBLING of the non-pool path rather than a modification of it: the
 /// non-pool path builds exactly one provider from the model's own entry,
 /// while this walks the pool's declared members and builds one provider per
-/// member from that member's OWN `api_key_ref`. No member is ever enumerated
+/// member from that member's OWN `credential`. No member is ever enumerated
 /// through the credential store, so the bare-ref-means-default-seat rule
 /// arrives here by construction -- a member whose ref is a bare
 /// `oauth://<provider>` gets that provider's default seat and nothing else.

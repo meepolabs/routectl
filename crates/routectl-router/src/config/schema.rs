@@ -917,13 +917,13 @@ impl CacheCapability {
     pub fn for_provider_kind(kind: &str) -> Self {
         match kind {
             kind::ANTHROPIC_API => Self::new(true, true),
-            // Conservative kind-level default used only when no
-            // `api_shape` is known (the kind token carries no shape).
+            // Conservative kind-level default used only when no format
+            // is known (the kind token is shared by both Bedrock formats).
             // `ProviderEntry::cache_capability()` special-cases the
-            // Bedrock variant and derives the live value from `api_shape`
-            // instead: Invoke -> supports_top_level = true, because the
+            // Bedrock formats and derives the live value from `format`
+            // instead: `bedrock-invoke` -> supports_top_level = true, because the
             // egress lowers a routectl-injected top-level marker to the
-            // per-block form Invoke caches on (commit 3e12f88); Converse
+            // per-block form Invoke caches on (commit 3e12f88); `bedrock-converse`
             // -> false, because a top-level marker is inert there (no
             // `cachePoint` translation). Hit usage is reported back on
             // both shapes, so cache_hit_observable stays true. This

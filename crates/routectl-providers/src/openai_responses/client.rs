@@ -29,8 +29,8 @@ pub struct OpenAiResponsesConfig {
     /// Resolved ChatGPT account ID. Required for ChatgptOauth;
     /// must be None for the other variants (enforced by the factory).
     pub account_id: Option<String>,
-    /// Endpoint base URL. Defaults are auth_kind-dependent (resolved
-    /// by the factory):
+    /// Endpoint base URL: the entry's `base_url`, or derived from its AWS
+    /// region by the factory. Typical values:
     ///   - ChatgptOauth: `https://chatgpt.com/backend-api/codex`
     ///   - ApiKey: `https://api.openai.com/v1`
     ///   - BedrockMantle: `https://bedrock-mantle.<region>.api.aws/openai/v1`
@@ -70,7 +70,7 @@ pub struct OpenAiResponsesConfig {
     /// `Authorization` from the provider, a no-redirect client, and no
     /// Cloudflare cookie jar). `None` (default) keeps the chatgpt-oauth /
     /// api-key behavior byte-for-byte. Resolved at the factory from a
-    /// `bedrock_mantle` sub-config.
+    /// `cloud = { name = "aws", ... }` carrier.
     #[cfg(feature = "bedrock")]
     pub mantle: Option<MantleAuth>,
 }

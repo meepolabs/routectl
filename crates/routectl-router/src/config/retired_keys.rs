@@ -145,21 +145,24 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
     RetiredKey {
         path: &["providers", ANY_ENTRY, "api_shape"],
         refused_value: None,
-        replacement: "the Bedrock API is the format: `format = \"bedrock-invoke\"` or `format = \
-                      \"bedrock-converse\"`",
+        replacement: "the Bedrock API is the format: `invoke` (the default) is `format = \
+                      \"bedrock-invoke\"`, `converse` is `format = \"bedrock-converse\"`",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "auth_kind"],
         refused_value: None,
-        replacement: "set `auth`: `api-key` is `x-api-key`, `oauth-bearer` and `chatgpt-oauth` \
-                      are `bearer`; the Bedrock managed surface is a `cloud`",
+        replacement: "set `auth`: `api-key` is `x-api-key` on `anthropic-messages` over \
+                      `base_url` and `bearer` everywhere else; `oauth-bearer` and \
+                      `chatgpt-oauth` are `bearer`; `bedrock-mantle` is `cloud = { name = \
+                      \"aws\", region = \"<region>\" }` with `auth = \"bearer\"` for a key or \
+                      `auth = \"aws-sigv4\"` for an `aws://` credential",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "auth_mode"],
         refused_value: None,
         replacement: "set `format`: `api-key` is `format = \"gemini\"` with `auth = \
                       \"x-goog-api-key\"`, `cloud-code` is `format = \"gemini-cloud-code\"` with \
-                      `auth = \"bearer\"`",
+                      `auth = \"bearer\"` and `credential = \"oauth://antigravity[#label]\"`",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "auto_emit_per_block_breakpoints"],
@@ -174,8 +177,11 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
     RetiredKey {
         path: &["providers", ANY_ENTRY, "bedrock_mantle"],
         refused_value: None,
-        replacement: "set `cloud = { name = \"aws\", region = \"<region>\" }` and write the \
-                      credential as `credential`",
+        replacement: "set `cloud = { name = \"aws\", region = \"<region>\" }` in place of \
+                      `base_url`; a `bearer-key` `key_ref` becomes `credential` with `auth = \
+                      \"bearer\"`, a profile is `credential = \"aws://profile/<name>\"` and the \
+                      default chain `credential = \"aws://chain\"`, both with `auth = \
+                      \"aws-sigv4\"`",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "class_overrides"],
@@ -201,22 +207,28 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
     RetiredKey {
         path: &["providers", ANY_ENTRY, "credential_source"],
         refused_value: None,
-        replacement: "`forwarded` is `credential = \"forwarded\"` with `auth = \"bearer\"`; \
-                      `own` is the entry's own `credential`",
+        replacement: "`forwarded` is `credential = \"forwarded\"` with `auth = \"bearer\"` on \
+                      `format = \"anthropic-messages\"` and `base_url = \
+                      \"https://api.anthropic.com\"`; `own` is the entry's own `credential`",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "creds"],
         refused_value: None,
-        replacement: "write one `credential`: `aws://profile/<name>`, `aws://chain`, or a bearer \
-                      key reference with `auth = \"bearer\"`; static key pairs move to a profile \
-                      or the environment",
+        replacement: "write one `credential`: a `bearer-key` `key_ref` with `auth = \
+                      \"bearer\"`, or `aws://profile/<name>` or `aws://chain` with `auth = \
+                      \"aws-sigv4\"`; static key pairs move to a profile or the environment \
+                      (read by `aws://chain`)",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "kind"],
         refused_value: None,
-        replacement: "set `format`: `anthropic-api` is `anthropic-messages`, `openai-compat` is \
-                      `openai-chat`, `bedrock` is `bedrock-invoke` or `bedrock-converse`, \
-                      `gemini` is `gemini` or `gemini-cloud-code`, `openai-responses` stays",
+        replacement: "set `format` and `auth`: `anthropic-api` is `anthropic-messages` with \
+                      `x-api-key` (`bearer` for an `oauth://` login or over `cloud`), \
+                      `openai-compat` is `openai-chat` with `bearer`, `openai-responses` stays \
+                      and takes `bearer`, `gemini` is `gemini` with `x-goog-api-key` (`auth_mode = \
+                      \"cloud-code\"`: `gemini-cloud-code` with `bearer`), `bedrock` is \
+                      `bedrock-invoke` (`api_shape = \"converse\"`: `bedrock-converse`) over \
+                      `cloud` with `aws-sigv4` for an `aws://` credential or `bearer` for a key",
     },
     RetiredKey {
         path: &["providers", ANY_ENTRY, "max_thinking_entry_bytes"],

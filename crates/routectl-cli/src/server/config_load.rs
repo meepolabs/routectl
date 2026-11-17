@@ -42,7 +42,7 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
 /// intact rather than have the load abort on the first semantic error.
 ///
 /// Parse-level failures (unreadable file, version out of range, unknown
-/// fields, the legacy `[mitm] credential_source` key) still return `Err`
+/// fields, a retired key) still return `Err`
 /// here -- a config that does not parse has nothing for `check` to render
 /// against, and this keeps the did-you-mean / remediation guidance those
 /// preflights emit. In particular a too-old or missing `version` is

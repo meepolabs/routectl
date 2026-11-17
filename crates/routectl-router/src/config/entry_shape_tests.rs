@@ -192,6 +192,61 @@ fn a_base_url_that_is_not_a_plain_url_is_refused_without_echoing_it() {
         ),
         ("not a url", "sk-SENTINEL", "not a valid URL"),
         ("blank", "   ", "set but empty"),
+        (
+            "backslash before userinfo",
+            "https://gw.example\\@sk-SENTINEL.example/",
+            "a backslash",
+        ),
+        (
+            "ideographic full stop in the host",
+            "https://gw.example\u{3002}sk-SENTINEL.example/v1",
+            "outside printable ASCII",
+        ),
+        (
+            "non-ASCII homoglyph host",
+            "https://gw.ex\u{0430}mple/sk-SENTINEL",
+            "outside printable ASCII",
+        ),
+        (
+            "tab inside",
+            "https://gw.ex\tample/sk-SENTINEL",
+            "outside printable ASCII",
+        ),
+        (
+            "newline inside",
+            "https://gw.example/v1\nsk-SENTINEL",
+            "outside printable ASCII",
+        ),
+        (
+            "space inside",
+            "https://gw.example/v1 sk-SENTINEL",
+            "outside printable ASCII",
+        ),
+        (
+            "default https port",
+            "https://gw.example:443/sk-SENTINEL",
+            "rewrites",
+        ),
+        (
+            "default http port",
+            "http://gw.example:80/sk-SENTINEL",
+            "rewrites",
+        ),
+        (
+            "dot segment",
+            "https://gw.example/v1/../sk-SENTINEL",
+            "rewrites",
+        ),
+        (
+            "escaped host",
+            "https://gw.%65xample/sk-SENTINEL",
+            "rewrites",
+        ),
+        (
+            "decimal ip host",
+            "http://2130706433/sk-SENTINEL",
+            "rewrites",
+        ),
     ];
     for (label, base_url, rule) in rows {
         let refusals = base_url_refusals(base_url);
@@ -214,6 +269,27 @@ fn a_base_url_that_is_not_a_plain_url_is_refused_without_echoing_it() {
     }
 }
 
+/// A base_url that reads as one host and parses as another is refused:
+/// the text must be the URL the client dials.
+#[test]
+fn a_base_url_that_reads_as_a_different_host_is_refused() {
+    for base_url in [
+        "https://evil.example\\@api.anthropic.com/",
+        "https://api.anthropic.com\u{3002}evil.example",
+        "https://api.anthropic.com\t.evil.example/",
+        "https://\u{0430}pi.anthropic.com/",
+    ] {
+        let refusals = base_url_refusals(base_url);
+
+        assert_eq!(refusals.len(), 1, "{base_url:?}: {refusals:?}");
+        assert!(
+            !refusals[0].contains("anthropic.com"),
+            "{base_url:?} echoes the host: {}",
+            refusals[0]
+        );
+    }
+}
+
 #[test]
 fn a_plain_base_url_is_accepted() {
     for base_url in [
@@ -224,6 +300,9 @@ fn a_plain_base_url_is_accepted() {
         "http://127.0.0.1:8080/v1",
         "http://localhost:11434",
         "http://[::1]:8080/",
+        "HTTPS://GW.Example/v1",
+        "https://gw.example/v1/%7Euser",
+        "  https://gw.example/v1  ",
     ] {
         assert_eq!(
             base_url_refusals(base_url),
