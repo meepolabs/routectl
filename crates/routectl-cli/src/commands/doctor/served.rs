@@ -308,7 +308,7 @@ impl ServedInputs {
 /// and the deadline as RFC3339 UTC. The state key carries an operator-written
 /// member label, so it routes through the log-safe helper.
 pub(super) fn parked_seat_finding(seat: &ParkedSeat) -> Finding {
-    let deadline = rfc3339_or_epoch_ms(seat.parked_until_ms);
+    let deadline = crate::handlers::status::utc_rfc3339(seat.parked_until_ms);
     Finding {
         section: "auth",
         name: format!("parked seat {}", safe(&seat.state_key)),
@@ -338,17 +338,10 @@ pub(super) fn unusable_seat_finding(seat: &UnusableSeat) -> Finding {
             "{} ({}) since {}; requests skip this seat until its credential is fixed",
             seat.reason.as_str(),
             seat.cause.as_str(),
-            rfc3339_or_epoch_ms(seat.since_ms),
+            crate::handlers::status::utc_rfc3339(seat.since_ms),
         ),
         remediation: Some(seat.fix.clone()),
     }
-}
-
-fn rfc3339_or_epoch_ms(epoch_ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(epoch_ms).map_or_else(
-        || format!("epoch ms {epoch_ms}"),
-        |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    )
 }
 
 /// The per-layer inputs the shared gather body draws from, whichever source

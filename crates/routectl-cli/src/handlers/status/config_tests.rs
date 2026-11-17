@@ -596,7 +596,7 @@ async fn handler_returns_available_panel_with_effective_view() {
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(
-        chrono::DateTime::parse_from_rfc3339(as_of).is_ok(),
+        time::OffsetDateTime::parse(as_of, &time::format_description::well_known::Rfc3339).is_ok(),
         "as_of must be RFC3339: {as_of}"
     );
     // A default config has no models and no capability overrides, but every

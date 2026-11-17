@@ -9,7 +9,6 @@
 
 use std::time::{Duration, Instant};
 
-use chrono::{Local, TimeZone};
 use routectl_router::Config;
 use routectl_usage::{CACHE_IGNORE_LANE_CAP, UsageDb};
 
@@ -18,12 +17,11 @@ use crate::cache_ignore::{
     NotEvaluatedReason, cache_ignore_report,
 };
 use crate::commands::seat_report::safe;
+use crate::local_time::{self, LocalZone};
 
 /// How long the block's ledger read may run before it reports
 /// `unavailable: query_timeout` instead.
 pub const CACHE_IGNORE_READ_BUDGET: Duration = Duration::from_secs(2);
-
-const WINDOW_TS_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 const IGNORING_NOTE: &str = "markers sent, no cache activity";
 
@@ -35,19 +33,20 @@ const IGNORING_NOTE: &str = "markers sent, no cache activity";
 pub fn cache_ignore_block(
     db: &mut UsageDb,
     config: &Config,
+    zone: &LocalZone,
     now_ms: i64,
     deadline: Instant,
 ) -> String {
-    render_cache_ignore(&cache_ignore_report(db, config, now_ms, deadline))
+    render_cache_ignore(&cache_ignore_report(db, config, now_ms, deadline), zone)
 }
 
 /// Render one report as the `--detail` cache-ignore block.
-pub fn render_cache_ignore(report: &CacheIgnoreReport) -> String {
+pub fn render_cache_ignore(report: &CacheIgnoreReport, zone: &LocalZone) -> String {
     let mut out = format!(
         "cache-ignore: last {}h, {} .. {} (fixed window; window flags and --since do not apply)\n",
         CACHE_IGNORE_WINDOW.as_secs() / 3600,
-        format_window_ts(report.window.from_ms),
-        format_window_ts(report.window.to_ms),
+        format_window_ts(zone, report.window.from_ms),
+        format_window_ts(zone, report.window.to_ms),
     );
     match report.status {
         CacheIgnoreStatus::Unavailable(class) => {
@@ -111,11 +110,8 @@ fn render_lane(lane: &CacheIgnoreLaneReport) -> String {
 
 /// Local time to the minute; the raw milliseconds when the instant is not
 /// representable locally.
-fn format_window_ts(ts_ms: i64) -> String {
-    Local.timestamp_millis_opt(ts_ms).single().map_or_else(
-        || ts_ms.to_string(),
-        |dt| dt.format(WINDOW_TS_FORMAT).to_string(),
-    )
+fn format_window_ts(zone: &LocalZone, ts_ms: i64) -> String {
+    local_time::format_minutes(zone, ts_ms)
 }
 
 #[cfg(test)]

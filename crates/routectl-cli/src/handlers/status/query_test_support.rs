@@ -62,15 +62,15 @@ const VALID_BODY: &str = r#"{"window":"all","group_by":"model"}"#;
 
 /// The spec half of a parsed body, for the tests that only assert on the window
 /// and filters.
-fn parse_spec(body: &[u8], now: DateTime<Local>) -> Result<QuerySpec, ()> {
-    spec_from_body(body, now).map(|(spec, _)| spec)
+fn parse_spec(body: &[u8], now: OffsetDateTime) -> Result<QuerySpec, ()> {
+    spec_from_body(body, &crate::local_time::LocalZone::utc(), now).map(|(spec, _)| spec)
 }
 
 /// Seed `rows` rows, each under its OWN model/alias so the grouped aggregate
 /// builds a real temp B-tree rather than collapsing to a single group.
 fn seed_wide_ledger(path: &Path, rows: usize) {
     let db = open(path).expect("open ledger");
-    let now = Local::now().timestamp_millis();
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     let conn = db.conn();
     conn.execute_batch("BEGIN").expect("begin");
     for i in 0..rows {

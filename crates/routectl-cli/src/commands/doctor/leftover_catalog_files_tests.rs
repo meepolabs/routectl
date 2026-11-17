@@ -238,7 +238,13 @@ async fn both_gathers_look_in_the_config_folder() {
         };
 
         // Act
-        let context = gather_context_no_network(&config_path, sources, &[]).await;
+        let context = gather_context_no_network(
+            &config_path,
+            sources,
+            &[],
+            &crate::local_time::LocalZone::utc(),
+        )
+        .await;
 
         // Assert
         assert_eq!(
@@ -271,7 +277,13 @@ async fn a_corrupt_leftover_overlay_does_not_fail_the_disk_gather() {
     std::fs::write(&config_path, current_version_stamp()).expect("write config");
 
     // Act
-    let context = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
+    let context = gather_context_no_network(
+        &config_path,
+        GatherSources::Disk,
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
     let report = build_report_no_network(&context);
 
     // Assert

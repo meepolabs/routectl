@@ -149,12 +149,18 @@ async fn the_served_doctor_warns_once_per_parked_seat_and_the_offline_doctor_nam
     let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, config_text(&dir.path().join("usage.db"))).unwrap();
-    let before_ms = chrono::Utc::now().timestamp_millis();
+    let before_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
 
     let served = served_findings(router(true), config_path.clone()).await;
     let unparked = served_findings(router(false), config_path.clone()).await;
     let offline = build_report_no_network(
-        &gather_context_no_network(&config_path, GatherSources::Disk, &[]).await,
+        &gather_context_no_network(
+            &config_path,
+            GatherSources::Disk,
+            &[],
+            &crate::local_time::LocalZone::utc(),
+        )
+        .await,
     );
     let offline: Vec<Value> = offline
         .findings
@@ -178,9 +184,10 @@ async fn the_served_doctor_warns_once_per_parked_seat_and_the_offline_doctor_nam
             .nth(1)
             .and_then(|rest| rest.split(';').next())
             .unwrap_or_else(|| panic!("no deadline in {detail}"));
-        let at = chrono::DateTime::parse_from_rfc3339(deadline)
-            .unwrap_or_else(|e| panic!("deadline {deadline} is not RFC3339: {e}"));
-        let lead_ms = at.timestamp_millis() - before_ms;
+        let at =
+            time::OffsetDateTime::parse(deadline, &time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|e| panic!("deadline {deadline} is not RFC3339: {e}"));
+        let lead_ms = crate::local_time::unix_ms(at) - before_ms;
         assert!(
             (3_500_000..=3_700_000).contains(&lead_ms),
             "the deadline is about an hour out: {lead_ms} ms"

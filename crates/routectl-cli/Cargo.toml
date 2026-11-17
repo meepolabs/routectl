@@ -41,7 +41,7 @@ http.workspace = true
 bytes.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
-chrono.workspace = true
+time.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 subtle = "2"
 # Hidden interactive API-key prompt for `provider add` (reads from the TTY
@@ -105,6 +105,16 @@ dhat = { version = "0.3", optional = true }
 # here since routectl's own code now names it.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Local time-zone rules (TZ, then /etc/localtime) for the local usage windows
+# and timestamps. Pure Rust, no dependencies; read per command or request,
+# never through libc's localtime.
+tz-rs = "0.7.3"
+
+# Off Unix, local offsets come from `time`, which asks the OS per instant.
+# Unix never enables this feature: there `time` reads the offset through
+# localtime_r, which is not sound once threads run.
+[target.'cfg(windows)'.dependencies]
+time = { workspace = true, features = ["local-offset"] }
 
 [features]
 # The CLI ships every provider by design. Its `routectl-providers` dependency

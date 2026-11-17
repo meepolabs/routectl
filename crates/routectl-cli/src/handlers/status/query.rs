@@ -32,7 +32,9 @@ use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, Local};
+use time::OffsetDateTime;
+
+use crate::local_time::LocalZone;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -175,33 +177,69 @@ impl QueryBucket {
     }
 }
 
-/// Parse a request body into the query spec plus the requested series
-/// granularity, resolving the window against `now`. Every failure is the SAME
-/// opaque unit error: the caller emits one fixed code, so no parse detail can
-/// reach the wire.
-///
-/// The bucket GRID is not resolved here: an all-time series anchors on the
-/// ledger's earliest row, which is a read, so the grid is resolved on the
-/// blocking worker that already owns the connection.
+/// A body in the closed request vocabulary, with its filters validated but its
+/// window not yet resolved: resolving needs the host zone, which is loaded on
+/// the blocking worker that builds the panel.
+#[derive(Debug)]
+pub(super) struct ParsedQuery {
+    flag: WindowFlag,
+    group_by: GroupDim,
+    alias_filter: Option<String>,
+    provider_filter: Option<String>,
+    bucket: Option<BucketUnit>,
+}
+
+/// Parse a request body against the closed vocabulary. Every failure is the
+/// SAME opaque unit error: the caller emits one fixed code, so no parse detail
+/// can reach the wire.
+pub(super) fn parse_body(body: &[u8]) -> Result<ParsedQuery, ()> {
+    let request: QueryRequest = serde_json::from_slice(body).map_err(|_| ())?;
+    Ok(ParsedQuery {
+        flag: request.window.flag(),
+        group_by: request.group_by.dim(),
+        alias_filter: filter_value(request.alias)?,
+        provider_filter: filter_value(request.provider)?,
+        bucket: request.bucket.map(QueryBucket::unit),
+    })
+}
+
+impl ParsedQuery {
+    /// The query spec plus the requested series granularity, with the window
+    /// resolved in `zone` against `now`.
+    ///
+    /// The bucket GRID is not resolved here: an all-time series anchors on the
+    /// ledger's earliest row, which is a read, so the grid is resolved on the
+    /// blocking worker that already owns the connection.
+    pub(super) fn resolve(
+        self,
+        zone: &LocalZone,
+        now: OffsetDateTime,
+    ) -> (QuerySpec, Option<BucketUnit>) {
+        let bounds = window_bounds(zone, self.flag, now);
+        let spec = QuerySpec {
+            from_ms: bounds.from_ms,
+            to_ms: bounds.to_ms,
+            group_by: self.group_by,
+            alias_filter: self.alias_filter,
+            provider_filter: self.provider_filter,
+            bucket: None,
+        };
+        (spec, self.bucket)
+    }
+}
+
+/// [`parse_body`] then [`ParsedQuery::resolve`], for tests that hold a zone.
 ///
 /// Visible to the rest of the status module so the dashboard's drift test can
 /// validate the request shapes the page declares against THIS parser rather
 /// than a second copy of the vocabulary.
+#[cfg(test)]
 pub(super) fn spec_from_body(
     body: &[u8],
-    now: DateTime<Local>,
+    zone: &LocalZone,
+    now: OffsetDateTime,
 ) -> Result<(QuerySpec, Option<BucketUnit>), ()> {
-    let request: QueryRequest = serde_json::from_slice(body).map_err(|_| ())?;
-    let bounds = window_bounds(request.window.flag(), now);
-    let spec = QuerySpec {
-        from_ms: bounds.from_ms,
-        to_ms: bounds.to_ms,
-        group_by: request.group_by.dim(),
-        alias_filter: filter_value(request.alias)?,
-        provider_filter: filter_value(request.provider)?,
-        bucket: None,
-    };
-    Ok((spec, request.bucket.map(QueryBucket::unit)))
+    Ok(parse_body(body)?.resolve(zone, now))
 }
 
 /// Validate one optional filter. A present-but-blank filter matches nothing and
@@ -237,11 +275,10 @@ pub(super) async fn handler(
     let Ok(Ok(body)) = read else {
         return invalid_query();
     };
-    let now = Local::now();
-    let Ok((spec, bucket)) = spec_from_body(&body, now) else {
+    let Ok(parsed) = parse_body(&body) else {
         return invalid_query();
     };
-    render(build(&state, spec, bucket, now).await)
+    render(build(&state, parsed, OffsetDateTime::now_utc()).await)
 }
 
 /// Serialize a finished panel. Rendering is EXPLICIT rather than through the
@@ -290,10 +327,10 @@ fn invalid_query() -> Response {
 /// failing series poll. Exactly ONE of them sees each request.
 async fn build(
     state: &StatusState,
-    spec: QuerySpec,
-    bucket: Option<BucketUnit>,
-    now: DateTime<Local>,
+    parsed: ParsedQuery,
+    now: OffsetDateTime,
 ) -> Panel<QueryResult> {
+    let is_series = parsed.bucket.is_some();
     let db_path = state.usage_db_path.clone();
     // ONE pinned config snapshot for the whole request; its price tables are
     // pinned once on the blocking worker.
@@ -305,10 +342,14 @@ async fn build(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
-        move || build_panel(&db_path, spec, bucket, &pricer.pin(), as_of, now),
+        move || {
+            let zone = LocalZone::load();
+            let (spec, bucket) = parsed.resolve(&zone, now);
+            build_panel(&db_path, spec, bucket, &pricer.pin(), as_of, &zone, now)
+        },
     )
     .await;
-    if bucket.is_some() {
+    if is_series {
         state.observability.query_series.record(&panel);
     } else {
         state.observability.query.record(&panel);
@@ -336,7 +377,8 @@ fn build_panel(
     bucket: Option<BucketUnit>,
     pricer: &QueryPricer,
     as_of: String,
-    now: DateTime<Local>,
+    zone: &LocalZone,
+    now: OffsetDateTime,
 ) -> Panel<QueryResult> {
     let deadline = Instant::now() + Duration::from_millis(QUERY_BUDGET_MS);
     let mut db = match open_readonly_fastfail(db_path) {
@@ -356,7 +398,7 @@ fn build_panel(
             } else {
                 None
             };
-            match resolve_bucket(unit, spec.from_ms, spec.to_ms, first_row_ms, now) {
+            match resolve_bucket(zone, unit, spec.from_ms, spec.to_ms, first_row_ms, now) {
                 Some((anchor_ms, resolved)) => {
                     spec.from_ms = anchor_ms;
                     spec.bucket = Some(resolved);

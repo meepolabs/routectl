@@ -1107,6 +1107,8 @@ list with more narrative.
 
 ### Security
 
+- **routectl no longer depends on `chrono`, which is unmaintained (RUSTSEC-2026-0543).** Timestamps are formatted and parsed with `time`, and the local time-zone rules behind `routectl usage` windows and the local timestamps it prints come from `tz-rs` on Unix (the `TZ` variable, then `/etc/localtime`) and from the OS on Windows. Every timestamp routectl writes or prints keeps its text form and every usage window keeps its edges. A host zone that cannot be read still falls back to UTC, now with one WARN line.
+
 - **A retired-key refusal no longer repeats a quoted entry name.** In the retired-key lines printed by `config check`, `doctor`, `serve` start, `config set` and the hot-reload WARN log, an entry name that is not a bare TOML key (letters, digits, `_` and `-`) is shown as `<quoted name>`, the same rule the config parse-error redaction applies, since a quoted name can be a pasted credential. Bare names are shown as written. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#retired-config-keys).
 
 - **The fixture scrub gate (`scripts/scrub-fixture.sh --check`) catches more credential and task-id shapes.** A vendor key after a percent-encoded boundary (`%22`, `%3D`, `%20`) is now refused like one after a JSON escape; OpenAI keys carrying the `T3BlbkFJ` infix and `sk-None-` keys are refused as `provider-key`; a vendor `req_` id under a JSON `request_id` key is refused as the new `upstream-request-id` class in raw, JSON-escaped, pretty-printed, percent-encoded and percent-encoded JSON-escaped bodies, while the `request-id` response header and the uuid `request_id` in `meta.json` stay accepted; and the scratch task-id class matches case-insensitively, still accepting all-hex slugs.

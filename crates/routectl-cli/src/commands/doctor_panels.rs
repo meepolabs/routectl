@@ -7,7 +7,9 @@
 //! its human battery. Kept apart from the doctor orchestration so the
 //! compute/map/render seam is unit-testable against a temp DB.
 
-use chrono::{DateTime, Local};
+use time::OffsetDateTime;
+
+use crate::local_time::LocalZone;
 
 use routectl_router::{
     ACTION_MIXED, ACTION_NONE, CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell,
@@ -28,7 +30,7 @@ const DEFAULT_WINDOW: WindowFlag = WindowFlag::All;
 ///
 /// Opens the usage DB via `open_readonly_fastfail` and summarizes the
 /// would-trim opportunity over the default window
-/// (`window_bounds(DEFAULT_WINDOW, now)`). The served status doctor polls this,
+/// (`window_bounds(&crate::local_time::LocalZone::utc(), DEFAULT_WINDOW, now)`). The served status doctor polls this,
 /// so a locked DB sheds after the short fast-fail busy timeout rather than
 /// holding the poll on the writer's lock. Returns `None` when there is no
 /// panel to show -- a missing / unmigrated / non-WAL DB, a lock that outlasts
@@ -40,7 +42,8 @@ const DEFAULT_WINDOW: WindowFlag = WindowFlag::All;
 /// deterministic under test.
 pub(crate) fn compute_would_trim_panel(
     config: &Config,
-    now: DateTime<Local>,
+    zone: &LocalZone,
+    now: OffsetDateTime,
 ) -> Option<WouldTrimPanel> {
     let db = match open_readonly_fastfail(&config.usage.db_path) {
         Ok(db) => db,
@@ -56,7 +59,7 @@ pub(crate) fn compute_would_trim_panel(
             return None;
         }
     };
-    let bounds = window_bounds(DEFAULT_WINDOW, now);
+    let bounds = window_bounds(zone, DEFAULT_WINDOW, now);
     match would_trim_summary(&db, bounds.from_ms, bounds.to_ms) {
         Ok(summary) => Some(panel_from_summary(summary)),
         Err(e) => {
@@ -299,7 +302,6 @@ fn signal_token(cell: &MatrixCell) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{NaiveDate, TimeZone};
     use routectl_usage::{UsageDb, open};
     use rusqlite::OpenFlags;
     use std::path::{Path, PathBuf};
@@ -307,16 +309,9 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
-    fn fixed_now() -> DateTime<Local> {
-        Local
-            .from_local_datetime(
-                &NaiveDate::from_ymd_opt(2026, 6, 11)
-                    .expect("valid date")
-                    .and_hms_opt(14, 30, 0)
-                    .expect("valid time"),
-            )
-            .earliest()
-            .expect("unambiguous local time")
+    fn fixed_now() -> OffsetDateTime {
+        // 2026-06-11 (Thursday) 14:30, read in UTC.
+        time::macros::datetime!(2026-06-11 14:30 UTC)
     }
 
     fn temp_db() -> (TempDir, PathBuf, UsageDb) {
@@ -417,7 +412,7 @@ mod tests {
         let config = config_for(&path);
 
         // Act + Assert: NoData collapses to no panel, never an error.
-        assert!(compute_would_trim_panel(&config, fixed_now()).is_none());
+        assert!(compute_would_trim_panel(&config, &LocalZone::utc(), fixed_now()).is_none());
     }
 
     #[test]
@@ -432,7 +427,9 @@ mod tests {
         drop(db);
 
         // Act + Assert: VersionTooOld collapses to no panel, never an error.
-        assert!(compute_would_trim_panel(&config_for(&path), fixed_now()).is_none());
+        assert!(
+            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), fixed_now()).is_none()
+        );
     }
 
     #[test]
@@ -441,7 +438,7 @@ mod tests {
         // stamped AFTER `now` -- excluded by the default window's upper bound.
         let (_dir, path, db) = temp_db();
         let now = fixed_now();
-        let now_ms = now.timestamp_millis();
+        let now_ms = crate::local_time::unix_ms(now);
         insert_would_trim_row(&db, "w1", now_ms - 2_000, Some(40_000));
         insert_would_trim_row(&db, "w2", now_ms - 1_000, Some(20_000));
         insert_would_trim_row(&db, "plain", now_ms - 500, None);
@@ -449,7 +446,8 @@ mod tests {
         drop(db);
 
         // Act
-        let panel = compute_would_trim_panel(&config_for(&path), now).expect("panel");
+        let panel =
+            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now).expect("panel");
 
         // Assert: the future candidate is excluded by the window's upper bound.
         assert_eq!(panel.candidate_requests, 2);
@@ -461,12 +459,18 @@ mod tests {
         // Arrange: seed a candidate, then drop the writer so the DB is quiescent.
         let (_dir, path, db) = temp_db();
         let now = fixed_now();
-        insert_would_trim_row(&db, "w1", now.timestamp_millis() - 1_000, Some(30_000));
+        insert_would_trim_row(
+            &db,
+            "w1",
+            crate::local_time::unix_ms(now) - 1_000,
+            Some(30_000),
+        );
         drop(db);
         let before = std::fs::read(&path).expect("read db before");
 
         // Act: the read-only compute must not touch the file.
-        let panel = compute_would_trim_panel(&config_for(&path), now).expect("panel");
+        let panel =
+            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now).expect("panel");
 
         // Assert: candidate seen, and the DB file is byte-for-byte unchanged.
         assert_eq!(panel.candidate_requests, 1);
@@ -509,7 +513,7 @@ mod tests {
 
         // Act: capture the omission log emitted while computing the panel.
         let events = capture_events(|| {
-            assert!(compute_would_trim_panel(&config, fixed_now()).is_none());
+            assert!(compute_would_trim_panel(&config, &LocalZone::utc(), fixed_now()).is_none());
         });
 
         // Assert: the panel is omitted, exactly the path-free class is logged,
@@ -571,7 +575,12 @@ mod tests {
         // holder can engage exclusive mode.
         let (_dir, path, db) = temp_db();
         let now = fixed_now();
-        insert_would_trim_row(&db, "w1", now.timestamp_millis() - 1_000, Some(30_000));
+        insert_would_trim_row(
+            &db,
+            "w1",
+            crate::local_time::unix_ms(now) - 1_000,
+            Some(30_000),
+        );
         drop(db);
         let fastfail_ms = busy_timeout_ms(&open_readonly_fastfail(&path).expect("fastfail open"));
         let viewer_ms = busy_timeout_ms(&routectl_usage::open_readonly(&path).expect("open"));
@@ -601,7 +610,7 @@ mod tests {
         let config = config_for(&path);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(compute_would_trim_panel(&config, now));
+            let _ = tx.send(compute_would_trim_panel(&config, &LocalZone::utc(), now));
         });
         let result = rx.recv_timeout(bound);
 
@@ -610,7 +619,8 @@ mod tests {
         let panel = result.unwrap_or_else(|_| panic!("panel did not shed within {bound:?}"));
         assert!(panel.is_none(), "a locked DB must omit the panel");
         drop(holder);
-        let after = compute_would_trim_panel(&config_for(&path), now).expect("panel after unlock");
+        let after = compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now)
+            .expect("panel after unlock");
         assert_eq!(after.candidate_requests, 1);
     }
 
@@ -622,7 +632,12 @@ mod tests {
         // journal, so only the WAL check can refuse it.
         let (_dir, path, db) = temp_db();
         let now = fixed_now();
-        insert_would_trim_row(&db, "w1", now.timestamp_millis() - 1_000, Some(30_000));
+        insert_would_trim_row(
+            &db,
+            "w1",
+            crate::local_time::unix_ms(now) - 1_000,
+            Some(30_000),
+        );
         drop(db);
         let raw = rusqlite::Connection::open(&path).expect("raw open");
         let mode: String = raw
@@ -638,7 +653,7 @@ mod tests {
 
         // Act
         let events = capture_events(|| {
-            assert!(compute_would_trim_panel(&config, now).is_none());
+            assert!(compute_would_trim_panel(&config, &LocalZone::utc(), now).is_none());
         });
 
         // Assert: exactly the path-free class is logged, and nothing carries

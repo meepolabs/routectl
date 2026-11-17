@@ -228,7 +228,7 @@ async fn the_health_panel_reads_the_park_from_the_live_router() {
     let router = parked_router();
     let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let state = Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()));
-    let before_ms = chrono::Utc::now().timestamp_millis();
+    let before_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
 
     let panel = build(&state).await;
 
@@ -705,7 +705,7 @@ async fn handler_returns_available_panel_with_rfc3339_as_of() {
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(
-        chrono::DateTime::parse_from_rfc3339(as_of).is_ok(),
+        time::OffsetDateTime::parse(as_of, &time::format_description::well_known::Rfc3339).is_ok(),
         "as_of must be RFC3339: {as_of}"
     );
     assert!(json["data"]["targets"].is_array());

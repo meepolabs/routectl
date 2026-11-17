@@ -615,7 +615,8 @@ enum CapabilityMatrixSource {
 /// Read-only and infallible in posture: a load or probe failure degrades to
 /// a finding, never a hard error. Returns the process exit code.
 pub async fn run(config_path: &Path, legacy_dirs: &[LegacyConfigDir], json: bool) -> i32 {
-    let ctx = gather_context(config_path, legacy_dirs).await;
+    let zone = crate::local_time::LocalZone::load();
+    let ctx = gather_context(config_path, legacy_dirs, &zone).await;
     let report = build_report(&ctx);
 
     if json {

@@ -87,8 +87,10 @@ tokio-stream = "0.1"
 cookie_store = "0.21"
 reqwest_cookie_store = "0.8"
 
-# Time / ids (used in response shaping)
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# Time / ids (used in response shaping). `time` is already in the graph
+# through the AWS SDK and rcgen. Local zone rules come from tz-rs, declared
+# per crate under a unix target table (see routectl-cli).
+time = { version = "0.3.47", default-features = false, features = ["std", "formatting", "parsing", "macros"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 
 # Bounded LRU cache (used by anthropic-api context_management

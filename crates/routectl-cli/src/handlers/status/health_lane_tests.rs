@@ -348,6 +348,7 @@ mod doctor_agreement {
                 absent_ledger.clone(),
             ))),
             &[],
+            &crate::local_time::LocalZone::utc(),
         )
         .await;
         let doctor = build_report_no_network(&served)

@@ -110,7 +110,7 @@ fn stats(samples: &[Duration]) -> Stats {
 fn seed_wide_grid(path: &Path) -> (i64, i64) {
     let db = open(path).expect("open ledger");
     let span_ms = SPAN_DAYS * 86_400_000;
-    let from_ms = Local::now().timestamp_millis() - span_ms;
+    let from_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc()) - span_ms;
     let conn = db.conn();
     conn.execute_batch("BEGIN").expect("begin");
     {

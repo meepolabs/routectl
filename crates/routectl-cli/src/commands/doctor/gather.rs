@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
 use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::{TokenRecord, seat_key, unix_now};
 use routectl_auth::{CredentialRef, SecretRef, SecretScheme, default_secret_dir};
@@ -24,6 +23,7 @@ use crate::commands::pricing::{
 };
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
 use crate::config_folder::LegacyConfigDir;
+use crate::local_time::LocalZone;
 use crate::server::CompositeStore;
 use crate::server::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
@@ -44,8 +44,9 @@ use super::{
 pub(super) async fn gather_context(
     config_path: &Path,
     legacy_dirs: &[LegacyConfigDir],
+    zone: &LocalZone,
 ) -> DoctorContext {
-    let ctx = gather_context_no_network(config_path, GatherSources::Disk, legacy_dirs).await;
+    let ctx = gather_context_no_network(config_path, GatherSources::Disk, legacy_dirs, zone).await;
     let probe_results = gather_probe_results(&ctx.config).await;
     DoctorContext {
         probe_results,
@@ -71,10 +72,14 @@ pub(super) async fn gather_context(
 /// `legacy_dirs` are the old config folders to list, usually
 /// [`crate::config_folder::legacy_config_dirs_from_env`]; the gather itself
 /// reads no environment variable for them.
+///
+/// `zone` is the caller's one zone load for this command or request; the
+/// would-trim panel resolves its local window in it.
 pub async fn gather_context_no_network(
     config_path: &Path,
     sources: GatherSources,
     legacy_dirs: &[LegacyConfigDir],
+    zone: &LocalZone,
 ) -> DoctorContext {
     let raw_config = std::fs::read_to_string(config_path).ok();
     let cache_read_budget = read_budget(&sources);
@@ -108,12 +113,13 @@ pub async fn gather_context_no_network(
     let secret_checks = gather_secret_checks(&config, &probes);
     let orphan_secrets = gather_orphan_secrets(&config);
     let orphan_seats = gather_orphan_seats(&config, &seats);
-    let would_trim = compute_would_trim_panel(&config, Local::now());
+    let now = time::OffsetDateTime::now_utc();
+    let would_trim = compute_would_trim_panel(&config, zone, now);
     let cache_ignore = gather_cache_ignore(
         &usage_db_path,
         &config,
         cache_read_budget,
-        chrono::Utc::now().timestamp_millis(),
+        crate::local_time::unix_ms(now),
     );
     let legacy_folders = legacy_dirs
         .iter()

@@ -425,9 +425,9 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
     // Residual, accepted: router-vs-activation can still skew either way and
     // no ordering fixes it. The dashboard already footnotes those as different
     // sets.
-    let now = chrono::Utc::now();
-    let as_of = utc_rfc3339(now);
-    let daemon = state.daemon_meta.snapshot(now.timestamp_millis());
+    let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+    let as_of = utc_rfc3339(now_ms);
+    let daemon = state.daemon_meta.snapshot(now_ms);
     let view = state.router.view();
     let book = Arc::clone(&state.prices);
     let activation = state.activation.load_full();

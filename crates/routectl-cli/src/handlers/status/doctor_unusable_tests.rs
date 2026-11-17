@@ -162,13 +162,19 @@ async fn the_served_doctor_names_each_unusable_seat_and_the_offline_doctor_names
     let config_path = dir.path().join("config.toml");
     let text = config_text(&dir.path().join("usage.db"));
     std::fs::write(&config_path, &text).unwrap();
-    let before_ms = chrono::Utc::now().timestamp_millis();
+    let before_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
 
     // Act
     let served = served_findings(router(&text, true), config_path.clone()).await;
-    let after_ms = chrono::Utc::now().timestamp_millis();
+    let after_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     let offline = build_report_no_network(
-        &gather_context_no_network(&config_path, GatherSources::Disk, &[]).await,
+        &gather_context_no_network(
+            &config_path,
+            GatherSources::Disk,
+            &[],
+            &crate::local_time::LocalZone::utc(),
+        )
+        .await,
     );
     let offline: Vec<Value> = offline
         .findings
@@ -193,9 +199,9 @@ async fn the_served_doctor_names_each_unusable_seat_and_the_offline_doctor_names
             .nth(1)
             .and_then(|rest| rest.split(';').next())
             .unwrap_or_else(|| panic!("no since in {detail}"));
-        let at = chrono::DateTime::parse_from_rfc3339(since)
+        let at = time::OffsetDateTime::parse(since, &time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|e| panic!("since {since} is not RFC3339: {e}"));
-        let at_ms = at.timestamp_millis();
+        let at_ms = crate::local_time::unix_ms(at);
         assert!(
             (before_ms - 1_000..=after_ms).contains(&at_ms),
             "the mark was set during this test: {at_ms} not in {before_ms}..={after_ms}"

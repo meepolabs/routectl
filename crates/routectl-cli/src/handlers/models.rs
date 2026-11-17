@@ -5,7 +5,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
 use routectl_router::ActivationState;
 use serde_json::{Value, json};
 
@@ -93,7 +92,7 @@ struct ModelListEntry {
 /// would otherwise be invisible until dispatch actually 503s.
 fn local_models_list(router: &routectl_router::Router, activation: &ActivationState) -> Value {
     let config = &router.config;
-    let now = Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut entries: Vec<ModelListEntry> = Vec::new();
     let emit = |id: &str, entries: &mut Vec<ModelListEntry>, seen: &mut BTreeSet<String>| {

@@ -27,7 +27,7 @@ mod health;
 mod learned_seed;
 mod page;
 #[cfg(test)]
-mod production_source;
+pub(crate) mod production_source;
 mod query;
 mod router_view;
 #[cfg(test)]

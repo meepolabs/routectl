@@ -11,24 +11,16 @@ use routectl_usage::{BucketSpec, RowCost, UsageDb};
 
 // --- the series mode ----------------------------------------------------
 
-/// A pinned local instant, mid-afternoon on an ordinary day: 2026-06-11
-/// (Thursday) 14:30.
+/// A pinned instant, mid-afternoon on an ordinary day: 2026-06-11 (Thursday)
+/// 14:30, read in UTC.
 ///
 /// The `today` window runs from local midnight to `now`, so seeding rows at
 /// offsets from the REAL clock and asserting they share that window only holds
 /// for some hours of the day: `now - 1h` falls into yesterday whenever the suite
 /// runs before 01:00 local. Anchoring the arrangement to a fixed instant instead
 /// makes seed, window, and expected bucket count agree at every wall-clock hour.
-fn fixed_now() -> DateTime<Local> {
-    Local
-        .from_local_datetime(
-            &NaiveDate::from_ymd_opt(2026, 6, 11)
-                .unwrap()
-                .and_hms_opt(14, 30, 0)
-                .unwrap(),
-        )
-        .earliest()
-        .unwrap()
+fn fixed_now() -> OffsetDateTime {
+    time::macros::datetime!(2026-06-11 14:30 UTC)
 }
 
 #[test]
@@ -42,14 +34,23 @@ fn a_bucket_token_returns_a_series_at_the_resolved_width() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
     let now = fixed_now();
-    let now_ms = now.timestamp_millis();
+    let now_ms = crate::local_time::unix_ms(now);
     seed_ledger(&path, &[now_ms - 3_600_000, now_ms]);
     let body = r#"{"window":"today","group_by":"model","bucket":"hour"}"#;
-    let (spec, bucket) = spec_from_body(body.as_bytes(), now).expect("body is in vocabulary");
+    let (spec, bucket) = spec_from_body(body.as_bytes(), &crate::local_time::LocalZone::utc(), now)
+        .expect("body is in vocabulary");
     let pricer = state_with_ledger(path.clone()).pricer().pin();
 
     // Act
-    let panel = build_panel(&path, spec, bucket, &pricer, now.to_utc().to_rfc3339(), now);
+    let panel = build_panel(
+        &path,
+        spec,
+        bucket,
+        &pricer,
+        crate::handlers::status::utc_rfc3339(now_ms),
+        &crate::local_time::LocalZone::utc(),
+        now,
+    );
     let json = serde_json::to_value(&panel).expect("the panel renders");
 
     // Assert: a populated series whose width is the requested hour, and whose
@@ -73,7 +74,10 @@ async fn an_absent_bucket_token_leaves_the_series_null() {
     // series object, an explicit null.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
 
     let (status, json) = send(state_with_ledger(path), QUERY_METHOD, VALID_BODY).await;
 
@@ -92,7 +96,10 @@ async fn an_out_of_vocabulary_bucket_token_is_a_leak_free_400() {
     // including the plausible-looking granularities and the alternate spellings.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
     let bodies = [
         r#"{"window":"all","group_by":"model","bucket":"week"}"#,
         r#"{"window":"all","group_by":"model","bucket":"minute"}"#,
@@ -125,7 +132,7 @@ async fn a_window_too_wide_for_the_cap_widens_the_bucket_instead_of_exceeding_it
     // ~90k buckets.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    let now_ms = Local::now().timestamp_millis();
+    let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     let decade_ms = 3_650 * 86_400_000_i64;
     seed_ledger(&path, &[now_ms - decade_ms, now_ms]);
 
@@ -190,7 +197,7 @@ async fn the_all_time_re_anchor_leaves_the_groups_and_totals_unchanged() {
     // coarse fold must match the non-series path exactly.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    let now_ms = Local::now().timestamp_millis();
+    let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     seed_ledger(
         &path,
         &[now_ms - 30 * 86_400_000, now_ms - 86_400_000, now_ms],
@@ -224,7 +231,7 @@ async fn a_pre_epoch_row_is_excluded_by_the_bucketed_and_plain_all_time_paths_al
     // the same row set rather than pulling it back in.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    let now_ms = Local::now().timestamp_millis();
+    let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     seed_ledger(&path, &[-86_400_000, now_ms - 86_400_000, now_ms]);
     let state = state_with_ledger(path);
 
@@ -269,7 +276,7 @@ fn seed_deep_ledger(path: &Path, rows: usize, days: i64) -> (i64, i64) {
 
     let db = open(path).expect("open ledger");
     let span_ms = days * 86_400_000;
-    let from_ms = Local::now().timestamp_millis() - span_ms;
+    let from_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc()) - span_ms;
     let conn = db.conn();
     conn.execute_batch("BEGIN").expect("begin");
     {

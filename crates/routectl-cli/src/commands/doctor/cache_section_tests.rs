@@ -23,7 +23,7 @@ use super::super::{
 /// previous one, so `turns` turns are `turns - 1` evidence turns.
 fn seed_ignoring_lane(db_path: &Path, provider: &str, model: &str, turns: i64) {
     let db = routectl_usage::open(db_path).expect("open ledger");
-    let base = chrono::Utc::now().timestamp_millis() - 3_600_000;
+    let base = crate::local_time::unix_ms(time::OffsetDateTime::now_utc()) - 3_600_000;
     db.conn().execute_batch("BEGIN").expect("begin");
     for i in 0..turns {
         db.conn()
@@ -116,13 +116,24 @@ fn served_inputs(config_path: &Path, boot_db_path: &Path) -> ServedInputs {
 }
 
 async fn served_cache_findings(inputs: ServedInputs, config_path: &Path) -> Vec<Finding> {
-    let ctx =
-        gather_context_no_network(config_path, GatherSources::Served(Box::new(inputs)), &[]).await;
+    let ctx = gather_context_no_network(
+        config_path,
+        GatherSources::Served(Box::new(inputs)),
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
     cache_findings(&build_report_no_network(&ctx).findings)
 }
 
 async fn disk_report(config_path: &Path) -> routectl_router::DoctorReport {
-    let ctx = gather_context_no_network(config_path, GatherSources::Disk, &[]).await;
+    let ctx = gather_context_no_network(
+        config_path,
+        GatherSources::Disk,
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
     build_report(&ctx)
 }
 
@@ -395,6 +406,7 @@ async fn a_served_read_past_its_deadline_reports_query_timeout() {
         &fx.config_path,
         GatherSources::Served(Box::new(inputs)),
         &[],
+        &crate::local_time::LocalZone::utc(),
     )
     .await;
     let report = build_report_no_network(&ctx);

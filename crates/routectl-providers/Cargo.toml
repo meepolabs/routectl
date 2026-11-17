@@ -10,10 +10,10 @@ description = "Provider implementations for routectl."
 
 [features]
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses", "gemini"]
-"openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
-"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64", "dep:xxhash-rust"]
-"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store", "dep:tempfile", "dep:routectl-auth", "dep:bytes", "dep:sha2"]
-"gemini" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:bytes"]
+"openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:time", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
+"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:time", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64", "dep:xxhash-rust"]
+"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:time", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store", "dep:tempfile", "dep:routectl-auth", "dep:bytes", "dep:sha2"]
+"gemini" = ["dep:reqwest", "dep:eventsource-stream", "dep:time", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:bytes"]
 # Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
 # that must not appear in production builds. Required when running integration
 # tests that pre-populate the thinking cache.
@@ -68,7 +68,7 @@ url.workspace = true
 # Used by anthropic-api and openai-compat providers.
 reqwest = { workspace = true, optional = true }
 eventsource-stream = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 async-stream = { version = "0.3", optional = true }

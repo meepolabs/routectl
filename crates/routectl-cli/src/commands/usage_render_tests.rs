@@ -18,7 +18,7 @@ fn paid_row(db: &UsageDb, request_id: &str, input: Option<i64>, output: Option<i
 }
 
 fn report_all(db: &UsageDb, config: &Config, by: Option<GroupDim>, detail: bool) -> WindowReport {
-    let bounds = window_bounds(WindowFlag::All, fixed_now());
+    let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
     build_window_report(db, config, &no_prices(), "t".into(), bounds, by, detail).unwrap()
 }
 
@@ -47,7 +47,7 @@ fn render_non_detail_header_has_expected_columns() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let header = out.lines().nth(1).expect("header line present");
 
     // Assert: default grouping is by model; standard columns follow. Dropped
@@ -102,7 +102,7 @@ fn render_detail_shows_would_trim_opportunity_line() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: the compact advisory line names the candidate count, the summed
     // tokens (humanized 60_000 -> "60K"), and flags that it is not applied.
@@ -123,7 +123,7 @@ fn render_non_detail_omits_would_trim_line() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act + Assert
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("would-trim"),
         "the default (non-detail) table must omit the would-trim line: {out}"
@@ -138,7 +138,7 @@ fn render_detail_omits_would_trim_line_when_no_candidates() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert: a window with no candidates stays uncluttered.
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("would-trim"),
         "no candidates -> no would-trim line: {out}"
@@ -153,7 +153,7 @@ fn render_by_provider_uses_provider_key_header() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Provider), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let header = out.lines().nth(1).expect("header line present");
 
     // Assert
@@ -170,7 +170,7 @@ fn render_data_row_shows_rolled_up_values_and_priced_cost() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Provider), true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let data_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("paid"))
@@ -191,8 +191,8 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
     let plain = report_all(&db, &config, None, false);
 
     // Act
-    let detail_out = render_report(&detail);
-    let plain_out = render_report(&plain);
+    let detail_out = render_report(&detail, &zone());
+    let plain_out = render_report(&plain, &zone());
     let detail_header = detail_out.lines().nth(1).expect("header");
     let plain_header = plain_out.lines().nth(1).expect("header");
 
@@ -252,7 +252,7 @@ fn render_humanizes_large_cache_read_and_honors_not_reported() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let big_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("big"))
@@ -313,7 +313,7 @@ fn render_detail_latency_summary_uses_window_total_not_alias_named_total() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Alias), true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let summary = out
         .lines()
         .find(|l| l.starts_with("latency: TTFT"))
@@ -433,7 +433,7 @@ fn render_includes_total_row() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: a total row is always present.
     assert!(out.lines().any(|l| l.trim_start().starts_with("total")));
@@ -451,7 +451,7 @@ fn render_footer_shows_cache_hit_rate() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: errors moved to a column; the footer is the cache-hit line only.
     assert!(out.contains("cache hit 100.0%"));
@@ -466,7 +466,7 @@ fn render_footer_na_rate_when_no_tokens() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert
     assert!(out.contains("cache hit n/a"));
@@ -495,7 +495,7 @@ fn render_footer_cache_hit_rate_is_token_weighted_over_reporting_rows() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: token-weighted 900/1100 = 81.8%.
     assert!(
@@ -529,7 +529,7 @@ fn render_footer_excludes_non_cache_reporting_rows() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let footer_line = out
         .lines()
         .find(|l| l.starts_with("cache hit"))
@@ -602,7 +602,7 @@ fn non_reporting_only_group_renders_no_data_marker() {
 
     // Act
     let group = find(&report, "norep");
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let row_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("norep"))
@@ -635,7 +635,7 @@ fn render_footer_not_equal_to_old_peak_based_value() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: the token-weighted billed figure (90.9%), NOT the old peak (90.0%).
     assert!(
@@ -675,7 +675,7 @@ fn render_footer_shows_client_disconnect_line() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: both disconnects counted in the total; only the model-NULL one
     // counts toward the pre-dispatch subset.
@@ -715,7 +715,7 @@ fn report_counts_cancelled_apart_from_errors_and_disconnects() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: the footer reports the cancelled count on its own line, and the
     // model row's err cell counts only the upstream_error (header order is
@@ -746,7 +746,7 @@ fn render_footer_client_disconnect_excluded_from_error_column() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let row_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("m "))
@@ -776,7 +776,7 @@ fn render_hit_pct_column_is_token_weighted_over_billed_not_peak() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let row_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("hp"))
@@ -803,7 +803,7 @@ fn render_hit_pct_column_dash_when_provider_does_not_report_cache() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let row_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("nocache"))
@@ -849,7 +849,7 @@ fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let total_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("total"))
@@ -962,7 +962,7 @@ fn render_report_includes_quota_line() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let quota_line = out
         .lines()
         .find(|l| l.starts_with("quota["))
@@ -1015,7 +1015,7 @@ fn render_report_includes_one_quota_line_per_seat() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("quota[")).collect();
 
     // Assert: one line per seat, each carrying that seat's newest snapshot.
@@ -1042,7 +1042,7 @@ fn render_report_omits_the_quota_line_when_nothing_reported() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert
     assert!(report.quota.is_empty());
@@ -1056,7 +1056,7 @@ fn format_reset_renders_local_timestamp_shape() {
     let epoch_s = 1_800_000_000i64;
 
     // Act
-    let rendered = format_reset(epoch_s);
+    let rendered = format_reset(&zone(), epoch_s);
 
     // Assert
     assert!(!rendered.is_empty());
@@ -1091,7 +1091,7 @@ fn since_with_until_builds_single_range_titled_block() {
     };
 
     // Act
-    let blocks = build_blocks(&mut db, &config, &no_prices(), &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&mut db, &config, &no_prices(), &args, &zone(), fixed_now()).unwrap();
 
     // Assert
     assert_eq!(blocks.len(), 1);
@@ -1114,7 +1114,7 @@ fn since_without_until_builds_single_open_ended_block() {
     };
 
     // Act
-    let blocks = build_blocks(&mut db, &config, &no_prices(), &args, fixed_now()).unwrap();
+    let blocks = build_blocks(&mut db, &config, &no_prices(), &args, &zone(), fixed_now()).unwrap();
 
     // Assert
     assert_eq!(blocks.len(), 1);
@@ -1206,7 +1206,7 @@ fn displayed_input_folds_in_cache_write_buckets() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let row_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("m "))
@@ -1233,7 +1233,7 @@ fn displayed_input_unchanged_for_write_less_provider() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let row_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("m "))
@@ -1269,7 +1269,7 @@ fn current_era_write_total_feeds_displayed_input_and_hit_rate() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let row_line = out
         .lines()
         .find(|l| l.trim_start().starts_with("m "))
@@ -1338,7 +1338,7 @@ fn would_trim_render_verdict_line_present_when_candidates() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: first line survives, verdict line appended.
     assert!(
@@ -1359,7 +1359,7 @@ fn would_trim_render_no_verdict_line_when_zero_candidates() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert: verdict line must not appear.
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("verdict:"),
         "no verdict line when no candidates: {out}"
@@ -1410,7 +1410,7 @@ fn render_detail_shows_near_lossless_attribution_line() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: recorder count, per-heuristic freed-token breakdown (summed and
     // humanized: 60_000 -> "60K", 30_000 -> "30K"), the extractability rate
@@ -1440,7 +1440,7 @@ fn render_non_detail_omits_near_lossless_attribution_line() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act + Assert
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("near-lossless-attribution"),
         "the default (non-detail) table must omit the near-lossless attribution line: {out}"
@@ -1457,7 +1457,7 @@ fn render_detail_omits_near_lossless_attribution_line_when_no_recorder_rows() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert: no recorder rows -> no attribution block.
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("near-lossless-attribution"),
         "no recorder rows -> no near-lossless attribution line: {out}"
@@ -1510,7 +1510,7 @@ fn render_detail_shows_cache_breakpoint_and_prefix_epoch_lines() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: emitted-of-decided per region, and the classified epoch breakdown.
     assert!(
@@ -1537,7 +1537,7 @@ fn render_non_detail_omits_cache_breakpoint_line() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act + Assert
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("cache-breakpoints"),
         "the default (non-detail) table must omit the cache-breakpoint line: {out}"
@@ -1553,7 +1553,7 @@ fn render_detail_omits_cache_breakpoint_line_when_every_row_predates_the_columns
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("cache-breakpoints"),
         "undecided rows must not render as declines: {out}"
@@ -1568,7 +1568,7 @@ fn render_detail_omits_the_prefix_epoch_line_when_no_epoch_was_classified() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert: the region line renders, the epoch line does not.
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         out.contains("cache-breakpoints"),
         "region line renders: {out}"
@@ -1858,7 +1858,7 @@ fn the_usage_report_prints_the_window_walk_counts_exactly() {
     walk_row(&db, "late", 5_000, [100, 100, 100, 100, 100]);
 
     // Act
-    let out = render_report(&walk_report(&db));
+    let out = render_report(&walk_report(&db), &zone());
 
     // Assert
     assert_eq!(
@@ -1902,7 +1902,7 @@ fn the_walk_line_says_lower_bound_only_when_the_window_has_a_gap() {
         }
 
         // Act
-        let out = render_report(&walk_report(&db));
+        let out = render_report(&walk_report(&db), &zone());
         let line = walk_line(&out);
 
         // Assert
@@ -1915,6 +1915,162 @@ fn the_walk_line_says_lower_bound_only_when_the_window_has_a_gap() {
             case.clause.is_some(),
             "{}: {line}",
             case.name
+        );
+    }
+}
+
+// --- local timestamp text, pinned per zone ---
+
+/// A fixed +05:30 zone with no DST.
+const PLUS_0530_TZ: &str = "<+0530>-5:30";
+
+/// `(name, epoch ms, suppression text, minute text)` under
+/// `test_tz::eastern()`.
+/// Rows were recorded from the formatter these renderers used before.
+const EASTERN_LOCAL_TEXT: &[(&str, i64, &str, &str)] = &[
+    (
+        "winter",
+        1_768_480_496_789,
+        "2026-01-15 07:34:56",
+        "2026-01-15 07:34",
+    ),
+    (
+        "summer, previous local day",
+        1_783_134_309_000,
+        "2026-07-03 23:05:09",
+        "2026-07-03 23:05",
+    ),
+    (
+        "last second before spring-forward",
+        1_772_953_199_000,
+        "2026-03-08 01:59:59",
+        "2026-03-08 01:59",
+    ),
+    (
+        "first second after spring-forward",
+        1_772_953_200_000,
+        "2026-03-08 03:00:00",
+        "2026-03-08 03:00",
+    ),
+    (
+        "repeated hour, first pass",
+        1_793_511_000_000,
+        "2026-11-01 01:30:00",
+        "2026-11-01 01:30",
+    ),
+    (
+        "repeated hour, second pass",
+        1_793_514_600_000,
+        "2026-11-01 01:30:00",
+        "2026-11-01 01:30",
+    ),
+    ("epoch", 0, "1969-12-31 19:00:00", "1969-12-31 19:00"),
+    (
+        "before the epoch",
+        -1,
+        "1969-12-31 18:59:59",
+        "1969-12-31 18:59",
+    ),
+    (
+        "year zero in UTC",
+        -62_167_219_200_000,
+        "-0001-12-31 19:00:00",
+        "-0001-12-31 19:00",
+    ),
+    (
+        "first five-digit UTC year, still 9999 locally",
+        253_402_300_800_000,
+        "9999-12-31 19:00:00",
+        "9999-12-31 19:00",
+    ),
+    (
+        "five-digit local year",
+        253_402_318_800_000,
+        "+10000-01-01 00:00:00",
+        "+10000-01-01 00:00",
+    ),
+    (
+        "five-digit negative local year",
+        -377_705_116_800_001,
+        "-10000-12-31 18:59:59",
+        "-10000-12-31 18:59",
+    ),
+    (
+        "last representable",
+        8_210_266_876_799_000,
+        "+262142-12-31 18:59:59",
+        "+262142-12-31 18:59",
+    ),
+    (
+        "one past the last",
+        8_210_266_876_800_000,
+        "8210266876800000",
+        "8210266876800000",
+    ),
+    (
+        "unrepresentable high",
+        i64::MAX,
+        "9223372036854775807",
+        "9223372036854775807",
+    ),
+    (
+        "unrepresentable low",
+        i64::MIN,
+        "-9223372036854775808",
+        "-9223372036854775808",
+    ),
+];
+
+/// `(name, epoch ms, suppression text, minute text)` under [`PLUS_0530_TZ`].
+const PLUS_0530_LOCAL_TEXT: &[(&str, i64, &str, &str)] = &[
+    (
+        "winter",
+        1_768_480_496_789,
+        "2026-01-15 18:04:56",
+        "2026-01-15 18:04",
+    ),
+    (
+        "summer",
+        1_783_134_309_000,
+        "2026-07-04 08:35:09",
+        "2026-07-04 08:35",
+    ),
+    ("epoch", 0, "1970-01-01 05:30:00", "1970-01-01 05:30"),
+    (
+        "before the epoch",
+        -1,
+        "1970-01-01 05:29:59",
+        "1970-01-01 05:29",
+    ),
+];
+
+#[test]
+fn local_suppression_and_reset_text_is_pinned_per_zone() {
+    for (tz, rows) in [
+        (crate::test_tz::eastern(), EASTERN_LOCAL_TEXT),
+        (PLUS_0530_TZ.to_string(), PLUS_0530_LOCAL_TEXT),
+    ] {
+        crate::test_tz::in_zone(
+            &tz,
+            module_path!(),
+            "local_suppression_and_reset_text_is_pinned_per_zone",
+            || {
+                for (name, ms, seconds_text, minute_text) in rows {
+                    assert_eq!(
+                        format_suppression_ts(&LocalZone::load(), *ms),
+                        *seconds_text,
+                        "{tz} {name}"
+                    );
+                    let is_raw_fallback = *minute_text == ms.to_string();
+                    if ms.rem_euclid(1000) == 0 && !is_raw_fallback {
+                        assert_eq!(
+                            format_reset(&LocalZone::load(), ms / 1000),
+                            *minute_text,
+                            "{tz} {name}"
+                        );
+                    }
+                }
+            },
         );
     }
 }

@@ -487,6 +487,7 @@ async fn context_gather_lists_each_old_folder_it_is_given() {
         &config_path,
         GatherSources::Disk,
         &[appdata, empty, library],
+        &crate::local_time::LocalZone::utc(),
     )
     .await;
 

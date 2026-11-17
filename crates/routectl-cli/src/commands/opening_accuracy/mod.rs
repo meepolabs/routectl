@@ -21,7 +21,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{DateTime, Local};
+use time::OffsetDateTime;
+
+use crate::local_time::LocalZone;
 use routectl_usage::{OpenError, StreamExtraRow, UsageDb, for_each_stream_extra, open_readonly};
 
 use crate::commands::usage::{UsageError, WindowBounds, WindowFlag, since_bounds, window_bounds};
@@ -241,10 +243,11 @@ pub fn opening_accuracy_bounds(
     flag: WindowFlag,
     since: Option<&str>,
     until: Option<&str>,
-    now: DateTime<Local>,
+    zone: &LocalZone,
+    now: OffsetDateTime,
 ) -> Result<(WindowBounds, String), UsageError> {
     if let Some(since) = since {
-        let bounds = since_bounds(since, until, now)?;
+        let bounds = since_bounds(zone, since, until, now)?;
         let span = until.map_or_else(
             || format!("since {since}"),
             |until| format!("{since} .. {until}"),
@@ -259,7 +262,7 @@ pub fn opening_accuracy_bounds(
         WindowFlag::None => return Err(UsageError::OpeningAccuracyNeedsWindow),
     };
     Ok((
-        window_bounds(flag, now),
+        window_bounds(zone, flag, now),
         format!("== opening accuracy: {span} =="),
     ))
 }
@@ -306,7 +309,9 @@ pub fn run(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Verdict, UsageError> {
-    let (bounds, title) = opening_accuracy_bounds(flag, since, until, Local::now())?;
+    let zone = LocalZone::load();
+    let (bounds, title) =
+        opening_accuracy_bounds(flag, since, until, &zone, OffsetDateTime::now_utc())?;
     let (out, verdict) = opening_accuracy_for_path(db_path, &title, bounds)?;
     print!("{out}");
     Ok(verdict)

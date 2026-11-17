@@ -50,7 +50,7 @@ pub(super) fn ceiling_key() -> String {
 /// revision every router boots with, followed by one learned
 /// [`CEILING_TOKEN`] row on [`LANE`].
 pub(super) fn seed_learned_ceiling(db_path: &Path) {
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     let catalog_version = i64::from(routectl_router::FROZEN_CATALOG_VERSION);
     let overlay_revision =
         i64::try_from(routectl_router::FROZEN_OVERLAY_REVISION).expect("revision fits i64");

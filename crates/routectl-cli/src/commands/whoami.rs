@@ -140,11 +140,12 @@ fn format_duration(secs: u64) -> String {
 }
 
 fn format_unix(secs: u64) -> String {
-    use chrono::{TimeZone, Utc};
-    Utc.timestamp_opt(secs as i64, 0).single().map_or_else(
-        || format!("unix {secs}"),
-        |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    crate::local_time::calendar_text(
+        secs as i64,
+        time::UtcOffset::UTC,
+        crate::local_time::TextLayout::SecondsUtc,
     )
+    .unwrap_or_else(|| format!("unix {secs}"))
 }
 
 #[cfg(test)]
@@ -186,6 +187,41 @@ mod tests {
             past.contains("routectl login anthropic"),
             "expected provider-aware refresh hint, got: {past}"
         );
+    }
+
+    /// Rows recorded from the formatter this function used before.
+    #[test]
+    fn format_unix_renders_each_pinned_instant() {
+        let rows: &[(&str, u64, &str)] = &[
+            ("epoch", 0, "1970-01-01 00:00:00 UTC"),
+            ("mid-year", 1_783_134_309, "2026-07-04 03:05:09 UTC"),
+            ("pre-2038", 1_800_000_000, "2027-01-15 08:00:00 UTC"),
+            (
+                "last four-digit year",
+                253_402_300_799,
+                "9999-12-31 23:59:59 UTC",
+            ),
+            (
+                "first five-digit year",
+                253_402_300_800,
+                "+10000-01-01 00:00:00 UTC",
+            ),
+            (
+                "later five-digit year",
+                300_000_000_000,
+                "+11476-08-15 05:20:00 UTC",
+            ),
+            (
+                "past the last year",
+                1_000_000_000_000_000,
+                "unix 1000000000000000",
+            ),
+            ("wraps negative", u64::MAX, "1969-12-31 23:59:59 UTC"),
+            ("unrepresentable", 1u64 << 63, "unix 9223372036854775808"),
+        ];
+        for (name, secs, expected) in rows {
+            assert_eq!(format_unix(*secs), *expected, "{name}");
+        }
     }
 
     #[test]

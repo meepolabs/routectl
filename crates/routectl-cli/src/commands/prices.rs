@@ -259,11 +259,18 @@ pub async fn run(from: Option<&str>) -> Result<RefreshSummary, PricesError> {
 }
 
 fn today() -> Result<TableDate, PricesError> {
-    let text = chrono::Utc::now()
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string();
-    TableDate::parse(&text).ok_or(PricesError::Date)
+    utc_table_date(time::OffsetDateTime::now_utc().unix_timestamp()).ok_or(PricesError::Date)
+}
+
+/// The UTC calendar date of a Unix instant, as a price-table date.
+fn utc_table_date(unix_s: i64) -> Option<TableDate> {
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    let text = time::OffsetDateTime::from_unix_timestamp(unix_s)
+        .ok()?
+        .date()
+        .format(format)
+        .ok()?;
+    TableDate::parse(&text)
 }
 
 /// Acquire, convert, validate and write: the whole refresh against

@@ -531,19 +531,47 @@ fn an_unreadable_ledger_is_a_user_facing_error_naming_the_path() {
 #[test]
 fn the_report_needs_an_explicit_window() {
     // Arrange
-    let now = Local::now();
+    let now = time::OffsetDateTime::now_utc();
 
     // Act + Assert
     assert!(matches!(
-        opening_accuracy_bounds(WindowFlag::None, None, None, now),
+        opening_accuracy_bounds(
+            WindowFlag::None,
+            None,
+            None,
+            &crate::local_time::LocalZone::utc(),
+            now
+        ),
         Err(UsageError::OpeningAccuracyNeedsWindow)
     ));
-    let since = opening_accuracy_bounds(WindowFlag::None, Some("2026-06-01"), None, now)
-        .expect("since is a window");
+    let since = opening_accuracy_bounds(
+        WindowFlag::None,
+        Some("2026-06-01"),
+        None,
+        &crate::local_time::LocalZone::utc(),
+        now,
+    )
+    .expect("since is a window");
     assert_eq!(
         since.0,
-        since_bounds("2026-06-01", None, now).expect("bounds")
+        since_bounds(
+            &crate::local_time::LocalZone::utc(),
+            "2026-06-01",
+            None,
+            now
+        )
+        .expect("bounds")
     );
-    let all = opening_accuracy_bounds(WindowFlag::All, None, None, now).expect("all");
-    assert_eq!(all.0, window_bounds(WindowFlag::All, now));
+    let all = opening_accuracy_bounds(
+        WindowFlag::All,
+        None,
+        None,
+        &crate::local_time::LocalZone::utc(),
+        now,
+    )
+    .expect("all");
+    assert_eq!(
+        all.0,
+        window_bounds(&crate::local_time::LocalZone::utc(), WindowFlag::All, now)
+    );
 }

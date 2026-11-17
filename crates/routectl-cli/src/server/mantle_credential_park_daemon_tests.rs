@@ -292,7 +292,7 @@ async fn a_rejected_key_parks(name: &str, capture: &str, reason: &str, dials: us
     assert_eq!(parked["park_reason"], reason, "{name}: {parked}");
     let until = parked["parked_until_ms"].as_i64().expect("park deadline");
     assert!(
-        until > chrono::Utc::now().timestamp_millis(),
+        until > crate::local_time::unix_ms(time::OffsetDateTime::now_utc()),
         "{name}: {parked}"
     );
 

@@ -200,7 +200,7 @@ fn first_run_record(request_id: &str) -> UsageRecord {
     UsageRecord {
         request_id: request_id.to_string(),
         alias: "a".to_string(),
-        ts_start: chrono::Local::now().timestamp_millis(),
+        ts_start: crate::local_time::unix_ms(time::OffsetDateTime::now_utc()),
         outcome: routectl_usage::Outcome::Ok,
         ..UsageRecord::default()
     }

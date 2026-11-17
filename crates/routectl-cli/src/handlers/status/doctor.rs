@@ -27,9 +27,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::local_time::LocalZone;
 use axum::Json;
 use axum::extract::State;
-use chrono::Local;
 use serde::Serialize;
 
 use routectl_core::failure_class::LastOutcome;
@@ -217,7 +217,7 @@ async fn build_from_path(
     let view = state.router.view();
     let reload_failure = state
         .daemon_meta
-        .reload_failure(chrono::Utc::now().timestamp_millis());
+        .reload_failure(crate::local_time::unix_ms(time::OffsetDateTime::now_utc()));
     let served = view
         .served_doctor_inputs(
             *state.warm_report(),
@@ -230,7 +230,7 @@ async fn build_from_path(
     let capability_writes = state.usage_health.capability_writes();
     let ledger_health = state.usage_health.ledger_health();
     let usage_db_path = state.usage_db_path.clone();
-    let today = window_bounds(WindowFlag::Today, Local::now());
+    let now = time::OffsetDateTime::now_utc();
     let gate = Arc::clone(&state.fidelity_gate);
     let legacy_dirs = state.legacy_config_dirs().to_vec();
     let handle = tokio::runtime::Handle::current();
@@ -245,10 +245,13 @@ async fn build_from_path(
         DOCTOR_SCHEMA_VERSION,
         codes::DOCTOR_UNAVAILABLE,
         move || {
+            let zone = LocalZone::load();
+            let today = window_bounds(&zone, WindowFlag::Today, now);
             let ctx = handle.block_on(gather_context_no_network(
                 &config_path,
                 GatherSources::Served(Box::new(served)),
                 &legacy_dirs,
+                &zone,
             ));
             let report = build_report_no_network(&ctx);
             let schema_version = report.schema_version;

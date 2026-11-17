@@ -21,7 +21,6 @@
 //!   - anything else                                     -> passthrough
 //!     (mirrors the Bedrock Converse unknown-stop-reason policy).
 
-use chrono::Utc;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::time::Duration;
@@ -190,7 +189,7 @@ fn translate_filtered(
         body.id
     };
     let created = if body.created_at == 0 {
-        Utc::now().timestamp()
+        time::OffsetDateTime::now_utc().unix_timestamp()
     } else {
         body.created_at
     };
@@ -668,7 +667,7 @@ pub fn codex_reset_hint(err_body: &Value) -> Option<Duration> {
     // Absolute epoch -> delay from now. Guard a negative `now` (clock
     // before the unix epoch is impossible in practice but keeps the
     // cast total) and saturate so a past `resets_at` clamps to zero.
-    let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+    let now = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0);
     Some(Duration::from_secs(resets_at.saturating_sub(now)))
 }
 

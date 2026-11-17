@@ -4335,6 +4335,14 @@ daemon is live) and prints an aligned ASCII report.
 | `--all`        | all recorded rows                                |
 | `--since D [--until E]` | `D` 00:00 -> end of `E` (or now if omitted), local |
 
+"Local" is the host's time zone, read when the command starts (and per
+request on `/status/usage`, `/status/query` and `/status/doctor`): the `TZ`
+environment variable when set, where an empty value means UTC, otherwise
+`/etc/localtime` (Windows uses the system zone). If the zone cannot be read,
+the windows and printed timestamps use UTC and one WARN line says so. On a
+day with a daylight-saving change, "today" spans its real 23 or 25 hours; a
+midnight that falls in a skipped hour starts at the first time that exists.
+
 The ISO week starts **Monday**. With no window flag and no `--since`,
 the command prints a multi-window summary (today / this week / this
 month / all time) as separate blocks. There are no rolling

@@ -35,7 +35,7 @@
 /// author of the second module is the right person to decide what the guard
 /// should scan.
 #[cfg(test)]
-pub(super) fn production_source(src: &str) -> &str {
+pub fn production_source(src: &str) -> &str {
     const OPENER: &str = "mod tests {";
     let mask = code_mask(src);
     let openers: Vec<usize> = src

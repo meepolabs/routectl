@@ -49,7 +49,7 @@ fn render_detail_shows_reduction_block_with_histogram_and_derived_tokens() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: decided count, per-token histogram, humanized bytes (40_000 ->
     // "40K"), and the read-time-derived token estimate (40_000 / 4 = 10_000 ->
@@ -80,7 +80,7 @@ fn render_detail_reduction_block_carries_the_drop_counter_validity_caveat() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: the block states it is counts-not-a-rate and names all three
     // usage-channel drop counters an operator must check flat, and no
@@ -104,7 +104,7 @@ fn render_detail_reduction_block_omits_a_percentage_or_cost_figure() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let block = out
         .lines()
         .skip_while(|l| !l.starts_with("reduction:"))
@@ -127,7 +127,7 @@ fn render_detail_reduction_block_flags_a_nonzero_rejected_count_as_a_defect() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert
     assert!(out.contains("rejected=3"), "rejected count surfaced: {out}");
@@ -145,7 +145,7 @@ fn render_detail_reduction_block_omits_the_rejected_line_when_zero() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("rejected="),
         "a zero rejected count adds no line: {out}"
@@ -160,7 +160,7 @@ fn render_non_detail_omits_reduction_block() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act + Assert
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("reduction:"),
         "the default (non-detail) table must omit the reduction block: {out}"
@@ -176,7 +176,7 @@ fn render_detail_omits_reduction_block_when_no_row_carries_an_outcome() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert: a window with no decided request stays uncluttered.
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("reduction:"),
         "no decided requests -> no reduction block: {out}"

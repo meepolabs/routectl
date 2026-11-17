@@ -180,8 +180,13 @@ async fn the_served_no_network_report_carries_the_tuning_section() {
         usage_db_path,
     );
 
-    let context =
-        gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs)), &[]).await;
+    let context = gather_context_no_network(
+        &config_path,
+        GatherSources::Served(Box::new(inputs)),
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
     let report = build_report_no_network(&context);
 
     let names: Vec<&str> = tuning_findings(&report.findings)

@@ -120,7 +120,7 @@ async fn seed_v19_ledger(db_path: &std::path::Path) {
     let path = db_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let (handle, writer) = UsageWriter::start(path.clone(), 4, 0);
-        let now = chrono::Local::now().timestamp_millis();
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         handle.try_send(UsageRecord {
             request_id: SEEDED_ID.to_string(),
             alias: WALK_ALIAS.to_string(),
@@ -637,7 +637,8 @@ fn usage_cli_output(config: &Config, usage_db: &std::path::Path) -> String {
         config,
         &crate::commands::pricing::PriceSnapshot::default(),
         &args,
-        chrono::Local::now(),
+        &crate::local_time::LocalZone::load(),
+        time::OffsetDateTime::now_utc(),
     )
     .expect("the usage report builds")
 }

@@ -439,7 +439,11 @@ fn a_mixed_window_reports_the_priced_subtotal_only() {
         &config,
         &both_tables(),
         "t".into(),
-        window_bounds(WindowFlag::All, fixed_now()),
+        window_bounds(
+            &crate::local_time::LocalZone::utc(),
+            WindowFlag::All,
+            fixed_now(),
+        ),
         Some(GroupDim::Alias),
         false,
     )

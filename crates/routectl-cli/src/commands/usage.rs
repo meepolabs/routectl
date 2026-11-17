@@ -18,7 +18,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
+use time::macros::format_description;
+use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime, Time};
+
+use crate::local_time::{self, CivilInstant, LocalZone, unix_ms};
 
 use routectl_router::Config;
 use routectl_router::prices::{PriceSubject, effective_pricing};
@@ -191,29 +194,31 @@ pub struct WindowBounds {
 const DST_PROBE_STEP_MIN: i64 = 15;
 const DST_PROBE_CAP_MIN: i64 = 180;
 
-/// Resolve a naive local midnight to a concrete instant, handling every
-/// `LocalResult` explicitly so the window can never silently collapse:
-/// - `Single` -> that instant.
-/// - `Ambiguous` -> the earliest (a fall-back day has two midnights; the
-///   earliest is the true day start).
-/// - `None` (spring-forward gap, midnight does not exist) -> debug, then probe
+/// Resolve a local midnight to a concrete instant, handling every case
+/// explicitly so the window can never silently collapse:
+/// - one instant -> that instant.
+/// - two instants (a fall-back at midnight) -> the later one, see
+///   [`CivilInstant::latest`].
+/// - none (spring-forward gap, midnight does not exist) -> debug, then probe
 ///   forward in small steps to the next valid local instant; only if that
 ///   fails within the cap fall back to `now`.
-fn resolve_local_midnight(naive: NaiveDateTime, now: DateTime<Local>) -> DateTime<Local> {
-    match Local.from_local_datetime(&naive) {
-        LocalResult::Single(t) => t,
-        LocalResult::Ambiguous(earliest, _) => earliest,
-        LocalResult::None => {
+fn resolve_local_midnight(
+    zone: &LocalZone,
+    naive: PrimitiveDateTime,
+    now: OffsetDateTime,
+) -> OffsetDateTime {
+    match zone.resolve(naive) {
+        CivilInstant::Single(t) => t,
+        CivilInstant::Ambiguous { latest, .. } => latest,
+        CivilInstant::Skipped => {
             tracing::debug!(
-                naive_midnight = %naive,
+                naive_midnight = %civil_text(naive),
                 "local midnight falls in a DST spring-forward gap; probing forward for the next valid instant"
             );
             let mut offset = DST_PROBE_STEP_MIN;
             while offset <= DST_PROBE_CAP_MIN {
-                let probe = naive + chrono::Duration::minutes(offset);
-                if let LocalResult::Single(t) | LocalResult::Ambiguous(t, _) =
-                    Local.from_local_datetime(&probe)
-                {
+                let probe = naive + TimeDuration::minutes(offset);
+                if let Some(t) = zone.resolve(probe).latest() {
                     return t;
                 }
                 offset += DST_PROBE_STEP_MIN;
@@ -223,6 +228,18 @@ fn resolve_local_midnight(naive: NaiveDateTime, now: DateTime<Local>) -> DateTim
     }
 }
 
+/// `YYYY-MM-DD HH:MM:SS` of a wall-clock reading; `time`'s own Display is
+/// `YYYY-MM-DD H:MM:SS.f`, which is not the text routectl logs.
+fn civil_text(civil: PrimitiveDateTime) -> String {
+    let unix_s = civil.assume_utc().unix_timestamp();
+    local_time::calendar_text(
+        unix_s,
+        time::UtcOffset::UTC,
+        local_time::TextLayout::Seconds,
+    )
+    .unwrap_or_else(|| unix_s.to_string())
+}
+
 /// Local midnight (00:00:00.000) on the calendar day the epoch-ms instant
 /// `ts_ms` falls on, resolved through the same DST handling as every other
 /// window edge.
@@ -230,48 +247,51 @@ fn resolve_local_midnight(naive: NaiveDateTime, now: DateTime<Local>) -> DateTim
 /// `None` only when `ts_ms` is outside the representable date range, which no
 /// ledger timestamp reaches; the caller treats that as nothing to bucket rather
 /// than substituting a wrong anchor.
-fn local_midnight_of(ts_ms: i64, now: DateTime<Local>) -> Option<DateTime<Local>> {
-    let instant = Local.timestamp_millis_opt(ts_ms).single()?;
-    let naive = instant.date_naive().and_hms_opt(0, 0, 0)?;
-    Some(resolve_local_midnight(naive, now))
+fn local_midnight_of(zone: &LocalZone, ts_ms: i64, now: OffsetDateTime) -> Option<OffsetDateTime> {
+    let instant = zone.at_unix_ms(ts_ms)?;
+    Some(resolve_local_midnight(
+        zone,
+        local_time::midnight(instant.date()),
+        now,
+    ))
 }
 
 /// Local midnight (00:00:00.000) on the calendar day of `now`.
-fn local_midnight(now: DateTime<Local>) -> DateTime<Local> {
-    let naive = now
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .expect("valid midnight");
-    resolve_local_midnight(naive, now)
+fn local_midnight(zone: &LocalZone, now: OffsetDateTime) -> OffsetDateTime {
+    let local = zone.to_local(now);
+    resolve_local_midnight(zone, local_time::midnight(local.date()), now)
 }
 
 /// Local midnight on the Monday of `now`'s ISO week (week starts Monday).
-fn local_week_start(now: DateTime<Local>) -> DateTime<Local> {
-    let weekday_from_monday = now.date_naive().weekday().num_days_from_monday() as i64;
-    let monday = now.date_naive() - chrono::Duration::days(weekday_from_monday);
-    let naive = monday.and_hms_opt(0, 0, 0).expect("valid midnight");
-    resolve_local_midnight(naive, now)
+fn local_week_start(zone: &LocalZone, now: OffsetDateTime) -> OffsetDateTime {
+    let today = zone.to_local(now).date();
+    let since_monday = i64::from(today.weekday().number_days_from_monday());
+    let monday = today
+        .checked_sub(TimeDuration::days(since_monday))
+        .unwrap_or(today);
+    resolve_local_midnight(zone, local_time::midnight(monday), now)
 }
 
 /// Local midnight on the 1st of `now`'s month.
-fn local_month_start(now: DateTime<Local>) -> DateTime<Local> {
-    let first = now.date_naive().with_day(1).expect("day 1 always valid");
-    let naive = first.and_hms_opt(0, 0, 0).expect("valid midnight");
-    resolve_local_midnight(naive, now)
+fn local_month_start(zone: &LocalZone, now: OffsetDateTime) -> OffsetDateTime {
+    let today = zone.to_local(now).date();
+    let first = today.replace_day(1).unwrap_or(today);
+    resolve_local_midnight(zone, local_time::midnight(first), now)
 }
 
-/// Bounds for a calendar window flag, anchored at an explicit `now` so
-/// tests are deterministic. The binary passes `Local::now()`.
-pub fn window_bounds(flag: WindowFlag, now: DateTime<Local>) -> WindowBounds {
-    let to_ms = now.timestamp_millis() + 1;
+/// Bounds for a calendar window flag in `zone`, anchored at an explicit `now`
+/// so tests are deterministic. The binary passes the loaded host zone and the
+/// current instant.
+pub fn window_bounds(zone: &LocalZone, flag: WindowFlag, now: OffsetDateTime) -> WindowBounds {
+    let to_ms = unix_ms(now) + 1;
     let from = match flag {
-        WindowFlag::Today | WindowFlag::None => local_midnight(now),
-        WindowFlag::ThisWeek => local_week_start(now),
-        WindowFlag::ThisMonth => local_month_start(now),
+        WindowFlag::Today | WindowFlag::None => local_midnight(zone, now),
+        WindowFlag::ThisWeek => local_week_start(zone, now),
+        WindowFlag::ThisMonth => local_month_start(zone, now),
         WindowFlag::All => return WindowBounds { from_ms: 0, to_ms },
     };
     WindowBounds {
-        from_ms: from.timestamp_millis(),
+        from_ms: unix_ms(from),
         to_ms,
     }
 }
@@ -327,16 +347,15 @@ impl BucketUnit {
 /// Every intermediate is computed in `i128` so neither the span nor the widened
 /// width can wrap on the way there.
 pub fn resolve_bucket(
+    zone: &LocalZone,
     unit: BucketUnit,
     from_ms: i64,
     to_ms: i64,
     first_row_ms: Option<i64>,
-    now: DateTime<Local>,
+    now: OffsetDateTime,
 ) -> Option<(i64, BucketSpec)> {
     let anchor = if from_ms == 0 {
-        local_midnight_of(first_row_ms?, now)?
-            .timestamp_millis()
-            .max(from_ms)
+        unix_ms(local_midnight_of(zone, first_row_ms?, now)?).max(from_ms)
     } else {
         from_ms
     };
@@ -368,49 +387,60 @@ const fn div_ceil_positive(numerator: i128, denominator: i128) -> i128 {
     (numerator + denominator - 1) / denominator
 }
 
-/// Bounds for an ad-hoc `--since D [--until E]` range, anchored at `now`
-/// for the open-ended upper bound. `from` is local midnight of `D`; `to`
+/// Bounds for an ad-hoc `--since D [--until E]` range in `zone`, anchored at
+/// `now` for the open-ended upper bound. `from` is local midnight of `D`; `to`
 /// is the last millisecond of `E` (23:59:59.999 local) made inclusive via
 /// `+1`, or `now + 1` when `--until` is omitted.
 pub fn since_bounds(
+    zone: &LocalZone,
     since: &str,
     until: Option<&str>,
-    now: DateTime<Local>,
+    now: OffsetDateTime,
 ) -> Result<WindowBounds, UsageError> {
-    let from = parse_local_date_start(since)?;
+    let from = parse_local_date_start(zone, since)?;
     let to_ms = match until {
-        Some(e) => parse_local_date_end(e)? + 1,
-        None => now.timestamp_millis() + 1,
+        Some(e) => parse_local_date_end(zone, e)? + 1,
+        None => unix_ms(now) + 1,
     };
     Ok(WindowBounds {
-        from_ms: from.timestamp_millis(),
+        from_ms: unix_ms(from),
         to_ms,
     })
 }
 
-fn parse_naive_date(s: &str) -> Result<NaiveDate, UsageError> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| UsageError::BadDate(s.to_string()))
+/// A `YYYY-MM-DD` date. Leading whitespace and unpadded fields are accepted,
+/// matching the grammar this flag has always taken.
+fn parse_naive_date(s: &str) -> Result<Date, UsageError> {
+    let format = format_description!("[year padding:none]-[month padding:none]-[day padding:none]");
+    let compact: String = s
+        .trim_start()
+        .split('-')
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("-");
+    Date::parse(&compact, format).map_err(|_| UsageError::BadDate(s.to_string()))
 }
 
 /// Local midnight at the start of `s` (YYYY-MM-DD).
-fn parse_local_date_start(s: &str) -> Result<DateTime<Local>, UsageError> {
+fn parse_local_date_start(zone: &LocalZone, s: &str) -> Result<OffsetDateTime, UsageError> {
     let date = parse_naive_date(s)?;
-    Local
-        .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("valid midnight"))
-        .earliest()
+    zone.resolve(local_time::midnight(date))
+        .latest()
         .ok_or_else(|| UsageError::AmbiguousTime(s.to_string()))
 }
 
 /// Epoch-ms at 23:59:59.999 local on `s` (YYYY-MM-DD).
-fn parse_local_date_end(s: &str) -> Result<i64, UsageError> {
+fn parse_local_date_end(zone: &LocalZone, s: &str) -> Result<i64, UsageError> {
     let date = parse_naive_date(s)?;
-    let end = date
-        .and_hms_milli_opt(23, 59, 59, 999)
-        .expect("valid end-of-day");
-    Local
-        .from_local_datetime(&end)
-        .earliest()
-        .map(|dt| dt.timestamp_millis())
+    let end = PrimitiveDateTime::new(
+        date,
+        Time::MAX
+            .replace_nanosecond(999_000_000)
+            .unwrap_or(Time::MAX),
+    );
+    zone.resolve(end)
+        .latest()
+        .map(unix_ms)
         .ok_or_else(|| UsageError::AmbiguousTime(s.to_string()))
 }
 
@@ -1282,7 +1312,7 @@ fn ttft_cell(ms: Option<i64>) -> String {
 }
 
 /// Render one window report as an aligned ASCII block to a string.
-pub fn render_report(report: &WindowReport) -> String {
+pub fn render_report(report: &WindowReport, zone: &LocalZone) -> String {
     let mut out = String::new();
     out.push_str(&report.title);
     out.push('\n');
@@ -1309,10 +1339,10 @@ pub fn render_report(report: &WindowReport) -> String {
         out.push_str(&render_shadow_misfire(report));
         out.push_str(&render_reduction(report));
         out.push_str(&render_cache_decisions(report));
-        out.push_str(&render_suppressed_sessions(report));
+        out.push_str(&render_suppressed_sessions(report, zone));
     }
     for q in &report.quota {
-        out.push_str(&render_quota(q));
+        out.push_str(&render_quota(q, zone));
     }
     out.push_str(&render_footer(report));
     out
@@ -1505,19 +1535,13 @@ fn render_cache_decisions(report: &WindowReport) -> String {
     out
 }
 
-/// Timestamp format for a suppression instant: local, to the second. An
+/// Format a `ts_start` epoch-ms as a local timestamp, to the second: an
 /// operator reading the finder is correlating with service logs and with a
 /// kill-switch flip, so the seconds matter and the date must be unambiguous.
-const SUPPRESSION_TS_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
-
-/// Format a `ts_start` epoch-ms as a local timestamp. Falls back to the raw
-/// millisecond value when the instant is not representable locally, so the
-/// row still identifies its window position.
-fn format_suppression_ts(ts_ms: i64) -> String {
-    Local.timestamp_millis_opt(ts_ms).single().map_or_else(
-        || ts_ms.to_string(),
-        |dt| dt.format(SUPPRESSION_TS_FORMAT).to_string(),
-    )
+/// Falls back to the raw millisecond value when the instant is not
+/// representable locally, so the row still identifies its window position.
+fn format_suppression_ts(zone: &LocalZone, ts_ms: i64) -> String {
+    local_time::format_seconds(zone, ts_ms)
 }
 
 /// The K-suppression finder's validity caveat. Same shape and the same three
@@ -1554,7 +1578,7 @@ a serve-log session hash or another usage run\n";
 /// a serve log, nor the same session's reference in another `usage` run.
 /// Grouping is within one report only, deliberately -- a cross-surface join
 /// would need a persistent shared secret the digest construction forbids.
-fn render_suppressed_sessions(report: &WindowReport) -> String {
+fn render_suppressed_sessions(report: &WindowReport, zone: &LocalZone) -> String {
     let found = &report.suppressed_sessions;
     if found.rows.is_empty() {
         return String::new();
@@ -1571,8 +1595,8 @@ fn render_suppressed_sessions(report: &WindowReport) -> String {
             row.provider_kind,
             row.model,
             row.suppressed_requests,
-            format_suppression_ts(row.first_suppressed_ms),
-            format_suppression_ts(row.last_suppressed_ms),
+            format_suppression_ts(zone, row.first_suppressed_ms),
+            format_suppression_ts(zone, row.last_suppressed_ms),
         ));
     }
     if found.truncated {
@@ -1590,24 +1614,24 @@ fn render_suppressed_sessions(report: &WindowReport) -> String {
 /// (codex sends no status token); the other unreported fields -- `seat`
 /// (pre-seat history, forwarded client credentials), `utilization`,
 /// `overage`, `reset` -- render as `-`.
-fn render_quota(q: &QuotaSnapshot) -> String {
+fn render_quota(q: &QuotaSnapshot, zone: &LocalZone) -> String {
     let seat = q.seat.as_deref().unwrap_or("-");
     let status = q.status.as_deref().unwrap_or("unknown");
     let util = q
         .utilization
         .map_or_else(|| "-".to_string(), |u| format!("{:.0}%", u * 100.0));
     let overage = q.overage_status.as_deref().unwrap_or("-");
-    let reset = q.reset.map_or_else(|| "-".to_string(), format_reset);
+    let reset = q
+        .reset
+        .map_or_else(|| "-".to_string(), |epoch_s| format_reset(zone, epoch_s));
     format!("quota[{seat}]: status={status} utilization={util} overage={overage} reset={reset}\n")
 }
 
 /// Format a quota-reset epoch (seconds) as a local timestamp. Quota
 /// resets are stamped in epoch SECONDS by the upstream observer.
-fn format_reset(epoch_s: i64) -> String {
-    match Local.timestamp_opt(epoch_s, 0).earliest() {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
-        None => epoch_s.to_string(),
-    }
+fn format_reset(zone: &LocalZone, epoch_s: i64) -> String {
+    local_time::local_text(zone, epoch_s, local_time::TextLayout::Minutes)
+        .unwrap_or_else(|| epoch_s.to_string())
 }
 
 fn render_footer(report: &WindowReport) -> String {
@@ -1736,8 +1760,9 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
     };
 
     let prices = PriceSnapshot::pin(&default_price_book());
-    let now = Local::now();
-    let output = build_output(&mut db, config, &prices, args, now)?;
+    let zone = LocalZone::load();
+    let now = OffsetDateTime::now_utc();
+    let output = build_output(&mut db, config, &prices, args, &zone, now)?;
     print!("{output}");
     Ok(())
 }
@@ -1750,13 +1775,14 @@ pub fn build_output(
     config: &Config,
     prices: &PriceSnapshot,
     args: &UsageArgs,
-    now: DateTime<Local>,
+    zone: &LocalZone,
+    now: OffsetDateTime,
 ) -> Result<String, UsageError> {
     if args.k_calibration {
         let cal = k_calibration_summary(db)?;
         return Ok(render_k_calibration(&cal));
     }
-    let blocks = build_blocks(db, config, prices, args, now)?;
+    let blocks = build_blocks(db, config, prices, args, zone, now)?;
     Ok(blocks.join("\n"))
 }
 
@@ -1769,9 +1795,10 @@ pub fn build_blocks(
     config: &Config,
     prices: &PriceSnapshot,
     args: &UsageArgs,
-    now: DateTime<Local>,
+    zone: &LocalZone,
+    now: OffsetDateTime,
 ) -> Result<Vec<String>, UsageError> {
-    let mut blocks = build_window_blocks(db, config, prices, args, now)?;
+    let mut blocks = build_window_blocks(db, config, prices, args, zone, now)?;
     // Keep the legend and the cache-ignore block out of the block count:
     // append them to the last block so a multi-window summary still yields
     // exactly one block per window.
@@ -1781,7 +1808,8 @@ pub fn build_blocks(
             last.push_str(&cache_ignore_block(
                 db,
                 config,
-                now.timestamp_millis(),
+                zone,
+                unix_ms(now),
                 deadline,
             ));
         }
@@ -1797,16 +1825,17 @@ fn build_window_blocks(
     config: &Config,
     prices: &PriceSnapshot,
     args: &UsageArgs,
-    now: DateTime<Local>,
+    zone: &LocalZone,
+    now: OffsetDateTime,
 ) -> Result<Vec<String>, UsageError> {
     if let Some(since) = &args.since {
-        let bounds = since_bounds(since, args.until.as_deref(), now)?;
+        let bounds = since_bounds(zone, since, args.until.as_deref(), now)?;
         let title = match &args.until {
             Some(until) => format!("== {since} .. {until} =="),
             None => format!("== since {since} =="),
         };
         let report = build_window_report(db, config, prices, title, bounds, args.by, args.detail)?;
-        return Ok(vec![render_report(&report)]);
+        return Ok(vec![render_report(&report, zone)]);
     }
 
     if args.window == WindowFlag::None {
@@ -1818,7 +1847,7 @@ fn build_window_blocks(
         ];
         let mut blocks = Vec::with_capacity(windows.len());
         for (flag, title) in windows {
-            let bounds = window_bounds(flag, now);
+            let bounds = window_bounds(zone, flag, now);
             let report = build_window_report(
                 db,
                 config,
@@ -1828,15 +1857,15 @@ fn build_window_blocks(
                 args.by,
                 args.detail,
             )?;
-            blocks.push(render_report(&report));
+            blocks.push(render_report(&report, zone));
         }
         return Ok(blocks);
     }
 
     let title = window_title(args.window);
-    let bounds = window_bounds(args.window, now);
+    let bounds = window_bounds(zone, args.window, now);
     let report = build_window_report(db, config, prices, title, bounds, args.by, args.detail)?;
-    Ok(vec![render_report(&report)])
+    Ok(vec![render_report(&report, zone)])
 }
 
 fn window_title(flag: WindowFlag) -> String {

@@ -155,7 +155,11 @@ fn era_report(db: &UsageDb, config: &Config) -> WindowReport {
         config,
         &no_prices(),
         "t".into(),
-        window_bounds(WindowFlag::All, fixed_now()),
+        window_bounds(
+            &crate::local_time::LocalZone::utc(),
+            WindowFlag::All,
+            fixed_now(),
+        ),
         Some(GroupDim::Provider),
         false,
     )
@@ -369,7 +373,11 @@ fn ttft_samples_from_both_eras_land_in_one_display_group() {
         &config_shift_now_gemini(),
         &no_prices(),
         "t".into(),
-        window_bounds(WindowFlag::All, fixed_now()),
+        window_bounds(
+            &crate::local_time::LocalZone::utc(),
+            WindowFlag::All,
+            fixed_now(),
+        ),
         Some(GroupDim::Provider),
         true,
     )

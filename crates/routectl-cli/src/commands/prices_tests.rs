@@ -762,3 +762,29 @@ fn source_selection_reads_urls_by_scheme_and_everything_else_as_a_file() {
         assert_eq!(Source::parse(from).ok(), expected, "{name}");
     }
 }
+
+/// The table date `prices refresh` stamps: the UTC calendar day, `YYYY-MM-DD`.
+/// Rows recorded from the formatter this used before.
+#[test]
+fn utc_table_date_names_the_utc_calendar_day() {
+    let rows: &[(&str, i64, Option<&str>)] = &[
+        ("last second of a day", 1_783_209_599, Some("2026-07-04")),
+        (
+            "first second of the next",
+            1_783_209_600,
+            Some("2026-07-05"),
+        ),
+        ("epoch", 0, Some("1970-01-01")),
+        ("before the epoch", -1, Some("1969-12-31")),
+        ("year zero is no table date", -62_167_219_200, None),
+    ];
+    for (name, unix_s, expected) in rows {
+        assert_eq!(
+            utc_table_date(*unix_s)
+                .map(|date| date.to_string())
+                .as_deref(),
+            *expected,
+            "{name}"
+        );
+    }
+}

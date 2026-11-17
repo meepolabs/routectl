@@ -209,7 +209,7 @@ async fn a_reload_carrying_a_refused_pool_member_keeps_the_running_router_servin
         assert_eq!(
             status
                 .daemon_meta
-                .reload_failure(chrono::Utc::now().timestamp_millis())
+                .reload_failure(crate::local_time::unix_ms(time::OffsetDateTime::now_utc()))
                 .map(|f| f.class),
             Some(expected_class),
             "`{name}`: the rejection is recorded"

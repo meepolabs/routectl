@@ -2,7 +2,9 @@
 
 use super::*;
 
-use chrono::{DateTime, NaiveDate};
+use time::OffsetDateTime;
+
+use crate::local_time::LocalZone;
 use routectl_core::cache_decision::CALLER_SUPPLIED;
 use routectl_core::provider_kind::config::ANTHROPIC_API;
 use routectl_usage::open;
@@ -18,15 +20,9 @@ use crate::test_usage_dir::usage_dir;
 
 const BLOCK_HEADER: &str = "cache-ignore:";
 
-fn fixed_now() -> DateTime<Local> {
-    Local
-        .from_local_datetime(
-            &NaiveDate::from_ymd_opt(2026, 6, 11)
-                .and_then(|d| d.and_hms_opt(14, 30, 0))
-                .expect("valid date"),
-        )
-        .earliest()
-        .expect("representable local time")
+fn fixed_now() -> OffsetDateTime {
+    // 2026-06-11 (Thursday) 14:30, read in UTC.
+    time::macros::datetime!(2026-06-11 14:30 UTC)
 }
 
 /// `direct` is observable anthropic-api; `vendor` (custom base, no
@@ -51,7 +47,7 @@ fn fixture_config() -> Config {
 /// before `fixed_now`, in one session; the last reads `last_cache_read`.
 /// The first turn has no predecessor, so `count - 1` turns qualify.
 fn seed_lane(db: &UsageDb, model: &str, count: i64, last_cache_read: i64) {
-    let base = fixed_now().timestamp_millis() - 3_600_000;
+    let base = crate::local_time::unix_ms(fixed_now()) - 3_600_000;
     for i in 0..count {
         let cache_read = if i == count - 1 { last_cache_read } else { 0 };
         db.conn()
@@ -101,6 +97,7 @@ fn output(db: &mut UsageDb, args: &UsageArgs) -> String {
         &fixture_config(),
         &PriceSnapshot::default(),
         args,
+        &LocalZone::utc(),
         fixed_now(),
     )
     .expect("usage output builds")
@@ -153,7 +150,7 @@ fn without_detail_the_output_is_the_window_blocks_and_legend_alone() {
     let mut expected: Vec<String> = windows
         .iter()
         .map(|(flag, title)| {
-            let bounds = window_bounds(*flag, fixed_now());
+            let bounds = window_bounds(&LocalZone::utc(), *flag, fixed_now());
             let report = build_window_report(
                 &db,
                 &config,
@@ -164,7 +161,7 @@ fn without_detail_the_output_is_the_window_blocks_and_legend_alone() {
                 false,
             )
             .expect("window report");
-            render_report(&report)
+            render_report(&report, &LocalZone::utc())
         })
         .collect();
 
@@ -211,11 +208,11 @@ fn an_unavailable_report_renders_one_class_line() {
     db.conn()
         .execute_batch("DROP TABLE requests")
         .expect("drop the requests table");
-    let now_ms = fixed_now().timestamp_millis();
+    let now_ms = crate::local_time::unix_ms(fixed_now());
     let far = Instant::now() + Duration::from_mins(10);
 
     // Act
-    let block = cache_ignore_block(&mut db, &fixture_config(), now_ms, far);
+    let block = cache_ignore_block(&mut db, &fixture_config(), &LocalZone::utc(), now_ms, far);
 
     // Assert
     let unavailable: Vec<&str> = block
@@ -234,7 +231,7 @@ fn an_unavailable_report_renders_one_class_line() {
 fn a_truncated_report_says_more_lanes_exist() {
     // Arrange
     let report = CacheIgnoreReport {
-        window: CacheIgnoreWindow::ending_at(fixed_now().timestamp_millis()),
+        window: CacheIgnoreWindow::ending_at(crate::local_time::unix_ms(fixed_now())),
         status: CacheIgnoreStatus::Evaluated,
         lanes: vec![CacheIgnoreLaneReport {
             provider: "direct".to_owned(),
@@ -253,7 +250,7 @@ fn a_truncated_report_says_more_lanes_exist() {
     };
 
     // Act
-    let block = render_cache_ignore(&report);
+    let block = render_cache_ignore(&report, &LocalZone::utc());
 
     // Assert
     assert!(block.contains("seat=a model=m"), "{block}");
@@ -278,7 +275,7 @@ fn a_timed_out_read_renders_query_timeout_not_an_error() {
     };
 
     // Act
-    let block = render_cache_ignore(&report);
+    let block = render_cache_ignore(&report, &LocalZone::utc());
 
     // Assert
     assert_eq!(block.lines().count(), 2, "{block}");
@@ -314,7 +311,7 @@ fn lane_identifiers_render_scrubbed_and_neutralized() {
     };
 
     // Act
-    let block = render_cache_ignore(&report);
+    let block = render_cache_ignore(&report, &LocalZone::utc());
 
     // Assert
     assert!(!block.contains(&token), "{block}");
@@ -329,7 +326,7 @@ fn an_evaluated_report_with_no_lanes_says_no_turn_qualified() {
     // Arrange: four marked turns ten minutes apart, past the 300 s lifetime,
     // so not one turn qualifies.
     let mut db = open(usage_dir().join("usage.db")).expect("open ledger");
-    let base = fixed_now().timestamp_millis() - 3_600_000;
+    let base = crate::local_time::unix_ms(fixed_now()) - 3_600_000;
     for i in 0..4 {
         db.conn()
             .execute(
@@ -355,7 +352,8 @@ fn an_evaluated_report_with_no_lanes_says_no_turn_qualified() {
     let block = cache_ignore_block(
         &mut db,
         &fixture_config(),
-        fixed_now().timestamp_millis(),
+        &LocalZone::utc(),
+        crate::local_time::unix_ms(fixed_now()),
         far,
     );
 
@@ -394,7 +392,7 @@ fn not_evaluated_providers_render_one_line_per_reason() {
     };
 
     // Act
-    let block = render_cache_ignore(&report);
+    let block = render_cache_ignore(&report, &LocalZone::utc());
 
     // Assert
     let lines: Vec<&str> = block.lines().skip(2).collect();
@@ -421,7 +419,8 @@ fn the_lane_line_renders_the_shared_lane_identifiers() {
     let block = cache_ignore_block(
         &mut db,
         &fixture_config(),
-        fixed_now().timestamp_millis(),
+        &LocalZone::utc(),
+        crate::local_time::unix_ms(fixed_now()),
         far,
     );
 
@@ -435,5 +434,45 @@ fn the_lane_line_renders_the_shared_lane_identifiers() {
     assert!(
         !block.contains(crate::cache_ignore::KEY_SHAPED_DIGITS),
         "{block}"
+    );
+}
+
+/// The block's window text: local, to the minute. Rows were recorded from the
+/// formatter this renderer used before.
+#[test]
+fn window_text_is_local_to_the_minute() {
+    let rows: &[(&str, i64, &str)] = &[
+        ("winter", 1_768_480_496_789, "2026-01-15 07:34"),
+        (
+            "summer, previous local day",
+            1_783_134_309_000,
+            "2026-07-03 23:05",
+        ),
+        (
+            "first minute after spring-forward",
+            1_772_953_200_000,
+            "2026-03-08 03:00",
+        ),
+        (
+            "repeated hour, second pass",
+            1_793_514_600_000,
+            "2026-11-01 01:30",
+        ),
+        ("before the epoch", -1, "1969-12-31 18:59"),
+        ("unrepresentable", i64::MAX, "9223372036854775807"),
+    ];
+    crate::test_tz::in_zone(
+        &crate::test_tz::eastern(),
+        module_path!(),
+        "window_text_is_local_to_the_minute",
+        || {
+            for (name, ms, expected) in rows {
+                assert_eq!(
+                    format_window_ts(&LocalZone::load(), *ms),
+                    *expected,
+                    "{name}"
+                );
+            }
+        },
     );
 }

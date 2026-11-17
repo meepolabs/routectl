@@ -107,7 +107,7 @@ async fn seed_v20_ledger(db_path: &std::path::Path) {
     let path = db_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let (handle, writer) = UsageWriter::start(path.clone(), 4, 0);
-        let now = chrono::Local::now().timestamp_millis();
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         handle.try_send(UsageRecord {
             request_id: SEEDED_ID.to_string(),
             alias: ANTHROPIC_ALIAS.to_string(),

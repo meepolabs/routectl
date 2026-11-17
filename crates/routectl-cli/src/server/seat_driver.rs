@@ -289,7 +289,7 @@ impl SeatDriverHealth {
     }
 
     fn record_sweep(&self, tally: SweepTally) {
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         self.transient.fetch_add(tally.transient, Ordering::Relaxed);
         self.definitive
             .fetch_add(tally.definitive, Ordering::Relaxed);

@@ -380,12 +380,15 @@ fn absent_metrics_serialize_as_null_and_the_cost_tokens_are_stable() {
 async fn the_pricer_resolves_against_one_pinned_snapshot() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
     let state = state_with_ledger(path.clone());
 
     let pricer = state.pricer().pin();
     let mut db = open_readonly_fastfail(&path).expect("open seeded ledger");
-    let spec = parse_spec(VALID_BODY.as_bytes(), Local::now()).unwrap();
+    let spec = parse_spec(VALID_BODY.as_bytes(), OffsetDateTime::now_utc()).unwrap();
 
     let first = query(&mut db, &spec, |row| pricer.price(row), far_deadline()).unwrap();
     let second = query(&mut db, &spec, |row| pricer.price(row), far_deadline()).unwrap();

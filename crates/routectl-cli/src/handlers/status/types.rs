@@ -54,14 +54,20 @@ impl<T> Panel<T> {
 /// Current instant as an RFC3339-UTC string, the format every panel's
 /// `as_of` uses.
 pub fn now_utc_rfc3339() -> String {
-    utc_rfc3339(chrono::Utc::now())
+    utc_rfc3339(crate::local_time::unix_ms(time::OffsetDateTime::now_utc()))
 }
 
-/// Format an already-read instant in the same RFC3339-UTC shape as
-/// [`now_utc_rfc3339`], for a panel that must pin ONE clock reading and derive
-/// both its `as_of` and a relative age from it.
-pub fn utc_rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
-    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+/// Format an already-read instant (Unix milliseconds) in the same RFC3339-UTC
+/// shape as [`now_utc_rfc3339`], for a panel that must pin ONE clock reading
+/// and derive both its `as_of` and a relative age from it. An instant outside
+/// the representable calendar renders as `epoch ms <n>`.
+pub fn utc_rfc3339(epoch_ms: i64) -> String {
+    crate::local_time::calendar_text(
+        epoch_ms.div_euclid(1000),
+        time::UtcOffset::UTC,
+        crate::local_time::TextLayout::Rfc3339Utc,
+    )
+    .unwrap_or_else(|| format!("epoch ms {epoch_ms}"))
 }
 
 /// Fixed snake_case wire tokens the status DTOs reuse from the event
@@ -124,3 +130,7 @@ pub mod vocabulary {
         pub const QUERY_TIMEOUT: &str = "query_timeout";
     }
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;

@@ -236,14 +236,25 @@ async fn a_served_version_finding_reads_the_accepted_config_not_the_disk_file() 
 
     let served = version_finding(
         build_report_no_network(
-            &gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs)), &[])
-                .await,
+            &gather_context_no_network(
+                &config_path,
+                GatherSources::Served(Box::new(inputs)),
+                &[],
+                &crate::local_time::LocalZone::utc(),
+            )
+            .await,
         )
         .findings,
     );
     let disk = version_finding(
         build_report_no_network(
-            &gather_context_no_network(&config_path, GatherSources::Disk, &[]).await,
+            &gather_context_no_network(
+                &config_path,
+                GatherSources::Disk,
+                &[],
+                &crate::local_time::LocalZone::utc(),
+            )
+            .await,
         )
         .findings,
     );

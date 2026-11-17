@@ -11,7 +11,6 @@
 //! a `tracing::debug!` naming each dropped block. The block itself
 //! stays in the structured content parts.
 
-use chrono::Utc;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tracing::debug;
@@ -368,7 +367,7 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
     Ok(ChatResponse {
         id: resp.id,
         model: resp.model,
-        created: Utc::now().timestamp(),
+        created: time::OffsetDateTime::now_utc().unix_timestamp(),
         choices: vec![Choice {
             logprobs: None,
             index: 0,

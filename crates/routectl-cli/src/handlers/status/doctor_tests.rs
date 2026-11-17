@@ -163,7 +163,13 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
     .unwrap();
     let state = state_with_config(Some(config_path.clone()));
     let view = state.router.view();
-    let ctx = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
+    let ctx = gather_context_no_network(
+        &config_path,
+        GatherSources::Disk,
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
     let report = build_report_no_network(&ctx);
 
     let events = routectl_testkit::capture_events(|| {
@@ -265,7 +271,9 @@ async fn handler_returns_report_with_no_probe_section() {
     assert_eq!(json["schema_version"], 32);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
-    assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
+    assert!(
+        time::OffsetDateTime::parse(as_of, &time::format_description::well_known::Rfc3339).is_ok()
+    );
 
     assert_eq!(json["data"]["report"]["schema_version"], 32);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
@@ -479,7 +487,7 @@ async fn ledger_health_reports_full_and_closed_drops_apart() {
 async fn doctor_panel_carries_todays_observation_and_marks_a_gap_incomplete() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("usage.db");
-    let now = chrono::Local::now().timestamp_millis();
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     {
         let db = routectl_usage::open(&db_path).expect("open ledger");
         db.conn()
@@ -686,9 +694,16 @@ async fn a_served_gather_reads_the_resident_registry_not_the_ledger() {
             absent_ledger.clone(),
         ))),
         &[],
+        &crate::local_time::LocalZone::utc(),
     )
     .await;
-    let disk = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
+    let disk = gather_context_no_network(
+        &config_path,
+        GatherSources::Disk,
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
 
     assert!(
         !absent_ledger.exists(),
@@ -1039,7 +1054,7 @@ async fn the_served_doctor_json_carries_the_cache_section() {
     std::fs::write(&config_path, served_fixture_config(&db_path)).unwrap();
     {
         let db = routectl_usage::open(&db_path).expect("open ledger");
-        let base = chrono::Utc::now().timestamp_millis() - 3_600_000;
+        let base = crate::local_time::unix_ms(time::OffsetDateTime::now_utc()) - 3_600_000;
         for i in 0..4_i64 {
             db.conn()
                 .execute(
@@ -1097,4 +1112,37 @@ async fn the_served_doctor_json_carries_the_cache_section() {
             .any(|f| f["name"] == "cache markers" && f["status"] == "Pass"),
         "{cache:#?}"
     );
+}
+
+/// One `/status/doctor` request loads the host zone once, so a zone that
+/// cannot be read logs exactly one warning per request. The capture spans the
+/// blocking worker the panel builds on.
+///
+/// Mutation check: load the zone a second time inside the gather -> red here.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_zone_warns_once_per_doctor_request() {
+    let test = "an_unreadable_zone_warns_once_per_doctor_request";
+    crate::test_tz::in_zone("/nonexistent/zone/file", module_path!(), test, || {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+        )
+        .unwrap();
+        let state = state_with_config(Some(config_path));
+
+        let (json, events) = routectl_testkit::block_on_with_capture(doctor_json(&state));
+
+        assert!(json["unavailable"].is_null(), "{json}");
+        let zone_warns: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN && event.target == "routectl_cli::local_time"
+            })
+            .collect();
+        assert_eq!(zone_warns.len(), 1, "{zone_warns:?}");
+        assert_eq!(zone_warns[0].field("reason"), Some("tz_unreadable"));
+    });
 }

@@ -6,7 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-use chrono::{Local, TimeZone};
 use routectl_router::Config;
 use routectl_usage::{GroupDim, QueryResult, QuerySpec, RowCost, open, query};
 use tempfile::TempDir;
@@ -54,9 +53,7 @@ fn insert(db: &UsageDb, request_id: &str, model: &str, writes: &Writes) {
 /// The three surfaces over one ledger: the `routectl usage --all --by model
 /// --detail` text, the `/status/usage` panel and the `/status/query` result.
 fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
-    let now = Local
-        .timestamp_millis_opt(TO_MS - 1)
-        .single()
+    let now = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(TO_MS - 1) * 1_000_000)
         .expect("a representable instant");
     let args = UsageArgs {
         window: WindowFlag::All,
@@ -72,6 +69,7 @@ fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
         &Config::default(),
         &PriceSnapshot::default(),
         &args,
+        &crate::local_time::LocalZone::utc(),
         now,
     )
     .expect("usage report");

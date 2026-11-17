@@ -15,7 +15,6 @@
 //! OpenAI-SSE clients see identical totals regardless of whether the
 //! upstream was Bedrock-Invoke or Bedrock-Converse.
 
-use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -80,7 +79,7 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         // empty matches the Anthropic-API behavior pre-fix when
         // upstream omitted model.
         model: String::new(),
-        created: Utc::now().timestamp(),
+        created: time::OffsetDateTime::now_utc().unix_timestamp(),
         choices: vec![Choice {
             logprobs: None,
             index: 0,

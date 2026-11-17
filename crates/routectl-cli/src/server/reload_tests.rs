@@ -1489,7 +1489,7 @@ async fn the_coordinator_records_a_rejected_reload_until_a_later_reload_succeeds
         daemon_meta,
     };
     let mut current_config = config;
-    let now_ms = || chrono::Utc::now().timestamp_millis();
+    let now_ms = || crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
 
     // Act 1: the rejected reload.
     Box::pin(apply_config_reload(

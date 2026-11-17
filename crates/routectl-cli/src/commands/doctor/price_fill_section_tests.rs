@@ -427,7 +427,13 @@ async fn the_doctor_renders_no_table_string_beyond_prices_and_date() {
     .unwrap();
 
     // Act
-    let context = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
+    let context = gather_context_no_network(
+        &config_path,
+        GatherSources::Disk,
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
     let report = build_report_no_network(&context);
     let text = render_human(&report).join("\n");
     let json = serde_json::to_string(&report).unwrap();

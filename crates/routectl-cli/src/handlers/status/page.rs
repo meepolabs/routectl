@@ -601,7 +601,7 @@ mod tests {
         // Every declared request shape must parse as a valid query body. The
         // shapes are written as strict JSON in the dashboard script sources
         // precisely so they can be fed to the server's parser verbatim.
-        let now = chrono::Local::now();
+        let now = time::OffsetDateTime::now_utc();
         let shapes = json_object_literals(&literal_body("QUERY_SHAPES", '[', ']'));
         assert!(
             !shapes.is_empty(),
@@ -609,7 +609,12 @@ mod tests {
         );
         for shape in &shapes {
             assert!(
-                crate::handlers::status::query::spec_from_body(shape.as_bytes(), now).is_ok(),
+                crate::handlers::status::query::spec_from_body(
+                    shape.as_bytes(),
+                    &crate::local_time::LocalZone::utc(),
+                    now
+                )
+                .is_ok(),
                 "dashboard query shape `{shape}` is not in the server's request vocabulary"
             );
         }

@@ -64,8 +64,10 @@ impl DaemonMeta {
     /// A load supersedes any earlier rejected reload, so it clears that record.
     pub fn stamp_config_loaded(&self) {
         let mut failure = self.last_reload_failure.lock();
-        self.config_loaded_at_ms
-            .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+        self.config_loaded_at_ms.store(
+            crate::local_time::unix_ms(time::OffsetDateTime::now_utc()),
+            Ordering::Relaxed,
+        );
         *failure = None;
     }
 
@@ -73,7 +75,7 @@ impl DaemonMeta {
     /// earlier record. Called by the reload coordinator; the previous config
     /// stays in effect, so the load stamp is left alone.
     pub fn record_reload_failure(&self, class: ReloadFailure) {
-        let at_ms = chrono::Utc::now().timestamp_millis();
+        let at_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         *self.last_reload_failure.lock() = Some((class, at_ms));
     }
 }
@@ -154,7 +156,7 @@ mod tests {
     fn snapshot_reports_none_age_before_any_stamp() {
         let handle = DaemonMetaHandle::new(Arc::new(DaemonMeta::new("127.0.0.1:9000".to_string())));
 
-        let snapshot = handle.snapshot(chrono::Utc::now().timestamp_millis());
+        let snapshot = handle.snapshot(crate::local_time::unix_ms(time::OffsetDateTime::now_utc()));
 
         assert_eq!(snapshot.listen_addr, "127.0.0.1:9000");
         assert_eq!(snapshot.version, env!("CARGO_PKG_VERSION"));
@@ -220,7 +222,7 @@ mod tests {
         meta.stamp_config_loaded();
 
         assert_eq!(
-            handle.reload_failure(chrono::Utc::now().timestamp_millis()),
+            handle.reload_failure(crate::local_time::unix_ms(time::OffsetDateTime::now_utc())),
             None
         );
     }
@@ -253,7 +255,7 @@ mod tests {
         let handle = DaemonMetaHandle::new(DaemonMeta::for_test());
 
         assert_eq!(
-            handle.reload_failure(chrono::Utc::now().timestamp_millis()),
+            handle.reload_failure(crate::local_time::unix_ms(time::OffsetDateTime::now_utc())),
             None
         );
     }

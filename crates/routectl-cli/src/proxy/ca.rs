@@ -63,7 +63,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveTime, Utc};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose,
@@ -71,6 +70,7 @@ use rcgen::{
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
+use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio_rustls::TlsAcceptor;
 
 const CA_KEY_FILE: &str = "mitm-ca-key.pem";
@@ -235,8 +235,8 @@ fn ensure_crypto_provider_installed() {
     });
 }
 
-fn calendar_date(at: DateTime<Utc>) -> (i32, u8, u8) {
-    (at.year(), at.month() as u8, at.day() as u8)
+fn calendar_date(at: OffsetDateTime) -> (i32, u8, u8) {
+    (at.year(), u8::from(at.month()), at.day())
 }
 
 /// Truncates `at` to midnight UTC of its own calendar day -- the exact
@@ -245,15 +245,16 @@ fn calendar_date(at: DateTime<Utc>) -> (i32, u8, u8) {
 /// mirrors the DER's real `notAfter` exactly rather than the untruncated
 /// `now + N days` instant, which can be up to ~24h later than what the
 /// cert actually expires at.
-fn midnight_utc(at: DateTime<Utc>) -> DateTime<Utc> {
-    at.date_naive().and_time(NaiveTime::MIN).and_utc()
+const fn midnight_utc(at: OffsetDateTime) -> OffsetDateTime {
+    at.to_offset(time::UtcOffset::UTC)
+        .replace_time(time::Time::MIDNIGHT)
 }
 
 fn mint(mitm_host: &str) -> Result<MintedMaterial, CaError> {
-    let now = Utc::now();
-    let not_before = now - ChronoDuration::days(NOT_BEFORE_BACKDATE_DAYS);
-    let ca_not_after = midnight_utc(now + ChronoDuration::days(CA_VALIDITY_DAYS));
-    let leaf_not_after = midnight_utc(now + ChronoDuration::days(LEAF_VALIDITY_DAYS));
+    let now = OffsetDateTime::now_utc();
+    let not_before = now - TimeDuration::days(NOT_BEFORE_BACKDATE_DAYS);
+    let ca_not_after = midnight_utc(now + TimeDuration::days(CA_VALIDITY_DAYS));
+    let leaf_not_after = midnight_utc(now + TimeDuration::days(LEAF_VALIDITY_DAYS));
 
     let (nb_y, nb_m, nb_d) = calendar_date(not_before);
     let (ca_y, ca_m, ca_d) = calendar_date(ca_not_after);
@@ -290,8 +291,8 @@ fn mint(mitm_host: &str) -> Result<MintedMaterial, CaError> {
         ca_key_pem: ca_key.serialize_pem(),
         leaf_cert_pem: leaf_cert.pem(),
         leaf_key_pem: leaf_key.serialize_pem(),
-        ca_not_after_unix: ca_not_after.timestamp(),
-        leaf_not_after_unix: leaf_not_after.timestamp(),
+        ca_not_after_unix: ca_not_after.unix_timestamp(),
+        leaf_not_after_unix: leaf_not_after.unix_timestamp(),
     })
 }
 
@@ -588,7 +589,7 @@ fn load_existing(cert_dir: &Path, mitm_host: &str) -> Result<Option<StoredMateri
 }
 
 fn is_expired(meta: &CertMeta) -> bool {
-    let now = Utc::now().timestamp();
+    let now = OffsetDateTime::now_utc().unix_timestamp();
     now >= meta.ca_not_after_unix || now >= meta.leaf_not_after_unix
 }
 
@@ -783,7 +784,7 @@ mod tests {
     fn expire_stored_meta(dir: &Path) {
         let mut meta: CertMeta =
             toml::from_str(&fs::read_to_string(meta_path(dir)).unwrap()).unwrap();
-        let past = Utc::now().timestamp() - 1;
+        let past = OffsetDateTime::now_utc().unix_timestamp() - 1;
         meta.ca_not_after_unix = past;
         meta.leaf_not_after_unix = past;
         fs::write(meta_path(dir), toml::to_string_pretty(&meta).unwrap()).unwrap();
@@ -917,7 +918,7 @@ mod tests {
         let meta: CertMeta =
             toml::from_str(&fs::read_to_string(meta_path(dir.path())).unwrap()).unwrap();
 
-        let leaf_not_after = DateTime::<Utc>::from_timestamp(meta.leaf_not_after_unix, 0).unwrap();
+        let leaf_not_after = OffsetDateTime::from_unix_timestamp(meta.leaf_not_after_unix).unwrap();
         let (y, m, d) = calendar_date(leaf_not_after);
         let expected_der_not_after = rcgen::date_time_ymd(y, m, d).unix_timestamp();
 
@@ -926,7 +927,7 @@ mod tests {
             "sidecar not_after must exactly match the midnight-UTC instant rcgen bakes into the DER"
         );
 
-        let ca_not_after = DateTime::<Utc>::from_timestamp(meta.ca_not_after_unix, 0).unwrap();
+        let ca_not_after = OffsetDateTime::from_unix_timestamp(meta.ca_not_after_unix).unwrap();
         let (ca_y, ca_m, ca_d) = calendar_date(ca_not_after);
         let expected_ca_der_not_after = rcgen::date_time_ymd(ca_y, ca_m, ca_d).unix_timestamp();
         assert_eq!(meta.ca_not_after_unix, expected_ca_der_not_after);

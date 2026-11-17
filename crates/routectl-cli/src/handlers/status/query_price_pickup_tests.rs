@@ -80,7 +80,10 @@ async fn a_renamed_in_price_table_reprices_the_next_query_without_a_router_rebui
     // come from a read at query time.
     let dir = TempDir::new().unwrap();
     let ledger = dir.path().join("usage.db");
-    seed_ledger(&ledger, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &ledger,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
     let table = dir.path().join("prices.json");
     let (state, swap) = priced_state(dir.path(), ledger);
     let router_before = swap.load_full();
@@ -123,7 +126,7 @@ fn seed_write_row(path: &Path, alias: &str, total: Option<i64>, split: Option<&s
              VALUES (?1, ?1, ?2, 'anthropic', 'm', ?3, 'm', 'p', 'u', 0, 'ok', \
              50, 0, 0, 1, 0, 100, 20, ?4, ?5)",
             rusqlite::params![
-                Local::now().timestamp_millis(),
+                crate::local_time::unix_ms(time::OffsetDateTime::now_utc()),
                 format!("r-{alias}"),
                 alias,
                 total,

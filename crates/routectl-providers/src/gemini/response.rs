@@ -13,7 +13,6 @@
 //! A prompt-level block (empty candidates + `promptFeedback.blockReason`)
 //! also maps to "content_filter" on the HTTP-200 surface.
 
-use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -104,7 +103,7 @@ pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<Cha
     Ok(ChatResponse {
         id,
         model,
-        created: Utc::now().timestamp(),
+        created: time::OffsetDateTime::now_utc().unix_timestamp(),
         choices: vec![Choice {
             logprobs: None,
             index: 0,

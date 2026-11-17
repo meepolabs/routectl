@@ -258,7 +258,7 @@ impl StatusRouterView {
             entries,
             seed_clears,
             now: Instant::now(),
-            now_ms: chrono::Utc::now().timestamp_millis(),
+            now_ms: crate::local_time::unix_ms(time::OffsetDateTime::now_utc()),
         };
         let (parked, unusable) = self.credential_marked_seats();
         ServedInputs::new(
@@ -278,7 +278,7 @@ impl StatusRouterView {
     /// marks is in both lists.
     fn credential_marked_seats(&self) -> (Vec<ParkedSeat>, Vec<UnusableSeat>) {
         let now = Instant::now();
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         let mut parked = Vec::new();
         let mut unusable = Vec::new();
         for target in self.router.status_targets(now) {
@@ -323,8 +323,10 @@ mod tests {
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
         let _pools: Vec<PoolEligibility> = view.pool_eligibility(Instant::now());
         let _fix: SeatFix = view.seat_fix("absent");
-        let _learned: Vec<ResolvedEntry> =
-            view.learned_capabilities((Instant::now(), chrono::Utc::now().timestamp_millis()));
+        let _learned: Vec<ResolvedEntry> = view.learned_capabilities((
+            Instant::now(),
+            crate::local_time::unix_ms(time::OffsetDateTime::now_utc()),
+        ));
         let _counters: FieldRepairCounters = view.field_repair_counters();
         let _lossy: Vec<LaneLossyRepairs> = view.lossy_repairs_by_lane();
         let _exhaustions: Vec<LaneBudgetExhaustions> = view.budget_exhaustions_by_lane();

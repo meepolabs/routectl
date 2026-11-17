@@ -152,7 +152,7 @@ fn render_detail_shows_one_finder_line_per_suppressed_triple() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let block = suppressed_block(&out);
 
     // Assert: the header counts triples, and each triple carries its key, its
@@ -184,7 +184,7 @@ fn render_detail_finder_orders_triples_newest_suppression_first() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let block = suppressed_block(&out);
 
     // Assert: the model column is a proxy for triple identity here, so the
@@ -222,7 +222,7 @@ fn render_detail_finder_counts_a_both_marker_suppression_once() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let block = suppressed_block(&out);
 
     // Assert
@@ -249,7 +249,7 @@ fn render_detail_finder_caps_the_list_and_says_so() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let block = suppressed_block(&out);
 
     // Assert: exactly the cap is listed, and the operator is told the list is
@@ -275,7 +275,7 @@ fn render_detail_finder_omits_the_truncation_line_when_nothing_was_dropped() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert
-    let block = suppressed_block(&render_report(&report));
+    let block = suppressed_block(&render_report(&report, &zone()));
     assert!(
         !block.contains("more triples than"),
         "a complete list adds no truncation line: {block}"
@@ -293,7 +293,7 @@ fn render_detail_finder_carries_the_drop_counter_validity_caveat() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     let block = suppressed_block(&out);
 
     // Assert
@@ -322,7 +322,7 @@ fn render_detail_finder_never_prints_the_raw_session_key() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
 
     // Assert: an opaque fixed-width reference stands in for the key.
     assert!(
@@ -369,7 +369,7 @@ fn render_detail_omits_the_finder_when_nothing_was_suppressed() {
     let report = report_all(&db, &cost_config(), None, true);
 
     // Act + Assert: an ordinary window stays uncluttered.
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("k-suppressed sessions:"),
         "no suppression -> no finder block: {out}"
@@ -384,7 +384,7 @@ fn render_non_detail_omits_the_finder() {
     let report = report_all(&db, &cost_config(), None, false);
 
     // Act + Assert
-    let out = render_report(&report);
+    let out = render_report(&report, &zone());
     assert!(
         !out.contains("k-suppressed sessions:"),
         "the default (non-detail) table must omit the finder: {out}"

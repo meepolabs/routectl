@@ -227,13 +227,13 @@ fn marked_direct_router() -> Router {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_unusable_seat_row_names_its_reason_cause_since_and_exact_fix() {
     // Arrange
-    let before_ms = chrono::Utc::now().timestamp_millis();
+    let before_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     let swap = Arc::new(ArcSwap::from_pointee(marked_direct_router()));
     let state = status_state(swap, DaemonMeta::for_test());
 
     // Act
     let json = read_health(&state).await;
-    let after_ms = chrono::Utc::now().timestamp_millis();
+    let after_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
 
     // Assert
     let rows: [(Seat, &str, &str); 7] = [
@@ -361,7 +361,7 @@ async fn pool_counts_seat_rows_and_driver_health_match_the_fixture() {
     let secrets: Arc<dyn SecretStore> = Arc::new(store);
     let config = routectl_router::parse_config(&pool_config_text(&dir.path().join("usage.db")))
         .expect("fixture parses");
-    let before_ms = chrono::Utc::now().timestamp_millis();
+    let before_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     let router = crate::server::build_router_from_config(Arc::new(config), secrets)
         .await
         .expect("a pool with a logged-out member still builds");
@@ -372,7 +372,7 @@ async fn pool_counts_seat_rows_and_driver_health_match_the_fixture() {
 
     // Act
     let json = read_health(&state).await;
-    let after_ms = chrono::Utc::now().timestamp_millis();
+    let after_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
 
     // Assert
     assert_eq!(

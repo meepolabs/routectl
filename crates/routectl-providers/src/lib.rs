@@ -182,7 +182,7 @@ pub(crate) mod upstream_log;
 pub(crate) mod stream_completion;
 
 // Shared parser for the standard HTTP `Retry-After` response header.
-// Gated on the provider features that bring in `reqwest` + `chrono`
+// Gated on the provider features that bring in `reqwest` + `time`
 // (every provider does). Crate-internal: provider egresses call this
 // directly, and the router only ever sees the parsed `Duration` via
 // `Error::Upstream` -- it never reaches the module by path.

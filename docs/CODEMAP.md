@@ -8067,10 +8067,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   instants to epoch ms through the pinned `(now, now_ms)` anchor, and
   `lapse_deadline_ms` gives a negative's runtime lapse instant (decay
   deadline, or `RECHECK_BACKSTOP` past it when re-check owned)
+- `src/local_time.rs` -- `LocalZone` (`load`, `utc`, `from_posix_tz` (Unix),
+  `offset_at`, `to_local`, `now`, `at_unix_ms`, `resolve` -> `CivilInstant`),
+  `format_seconds`, `format_minutes`, `midnight`, `unix_ms`: the one owner of
+  instant <-> local wall-clock conversion for usage windows and local
+  timestamp text. Zone rules from tz-rs on Unix (TZ, then /etc/localtime),
+  the OS per instant on Windows; loaded per command or request; a load failure
+  is UTC plus one WARN
 - `src/log_sink.rs` -- the production tracing sink: `subscriber` (the one
   builder `main` installs via `init`) and `EscapingFields`, the field
   formatter that escapes control, format, separator and default-ignorable
   characters
+- `src/test_tz.rs` -- `in_zone(tz, module, test, body)` (`cfg(test)`): runs a
+  test body in a child copy of the test binary with `TZ` set, so a local-time
+  assertion is pinned to a named zone without touching the shared process
+  environment
 - `src/test_usage_dir.rs` -- `usage_dir()` (`cfg(test)`): a fresh usage-ledger
   dir under the testkit temp reaper's per-process dir, for fixtures whose
   writer thread may open the DB after the test's own scope has ended

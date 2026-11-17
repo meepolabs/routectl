@@ -6,7 +6,6 @@ use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::Request as HttpRequest;
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use routectl_router::{Config, Router};
 use routectl_usage::{CostStatus, QueryGroup, QueryMetrics, QuerySeries, SeriesBucket, open};
 use serde_json::Value;
@@ -24,7 +23,10 @@ async fn query_method_with_valid_body_returns_available_panel() {
     // Arrange: a seeded ledger and an in-vocabulary body.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
 
     // Act
     let (status, json) = send(state_with_ledger(path), QUERY_METHOD, VALID_BODY).await;
@@ -41,7 +43,10 @@ async fn query_method_with_valid_body_returns_available_panel() {
 async fn every_method_other_than_query_returns_405() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
 
     for method in ["GET", "POST", "PUT", "DELETE", "PATCH"] {
         let (status, _) = send(state_with_ledger(path.clone()), method, VALID_BODY).await;
@@ -57,7 +62,10 @@ async fn every_method_other_than_query_returns_405() {
 async fn out_of_vocabulary_bodies_return_a_leak_free_400() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
 
     // Each body fails closed for a DIFFERENT reason: unknown token, unknown
     // field, missing required field, wrong type, blank filter, not JSON at all,
@@ -158,7 +166,10 @@ async fn a_body_over_the_ceiling_is_refused_without_echoing_it() {
     // marker inside the padding so an echo is detectable.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
     let prefix = r#"{"window":"all","group_by":"model","alias":"LEAKMARKER"#;
     let body = format!(
         "{prefix}{}\"}}",
@@ -187,7 +198,10 @@ async fn a_body_that_never_finishes_arriving_is_refused_on_the_read_deadline() {
     // lasting as long as the client keeps the socket open.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("usage.db");
-    seed_ledger(&path, &[Local::now().timestamp_millis()]);
+    seed_ledger(
+        &path,
+        &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+    );
     let stalled = Body::from_stream(futures::stream::pending::<Result<Vec<u8>, std::io::Error>>());
     let app = super::super::status_router().with_state(state_with_ledger(path));
 
@@ -258,7 +272,7 @@ async fn a_non_finite_metric_renders_as_null_and_never_as_a_500() {
 
 #[test]
 fn each_window_token_maps_to_its_window_flag() {
-    let now = Local::now();
+    let now = OffsetDateTime::now_utc();
     let all = parse_spec(br#"{"window":"all","group_by":"model"}"#, now).unwrap();
     assert_eq!(all.from_ms, 0, "all-time starts at the epoch");
 
@@ -276,7 +290,7 @@ fn each_window_token_maps_to_its_window_flag() {
 
 #[test]
 fn each_group_by_token_maps_to_its_dimension() {
-    let now = Local::now();
+    let now = OffsetDateTime::now_utc();
     for (token, dim) in [
         ("model", GroupDim::Model),
         ("provider", GroupDim::Provider),
@@ -290,7 +304,7 @@ fn each_group_by_token_maps_to_its_dimension() {
 
 #[test]
 fn absent_filters_match_everything_and_present_ones_bind() {
-    let now = Local::now();
+    let now = OffsetDateTime::now_utc();
     let unfiltered = parse_spec(br#"{"window":"all","group_by":"model"}"#, now).unwrap();
     assert!(unfiltered.alias_filter.is_none());
     assert!(unfiltered.provider_filter.is_none());
@@ -316,7 +330,7 @@ async fn an_expired_deadline_sheds_query_timeout_end_to_end() {
     let path = dir.path().join("usage.db");
     seed_wide_ledger(&path, 4_000);
     let mut db = open_readonly_fastfail(&path).expect("open seeded ledger");
-    let spec = parse_spec(VALID_BODY.as_bytes(), Local::now()).unwrap();
+    let spec = parse_spec(VALID_BODY.as_bytes(), OffsetDateTime::now_utc()).unwrap();
     let pricer = state_with_ledger(path).pricer().pin();
 
     let err = query(

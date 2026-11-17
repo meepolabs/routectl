@@ -15,9 +15,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::local_time::LocalZone;
 use axum::Json;
 use axum::extract::{Query, State};
-use chrono::Local;
 use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
 
@@ -238,7 +238,7 @@ async fn build_window(
     flag: WindowFlag,
     token: &'static str,
 ) -> Panel<UsagePanel> {
-    let bounds = window_bounds(flag, Local::now());
+    let now = time::OffsetDateTime::now_utc();
     let db_path = state.usage_db_path.clone();
     // A counter read, not I/O; taken beside `as_of` so both describe one instant.
     let health = state.usage_health.ledger_health();
@@ -249,7 +249,10 @@ async fn build_window(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
-        move || build_panel(&db_path, token, bounds, health, as_of),
+        move || {
+            let bounds = window_bounds(&LocalZone::load(), flag, now);
+            build_panel(&db_path, token, bounds, health, as_of)
+        },
     )
     .await;
     state.observability.usage.record(&panel);
@@ -588,7 +591,7 @@ mod tests {
         // all-time; both share one group key.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        let now_ms = Local::now().timestamp_millis();
+        let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         seed_ledger(&path, &[now_ms, now_ms - 40 * DAY_MS]);
 
         // Act + Assert: default (no query) == today == 1 request.
@@ -661,7 +664,7 @@ mod tests {
     /// `ts_start` so the per-seat newest-row resolution is deterministic.
     fn seed_seat_quota_ledger(path: &Path, rows: &[SeatQuotaSeed<'_>]) {
         let db = open(path).expect("open ledger");
-        let now = Local::now().timestamp_millis();
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         for (i, (id, seat, provider_kind, status, utilization, reset_s)) in rows.iter().enumerate()
         {
             db.conn()
@@ -777,7 +780,7 @@ mod tests {
         // per-request open sheds to no_data once the file is gone.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        let now_ms = Local::now().timestamp_millis();
+        let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         seed_ledger(&path, &[now_ms]);
 
         let (status, json) = get_usage(state_with_ledger(path.clone()), "/status/usage").await;
@@ -1101,7 +1104,7 @@ mod tests {
     /// full HTTP panel. All rows share one group key.
     fn seed_class_ledger(path: &Path, rows: &[(&str, Option<&str>)]) {
         let db = open(path).expect("open ledger");
-        let now = Local::now().timestamp_millis();
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         for (i, (outcome, class)) in rows.iter().enumerate() {
             db.conn()
                 .execute(
@@ -1167,7 +1170,7 @@ mod tests {
     /// NULL era is expressible.
     fn seed_two_kind_eras(path: &Path, rows: &[(Option<&str>, &str, Option<&str>)]) {
         let db = open(path).expect("open ledger");
-        let now = Local::now().timestamp_millis();
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         for (i, (kind, outcome, class)) in rows.iter().enumerate() {
             db.conn()
                 .execute(
@@ -1418,7 +1421,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         let db = open(&path).expect("open ledger");
-        let old = Local::now().timestamp_millis() - 40 * DAY_MS;
+        let old = crate::local_time::unix_ms(time::OffsetDateTime::now_utc()) - 40 * DAY_MS;
         db.conn()
             .execute(
                 "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
@@ -1452,7 +1455,10 @@ mod tests {
     async fn usage_panel_reports_schema_version_six() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+        seed_ledger(
+            &path,
+            &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+        );
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["schema_version"], 6);
@@ -1483,7 +1489,10 @@ mod tests {
     async fn a_clean_window_reads_complete() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+        seed_ledger(
+            &path,
+            &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+        );
 
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
 
@@ -1503,7 +1512,7 @@ mod tests {
     async fn a_gap_row_in_the_window_reads_incomplete() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        let now = Local::now().timestamp_millis();
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         seed_ledger(&path, &[now]);
         seed_gap(&path, now - 40 * DAY_MS);
 
@@ -1525,7 +1534,7 @@ mod tests {
     async fn the_observation_block_carries_walk_counts_beside_the_gap_fields() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        let now = Local::now().timestamp_millis();
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
         seed_ledger(&path, &[now]);
         seed_walk_row(&path, now, [2, 3, 5, 7, 11]);
         seed_gap(&path, now);
@@ -1567,7 +1576,10 @@ mod tests {
     async fn a_closed_channel_drop_reads_incomplete() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+        seed_ledger(
+            &path,
+            &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+        );
         let usage = routectl_usage::handle_with_closed_channel();
         usage.try_send(routectl_usage::UsageRecord::default());
         assert_eq!(usage.counters().dropped_closed(), 1, "premise");
@@ -1587,7 +1599,10 @@ mod tests {
     async fn a_write_error_reads_incomplete() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
-        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+        seed_ledger(
+            &path,
+            &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+        );
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"not a directory").expect("plant the blocker");
         let (usage, writer) = routectl_usage::UsageWriter::start(
@@ -1666,7 +1681,10 @@ mod tests {
             for _ in 0..3 {
                 let _ = build(&state).await;
             }
-            seed_ledger(&path, &[Local::now().timestamp_millis()]);
+            seed_ledger(
+                &path,
+                &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
+            );
             for _ in 0..3 {
                 let _ = build(&state).await;
             }

@@ -382,7 +382,7 @@ fn build_from_view(
     // Pin a single monotonic read time and its epoch-ms anchor together, so
     // every target's elapsed-age conversion shares one clock reading.
     let now = Instant::now();
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     let targets = view
         .route_targets(now)
         .into_iter()
