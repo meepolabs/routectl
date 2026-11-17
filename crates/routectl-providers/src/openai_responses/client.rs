@@ -10,8 +10,8 @@ use super::{AuthKind, auth, cookies};
 use crate::mantle::MantleAuth;
 
 /// Resolved configuration for one Responses provider entry. The
-/// factory builds this from the TOML `ProviderEntry::OpenaiResponses`
-/// variant after resolving secret references.
+/// factory builds this from an `openai-responses` provider entry after
+/// resolving secret references.
 #[derive(Clone)]
 pub struct OpenAiResponsesConfig {
     /// Stable id used in errors and on `routectl_provider` response
