@@ -134,6 +134,59 @@ fn seeded_override_appears_as_capability_cell_with_override_source() {
     assert_eq!(cell.verdict, OverrideVerdict::RouteAway);
 }
 
+/// Byte order puts an uppercase letter before every lowercase one, so
+/// sorting the written spellings would put `beta:Zeta-Flag` before
+/// `beta:alpha-flag`; only sorting the normalized keys reverses them.
+const MIXED_CASE_OVERRIDES: &str = r#"
+version = 2
+
+[providers.anthropic]
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ANTHROPIC_API_KEY"
+auth = "x-api-key"
+
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-8"
+
+[capability.overrides."anthropic:opus"]
+unsupported = ["beta:Mixed-Case"]
+
+[capability.overrides.anthropic]
+unsupported = ["web_search", "beta:Zeta-Flag"]
+force_supported = ["beta:alpha-flag"]
+"#;
+
+#[test]
+fn capability_cells_show_override_keys_lowercased_and_sorted_by_target_then_key() {
+    // Arrange: the source text writes the beta keys in mixed case.
+    let beta =
+        |flag: &str| crate::beta_capability::beta_capability_key(flag).expect("a well-formed flag");
+    assert!(MIXED_CASE_OVERRIDES.contains(&beta("Zeta-Flag")));
+    assert!(MIXED_CASE_OVERRIDES.contains(&beta("Mixed-Case")));
+    let config: Config = toml::from_str(MIXED_CASE_OVERRIDES).expect("valid config");
+
+    // Act
+    let view = derive_effective_view(&config, None, None);
+
+    // Assert
+    let rows: Vec<(&str, String)> = view
+        .capabilities
+        .iter()
+        .map(|c| (c.target_spec.as_str(), c.capability_key.clone()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("anthropic", beta("alpha-flag")),
+            ("anthropic", beta("zeta-flag")),
+            ("anthropic", "web_search".to_string()),
+            ("anthropic:opus", beta("mixed-case")),
+        ]
+    );
+}
+
 /// The exact fixture `factory::validate_tests` uses to pin that a REJECTED
 /// base_url's embedded credential never reaches an error message. Here it
 /// pins the ACCEPTED case: a config carrying userinfo passes validation, so

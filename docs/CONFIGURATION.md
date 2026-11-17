@@ -3453,7 +3453,11 @@ Five sections are printed:
   `null` there, which the dashboard reads as "not set here": a pool or
   default may still apply, so it is not a claim that no cap runs.
 - **capability cells** -- one row per config-derived capability
-  override, with its verdict and `source=override`.
+  override, with its verdict and `source=override`. Override keys are
+  shown normalized, not as written: a `beta:` key's flag prints in
+  lowercase (`beta:Foo-Bar` shows as `beta:foo-bar`, the form overrides
+  match on), a Bedrock request-bag key prints as its capability leaf,
+  and rows are sorted by target, then by that normalized key.
 
 ```sh
 routectl config show --effective
