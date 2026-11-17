@@ -53,13 +53,14 @@ pub struct QuotaSnapshot {
 /// tokens are DISJOINT from output for some kinds and subsumed for others, so a
 /// row's cost depends on the kind PERSISTED with it. Grouping on it keeps each
 /// era of a renamed-kind provider in its own partition, so each is priced by
-/// what it actually was. Callers that report at the documented external grain
-/// coalesce these partitions back together after pricing.
+/// what it actually was. `seat` is in the grain so a seat grouping reads the
+/// persisted column. Callers that report at a coarser external grain coalesce
+/// these partitions back together after pricing.
 macro_rules! agg_base_columns {
     () => {
         concat!(
             "    COALESCE(model, requested_model) AS model, provider, upstream, alias,
-    provider_kind,
+    provider_kind, seat,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
     SUM(CASE WHEN outcome NOT IN ('ok', 'client_disconnect', 'cancelled')
@@ -113,7 +114,7 @@ macro_rules! agg_base_columns {
 macro_rules! agg_group_by {
     () => {
         "GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
-         provider_kind"
+         provider_kind, seat"
     };
 }
 
@@ -314,7 +315,7 @@ pub(super) struct FineRow {
 }
 
 /// Windowed aggregate grouped by
-/// `(model, provider, upstream, alias, provider_kind)`. Rows outside
+/// `(model, provider, upstream, alias, provider_kind, seat)`. Rows outside
 /// `[from_ms, to_ms)` are excluded. The caller prices each row from its
 /// PERSISTED `provider_kind` and then rolls the partitions up for display.
 ///
@@ -343,18 +344,18 @@ pub(super) fn aggregate_in(
 pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
     Ok(FineRow {
         agg: map_agg_row(row)?,
-        ttfb_max: row.get(32)?,
-        ttft_sum: row.get(33)?,
-        ttft_count: row.get(34)?,
-        latency_sum: row.get(35)?,
-        latency_max: row.get(36)?,
-        input_tokens_max: row.get(37)?,
-        input_tokens_present: row.get(38)?,
-        tok_s_sum: row.get(39)?,
-        tok_s_count: row.get(40)?,
-        cache_hit_sum: row.get(41)?,
-        cache_hit_count: row.get(42)?,
-        fallback_served: row.get(43)?,
+        ttfb_max: row.get(33)?,
+        ttft_sum: row.get(34)?,
+        ttft_count: row.get(35)?,
+        latency_sum: row.get(36)?,
+        latency_max: row.get(37)?,
+        input_tokens_max: row.get(38)?,
+        input_tokens_present: row.get(39)?,
+        tok_s_sum: row.get(40)?,
+        tok_s_count: row.get(41)?,
+        cache_hit_sum: row.get(42)?,
+        cache_hit_count: row.get(43)?,
+        fallback_served: row.get(44)?,
     })
 }
 
@@ -364,7 +365,7 @@ pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
 /// index is read here.
 pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64)> {
     let fine = map_fine_row(row)?;
-    let bucket = row.get(44)?;
+    let bucket = row.get(45)?;
     Ok((fine, bucket))
 }
 
@@ -390,43 +391,55 @@ pub fn earliest_ts_start(db: &UsageDb, from_ms: i64) -> Result<Option<i64>, Quer
     Ok(earliest)
 }
 
+/// How many leading columns every grain-keyed statement spends on its
+/// [`GroupKey`]: `model, provider, upstream, alias, provider_kind, seat`.
+pub(super) const GROUP_KEY_COLUMNS: usize = 6;
+
+/// Read the [`GroupKey`] from the first [`GROUP_KEY_COLUMNS`] columns of a
+/// grain-keyed result row. Every statement whose rows are matched by key reads
+/// it here, so no reader can key on a different column set.
+pub(super) fn read_group_key(row: &Row) -> rusqlite::Result<GroupKey> {
+    Ok(GroupKey {
+        model: row.get(0)?,
+        provider: row.get(1)?,
+        upstream: row.get(2)?,
+        alias: row.get(3)?,
+        provider_kind: row.get(4)?,
+        seat: row.get(5)?,
+    })
+}
+
 /// Build an `AggRow` from a result row. The column order matches `AGG_SQL`.
 fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
     Ok(AggRow {
-        key: GroupKey {
-            model: row.get(0)?,
-            provider: row.get(1)?,
-            upstream: row.get(2)?,
-            alias: row.get(3)?,
-            provider_kind: row.get(4)?,
-        },
-        requests: row.get(5)?,
-        ok: row.get(6)?,
-        errors: row.get(7)?,
-        input_tokens: row.get(8)?,
-        output_tokens: row.get(9)?,
-        reasoning_tokens: row.get(10)?,
-        cache_read_peak: row.get(11)?,
-        cache_read_avg: row.get(12)?,
-        cache_read_billed: row.get(13)?,
-        cache_write_5m: row.get(14)?,
-        cache_write_1h: row.get(15)?,
-        server_tool_calls: row.get(16)?,
-        sum_ttfb_ms: row.get(17)?,
-        ttfb_count: row.get(18)?,
-        gen_window_ms: row.get(19)?,
-        gen_output_tokens: row.get(20)?,
-        reasoning_present: row.get(21)?,
-        cache_read_present: row.get(22)?,
-        cache_write_5m_present: row.get(23)?,
-        cache_write_1h_present: row.get(24)?,
-        server_tool_present: row.get(25)?,
-        stream_count: row.get(26)?,
-        client_disconnect_total: row.get(27)?,
-        client_disconnect_pre_dispatch: row.get(28)?,
-        cancelled_total: row.get(29)?,
-        cache_write_tokens: row.get(30)?,
-        cache_write_present: row.get(31)?,
+        key: read_group_key(row)?,
+        requests: row.get(6)?,
+        ok: row.get(7)?,
+        errors: row.get(8)?,
+        input_tokens: row.get(9)?,
+        output_tokens: row.get(10)?,
+        reasoning_tokens: row.get(11)?,
+        cache_read_peak: row.get(12)?,
+        cache_read_avg: row.get(13)?,
+        cache_read_billed: row.get(14)?,
+        cache_write_5m: row.get(15)?,
+        cache_write_1h: row.get(16)?,
+        server_tool_calls: row.get(17)?,
+        sum_ttfb_ms: row.get(18)?,
+        ttfb_count: row.get(19)?,
+        gen_window_ms: row.get(20)?,
+        gen_output_tokens: row.get(21)?,
+        reasoning_present: row.get(22)?,
+        cache_read_present: row.get(23)?,
+        cache_write_5m_present: row.get(24)?,
+        cache_write_1h_present: row.get(25)?,
+        server_tool_present: row.get(26)?,
+        stream_count: row.get(27)?,
+        client_disconnect_total: row.get(28)?,
+        client_disconnect_pre_dispatch: row.get(29)?,
+        cancelled_total: row.get(30)?,
+        cache_write_tokens: row.get(31)?,
+        cache_write_present: row.get(32)?,
         cache_write_lifetimes: None,
     })
 }
@@ -444,7 +457,7 @@ pub(super) const ERRORS_BY_CLASS_SQL: &str = concat!(
     "\
 SELECT
     COALESCE(model, requested_model) AS model, provider, upstream, alias,
-    provider_kind,
+    provider_kind, seat,
     COALESCE(resolved_class, 'unclassified')            AS class,
     COUNT(*)                                            AS count
 FROM requests
@@ -454,7 +467,7 @@ WHERE ts_start >= ?1 AND ts_start < ?2
     inference_rows!(),
     "
 GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
-         provider_kind,
+         provider_kind, seat,
          COALESCE(resolved_class, 'unclassified')"
 );
 
@@ -479,14 +492,11 @@ pub fn errors_by_class(
     let mut stmt = db.conn().prepare(ERRORS_BY_CLASS_SQL)?;
     let rows = stmt
         .query_map([from_ms, to_ms], |row| {
-            let key = GroupKey {
-                model: row.get(0)?,
-                provider: row.get(1)?,
-                upstream: row.get(2)?,
-                alias: row.get(3)?,
-                provider_kind: row.get(4)?,
-            };
-            Ok((key, row.get::<_, String>(5)?, row.get::<_, i64>(6)?))
+            Ok((
+                read_group_key(row)?,
+                row.get::<_, String>(GROUP_KEY_COLUMNS)?,
+                row.get::<_, i64>(GROUP_KEY_COLUMNS + 1)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -545,7 +555,7 @@ pub fn latest_quota_by_seat(db: &UsageDb) -> Result<Vec<QuotaSnapshot>, QueryErr
 
 const TTFBS_SQL: &str = concat!(
     "\
-SELECT model, provider, upstream, alias, provider_kind, ttfb_ms
+SELECT model, provider, upstream, alias, provider_kind, seat, ttfb_ms
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
   AND ttfb_ms IS NOT NULL AND stream = 1 AND outcome = 'ok'
@@ -561,14 +571,7 @@ pub fn ttfbs(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<(GroupKey, i6
     let mut stmt = db.conn().prepare(TTFBS_SQL)?;
     let rows = stmt
         .query_map([from_ms, to_ms], |row| {
-            let key = GroupKey {
-                model: row.get(0)?,
-                provider: row.get(1)?,
-                upstream: row.get(2)?,
-                alias: row.get(3)?,
-                provider_kind: row.get(4)?,
-            };
-            Ok((key, row.get::<_, i64>(5)?))
+            Ok((read_group_key(row)?, row.get::<_, i64>(GROUP_KEY_COLUMNS)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)

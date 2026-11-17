@@ -1,9 +1,10 @@
 //! Grouped, priced, deadline-bounded aggregate query over the usage ledger.
 //!
 //! One SQL statement reads the ledger at the finest cost-relevant grain
-//! (`model, provider, upstream, alias, provider_kind` -- the kind is part of the
-//! grain because reasoning pricing depends on the structure the row was written
-//! under, not on current config); the fold in this module prices each
+//! (`model, provider, upstream, alias, provider_kind, seat` -- the kind is part
+//! of the grain because reasoning pricing depends on the structure the row was
+//! written under, not on current config, and the seat so a seat grouping reads
+//! the persisted column); the fold in this module prices each
 //! fine row through a caller-supplied closure BEFORE the upstream dimension is
 //! discarded, rolls the priced fine rows up to the requested coarse dimension,
 //! and derives the display metrics. Totals are folded from the SAME per-group
@@ -17,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::UsageDb;
 
@@ -96,15 +97,55 @@ pub struct QuerySpec {
     pub bucket: Option<BucketSpec>,
 }
 
-/// The dimension a result set is grouped by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The dimension a result set is grouped by: the one list of groupings every
+/// usage reader offers.
+///
+/// The serialized form is the lowercase token [`GroupDim::as_str`] returns;
+/// the serde rename and `as_str` must stay in lockstep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GroupDim {
     /// Served model nickname (coalesced to the requested model).
     Model,
-    /// Served provider name.
-    Provider,
     /// Resolved routing alias.
     Alias,
+    /// Served provider name.
+    Provider,
+    /// The credential identity the row was served under, read from the
+    /// persisted `seat` column.
+    Seat,
+}
+
+impl GroupDim {
+    /// Every grouping, in display order.
+    pub const ALL: [Self; 4] = [Self::Model, Self::Alias, Self::Provider, Self::Seat];
+
+    /// The wire token for this grouping.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Alias => "alias",
+            Self::Provider => "provider",
+            Self::Seat => "seat",
+        }
+    }
+
+    /// The grouping whose token is `token`, or `None` for an unknown token.
+    pub fn parse(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|dim| dim.as_str() == token)
+    }
+
+    /// The label a fine row rolls up under for this grouping; a NULL grouping
+    /// column reads as `(unattributed)`.
+    pub fn label(self, key: &GroupKey) -> String {
+        let column = match self {
+            Self::Model => key.model.as_deref(),
+            Self::Alias => Some(key.alias.as_str()),
+            Self::Provider => key.provider.as_deref(),
+            Self::Seat => key.seat.as_deref(),
+        };
+        column.unwrap_or(UNATTRIBUTED).to_string()
+    }
 }
 
 /// The cost verdict for one fine-grained [`AggRow`], as decided by the caller's
@@ -386,7 +427,7 @@ fn fold_groups(
         let mut fine = row?;
         attach(&mut fine.agg, 0, &mut lifetimes);
         let cost = price(&fine.agg);
-        let label = group_label(&fine.agg.key, spec.group_by);
+        let label = spec.group_by.label(&fine.agg.key);
         groups.entry(label).or_default().add(&fine, cost);
     }
     Ok(())
@@ -428,7 +469,7 @@ fn fold_groups_and_buckets(
         }
         attach(&mut fine.agg, bucket_ix, &mut lifetimes);
         let cost = price(&fine.agg);
-        let label = group_label(&fine.agg.key, spec.group_by);
+        let label = spec.group_by.label(&fine.agg.key);
         groups.entry(label).or_default().add(&fine, cost);
         buckets.entry(bucket_ix).or_default().add(&fine, cost);
     }
@@ -475,21 +516,6 @@ fn densify(
     QuerySeries {
         bucket_ms: bucket.width_ms,
         buckets: filled,
-    }
-}
-
-/// The label a fine row rolls up under for the requested dimension.
-fn group_label(key: &GroupKey, dim: GroupDim) -> String {
-    match dim {
-        GroupDim::Model => key
-            .model
-            .clone()
-            .unwrap_or_else(|| UNATTRIBUTED.to_string()),
-        GroupDim::Provider => key
-            .provider
-            .clone()
-            .unwrap_or_else(|| UNATTRIBUTED.to_string()),
-        GroupDim::Alias => key.alias.clone(),
     }
 }
 

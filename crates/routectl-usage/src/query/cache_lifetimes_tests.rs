@@ -14,6 +14,7 @@ use crate::query::{BucketSpec, GroupDim, QuerySpec, RowCost, aggregate, query};
 struct Writes {
     ts_start: i64,
     provider: &'static str,
+    seat: Option<&'static str>,
     legacy_5m: Option<i64>,
     legacy_1h: Option<i64>,
     total: Option<i64>,
@@ -27,6 +28,7 @@ impl Default for Writes {
         Self {
             ts_start: 100,
             provider: "pa",
+            seat: None,
             legacy_5m: None,
             legacy_1h: None,
             total: None,
@@ -51,9 +53,9 @@ fn seed(db: &UsageDb, rows: &[Writes]) {
                  requested_model, alias, model, provider, upstream, stream, outcome, \
                  latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
                  input_tokens, cache_read, cache_write_5m, cache_write_1h, \
-                 cache_write_tokens, cache_write_lifetimes) \
+                 cache_write_tokens, cache_write_lifetimes, seat) \
                  VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', 'm1', ?3, 'u1', 0, \
-                 'ok', 10, 0, 0, 1, 0, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 'ok', 10, 0, 0, 1, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     w.ts_start,
                     format!("r{index}"),
@@ -64,6 +66,7 @@ fn seed(db: &UsageDb, rows: &[Writes]) {
                     w.legacy_1h,
                     w.total,
                     w.split,
+                    w.seat,
                 ],
             )
             .expect("insert row");
@@ -439,6 +442,57 @@ fn series_bucket_lifetime_sums_reconcile_to_the_group_sums() {
         "the fixture must split a group across buckets"
     );
     assert_eq!(per_provider(&bucketed), per_provider(&unbucketed));
+}
+
+#[test]
+fn each_seat_of_one_provider_gets_its_own_lifetimes_on_every_priced_read() {
+    // Arrange: one provider writing under two seats, each with a positive
+    // total and its own split.
+    let (_dir, mut db) = open_db();
+    seed(
+        &db,
+        &[
+            Writes {
+                seat: Some("pa"),
+                ..new_era(30, Some(r#"{"300":30}"#))
+            },
+            Writes {
+                seat: Some("pa#two"),
+                ..new_era(70, Some(r#"{"3600":50}"#))
+            },
+        ],
+    );
+    let expected = BTreeMap::from([
+        (
+            Some("pa".to_string()),
+            CacheWriteLifetimes {
+                tokens_by_lifetime: BTreeMap::from([(300, 30)]),
+                unknown_tokens: 0,
+                invalid_split: false,
+            },
+        ),
+        (
+            Some("pa#two".to_string()),
+            CacheWriteLifetimes {
+                tokens_by_lifetime: BTreeMap::from([(3600, 50)]),
+                unknown_tokens: 20,
+                invalid_split: false,
+            },
+        ),
+    ]);
+
+    // Act
+    let reads = priced_reads(&mut db);
+
+    // Assert: two fine rows, each carrying only its own seat's writes.
+    for (path, read) in reads {
+        let by_seat: BTreeMap<Option<String>, CacheWriteLifetimes> = read
+            .iter()
+            .map(|row| (row.key.seat.clone(), lifetimes_of(row).clone()))
+            .collect();
+        assert_eq!(read.len(), 2, "{path}: one fine row per seat");
+        assert_eq!(by_seat, expected, "{path}");
+    }
 }
 
 /// One legacy-only group: its name, the seeded rows, and the expected

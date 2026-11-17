@@ -26,6 +26,7 @@ struct Fixture {
     provider: Option<&'static str>,
     upstream: Option<&'static str>,
     alias: &'static str,
+    seat: Option<&'static str>,
     outcome: &'static str,
     stream: i64,
     latency_ms: i64,
@@ -51,6 +52,7 @@ impl Default for Fixture {
             provider: Some("pa"),
             upstream: Some("u1"),
             alias: "al",
+            seat: None,
             outcome: "ok",
             stream: 0,
             latency_ms: 10,
@@ -74,9 +76,9 @@ fn insert(db: &UsageDb, f: &Fixture) {
              requested_model, alias, model, provider, upstream, stream, outcome, \
              latency_ms, ttfb_ms, tool_count, msg_count, attempt_count, \
              fallback_count, input_tokens, output_tokens, reasoning_tokens, \
-             cache_read, cache_write_5m, cache_write_1h, server_tool_use) \
+             cache_read, cache_write_5m, cache_write_1h, server_tool_use, seat) \
              VALUES (?1, ?1, ?2, 'openai', 'req-model', ?3, ?4, ?5, ?6, ?7, ?8, \
-             ?9, ?10, 0, 0, 1, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             ?9, ?10, 0, 0, 1, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             rusqlite::params![
                 f.ts_start,
                 f.request_id,
@@ -96,6 +98,7 @@ fn insert(db: &UsageDb, f: &Fixture) {
                 f.cache_write_5m,
                 f.cache_write_1h,
                 f.server_tool_use,
+                f.seat,
             ],
         )
         .expect("insert fixture row");
@@ -689,3 +692,4 @@ include!("grouped_hand_computed_tests.rs");
 include!("grouped_series_tests.rs");
 include!("grouped_series_grid_tests.rs");
 include!("grouped_robustness_tests.rs");
+include!("grouped_seat_tests.rs");

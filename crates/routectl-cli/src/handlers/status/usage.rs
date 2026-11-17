@@ -150,7 +150,7 @@ struct UsageGroup {
 }
 
 impl UsageGroup {
-    /// Fold another era-partition of the SAME reported group in (verified by
+    /// Fold another era or seat partition of the SAME reported group in (verified by
     /// [`same_reported_group`]). Every field this panel emits is additive
     /// except the cached-context peak, which is a per-turn SNAPSHOT high-water
     /// mark and so takes the MAX; the error-class maps merge per class.
@@ -337,11 +337,12 @@ fn collect(
 /// the window-wide totals map.
 ///
 /// The ledger read groups at a finer grain than this panel reports: it carries
-/// the row's persisted `provider_kind` so cost can be resolved per era, while
-/// this panel's documented group grain is `(alias, provider, model, upstream)`.
-/// The era partitions are therefore coalesced back together here, which keeps
-/// the panel's group CARDINALITY and wire shape identical to what a kind-blind
-/// read produced -- a group spanning two eras reports the sum of both.
+/// the row's persisted `provider_kind` so cost can be resolved per era, and its
+/// `seat`, while this panel's documented group grain is `(alias, provider,
+/// model, upstream)`. The era and seat partitions are therefore coalesced back
+/// together here, which keeps the panel's group CARDINALITY and wire shape
+/// identical to what a kind- and seat-blind read produced -- a group spanning
+/// two eras or two seats reports the sum of both.
 fn assemble(
     token: &'static str,
     bounds: WindowBounds,
@@ -375,9 +376,9 @@ fn assemble(
         totals.cache_read_present += row.cache_read_present;
         totals.cache_write_tokens += row.cache_write_tokens;
         totals.cache_write_present += row.cache_write_present;
-        // The breakdown is grouped at the SAME kind-bearing grain as the
-        // aggregate, so this stays an exact-match lookup; the class maps are
-        // merged together when the era partitions coalesce below.
+        // The breakdown is grouped at the SAME fine grain as the aggregate, so
+        // this stays an exact-match lookup; the class maps are merged together
+        // when the era and seat partitions coalesce below.
         let group_classes = per_group.remove(&row.key).unwrap_or_default();
         let mapped = map_group(row, group_classes);
         match groups.iter_mut().find(|g| same_reported_group(g, &mapped)) {
@@ -400,7 +401,8 @@ fn assemble(
 
 /// Whether two mapped groups occupy the same REPORTED group of this panel, i.e.
 /// agree on the whole `(alias, provider, model, upstream)` key the wire carries.
-/// Two rows of one re-kinded provider satisfy this and are merged.
+/// Two rows of one re-kinded provider, or of two seats of one provider,
+/// satisfy this and are merged.
 fn same_reported_group(a: &UsageGroup, b: &UsageGroup) -> bool {
     a.alias == b.alias && a.provider == b.provider && a.model == b.model && a.upstream == b.upstream
 }
@@ -1016,6 +1018,7 @@ mod tests {
                     upstream: Some("u".into()),
                     alias: "a".into(),
                     provider_kind: Some("anthropic-api".into()),
+                    seat: None,
                 },
                 requests: 3,
                 ok: 2,
@@ -1053,6 +1056,7 @@ mod tests {
                     upstream: Some("u".into()),
                     alias: "a".into(),
                     provider_kind: Some("anthropic-api".into()),
+                    seat: None,
                 },
                 "http-5xx".into(),
                 1,
@@ -1271,6 +1275,78 @@ mod tests {
             .sum();
         assert_eq!(group_sum, group["errors"].as_i64().unwrap());
         assert_eq!(json["data"]["totals"]["errors"], 4);
+    }
+
+    /// Seed a WAL ledger whose rows share ONE `(alias, provider, model,
+    /// upstream)` key and one `provider_kind` but carry DIFFERENT persisted
+    /// seats. Each tuple is `(seat, outcome, resolved_class)`.
+    fn seed_seats(path: &Path, rows: &[(Option<&str>, &str, Option<&str>)]) {
+        let db = open(path).expect("open ledger");
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+        for (i, (seat, outcome, class)) in rows.iter().enumerate() {
+            db.conn()
+                .execute(
+                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                     requested_model, alias, model, provider, upstream, provider_kind, \
+                     seat, stream, outcome, latency_ms, tool_count, msg_count, \
+                     attempt_count, fallback_count, input_tokens, output_tokens, \
+                     cache_read, resolved_class) \
+                     VALUES (?1, ?1, ?2, 'anthropic', 'm', 'a', 'm', 'p', 'u', \
+                     'anthropic-api', ?3, 1, ?4, 500, 0, 0, 1, 0, 10, 20, ?5, ?6)",
+                    rusqlite::params![now, format!("r{i}"), seat, outcome, 5 * (i + 1), class],
+                )
+                .expect("seed seat row");
+        }
+    }
+
+    #[tokio::test]
+    async fn seats_of_one_reported_group_merge_into_one_group() {
+        // Arrange: two seats under one reported key, with errors in both.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_seats(
+            &path,
+            &[
+                (Some("p#one"), "upstream_error", Some("http-5xx")),
+                (Some("p#two"), "upstream_error", Some("http-5xx")),
+                (Some("p#two"), "gate_blocked", None),
+                (Some("p#one"), "ok", None),
+            ],
+        );
+
+        // Act
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+
+        // Assert: one group carrying every seat's rows, figures hand-computed
+        // from the seed (cache_read 5, 10, 15, 20).
+        assert_eq!(status, StatusCode::OK);
+        let groups = json["data"]["groups"].as_array().unwrap();
+        assert_eq!(
+            groups.len(),
+            1,
+            "seats are not a panel dimension: {groups:?}"
+        );
+        let group = &groups[0];
+        assert_eq!(group["requests"], 4);
+        assert_eq!(group["ok"], 1);
+        assert_eq!(group["errors"], 3);
+        assert_eq!(group["input_tokens"], 40);
+        assert_eq!(group["output_tokens"], 80);
+        assert_eq!(group["cache_read_peak"], 20);
+        assert_eq!(group["cache_read_billed"], 50);
+        assert_eq!(group["cache_read_present"], 4);
+        assert_eq!(group["errors_by_class"]["http-5xx"], 2);
+        assert_eq!(group["errors_by_class"]["unclassified"], 1);
+        let class_sum: i64 = group["errors_by_class"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_i64().unwrap())
+            .sum();
+        assert_eq!(class_sum, 3, "the merged class map sums to errors");
+        assert_eq!(json["data"]["totals"]["requests"], 4);
+        assert_eq!(json["data"]["totals"]["errors"], 3);
     }
 
     /// The four outcome buckets of one metric set: `(ok, errors,

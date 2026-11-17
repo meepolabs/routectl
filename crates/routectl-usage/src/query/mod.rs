@@ -164,10 +164,16 @@ pub struct GroupKey {
     /// this keeps them apart; a caller reporting at a kind-agnostic grain
     /// coalesces the partitions back together AFTER pricing.
     pub provider_kind: Option<String>,
+    /// Credential identity the row was served under (`seat_key(provider,
+    /// label)`), read from the persisted `seat` column. `None` for rows
+    /// written before the column was populated and for forwarded client
+    /// credentials. One provider can serve under several seats, so this is
+    /// never derived from `provider`.
+    pub seat: Option<String>,
 }
 
 /// One aggregate row at the finest cost-relevant granularity:
-/// `(model, provider, upstream, alias, provider_kind)`, where `model` coalesces
+/// `(model, provider, upstream, alias, provider_kind, seat)`, where `model` coalesces
 /// to `requested_model` so pre-dispatch aborts (NULL `model`) attribute to the
 /// route the caller asked for rather than a NULL bucket, and `provider_kind` is
 /// the kind persisted with the row so each era of a re-kinded provider prices
@@ -196,7 +202,8 @@ pub struct GroupKey {
 /// cancelled_total` per group.
 #[derive(Debug, Clone)]
 pub struct AggRow {
-    /// The group's `(model, provider, upstream, alias, provider_kind)` key.
+    /// The group's `(model, provider, upstream, alias, provider_kind, seat)`
+    /// key.
     pub key: GroupKey,
     /// Total requests in the group.
     pub requests: i64,

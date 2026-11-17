@@ -24,6 +24,7 @@ use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Vis
 use crate::cache_writes::{LEGACY_1H_SECONDS, LEGACY_5M_SECONDS};
 use crate::db::UsageDb;
 
+use super::aggregate::{GROUP_KEY_COLUMNS, read_group_key};
 use super::{AggRow, GroupKey, QueryError};
 
 /// The cache writes of one fine aggregate row, split by how long the written
@@ -71,7 +72,7 @@ macro_rules! cache_lifetimes_sql {
     ($bucket:literal) => {
         concat!(
             "SELECT COALESCE(model, requested_model), provider, upstream, alias,
-        provider_kind, ",
+        provider_kind, seat, ",
             $bucket,
             ", cache_write_tokens, cache_write_lifetimes
     FROM requests
@@ -147,16 +148,10 @@ pub(super) fn read_lifetimes(
 }
 
 fn fold_row(row: &Row<'_>, out: &mut LifetimesByRow) -> rusqlite::Result<()> {
-    let key = GroupKey {
-        model: row.get(0)?,
-        provider: row.get(1)?,
-        upstream: row.get(2)?,
-        alias: row.get(3)?,
-        provider_kind: row.get(4)?,
-    };
-    let bucket: i64 = row.get(5)?;
-    let total: i64 = row.get(6)?;
-    let split = match row.get_ref(7)? {
+    let key = read_group_key(row)?;
+    let bucket: i64 = row.get(GROUP_KEY_COLUMNS)?;
+    let total: i64 = row.get(GROUP_KEY_COLUMNS + 1)?;
+    let split = match row.get_ref(GROUP_KEY_COLUMNS + 2)? {
         ValueRef::Text(text) => parse_split(text),
         _ => Vec::new(),
     };

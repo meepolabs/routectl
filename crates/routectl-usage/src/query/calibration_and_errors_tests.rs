@@ -397,3 +397,92 @@ fn cancelled_rows_stay_out_of_errors_and_the_class_breakdown() {
     let class_sum: i64 = breakdown.iter().map(|(_, _, n)| *n).sum();
     assert_eq!(class_sum, row.errors);
 }
+
+/// Insert a streaming row under an explicit `seat`, with an outcome, a
+/// resolved class and a first-byte time, so the seat-keyed side reads are
+/// exercisable on one provider.
+fn insert_seat_row(
+    db: &UsageDb,
+    request_id: &str,
+    seat: Option<&str>,
+    outcome: &str,
+    resolved_class: Option<&str>,
+    ttfb_ms: i64,
+) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, ttfb_ms, tool_count, msg_count, attempt_count, \
+             fallback_count, resolved_class, seat) \
+             VALUES (100, 100, ?1, 'openai', 'req-model', 'al', 'm', 'pa', 'ua', 1, \
+             ?2, 50, ?3, 0, 0, 1, 0, ?4, ?5)",
+            rusqlite::params![request_id, outcome, ttfb_ms, resolved_class, seat],
+        )
+        .expect("insert seat row");
+}
+
+#[test]
+fn error_class_and_ttfb_rows_carry_the_seat_of_their_fine_group() {
+    use std::collections::{BTreeMap, HashMap};
+
+    // Arrange: one provider, two seats plus a pre-seat row; each seat has
+    // errors and a streaming success.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    insert_seat_row(
+        &db,
+        "a-e1",
+        Some("pa"),
+        "upstream_error",
+        Some("http-5xx"),
+        1,
+    );
+    insert_seat_row(&db, "a-e2", Some("pa"), "gate_blocked", None, 2);
+    insert_seat_row(&db, "a-ok", Some("pa"), "ok", None, 11);
+    insert_seat_row(
+        &db,
+        "b-e1",
+        Some("pa#two"),
+        "upstream_error",
+        Some("timeout"),
+        3,
+    );
+    insert_seat_row(&db, "b-ok", Some("pa#two"), "ok", None, 22);
+    insert_seat_row(&db, "n-ok", None, "ok", None, 33);
+
+    // Act
+    let agg = aggregate(&db, 0, 1000).expect("aggregate");
+    let breakdown = errors_by_class(&db, 0, 1000).expect("errors_by_class");
+    let ttfb_rows = ttfbs(&db, 0, 1000).expect("ttfbs");
+
+    // Assert: every class row matches a fine row by key, and per key the
+    // classes sum to that fine row's errors.
+    let mut classes: HashMap<GroupKey, BTreeMap<String, i64>> = HashMap::new();
+    for (key, class, count) in breakdown {
+        *classes.entry(key).or_default().entry(class).or_default() += count;
+    }
+    assert_eq!(agg.len(), 3, "one fine row per seat");
+    for row in &agg {
+        let row_classes = classes.remove(&row.key).unwrap_or_default();
+        assert_eq!(
+            row_classes.values().sum::<i64>(),
+            row.errors,
+            "seat {:?}",
+            row.key.seat
+        );
+    }
+    assert!(classes.is_empty(), "unmatched class rows: {classes:?}");
+    let by_seat: BTreeMap<Option<String>, i64> = ttfb_rows
+        .into_iter()
+        .map(|(key, ms)| (key.seat, ms))
+        .collect();
+    assert_eq!(
+        by_seat,
+        BTreeMap::from([
+            (None, 33),
+            (Some("pa".to_string()), 11),
+            (Some("pa#two".to_string()), 22),
+        ])
+    );
+}
