@@ -15,23 +15,18 @@ use crate::commands::provider_env::env_var_for_kind;
 /// Provider kinds an env-detected credential may be OFFERED for. Restricted
 /// to kinds `provider add` can build non-interactively from a bare
 /// `env://VAR` ref with NO extra required input: `anthropic-api` resolves its
-/// whole entry from the ref alone. `openai-compat` is deliberately excluded --
-/// it additionally requires a `--base-url` an env-presence check cannot
-/// supply -- and `openai-responses` is not a kind `provider add` constructs
-/// from an api-key ref at all. An env var whose kind is outside this set is
+/// whole entry from the ref alone. `openai-compat` and `openai-responses` are
+/// deliberately excluded: they additionally require a `--base-url` an
+/// env-presence check cannot supply. An env var whose kind is outside this set is
 /// surfaced by no offer even when it resolves.
 const ENV_OFFERABLE_KINDS: &[&str] = &[routectl_core::provider_kind::config::ANTHROPIC_API];
 
-/// OAuth login ids `init` may OFFER. Restricted to the ids `provider add` can
-/// actually build a provider block for through the oauth login path -- today
-/// only `anthropic` (its sentinel `--kind anthropic` routes the login flow and
-/// writes an `oauth://anthropic` ref). Every other activated login id maps to a
-/// kind `provider add` has no oauth constructor for (`codex` -> openai-responses,
-/// `xai` -> openai-compat, `antigravity` -> gemini), so offering one would
-/// misroute it -- `Offer::provider_add_kind` funnels ALL oauth offers through
-/// the `anthropic` sentinel, wiring `oauth://anthropic` under a foreign name. An
-/// activated id outside this set is surfaced by no offer until `provider add`
-/// grows a constructor for it. Mirrors [`ENV_OFFERABLE_KINDS`].
+/// OAuth login ids `init` may OFFER. `Offer::provider_add_login` hands every
+/// oauth offer to `provider add --login anthropic`, so an offer for any other
+/// activated login id (`codex`, `xai`, `antigravity`) would wire
+/// `oauth://anthropic` under a foreign name; such an id is surfaced by no
+/// offer until that mapping carries the vendor. Mirrors
+/// [`ENV_OFFERABLE_KINDS`].
 const OAUTH_OFFERABLE_IDS: &[&str] = &["anthropic"];
 
 /// The config kind the forwarded (MITM/RC) lane routes through.

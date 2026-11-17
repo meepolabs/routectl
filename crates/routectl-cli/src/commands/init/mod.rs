@@ -70,11 +70,9 @@ pub struct Offer {
     /// Proposed `[providers.<name>]` key.
     pub provider_name: String,
     /// kind_str token: anthropic-api / openai-compat / ... This is the CONFIG
-    /// kind, which is asymmetric with the `provider add` `--kind` sentinel: an
-    /// oauth offer's config kind is `anthropic-api`, but `provider add` routes
-    /// the login path off the sentinel `anthropic`. Use
-    /// [`Offer::provider_add_kind`] to feed `provider add`, never `kind`
-    /// directly.
+    /// family, not a `provider add` flag value: use
+    /// [`Offer::provider_add_login`] and [`Offer::provider_add_format`] to
+    /// feed `provider add`, never `kind` directly.
     pub kind: String,
     pub source: OfferSource,
     /// Scheme label: oauth / env / forwarded.
@@ -82,17 +80,33 @@ pub struct Offer {
 }
 
 impl Offer {
-    /// The `--kind` token to hand `provider add` for this offer. An oauth
-    /// offer maps to the sentinel `anthropic` (the login path); every other
-    /// source uses its config `kind` verbatim. This oauth->`anthropic` mapping
-    /// is only sound because detection restricts oauth offers to the `anthropic`
-    /// login id (see `detect::OAUTH_OFFERABLE_IDS`): `provider add` has no oauth
-    /// constructor for any other login id, so an offer for one would misroute
-    /// here into the anthropic path. Keep the two in lockstep.
-    pub fn provider_add_kind(&self) -> &str {
+    /// The `--login` vendor to hand `provider add` for this offer: an oauth
+    /// offer maps to `anthropic`, every other source to `None`. This mapping
+    /// is only sound because detection restricts oauth offers to the
+    /// `anthropic` login id (see `detect::OAUTH_OFFERABLE_IDS`); an offer for
+    /// another id would be wired as an anthropic login. Keep the two in
+    /// lockstep.
+    pub const fn provider_add_login(&self) -> Option<&'static str> {
         match self.source {
-            OfferSource::Oauth => "anthropic",
-            _ => &self.kind,
+            OfferSource::Oauth => Some("anthropic"),
+            _ => None,
+        }
+    }
+
+    /// The `--format` to hand `provider add` for a non-oauth offer: the
+    /// base-URL format of the offer's config family. `None` for an oauth
+    /// offer, or a family with no single base-URL format.
+    pub fn provider_add_format(&self) -> Option<&'static str> {
+        use routectl_core::provider_kind::config as family;
+        if self.source == OfferSource::Oauth {
+            return None;
+        }
+        match self.kind.as_str() {
+            family::ANTHROPIC_API => Some("anthropic-messages"),
+            family::OPENAI_COMPAT => Some("openai-chat"),
+            family::OPENAI_RESPONSES => Some("openai-responses"),
+            family::GEMINI => Some("gemini"),
+            _ => None,
         }
     }
 }
@@ -373,23 +387,55 @@ mod tests {
     }
 
     #[test]
-    fn provider_add_kind_maps_oauth_to_the_login_sentinel() {
-        let offer = |source| Offer {
+    fn provider_add_flags_map_oauth_to_the_login_and_the_rest_to_a_format() {
+        let offer = |kind: &str, source| Offer {
             provider_name: "claude".into(),
-            kind: "anthropic-api".into(),
+            kind: kind.into(),
             source,
             credential_class: "oauth".into(),
         };
-        assert_eq!(offer(OfferSource::Oauth).provider_add_kind(), "anthropic");
-        assert_eq!(
-            offer(OfferSource::Env).provider_add_kind(),
-            "anthropic-api",
-            "a non-oauth offer keeps its config kind"
-        );
-        assert_eq!(
-            offer(OfferSource::Forwarded).provider_add_kind(),
-            "anthropic-api"
-        );
+        let rows = [
+            (
+                "oauth",
+                offer("anthropic-api", OfferSource::Oauth),
+                Some("anthropic"),
+                None,
+            ),
+            (
+                "env",
+                offer("anthropic-api", OfferSource::Env),
+                None,
+                Some("anthropic-messages"),
+            ),
+            (
+                "forwarded",
+                offer("anthropic-api", OfferSource::Forwarded),
+                None,
+                Some("anthropic-messages"),
+            ),
+            (
+                "api-key prompt",
+                offer("anthropic-api", OfferSource::ApiKeyPrompt),
+                None,
+                Some("anthropic-messages"),
+            ),
+            (
+                "openai-compat env",
+                offer("openai-compat", OfferSource::Env),
+                None,
+                Some("openai-chat"),
+            ),
+            (
+                "bedrock env",
+                offer("bedrock", OfferSource::Env),
+                None,
+                None,
+            ),
+        ];
+        for (row, offer, login, format) in rows {
+            assert_eq!(offer.provider_add_login(), login, "row `{row}`");
+            assert_eq!(offer.provider_add_format(), format, "row `{row}`");
+        }
     }
 
     #[test]

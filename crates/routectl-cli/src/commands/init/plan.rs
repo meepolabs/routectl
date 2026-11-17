@@ -163,8 +163,9 @@ fn nick_taken(candidate: &str, provider: &str, existing: &Config, used: &BTreeSe
     matches!(existing.models.get(candidate), Some(model) if model.provider != provider)
 }
 
-/// Map one selected offer to the `provider add` args that add it. The oauth
-/// sentinel and the env credential var are the only source-specific pieces;
+/// Map one selected offer to the `provider add` args that add it. The
+/// `--login` / `--format` choice and the env credential var are the only
+/// source-specific pieces;
 /// every arg carries `yes: true` because init owns the one wizard-level ack
 /// and calls `provider add` with its confirm bypassed.
 fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
@@ -177,7 +178,9 @@ fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
         OfferSource::ApiKeyPrompt => (None, None),
     };
     ProviderAddArgs {
-        kind: offer.provider_add_kind().to_string(),
+        format: offer.provider_add_format().map(str::to_string),
+        login: offer.provider_add_login().map(str::to_string),
+        auth: None,
         name: offer.provider_name.clone(),
         base_url: None,
         api_key_env,
@@ -247,28 +250,31 @@ mod tests {
         // Sorted by provider name: claude-env, claude-fwd, claude-sub.
         let env = &plan.provider_args[0];
         assert_eq!(env.name, "claude-env");
-        assert_eq!(env.kind, "anthropic-api");
+        assert_eq!(env.format.as_deref(), Some("anthropic-messages"));
+        assert_eq!(env.login, None);
         assert_eq!(env.credential_source, None);
         assert_eq!(env.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
         assert!(env.yes);
 
         let fwd = &plan.provider_args[1];
         assert_eq!(fwd.name, "claude-fwd");
-        assert_eq!(fwd.kind, "anthropic-api");
+        assert_eq!(fwd.format.as_deref(), Some("anthropic-messages"));
+        assert_eq!(fwd.login, None);
         assert_eq!(fwd.credential_source.as_deref(), Some("forwarded"));
         assert_eq!(fwd.api_key_env, None);
         assert!(fwd.yes);
 
         let oauth = &plan.provider_args[2];
         assert_eq!(oauth.name, "claude-sub");
-        assert_eq!(oauth.kind, "anthropic", "oauth routes through the sentinel");
+        assert_eq!(oauth.login.as_deref(), Some("anthropic"));
+        assert_eq!(oauth.format, None, "oauth routes through the managed login");
         assert_eq!(oauth.credential_source, None);
         assert_eq!(oauth.api_key_env, None);
         assert!(oauth.yes);
     }
 
     #[test]
-    fn api_key_prompt_offer_maps_to_bare_anthropic_api_args_for_the_hidden_prompt() {
+    fn api_key_prompt_offer_maps_to_bare_anthropic_messages_args_for_the_hidden_prompt() {
         // The empty-offer capture branch's api-key offer carries no env var and
         // no forwarded source, so `provider add` falls through to its hidden
         // prompt and captures to the managed store. Anything else here (an env
@@ -286,7 +292,9 @@ mod tests {
 
         let plan = build_plan(&a, &Config::default(), &offers).expect("plan builds");
         let args = &plan.provider_args[0];
-        assert_eq!(args.kind, "anthropic-api");
+        assert_eq!(args.format.as_deref(), Some("anthropic-messages"));
+        assert_eq!(args.login, None);
+        assert_eq!(args.auth, None);
         assert_eq!(args.api_key_env, None);
         assert_eq!(args.credential_source, None);
         assert_eq!(args.secret_ref, None);
@@ -499,7 +507,9 @@ mod tests {
 
         assert_eq!(first.provider_args.len(), second.provider_args.len());
         for (x, y) in first.provider_args.iter().zip(second.provider_args.iter()) {
-            assert_eq!(x.kind, y.kind);
+            assert_eq!(x.format, y.format);
+            assert_eq!(x.login, y.login);
+            assert_eq!(x.auth, y.auth);
             assert_eq!(x.name, y.name);
             assert_eq!(x.base_url, y.base_url);
             assert_eq!(x.api_key_env, y.api_key_env);

@@ -72,6 +72,7 @@ overlays merge, what's reserved.
 - [Inspecting a request offline (`prompt-size`)](#inspecting-a-request-offline-routectl-prompt-size)
 - [Inspecting the effective config](#inspecting-the-effective-config-config-show---effective)
 - [Editing config from the CLI](#editing-config-from-the-cli-config-set--config-unset)
+- [Adding a provider (`provider add`)](#adding-a-provider-provider-add)
 - [MITM front-proxy (`[mitm]`)](#mitm-front-proxy-mitm)
 
 **Client integrations**
@@ -155,8 +156,10 @@ lists the old folder. A `credential` is always a reference:
 form, or `forwarded` (see
 [Provider entries](#provider-entries-providersx)); inline `literal:`
 values are rejected at parse and resolve. To add a
-provider interactively (with secret capture) use
-`routectl provider add`; the rest of this document is the full
+provider from the command line (with secret capture) use
+`routectl provider add --format <format>` or
+`routectl provider add --login <vendor>` (see
+[Adding a provider](#adding-a-provider-provider-add)); the rest of this document is the full
 reference for everything the wizard does not cover.
 
 ## Top-level shape
@@ -3549,6 +3552,44 @@ differing only in the mutation and in two path rules:
 Removing a key that is not set writes nothing (there is no override to
 remove) and reports no change. Comments and key ordering elsewhere in
 the file survive, exactly as with `set`.
+
+### Adding a provider (`provider add`)
+
+`routectl provider add` writes one `[providers.<name>]` block through
+the same pipeline. Name what the provider speaks with `--format`, or a
+routectl-managed login with `--login`:
+
+```sh
+routectl provider add --format openai-chat --name grok \
+  --base-url https://api.x.ai/v1 --api-key-env XAI_API_KEY
+routectl provider add --format anthropic-messages --name claude-key \
+  --api-key-env ANTHROPIC_API_KEY
+routectl provider add --format anthropic-messages --name claude-fwd \
+  --credential-source forwarded
+routectl provider add --login codex --name codex
+```
+
+- **`--format`** is `anthropic-messages`, `openai-chat`,
+  `openai-responses` or `gemini`. `openai-chat` and `openai-responses`
+  need `--base-url`; `anthropic-messages` defaults to
+  `https://api.anthropic.com`; `gemini` always uses the public Gemini
+  REST base.
+- **`--auth`** is optional. Left out, it is `x-api-key` for
+  `anthropic-messages`, `x-goog-api-key` for `gemini` and `bearer` for
+  the others (a forwarded credential is always `bearer`). The chosen
+  value is written to the entry and shown in the confirmation, and a
+  combination the router refuses is refused with nothing written.
+- **`--login`** is `anthropic` or `codex`. It runs the `login` flow after
+  the confirmation and writes the vendor's own `format`, `base_url` and
+  `auth` with `credential = "oauth://<vendor>"`; it takes no secret
+  flag, `--base-url` or `--auth`.
+- The credential comes from `--api-key-env`, `--secret-ref`,
+  `--api-key-stdin` (captured to the managed `file://` store) or, on a
+  terminal, the matching conventional environment variable or a hidden
+  prompt.
+
+The old `--kind` flag is refused with a message naming `--format` and
+`--login`; nothing is written.
 
 ## Prompt-cache auto-emission (`[cache]`)
 

@@ -42,9 +42,11 @@ fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
     path
 }
 
-fn args(kind: &str, name: &str) -> ProviderAddArgs {
+fn args(format: &str, name: &str) -> ProviderAddArgs {
     ProviderAddArgs {
-        kind: kind.to_string(),
+        format: Some(format.to_string()),
+        login: None,
+        auth: None,
         name: name.to_string(),
         base_url: None,
         api_key_env: None,
@@ -53,6 +55,14 @@ fn args(kind: &str, name: &str) -> ProviderAddArgs {
         credential_source: None,
         overwrite: false,
         yes: true,
+    }
+}
+
+fn login_args(vendor: &str, name: &str) -> ProviderAddArgs {
+    ProviderAddArgs {
+        format: None,
+        login: Some(vendor.to_string()),
+        ..args("anthropic-messages", name)
     }
 }
 
@@ -78,9 +88,10 @@ fn resolve_secret_env_yields_scheme_ref_not_the_value() {
     let key = "ROUTECTL_PROVIDER_ADD_RESOLVE_KEY";
     set_env(key, "the-actual-secret-value");
 
-    let mut a = args("anthropic-api", "x");
+    let mut a = args("anthropic-messages", "x");
     a.api_key_env = Some(key.to_string());
-    let (ref_str, class, _pending) = resolve_secret(&a, &FakeIo::default()).unwrap();
+    let (ref_str, class, _pending) =
+        resolve_secret(&a, "anthropic-api", &FakeIo::default()).unwrap();
 
     assert_eq!(ref_str, format!("env://{key}"));
     assert_eq!(class, "env");
@@ -96,9 +107,9 @@ fn resolve_secret_rejects_literal_ref() {
     // `--secret-ref literal:...` is refused: the inline key would land
     // on argv and be persisted in plaintext in config. The error must
     // steer to the safe paths and never echo the key value.
-    let mut a = args("openai-compat", "x");
+    let mut a = args("openai-chat", "x");
     a.secret_ref = Some("literal:keep-me-exactly".to_string());
-    let err = match resolve_secret(&a, &FakeIo::default()) {
+    let err = match resolve_secret(&a, "openai-compat", &FakeIo::default()) {
         Ok(_) => panic!("a literal: secret-ref must be rejected"),
         Err(e) => e,
     };
@@ -123,7 +134,7 @@ async fn adds_openai_compat_via_secret_ref() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
 
@@ -153,7 +164,7 @@ async fn adds_via_api_key_env_without_leaking_the_value() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = args("anthropic-api", "claude");
+    let mut a = args("anthropic-messages", "claude");
     a.api_key_env = Some(key.to_string());
 
     let result = run(&path, a).await.expect("add");
@@ -182,7 +193,7 @@ async fn key_env_that_is_unset_errors_without_writing() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("anthropic-api", "claude");
+    let mut a = args("anthropic-messages", "claude");
     a.api_key_env = Some(key.to_string());
 
     let err = run(&path, a).await.expect_err("unset env var must error");
@@ -219,7 +230,7 @@ default = \"gpt\"
 ";
     let path = write_config(dir.path(), &body);
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
 
@@ -260,7 +271,7 @@ format = \"openai-chat\"
     );
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &body);
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
 
@@ -291,7 +302,7 @@ async fn identical_re_add_is_a_no_op() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut first = args("openai-compat", "grok");
+    let mut first = args("openai-chat", "grok");
     first.base_url = Some("https://api.x.example/v1".to_string());
     first.secret_ref = Some("file:///abs/key".to_string());
     assert_eq!(
@@ -301,7 +312,7 @@ async fn identical_re_add_is_a_no_op() {
 
     let after_first = std::fs::read(&path).unwrap();
 
-    let mut second = args("openai-compat", "grok");
+    let mut second = args("openai-chat", "grok");
     second.base_url = Some("https://api.x.example/v1".to_string());
     second.secret_ref = Some("file:///abs/key".to_string());
     assert_eq!(
@@ -328,7 +339,7 @@ async fn different_block_on_existing_name_is_refused_without_overwrite() {
     let before = std::fs::read(&path).unwrap();
 
     // "fast" already exists with a different base_url + api_key_ref.
-    let mut a = args("openai-compat", "fast");
+    let mut a = args("openai-chat", "fast");
     a.base_url = Some("https://elsewhere.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
 
@@ -344,7 +355,7 @@ async fn overwrite_replaces_an_existing_block() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = args("openai-compat", "fast");
+    let mut a = args("openai-chat", "fast");
     a.base_url = Some("https://elsewhere.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
     a.overwrite = true;
@@ -366,7 +377,7 @@ async fn overwrite_still_passes_through_the_confirm_gate() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("openai-compat", "fast");
+    let mut a = args("openai-chat", "fast");
     a.base_url = Some("https://elsewhere.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
     a.overwrite = true;
@@ -416,7 +427,7 @@ default = \"no-such-model\"
     let path = write_config(dir.path(), &body);
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
 
@@ -445,14 +456,14 @@ async fn an_unsupported_config_version_is_refused_before_any_side_effect() {
     ];
 
     for (row, body) in rows {
-        // Arrange: an oauth kind, whose success path runs the login seam.
+        // Arrange: a managed login, whose success path runs the login seam.
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), &body);
         let before = std::fs::read(&path).unwrap();
         let io = FakeIo::default();
 
         // Act
-        let err = run_with_io(&path, args("anthropic", "claude-sub"), &io)
+        let err = run_with_io(&path, login_args("anthropic", "claude-sub"), &io)
             .await
             .expect_err(&format!("row `{row}`: the version must be refused"));
 
@@ -485,7 +496,7 @@ async fn missing_secret_source_errors_actionably() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     // no api_key_env, no secret_ref
 
@@ -533,23 +544,23 @@ async fn gemini_rejects_base_url_flag() {
 }
 
 #[tokio::test]
-async fn unsupported_kind_errors_actionably() {
+async fn unsupported_format_errors_actionably() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = args("bedrock", "aws");
+    let mut a = args("bedrock-invoke", "aws");
     a.secret_ref = Some("file:///abs/key".to_string());
 
     let err = run(&path, a)
         .await
-        .expect_err("unsupported kind must error");
+        .expect_err("unsupported format must error");
     let msg = err.to_string();
     assert!(
         msg.contains("cannot be added with this command"),
         "err: {msg}"
     );
     assert!(
-        msg.contains("supported kinds"),
+        msg.contains("supported formats: anthropic-messages, openai-chat"),
         "err lists the supported set: {msg}"
     );
 }
@@ -567,7 +578,7 @@ async fn declining_the_confirmation_writes_nothing() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
     a.yes = false;
@@ -597,7 +608,7 @@ async fn emits_one_audit_event_without_value_or_full_ref() {
     let path = write_config(dir.path(), &current_base());
 
     let (_res, events) = routectl_testkit::with_capture(async {
-        let mut a = args("anthropic-api", "claude");
+        let mut a = args("anthropic-messages", "claude");
         a.api_key_env = Some(key.to_string());
         run(&path, a).await.expect("add");
     })
@@ -746,7 +757,7 @@ async fn api_key_stdin_captures_to_managed_store_and_writes_only_the_ref() {
     let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
     let secret_value = "piped-secret-value-not-real";
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.api_key_stdin = true;
     let io = FakeIo {
@@ -790,7 +801,7 @@ async fn api_key_stdin_on_a_tty_errors_immediately_without_reading() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.api_key_stdin = true;
     let io = FakeIo {
@@ -817,7 +828,7 @@ async fn missing_key_without_tty_errors_actionably_and_never_prompts() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     let io = FakeIo::default(); // not a TTY, no flags
 
@@ -848,7 +859,7 @@ async fn interactive_hidden_prompt_captures_when_tty_and_missing() {
     let prev_var = std::env::var(var).ok();
     unset_env(var);
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     let io = FakeIo {
         is_tty: true,
@@ -882,7 +893,7 @@ async fn interactive_offers_a_resolvable_env_var_and_writes_the_env_ref() {
     let prev_var = std::env::var(var).ok();
     set_env(var, "resolvable-value-not-real");
 
-    let a = args("anthropic-api", "claude");
+    let a = args("anthropic-messages", "claude");
     let io = FakeIo {
         is_tty: true,
         offer_env: true,
@@ -917,7 +928,7 @@ async fn interactive_does_not_offer_an_unresolved_env_var() {
     let prev_var = std::env::var(var).ok();
     unset_env(var);
 
-    let a = args("anthropic-api", "claude");
+    let a = args("anthropic-messages", "claude");
     // offer_env=true would accept IF asked; the unresolved var must mean
     // it is never offered, so the prompt captures instead.
     let io = FakeIo {
@@ -954,7 +965,7 @@ async fn interactive_does_not_offer_an_empty_env_var() {
     // Set-but-empty must NOT satisfy "resolves non-empty NOW": no offer.
     set_env(var, "");
 
-    let a = args("anthropic-api", "claude");
+    let a = args("anthropic-messages", "claude");
     let io = FakeIo {
         is_tty: true,
         offer_env: true,
@@ -978,11 +989,11 @@ async fn interactive_does_not_offer_an_empty_env_var() {
 }
 
 #[tokio::test]
-async fn forwarded_anthropic_api_adds_without_a_secret_prompt() {
+async fn forwarded_anthropic_messages_adds_without_a_secret_prompt() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = args("anthropic-api", "fwd");
+    let mut a = args("anthropic-messages", "fwd");
     a.credential_source = Some("forwarded".to_string());
     let io = FakeIo::default();
 
@@ -1016,20 +1027,20 @@ async fn forwarded_anthropic_api_adds_without_a_secret_prompt() {
 }
 
 #[tokio::test]
-async fn forwarded_on_a_non_anthropic_kind_is_rejected() {
+async fn forwarded_on_a_non_anthropic_format_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("openai-compat", "x");
+    let mut a = args("openai-chat", "x");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.credential_source = Some("forwarded".to_string());
     let io = FakeIo::default();
 
     let err = run_with_io(&path, a, &io)
         .await
-        .expect_err("forwarded is anthropic-api only");
-    assert!(err.to_string().contains("anthropic-api"), "err: {err}");
+        .expect_err("forwarded is anthropic-messages only");
+    assert!(err.to_string().contains("anthropic-messages"), "err: {err}");
     assert_eq!(std::fs::read(&path).unwrap(), before, "must not write");
 }
 
@@ -1039,7 +1050,7 @@ async fn forwarded_with_a_secret_flag_is_rejected() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("anthropic-api", "fwd");
+    let mut a = args("anthropic-messages", "fwd");
     a.credential_source = Some("forwarded".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
     let io = FakeIo::default();
@@ -1055,28 +1066,28 @@ async fn forwarded_with_a_secret_flag_is_rejected() {
 }
 
 #[tokio::test]
-async fn oauth_backed_kind_rejects_base_url_flag() {
+async fn login_rejects_base_url_flag() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let mut a = args("anthropic", "claude-sub");
+    let mut a = login_args("anthropic", "claude-sub");
     a.base_url = Some("https://api.anthropic.com/v1".to_string());
     let io = FakeIo::default();
 
     let err = run_with_io(&path, a, &io)
         .await
-        .expect_err("an oauth-backed kind must reject --base-url");
+        .expect_err("a managed login must reject --base-url");
     assert!(err.to_string().contains("--base-url"), "err: {err}");
     assert_eq!(std::fs::read(&path).unwrap(), before, "must not write");
 }
 
 #[tokio::test]
-async fn oauth_backed_kind_delegates_to_login_and_writes_the_oauth_ref() {
+async fn login_delegates_to_the_login_flow_and_writes_the_oauth_ref() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let a = args("anthropic", "claude-sub");
+    let a = login_args("anthropic", "claude-sub");
     let io = FakeIo::default(); // login_ok = true (already-logged-in seam)
 
     let result = run_with_io(&path, a, &io).await.expect("oauth add");
@@ -1099,7 +1110,7 @@ async fn oauth_login_failure_aborts_before_the_config_write() {
     let path = write_config(dir.path(), &current_base());
     let before = std::fs::read(&path).unwrap();
 
-    let a = args("anthropic", "claude-sub");
+    let a = login_args("anthropic", "claude-sub");
     let io = FakeIo {
         login_ok: false,
         ..Default::default()
@@ -1121,7 +1132,7 @@ async fn declined_confirm_captures_no_secret_file() {
     let xdg = tempfile::tempdir().unwrap();
     let (_xdg_env, secrets) = scoped_secret_dir(xdg.path());
 
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.api_key_stdin = true;
     a.yes = false; // non-terminal stdin -> confirm declines
@@ -1158,7 +1169,7 @@ async fn post_capture_config_conflict_persists_secret_and_reports_recovery() {
     // commit sees a changed file and conflicts, with the capture already
     // done.
     let conflict_path = path.clone();
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.api_key_stdin = true;
     let io = FakeIo {
@@ -1194,7 +1205,7 @@ async fn captured_value_never_appears_in_tracing_events() {
     let secret_value = "tracing-secret-value-not-real";
 
     let (_res, events) = routectl_testkit::with_capture(async {
-        let mut a = args("openai-compat", "grok");
+        let mut a = args("openai-chat", "grok");
         a.base_url = Some("https://api.x.example/v1".to_string());
         a.api_key_stdin = true;
         let io = FakeIo {
@@ -1246,7 +1257,7 @@ async fn symlinked_ancestor_swap_between_phases_lands_at_original_base() {
     std::os::unix::fs::symlink(&real_a, &link).unwrap();
     let _xdg_env = ScopedEnv::set("XDG_CONFIG_HOME", &link);
 
-    let a = args("openai-compat", "grok");
+    let a = args("openai-chat", "grok");
 
     // Act (capture phase): opens the store, canonicalizes through the
     // symlink, and computes the ref off the resolved base.
@@ -1303,7 +1314,7 @@ async fn symlinked_ancestor_swap_between_phases_lands_at_original_base() {
 /// asserting the initial add wrote. Returns the config bytes on disk after
 /// the add so a later rotation can prove config.toml is untouched.
 async fn seed_file_backed_grok(path: &std::path::Path, value: &str) -> Vec<u8> {
-    let mut a = args("openai-compat", "grok");
+    let mut a = args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.api_key_stdin = true;
     let io = FakeIo {
@@ -1335,7 +1346,7 @@ async fn fresh_piped_key_rewrites_secret_and_reports_rotated() {
     // Act: re-add the SAME provider with a NEW piped key + --overwrite. The
     // block normalizes byte-identically (the ref is name-derived), so
     // config.toml is untouched -- but the managed secret must rotate.
-    let mut rotate = args("openai-compat", "grok");
+    let mut rotate = args("openai-chat", "grok");
     rotate.base_url = Some("https://api.x.example/v1".to_string());
     rotate.api_key_stdin = true;
     rotate.overwrite = true;
@@ -1383,7 +1394,7 @@ async fn fresh_piped_key_on_existing_provider_requires_overwrite() {
     let config_before = seed_file_backed_grok(&path, "original-key-not-real").await;
 
     // Act: a fresh capture WITHOUT --overwrite on the existing provider.
-    let mut rotate = args("openai-compat", "grok");
+    let mut rotate = args("openai-chat", "grok");
     rotate.base_url = Some("https://api.x.example/v1".to_string());
     rotate.api_key_stdin = true;
     let io = FakeIo {
@@ -1419,7 +1430,7 @@ async fn env_ref_identical_re_add_stays_no_change() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut first = args("anthropic-api", "claude");
+    let mut first = args("anthropic-messages", "claude");
     first.api_key_env = Some(key.to_string());
     assert_eq!(
         run(&path, first).await.expect("first add"),
@@ -1427,7 +1438,7 @@ async fn env_ref_identical_re_add_stays_no_change() {
     );
     let after_first = std::fs::read(&path).unwrap();
 
-    let mut second = args("anthropic-api", "claude");
+    let mut second = args("anthropic-messages", "claude");
     second.api_key_env = Some(key.to_string());
     assert_eq!(
         run(&path, second).await.expect("re-add"),
@@ -1468,7 +1479,7 @@ async fn rotation_secret_write_failure_leaves_old_secret_intact() {
     }
 
     // Act: attempt a rotation with --overwrite; the capture write must fail.
-    let mut rotate = args("openai-compat", "grok");
+    let mut rotate = args("openai-chat", "grok");
     rotate.base_url = Some("https://api.x.example/v1".to_string());
     rotate.api_key_stdin = true;
     rotate.overwrite = true;
@@ -1512,7 +1523,7 @@ async fn rotation_emits_one_audit_event_config_unchanged_without_value_or_ref() 
     seed_file_backed_grok(&path, "seed-key-not-real").await;
 
     let (_res, events) = routectl_testkit::with_capture(async {
-        let mut rotate = args("openai-compat", "grok");
+        let mut rotate = args("openai-chat", "grok");
         rotate.base_url = Some("https://api.x.example/v1".to_string());
         rotate.api_key_stdin = true;
         rotate.overwrite = true;
@@ -1617,7 +1628,7 @@ async fn a_config_writing_login_would_make_the_oauth_arm_conflict_on_its_own_sna
     };
 
     // Act
-    let err = run_with_io(&path, args("anthropic", "claude-sub"), &io)
+    let err = run_with_io(&path, login_args("anthropic", "claude-sub"), &io)
         .await
         .expect_err("a login that writes config invalidates this command's snapshot");
 

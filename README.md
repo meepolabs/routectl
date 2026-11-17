@@ -95,6 +95,14 @@ routectl serve
 # routectl listening on http://127.0.0.1:8787
 ```
 
+One provider at a time:
+
+```bash
+routectl provider add --format openai-chat --name grok \
+  --base-url https://api.x.ai/v1 --api-key-env XAI_API_KEY
+routectl provider add --login anthropic --name anthropic
+```
+
 Or by hand:
 
 ```bash

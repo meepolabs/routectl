@@ -408,18 +408,41 @@ enum ProviderCmd {
     /// Add a provider block to `config.toml` (or overwrite one with
     /// `--overwrite`). The credential is given by reference only.
     Add {
-        /// Provider kind. `openai-compat` (requires `--base-url`),
-        /// `anthropic-api` (base URL defaults to api.anthropic.com; pair
-        /// with `--credential-source forwarded` for a no-key forwarded
-        /// provider), or `anthropic` (oauth-backed -- delegates to the
-        /// `login` flow and stores an `oauth://` ref).
-        #[arg(long)]
-        kind: String,
+        /// Wire format of a provider reached with a key: `anthropic-messages`
+        /// (base URL defaults to api.anthropic.com; pair with
+        /// `--credential-source forwarded` for a no-key forwarded provider),
+        /// `openai-chat` or `openai-responses` (both require `--base-url`), or
+        /// `gemini` (built-in base URL).
+        #[arg(
+            long,
+            conflicts_with = "login",
+            value_parser = PossibleValuesParser::new(commands::provider_add::FORMAT_VALUES)
+        )]
+        format: Option<String>,
+        /// How the credential is sent. Default: `x-api-key` for
+        /// `anthropic-messages`, `x-goog-api-key` for `gemini`, else `bearer`
+        /// (a forwarded credential is always `bearer`). Written to the entry.
+        #[arg(
+            long,
+            value_parser = PossibleValuesParser::new(commands::provider_add::AUTH_VALUES)
+        )]
+        auth: Option<String>,
+        /// A routectl-managed login (`anthropic` or `codex`): runs the `login`
+        /// flow and writes the vendor's entry with an `oauth://<vendor>`
+        /// credential.
+        #[arg(
+            long,
+            value_parser = PossibleValuesParser::new(commands::provider_add::LOGIN_VALUES)
+        )]
+        login: Option<String>,
+        /// Replaced by `--format` / `--login`; refused when given.
+        #[arg(long, hide = true)]
+        kind: Option<String>,
         /// Operator-facing provider name; the `[providers.<name>]` key.
         #[arg(long)]
         name: String,
-        /// Upstream base URL. Required for `openai-compat`; optional for
-        /// `anthropic-api` (its constructor supplies the default).
+        /// Upstream base URL. Required for `openai-chat` and
+        /// `openai-responses`; optional for `anthropic-messages`.
         #[arg(long = "base-url")]
         base_url: Option<String>,
         /// Environment variable holding the API key; stored as
@@ -436,7 +459,7 @@ enum ProviderCmd {
         /// TTY -- it never blocks waiting for keyboard input.
         #[arg(long = "api-key-stdin", group = "secret_source")]
         api_key_stdin: bool,
-        /// Credential source for an `anthropic-api` provider: `own`
+        /// Credential source for an `anthropic-messages` provider: `own`
         /// (default -- routectl's configured key) or `forwarded` (relay the
         /// client's captured claude.ai bearer as `credential = "forwarded"`
         /// with `auth = "bearer"`; captures no key, pins the base URL to
@@ -703,6 +726,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Provider { action } => match action {
             ProviderCmd::Add {
+                format,
+                auth,
+                login,
                 kind,
                 name,
                 base_url,
@@ -713,9 +739,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 overwrite,
                 yes,
             } => {
+                if kind.is_some() {
+                    eprintln!("error: {}", commands::provider_add::KIND_REPLACED_MESSAGE);
+                    std::process::exit(1);
+                }
                 let config_path = resolve_config_path(cli.config.as_deref())?;
                 let args = commands::provider_add::ProviderAddArgs {
-                    kind,
+                    format,
+                    login,
+                    auth,
                     name,
                     base_url,
                     api_key_env,
@@ -1117,8 +1149,8 @@ mod tests {
             "routectl",
             "provider",
             "add",
-            "--kind",
-            "openai-compat",
+            "--format",
+            "openai-chat",
             "--name",
             "x",
             "--base-url",
@@ -1142,8 +1174,8 @@ mod tests {
             "routectl",
             "provider",
             "add",
-            "--kind",
-            "openai-compat",
+            "--format",
+            "openai-chat",
             "--name",
             "x",
             "--base-url",
@@ -1165,8 +1197,8 @@ mod tests {
             "routectl",
             "provider",
             "add",
-            "--kind",
-            "anthropic-api",
+            "--format",
+            "anthropic-messages",
             "--name",
             "x",
             "--credential-source",
@@ -1178,6 +1210,32 @@ mod tests {
         );
     }
 
+    /// `--format`, `--auth` and `--login` take only the values `provider add`
+    /// builds, and `--format` with `--login` is a clap-layer rejection.
+    #[test]
+    fn provider_add_target_flags_parse_only_supported_values() {
+        let base = ["routectl", "provider", "add", "--name", "x"];
+        let parses = |extra: &[&str]| {
+            let argv: Vec<&str> = base.iter().chain(extra).copied().collect();
+            Cli::try_parse_from(argv).is_ok()
+        };
+        let rows: &[(&[&str], bool)] = &[
+            (&["--format", "openai-responses"], true),
+            (&["--format", "gemini", "--auth", "x-goog-api-key"], true),
+            (&["--login", "codex"], true),
+            (&["--format", "bedrock-invoke"], false),
+            (&["--format", "openai-chat", "--auth", "aws-sigv4"], false),
+            (&["--login", "xai"], false),
+            (
+                &["--format", "anthropic-messages", "--login", "anthropic"],
+                false,
+            ),
+        ];
+        for (extra, expected) in rows {
+            assert_eq!(parses(extra), *expected, "{extra:?}");
+        }
+    }
+
     /// A single secret source parses cleanly to the `provider add` variant.
     #[test]
     fn provider_add_accepts_one_secret_source() {
@@ -1185,8 +1243,8 @@ mod tests {
             "routectl",
             "provider",
             "add",
-            "--kind",
-            "anthropic-api",
+            "--format",
+            "anthropic-messages",
             "--name",
             "claude",
             "--secret-ref",
@@ -1264,8 +1322,8 @@ mod tests {
             "routectl",
             "provider",
             "add",
-            "--kind",
-            "openai-compat",
+            "--format",
+            "openai-chat",
             "--name",
             "x",
             "--secret-ref",
@@ -1343,8 +1401,8 @@ mod tests {
             "routectl",
             "provider",
             "add",
-            "--kind",
-            "openai-compat",
+            "--format",
+            "openai-chat",
             "--name",
             "x",
             "--base-url",
@@ -1368,8 +1426,8 @@ mod tests {
                 "routectl",
                 "provider",
                 "add",
-                "--kind",
-                "openai-compat",
+                "--format",
+                "openai-chat",
                 "--name",
                 "x",
                 "--base-url",
@@ -1676,7 +1734,7 @@ mod tests {
         ("init", &[], true),
         (
             "provider add",
-            &["--kind", "openai-compat", "--name", "p"],
+            &["--format", "openai-chat", "--name", "p"],
             true,
         ),
         ("provider probe", &[], true),

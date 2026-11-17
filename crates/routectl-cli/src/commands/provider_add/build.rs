@@ -1,33 +1,31 @@
-//! Provider entry construction from args (direct / forwarded / oauth).
+//! Provider entry construction from args (format / forwarded / managed login).
 
 use routectl_auth::{SecretRef, env_ref};
-use routectl_core::provider_kind::config as kind;
 use routectl_core::{Error, Result};
-use routectl_router::ProviderEntry;
-use routectl_router::config::Auth;
+use routectl_router::{Auth, Format, ProviderEntry};
 
 use super::capture::{PendingSecret, capture_from_stdin, ref_class, resolve_interactive};
-use super::{AddIo, ProviderAddArgs};
+use super::{AUTH_VALUES, AddIo, FORMAT_VALUES, LOGIN_VALUES, ProviderAddArgs};
 
-/// Provider kinds this flag-driven command can construct from a single
-/// credential reference. Kinds needing richer inputs are out of this command's
-/// non-interactive scope: Bedrock takes a multi-field credential block, and
-/// OpenAI Responses defaults to OAuth; both are configured by hand or through
-/// the interactive flow.
-const SUPPORTED_KINDS: &[&str] = &[kind::OPENAI_COMPAT, kind::ANTHROPIC_API, kind::GEMINI];
+/// The formats this command builds over a base URL. The Bedrock formats ride
+/// a cloud carrier and `gemini-cloud-code` takes only a managed login, so
+/// neither is reachable through `--format` here.
+const SUPPORTED_FORMATS: [Format; 4] = [
+    Format::AnthropicMessages,
+    Format::OpenaiChat,
+    Format::OpenaiResponses,
+    Format::Gemini,
+];
 
-/// The login provider id an oauth-backed `--kind` delegates to, or `None`
-/// for an ordinary api-key kind. Hardcode-then-abstract: the login flow
-/// backs `anthropic` (claude.ai subscription -> `anthropic-api` provider
-/// with an `oauth://anthropic` ref and the oauth-bearer auth kind). Other
-/// oauth login providers map to provider variants this command does not
-/// yet construct, so they are added here as those constructors come into
-/// scope rather than guessed at now.
-fn oauth_provider_for_kind(kind: &str) -> Option<&'static str> {
-    match kind {
-        "anthropic" => Some("anthropic"),
-        _ => None,
-    }
+/// The `auth` values a base-URL entry can carry.
+const SUPPORTED_AUTHS: [Auth; 3] = [Auth::XApiKey, Auth::Bearer, Auth::XGoogApiKey];
+
+/// What the args ask this command to build.
+enum Target {
+    /// An entry of `format` whose credential is resolved from the secret flags.
+    Format(Format),
+    /// The entry consuming a managed login of this vendor.
+    Login(&'static str),
 }
 
 /// Whether `--credential-source forwarded` was requested. `own` (or the
@@ -44,123 +42,210 @@ fn wants_forwarded(args: &ProviderAddArgs) -> Result<bool> {
     }
 }
 
-/// Validate the kind and resolve the secret source into a [`ProviderEntry`]
+/// Resolve `--format` / `--login` into the one [`Target`] they name.
+fn target(args: &ProviderAddArgs) -> Result<Target> {
+    match (args.format.as_deref(), args.login.as_deref()) {
+        (Some(format), None) => parse_format(format).map(Target::Format),
+        (None, Some(vendor)) => parse_login(vendor).map(Target::Login),
+        (Some(_), Some(_)) => Err(Error::Config(
+            "pass only one of `--format <FORMAT>` or `--login <VENDOR>`".into(),
+        )),
+        (None, None) => Err(Error::Config(
+            "pass `--format <FORMAT>` or `--login <VENDOR>`".into(),
+        )),
+    }
+}
+
+fn parse_format(value: &str) -> Result<Format> {
+    SUPPORTED_FORMATS
+        .into_iter()
+        .find(|format| format.as_str() == value)
+        .ok_or_else(|| {
+            Error::Config(format!(
+                "format `{value}` cannot be added with this command; supported formats: {}",
+                FORMAT_VALUES.join(", ")
+            ))
+        })
+}
+
+fn parse_login(value: &str) -> Result<&'static str> {
+    LOGIN_VALUES
+        .iter()
+        .copied()
+        .find(|vendor| *vendor == value)
+        .ok_or_else(|| {
+            Error::Config(format!(
+                "`--login {value}` is not supported; supported logins: {}",
+                LOGIN_VALUES.join(", ")
+            ))
+        })
+}
+
+fn parse_auth(value: &str) -> Result<Auth> {
+    SUPPORTED_AUTHS
+        .into_iter()
+        .find(|auth| auth.as_str() == value)
+        .ok_or_else(|| {
+            Error::Config(format!(
+                "unknown `--auth` `{value}`; expected one of: {}",
+                AUTH_VALUES.join(", ")
+            ))
+        })
+}
+
+/// The `auth` written when `--auth` is not given: what the format's own API
+/// expects for an API key over a base URL. A forwarded credential is always
+/// sent as a bearer.
+pub(super) const fn default_auth(format: Format, forwarded: bool) -> Auth {
+    if forwarded {
+        return Auth::Bearer;
+    }
+    match format {
+        Format::AnthropicMessages => Auth::XApiKey,
+        Format::Gemini => Auth::XGoogApiKey,
+        _ => Auth::Bearer,
+    }
+}
+
+/// Validate the args and resolve the secret source into a [`ProviderEntry`]
 /// plus its credential CLASS label (scheme only) and any [`PendingSecret`]
 /// side effect owed after the confirm. Errors actionably -- and never hangs
-/// -- when a key-requiring kind has no usable secret source.
+/// -- when a key-requiring entry has no usable secret source.
 pub(super) fn build_entry(
     args: &ProviderAddArgs,
     io: &dyn AddIo,
 ) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
-    if wants_forwarded(args)? {
-        return build_forwarded(args);
+    let forwarded = wants_forwarded(args)?;
+    let format = match target(args)? {
+        Target::Login(vendor) => return build_login(args, vendor),
+        Target::Format(format) => format,
+    };
+    let auth = match args.auth.as_deref() {
+        Some(value) => parse_auth(value)?,
+        None => default_auth(format, forwarded),
+    };
+    let shape = entry_over_base_url(format, args.base_url.as_deref())?.with_auth(auth);
+    if forwarded {
+        return build_forwarded(args, shape);
     }
-    if let Some(provider) = oauth_provider_for_kind(&args.kind) {
-        return build_oauth(args, provider);
-    }
+    let (ref_str, cred_class, pending) = resolve_secret(args, shape.kind_str(), io)?;
+    Ok((shape.with_credential(ref_str), cred_class, pending))
+}
 
-    match args.kind.as_str() {
-        kind::OPENAI_COMPAT => {
-            let base_url = args.base_url.as_deref().ok_or_else(|| {
-                Error::Config("`openai-compat` requires `--base-url <URL>`".into())
-            })?;
-            let (ref_str, cred_class, pending) = resolve_secret(args, io)?;
-            Ok((
-                ProviderEntry::openai_compat(base_url, ref_str),
-                cred_class,
-                pending,
+/// The entry of `format` over `base_url` with no credential yet. The
+/// Anthropic API and the public Gemini REST base are the defaults for their
+/// formats; the other formats need `--base-url`.
+fn entry_over_base_url(format: Format, base_url: Option<&str>) -> Result<ProviderEntry> {
+    let required = || {
+        base_url.ok_or_else(|| {
+            Error::Config(format!(
+                "`--format {}` requires `--base-url <URL>`",
+                format.as_str()
             ))
-        }
-        kind::ANTHROPIC_API => {
-            let (ref_str, cred_class, pending) = resolve_secret(args, io)?;
-            let entry = ProviderEntry::anthropic_api(ref_str);
-            let entry = match args.base_url.as_deref() {
-                Some(base_url) => entry.with_base_url(base_url),
+        })
+    };
+    match format {
+        Format::AnthropicMessages => {
+            let entry = ProviderEntry::anthropic_api(String::new());
+            Ok(match base_url {
+                Some(url) => entry.with_base_url(url),
                 None => entry,
-            };
-            Ok((entry, cred_class, pending))
+            })
         }
-        kind::GEMINI => {
-            // Gemini has no public base-URL setter; its constructor pins the
-            // public v1beta endpoint. A custom endpoint is a hand-edit, so a
-            // `--base-url` here is rejected rather than silently ignored.
-            if args.base_url.is_some() {
+        Format::OpenaiChat => Ok(ProviderEntry::openai_compat(required()?, String::new())),
+        Format::OpenaiResponses => {
+            Ok(ProviderEntry::openai_responses(String::new()).with_base_url(required()?))
+        }
+        Format::Gemini => {
+            if base_url.is_some() {
                 return Err(Error::Config(
-                    "`gemini` uses its built-in base URL; `--base-url` is not \
-                     supported for this kind"
+                    "`--format gemini` uses its built-in base URL; `--base-url` is not \
+                     supported for this format"
                         .into(),
                 ));
             }
-            let (ref_str, cred_class, pending) = resolve_secret(args, io)?;
-            Ok((ProviderEntry::gemini(ref_str), cred_class, pending))
+            Ok(ProviderEntry::gemini(String::new()))
         }
         other => Err(Error::Config(format!(
-            "provider kind `{other}` cannot be added with this command; \
-             supported kinds: {}",
-            SUPPORTED_KINDS.join(", ")
+            "format `{}` cannot be added with this command",
+            other.as_str()
         ))),
     }
 }
 
-/// Build a `credential = "forwarded"` anthropic-messages entry sent as
-/// `auth = "bearer"`: it carries NO secret and its base URL is pinned to the
-/// Anthropic origin the shared gate requires. Forwarded is valid for
-/// `anthropic-api` ONLY, and never mixes with a secret-source flag.
-fn build_forwarded(args: &ProviderAddArgs) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
-    if args.kind != kind::ANTHROPIC_API {
+/// Finish a `credential = "forwarded"` entry: it carries NO secret, and the
+/// shared gate pins it to `anthropic-messages` on the Anthropic API host
+/// with `auth = "bearer"`. Forwarded never mixes with a secret-source flag.
+fn build_forwarded(
+    args: &ProviderAddArgs,
+    shape: ProviderEntry,
+) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
+    if shape.format() != Format::AnthropicMessages {
         return Err(Error::Config(format!(
-            "`--credential-source forwarded` is only valid for `--kind anthropic-api` \
+            "`--credential-source forwarded` is only valid for `--format anthropic-messages` \
              (got `{}`)",
-            args.kind
+            shape.format().as_str()
         )));
     }
-    if args.api_key_env.is_some() || args.secret_ref.is_some() || args.api_key_stdin {
+    if has_secret_flag(args) {
         return Err(Error::Config(
             "`--credential-source forwarded` captures no credential; drop the \
              `--api-key-env` / `--secret-ref` / `--api-key-stdin` flag"
                 .into(),
         ));
     }
-    // The constructor already pins `base_url` to https://api.anthropic.com;
-    // an explicit `--base-url` (e.g. a pinned path on that host) passes
-    // through and is host-checked by the shared gate.
-    let entry = ProviderEntry::anthropic_api("forwarded").with_auth(Auth::Bearer);
-    let entry = match args.base_url.as_deref() {
-        Some(base_url) => entry.with_base_url(base_url),
-        None => entry,
-    };
-    Ok((entry, "forwarded", PendingSecret::None))
+    Ok((
+        shape.with_credential("forwarded"),
+        "forwarded",
+        PendingSecret::None,
+    ))
 }
 
-/// Build an oauth-backed anthropic-api entry sent as `auth = "bearer"` and
-/// defer the login. The credential is `oauth://<provider>` and no key is captured to the file store; the
-/// login runs post-confirm via `execute_pending`.
-fn build_oauth(
+/// Build the entry consuming a managed login of `vendor` and defer the
+/// login. The credential is `oauth://<vendor>`; no key is captured to the
+/// file store, and the login runs post-confirm via `execute_pending`.
+fn build_login(
     args: &ProviderAddArgs,
-    provider: &'static str,
+    vendor: &'static str,
 ) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
-    if args.api_key_env.is_some() || args.secret_ref.is_some() || args.api_key_stdin {
+    if has_secret_flag(args) {
         return Err(Error::Config(format!(
-            "`--kind {}` authenticates via oauth; drop the `--api-key-env` / \
-             `--secret-ref` / `--api-key-stdin` flag",
-            args.kind
+            "`--login {vendor}` authenticates via oauth; drop the `--api-key-env` / \
+             `--secret-ref` / `--api-key-stdin` flag"
         )));
     }
-    if args.base_url.is_some() {
+    let refused_flag = [
+        (args.base_url.is_some(), "--base-url"),
+        (args.auth.is_some(), "--auth"),
+        (args.credential_source.is_some(), "--credential-source"),
+    ]
+    .into_iter()
+    .find_map(|(given, flag)| given.then_some(flag));
+    if let Some(flag) = refused_flag {
         return Err(Error::Config(format!(
-            "`--kind {}` uses the pinned Anthropic endpoint; `--base-url` is not \
-             supported for this kind",
-            args.kind
+            "`--login {vendor}` writes the vendor's own endpoint and auth; `{flag}` is not \
+             supported with it"
         )));
     }
-    let entry = ProviderEntry::anthropic_api(format!("oauth://{provider}")).with_auth(Auth::Bearer);
+    let credential = SecretRef::OAuth {
+        provider: vendor.to_string(),
+        label: None,
+    }
+    .to_string();
+    let entry = ProviderEntry::for_managed_login(vendor, credential).ok_or_else(|| {
+        Error::Config(format!("`--login {vendor}` has no managed provider entry"))
+    })?;
     Ok((
         entry,
         "oauth",
         PendingSecret::OAuth {
-            provider: provider.to_string(),
+            provider: vendor.to_string(),
         },
     ))
+}
+
+const fn has_secret_flag(args: &ProviderAddArgs) -> bool {
+    args.api_key_env.is_some() || args.secret_ref.is_some() || args.api_key_stdin
 }
 
 /// Resolve the api-key secret source into the ref STRING that lands in
@@ -170,11 +255,12 @@ fn build_oauth(
 /// `file://` ref is preserved exactly, never round-tripped through the
 /// redacting `Display`; a `literal:` ref is rejected at parse); `--api-key-stdin`
 /// captures the piped value to the managed store; with no flag on a TTY, an
-/// already-resolvable conventional env var is OFFERED, else a hidden prompt
-/// captures the value. A missing key with no TTY errors actionably rather
-/// than hanging.
+/// already-resolvable conventional env var for the `family` token is
+/// OFFERED, else a hidden prompt captures the value. A missing key with no
+/// TTY errors actionably rather than hanging.
 pub(super) fn resolve_secret(
     args: &ProviderAddArgs,
+    family: &str,
     io: &dyn AddIo,
 ) -> Result<(String, &'static str, PendingSecret)> {
     if args.api_key_env.is_some() && args.secret_ref.is_some() {
@@ -193,5 +279,5 @@ pub(super) fn resolve_secret(
     if args.api_key_stdin {
         return capture_from_stdin(args, io);
     }
-    resolve_interactive(args, io)
+    resolve_interactive(args, family, io)
 }

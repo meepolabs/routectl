@@ -158,9 +158,11 @@ fn write_config(dir: &Path, body: &str) -> PathBuf {
     path
 }
 
-fn base_args(kind: &str, name: &str) -> ProviderAddArgs {
+fn base_args(format: &str, name: &str) -> ProviderAddArgs {
     ProviderAddArgs {
-        kind: kind.to_string(),
+        format: Some(format.to_string()),
+        login: None,
+        auth: None,
         name: name.to_string(),
         base_url: None,
         api_key_env: None,
@@ -169,6 +171,14 @@ fn base_args(kind: &str, name: &str) -> ProviderAddArgs {
         credential_source: None,
         overwrite: false,
         yes: true,
+    }
+}
+
+fn login_args(vendor: &str, name: &str) -> ProviderAddArgs {
+    ProviderAddArgs {
+        format: None,
+        login: Some(vendor.to_string()),
+        ..base_args("anthropic-messages", name)
     }
 }
 
@@ -249,7 +259,7 @@ async fn env_shape_checks_builds_and_boots() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = base_args("anthropic-api", "claude");
+    let mut a = base_args("anthropic-messages", "claude");
     a.api_key_env = Some(key.to_string());
     let (config, text) = add_and_parse(&path, a, &StubIo::default()).await;
 
@@ -271,7 +281,7 @@ async fn managed_file_shape_checks_builds_and_boots() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = base_args("openai-compat", "grok");
+    let mut a = base_args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.api_key_stdin = true;
     let io = StubIo {
@@ -294,11 +304,11 @@ async fn oauth_shape_checks_builds_and_boots() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    // `--kind anthropic` delegates to the login flow; the stub provisions a
+    // `--login anthropic` delegates to the login flow; the stub provisions a
     // token into the scoped credentials.json so no live browser is needed.
     let (config, text) = add_and_parse(
         &path,
-        base_args("anthropic", "claude-sub"),
+        login_args("anthropic", "claude-sub"),
         &StubIo::default(),
     )
     .await;
@@ -320,7 +330,7 @@ async fn forwarded_shape_checks_builds_and_boots() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = base_args("anthropic-api", "fwd");
+    let mut a = base_args("anthropic-messages", "fwd");
     a.credential_source = Some("forwarded".to_string());
     let (config, text) = add_and_parse(&path, a, &StubIo::default()).await;
 
@@ -357,7 +367,9 @@ fn every_provider_add_input_is_expressible_as_a_flag() {
     assert!(out.status.success(), "help must exit 0");
     let help = String::from_utf8_lossy(&out.stdout);
     for flag in [
-        "--kind",
+        "--format",
+        "--auth",
+        "--login",
         "--name",
         "--base-url",
         "--api-key-env",
@@ -369,12 +381,65 @@ fn every_provider_add_input_is_expressible_as_a_flag() {
     ] {
         assert!(help.contains(flag), "help must document {flag}:\n{help}");
     }
-    for removed in ["--probe", "--no-probe"] {
+    for removed in ["--probe", "--no-probe", "--kind"] {
         assert!(
             !help.contains(removed),
             "help must not document the removed {removed}:\n{help}"
         );
     }
+}
+
+/// The retired `--kind` is refused by the real binary: non-zero exit, a
+/// message naming both replacements, and no write. The positive control is
+/// the same command line with `--format`, which writes.
+#[test]
+fn the_retired_kind_flag_is_refused_naming_its_replacements() {
+    let dir = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &current_base());
+    let before = std::fs::read(&path).unwrap();
+    let run = |selector: [&str; 2]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+            .args(["--config", path.to_str().unwrap(), "provider", "add"])
+            .args(selector)
+            .args([
+                "--name",
+                "claude",
+                "--secret-ref",
+                "env://ROUTECTL_KIND_TEST_KEY",
+            ])
+            .args(["--yes"])
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run routectl")
+    };
+
+    let refused = run(["--kind", "anthropic-api"]);
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "--kind must exit non-zero");
+    assert!(
+        stderr.contains("--format") && stderr.contains("--login"),
+        "the refusal names both replacements: {stderr}"
+    );
+    assert!(
+        stderr.contains(provider_add::KIND_REPLACED_MESSAGE),
+        "the refusal is the retired-flag message: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "--kind writes nothing"
+    );
+
+    let accepted = run(["--format", "anthropic-messages"]);
+    assert!(
+        accepted.status.success(),
+        "positive control: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_ne!(std::fs::read(&path).unwrap(), before, "--format writes");
 }
 
 #[test]
@@ -387,7 +452,7 @@ fn missing_required_input_without_tty_errors_within_bounded_time() {
     // sends, so `recv_timeout` fails the test instead of stalling forever.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut a = base_args("openai-compat", "grok");
+        let mut a = base_args("openai-chat", "grok");
         a.base_url = Some("https://api.x.example/v1".to_string());
         let io = StubIo::default(); // not a TTY, no secret source
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -426,8 +491,8 @@ fn silent_stdin_declines_the_confirmation_within_bounded_time() {
             path.to_str().unwrap(),
             "provider",
             "add",
-            "--kind",
-            "openai-compat",
+            "--format",
+            "openai-chat",
             "--name",
             "grok",
             "--base-url",
@@ -470,6 +535,14 @@ fn silent_stdin_declines_the_confirmation_within_bounded_time() {
         stdout.contains("providers.base_url") && stdout.contains("--yes"),
         "the decline must name the field and the non-interactive contract: {stdout}"
     );
+    assert!(
+        stdout.contains("[providers.grok]")
+            && stdout.lines().any(|line| {
+                line.split_once('=')
+                    .is_some_and(|(k, v)| k.trim() == "auth" && v.trim() == "\"bearer\"")
+            }),
+        "the confirmation shows the block with its defaulted auth: {stdout}"
+    );
     assert_eq!(
         std::fs::read(&path).unwrap(),
         before,
@@ -507,7 +580,7 @@ auth = \"bearer\"
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &body);
 
-    let mut a = base_args("openai-compat", "grok");
+    let mut a = base_args("openai-chat", "grok");
     a.base_url = Some("https://api.x.example/v1".to_string());
     a.secret_ref = Some("file:///abs/key".to_string());
     let (_config, text) = add_and_parse(&path, a, &StubIo::default()).await;
@@ -534,9 +607,9 @@ auth = \"bearer\"
 }
 
 // ---------------------------------------------------------------------
-// Audit parity: an oauth-backed add resolves `--kind anthropic` to an
-// `anthropic-api` block, so the audit event must report the resolved kind
-// that lands on disk, not the CLI-supplied one.
+// Audit parity: a `--login anthropic` add writes an `anthropic-api` family
+// block, so the audit event must report the family token that lands on
+// disk, not the CLI-supplied vendor.
 // ---------------------------------------------------------------------
 
 #[tokio::test]
@@ -549,7 +622,7 @@ async fn oauth_add_audits_the_resolved_kind() {
     let (_r, events) = routectl_testkit::with_capture(async {
         provider_add::run_with_io(
             &path,
-            base_args("anthropic", "claude-sub"),
+            login_args("anthropic", "claude-sub"),
             &StubIo::default(),
         )
         .await
@@ -569,7 +642,7 @@ async fn oauth_add_audits_the_resolved_kind() {
     assert_eq!(
         audit[0].field("kind"),
         Some("anthropic-api"),
-        "the audit kind must match the on-disk `anthropic-api` block, not the CLI `anthropic`"
+        "the audit kind must match the on-disk `anthropic-api` block, not the CLI vendor"
     );
 
     // The block actually written carries the same resolved kind, confirming
@@ -619,7 +692,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let (_r, events) = routectl_testkit::with_capture(async {
-        let mut a = base_args("anthropic-api", "claude");
+        let mut a = base_args("anthropic-messages", "claude");
         a.api_key_env = Some(key.to_string());
         provider_add::run_with_io(&path, a, &StubIo::default())
             .await
@@ -634,7 +707,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let (_r, events) = routectl_testkit::with_capture(async {
-        let mut a = base_args("openai-compat", "grok");
+        let mut a = base_args("openai-chat", "grok");
         a.base_url = Some("https://api.x.example/v1".to_string());
         a.api_key_stdin = true;
         let io = StubIo {
@@ -653,7 +726,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let (_r, events) = routectl_testkit::with_capture(async {
-        let mut a = base_args("openai-compat", "grok2");
+        let mut a = base_args("openai-chat", "grok2");
         a.base_url = Some("https://api.x.example/v1".to_string());
         let io = StubIo {
             is_tty: true,
@@ -674,7 +747,7 @@ async fn no_capture_path_leaks_the_secret_to_tracing() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
     let (result, events) = routectl_testkit::with_capture(async {
-        let mut a = base_args("openai-compat", "grok3");
+        let mut a = base_args("openai-chat", "grok3");
         a.base_url = Some("https://api.x.example/v1".to_string());
         a.secret_ref = Some(format!("literal:{literal_secret}"));
         provider_add::run_with_io(&path, a, &StubIo::default()).await

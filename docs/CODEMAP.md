@@ -7914,20 +7914,26 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   unchanged). Emits ONE value-free audit event
   (surface/verb/name/kind/credential class -- never the value or full ref);
   owns `AddResult` {Written/NoChange/Aborted/Rotated} and the pinned
-  `credential rotated; config unchanged` line
+  `credential rotated; config unchanged` line. Also owns the accepted
+  `FORMAT_VALUES` / `AUTH_VALUES` / `LOGIN_VALUES` and the
+  `KIND_REPLACED_MESSAGE` refusal for the retired `--kind`
 - `src/commands/provider_add/build.rs` -- provider-entry construction from
-  args: `build_entry` validates the kind against the supported set and
-  dispatches to the direct api-key path (`resolve_secret` -> `env://` /
-  `--secret-ref` verbatim / stdin / interactive), `build_forwarded`
-  (`anthropic-messages` with `credential = "forwarded"` and `auth = "bearer"`,
-  base pinned to api.anthropic.com), or `build_oauth` (`anthropic` ->
-  `oauth://<provider>` sent as `bearer`, login deferred). Returns the `ProviderEntry` + credential CLASS label + the
-  `PendingSecret` owed post-confirm
+  args: `build_entry` resolves exactly one of `--format`
+  (anthropic-messages / openai-chat / openai-responses / gemini over a base
+  URL, `--auth` or its `default_auth`) or `--login` (anthropic / codex via
+  `ProviderEntry::for_managed_login`, `oauth://<vendor>`, login deferred),
+  then the direct api-key path (`resolve_secret` -> `env://` /
+  `--secret-ref` verbatim / stdin / interactive, keyed on the entry's family
+  token) or `build_forwarded` (`anthropic-messages` with
+  `credential = "forwarded"` and `auth = "bearer"`). Returns the
+  `ProviderEntry` + credential CLASS label + the `PendingSecret` owed
+  post-confirm
 - `src/commands/provider_add/capture.rs` -- interactive/stdin secret capture +
   deferred execution: the `PendingSecret` enum {None/File/OAuth} and
   `execute_pending` (managed-store `put` / oauth login, run post-confirm),
   plus `capture_from_stdin` (piped `--api-key-stdin`; errors immediately if
-  stdin is a TTY), `resolve_interactive` (`env_var_for_kind` env-detect OFFER,
+  stdin is a TTY), `resolve_interactive` (`env_var_for_kind` env-detect OFFER
+  for the entry's family token,
   never auto-routed, then a hidden `rpassword` prompt), and `capture_value`
   which opens the managed 0600 `file://` store ONCE and computes the ref via
   `ManagedSecretStore::ref_path` so the pre-confirm ref string and the
@@ -7946,8 +7952,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `AddIo` half to `RealAddIo`), the `InitArgs` flag surface, the leaf types
   passed between steps (`Offer` + `OfferSource`
   {Oauth/Env/Forwarded/ApiKeyPrompt} + `ModelWiring`;
-  `Offer::provider_add_kind` maps an oauth offer to the `anthropic` login
-  sentinel so it is never mis-routed into the api-key path), the
+  `Offer::provider_add_login` / `provider_add_format` map an oauth offer to
+  `--login anthropic` and every other offer to its `--format`), the
   `CredentialCapture` choice enum {OauthLogin/ApiKey/Skip}, the single-sourced
   `next_steps` renderer (run-doctor hint + `SERVE_COMMAND` + sample curl,
   shared with a later doctor path) and its `SERVE_COMMAND`/`DOCTOR_NEXT_HINT`

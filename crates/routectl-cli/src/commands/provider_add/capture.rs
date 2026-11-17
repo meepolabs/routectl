@@ -92,22 +92,23 @@ pub(super) fn capture_from_stdin(
     capture_value(args, value)
 }
 
-/// Interactive resolution for a missing key: on a TTY, offer an
-/// already-resolvable conventional env var, else prompt hidden and capture;
-/// off a TTY, error actionably rather than hang.
+/// Interactive resolution for a missing key: on a TTY, offer the
+/// already-resolvable conventional env var of the entry's `family` token,
+/// else prompt hidden and capture; off a TTY, error actionably rather than
+/// hang.
 pub(super) fn resolve_interactive(
     args: &ProviderAddArgs,
+    family: &str,
     io: &dyn AddIo,
 ) -> Result<(String, &'static str, PendingSecret)> {
     if !io.stdin_is_terminal() {
         return Err(Error::Config(format!(
-            "provider kind `{}` needs a credential and stdin is not a TTY; pass \
+            "provider kind `{family}` needs a credential and stdin is not a TTY; pass \
              `--api-key-env <VAR>`, `--secret-ref <REF>`, or pipe one with \
-             `--api-key-stdin`",
-            args.kind
+             `--api-key-stdin`"
         )));
     }
-    if let Some(var) = env_var_for_kind(&args.kind)
+    if let Some(var) = env_var_for_kind(family)
         && let Ok(sref) = env_ref(var)
         && io.confirm_env_offer(var)
     {

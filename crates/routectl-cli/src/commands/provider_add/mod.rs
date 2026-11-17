@@ -6,8 +6,8 @@
 //! Secret sources: `--secret-ref` / `--api-key-env` (flag-driven, no
 //! capture), `--api-key-stdin` (piped value captured to the managed
 //! `file://` store), an interactive hidden prompt (missing key + a TTY),
-//! `--credential-source forwarded` (no secret at all), and oauth-backed
-//! kinds (delegated to the `login` flow, ref `oauth://<provider>`).
+//! `--credential-source forwarded` (no secret at all), and `--login
+//! <vendor>` (delegated to the `login` flow, ref `oauth://<vendor>`).
 //!
 //! Every step runs IN MEMORY before any byte touches disk, so any refusal
 //! (a stale/legacy version, an unknown secret scheme, a candidate that fails
@@ -19,8 +19,8 @@
 //!
 //!   1. RAW version + legacy preflights on the snapshot bytes
 //!      (`super::edit_pipeline::preflight`, shared with `config set`).
-//!   2. Resolve the kind (validated against this command's supported set),
-//!      the name, the base URL, and the secret source into a
+//!   2. Resolve the format (or managed login), the auth, the name, the base
+//!      URL, and the secret source into a
 //!      [`routectl_router::ProviderEntry`] plus a credential CLASS label (scheme only, never
 //!      the value) and a `PendingSecret` (the deferred `put`/login, if
 //!      any). A captured file ref's STRING is computed deterministically
@@ -43,8 +43,8 @@
 //!      conflict emits an explicit recovery message -- the secret/login
 //!      persists, the config is unchanged, re-run to complete.
 //!   7. On a real write, emit exactly one audit event -- surface, verb,
-//!      name, kind, credential class -- NEVER the value and NEVER the full
-//!      ref string.
+//!      name, family token, credential class -- NEVER the value and NEVER
+//!      the full ref string.
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -57,6 +57,7 @@ use super::edit_pipeline::{
     confirm_high_consequence, gate, insert_provider_block, parse_document, preflight,
     render_gate_errors,
 };
+use super::provider_entry::render_provider_block;
 use crate::config_classify::collect_high_consequence_changes;
 
 mod build;
@@ -67,13 +68,40 @@ mod toml_edit;
 #[path = "mod_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "format_tests.rs"]
+mod format_tests;
+
 use self::build::build_entry;
 use self::capture::execute_pending;
 use self::toml_edit::{commit, provider_table};
 
+/// The `--format` values `provider add` builds over a base URL.
+pub const FORMAT_VALUES: [&str; 4] = [
+    "anthropic-messages",
+    "openai-chat",
+    "openai-responses",
+    "gemini",
+];
+
+/// The `--auth` values `provider add` accepts.
+pub const AUTH_VALUES: [&str; 3] = ["x-api-key", "bearer", "x-goog-api-key"];
+
+/// The managed logins `provider add --login` builds an entry for.
+pub const LOGIN_VALUES: [&str; 2] = ["anthropic", "codex"];
+
+/// The refusal for the retired `--kind` flag.
+pub const KIND_REPLACED_MESSAGE: &str = "`--kind` was replaced: use `--format \
+    <anthropic-messages|openai-chat|openai-responses|gemini>` for a provider with a key, or \
+    `--login <anthropic|codex>` for a managed login";
+
 /// Flag-driven inputs for `provider add`, assembled from the clap surface.
+/// Exactly one of `format` and `login` is set.
 pub struct ProviderAddArgs {
-    pub kind: String,
+    pub format: Option<String>,
+    pub login: Option<String>,
+    /// How the credential is sent; `None` writes the format's default.
+    pub auth: Option<String>,
     pub name: String,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
@@ -160,7 +188,7 @@ impl AddIo for RealAddIo {
 }
 
 /// Outcome of a completed [`run`], for the caller and for tests. Refusals
-/// (unknown kind, missing credential, gate rejection, conflict without
+/// (unknown format, missing credential, gate rejection, conflict without
 /// `--overwrite`, write conflict) surface as `Err` instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddResult {
@@ -223,9 +251,8 @@ pub async fn run_with_io(
 
     let (entry, cred_class, pending) = build_entry(&args, io)?;
     let name = args.name.as_str();
-    // The RESOLVED kind, not the CLI-supplied `--kind`: an oauth kind
-    // (`anthropic`) constructs an `anthropic-api` block, so the audit event
-    // and the human line must report what actually lands on disk.
+    // The family token of the built entry, so a `--login` add audits what
+    // actually lands on disk.
     let kind = entry.kind_str();
 
     let block = provider_table(&entry)?;
@@ -283,6 +310,9 @@ pub async fn run_with_io(
     if high.is_empty() {
         high.push("providers.base_url");
     }
+    if !args.yes {
+        print!("{}", render_provider_block(name, &block));
+    }
     if !confirm_high_consequence(&high, args.yes) {
         println!("aborted; nothing written.");
         return Ok(AddResult::Aborted);
@@ -339,6 +369,10 @@ pub async fn run_with_io(
         "provider add committed",
     );
 
-    println!("added provider `{name}` ({kind}).");
+    println!(
+        "added provider `{name}` (format = \"{}\", auth = \"{}\").",
+        entry.format().as_str(),
+        entry.auth.as_str()
+    );
     Ok(AddResult::Written)
 }

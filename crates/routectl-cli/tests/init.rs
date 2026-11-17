@@ -235,12 +235,14 @@ fn init_args(scaffold: bool, yes: bool, default_model: Option<&str>, forwarded: 
     }
 }
 
-/// The `provider add` args init composes for an oauth offer: the login sentinel
-/// kind and a name matching the oauth id, everything else defaulted (init always
-/// passes `yes: true` to its provider-add steps).
+/// The `provider add` args init composes for an oauth offer: `--login
+/// anthropic` and a name matching the oauth id, everything else defaulted (init
+/// always passes `yes: true` to its provider-add steps).
 fn oauth_add_args(name: &str) -> ProviderAddArgs {
     ProviderAddArgs {
-        kind: "anthropic".to_string(),
+        format: None,
+        login: Some("anthropic".to_string()),
+        auth: None,
         name: name.to_string(),
         base_url: None,
         api_key_env: None,
