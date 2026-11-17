@@ -228,7 +228,8 @@ enum Cmd {
     ///
     /// With no window flag and no `--since`, prints a multi-window
     /// summary (today / this week / this month / all time). Calendar
-    /// windows use LOCAL time; the week starts Monday.
+    /// windows use LOCAL time; the week starts Monday. The trailing
+    /// windows are exact durations ending now.
     #[command(args_conflicts_with_subcommands = true)]
     Usage {
         #[command(subcommand)]
@@ -242,6 +243,12 @@ enum Cmd {
         /// Usage since the 1st of the current month, 00:00 local.
         #[arg(long = "this-month", group = "window")]
         this_month: bool,
+        /// Usage over the 24 hours ending now.
+        #[arg(long = "last-24h", group = "window")]
+        last_24h: bool,
+        /// Usage over the 7 days (168 hours) ending now.
+        #[arg(long = "last-7d", group = "window")]
+        last_7d: bool,
         /// All recorded usage.
         #[arg(long, group = "window")]
         all: bool,
@@ -572,6 +579,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
+    let selected_window = usage_window(&cli.cmd);
     match cli.cmd {
         Cmd::Serve {
             host,
@@ -837,10 +845,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Usage {
             action: None,
-            today,
-            this_week,
-            this_month,
-            all,
             since,
             until,
             by,
@@ -848,19 +852,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             db,
             k_calibration,
             opening_accuracy,
+            ..
         } => {
             let config = load_config_unvalidated(cli.config.as_deref())?;
-            let window = if today {
-                commands::usage::WindowFlag::Today
-            } else if this_week {
-                commands::usage::WindowFlag::ThisWeek
-            } else if this_month {
-                commands::usage::WindowFlag::ThisMonth
-            } else if all {
-                commands::usage::WindowFlag::All
-            } else {
-                commands::usage::WindowFlag::None
-            };
+            let window = selected_window;
             if opening_accuracy {
                 let db_path = match routectl_cli::derived_path::usage_db_path(db, &config) {
                     Ok(path) => path,
@@ -1008,6 +1003,26 @@ fn apply_mitm_port_override(
     };
     mitm.listen_port = port;
     Ok(())
+}
+
+/// The window selected by `routectl usage`'s window flags; `None` when no
+/// flag was given (or `cmd` is another command). clap's `window` group
+/// guarantees at most one flag is set.
+const fn usage_window(cmd: &Cmd) -> commands::usage::WindowFlag {
+    use commands::usage::WindowFlag;
+    match cmd {
+        Cmd::Usage { today: true, .. } => WindowFlag::Today,
+        Cmd::Usage {
+            this_week: true, ..
+        } => WindowFlag::ThisWeek,
+        Cmd::Usage {
+            this_month: true, ..
+        } => WindowFlag::ThisMonth,
+        Cmd::Usage { last_24h: true, .. } => WindowFlag::Last24h,
+        Cmd::Usage { last_7d: true, .. } => WindowFlag::Last7d,
+        Cmd::Usage { all: true, .. } => WindowFlag::All,
+        _ => WindowFlag::None,
+    }
 }
 
 /// Resolve the config path the same way `load_config` does, but
@@ -1747,6 +1762,43 @@ mod tests {
         routectl_router::validate_mitm_config(&config)
             .expect("the repaired config must validate clean");
         assert_eq!(config.mitm.as_ref().unwrap().listen_port, 9443);
+    }
+
+    /// Each window flag selects its own window, and the trailing flags
+    /// conflict with `--since` and with every other window flag.
+    #[test]
+    fn usage_window_flags_select_their_window_and_conflict() {
+        use commands::usage::WindowFlag;
+        let rows = [
+            ("--today", WindowFlag::Today),
+            ("--this-week", WindowFlag::ThisWeek),
+            ("--this-month", WindowFlag::ThisMonth),
+            ("--last-24h", WindowFlag::Last24h),
+            ("--last-7d", WindowFlag::Last7d),
+            ("--all", WindowFlag::All),
+        ];
+        let plain = Cli::try_parse_from(["routectl", "usage"]).expect("parses");
+        assert_eq!(usage_window(&plain.cmd), WindowFlag::None);
+        for (flag, window) in rows {
+            let cli = Cli::try_parse_from(["routectl", "usage", flag]).expect(flag);
+            assert_eq!(usage_window(&cli.cmd), window, "{flag}");
+        }
+        for trailing in ["--last-24h", "--last-7d"] {
+            let since = ["routectl", "usage", trailing, "--since", "2026-06-01"];
+            assert!(Cli::try_parse_from(since).is_err(), "{trailing} --since");
+            for (other, _) in rows {
+                if other == trailing {
+                    continue;
+                }
+                let argv = ["routectl", "usage", trailing, other];
+                let err = Cli::try_parse_from(argv).expect_err(other);
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{trailing} {other}"
+                );
+            }
+        }
     }
 
     /// `--opening-accuracy` is opt-in and exclusive with the other report

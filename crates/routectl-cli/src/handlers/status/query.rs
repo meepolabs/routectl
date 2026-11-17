@@ -98,7 +98,7 @@ pub(super) const BODY_READ_TIMEOUT: Duration = Duration::from_secs(1);
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryRequest {
-    /// The calendar window to aggregate.
+    /// The window to aggregate.
     window: QueryWindow,
     /// The dimension to roll the fine rows up to.
     group_by: QueryGroupBy,
@@ -116,13 +116,17 @@ struct QueryRequest {
 
 /// The closed `window` vocabulary. Time-series granularity is NOT expressed
 /// here -- it is carried by the separate `bucket` field ([`QueryBucket`]),
-/// so a window token is only ever a range.
+/// so a window token is only ever a range. `last24h` and `last7d` are exact
+/// durations ending at the request's instant; the rest are local calendar
+/// windows.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum QueryWindow {
     Today,
     Week,
     Month,
+    Last24h,
+    Last7d,
     All,
 }
 
@@ -153,6 +157,8 @@ impl QueryWindow {
             Self::Today => WindowFlag::Today,
             Self::Week => WindowFlag::ThisWeek,
             Self::Month => WindowFlag::ThisMonth,
+            Self::Last24h => WindowFlag::Last24h,
+            Self::Last7d => WindowFlag::Last7d,
             Self::All => WindowFlag::All,
         }
     }

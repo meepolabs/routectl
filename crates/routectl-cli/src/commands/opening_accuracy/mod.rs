@@ -258,6 +258,8 @@ pub fn opening_accuracy_bounds(
         WindowFlag::Today => "today",
         WindowFlag::ThisWeek => "this week",
         WindowFlag::ThisMonth => "this month",
+        WindowFlag::Last24h => "last 24 hours",
+        WindowFlag::Last7d => "last 7 days",
         WindowFlag::All => "all time",
         WindowFlag::None => return Err(UsageError::OpeningAccuracyNeedsWindow),
     };

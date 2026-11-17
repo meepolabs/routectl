@@ -72,6 +72,8 @@ async fn out_of_vocabulary_bodies_return_a_leak_free_400() {
     // and a nested marker that must never be echoed back.
     let bodies = [
         r#"{"window":"decade","group_by":"model"}"#,
+        r#"{"window":"24h","group_by":"model"}"#,
+        r#"{"window":"trailing_24h","group_by":"model"}"#,
         r#"{"window":"all","group_by":"upstream"}"#,
         r#"{"window":"all","group_by":"model","seat":"LEAKMARKER"}"#,
         r#"{"group_by":"model"}"#,
@@ -285,6 +287,18 @@ fn each_window_token_maps_to_its_window_flag() {
         assert!(spec.from_ms > 0, "window={token} is not all-time");
         assert!(spec.from_ms < spec.to_ms, "window={token} is non-empty");
         assert_eq!(spec.to_ms, all.to_ms, "every window shares the upper bound");
+    }
+}
+
+#[test]
+fn trailing_window_tokens_parse_to_exact_durations_ending_now() {
+    let now = OffsetDateTime::now_utc();
+    let all = parse_spec(br#"{"window":"all","group_by":"model"}"#, now).unwrap();
+    for (token, span_ms) in [("last24h", 86_400_000), ("last7d", 604_800_000)] {
+        let body = format!(r#"{{"window":"{token}","group_by":"model"}}"#);
+        let spec = parse_spec(body.as_bytes(), now).expect("token is in vocabulary");
+        assert_eq!(spec.to_ms, all.to_ms, "window={token} ends at now");
+        assert_eq!(spec.to_ms - spec.from_ms, span_ms, "window={token} span");
     }
 }
 

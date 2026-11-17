@@ -4409,17 +4409,20 @@ daemon is live) and prints an aligned ASCII report.
 ./routectl usage                       # multi-window summary (default)
 ./routectl usage --today               # one calendar window
 ./routectl usage --this-week --by provider
+./routectl usage --last-24h            # the 24 hours ending now
 ./routectl usage --since 2026-06-01 --until 2026-06-07 --detail
 ./routectl usage --all --db /path/to/usage.db
 ```
 
-**Windows (LOCAL time).** Exactly one window selector may be given:
+**Windows.** Exactly one window selector may be given:
 
 | Flag           | Range                                            |
 |----------------|--------------------------------------------------|
 | `--today`      | local midnight today -> now                      |
 | `--this-week`  | Monday 00:00 of the current ISO week -> now      |
 | `--this-month` | the 1st at 00:00 -> now                           |
+| `--last-24h`   | exactly 24 hours ending now                      |
+| `--last-7d`    | exactly 7 days (168 hours) ending now            |
 | `--all`        | all recorded rows                                |
 | `--since D [--until E]` | `D` 00:00 -> end of `E` (or now if omitted), local |
 
@@ -4430,11 +4433,14 @@ environment variable when set, where an empty value means UTC, otherwise
 the windows and printed timestamps use UTC and one WARN line says so. On a
 day with a daylight-saving change, "today" spans its real 23 or 25 hours; a
 midnight that falls in a skipped hour starts at the first time that exists.
+`--last-24h` and `--last-7d` are trailing windows: fixed durations ending
+now that never read the time zone, so they stay exactly 24 and 168 hours
+across a daylight-saving change.
 
 The ISO week starts **Monday**. With no window flag and no `--since`,
 the command prints a multi-window summary (today / this week / this
-month / all time) as separate blocks. There are no rolling
-1h/24h/7d/30d windows.
+month / all time) as separate blocks. The only trailing windows are
+`--last-24h` and `--last-7d`.
 
 **Breakdown.** `--by model|provider|alias` rolls the rows up to that
 dimension; omit `--by` for a single total row. `--detail` adds extra
@@ -4816,7 +4822,10 @@ QUERY /status/query
 {"window": "week", "group_by": "model"}
 ```
 
-`window` is one of `today`, `week`, `month`, `all`; `group_by` is one of
+`window` is one of `today`, `week`, `month`, `last24h`, `last7d`, `all`
+(`last24h` and `last7d` are the trailing 24 hours and 7 days ending at the
+request, the rest local calendar windows, as for `routectl usage`; a series
+on a trailing window starts its buckets at the window's start); `group_by` is one of
 `model`, `provider`, `alias`; optional `alias` and `provider` keys narrow
 the result to one routing alias or served provider. Do not build a durable
 integration on the response shape before 1.0.

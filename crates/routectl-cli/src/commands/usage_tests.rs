@@ -1435,3 +1435,4 @@ include!("usage_era_pricing_tests.rs");
 include!("usage_price_table_tests.rs");
 include!("usage_equivalent_cost_tests.rs");
 include!("usage_lifetime_cost_tests.rs");
+include!("usage_trailing_window_tests.rs");

@@ -54,13 +54,16 @@ pub struct UsageArgs {
     pub k_calibration: bool,
 }
 
-/// The mutually-exclusive calendar-window selector. `None` (no flag and no
-/// `--since`) prints the multi-window summary.
+/// The mutually-exclusive window selector: a local calendar window, a
+/// trailing fixed-length window ending now, or all history. `None` (no flag
+/// and no `--since`) prints the multi-window summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowFlag {
     Today,
     ThisWeek,
     ThisMonth,
+    Last24h,
+    Last7d,
     All,
     None,
 }
@@ -109,7 +112,7 @@ pub enum UsageError {
     Open(#[from] OpenError),
     #[error(
         "--opening-accuracy needs an explicit window: --today, --this-week, --this-month, \
-         --all, or --since D [--until E]"
+         --last-24h, --last-7d, --all, or --since D [--until E]"
     )]
     OpeningAccuracyNeedsWindow,
     #[error("usage db unavailable at {path}: {source}")]
@@ -279,19 +282,33 @@ fn local_month_start(zone: &LocalZone, now: OffsetDateTime) -> OffsetDateTime {
     resolve_local_midnight(zone, local_time::midnight(first), now)
 }
 
-/// Bounds for a calendar window flag in `zone`, anchored at an explicit `now`
-/// so tests are deterministic. The binary passes the loaded host zone and the
-/// current instant.
+/// Bounds for a window flag, anchored at an explicit `now` so tests are
+/// deterministic. The binary passes the loaded host zone and the current
+/// instant.
+///
+/// The trailing windows are exact durations ending at `now` and never consult
+/// `zone`: across a daylight-saving change "last 24 hours" stays 24 hours,
+/// while "today" spans the local day's real 23 or 25.
 pub fn window_bounds(zone: &LocalZone, flag: WindowFlag, now: OffsetDateTime) -> WindowBounds {
     let to_ms = unix_ms(now) + 1;
     let from = match flag {
         WindowFlag::Today | WindowFlag::None => local_midnight(zone, now),
         WindowFlag::ThisWeek => local_week_start(zone, now),
         WindowFlag::ThisMonth => local_month_start(zone, now),
+        WindowFlag::Last24h => return trailing_bounds(to_ms, MS_PER_DAY),
+        WindowFlag::Last7d => return trailing_bounds(to_ms, 7 * MS_PER_DAY),
         WindowFlag::All => return WindowBounds { from_ms: 0, to_ms },
     };
     WindowBounds {
         from_ms: unix_ms(from),
+        to_ms,
+    }
+}
+
+/// `[to_ms - span_ms, to_ms)`.
+const fn trailing_bounds(to_ms: i64, span_ms: i64) -> WindowBounds {
+    WindowBounds {
+        from_ms: to_ms - span_ms,
         to_ms,
     }
 }
@@ -1873,6 +1890,8 @@ fn window_title(flag: WindowFlag) -> String {
         WindowFlag::Today => "== today ==",
         WindowFlag::ThisWeek => "== this week ==",
         WindowFlag::ThisMonth => "== this month ==",
+        WindowFlag::Last24h => "== last 24 hours ==",
+        WindowFlag::Last7d => "== last 7 days ==",
         WindowFlag::All => "== all time ==",
         WindowFlag::None => "== usage ==",
     }

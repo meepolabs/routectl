@@ -68,6 +68,51 @@ fn a_bucket_token_returns_a_series_at_the_resolved_width() {
     assert_eq!(json["data"]["totals"]["requests"], 2);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_trailing_window_series_anchors_its_grid_at_the_window_start() {
+    // Arrange: the only row sits mid-window, hours after the window opens, so a
+    // grid re-anchored on the earliest row (or on a local midnight) would start
+    // somewhere else. Read in a zone whose midnight is not a whole-hour step
+    // from the window start, so a midnight anchor cannot coincide with it.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("usage.db");
+    let now = fixed_now();
+    let now_ms = crate::local_time::unix_ms(now);
+    seed_ledger(&path, &[now_ms - 5 * 3_600_000]);
+    let zone = crate::local_time::LocalZone::from_posix_tz("<+0530>-5:30").unwrap();
+    let pricer = state_with_ledger(path.clone()).pricer().pin();
+
+    for (token, span_ms) in [("last24h", 86_400_000_i64), ("last7d", 604_800_000)] {
+        let body = format!(r#"{{"window":"{token}","group_by":"model","bucket":"hour"}}"#);
+        let (spec, bucket) = spec_from_body(body.as_bytes(), &zone, now).expect("in vocabulary");
+        let from_ms = spec.from_ms;
+
+        // Act
+        let panel = build_panel(
+            &path,
+            spec,
+            bucket,
+            &pricer,
+            crate::handlers::status::utc_rfc3339(now_ms),
+            &zone,
+            now,
+        );
+        let json = serde_json::to_value(&panel).expect("the panel renders");
+
+        // Assert: hourly buckets laid from `from_ms`, covering the whole span.
+        assert!(json["unavailable"].is_null(), "{token}: {json}");
+        let buckets = json["data"]["series"]["buckets"].as_array().unwrap();
+        assert_eq!(buckets[0]["start_ms"], from_ms, "{token}: grid anchor");
+        assert_eq!(
+            buckets.len() as i64,
+            span_ms / 3_600_000,
+            "{token}: one bucket per hour of the window"
+        );
+        assert_eq!(json["data"]["totals"]["requests"], 1, "{token}");
+    }
+}
+
 #[tokio::test]
 async fn an_absent_bucket_token_leaves_the_series_null() {
     // The non-series shape must stay byte-identical to the pre-series one: no
