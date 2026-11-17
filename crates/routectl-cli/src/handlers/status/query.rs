@@ -92,7 +92,7 @@ const MAX_BODY_BYTES: usize = 8 * 1024;
 /// docs.
 pub(super) const BODY_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The closed request vocabulary. `deny_unknown_fields` plus the two closed
+/// The closed request vocabulary. `deny_unknown_fields` plus the closed
 /// enums make every out-of-vocabulary body -- an unknown key, an unknown token,
 /// a wrong type -- fail closed at parse time, before the ledger is touched.
 #[derive(Debug, Deserialize)]
@@ -100,8 +100,9 @@ pub(super) const BODY_READ_TIMEOUT: Duration = Duration::from_secs(1);
 struct QueryRequest {
     /// The window to aggregate.
     window: QueryWindow,
-    /// The dimension to roll the fine rows up to.
-    group_by: QueryGroupBy,
+    /// The dimension to roll the fine rows up to: any token of the shared
+    /// grouping list, so a new grouping is accepted here without an edit.
+    group_by: GroupDim,
     /// Restrict to one routing alias. Absent matches every alias.
     #[serde(default)]
     alias: Option<String>,
@@ -130,16 +131,6 @@ enum QueryWindow {
     All,
 }
 
-/// The closed `group_by` vocabulary. `seat`, `upstream`, `outcome`, and `class`
-/// are not accepted.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum QueryGroupBy {
-    Model,
-    Provider,
-    Alias,
-}
-
 /// The closed `bucket` vocabulary: the granularity a series is REQUESTED at.
 /// Coarser tokens are deliberately absent -- the server widens the grid itself
 /// under the bucket cap and reports the resolved width, so a client never needs
@@ -160,16 +151,6 @@ impl QueryWindow {
             Self::Last24h => WindowFlag::Last24h,
             Self::Last7d => WindowFlag::Last7d,
             Self::All => WindowFlag::All,
-        }
-    }
-}
-
-impl QueryGroupBy {
-    const fn dim(self) -> GroupDim {
-        match self {
-            Self::Model => GroupDim::Model,
-            Self::Provider => GroupDim::Provider,
-            Self::Alias => GroupDim::Alias,
         }
     }
 }
@@ -202,7 +183,7 @@ pub(super) fn parse_body(body: &[u8]) -> Result<ParsedQuery, ()> {
     let request: QueryRequest = serde_json::from_slice(body).map_err(|_| ())?;
     Ok(ParsedQuery {
         flag: request.window.flag(),
-        group_by: request.group_by.dim(),
+        group_by: request.group_by,
         alias_filter: filter_value(request.alias)?,
         provider_filter: filter_value(request.provider)?,
         bucket: request.bucket.map(QueryBucket::unit),

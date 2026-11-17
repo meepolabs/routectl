@@ -4826,7 +4826,9 @@ QUERY /status/query
 (`last24h` and `last7d` are the trailing 24 hours and 7 days ending at the
 request, the rest local calendar windows, as for `routectl usage`; a series
 on a trailing window starts its buckets at the window's start); `group_by` is one of
-`model`, `provider`, `alias`; optional `alias` and `provider` keys narrow
+`model`, `alias`, `provider`, `seat` (`seat` groups by the credential
+identity each request was served under; a request with none recorded reads
+as `(unattributed)`); optional `alias` and `provider` keys narrow
 the result to one routing alias or served provider. Do not build a durable
 integration on the response shape before 1.0.
 

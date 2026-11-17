@@ -75,6 +75,9 @@ async fn out_of_vocabulary_bodies_return_a_leak_free_400() {
         r#"{"window":"24h","group_by":"model"}"#,
         r#"{"window":"trailing_24h","group_by":"model"}"#,
         r#"{"window":"all","group_by":"upstream"}"#,
+        r#"{"window":"all","group_by":"outcome"}"#,
+        r#"{"window":"all","group_by":"class"}"#,
+        r#"{"window":"all","group_by":"client"}"#,
         r#"{"window":"all","group_by":"model","seat":"LEAKMARKER"}"#,
         r#"{"group_by":"model"}"#,
         r#"{"window":"all"}"#,
@@ -106,6 +109,9 @@ async fn out_of_vocabulary_bodies_return_a_leak_free_400() {
             "seat",
             "decade",
             "upstream",
+            "outcome",
+            "class",
+            "client",
         ] {
             assert!(
                 !rendered.contains(forbidden),
@@ -305,14 +311,75 @@ fn trailing_window_tokens_parse_to_exact_durations_ending_now() {
 #[test]
 fn each_group_by_token_maps_to_its_dimension() {
     let now = OffsetDateTime::now_utc();
-    for (token, dim) in [
-        ("model", GroupDim::Model),
-        ("provider", GroupDim::Provider),
-        ("alias", GroupDim::Alias),
-    ] {
+    for dim in GroupDim::ALL {
+        let token = dim.as_str();
         let body = format!(r#"{{"window":"all","group_by":"{token}"}}"#);
         let spec = parse_spec(body.as_bytes(), now).unwrap();
         assert_eq!(spec.group_by, dim, "group_by={token}");
+    }
+}
+
+#[tokio::test]
+async fn group_by_seat_rolls_rows_up_by_their_recorded_seat() {
+    // Arrange: two rows under one seat, one under another, and one with no
+    // recorded seat, all sharing one model so only a seat grouping splits them.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("usage.db");
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+    seed_seated_ledger(
+        &path,
+        now,
+        &[Some("work"), Some("work"), Some("home"), None],
+    );
+
+    // Act
+    let (status, json) = send(
+        state_with_ledger(path),
+        QUERY_METHOD,
+        r#"{"window":"all","group_by":"seat"}"#,
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["unavailable"].is_null(), "seeded ledger: {json}");
+    let mut groups: Vec<(String, i64)> = json["data"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| {
+            let label = g["label"].as_str().unwrap().to_string();
+            (label, g["metrics"]["requests"].as_i64().unwrap())
+        })
+        .collect();
+    groups.sort();
+    assert_eq!(
+        groups,
+        [
+            ("(unattributed)".to_string(), 1),
+            ("home".to_string(), 1),
+            ("work".to_string(), 2),
+        ]
+    );
+    assert_eq!(json["data"]["totals"]["requests"], 4);
+}
+
+/// Seed one `ok` row at `ts` per entry of `seats`, each recording that seat
+/// (or none), all under one model/alias/provider.
+fn seed_seated_ledger(path: &Path, ts: i64, seats: &[Option<&str>]) {
+    let db = open(path).expect("open ledger");
+    for (i, seat) in seats.iter().enumerate() {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, ttfb_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                 input_tokens, output_tokens, seat) \
+                 VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 'm', 'p', 'u', 1, 'ok', \
+                 50, 10, 0, 0, 1, 0, 100, 20, ?3)",
+                rusqlite::params![ts, format!("r{i}"), seat],
+            )
+            .expect("seed row");
     }
 }
 
