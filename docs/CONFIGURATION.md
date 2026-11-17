@@ -3589,7 +3589,11 @@ routectl provider add --login anthropic --label work --name anthropic-work
   default seat. If the config write fails after the login (another writer
   changed the file), the login is kept, nothing is written, and the error
   names the exact `routectl provider add --login ... --label ...` command
-  to run again, with any value the shell would split single-quoted.
+  to run again, with any value the shell would split single-quoted and
+  `--config <path>` when the file was chosen with `--config` or
+  `ROUTECTL_CONFIG`. When a value holds a control character, no command is
+  printed: the error says to re-run the same `routectl provider add`
+  command instead.
 - The credential comes from `--api-key-env`, `--secret-ref`,
   `--api-key-stdin` (captured to the managed `file://` store) or, on a
   terminal, the matching conventional environment variable or a hidden

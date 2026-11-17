@@ -42,7 +42,8 @@
 //!      re-applies the same deterministic insert, re-gates, and commits
 //!      atomically (or writes nothing on a no-op). A post-capture write
 //!      conflict emits an explicit recovery message -- the secret/login
-//!      persists, the config is unchanged, re-run to complete.
+//!      persists, the config is unchanged, re-run to complete (a login
+//!      names the exact command when it can be printed exactly).
 //!   7. On a real write, emit exactly one audit event -- surface, verb,
 //!      name, family token, credential class -- NEVER the value and NEVER
 //!      the full ref string.
@@ -51,7 +52,7 @@ use std::io::{IsTerminal, Read};
 use std::path::Path;
 
 use async_trait::async_trait;
-use routectl_core::{Error, Result, render_operator_text};
+use routectl_core::{Error, Result};
 use routectl_router::{EditOutcome, parse_config};
 
 use super::edit_pipeline::{
@@ -59,7 +60,7 @@ use super::edit_pipeline::{
     render_gate_errors,
 };
 use super::provider_entry::render_provider_block;
-use super::seat::shell_word;
+use super::rerun::{RerunCommand, chosen_config_path, instruction};
 use crate::config_classify::collect_high_consequence_changes;
 
 mod build;
@@ -219,39 +220,42 @@ const ROTATED_MESSAGE: &str = "credential rotated; config unchanged";
 
 /// The error for a config write that failed after the secret capture or the
 /// login already ran: the side effect persists and the file is unchanged. A
-/// login names the exact command that finishes the wiring, so the rerun lands
-/// in the same seat.
-fn post_side_effect_error(args: &ProviderAddArgs, cause: &Error) -> Error {
-    match login_rerun_command(args) {
-        Some(command) => Error::Config(format!(
-            "the login succeeded, but the config was NOT changed ({cause}). config.toml is \
-             unchanged; the login persists -- re-run `{command}` to complete the wiring"
-        )),
-        None => Error::Config(format!(
+/// login names the command that finishes the wiring, so the rerun lands in
+/// the same seat, entry and file.
+fn post_side_effect_error(config_path: &Path, args: &ProviderAddArgs, cause: &Error) -> Error {
+    if args.login.is_none() {
+        return Error::Config(format!(
             "the credential was captured/logged in successfully, but the config was \
              NOT changed ({cause}). config.toml is unchanged; the captured credential \
              persists -- re-run `provider add` to complete the wiring"
-        )),
+        ));
     }
+    let rerun = instruction(
+        login_rerun_command(chosen_config_path(config_path), args),
+        "routectl provider add",
+    );
+    Error::Config(format!(
+        "the login succeeded, but the config was NOT changed ({cause}). config.toml is \
+         unchanged; the login persists -- {rerun} to complete the wiring"
+    ))
 }
 
-/// The `provider add --login` command line these args came from, with every
-/// operator-written value as one shell word; `None` when no login was asked.
-fn login_rerun_command(args: &ProviderAddArgs) -> Option<String> {
-    let word = |value: &str| shell_word(&render_operator_text(value));
-    let vendor = args.login.as_deref()?;
-    let mut words = vec!["routectl provider add --login".to_string(), word(vendor)];
-    if let Some(label) = args.label.as_deref() {
-        words.extend(["--label".to_string(), word(label)]);
-    }
-    words.extend(["--name".to_string(), word(&args.name)]);
-    if args.overwrite {
-        words.push("--overwrite".to_string());
-    }
-    if args.yes {
-        words.push("--yes".to_string());
-    }
-    Some(words.join(" "))
+/// The `provider add --login` command line these args came from, against
+/// `config_path` (`None` for the default file), every operator-written value
+/// one exact shell word. `None` when no login was asked, or when a value has
+/// no exact printable form.
+fn login_rerun_command(config_path: Option<&Path>, args: &ProviderAddArgs) -> Option<String> {
+    RerunCommand::routectl(config_path)
+        .word("provider")
+        .word("add")
+        .word("--login")
+        .value(args.login.as_deref()?)
+        .option("--label", args.label.as_deref())
+        .word("--name")
+        .value(&args.name)
+        .switch("--overwrite", args.overwrite)
+        .switch("--yes", args.yes)
+        .render()
 }
 
 /// Run the `provider add` pipeline against `config_path` with the
@@ -367,7 +371,9 @@ pub async fn run_with_io(
 
     let outcome = match commit(config_path, &snapshot, &snapshot_text, name, block) {
         Ok(outcome) => outcome,
-        Err(e) if did_side_effect => return Err(post_side_effect_error(&args, &e)),
+        Err(e) if did_side_effect => {
+            return Err(post_side_effect_error(config_path, &args, &e));
+        }
         Err(e) => return Err(e),
     };
 

@@ -7912,7 +7912,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lock is never held across a prompt/login/env-probe/put. A post-capture write
   conflict reports an explicit recovery (secret/login persists, config
   unchanged); after a login it names the exact `provider add --login
-  [--label]` rerun command. Emits ONE value-free audit event
+  [--label]` rerun command (built with `commands::rerun`). Emits ONE value-free audit event
   (surface/verb/name/kind/credential class -- never the value or full ref);
   owns `AddResult` {Written/NoChange/Aborted/Rotated} and the pinned
   `credential rotated; config unchanged` line. Also owns the accepted
@@ -8215,11 +8215,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   grouped by provider (default seat as `<provider> (default)`, labeled seats
   as `<provider>#<label>`), each with its own expiry; exits 0 when at least
   one seat is logged in, 2 otherwise
+- `src/commands/rerun.rs` -- the literal rerun command a failure message
+  prints: `RerunCommand` builds `routectl [--config <path>] ...` word by
+  word, each operator-written value one exact shell word, and voids the
+  whole command when a value has no exact printable form (control
+  character, non-UTF-8 path); `chosen_config_path` leaves the default file
+  unnamed; `instruction` falls back to "re-run the same `...` command".
+  Used by `login`, `provider add --login` and `init`
 - `src/commands/seat.rs` -- shared `--label` handling for the seat-aware
   OAuth commands: `validate_label` (rejects empty/whitespace labels,
   mirroring the `oauth://` ref parser) and `shell_word` (one POSIX shell
   word for a printed command; used by doctor's login remediation and
-  `provider add`'s rerun line)
+  `commands::rerun`)
 - `src/commands/seat_report.rs` -- shared OAuth seat-pool report: pure
   `pool_rows(config, Option<&[seat_key]>)` joins every `[pools.<name>]` block
   against its members' refs (`PoolRow`/`PoolMember`/`PoolHealth`

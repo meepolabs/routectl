@@ -40,7 +40,6 @@
 //! one `Err` is an oauth id with no known provider shape, which the CLI's
 //! accepted set (the login registry) cannot produce.
 
-use std::borrow::Cow;
 use std::path::Path;
 
 use routectl_auth::SecretRef;
@@ -64,13 +63,9 @@ use super::login_provider_block::{ProviderBlock, provider_block, required_auth_f
 use super::login_surface_availability::availability_gap;
 use super::parse_error_redaction::{CONFIG_UNREADABLE, redact_parse_error};
 use super::provider_entry::{toml_key, toml_string};
+use super::rerun::{RerunCommand, chosen_config_path, instruction};
 use super::seat::shell_word;
 use crate::config_classify::collect_high_consequence_changes;
-
-/// The variable the CLI's global `--config` flag also reads.
-const CONFIG_ENV_VAR: &str = "ROUTECTL_CONFIG";
-/// The file name under the config folder when no path is given.
-const DEFAULT_CONFIG_FILE: &str = "config.toml";
 
 /// The config delta a freshly minted seat implies.
 #[derive(Debug)]
@@ -850,51 +845,28 @@ fn surface_against(
 /// How the post-commit failure tells the operator to be offered the change
 /// again: the exact command when one can be printed, else the vendor alone.
 fn rerun_instruction(config_path: &Path, family: &str, label: Option<&str>) -> String {
-    let explicit_path = (!is_default_config_path(config_path)).then_some(config_path);
-    login_rerun_command(explicit_path, family, label).map_or_else(
-        || {
-            format!(
-                "re-run the same `routectl login {}` command",
-                shell_word(&render_operator_text(family))
-            )
-        },
-        |command| format!("re-run `{command}`"),
+    instruction(
+        login_rerun_command(chosen_config_path(config_path), family, label),
+        &format!(
+            "routectl login {}",
+            shell_word(&render_operator_text(family))
+        ),
     )
 }
 
 /// The `routectl login` command line that mints this seat again against
-/// `config_path` (`None` for the default file), each value one shell word.
-///
-/// `None` when a value cannot be printed exactly: a control character would
-/// reach the terminal raw, and dropping it would name a different seat or
-/// file than the one just logged in.
+/// `config_path` (`None` for the default file), each value one shell word;
+/// `None` when a value has no exact printable form.
 fn login_rerun_command(
     config_path: Option<&Path>,
     family: &str,
     label: Option<&str>,
 ) -> Option<String> {
-    let word = |value: &str| {
-        let printable = matches!(render_operator_text(value), Cow::Borrowed(_));
-        printable.then(|| shell_word(value))
-    };
-    let mut words = vec!["routectl".to_string()];
-    if let Some(path) = config_path {
-        words.extend(["--config".to_string(), word(path.to_str()?)?]);
-    }
-    words.extend(["login".to_string(), word(family)?]);
-    if let Some(label) = label {
-        words.extend(["--label".to_string(), word(label)?]);
-    }
-    Some(words.join(" "))
-}
-
-/// Whether a bare `routectl login` resolves `config_path`, with neither
-/// `--config` nor `ROUTECTL_CONFIG`. That path is never echoed: it embeds
-/// the operator's home directory, and the operator did not write it.
-fn is_default_config_path(config_path: &Path) -> bool {
-    std::env::var_os(CONFIG_ENV_VAR).is_none()
-        && routectl_core::config_dir::config_dir()
-            .is_some_and(|dir| dir.join(DEFAULT_CONFIG_FILE) == config_path)
+    RerunCommand::routectl(config_path)
+        .word("login")
+        .value(family)
+        .option("--label", label)
+        .render()
 }
 
 /// Print the skip reason plus the block the operator would add by hand.

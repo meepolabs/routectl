@@ -1414,10 +1414,11 @@ fn a_control_character_in_a_label_keeps_the_printed_entry_parseable() {
     );
 }
 
-/// The Unreadable skip and the post-acceptance failure both describe a file
-/// login resolved itself, so neither may echo its path -- login output gets
-/// pasted into bug reports, and the path embeds the operator's home
-/// directory.
+/// The Unreadable skip never echoes the config path, and the
+/// post-acceptance failure never echoes the default one: login output gets
+/// pasted into bug reports, and that path embeds the operator's home
+/// directory. A file the operator chose (`--config` or `ROUTECTL_CONFIG`)
+/// is printed in the rerun, since the rerun must name it.
 #[test]
 fn no_config_surface_message_echoes_the_config_path() {
     // Arrange: a path with a recognizable "username" segment, made

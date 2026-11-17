@@ -30,6 +30,7 @@ pub mod provider_entry;
 pub mod provider_env;
 pub mod rc;
 pub mod refresh;
+pub mod rerun;
 pub mod seat;
 pub mod seat_report;
 pub mod test;

@@ -31,7 +31,9 @@ pub enum ScaffoldError {
     /// existence check saw it, or it appeared in the window between that
     /// check and this exclusive create. Scaffold never clobbers; the
     /// orchestrator routes this onto the existing-config path.
-    #[error("config already exists; re-run `routectl init` to walk it, or edit in place")]
+    #[error(
+        "config already exists; run `init` without `--scaffold` to walk it, or edit it in place"
+    )]
     AlreadyExists,
 
     /// The starter text failed the shared config-check gate; nothing was

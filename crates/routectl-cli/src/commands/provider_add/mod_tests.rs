@@ -1117,76 +1117,229 @@ async fn login_delegates_to_the_login_flow_and_writes_the_oauth_ref() {
 }
 
 /// A config write that fails after a labelled login names the exact command
-/// that finishes the wiring, so the rerun lands in the same seat.
+/// that finishes the wiring, so the rerun lands in the same seat and file:
+/// the default file stays unnamed, a file chosen with `--config` or with
+/// `ROUTECTL_CONFIG` is named with `--config`.
 #[tokio::test]
+#[serial_test::serial]
 async fn a_conflict_after_a_labelled_login_names_the_exact_rerun_command() {
-    // Arrange: the stub login lands another writer's bytes between this
-    // command's snapshot and its commit.
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_config(dir.path(), &current_base());
-    let other_writer = format!("{}# another writer\n", current_base());
-    let racing_path = path.clone();
-    let racing_bytes = other_writer.clone();
-    let io = FakeIo {
-        login_hook: Some(Box::new(move || {
-            std::fs::write(&racing_path, &racing_bytes).unwrap();
-        })),
-        ..Default::default()
-    };
-    let mut a = login_args("anthropic", "claude-work");
-    a.label = Some("work".to_string());
-
-    // Act
-    let err = run_with_io(&path, a, &io)
-        .await
-        .expect_err("a snapshot conflict after the login must error");
-
-    // Assert
-    let msg = err.to_string();
-    assert!(
-        msg.contains(
-            "re-run `routectl provider add --login anthropic --label work --name claude-work --yes`"
-        ),
-        "{msg}"
-    );
-    assert_eq!(
-        *io.login_calls.lock().unwrap(),
-        vec![("anthropic".to_string(), Some("work".to_string()))]
-    );
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), other_writer);
-}
-
-/// Every operator-written word of the rerun command is one shell word: a
-/// plain value is bare, any other is single-quoted.
-#[test]
-fn the_login_rerun_command_quotes_values_the_shell_would_split() {
+    #[derive(Clone, Copy)]
+    enum Chosen {
+        Default,
+        Flag,
+        Env,
+    }
     let rows = [
-        ("plain", "seat-a.1_b", "--label seat-a.1_b"),
-        ("space", "my seat", "--label 'my seat'"),
-        ("single quote", "seat'a", "--label 'seat'\\''a'"),
-        ("expansion", "$(id)", "--label '$(id)'"),
+        ("default file", Chosen::Default),
+        ("--config flag", Chosen::Flag),
+        ("ROUTECTL_CONFIG", Chosen::Env),
     ];
-    for (row, label, shown) in rows {
-        let mut a = login_args("codex", "my codex");
-        a.label = Some(label.to_string());
+    for (row, chosen) in rows {
+        // Arrange: the default file lives under XDG_CONFIG_HOME; a chosen
+        // file sits in a folder whose name the shell would split. The stub
+        // login lands another writer's bytes between this command's
+        // snapshot and its commit.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let folder = match chosen {
+            Chosen::Default => routectl_core::config_dir::config_dir().expect("absolute XDG"),
+            Chosen::Flag | Chosen::Env => dir.path().join("my configs"),
+        };
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = write_config(&folder, &current_base());
+        let _env = match chosen {
+            Chosen::Env => ScopedEnv::set("ROUTECTL_CONFIG", &path),
+            Chosen::Default | Chosen::Flag => ScopedEnv::unset("ROUTECTL_CONFIG"),
+        };
+        let other_writer = format!("{}# another writer\n", current_base());
+        let racing_path = path.clone();
+        let racing_bytes = other_writer.clone();
+        let io = FakeIo {
+            login_hook: Some(Box::new(move || {
+                std::fs::write(&racing_path, &racing_bytes).unwrap();
+            })),
+            ..Default::default()
+        };
+        let mut a = login_args("anthropic", "claude-work");
+        a.label = Some("work".to_string());
 
-        let command = login_rerun_command(&a).expect("a login names a rerun");
+        // Act
+        let err = run_with_io(&path, a, &io)
+            .await
+            .expect_err("a snapshot conflict after the login must error");
 
+        // Assert
+        let config_words = match chosen {
+            Chosen::Default => String::new(),
+            Chosen::Flag | Chosen::Env => format!("--config '{}' ", path.display()),
+        };
+        let expected = format!(
+            "re-run `routectl {config_words}provider add --login anthropic --label work \
+             --name claude-work --yes`"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains(&expected), "row `{row}`: {msg}");
         assert_eq!(
-            command,
-            format!("routectl provider add --login codex {shown} --name 'my codex' --yes"),
+            *io.login_calls.lock().unwrap(),
+            vec![("anthropic".to_string(), Some("work".to_string()))],
+            "row `{row}`"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            other_writer,
             "row `{row}`"
         );
     }
 }
 
+/// A value with no exact printable form voids the literal command: the
+/// recovery names no `--label`, `--name` or `--config` word and says to
+/// repeat the same invocation. The printable row is the positive control.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_conflict_with_a_control_character_value_prints_no_literal_rerun() {
+    let rows = [
+        ("printable", "work", "claude-work", true),
+        ("escape in label", "wo\u{1b}[2Jrk", "claude-work", false),
+        ("newline in name", "work", "claude\nwork", false),
+    ];
+    for (row, label, name, is_literal) in rows {
+        // Arrange: a chosen file, so the printable row also shows the
+        // `--config` word the control rows must not.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path().join("default"));
+        let _env = ScopedEnv::unset("ROUTECTL_CONFIG");
+        let path = write_config(dir.path(), &current_base());
+        let racing_path = path.clone();
+        let io = FakeIo {
+            login_hook: Some(Box::new(move || {
+                std::fs::write(&racing_path, format!("{}# raced\n", current_base())).unwrap();
+            })),
+            ..Default::default()
+        };
+        let mut a = login_args("anthropic", name);
+        a.label = Some(label.to_string());
+
+        // Act
+        let msg = run_with_io(&path, a, &io)
+            .await
+            .expect_err("a conflict after the login must error")
+            .to_string();
+
+        // Assert
+        let same = "re-run the same `routectl provider add` command to complete the wiring";
+        assert_eq!(msg.contains(same), !is_literal, "row `{row}`: {msg}");
+        for word in ["--label", "--name", "--config"] {
+            assert_eq!(
+                msg.contains(word),
+                is_literal,
+                "row `{row}` `{word}`: {msg}"
+            );
+        }
+    }
+}
+
+/// Every operator-written word of the rerun command is one shell word
+/// holding exactly the value given: a plain value is bare, any other is
+/// single-quoted, and a value with a control character (or a path that is
+/// not UTF-8) builds no command at all.
+#[test]
+fn the_login_rerun_command_is_exact_or_absent() {
+    /// (row, config path, label, name, the words after `--login codex`)
+    type Row = (
+        &'static str,
+        Option<&'static str>,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+    );
+    let rows: [Row; 9] = [
+        (
+            "plain",
+            None,
+            "seat-a.1_b",
+            "my codex",
+            Some("--label seat-a.1_b --name 'my codex'"),
+        ),
+        (
+            "space",
+            None,
+            "my seat",
+            "my codex",
+            Some("--label 'my seat' --name 'my codex'"),
+        ),
+        (
+            "single quote",
+            None,
+            "seat'a",
+            "my codex",
+            Some("--label 'seat'\\''a' --name 'my codex'"),
+        ),
+        (
+            "expansion",
+            None,
+            "$(id)",
+            "my codex",
+            Some("--label '$(id)' --name 'my codex'"),
+        ),
+        (
+            "path",
+            Some("/srv/my cfg/config.toml"),
+            "work",
+            "codex",
+            Some("--label work --name codex"),
+        ),
+        ("escape in label", None, "a\u{1b}[31mb", "codex", None),
+        ("newline in label", None, "a\nb", "codex", None),
+        ("control in name", None, "work", "co\u{7}dex", None),
+        (
+            "control in path",
+            Some("/srv/a\u{7}b/config.toml"),
+            "work",
+            "codex",
+            None,
+        ),
+    ];
+    for (row, path, label, name, shown) in rows {
+        let mut a = login_args("codex", name);
+        a.label = Some(label.to_string());
+
+        let command = login_rerun_command(path.map(Path::new), &a);
+
+        let expected = shown.map(|tail| {
+            let config = path.map_or_else(String::new, |p| format!("--config '{p}' "));
+            format!("routectl {config}provider add --login codex {tail} --yes")
+        });
+        assert_eq!(command, expected, "row `{row}`");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_config_path_builds_no_rerun_command() {
+    use std::os::unix::ffi::OsStrExt;
+    let path = Path::new(std::ffi::OsStr::from_bytes(b"/srv/\xff/config.toml"));
+
+    let command = login_rerun_command(Some(path), &login_args("codex", "codex"));
+
+    assert_eq!(command, None);
+    assert!(
+        login_rerun_command(
+            Some(Path::new("/srv/config.toml")),
+            &login_args("codex", "codex")
+        )
+        .is_some(),
+        "a UTF-8 path builds one"
+    );
+}
+
 #[test]
 fn a_rerun_without_a_label_or_a_login_names_neither() {
     assert_eq!(
-        login_rerun_command(&login_args("codex", "codex")).as_deref(),
+        login_rerun_command(None, &login_args("codex", "codex")).as_deref(),
         Some("routectl provider add --login codex --name codex --yes")
     );
-    assert_eq!(login_rerun_command(&args("gemini", "g")), None);
+    assert_eq!(login_rerun_command(None, &args("gemini", "g")), None);
 }
 
 #[tokio::test]

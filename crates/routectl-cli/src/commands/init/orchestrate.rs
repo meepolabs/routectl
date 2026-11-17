@@ -25,6 +25,7 @@ use super::{CredentialCapture, InitArgs, InitIo, Offer, OfferSource, detect, nex
 use crate::commands::edit_pipeline::preflight;
 use crate::commands::provider_add::{self, AddIo};
 use crate::commands::provider_env::env_var_for_kind;
+use crate::commands::rerun::{RerunCommand, chosen_config_path, instruction};
 
 /// Print `label`, flush, and read one trimmed line. `None` on a read error
 /// (e.g. EOF stdin) or when stdin is not a terminal, so a non-interactive
@@ -81,8 +82,9 @@ pub(super) async fn orchestrate(
         if config_exists {
             return Err(Error::Config(format!(
                 "config already exists at `{}`; `--scaffold` never overwrites it. \
-                 re-run `routectl init` without `--scaffold` to walk the existing config",
-                config_path.display()
+                 {} without `--scaffold` to walk the existing config",
+                config_path.display(),
+                init_rerun_instruction(config_path, args)
             )));
         }
         return confirmed_scaffold(config_path, args.yes, io);
@@ -102,7 +104,7 @@ pub(super) async fn orchestrate(
         match capture_missing_credential(args, io) {
             Some(offer) => offers.push(offer),
             None => {
-                print!("{}", missing_credential_next_steps());
+                print!("{}", missing_credential_next_steps(config_path, args));
                 return Ok(());
             }
         }
@@ -117,7 +119,19 @@ pub(super) async fn orchestrate(
         return Ok(());
     }
 
-    apply_plan(config_path, config_exists, plan, existing_config, io).await
+    apply_plan(config_path, args, config_exists, plan, existing_config, io).await
+}
+
+/// How a message tells the operator to run this `init` again: the exact
+/// invocation, against the same config file, when it can be printed exactly.
+fn init_rerun_instruction(config_path: &Path, args: &InitArgs) -> String {
+    let command = RerunCommand::routectl(chosen_config_path(config_path))
+        .word("init")
+        .switch("--yes", args.yes)
+        .option("--default-model", args.default_model.as_deref())
+        .switch("--forwarded", args.forwarded)
+        .render();
+    instruction(command, "routectl init")
 }
 
 /// The empty-offer capture branch: on a credential-less interactive run,
@@ -169,11 +183,12 @@ fn api_key_capture_offer() -> Offer {
 /// and the re-run hint. Deliberately NEVER the raw `MissingDefaultRoute` -- a
 /// fresh machine has nothing to route, which is a setup gap to guide through,
 /// not a routing error to surface.
-fn missing_credential_next_steps() -> String {
+fn missing_credential_next_steps(config_path: &Path, args: &InitArgs) -> String {
     let env_var = env_var_for_kind("anthropic-api").unwrap_or("ANTHROPIC_API_KEY");
+    let rerun = init_rerun_instruction(config_path, args);
     format!(
         "no credentials detected, so there is nothing to route yet.\n\
-         set up a provider, then re-run `routectl init`:\n  \
+         set up a provider, then {rerun}:\n  \
          - log in to your Anthropic account:      routectl login anthropic\n  \
          - or set an API key in the environment:  export {env_var}=<your-key>\n"
     )
@@ -303,31 +318,34 @@ fn choose_default_route(
 /// init completes the setup.
 async fn apply_plan(
     config_path: &Path,
+    args: &InitArgs,
     config_exists: bool,
     plan: WizardPlan,
     existing_config: &Config,
     io: &dyn InitIo,
 ) -> Result<()> {
+    let rerun = init_rerun_instruction(config_path, args);
+    let recover = |err| recovery_error(err, &rerun);
     if !config_exists {
         match scaffold::scaffold_seed(config_path) {
             Ok(()) | Err(ScaffoldError::AlreadyExists) => {}
-            Err(e) => return Err(recovery_error(Error::Config(e.to_string()))),
+            Err(e) => return Err(recover(Error::Config(e.to_string()))),
         }
     }
 
     for provider_arg in plan.provider_args {
         provider_add::run_with_io(config_path, provider_arg, io as &dyn AddIo)
             .await
-            .map_err(recovery_error)?;
+            .map_err(recover)?;
     }
 
     let snapshot = std::fs::read(config_path).map_err(|e| {
-        recovery_error(Error::Config(format!(
+        recover(Error::Config(format!(
             "read config after wiring providers: {e}"
         )))
     })?;
     let snapshot_text = String::from_utf8(snapshot.clone())
-        .map_err(|e| recovery_error(Error::Config(format!("config is not UTF-8: {e}"))))?;
+        .map_err(|e| recover(Error::Config(format!("config is not UTF-8: {e}"))))?;
     commit_models_aliases(
         config_path,
         &snapshot,
@@ -335,7 +353,7 @@ async fn apply_plan(
         &plan.models,
         &plan.default_alias,
     )
-    .map_err(recovery_error)?;
+    .map_err(recover)?;
 
     println!(
         "routing configured; default route -> `{}`.",
@@ -442,11 +460,11 @@ pub(super) async fn gather_probes() -> Vec<(&'static str, LocalProbe)> {
 /// on-disk config is valid, any providers/credentials already written persist
 /// and are reused on re-run (ref paths are deterministic), so re-running init
 /// completes the setup. No rollback engine, no secret auto-delete.
-fn recovery_error(err: Error) -> Error {
+fn recovery_error(err: Error, rerun: &str) -> Error {
     Error::Config(format!(
         "init did not complete ({err}). the config on disk is valid; any providers \
          already added and any credentials already captured persist and are reused \
-         on re-run -- re-run `routectl init` to complete the setup"
+         on re-run -- {rerun} to complete the setup"
     ))
 }
 
@@ -901,6 +919,7 @@ mod tests {
 
         let err = apply_plan(
             &path,
+            &init_args(false, false, None, false),
             false,
             plan,
             &Config::default(),
@@ -1355,7 +1374,10 @@ mod tests {
 
     #[test]
     fn missing_credential_next_steps_names_login_and_env_but_no_routing_error() {
-        let msg = missing_credential_next_steps();
+        let msg = missing_credential_next_steps(
+            Path::new("/srv/cfg/config.toml"),
+            &init_args(false, false, None, false),
+        );
 
         assert!(
             msg.contains("routectl login anthropic"),
@@ -1366,13 +1388,58 @@ mod tests {
             "names the conventional env var: {msg}"
         );
         assert!(
-            msg.contains("routectl init"),
-            "tells the operator to re-run init: {msg}"
+            msg.contains("re-run `routectl --config '/srv/cfg/config.toml' init`"),
+            "tells the operator to re-run init against the same file: {msg}"
         );
         assert!(
             !msg.to_ascii_lowercase().contains("default route"),
             "never surfaces the raw routing error: {msg}"
         );
+    }
+
+    /// The `init` rerun repeats the invocation exactly: the chosen file and
+    /// every flag given, the default file unnamed, and no literal command at
+    /// all when a value has no exact printable form.
+    #[test]
+    #[serial_test::serial]
+    fn the_init_rerun_repeats_the_invocation_exactly_or_not_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let _env = routectl_testkit::ScopedEnv::unset("ROUTECTL_CONFIG");
+        let default = routectl_core::config_dir::config_dir()
+            .expect("absolute XDG")
+            .join("config.toml");
+        let chosen = dir.path().join("my cfg.toml");
+        let chosen_word = format!("'{}'", chosen.display());
+        let rows = [
+            (
+                "default file",
+                &default,
+                init_args(false, false, None, false),
+                "re-run `routectl init`".to_string(),
+            ),
+            (
+                "chosen file",
+                &chosen,
+                init_args(false, false, None, false),
+                format!("re-run `routectl --config {chosen_word} init`"),
+            ),
+            (
+                "flags",
+                &default,
+                init_args(false, true, Some("gpt 4o"), true),
+                "re-run `routectl init --yes --default-model 'gpt 4o' --forwarded`".to_string(),
+            ),
+            (
+                "control in model",
+                &chosen,
+                init_args(false, true, Some("gpt\u{1b}[2J"), false),
+                "re-run the same `routectl init` command".to_string(),
+            ),
+        ];
+        for (row, path, args, expected) in rows {
+            assert_eq!(init_rerun_instruction(path, &args), expected, "row `{row}`");
+        }
     }
 
     // -----------------------------------------------------------------
