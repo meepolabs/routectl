@@ -286,7 +286,14 @@ mod chain {
     /// admitted while the returned connection is open is refused at
     /// admission. The writer is stuck on its first batch behind the lock, so
     /// nothing drains.
-    fn block_capability_writes(
+    ///
+    /// The channel alone holds `CHANNEL_CAPACITY` batches; the writer thread
+    /// may not have dequeued the first one yet when the fill is refused, and
+    /// the slot it frees on dequeuing would admit a later write. So the fill
+    /// keeps retrying until one batch more than the channel holds has been
+    /// admitted (that one is in the writer's hands, blocked on the lock), then
+    /// confirms the channel now refuses.
+    async fn block_capability_writes(
         daemon: &Daemon,
         db_path: &std::path::Path,
     ) -> (rusqlite::Connection, Vec<routectl_usage::BatchReceipt>) {
@@ -296,15 +303,31 @@ mod chain {
         lock.execute_batch("BEGIN EXCLUSIVE")
             .expect("take the write lock");
         let mut held = Vec::new();
-        for _ in 0..(routectl_usage::CHANNEL_CAPACITY * 2 + 8) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while held.len() <= routectl_usage::CHANNEL_CAPACITY {
             match daemon.usage().admit_capability_batch(
                 vec![routectl_usage::CapabilityEvent::tombstone(900, 8, 1)],
                 1,
             ) {
                 Ok(receipt) => held.push(receipt),
-                Err(_) => break,
+                Err(_) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the writer never took a batch off the full channel: {} admitted",
+                        held.len(),
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
             }
         }
+        let overflow = daemon.usage().admit_capability_batch(
+            vec![routectl_usage::CapabilityEvent::tombstone(900, 8, 1)],
+            1,
+        );
+        assert!(
+            matches!(overflow, Err(routectl_usage::BatchCommit::ChannelFull)),
+            "premise: the full channel refuses with the writer blocked",
+        );
         (lock, held)
     }
 
@@ -354,7 +377,7 @@ mod chain {
             Some(config_path),
         )
         .await;
-        let (lock, held) = block_capability_writes(&daemon, &db_path);
+        let (lock, held) = block_capability_writes(&daemon, &db_path).await;
         let refused_before = daemon.usage().counters().capability_events_dropped_full();
         assert!(refused_before >= 1, "premise: the channel refused a batch");
 
