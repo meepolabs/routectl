@@ -60,7 +60,13 @@ async fn doctor_renders_one_finding_per_validator_finding() {
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, two_finding_config()).expect("write config.toml");
 
-    let ctx = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
+    let ctx = gather_context_no_network(
+        &config_path,
+        GatherSources::Disk,
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
     let report = build_report_no_network(&ctx);
 
     let details: Vec<String> = report
