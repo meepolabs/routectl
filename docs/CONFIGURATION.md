@@ -3568,18 +3568,30 @@ routectl provider add --format anthropic-messages --name claude-fwd \
   --credential-source forwarded
 routectl provider add --login codex --name codex
 routectl provider add --login anthropic --label work --name anthropic-work
+routectl provider add --format bedrock-converse --name bedrock \
+  --region us-west-2 --secret-ref aws://profile/work
+routectl provider add --format anthropic-messages --name mantle \
+  --region us-east-1 --api-key-env AWS_BEARER_TOKEN_BEDROCK
 ```
 
 - **`--format`** is `anthropic-messages`, `openai-chat`,
-  `openai-responses` or `gemini`. `openai-chat` and `openai-responses`
-  need `--base-url`; `anthropic-messages` defaults to
-  `https://api.anthropic.com`; `gemini` always uses the public Gemini
-  REST base.
-- **`--auth`** is optional. Left out, it is `x-api-key` for
-  `anthropic-messages`, `x-goog-api-key` for `gemini` and `bearer` for
-  the others (a forwarded credential is always `bearer`). The chosen
-  value is written to the entry and shown in the confirmation, and a
-  combination the router refuses is refused with nothing written.
+  `openai-responses`, `bedrock-invoke`, `bedrock-converse` or `gemini`.
+  `openai-chat` and `openai-responses` need `--base-url` or `--region`;
+  `anthropic-messages` defaults to `https://api.anthropic.com`;
+  `bedrock-invoke` and `bedrock-converse` need `--region`; `gemini` always
+  uses the public Gemini REST base.
+- **`--region`** puts the entry on the AWS cloud instead of a base URL:
+  it writes `cloud = { name = "aws", region = "<region>" }`. The
+  `bedrock-*` formats reach Bedrock; `anthropic-messages`, `openai-chat`
+  and `openai-responses` reach Bedrock's managed surface (Mantle). It is
+  refused together with `--base-url`, `--login`,
+  `--credential-source forwarded` or `--format gemini`.
+- **`--auth`** is optional. Left out, it is `aws-sigv4` for an `aws://`
+  credential, `x-api-key` for `anthropic-messages` over a base URL,
+  `x-goog-api-key` for `gemini` and `bearer` for the others (a forwarded
+  credential is always `bearer`, and so is a key on the AWS cloud). The
+  chosen value is written to the entry and shown in the confirmation, and
+  a combination the router refuses is refused with nothing written.
 - **`--login`** is `anthropic` or `codex`. It runs the `login` flow after
   the confirmation and writes the vendor's own `format`, `base_url` and
   `auth` with `credential = "oauth://<vendor>"`; it takes no secret
@@ -3596,8 +3608,11 @@ routectl provider add --login anthropic --label work --name anthropic-work
   command instead.
 - The credential comes from `--api-key-env`, `--secret-ref`,
   `--api-key-stdin` (captured to the managed `file://` store) or, on a
-  terminal, the matching conventional environment variable or a hidden
-  prompt.
+  terminal, the matching conventional environment variable (not offered
+  for an entry on the AWS cloud) or a hidden prompt. `--secret-ref` takes
+  `env://`, `file://`, `oauth://`, `aws://profile/<name>` or `aws://chain`;
+  anything else, `literal:` included, is refused without repeating the
+  value.
 
 The old `--kind` flag is refused with a message naming `--format` and
 `--login`; nothing is written.

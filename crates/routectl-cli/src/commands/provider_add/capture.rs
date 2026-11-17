@@ -98,13 +98,14 @@ pub(super) fn capture_from_stdin(
 }
 
 /// Interactive resolution for a missing key: on a TTY, offer the
-/// already-resolvable conventional env var of the entry's `family` token,
+/// already-resolvable conventional env var of the entry's `family` token
+/// (none for an entry on a cloud, whose key is not the vendor's own),
 /// else prompt hidden and capture; off a TTY, error actionably (naming the
 /// selected `format`) rather than hang.
 pub(super) fn resolve_interactive(
     args: &ProviderAddArgs,
     format: Format,
-    family: &str,
+    family: Option<&str>,
     io: &dyn AddIo,
 ) -> Result<(String, &'static str, PendingSecret)> {
     if !io.stdin_is_terminal() {
@@ -115,7 +116,7 @@ pub(super) fn resolve_interactive(
             format.as_str()
         )));
     }
-    if let Some(var) = env_var_for_kind(family)
+    if let Some(var) = family.and_then(env_var_for_kind)
         && let Ok(sref) = env_ref(var)
         && io.confirm_env_offer(var)
     {

@@ -184,6 +184,7 @@ fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
         auth: None,
         name: offer.provider_name.clone(),
         base_url: None,
+        region: None,
         api_key_env,
         secret_ref: None,
         api_key_stdin: false,

@@ -1,6 +1,6 @@
 //! Provider entry construction from args (format / forwarded / managed login).
 
-use routectl_auth::{SecretRef, env_ref};
+use routectl_auth::{CredentialRef, SecretRef, env_ref};
 use routectl_core::{Error, Result};
 use routectl_router::{Auth, Format, ProviderEntry};
 
@@ -8,18 +8,24 @@ use super::capture::{PendingSecret, capture_from_stdin, ref_class, resolve_inter
 use super::{AUTH_VALUES, AddIo, FORMAT_VALUES, LOGIN_VALUES, ProviderAddArgs};
 use crate::commands::seat::validate_label;
 
-/// The formats this command builds over a base URL. The Bedrock formats ride
-/// a cloud carrier and `gemini-cloud-code` takes only a managed login, so
-/// neither is reachable through `--format` here.
-const SUPPORTED_FORMATS: [Format; 4] = [
+/// The formats this command builds. `gemini-cloud-code` takes only a
+/// managed login, so it is not reachable through `--format`.
+const SUPPORTED_FORMATS: [Format; 6] = [
     Format::AnthropicMessages,
     Format::OpenaiChat,
     Format::OpenaiResponses,
+    Format::BedrockInvoke,
+    Format::BedrockConverse,
     Format::Gemini,
 ];
 
-/// The `auth` values a base-URL entry can carry.
-const SUPPORTED_AUTHS: [Auth; 3] = [Auth::XApiKey, Auth::Bearer, Auth::XGoogApiKey];
+/// The `auth` values an entry this command builds can carry.
+const SUPPORTED_AUTHS: [Auth; 4] = [
+    Auth::XApiKey,
+    Auth::Bearer,
+    Auth::XGoogApiKey,
+    Auth::AwsSigv4,
+];
 
 /// What the args ask this command to build.
 enum Target {
@@ -27,6 +33,24 @@ enum Target {
     Format(Format),
     /// The entry consuming a managed login of this vendor.
     Login(&'static str),
+}
+
+/// Where the entry's requests go: `--base-url` (or the format's default
+/// base), or the AWS cloud in `--region`.
+enum Carrier<'a> {
+    BaseUrl(Option<&'a str>),
+    Aws { region: &'a str },
+}
+
+/// Resolve `--base-url` / `--region` into the one [`Carrier`] they name.
+fn carrier(args: &ProviderAddArgs) -> Result<Carrier<'_>> {
+    match (args.base_url.as_deref(), args.region.as_deref()) {
+        (Some(_), Some(_)) => Err(Error::Config(
+            "pass only one of `--base-url <URL>` or `--region <REGION>`".into(),
+        )),
+        (base_url, None) => Ok(Carrier::BaseUrl(base_url)),
+        (None, Some(region)) => Ok(Carrier::Aws { region }),
+    }
 }
 
 /// Whether `--credential-source forwarded` was requested. `own` (or the
@@ -94,15 +118,18 @@ fn parse_auth(value: &str) -> Result<Auth> {
         })
 }
 
-/// The `auth` written when `--auth` is not given: what the format's own API
-/// expects for an API key over a base URL. A forwarded credential is always
-/// sent as a bearer.
-pub(super) const fn default_auth(format: Format, forwarded: bool) -> Auth {
-    if forwarded {
-        return Auth::Bearer;
+/// The `auth` written when `--auth` is not given: an `aws://` credential
+/// signs with SigV4, a forwarded credential is a bearer, and otherwise the
+/// format's own key header (`x-api-key` for Anthropic Messages over a base
+/// URL, `x-goog-api-key` for Gemini), else a bearer.
+fn default_auth(format: Format, over_cloud: bool, credential: &str) -> Auth {
+    match CredentialRef::parse(credential) {
+        Ok(CredentialRef::AwsProfile(_) | CredentialRef::AwsChain) => return Auth::AwsSigv4,
+        Ok(CredentialRef::Forwarded) => return Auth::Bearer,
+        _ => {}
     }
     match format {
-        Format::AnthropicMessages => Auth::XApiKey,
+        Format::AnthropicMessages if !over_cloud => Auth::XApiKey,
         Format::Gemini => Auth::XGoogApiKey,
         _ => Auth::Bearer,
     }
@@ -126,16 +153,42 @@ pub(super) fn build_entry(
         Target::Login(vendor) => return build_login(args, vendor),
         Target::Format(format) => format,
     };
-    let auth = match args.auth.as_deref() {
-        Some(value) => parse_auth(value)?,
-        None => default_auth(format, forwarded),
+    let explicit_auth = args.auth.as_deref().map(parse_auth).transpose()?;
+    let shape = match carrier(args)? {
+        Carrier::BaseUrl(base_url) => entry_over_base_url(format, base_url)?,
+        Carrier::Aws { region } => entry_over_aws(format, region)?,
     };
-    let shape = entry_over_base_url(format, args.base_url.as_deref())?.with_auth(auth);
-    if forwarded {
-        return build_forwarded(args, shape);
+    let (credential, cred_class, pending) = if forwarded {
+        forwarded_credential(args, &shape)?
+    } else {
+        let family = shape.cloud.is_none().then(|| shape.kind_str());
+        resolve_secret(args, format, family, io)?
+    };
+    let auth =
+        explicit_auth.unwrap_or_else(|| default_auth(format, shape.cloud.is_some(), &credential));
+    Ok((
+        shape.with_credential(credential).with_auth(auth),
+        cred_class,
+        pending,
+    ))
+}
+
+/// The entry of `format` on the AWS cloud in `region` with no credential
+/// yet: Bedrock for the `bedrock-*` formats, Bedrock's managed surface for
+/// the Messages, Chat and Responses formats.
+fn entry_over_aws(format: Format, region: &str) -> Result<ProviderEntry> {
+    if matches!(format, Format::Gemini | Format::GeminiCloudCode) {
+        return Err(Error::Config(format!(
+            "`--format {}` has no AWS cloud form; `--region` is not supported for this format",
+            format.as_str()
+        )));
     }
-    let (ref_str, cred_class, pending) = resolve_secret(args, format, shape.kind_str(), io)?;
-    Ok((shape.with_credential(ref_str), cred_class, pending))
+    Ok(ProviderEntry::cloud_aws(
+        format,
+        region,
+        String::new(),
+        Auth::Bearer,
+    ))
 }
 
 /// The entry of `format` over `base_url` with no credential yet. The
@@ -172,6 +225,11 @@ fn entry_over_base_url(format: Format, base_url: Option<&str>) -> Result<Provide
             }
             Ok(ProviderEntry::gemini(String::new()))
         }
+        Format::BedrockInvoke | Format::BedrockConverse => Err(Error::Config(format!(
+            "`--format {}` runs on the AWS cloud; pass `--region <REGION>` instead of \
+             `--base-url`",
+            format.as_str()
+        ))),
         other => Err(Error::Config(format!(
             "format `{}` cannot be added with this command",
             other.as_str()
@@ -179,19 +237,27 @@ fn entry_over_base_url(format: Format, base_url: Option<&str>) -> Result<Provide
     }
 }
 
-/// Finish a `credential = "forwarded"` entry: it carries NO secret, and the
+/// The `credential = "forwarded"` source: it carries NO secret, and the
 /// shared gate pins it to `anthropic-messages` on the Anthropic API host
-/// with `auth = "bearer"`. Forwarded never mixes with a secret-source flag.
-fn build_forwarded(
+/// with `auth = "bearer"`. Forwarded never mixes with a secret-source flag
+/// or the AWS cloud.
+fn forwarded_credential(
     args: &ProviderAddArgs,
-    shape: ProviderEntry,
-) -> Result<(ProviderEntry, &'static str, PendingSecret)> {
+    shape: &ProviderEntry,
+) -> Result<(String, &'static str, PendingSecret)> {
     if shape.format() != Format::AnthropicMessages {
         return Err(Error::Config(format!(
             "`--credential-source forwarded` is only valid for `--format anthropic-messages` \
              (got `{}`)",
             shape.format().as_str()
         )));
+    }
+    if shape.cloud.is_some() {
+        return Err(Error::Config(
+            "`--credential-source forwarded` relays to the Anthropic API; `--region` is not \
+             supported with it"
+                .into(),
+        ));
     }
     if has_secret_flag(args) {
         return Err(Error::Config(
@@ -200,11 +266,7 @@ fn build_forwarded(
                 .into(),
         ));
     }
-    Ok((
-        shape.with_credential("forwarded"),
-        "forwarded",
-        PendingSecret::None,
-    ))
+    Ok(("forwarded".to_string(), "forwarded", PendingSecret::None))
 }
 
 /// Build the entry consuming a managed login of `vendor` and defer the
@@ -223,6 +285,7 @@ fn build_login(
     }
     let refused_flag = [
         (args.base_url.is_some(), "--base-url"),
+        (args.region.is_some(), "--region"),
         (args.auth.is_some(), "--auth"),
         (args.credential_source.is_some(), "--credential-source"),
     ]
@@ -260,17 +323,19 @@ const fn has_secret_flag(args: &ProviderAddArgs) -> bool {
 /// Resolve the api-key secret source into the ref STRING that lands in
 /// `credential`, its scheme CLASS, and any deferred capture. `--api-key-env
 /// VAR` verifies the var resolves now and yields `env://VAR`; `--secret-ref
-/// REF` validates the ref parses and writes it back verbatim (so a
-/// `file://` ref is preserved exactly, never round-tripped through the
-/// redacting `Display`; a `literal:` ref is rejected at parse); `--api-key-stdin`
+/// REF` validates the ref parses as a credential (`env://`, `file://`,
+/// `oauth://`, `aws://profile/<name>`, `aws://chain`) and writes it back
+/// verbatim (so a `file://` ref is preserved exactly, never round-tripped
+/// through the redacting `Display`; a `literal:` ref is rejected at parse,
+/// and `forwarded` is `--credential-source forwarded`'s); `--api-key-stdin`
 /// captures the piped value to the managed store; with no flag on a TTY, an
-/// already-resolvable conventional env var for the `family` token is
+/// already-resolvable conventional env var for the `family` token (if any) is
 /// OFFERED, else a hidden prompt captures the value. A missing key with no
 /// TTY errors actionably, naming `format`, rather than hanging.
 pub(super) fn resolve_secret(
     args: &ProviderAddArgs,
     format: Format,
-    family: &str,
+    family: Option<&str>,
     io: &dyn AddIo,
 ) -> Result<(String, &'static str, PendingSecret)> {
     if args.api_key_env.is_some() && args.secret_ref.is_some() {
@@ -283,8 +348,19 @@ pub(super) fn resolve_secret(
         return Ok((sref.to_string(), ref_class(&sref), PendingSecret::None));
     }
     if let Some(reference) = args.secret_ref.as_deref() {
-        let sref = SecretRef::parse(reference)?;
-        return Ok((reference.to_string(), ref_class(&sref), PendingSecret::None));
+        let credential = CredentialRef::parse(reference)?;
+        if credential == CredentialRef::Forwarded {
+            return Err(Error::Config(
+                "`--secret-ref` names a stored credential; use `--credential-source forwarded` \
+                 for a forwarded one"
+                    .into(),
+            ));
+        }
+        return Ok((
+            reference.to_string(),
+            credential.scheme_label(),
+            PendingSecret::None,
+        ));
     }
     if args.api_key_stdin {
         return capture_from_stdin(args, io);

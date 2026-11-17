@@ -166,6 +166,7 @@ fn base_args(format: &str, name: &str) -> ProviderAddArgs {
         auth: None,
         name: name.to_string(),
         base_url: None,
+        region: None,
         api_key_env: None,
         secret_ref: None,
         api_key_stdin: false,
@@ -373,6 +374,7 @@ fn every_provider_add_input_is_expressible_as_a_flag() {
         "--login",
         "--name",
         "--base-url",
+        "--region",
         "--api-key-env",
         "--secret-ref",
         "--api-key-stdin",
@@ -441,6 +443,92 @@ fn the_retired_kind_flag_is_refused_naming_its_replacements() {
         String::from_utf8_lossy(&accepted.stderr)
     );
     assert_ne!(std::fs::read(&path).unwrap(), before, "--format writes");
+}
+
+/// The real binary on the AWS cloud carrier: `--region` with `--base-url`,
+/// `--region` with `--login`, a Bedrock format without `--region`, and an
+/// unparseable `aws://` credential exit non-zero and leave the file
+/// byte-identical, the credential never echoed. The positive control is a
+/// Bedrock add with `--region`, which writes the inline cloud line.
+#[test]
+fn the_cloud_carrier_flags_are_refused_or_written_by_the_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &current_base());
+    let before = std::fs::read(&path).unwrap();
+    let run = |extra: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+            .args(["--config", path.to_str().unwrap(), "provider", "add"])
+            .args(["--name", "aws", "--yes"])
+            .args(extra)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run routectl")
+    };
+    let refused: &[(&str, &[&str])] = &[
+        (
+            "--region with --base-url",
+            &[
+                "--format",
+                "openai-chat",
+                "--region",
+                "us-west-2",
+                "--base-url",
+                "https://api.x.example/v1",
+                "--secret-ref",
+                "env://K",
+            ],
+        ),
+        (
+            "--region with --login",
+            &["--login", "anthropic", "--region", "us-west-2"],
+        ),
+        (
+            "bedrock without --region",
+            &["--format", "bedrock-invoke", "--secret-ref", "aws://chain"],
+        ),
+        (
+            "aws://bogus",
+            &[
+                "--format",
+                "bedrock-invoke",
+                "--region",
+                "us-west-2",
+                "--secret-ref",
+                "aws://bogus",
+            ],
+        ),
+    ];
+    for (row, extra) in refused {
+        let out = run(extra);
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "row `{row}` must exit non-zero");
+        assert!(!stderr.contains("bogus"), "row `{row}` echoed: {stderr}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "row `{row}`");
+    }
+
+    let accepted = run(&[
+        "--format",
+        "bedrock-converse",
+        "--region",
+        "us-west-2",
+        "--secret-ref",
+        "aws://chain",
+    ]);
+
+    assert!(
+        accepted.status.success(),
+        "positive control: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("cloud = { name = \"aws\", region = \"us-west-2\" }")
+            && text.contains("auth = \"aws-sigv4\""),
+        "positive control writes the inline cloud and sigv4:\n{text}"
+    );
 }
 
 #[test]

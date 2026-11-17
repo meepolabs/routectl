@@ -40,6 +40,7 @@ fn format_args(format: &str, credential: Option<&str>) -> ProviderAddArgs {
         auth: None,
         name: "added".to_string(),
         base_url: None,
+        region: None,
         api_key_env: None,
         secret_ref: credential.map(str::to_string),
         api_key_stdin: false,

@@ -246,6 +246,7 @@ fn oauth_add_args(name: &str) -> ProviderAddArgs {
         auth: None,
         name: name.to_string(),
         base_url: None,
+        region: None,
         api_key_env: None,
         secret_ref: None,
         api_key_stdin: false,

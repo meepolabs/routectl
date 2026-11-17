@@ -20,8 +20,8 @@
 //!
 //!   1. RAW version + legacy preflights on the snapshot bytes
 //!      (`super::edit_pipeline::preflight`, shared with `config set`).
-//!   2. Resolve the format (or managed login), the auth, the name, the base
-//!      URL, and the secret source into a
+//!   2. Resolve the format (or managed login), the auth, the name, the
+//!      carrier (base URL or AWS region), and the secret source into a
 //!      [`routectl_router::ProviderEntry`] plus a credential CLASS label (scheme only, never
 //!      the value) and a `PendingSecret` (the deferred `put`/login, if
 //!      any). A captured file ref's STRING is computed deterministically
@@ -75,27 +75,34 @@ mod tests;
 #[path = "format_tests.rs"]
 mod format_tests;
 
+#[cfg(test)]
+#[path = "carrier_tests.rs"]
+mod carrier_tests;
+
 use self::build::build_entry;
 use self::capture::execute_pending;
 use self::toml_edit::{commit, provider_table};
 
-/// The `--format` values `provider add` builds over a base URL.
-pub const FORMAT_VALUES: [&str; 4] = [
+/// The `--format` values `provider add` builds.
+pub const FORMAT_VALUES: [&str; 6] = [
     "anthropic-messages",
     "openai-chat",
     "openai-responses",
+    "bedrock-invoke",
+    "bedrock-converse",
     "gemini",
 ];
 
 /// The `--auth` values `provider add` accepts.
-pub const AUTH_VALUES: [&str; 3] = ["x-api-key", "bearer", "x-goog-api-key"];
+pub const AUTH_VALUES: [&str; 4] = ["x-api-key", "bearer", "x-goog-api-key", "aws-sigv4"];
 
 /// The managed logins `provider add --login` builds an entry for.
 pub const LOGIN_VALUES: [&str; 2] = ["anthropic", "codex"];
 
 /// The refusal for the retired `--kind` flag.
 pub const KIND_REPLACED_MESSAGE: &str = "`--kind` was replaced: use `--format \
-    <anthropic-messages|openai-chat|openai-responses|gemini>` for a provider with a key, or \
+    <anthropic-messages|openai-chat|openai-responses|bedrock-invoke|bedrock-converse|gemini>` \
+    for a provider with a key or an AWS credential, or \
     `--login <anthropic|codex>` for a managed login";
 
 /// Flag-driven inputs for `provider add`, assembled from the clap surface.
@@ -109,6 +116,9 @@ pub struct ProviderAddArgs {
     pub auth: Option<String>,
     pub name: String,
     pub base_url: Option<String>,
+    /// The AWS region of a `cloud = { name = "aws", region }` entry; never
+    /// together with `base_url`.
+    pub region: Option<String>,
     pub api_key_env: Option<String>,
     pub secret_ref: Option<String>,
     pub api_key_stdin: bool,

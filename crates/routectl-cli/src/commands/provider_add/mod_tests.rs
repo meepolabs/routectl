@@ -50,6 +50,7 @@ fn args(format: &str, name: &str) -> ProviderAddArgs {
         auth: None,
         name: name.to_string(),
         base_url: None,
+        region: None,
         api_key_env: None,
         secret_ref: None,
         api_key_stdin: false,
@@ -94,7 +95,7 @@ fn resolve_secret_env_yields_scheme_ref_not_the_value() {
     let (ref_str, class, _pending) = resolve_secret(
         &a,
         Format::AnthropicMessages,
-        "anthropic-api",
+        Some("anthropic-api"),
         &FakeIo::default(),
     )
     .unwrap();
@@ -115,7 +116,12 @@ fn resolve_secret_rejects_literal_ref() {
     // steer to the safe paths and never echo the key value.
     let mut a = args("openai-chat", "x");
     a.secret_ref = Some("literal:keep-me-exactly".to_string());
-    let err = match resolve_secret(&a, Format::OpenaiChat, "openai-compat", &FakeIo::default()) {
+    let err = match resolve_secret(
+        &a,
+        Format::OpenaiChat,
+        Some("openai-compat"),
+        &FakeIo::default(),
+    ) {
         Ok(_) => panic!("a literal: secret-ref must be rejected"),
         Err(e) => e,
     };
@@ -554,7 +560,7 @@ async fn unsupported_format_errors_actionably() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_config(dir.path(), &current_base());
 
-    let mut a = args("bedrock-invoke", "aws");
+    let mut a = args("gemini-cloud-code", "gcc");
     a.secret_ref = Some("file:///abs/key".to_string());
 
     let err = run(&path, a)

@@ -412,20 +412,22 @@ enum ProviderCmd {
     /// Add a provider block to `config.toml` (or overwrite one with
     /// `--overwrite`). The credential is given by reference only.
     Add {
-        /// Wire format of a provider reached with a key: `anthropic-messages`
-        /// (base URL defaults to api.anthropic.com; pair with
-        /// `--credential-source forwarded` for a no-key forwarded provider),
-        /// `openai-chat` or `openai-responses` (both require `--base-url`), or
-        /// `gemini` (built-in base URL).
+        /// Wire format of a provider reached with a key or an AWS credential:
+        /// `anthropic-messages` (base URL defaults to api.anthropic.com; pair
+        /// with `--credential-source forwarded` for a no-key forwarded
+        /// provider), `openai-chat` or `openai-responses` (both require
+        /// `--base-url` or `--region`), `bedrock-invoke` or `bedrock-converse`
+        /// (require `--region`), or `gemini` (built-in base URL).
         #[arg(
             long,
             conflicts_with = "login",
             value_parser = PossibleValuesParser::new(commands::provider_add::FORMAT_VALUES)
         )]
         format: Option<String>,
-        /// How the credential is sent. Default: `x-api-key` for
-        /// `anthropic-messages`, `x-goog-api-key` for `gemini`, else `bearer`
-        /// (a forwarded credential is always `bearer`). Written to the entry.
+        /// How the credential is sent. Default: `aws-sigv4` for an `aws://`
+        /// credential, `x-api-key` for `anthropic-messages` over a base URL,
+        /// `x-goog-api-key` for `gemini`, else `bearer` (a forwarded
+        /// credential is always `bearer`). Written to the entry.
         #[arg(
             long,
             value_parser = PossibleValuesParser::new(commands::provider_add::AUTH_VALUES)
@@ -451,16 +453,24 @@ enum ProviderCmd {
         #[arg(long)]
         name: String,
         /// Upstream base URL. Required for `openai-chat` and
-        /// `openai-responses`; optional for `anthropic-messages`.
+        /// `openai-responses` unless `--region` is given; optional for
+        /// `anthropic-messages`.
         #[arg(long = "base-url")]
         base_url: Option<String>,
+        /// AWS region: writes `cloud = { name = "aws", region = "<r>" }`
+        /// instead of a base URL. Required for `bedrock-invoke` and
+        /// `bedrock-converse`; with `anthropic-messages`, `openai-chat` or
+        /// `openai-responses` it selects Bedrock's managed surface.
+        #[arg(long, conflicts_with_all = ["base_url", "login"])]
+        region: Option<String>,
         /// Environment variable holding the API key; stored as
         /// `credential = "env://<VAR>"` after verifying it resolves now.
         #[arg(long = "api-key-env", group = "secret_source")]
         api_key_env: Option<String>,
-        /// A secret reference written verbatim to `credential`
-        /// (`env://VAR`, `file:///abs/key`, `oauth://...`). `literal:` refs
-        /// are rejected; use `--api-key-stdin`, the hidden prompt, or `env://`.
+        /// A credential reference written verbatim to `credential`
+        /// (`env://VAR`, `file:///abs/key`, `oauth://...`,
+        /// `aws://profile/<name>`, `aws://chain`). `literal:` refs are
+        /// rejected; use `--api-key-stdin`, the hidden prompt, or `env://`.
         #[arg(long = "secret-ref", group = "secret_source")]
         secret_ref: Option<String>,
         /// Read the API key from stdin (pipe it in), capturing it to the
@@ -742,6 +752,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 kind,
                 name,
                 base_url,
+                region,
                 api_key_env,
                 secret_ref,
                 api_key_stdin,
@@ -761,6 +772,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     auth,
                     name,
                     base_url,
+                    region,
                     api_key_env,
                     secret_ref,
                     api_key_stdin,
@@ -1238,8 +1250,29 @@ mod tests {
             (&["--login", "codex", "--label", "work"], true),
             (&["--format", "gemini", "--label", "work"], false),
             (&["--label", "work"], false),
-            (&["--format", "bedrock-invoke"], false),
-            (&["--format", "openai-chat", "--auth", "aws-sigv4"], false),
+            (
+                &["--format", "bedrock-invoke", "--region", "us-east-1"],
+                true,
+            ),
+            (
+                &["--format", "bedrock-converse", "--auth", "aws-sigv4"],
+                true,
+            ),
+            (&["--format", "gemini-cloud-code"], false),
+            (&["--format", "openai-chat", "--auth", "sigv4"], false),
+            (
+                &[
+                    "--format",
+                    "openai-chat",
+                    "--region",
+                    "us-east-1",
+                    "--base-url",
+                    "https://x.example",
+                ],
+                false,
+            ),
+            (&["--login", "codex", "--region", "us-east-1"], false),
+            (&["--region", "us-east-1", "--login", "codex"], false),
             (&["--login", "xai"], false),
             (
                 &["--format", "anthropic-messages", "--login", "anthropic"],
