@@ -4,7 +4,7 @@
 //!
 //! Both folds are driven directly, below one `open` and against LITERAL window
 //! bounds, so a single connection and a single snapshot feed both and no clock
-//! read can confound the comparison. The pricer is `RowCost::Unpriced` for
+//! read can confound the comparison. The pricer is `RowCost::Unpriced(Vec::new())` for
 //! every row: no cost figure is comparable between the two surfaces, so
 //! pricing is kept out of the test entirely.
 //!
@@ -112,7 +112,7 @@ const SHARED: [&str; 17] = [
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 14] = [
+const QUERY_ONLY: [&str; 15] = [
     "fallback_served",
     "server_tool_present",
     "client_disconnect_pre_dispatch",
@@ -127,6 +127,7 @@ const QUERY_ONLY: [&str; 14] = [
     "cost_usd",
     "equivalent_cost_usd",
     "cost_status",
+    "missing_price_dimensions",
 ];
 
 /// Panel metric-surface fields with NO `/status/query` counterpart: the group
@@ -430,7 +431,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
     let result = query(
         &mut db,
         &spec,
-        |_| RowCost::Unpriced,
+        |_| RowCost::Unpriced(Vec::new()),
         Instant::now() + Duration::from_mins(10),
     )
     .expect("query fold");

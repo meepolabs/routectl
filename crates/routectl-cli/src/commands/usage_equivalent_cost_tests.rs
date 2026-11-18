@@ -169,9 +169,9 @@ fn a_subscription_equivalent_equals_what_the_same_row_would_cost_priced() {
     assert_eq!(priced, RowCost::Priced(EQUIV_COMPLETE_USD));
     assert_eq!(
         subscription,
-        RowCost::Subscription(Some(EQUIV_COMPLETE_USD))
+        RowCost::Subscription(Some(EQUIV_COMPLETE_USD), Vec::new())
     );
-    let RowCost::Subscription(Some(equivalent)) = subscription else {
+    let RowCost::Subscription(Some(equivalent), _) = subscription else {
         panic!("the subscription arm resolved an equivalent");
     };
     assert_ne!(
@@ -197,7 +197,7 @@ fn an_operator_model_price_is_the_equivalence_basis_for_a_subscription_row() {
     // $3.00 of input becomes $1.50; every other dimension is unchanged.
     assert_eq!(
         verdict,
-        RowCost::Subscription(Some(EQUIV_COMPLETE_USD - 1.50))
+        RowCost::Subscription(Some(EQUIV_COMPLETE_USD - 1.50), Vec::new())
     );
 }
 
@@ -223,11 +223,14 @@ fn a_cache_active_row_without_a_cache_read_rate_reads_absent_not_base_only() {
     let present = equiv_verdict(&db, &equiv_config_subscription(complete_rates()));
 
     // Assert
-    assert_eq!(absent, RowCost::Subscription(None));
-    assert_eq!(present, RowCost::Subscription(Some(EQUIV_COMPLETE_USD)));
+    assert_eq!(absent, RowCost::Subscription(None, labels(&["cache read"])));
+    assert_eq!(
+        present,
+        RowCost::Subscription(Some(EQUIV_COMPLETE_USD), Vec::new())
+    );
     assert_ne!(
         absent,
-        RowCost::Subscription(Some(EQUIV_BASE_ONLY_USD)),
+        RowCost::Subscription(Some(EQUIV_BASE_ONLY_USD), Vec::new()),
         "a base-token-only subtotal understates a cached workload by most of \
          its value and must never be surfaced as the equivalent"
     );
@@ -241,19 +244,25 @@ fn each_cache_write_bucket_alone_can_withhold_the_equivalent() {
     let (_dir, _path, db) = temp_db();
     seed_equiv_ledger(&db);
 
-    for pricing in [
-        PricingConfig {
-            cache_write_5m_per_mtok: None,
-            ..complete_rates()
-        },
-        PricingConfig {
-            cache_write_1h_per_mtok: None,
-            ..complete_rates()
-        },
+    for (pricing, missing) in [
+        (
+            PricingConfig {
+                cache_write_5m_per_mtok: None,
+                ..complete_rates()
+            },
+            "cache write 5m",
+        ),
+        (
+            PricingConfig {
+                cache_write_1h_per_mtok: None,
+                ..complete_rates()
+            },
+            "cache write 1h",
+        ),
     ] {
         assert_eq!(
             equiv_verdict(&db, &equiv_config_subscription(pricing)),
-            RowCost::Subscription(None)
+            RowCost::Subscription(None, labels(&[missing]))
         );
     }
 }
@@ -275,7 +284,7 @@ fn a_known_zero_rate_on_a_used_dimension_keeps_the_equivalent() {
     // $28.35 less the $0.60 the cache reads cost at $0.30.
     assert_eq!(
         verdict,
-        RowCost::Subscription(Some(EQUIV_COMPLETE_USD - 0.60))
+        RowCost::Subscription(Some(EQUIV_COMPLETE_USD - 0.60), Vec::new())
     );
 }
 
@@ -294,7 +303,10 @@ fn a_negative_rate_on_a_used_dimension_withholds_the_equivalent() {
 
     let verdict = equiv_verdict(&db, &equiv_config_subscription(credited_cache_reads));
 
-    assert_eq!(verdict, RowCost::Subscription(None));
+    assert_eq!(
+        verdict,
+        RowCost::Subscription(None, labels(&["cache read"]))
+    );
 }
 
 #[test]
@@ -315,7 +327,10 @@ fn a_dimension_the_row_never_used_needs_no_rate() {
     let verdict = equiv_verdict(&db, &equiv_config_subscription(base_only));
 
     // Assert: a reported zero and a NULL are both "unused", not "unpriced".
-    assert_eq!(verdict, RowCost::Subscription(Some(EQUIV_BASE_ONLY_USD)));
+    assert_eq!(
+        verdict,
+        RowCost::Subscription(Some(EQUIV_BASE_ONLY_USD), Vec::new())
+    );
 }
 
 #[test]
@@ -334,9 +349,10 @@ fn a_used_unpriced_dimension_withholds_the_figure_on_both_arms() {
     let priced = equiv_verdict(&db, &equiv_config_api_key(no_cache_rates.clone()));
     let subscription = equiv_verdict(&db, &equiv_config_subscription(no_cache_rates));
 
-    assert_eq!(priced, RowCost::Unpriced);
+    let missing = labels(&["cache read", "cache write 1h", "cache write 5m"]);
+    assert_eq!(priced, RowCost::Unpriced(missing.clone()));
     assert_ne!(priced, RowCost::Priced(EQUIV_BASE_ONLY_USD));
-    assert_eq!(subscription, RowCost::Subscription(None));
+    assert_eq!(subscription, RowCost::Subscription(None, missing));
 }
 
 #[test]
@@ -371,7 +387,7 @@ fn a_kindless_subscription_row_on_a_removed_provider_resolves_no_equivalent() {
     // Assert: a removed provider is not a subscription any more, so the kinded
     // row prices and the kindless one does not.
     assert_eq!(verdicts.len(), 2);
-    assert!(verdicts.contains(&RowCost::Unpriced));
+    assert!(verdicts.contains(&RowCost::Unpriced(labels(&["input", "output"]))));
     assert!(verdicts.contains(&RowCost::Priced(REFRESHED_USD)));
 }
 
@@ -507,8 +523,11 @@ fn a_per_row_equivalent_that_overflows_reads_absent() {
     let sane = equiv_verdict(&db, &equiv_config_subscription(complete_rates()));
 
     // Assert
-    assert_eq!(overflowed, RowCost::Subscription(None));
-    assert_eq!(sane, RowCost::Subscription(Some(EQUIV_COMPLETE_USD)));
+    assert_eq!(overflowed, RowCost::Subscription(None, Vec::new()));
+    assert_eq!(
+        sane,
+        RowCost::Subscription(Some(EQUIV_COMPLETE_USD), Vec::new())
+    );
 }
 
 #[test]
@@ -530,9 +549,14 @@ fn a_non_finite_equivalent_total_degrades_to_absent() {
     };
     let fold = |db: &mut UsageDb, usd: f64| {
         let deadline = Instant::now() + std::time::Duration::from_mins(10);
-        routectl_usage::query(db, &spec, |_| RowCost::Subscription(Some(usd)), deadline)
-            .expect("query")
-            .totals
+        routectl_usage::query(
+            db,
+            &spec,
+            |_| RowCost::Subscription(Some(usd), Vec::new()),
+            deadline,
+        )
+        .expect("query")
+        .totals
     };
 
     let overflowed = fold(&mut db, f64::INFINITY);

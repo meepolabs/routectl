@@ -121,7 +121,7 @@ fn spec(group_by: GroupDim) -> QuerySpec {
 
 /// Every row unpriced -- the pricing dimension is out of scope for the test.
 fn unpriced(_row: &AggRow) -> RowCost {
-    RowCost::Unpriced
+    RowCost::Unpriced(Vec::new())
 }
 
 fn group<'a>(result: &'a QueryResult, label: &str) -> &'a QueryGroup {
@@ -390,7 +390,7 @@ fn all_subscription_group_reports_subscription_without_cost() {
     let result = query(
         &mut db,
         &spec(GroupDim::Model),
-        |_row| RowCost::Subscription(None),
+        |_row| RowCost::Subscription(None, Vec::new()),
         no_deadline(),
     )
     .expect("query");
@@ -412,7 +412,7 @@ fn a_resolved_subscription_equivalent_never_reaches_the_priced_channel() {
     let result = query(
         &mut db,
         &spec(GroupDim::Model),
-        |_row| RowCost::Subscription(Some(12.34)),
+        |_row| RowCost::Subscription(Some(12.34), Vec::new()),
         no_deadline(),
     )
     .expect("query");
@@ -450,7 +450,7 @@ fn an_overflowed_equivalent_degrades_without_touching_the_priced_channel() {
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(3.5),
-            _ => RowCost::Subscription(Some(f64::MAX)),
+            _ => RowCost::Subscription(Some(f64::MAX), Vec::new()),
         },
         no_deadline(),
     )
@@ -477,7 +477,7 @@ fn a_non_finite_per_row_equivalent_degrades_instead_of_panicking() {
     let result = query(
         &mut db,
         &spec(GroupDim::Model),
-        |_row| RowCost::Subscription(Some(f64::INFINITY)),
+        |_row| RowCost::Subscription(Some(f64::INFINITY), Vec::new()),
         no_deadline(),
     )
     .expect("query");
@@ -510,7 +510,7 @@ fn an_overflowed_priced_sum_degrades_without_touching_the_equivalent_channel() {
         &mut db,
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
-            Some("u-sub") => RowCost::Subscription(Some(9.0)),
+            Some("u-sub") => RowCost::Subscription(Some(9.0), Vec::new()),
             _ => RowCost::Priced(f64::MAX),
         },
         no_deadline(),
@@ -545,8 +545,8 @@ fn a_mixed_group_keeps_real_spend_and_notional_value_in_separate_fields() {
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(4.0),
-            Some("u-sub-ok") => RowCost::Subscription(Some(7.5)),
-            _ => RowCost::Subscription(None),
+            Some("u-sub-ok") => RowCost::Subscription(Some(7.5), Vec::new()),
+            _ => RowCost::Subscription(None, Vec::new()),
         },
         no_deadline(),
     )
@@ -583,8 +583,8 @@ fn mixed_pricing_group_reports_partial_with_priced_subtotal() {
         &spec(GroupDim::Model),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(2.25),
-            Some("u-sub") => RowCost::Subscription(None),
-            _ => RowCost::Unpriced,
+            Some("u-sub") => RowCost::Subscription(None, Vec::new()),
+            _ => RowCost::Unpriced(Vec::new()),
         },
         no_deadline(),
     )

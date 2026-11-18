@@ -15,7 +15,7 @@ use std::sync::Arc;
 use routectl_router::prices::{PriceBook, PriceTable, shipped_table};
 
 use crate::commands::prices::PRICES_FILE;
-use routectl_router::{Config, PricingConfig};
+use routectl_router::{Config, PriceDimension, PricingConfig};
 use routectl_usage::Rates;
 
 /// The book over `prices.json` in the shared config folder, the file
@@ -114,6 +114,20 @@ pub(super) fn rate_covers(rate: Option<f64>) -> bool {
     rate.is_some_and(|r| r >= 0.0)
 }
 
+/// The name a diagnostic or a usage figure gives one rate dimension:
+/// `input`, `output`, `cache read`, or `cache write <duration>`.
+pub(super) fn dimension_label(dimension: PriceDimension) -> String {
+    match dimension {
+        PriceDimension::Input => "input".to_string(),
+        PriceDimension::Output => "output".to_string(),
+        PriceDimension::CacheRead => "cache read".to_string(),
+        PriceDimension::CacheWrite(seconds) => format!(
+            "cache write {}",
+            routectl_core::format_cache_lifetime(seconds)
+        ),
+    }
+}
+
 /// The rate dimensions an API-equivalent value needs priced, in the order a
 /// diagnostic names them: the labels of the ones [`rate_covers`] refuses.
 ///
@@ -138,24 +152,18 @@ pub(super) fn missing_equivalence_dimensions(pricing: &PricingConfig) -> Vec<Str
         write_rates.insert(seconds, Some(rate));
     }
     let fixed = [
-        ("input".to_string(), pricing.input_per_mtok),
-        ("output".to_string(), pricing.output_per_mtok),
-        ("cache read".to_string(), pricing.cache_read_per_mtok),
+        (PriceDimension::Input, pricing.input_per_mtok),
+        (PriceDimension::Output, pricing.output_per_mtok),
+        (PriceDimension::CacheRead, pricing.cache_read_per_mtok),
     ];
-    let writes = write_rates.into_iter().map(|(seconds, rate)| {
-        (
-            format!(
-                "cache write {}",
-                routectl_core::format_cache_lifetime(seconds)
-            ),
-            rate,
-        )
-    });
+    let writes = write_rates
+        .into_iter()
+        .map(|(seconds, rate)| (PriceDimension::CacheWrite(seconds), rate));
     fixed
         .into_iter()
         .chain(writes)
         .filter(|(_, rate)| !rate_covers(*rate))
-        .map(|(label, _)| label)
+        .map(|(dimension, _)| dimension_label(dimension))
         .collect()
 }
 

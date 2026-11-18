@@ -78,7 +78,7 @@ fn price_per_thousand_input(row: &AggRow) -> RowCost {
     if row.key.upstream.as_deref() == Some("u-priced") {
         RowCost::Priced(row.input_tokens as f64 / 1000.0)
     } else {
-        RowCost::Unpriced
+        RowCost::Unpriced(Vec::new())
     }
 }
 

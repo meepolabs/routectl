@@ -61,7 +61,8 @@ fn query_cache_hit_share_equals_the_report_footer_rule() {
         bucket: None,
     };
     let deadline = Instant::now() + std::time::Duration::from_mins(10);
-    let result = routectl_usage::query(&mut db, &spec, |_| RowCost::Unpriced, deadline).unwrap();
+    let result =
+        routectl_usage::query(&mut db, &spec, |_| RowCost::Unpriced(Vec::new()), deadline).unwrap();
 
     // Assert
     let footer_pct = report

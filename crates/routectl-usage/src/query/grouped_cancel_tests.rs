@@ -73,7 +73,7 @@ fn a_flag_set_before_the_query_interrupts_it_without_pricing_a_row() {
         let priced = std::cell::Cell::new(0_usize);
         let counting = |_row: &AggRow| {
             priced.set(priced.get() + 1);
-            RowCost::Unpriced
+            RowCost::Unpriced(Vec::new())
         };
 
         // Act
@@ -134,7 +134,7 @@ fn a_flag_set_from_inside_the_price_closure_interrupts_at_the_next_fine_row() {
         let cancelling = |_row: &AggRow| {
             priced.set(priced.get() + 1);
             flag.cancel();
-            RowCost::Unpriced
+            RowCost::Unpriced(Vec::new())
         };
 
         // Act

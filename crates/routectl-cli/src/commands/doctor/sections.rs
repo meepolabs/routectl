@@ -14,7 +14,9 @@ use routectl_router::prices::{PriceSource, TableDate};
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::config_effective::{tuning_cells, tuning_kind};
-use crate::commands::pricing::{CacheWriteSpellingConflict, missing_equivalence_dimensions};
+use crate::commands::pricing::{
+    CacheWriteSpellingConflict, dimension_label, missing_equivalence_dimensions,
+};
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat::shell_word;
 use crate::commands::seat_report::{
@@ -805,25 +807,13 @@ fn render_price_fields(fields: &[(PriceDimension, Option<f64>, PriceSource)]) ->
         .map(|(dimension, value, source)| {
             format!(
                 "{} {} ({})",
-                price_label(*dimension),
+                dimension_label(*dimension),
                 render_rate(*value),
                 source.as_str()
             )
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn price_label(dimension: PriceDimension) -> String {
-    match dimension {
-        PriceDimension::Input => "input".to_string(),
-        PriceDimension::Output => "output".to_string(),
-        PriceDimension::CacheRead => "cache read".to_string(),
-        PriceDimension::CacheWrite(seconds) => format!(
-            "cache write {}",
-            routectl_core::format_cache_lifetime(seconds)
-        ),
-    }
 }
 
 /// One note per cache-write lifetime a pricing block sets under both

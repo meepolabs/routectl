@@ -174,8 +174,13 @@ fn no_deadline() -> Instant {
 fn time_query(path: &Path, spec: &QuerySpec) -> (Duration, i64) {
     let mut db = open_readonly_fastfail(path).expect("open seeded ledger");
     let started = Instant::now();
-    let result =
-        query(&mut db, spec, |_row| RowCost::Unpriced, no_deadline()).expect("query completes");
+    let result = query(
+        &mut db,
+        spec,
+        |_row| RowCost::Unpriced(Vec::new()),
+        no_deadline(),
+    )
+    .expect("query completes");
     (started.elapsed(), result.totals.requests)
 }
 

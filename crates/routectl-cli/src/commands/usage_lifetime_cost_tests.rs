@@ -122,7 +122,7 @@ fn assert_priced(verdict: RowCost, expected: f64, name: &str) {
 }
 
 fn assert_equivalent(verdict: RowCost, expected: f64, name: &str) {
-    let RowCost::Subscription(Some(usd)) = verdict else {
+    let RowCost::Subscription(Some(usd), _) = verdict else {
         panic!("{name}: expected an equivalent of {expected}, got {verdict:?}");
     };
     assert!((usd - expected).abs() < 1e-9, "{name}: {usd} != {expected}");
@@ -150,7 +150,7 @@ fn a_used_lifetime_with_no_price_leaves_the_row_unpriced() {
     let control = lifetime_verdict(&SPLIT_5M, &config);
 
     // Assert: the same config prices a row whose lifetime it covers.
-    assert_eq!(unpriced, RowCost::Unpriced);
+    assert_eq!(unpriced, RowCost::Unpriced(labels(&["cache write 30m"])));
     assert_priced(control, LIFETIME_WITH_5M_USD, "5m control");
 }
 
@@ -168,7 +168,11 @@ fn writes_with_no_reported_lifetime_leave_the_row_unpriced() {
         let verdict = lifetime_verdict(&writes, &config);
 
         // Assert
-        assert_eq!(verdict, RowCost::Unpriced, "{name}");
+        assert_eq!(
+            verdict,
+            RowCost::Unpriced(labels(&[UNKNOWN_LIFETIME_LABEL])),
+            "{name}"
+        );
     }
 }
 
@@ -181,7 +185,10 @@ fn a_split_above_its_total_leaves_the_row_unpriced() {
     let verdict = lifetime_verdict(&SPLIT_ABOVE_TOTAL, &config);
 
     // Assert
-    assert_eq!(verdict, RowCost::Unpriced);
+    assert_eq!(
+        verdict,
+        RowCost::Unpriced(labels(&[UNKNOWN_LIFETIME_LABEL]))
+    );
 }
 
 #[test]
@@ -194,6 +201,9 @@ fn a_subscription_with_unknown_lifetime_writes_has_no_equivalent() {
     let control = lifetime_verdict(&SPLIT_30M, &config);
 
     // Assert: the same subscription values a fully split row.
-    assert_eq!(unknown, RowCost::Subscription(None));
+    assert_eq!(
+        unknown,
+        RowCost::Subscription(None, labels(&[UNKNOWN_LIFETIME_LABEL]))
+    );
     assert_equivalent(control, LIFETIME_WITH_30M_USD, "subscription control");
 }

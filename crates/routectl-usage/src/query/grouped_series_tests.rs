@@ -270,7 +270,7 @@ fn both_cost_channels_reconcile_bucket_wise_with_the_window_totals() {
         &bucketed(GroupDim::Model, 1000, 4),
         |row| match row.key.upstream.as_deref() {
             Some("u-priced") => RowCost::Priced(1.25),
-            _ => RowCost::Subscription(Some(2.5)),
+            _ => RowCost::Subscription(Some(2.5), Vec::new()),
         },
         no_deadline(),
     )
@@ -407,7 +407,7 @@ fn per_bucket_maxima_and_cost_status_describe_that_bucket_only() {
             if row.key.upstream.as_deref() == Some("u-priced") {
                 RowCost::Priced(3.0)
             } else {
-                RowCost::Unpriced
+                RowCost::Unpriced(Vec::new())
             }
         },
         no_deadline(),
@@ -431,4 +431,56 @@ fn per_bucket_maxima_and_cost_status_describe_that_bucket_only() {
     assert_eq!(second.cost_usd, None);
     assert_eq!(result.totals.cost_status, CostStatus::Partial);
     assert_eq!(result.totals.latency_max_ms, Some(4000));
+}
+
+#[test]
+fn missing_price_dimensions_union_sorted_and_deduplicated_on_every_metric_set() {
+    // Arrange: model m1 has an unpriced row and a subscription row with no
+    // equivalent, overlapping on "output"; model m2 is fully priced. m1's rows
+    // land in bucket 0, m2's in bucket 1.
+    let (_dir, mut db) = open_db();
+    for (id, ts, model, upstream) in [
+        ("a", 100, "m1", "u-unpriced"),
+        ("b", 200, "m1", "u-sub"),
+        ("c", 1500, "m2", "u-priced"),
+    ] {
+        insert(
+            &db,
+            &Fixture {
+                request_id: id,
+                ts_start: ts,
+                model: Some(model),
+                upstream: Some(upstream),
+                ..Fixture::default()
+            },
+        );
+    }
+    let owned = |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+
+    // Act
+    let result = query(
+        &mut db,
+        &bucketed(GroupDim::Model, 1000, 2),
+        |row| match row.key.upstream.as_deref() {
+            Some("u-unpriced") => RowCost::Unpriced(owned(&["output", "cache write 30m"])),
+            Some("u-sub") => RowCost::Subscription(None, owned(&["output", "cache read"])),
+            _ => RowCost::Priced(1.0),
+        },
+        no_deadline(),
+    )
+    .expect("query");
+
+    // Assert
+    let union = owned(&["cache read", "cache write 30m", "output"]);
+    assert_eq!(group(&result, "m1").metrics.missing_price_dimensions, union);
+    assert!(
+        group(&result, "m2")
+            .metrics
+            .missing_price_dimensions
+            .is_empty()
+    );
+    assert_eq!(result.totals.missing_price_dimensions, union);
+    let s = series(&result);
+    assert_eq!(s.buckets[0].metrics.missing_price_dimensions, union);
+    assert!(s.buckets[1].metrics.missing_price_dimensions.is_empty());
 }

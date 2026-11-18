@@ -23,8 +23,8 @@ use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime, Ti
 
 use crate::local_time::{self, CivilInstant, LocalZone, unix_ms};
 
-use routectl_router::Config;
 use routectl_router::prices::{PriceSubject, effective_pricing};
+use routectl_router::{Config, PriceDimension};
 use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupDim, KCalibration,
     NearLosslessAttributionSummary, ObservationTotals, OpenError, QueryError, QueryMetrics,
@@ -36,7 +36,8 @@ use routectl_usage::{
 };
 
 use crate::commands::pricing::{
-    PriceSnapshot, default_price_book, is_subscription, rate_covers, rates_from_pricing,
+    PriceSnapshot, default_price_book, dimension_label, is_subscription, rate_covers,
+    rates_from_pricing,
 };
 use crate::commands::text_table::render_table;
 use crate::commands::usage_cache_ignore::{CACHE_IGNORE_READ_BUDGET, cache_ignore_block};
@@ -606,6 +607,14 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
     }
 }
 
+/// The missing-price label for cache-write tokens no lifetime can be matched
+/// to: tokens with no reported lifetime, or a split summing above its total.
+const UNKNOWN_LIFETIME_LABEL: &str = "cache write (unknown lifetime)";
+
+/// The missing-price label for reasoning tokens on a row whose persisted kind
+/// does not say whether they bill on their own.
+const UNKNOWN_REASONING_LABEL: &str = "reasoning";
+
 /// Classify and cost one fine-grained row. Subscription detection runs
 /// first (it overrides pricing); then a priced API-key row prices its
 /// summed tokens; everything else is unpriced.
@@ -615,8 +624,8 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// rate -- computed through the SAME rate resolution and token math a priced
 /// row goes through, so the two can never disagree on reasoning structure,
 /// cache-read basis, or persisted-kind keying. That equivalent is
-/// complete-or-absent (see [`rates_cover_used_dimensions`]), and so is a
-/// priced row (see `priced_usd`).
+/// complete-or-absent (see [`uncovered_used_dimensions`]), and so is a priced
+/// row.
 ///
 /// Rates resolve through `routectl_router::prices::effective_pricing` against
 /// `prices`, field by field: `[models.X.pricing]` on the served model, then
@@ -638,63 +647,87 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// defect this avoids. A kindless row with ZERO reasoning tokens still prices,
 /// since its structure cannot affect the result.
 ///
+/// An unpriced row, and a subscription row with no equivalent, name what was
+/// missing: the used dimensions with no rate; every used dimension when no
+/// pricing resolves at all; [`UNKNOWN_LIFETIME_LABEL`] for writes no lifetime
+/// can be matched to; [`UNKNOWN_REASONING_LABEL`] for reasoning of an unknown
+/// structure. A row with no recorded provider names nothing.
+///
 /// Returns the usage crate's `RowCost` verdict, which is also what the grouped
 /// query layer's pricing closure must yield -- so the CLI report and the
 /// `/status/query` endpoint price a row through exactly one function.
 pub(crate) fn cost_for_row(config: &Config, prices: &PriceSnapshot, row: &AggRow) -> RowCost {
     let Some(provider) = row.key.provider.as_deref() else {
-        return RowCost::Unpriced;
+        return RowCost::Unpriced(Vec::new());
     };
+    let priced = complete_price(config, prices, row, provider);
     if is_subscription(config, provider) {
-        return RowCost::Subscription(equivalent_usd(config, prices, row, provider));
+        // A non-finite product reads as absent rather than propagating into
+        // the equivalent channel's sum, where it would poison every other
+        // row's value.
+        return match priced {
+            Ok(usd) => RowCost::Subscription(usd.filter(|usd| usd.is_finite()), Vec::new()),
+            Err(missing) => RowCost::Subscription(None, missing),
+        };
     }
-    match priced_usd(config, prices, row, provider) {
-        Some(usd) => RowCost::Priced(usd),
-        None => RowCost::Unpriced,
+    match priced {
+        Ok(Some(usd)) => RowCost::Priced(usd),
+        Ok(None) => RowCost::Unpriced(Vec::new()),
+        Err(missing) => RowCost::Unpriced(missing),
     }
 }
 
-/// The real dollar cost of one non-subscription row, or `None` when no usable
-/// price exists.
+/// The dollar value of one row's usage at its resolved rates, or the labels
+/// of everything that kept it from being complete.
 ///
 /// A row is complete-or-absent: a dimension it used with no rate leaves the
-/// row unpriced. A table gap or a partial `[models.X.pricing]` block is not a
-/// statement that the dimension is free.
-fn priced_usd(
-    config: &Config,
-    prices: &PriceSnapshot,
-    row: &AggRow,
-    provider: &str,
-) -> Option<f64> {
-    let resolved = resolve_row_rates(config, prices, row, provider)?;
-    if !rates_cover_used_dimensions(&resolved, row) {
-        return None;
-    }
-    price_row(&resolved, row)
-}
-
-/// The API-equivalent dollar value of one SUBSCRIPTION row: the same rate
-/// resolution and token math a priced row uses, wrapped in the
-/// complete-or-absent rule.
-///
-/// The completeness wrapper applies here whatever priced the row. A
-/// subscription operator's workload runs at a high cache-hit rate, so a figure
-/// that silently dropped an unpriced cache dimension would understate the value
-/// by most of its magnitude -- worse than absent for exactly the workload this
+/// row with no value. A table gap or a partial `[models.X.pricing]` block is
+/// not a statement that the dimension is free. The rule applies to the
+/// subscription equivalent as much as to a real price: a subscription
+/// operator's workload runs at a high cache-hit rate, so a figure that
+/// silently dropped an unpriced cache dimension would understate the value by
+/// most of its magnitude -- worse than absent for exactly the workload this
 /// number serves.
-fn equivalent_usd(
+///
+/// Every reason is collected, not only the first: writes no lifetime can be
+/// matched to, reasoning of an unknown structure, and either every used
+/// dimension (no pricing resolves) or the used dimensions with no rate. `Err`
+/// is empty only for a row that resolves no pricing and used no dimension.
+fn complete_price(
     config: &Config,
     prices: &PriceSnapshot,
     row: &AggRow,
     provider: &str,
-) -> Option<f64> {
-    let resolved = resolve_row_rates(config, prices, row, provider)?;
-    if !rates_cover_used_dimensions(&resolved, row) {
-        return None;
+) -> Result<Option<f64>, Vec<String>> {
+    let mut missing = BTreeSet::new();
+    let (cache_writes, lifetimes_known) = lifetime_split_writes(row);
+    if !lifetimes_known {
+        missing.insert(UNKNOWN_LIFETIME_LABEL.to_string());
     }
-    // A non-finite product reads as absent rather than propagating into the
-    // equivalent channel's sum, where it would poison every other row's value.
-    price_row(&resolved, row).filter(|usd| usd.is_finite())
+    let structure = reasoning_structure(row.key.provider_kind.as_deref());
+    if matches!(structure, ReasoningStructure::Unknown) && row.reasoning_tokens != 0 {
+        missing.insert(UNKNOWN_REASONING_LABEL.to_string());
+    }
+    let reasoning_billed = matches!(structure, ReasoningStructure::Disjoint);
+    let Some(pricing) = row_pricing(config, prices, row, provider) else {
+        missing.extend(
+            used_dimensions(row, &cache_writes, reasoning_billed)
+                .into_iter()
+                .map(dimension_label),
+        );
+        return Err(missing.into_iter().collect());
+    };
+    let resolved = RowRates {
+        rates: row_rates(&pricing, reasoning_billed),
+        cache_writes,
+        reasoning_billed,
+    };
+    missing.extend(uncovered_used_dimensions(&resolved, row));
+    if missing.is_empty() {
+        Ok(price_row(&resolved, row))
+    } else {
+        Err(missing.into_iter().collect())
+    }
 }
 
 /// A row's resolved rate table plus whether its reasoning tokens bill as their
@@ -709,57 +742,44 @@ struct RowRates {
     reasoning_billed: bool,
 }
 
-/// Resolve the rate table for one row and settle its reasoning structure.
-/// `None` means no price can be justified for the row at all: no upstream, no
-/// effective pricing, an unknown persisted kind on a row that reported
-/// reasoning tokens, or cache writes that cannot be priced by lifetime.
-fn resolve_row_rates(
+/// The leaf rate table for `pricing`. A disjoint-reasoning row bills its
+/// thinking tokens at the output rate; a subsumed one already counted them
+/// inside output, so pricing them again would double-charge.
+fn row_rates(pricing: &routectl_router::PricingConfig, reasoning_billed: bool) -> Rates {
+    let mut rates = rates_from_pricing(pricing);
+    if reasoning_billed {
+        rates.reasoning_per_mtok = rates.output_per_mtok;
+    }
+    rates
+}
+
+/// The effective pricing for the row's served upstream, or `None` when the
+/// row recorded no upstream or no source prices it.
+fn row_pricing(
     config: &Config,
     prices: &PriceSnapshot,
     row: &AggRow,
     provider: &str,
-) -> Option<RowRates> {
-    let cache_writes = lifetime_priceable_writes(row)?;
+) -> Option<routectl_router::PricingConfig> {
     let subject = PriceSubject {
         model: row.key.model.as_deref(),
         provider,
         upstream: row.key.upstream.as_deref()?,
         persisted_kind: row.key.provider_kind.as_deref(),
     };
-    let (pricing, _) = effective_pricing(config, &subject, prices.refreshed(), prices.shipped())?;
-    let mut rates = rates_from_pricing(&pricing);
-    let mut reasoning_billed = false;
-    match reasoning_structure(row.key.provider_kind.as_deref()) {
-        // A disjoint-reasoning row bills its thinking tokens at the output
-        // rate; a subsumed one already counted them inside output, so pricing
-        // them again would double-charge.
-        ReasoningStructure::Disjoint => {
-            rates.reasoning_per_mtok = rates.output_per_mtok;
-            reasoning_billed = true;
-        }
-        ReasoningStructure::Subsumed => {}
-        ReasoningStructure::Unknown if row.reasoning_tokens != 0 => return None,
-        ReasoningStructure::Unknown => {}
-    }
-    Some(RowRates {
-        rates,
-        cache_writes,
-        reasoning_billed,
-    })
+    effective_pricing(config, &subject, prices.refreshed(), prices.shipped()).map(|(p, _)| p)
 }
 
-/// A row's cache-write tokens per lifetime, or `None` when some of them
-/// cannot be priced by lifetime: tokens with no reported lifetime, or a split
-/// summing above its total. A row read without its lifetimes has every
-/// written token unknown.
-fn lifetime_priceable_writes(row: &AggRow) -> Option<BTreeMap<u32, i64>> {
+/// A row's cache-write tokens per reported lifetime, and whether every
+/// written token has one. A row with tokens of no reported lifetime, a split
+/// summing above its total, or written tokens read without their lifetimes
+/// cannot be priced by lifetime.
+fn lifetime_split_writes(row: &AggRow) -> (BTreeMap<u32, i64>, bool) {
     let Some(lifetimes) = &row.cache_write_lifetimes else {
-        return (row.cache_write_tokens == 0).then(BTreeMap::new);
+        return (BTreeMap::new(), row.cache_write_tokens == 0);
     };
-    if lifetimes.invalid_split || lifetimes.unknown_tokens > 0 {
-        return None;
-    }
-    Some(lifetimes.tokens_by_lifetime.clone())
+    let known = !lifetimes.invalid_split && lifetimes.unknown_tokens == 0;
+    (lifetimes.tokens_by_lifetime.clone(), known)
 }
 
 /// The token math shared by the real price and the API-equivalent value.
@@ -780,39 +800,65 @@ fn price_row(resolved: &RowRates, row: &AggRow) -> Option<f64> {
     .map(|b| b.total_usd)
 }
 
-/// Whether every dimension this row actually USED resolved a rate -- the
-/// complete-or-absent test for an API-equivalent value.
+/// The rate dimensions a row actually USED: those with a nonzero count.
 ///
-/// A dimension with a zero count is irrelevant (it contributes nothing either
-/// way). A dimension with a nonzero count and no rate makes the whole figure a
-/// partial one, and a partial equivalent misstates value rather than
-/// approximating it. Presence decides, per [`rate_covers`]: a known `0` rate
-/// prices its dimension at nothing and keeps the figure complete. Reasoning counts as a dimension only when it bills
-/// separately; cache reads are weighed as the BILLED volume, never the peak;
-/// each cache-write lifetime is its own dimension.
-fn rates_cover_used_dimensions(resolved: &RowRates, row: &AggRow) -> bool {
-    let rates = &resolved.rates;
-    // A subsumed-reasoning row's thinking tokens are inside its output count, so
-    // the output pair below already covers them; only a disjoint row weighs
-    // reasoning as its own dimension.
-    let reasoning_tokens = if resolved.reasoning_billed {
+/// Reasoning counts only when it bills separately, and then as `Output`, the
+/// rate it bills at; a subsumed-reasoning row's thinking tokens are inside its
+/// output count already. Cache reads are weighed as the BILLED volume, never
+/// the peak; each cache-write lifetime is its own dimension.
+fn used_dimensions(
+    row: &AggRow,
+    cache_writes: &BTreeMap<u32, i64>,
+    reasoning_billed: bool,
+) -> Vec<PriceDimension> {
+    let reasoning_tokens = if reasoning_billed {
         row.reasoning_tokens
     } else {
         0
     };
-    let writes = resolved
-        .cache_writes
+    let writes = cache_writes
         .iter()
-        .map(|(seconds, tokens)| (*tokens, rates.cache_write_per_mtok.get(seconds).copied()));
+        .map(|(seconds, tokens)| (PriceDimension::CacheWrite(*seconds), *tokens));
     [
-        (row.input_tokens, rates.input_per_mtok),
-        (row.output_tokens, rates.output_per_mtok),
-        (reasoning_tokens, rates.reasoning_per_mtok),
-        (row.cache_read_billed, rates.cache_read_per_mtok),
+        (PriceDimension::Input, row.input_tokens),
+        (PriceDimension::Output, row.output_tokens),
+        (PriceDimension::Output, reasoning_tokens),
+        (PriceDimension::CacheRead, row.cache_read_billed),
     ]
     .into_iter()
     .chain(writes)
-    .all(|(tokens, rate)| tokens == 0 || rate_covers(rate))
+    .filter(|(_, tokens)| *tokens != 0)
+    .map(|(dimension, _)| dimension)
+    .collect()
+}
+
+/// The rate `rates` holds for one dimension.
+fn rate_for(rates: &Rates, dimension: PriceDimension) -> Option<f64> {
+    match dimension {
+        PriceDimension::Input => rates.input_per_mtok,
+        PriceDimension::Output => rates.output_per_mtok,
+        PriceDimension::CacheRead => rates.cache_read_per_mtok,
+        PriceDimension::CacheWrite(seconds) => rates.cache_write_per_mtok.get(&seconds).copied(),
+    }
+}
+
+/// The used dimensions with no rate, labelled, sorted and deduplicated -- the
+/// complete-or-absent test for a price or an API-equivalent value, which is
+/// complete exactly when this is empty.
+///
+/// A dimension with a zero count is irrelevant (it contributes nothing either
+/// way). A dimension with a nonzero count and no rate makes the whole figure a
+/// partial one, and a partial figure misstates value rather than
+/// approximating it. Presence decides, per [`rate_covers`]: a known `0` rate
+/// prices its dimension at nothing and keeps the figure complete.
+fn uncovered_used_dimensions(resolved: &RowRates, row: &AggRow) -> Vec<String> {
+    let labels: BTreeSet<String> =
+        used_dimensions(row, &resolved.cache_writes, resolved.reasoning_billed)
+            .into_iter()
+            .filter(|dimension| !rate_covers(rate_for(&resolved.rates, *dimension)))
+            .map(dimension_label)
+            .collect();
+    labels.into_iter().collect()
 }
 
 /// A nearest-rank TTFT p50 and p95 in ms, each `None` without samples.
@@ -864,7 +910,7 @@ pub fn build_window_report(
     let subscription_labels = RefCell::new(BTreeSet::new());
     let price = |row: &AggRow| {
         let cost = cost_for_row(config, prices, row);
-        if matches!(cost, RowCost::Subscription(_)) {
+        if matches!(cost, RowCost::Subscription(..)) {
             subscription_labels.borrow_mut().insert(dim.label(&row.key));
         }
         cost

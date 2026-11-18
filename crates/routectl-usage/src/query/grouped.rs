@@ -15,7 +15,7 @@
 //! Cost never enters this crate as a dependency -- only as the closure's
 //! [`RowCost`] verdict, which keeps `routectl-usage` a leaf.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -152,18 +152,22 @@ impl GroupDim {
 
 /// The cost verdict for one fine-grained [`AggRow`], as decided by the caller's
 /// pricing closure. The three states are exclusive and drive [`CostStatus`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// The label lists name the dimensions the row used that had no rate, in the
+/// caller's vocabulary; they feed [`QueryMetrics::missing_price_dimensions`].
+#[derive(Debug, Clone, PartialEq)]
 pub enum RowCost {
     /// A managed-subscription row: real usage, no per-token dollar cost, plus
     /// the API-equivalent value of that usage when the caller could resolve
-    /// EVERY dimension the row used. The payload feeds
-    /// [`QueryMetrics::equivalent_cost_usd`] only -- never `cost_usd`, which
-    /// stays real spend.
-    Subscription(Option<f64>),
+    /// EVERY dimension the row used, and the used dimensions it could not. The
+    /// value feeds [`QueryMetrics::equivalent_cost_usd`] only -- never
+    /// `cost_usd`, which stays real spend.
+    Subscription(Option<f64>, Vec<String>),
     /// A priced row and its dollar cost.
     Priced(f64),
-    /// A row with no usable price: counts toward usage, contributes no cost.
-    Unpriced,
+    /// A row with no usable price, and the used dimensions that had no rate:
+    /// counts toward usage, contributes no cost.
+    Unpriced(Vec<String>),
 }
 
 /// How completely a group's cost could be resolved.
@@ -295,6 +299,10 @@ pub struct QueryMetrics {
     pub equivalent_cost_usd: Option<f64>,
     /// How completely the cost could be resolved.
     pub cost_status: CostStatus,
+    /// The dimensions this metric set's rows used that had no rate, sorted
+    /// and deduplicated: the reason a cost or an API-equivalent value is
+    /// absent or partial. Empty when every used dimension was priced.
+    pub missing_price_dimensions: Vec<String>,
 }
 
 /// One coarse group: its label under the requested [`GroupDim`], plus its
@@ -465,7 +473,7 @@ fn fold_groups(
         groups
             .entry(label)
             .or_default()
-            .add(&fine, cost, &row_classes);
+            .add(&fine, &cost, &row_classes);
     }
     debug_assert_classes_attached(&classes);
     Ok(())
@@ -516,11 +524,11 @@ fn fold_groups_and_buckets(
         groups
             .entry(label)
             .or_default()
-            .add(&fine, cost, &row_classes);
+            .add(&fine, &cost, &row_classes);
         buckets
             .entry(bucket_ix)
             .or_default()
-            .add(&fine, cost, &row_classes);
+            .add(&fine, &cost, &row_classes);
     }
     debug_assert_classes_attached(&classes);
     Ok(())
@@ -633,6 +641,7 @@ struct GroupAcc {
     any_equivalent: bool,
     any_subscription: bool,
     any_unpriced: bool,
+    missing_price_dimensions: BTreeSet<String>,
 }
 
 impl GroupAcc {
@@ -640,7 +649,7 @@ impl GroupAcc {
     fn add(
         &mut self,
         fine: &super::aggregate::FineRow,
-        cost: RowCost,
+        cost: &RowCost,
         classes: &BTreeMap<String, i64>,
     ) {
         let agg = &fine.agg;
@@ -681,9 +690,11 @@ impl GroupAcc {
             self.cache_hit_den += agg.input_tokens + agg.cache_read_billed + agg.cache_write_tokens;
         }
         match cost {
-            RowCost::Subscription(equivalent) => {
+            RowCost::Subscription(equivalent, missing) => {
                 self.any_subscription = true;
-                if let Some(usd) = equivalent {
+                self.missing_price_dimensions
+                    .extend(missing.iter().cloned());
+                if let Some(usd) = *equivalent {
                     // No finiteness assertion here: the equivalent channel
                     // degrades a non-finite sum to absent in
                     // `equivalent_cost`, and a debug panic on the way in would
@@ -698,10 +709,14 @@ impl GroupAcc {
                 // bug, not operator input -- caught in tests, tolerated in
                 // release, where the sum's own finiteness check absorbs it.
                 debug_assert!(usd.is_finite(), "a resolved row price must be finite");
-                self.priced_usd += usd;
+                self.priced_usd += *usd;
                 self.any_priced = true;
             }
-            RowCost::Unpriced => self.any_unpriced = true,
+            RowCost::Unpriced(missing) => {
+                self.any_unpriced = true;
+                self.missing_price_dimensions
+                    .extend(missing.iter().cloned());
+            }
         }
     }
 
@@ -746,6 +761,8 @@ impl GroupAcc {
         self.any_equivalent |= other.any_equivalent;
         self.any_subscription |= other.any_subscription;
         self.any_unpriced |= other.any_unpriced;
+        self.missing_price_dimensions
+            .extend(other.missing_price_dimensions.iter().cloned());
     }
 
     /// Resolve the derived metrics and the cost tri-state. Every division is
@@ -786,6 +803,7 @@ impl GroupAcc {
             cost_usd,
             equivalent_cost_usd,
             cost_status,
+            missing_price_dimensions: self.missing_price_dimensions.into_iter().collect(),
         }
     }
 

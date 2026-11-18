@@ -187,7 +187,13 @@ fn hit_fraction_denominator_includes_new_era_write_total() {
     );
 
     // Act
-    let result = query(&mut db, &spec(None), |_| RowCost::Unpriced, no_deadline()).expect("query");
+    let result = query(
+        &mut db,
+        &spec(None),
+        |_| RowCost::Unpriced(Vec::new()),
+        no_deadline(),
+    )
+    .expect("query");
 
     // Assert
     let pct = result.totals.cache_hit_pct.expect("hit fraction present");
@@ -340,7 +346,7 @@ fn priced_rows(db: &mut UsageDb, bucket: Option<BucketSpec>) -> Vec<AggRow> {
         &spec(bucket),
         |row| {
             seen.borrow_mut().push(row.clone());
-            RowCost::Unpriced
+            RowCost::Unpriced(Vec::new())
         },
         no_deadline(),
     )

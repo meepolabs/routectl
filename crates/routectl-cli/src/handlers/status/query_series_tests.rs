@@ -456,8 +456,13 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
     for _ in 0..REPS {
         let reference = reference_scan(&db, from_ms, to_ms);
         let started = Instant::now();
-        let series = query(&mut db, &spec, |_row| RowCost::Unpriced, started + budget)
-            .expect("a 100k-row day series must complete inside the budget");
+        let series = query(
+            &mut db,
+            &spec,
+            |_row| RowCost::Unpriced(Vec::new()),
+            started + budget,
+        )
+        .expect("a 100k-row day series must complete inside the budget");
         let elapsed = started.elapsed();
         cost_ratio = cost_ratio.min(elapsed.as_secs_f64() / reference.as_secs_f64());
         result = Some(series);

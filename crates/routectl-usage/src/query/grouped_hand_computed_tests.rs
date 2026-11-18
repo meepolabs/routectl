@@ -74,7 +74,7 @@ fn hand_computed_fixture_matches_every_derived_metric() {
             if row.key.upstream.as_deref() == Some("u1") {
                 RowCost::Priced(row.input_tokens as f64 / 1000.0)
             } else {
-                RowCost::Unpriced
+                RowCost::Unpriced(Vec::new())
             }
         },
         no_deadline(),

@@ -196,7 +196,7 @@ fn each_price_source_wins_in_its_precedence_order() {
             name: "no table and no config",
             configure: |_| {},
             prices: no_prices,
-            expected: RowCost::Unpriced,
+            expected: RowCost::Unpriced(labels(&["input", "output"])),
         },
     ];
     for row in rows {
@@ -228,7 +228,7 @@ fn a_model_no_table_prices_is_unpriced_never_zero() {
     let hit = table_verdict(&listed, &config, &both_tables());
 
     // Assert
-    assert_eq!(miss, RowCost::Unpriced);
+    assert_eq!(miss, RowCost::Unpriced(labels(&["input", "output"])));
     assert_ne!(miss, RowCost::Priced(0.0));
     assert_eq!(hit, RowCost::Priced(REFRESHED_USD));
 }
@@ -246,7 +246,7 @@ fn an_unlisted_model_is_priced_only_by_its_own_pricing() {
     let miss = table_verdict(&db, &unpriced, &both_tables());
     let hit = table_verdict(&db, &priced, &both_tables());
 
-    assert_eq!(miss, RowCost::Unpriced);
+    assert_eq!(miss, RowCost::Unpriced(labels(&["input", "output"])));
     assert_eq!(hit, RowCost::Priced(2.00));
 }
 
@@ -260,8 +260,11 @@ fn a_subscription_row_on_an_unpriced_model_carries_no_equivalent() {
     let hit = table_verdict(&listed, &config, &both_tables());
 
     // Seat-billed either way; only the priced model carries an equivalent.
-    assert_eq!(miss, RowCost::Subscription(None));
-    assert_eq!(hit, RowCost::Subscription(Some(REFRESHED_USD)));
+    assert_eq!(
+        miss,
+        RowCost::Subscription(None, labels(&["input", "output"]))
+    );
+    assert_eq!(hit, RowCost::Subscription(Some(REFRESHED_USD), Vec::new()));
 }
 
 #[test]
@@ -288,8 +291,11 @@ fn a_known_zero_price_keeps_the_equivalent_complete() {
     let complete = table_verdict(&db, &config, &tables(Some(refreshed_rows()), None));
     let incomplete = table_verdict(&db, &config, &without_cache_read);
 
-    assert_eq!(complete, RowCost::Subscription(Some(0.0)));
-    assert_eq!(incomplete, RowCost::Subscription(None));
+    assert_eq!(complete, RowCost::Subscription(Some(0.0), Vec::new()));
+    assert_eq!(
+        incomplete,
+        RowCost::Subscription(None, labels(&["cache read"]))
+    );
 }
 
 /// `[models.sonnet.pricing]` setting only `input` and `output`, so a
@@ -322,7 +328,7 @@ fn a_row_with_a_used_unpriced_dimension_is_unpriced() {
             configure: |_| {},
             prices: shipped_only,
             cache_read: Some(500),
-            expected: RowCost::Unpriced,
+            expected: RowCost::Unpriced(labels(&["cache read"])),
         },
         Row {
             name: "shipped row, no cache reads",
@@ -336,7 +342,7 @@ fn a_row_with_a_used_unpriced_dimension_is_unpriced() {
             configure: |c| model_pricing(c, Some(4.0), Some(6.0)),
             prices: no_prices,
             cache_read: Some(500),
-            expected: RowCost::Unpriced,
+            expected: RowCost::Unpriced(labels(&["cache read"])),
         },
         Row {
             name: "model-config only, no cache reads",
@@ -350,7 +356,7 @@ fn a_row_with_a_used_unpriced_dimension_is_unpriced() {
             configure: |c| model_pricing(c, Some(4.0), None),
             prices: shipped_only,
             cache_read: Some(500),
-            expected: RowCost::Unpriced,
+            expected: RowCost::Unpriced(labels(&["cache read"])),
         },
         Row {
             name: "model-config input plus shipped output, no cache reads",
@@ -395,7 +401,10 @@ fn a_removed_provider_prices_a_first_party_upstream_by_its_persisted_kind() {
     let without_kind = table_verdict(&kindless, &config, &both_tables());
 
     assert_eq!(with_kind, RowCost::Priced(REFRESHED_USD));
-    assert_eq!(without_kind, RowCost::Unpriced);
+    assert_eq!(
+        without_kind,
+        RowCost::Unpriced(labels(&["input", "output"]))
+    );
 }
 
 #[test]

@@ -88,7 +88,7 @@ fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
         provider_filter: None,
         bucket: None,
     };
-    let result = query(db, &spec, |_| RowCost::Unpriced, deadline).expect("query");
+    let result = query(db, &spec, |_| RowCost::Unpriced(Vec::new()), deadline).expect("query");
     (report, panel, result)
 }
 

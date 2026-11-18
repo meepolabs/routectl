@@ -4887,6 +4887,21 @@ also counts `cache_read_present` and `server_tool_present` (requests that
 reported a cache read or a server-tool map, a reported zero included) and
 `client_disconnect_pre_dispatch` (client hangups before a model was served).
 
+Every metric set also carries `missing_price_dimensions`, a sorted list of
+the dimensions its requests used that had no price: the reason `cost_usd`
+or `equivalent_cost_usd` is absent or covers only part of the set. It is
+`[]` when every used dimension was priced. The names are the ones
+`routectl doctor` uses: `input`, `output`, `cache read` and
+`cache write <duration>` (for example `cache write 30m`). Reasoning tokens
+billed at the output rate count as `output`. Three other reasons have their
+own names: when no price source covers a model at all, every dimension its
+requests used is listed; cache writes with no recorded lifetime, or a
+lifetime split above its total, read `cache write (unknown lifetime)`; and
+reasoning tokens on a request whose provider kind is unknown read
+`reasoning`. A request with no recorded provider adds nothing. Totals and
+series buckets carry the union of their requests' names. Naming a missing
+dimension never adds any API-equivalent amount to `cost_usd`.
+
 ### `provider probe [<name>]` -- reachability, free-only
 
 `routectl provider probe` reports one reachability outcome per configured
