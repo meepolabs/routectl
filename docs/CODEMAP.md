@@ -381,7 +381,9 @@ license.
 - `src/log_safe.rs` -- `sanitize_for_log`, the `trace_*` body helpers,
   `redact_error_body_text`, `sanitize_upstream_body*`, `upstream_excerpt_for_log`
   and the env-only log knob resolvers and boot status lines: log-safe
-  rendering of untrusted text
+  rendering of untrusted text; also `render_operator_name` /
+  `render_operator_text` (terminal-safe operator-written names) and
+  `MAX_PROVIDER_NAME_BYTES`
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
   of an upstream error body carried on `Error::Upstream` (read via
   `Error::parsed_body`), plus its envelope / `error.*` accessors and
@@ -1204,9 +1206,10 @@ license.
   the serialized body's `input` to `mantle::refuse_unforwardable_media_urls`
 - `src/openai_responses/client.rs` -- provider construction, config, and auth
   wiring: `OpenAiResponsesConfig` (incl. `session_id` and `installation_id:
-  Option<String>`, `client_identity: bool`, plus cfg `bedrock` `mantle:
-  Option<MantleAuth>`, which forces `client_identity` off),
-  `OpenAiResponsesProvider` (client build + cookie-jar Drop persistence),
+  Option<String>`, `client_identity: bool`, `persist_cookie_jar: bool`, plus
+  cfg `bedrock` `mantle: Option<MantleAuth>`, which forces `client_identity`
+  off), `OpenAiResponsesProvider` (client build + cookie-jar Drop
+  persistence, skipped when `persist_cookie_jar` is off),
   header assembly. `build_headers` stamps the codex identity defaults and the
   `session-id` / `x-codex-installation-id` headers only when
   `client_identity` is set, in the compiled-defaults phase (before
@@ -1873,7 +1876,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   region that fails admission), `cache_capability()` and the per-block pair
   `per_block_breakpoints_enabled()` / `supports_per_block_breakpoints()`;
   code-built constructors (`openai_compat`, `anthropic_api`,
-  `openai_responses`, `gemini`, `cloud_aws`) plus `with_*` builders.
+  `openai_responses`, `gemini`, `cloud_aws`, and `for_managed_login` for a
+  managed-login vendor's own entry) plus `with_*` builders.
   `CONFIG_PROVIDER_KINDS` + `is_config_provider_kind` bound a kind string to
   what this build's formats can resolve to. Also `ModelEntry` (model facts and
   `pricing`), `AliasValue`, `ServerConfig` / `ServerAuth`, `PricingConfig`
@@ -1905,8 +1909,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `retired_keys.rs` (`RawConfigPreflightError::RetiredKeys`), so an older or
   versionless file is told about its version rather than its keys.
   Unparseable TOML passes both so the typed deserialize reports the real
-  syntax error. `message_safe_key` sanitizes and caps (256 chars) an
-  operator-written key before any message renders it. Callers: the shared
+  syntax error. `message_safe_key` renders an operator-written key through
+  `routectl_core::render_operator_text` and caps it (256 chars) before any
+  message interpolates it. Callers: the shared
   loader (`parse_config_only`) and the CLI edit pipeline (`preflight` and the
   candidate `gate`)
 - `src/config/retired_keys.rs` -- the ONE retired config-key table and its
@@ -2032,8 +2037,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   crate-facing surface (`build_provider`, `build_provider_with_options`,
   `build_resolved_models`, `build_resolved_models_reported`,
   `pool_member_refusals`, `ResolvedModelBuild`, `BuildOptions`
-  (`normalize_tools`, `mint_installation_id`; `config check` builds with
-  minting off), the `validate_*` family, `resolve_model_provider`,
+  (`normalize_tools`, `mint_installation_id`, `persist_cookie_jar`; `config
+  check` builds with minting and cookie-jar persistence off), the
+  `validate_*` family, `resolve_model_provider`,
   `resolved_codex_version` / `configured_codex_version`,
   `collect_config_validation`, `ConfigValidation`, `MAX_POOL_MEMBERS`,
   `validate_aws_regions`, and the advisory `codex_identity_warnings`,
@@ -2077,8 +2083,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   collection. `collect_config_validation(&Config) -> ConfigValidation` is the
   single ordered invocation of the suite (bare-message contract), routed
   through by `config check`, `test`, `prompt-size`, and the `serve` pre-parse
-  gate; per provider it reports every `shape_refusals` message plus the
-  plan's refusal. Also public `resolve_model_provider` ->
+  gate; `errors` holds one entry per finding (a multi-finding validator's
+  joined message is split per line), and per provider it reports every
+  `shape_refusals` message plus the plan's refusal. Also public `resolve_model_provider` ->
   `Option<ModelProviderTarget{Pool, Provider}>` (the shared `[pools]` /
   `[providers]` namespace lookup); `validate_class_policy` (rejects a
   `[retry.classes] feature-unsupported` count);
@@ -6352,7 +6359,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   candidate never replaces the published router);
   `load_effective_config_unvalidated` wraps it over ONE read, returning
   `LoadedConfig { config, raw_text }`; `load_effective_config`
-  adds the fail-fast `validate_effective_config` gate.
+  adds the fail-fast `validate_effective_config` gate (every finding, one
+  `config: ` line each).
   `read_parse_validate_config` is the synchronous hot-reload loader over
   `load_effective_config`, so a rejection returns
   `ReloadFailure::ConfigLoadFailed` (its WARN joins a multi-line loader error
@@ -7809,7 +7817,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   error/warning line prints through `safe_line`
   (`sanitize_for_log_with_cap`, 512 chars) -- the one render point that
   control-char-filters the whole validator suite's operator-written keys, so a
-  CR/LF/ANSI-bearing key cannot span lines or forge a report entry. `check`
+  CR/LF/ANSI-bearing key cannot span lines or forge a report entry; it is
+  `pub(crate)` so the edit gate and login's invalid-config skip print the same
+  lines, and the names its own messages interpolate go through
+  `render_operator_name`. `check`
   also prints the informational OAuth seat-pool block from
   `seat_report::seat_pool_lines` (one line per `[pools.<name>]` block, then one
   per provider entry no pool claims), reading seat presence through a direct
@@ -7837,7 +7848,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   check` runs: `OfflineCheckStore` (answers `oauth://` reads from the stored
   record, never refreshes or writes) and `member_build_errors`, which runs
   `routectl_router::pool_member_refusals` with serve's build options minus
-  installation-id minting
+  installation-id minting and cookie-jar persistence
 - `src/commands/config_edit.rs` -- `routectl config set/unset`: the write
   pipeline through the shared gate. Order: RAW version preflight FIRST
   (refuses a missing `version` or `version < CURRENT_CONFIG_VERSION`
@@ -7871,18 +7882,23 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `routectl_router::preflight_raw_config` (the same driver the loader runs;
   refuses an out-of-range or missing `version`), the in-memory `gate` (the
   same preflight on the candidate, then `parse_config` +
-  `collect_config_validation`) plus its error rendering,
+  `collect_config_validation`) plus its error rendering (one
+  `config::safe_line` per finding),
   the pre-lock high-consequence confirmation prompt (`--yes` bypasses; a
   non-TTY stdin declines without reading, so a silent pipe cannot hang any
   mutating command), and `parse_document` +
   `insert_provider_block` (format-preserving `[providers.<name>]`
   insert/replace, deterministic so a write closure reproduces under the lock
   exactly what planning gated), and `upsert_pool_members(&mut DocumentMut,
-  pool, members)`, the login auto-surface's member-union primitive: creates
-  `pools` and the block when absent, unions members without duplicating
-  (within one call's list as well as against the block's existing members),
-  and leaves everything else on the block (`seat_selection`, an
-  `accepts_new_logins` marker) verbatim, so a rerun changes no byte. One home
+  pool, members) -> Result`, the pool-join member-union primitive (login
+  auto-surface and `provider add --pool`): creates `pools` and the block when
+  absent, unions members without duplicating (within one call's list as well
+  as against the block's existing members), errors on a pool target that is
+  not a table / array, and leaves everything else on the block
+  (`seat_selection`, an `accepts_new_logins` marker) verbatim, so a rerun
+  changes no byte; `set_accepts_new_logins` marks a pool the writer creates,
+  and `inherit_pool_cloak` copies the first member's explicit cloak keys onto
+  an entry joining the pool. One home
   so every mutating command refuses
   stale/legacy files, re-validates candidates, and prompts on egress-defining
   edits identically
@@ -7912,18 +7928,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lock is never held across a prompt/login/env-probe/put. A post-capture write
   conflict reports an explicit recovery (secret/login persists, config
   unchanged); after a login it names the exact `provider add --login
-  [--label]` rerun command (built with `commands::rerun`). Emits ONE value-free audit event
+  [--label] [--pool]` rerun command (built with `commands::rerun`). With
+  `--pool` the entry and its pool edit are one candidate and one write. Emits ONE value-free audit event
   (surface/verb/name/kind/credential class -- never the value or full ref);
   owns `AddResult` {Written/NoChange/Aborted/Rotated} and the pinned
   `credential rotated; config unchanged` line. Also owns the accepted
   `FORMAT_VALUES` / `AUTH_VALUES` / `LOGIN_VALUES` and the
   `KIND_REPLACED_MESSAGE` refusal for the retired `--kind`
 - `src/commands/provider_add/build.rs` -- provider-entry construction from
-  args: `build_entry` resolves exactly one of `--format`
-  (anthropic-messages / openai-chat / openai-responses / gemini over a base
-  URL, `--auth` or its `default_auth`) or `--login` (anthropic / codex via
-  `ProviderEntry::for_managed_login`, `oauth://<vendor>[#<label>]` with
-  `--label` only valid here, login deferred),
+  args: `build_entry` resolves exactly one of `--format` (with its carrier:
+  `--base-url` or the format's default base, or `--region` for the inline
+  AWS `cloud`; `--auth` or its `default_auth`) or `--login` (anthropic /
+  codex via `ProviderEntry::for_managed_login`, `oauth://<vendor>[#<label>]`;
+  `--label` and `--pool` only valid here, login deferred),
   then the direct api-key path (`resolve_secret` -> `env://` /
   `--secret-ref` verbatim / stdin / interactive, keyed on the entry's family
   token) or `build_forwarded` (`anthropic-messages` with
@@ -7940,9 +7957,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   which opens the managed 0600 `file://` store ONCE and computes the ref via
   `ManagedSecretStore::ref_path` so the pre-confirm ref string and the
   post-confirm `put` share one canonical base
-- `src/commands/provider_add/toml_edit.rs` -- config.toml provider-block edit
-  + commit: `provider_table` delegates to `provider_entry::provider_entry_table`,
-  and `commit` re-reads under
+- `src/commands/provider_add/toml_edit.rs` -- config.toml provider-block (and
+  optional pool) edit + commit: `provider_table` delegates to
+  `provider_entry::provider_entry_table`; `Candidate` is the one edit
+  (`apply` inserts the block, then the `--pool` join/create via
+  `login_surface::apply_pool_action`; `render` prints both; `text` feeds the
+  gate) and `plan_pool` picks the pool action; `commit` re-reads under
   the advisory lock + revision check and writes the same deterministic insert
   atomically through `routectl_router::edit_config_toml` (re-gated; a stale
   snapshot or gate failure writes nothing). The document parse and the
@@ -7975,7 +7995,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   machine, composes each provider via `provider add` (atomic + gated +
   idempotent), then the single models/aliases write, wrapping any post-ack
   failure with the explicit re-run recovery message (config on disk stays
-  valid, captured credentials persist and are reused). An existing config
+  valid, captured credentials persist and are reused; the rerun is the exact
+  `init` invocation via `commands::rerun` when it prints exactly). An existing config
   passes the shared `edit_pipeline::preflight` before any step reads it
   (`load_existing`, and the scaffold-vs-wizard branch)
 - `src/commands/init/detect.rs` -- the detect step: `detect_offers(config,
@@ -8181,15 +8202,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `accepts_new_logins = true` ONLY on a pool the plan creates, and renders no
   pool block at all for a skipped pool half. `surface(path,
   family, label, yes) -> SurfaceOutcome` is the one impure half: byte snapshot
-  -> `edit_pipeline::preflight` -> parse -> plan -> print the delta (`--yes`
+  -> `edit_pipeline::preflight` -> parse -> `config::validation_report` (an
+  invalid snapshot is skipped with its findings, never planned around) ->
+  plan -> print the delta (`--yes`
   bypasses the PROMPT, never the print) -> `confirm_high_consequence` ->
   `edit_config_toml` against that exact snapshot (`apply_delta` mirrors
-  `render_delta`, so the shown TOML and the written bytes cannot disagree).
+  `render_delta`, so the shown TOML and the written bytes cannot disagree; a
+  join copies the pool's explicit cloak keys onto the entry). `join_action`,
+  `render_pool_block` and `apply_pool_action` are `pub(crate)` so
+  `provider add --pool` plans, prints and writes the pool half identically.
   Exit contract: decline / any refuse / pinned pool / `Nothing` / no config
-  file / an unwritable-or-unparseable config are all `Ok` VALUES (login
+  file / an unwritable, unparseable or invalid config are all `Ok` VALUES (login
   succeeded, the credential is stored); only a failure AFTER acceptance is
   `Err`, whose message states the credential remains stored and was never
-  rolled back and carries the same `render_delta` as a recovery block. A
+  rolled back, names the exact `login` rerun (`commands::rerun`), and
+  carries the same `render_delta` as a recovery block. A
   snapshot conflict NEVER retries against fresh bytes. Every message here is
   path-FREE (`write_failure_class` maps each `ConfigWriteError` variant to its
   class; the unreadable skip reuses `parse_error_redaction::CONFIG_UNREADABLE`)
@@ -8244,7 +8271,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   validation so its warnings cannot disagree with the block printed above them.
   Signatures take seat KEYS only, never
   a `TokenRecord`, so token material cannot reach the render; labels, pool
-  names and entry names go through `routectl_core::sanitize_for_log`
+  names and entry names go through `routectl_core::render_operator_name`
 - `src/commands/pricing.rs` -- the CLI's shared cost-pricing seams.
   `PriceSnapshot` (`pin(&PriceBook)` = the book's current refreshed table plus
   `shipped_table()`; `from_tables` for tests) is the price-table pair one cost
@@ -8909,10 +8936,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the
-  REAL command into a temp v3 config for each credential shape (`env://`,
+  REAL command into a temp current-version config for each credential shape (`env://`,
   managed `file://`, `oauth://`, `forwarded`) and asserts the
   learnings-mandated pair -- `config check` passes AND the provider factory
-  builds -- plus a serve-boot `/health` smoke; also the non-interactive
+  builds -- plus a serve-boot `/health` smoke; also the real binary's
+  refusals (the retired `--kind`, the AWS cloud carrier flags, `--pool`
+  without `--login`), the non-interactive
   no-hang guarantee, comment/section-order preservation on a round-trip add,
   and a secret-never-leaks scan across the capture paths. Every config is a
   temp copy with XDG-scoped credential + usage-DB isolation so no live file is
@@ -8929,7 +8958,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the server boots to a live `/health`), plus the idempotence floor
   (byte-identical re-run no-op + a partial-failure re-run that duplicates
   nothing and mints no new secret), the `--scaffold` refusal/output shape, the
-  pre-side-effect `--yes` error, the no-hang guarantee, and the forwarded
+  pre-side-effect `--yes` error, the no-hang guarantee, a detected login
+  written as the vendor's own entry, and the forwarded
   end-to-end path. XDG scoped to a fresh tempdir (isolating the managed secret
   store + credentials.json) with an isolated usage DB; env-mutating cases are
   serialized and readiness is polled off `/health`
