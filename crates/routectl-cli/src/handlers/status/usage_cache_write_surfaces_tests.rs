@@ -84,7 +84,7 @@ fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
         "all",
         bounds,
         LedgerHealth::default(),
-        &ConfiguredAccounts::new(),
+        &routectl_router::AccountIdentities::default(),
         deadline,
     )
     .expect("usage panel");

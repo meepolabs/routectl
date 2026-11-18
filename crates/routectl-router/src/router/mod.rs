@@ -122,7 +122,9 @@ use routectl_core::capability::FailurePhase;
 #[cfg(test)]
 use routectl_core::capability::SignalTier;
 use runtime_gate::{LearnedProbeGuard, ProbeAdmission};
-pub use status::{PolledUsageRejection, PoolEligibility, RouteTargetStatus};
+pub use status::{
+    AccountIdentities, AccountIdentity, PolledUsageRejection, PoolEligibility, RouteTargetStatus,
+};
 pub use stream_evidence::StreamEvidence;
 pub use wire_response::ResponseCheck;
 

@@ -27,6 +27,7 @@ use crate::handlers::status::{DaemonMeta, StatusState, status_router};
 use crate::server::AppState;
 use crate::server::seat_driver::SeatDriverHealth;
 use crate::server::usage_poll::{SeatPollSnapshot, UsagePollJob};
+use routectl_router::runtime_state::UnusableCause;
 
 const ENV_SENTINEL: &str = "SENTINEL_ENV_VAR_7c41";
 const FILE_SENTINEL: &str = "/fixture/sentinel-key-2b9e.key";
@@ -272,8 +273,6 @@ async fn every_configured_account_is_listed_with_three_separate_identity_keys() 
 
 /// A login the background driver does not manage, reached through two
 /// entries, is one row under the smaller entry whatever the model order.
-///
-/// Mutation check: flip `<` to `>` in `configured_accounts` -> red here.
 #[test]
 fn an_unmanaged_login_under_two_entries_reports_the_smaller_entry() {
     // Arrange
@@ -298,11 +297,12 @@ fn an_unmanaged_login_under_two_entries_reports_the_smaller_entry() {
         ),
     ];
     let router = router_of(&seats);
-    let targets = router.status_targets(std::time::Instant::now());
+    let identities = router.account_identities();
     let readings = router.account_readings(&routectl_router::ObservationStamp::now());
 
     // Act
-    let json = serde_json::to_value(build_from_sources(sources(targets, readings, None))).unwrap();
+    let json =
+        serde_json::to_value(build_from_sources(sources(identities, readings, None))).unwrap();
 
     // Assert
     let accounts = json["accounts"].as_array().unwrap();
@@ -415,7 +415,7 @@ async fn a_reload_that_drops_a_login_drops_its_row_and_keeps_the_others() {
 fn a_reading_for_an_unconfigured_account_is_not_listed() {
     // Arrange
     let router = router_of(&every_kind()[2..3]);
-    let targets = router.status_targets(std::time::Instant::now());
+    let identities = router.account_identities();
     let readings = AccountReadings {
         accounts: vec![AccountReading {
             account: "anthropic#gone".into(),
@@ -428,7 +428,7 @@ fn a_reading_for_an_unconfigured_account_is_not_listed() {
     };
 
     // Act
-    let panel = build_from_sources(sources(targets, readings, None));
+    let panel = build_from_sources(sources(identities, readings, None));
 
     // Assert
     let json = serde_json::to_value(panel).unwrap();
@@ -455,13 +455,12 @@ const fn zero_totals() -> RejectionTotals {
 }
 
 fn sources(
-    targets: Vec<RouteTargetStatus>,
+    identities: AccountIdentities,
     readings: AccountReadings,
     poll: Option<PollStateSnapshot>,
 ) -> AccountSources {
     AccountSources {
-        targets,
-        managed_entries: BTreeMap::new(),
+        identities,
         readings,
         poll,
         history: AccountReadingHistory::default(),
@@ -557,12 +556,13 @@ fn report_states_map_to_their_tokens() {
 fn poll_state_maps_per_account_and_vendor_pauses_are_listed() {
     // Arrange
     let router = router_of(&every_kind());
-    let targets = router.status_targets(std::time::Instant::now());
+    let identities = router.account_identities();
     let readings = router.account_readings(&routectl_router::ObservationStamp::now());
     let poll = PollStateSnapshot {
         seats: vec![SeatPollSnapshot {
             account: "anthropic#work".into(),
             vendor: UsageVendor::Anthropic,
+            awaiting_login: false,
             last_attempt_ms: Some(1_000),
             last_result: Some("malformed"),
             next_due_ms: Some(301_000),
@@ -571,8 +571,12 @@ fn poll_state_maps_per_account_and_vendor_pauses_are_listed() {
     };
 
     // Act
-    let json =
-        serde_json::to_value(build_from_sources(sources(targets, readings, Some(poll)))).unwrap();
+    let json = serde_json::to_value(build_from_sources(sources(
+        identities,
+        readings,
+        Some(poll),
+    )))
+    .unwrap();
 
     // Assert
     let find = |account: &str| {
@@ -625,7 +629,7 @@ fn top_level_counters_come_from_their_own_sources() {
         },
         refused_by_admission: 9,
     };
-    let mut sources = sources(Vec::new(), readings, None);
+    let mut sources = sources(AccountIdentities::default(), readings, None);
     sources.history = AccountReadingHistory {
         enqueued: 11,
         dropped_full: 12,
@@ -697,6 +701,170 @@ async fn a_running_poll_marks_its_managed_logins_polled() {
         assert_eq!(poll["vendor"], vendor, "{account}");
         assert!(poll["last_attempt_ms"].is_null(), "{account}: never swept");
     }
+}
+
+async fn state_with_running_poll(swap: Arc<ArcSwap<Router>>) -> Arc<StatusState> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let creds = dir.path().join("credentials.json");
+    std::fs::write(&creds, br#"{"schema_version": 1, "providers": {}}"#).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let store = Arc::new(OAuthStore::open(&creds).await.expect("open the store"));
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let job = UsagePollJob::new(store, routectl_usage::handle_over_channel(tx)).expect("job");
+    let meta = DaemonMeta::for_test();
+    assert!(meta.install_usage_poll_state(job.state()).is_ok());
+    state_over(swap, meta)
+}
+
+/// A login the router holds as needing a fresh login reads `awaiting_login`
+/// under its vendor, not `polled`, while the poll skips it; once a login
+/// lifts the mark it reads `polled` again. Other accounts are unaffected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_awaiting_login_reads_awaiting_login_until_its_mark_is_lifted() {
+    for cause in [UnusableCause::Revoked, UnusableCause::NotLoggedIn] {
+        // Arrange
+        let swap = Arc::new(ArcSwap::from_pointee(router_of(&every_kind())));
+        let state = state_with_running_poll(Arc::clone(&swap)).await;
+        assert!(
+            swap.load().mark_credential_unusable_for_tests("m-b", cause),
+            "{cause:?}: premise, marked"
+        );
+
+        // Act
+        let marked = read_accounts(&state).await;
+        swap.load().lift_oauth_credential_parks(["anthropic#work"]);
+        let lifted = read_accounts(&state).await;
+
+        // Assert
+        let poll = &row(&marked, "anthropic#work")["poll"];
+        assert_eq!(poll["applicability"], "awaiting_login", "{cause:?}: {poll}");
+        assert_eq!(poll["vendor"], "anthropic", "{cause:?}: {poll}");
+        assert_eq!(
+            row(&marked, "codex")["poll"]["applicability"],
+            "polled",
+            "{cause:?}: another login is unaffected"
+        );
+        let poll = &row(&lifted, "anthropic#work")["poll"];
+        assert_eq!(poll["applicability"], "polled", "{cause:?}: {poll}");
+        assert_eq!(poll["vendor"], "anthropic", "{cause:?}: {poll}");
+    }
+}
+
+/// A seat marked for a cause that clears on its own is still polled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_marked_for_a_transient_cause_still_reads_polled() {
+    // Arrange
+    let swap = Arc::new(ArcSwap::from_pointee(router_of(&every_kind())));
+    let state = state_with_running_poll(Arc::clone(&swap)).await;
+    assert!(
+        swap.load()
+            .mark_credential_unusable_for_tests("m-b", UnusableCause::Expired)
+    );
+
+    // Act
+    let json = read_accounts(&state).await;
+
+    // Assert
+    assert_eq!(
+        row(&json, "anthropic#work")["poll"]["applicability"],
+        "polled"
+    );
+}
+
+/// The panel's poll driver row has its own fixed key set, each key mapped
+/// from its own snapshot field.
+#[test]
+fn the_poll_driver_row_carries_its_own_key_set() {
+    // Arrange
+    let snapshot = SeatDriverHealthSnapshot {
+        running: true,
+        last_sweep_ms: Some(1),
+        last_good_sweep_ms: Some(2),
+        sweeps: 3,
+        transient: 4,
+        definitive: 5,
+    };
+
+    // Act
+    let json = serde_json::to_value(map_poll_driver(snapshot)).unwrap();
+
+    // Assert
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "running": true, "last_sweep_ms": 1, "last_good_sweep_ms": 2,
+            "sweeps": 3, "transient": 4, "definitive": 5,
+        })
+    );
+}
+
+/// The panel's window and source tokens equal the tokens the reading
+/// history stores for the same reading, so a reader can join the two.
+#[test]
+fn window_tokens_equal_the_history_tokens_of_the_same_reading() {
+    // Arrange
+    let mut windows = Vec::new();
+    for class in [LengthClass::Short, LengthClass::Long] {
+        for started in [Started::Yes, Started::No, Started::Unknown] {
+            windows.push(ReadingWindow {
+                length_secs: match class {
+                    LengthClass::Short => 18_000,
+                    LengthClass::Long => 604_800,
+                },
+                class,
+                scope: None,
+                used: 0.0,
+                reset: None,
+                started,
+            });
+        }
+    }
+    let accepted = routectl_router::AcceptedReading {
+        observed_at: at_ms(1_000),
+        windows: windows.clone(),
+    };
+
+    // Act
+    let history = crate::server::usage_poll::history_rows_for_tests("anthropic#a", &accepted);
+    let empty = crate::server::usage_poll::history_rows_for_tests(
+        "anthropic#a",
+        &routectl_router::AcceptedReading {
+            observed_at: at_ms(1_000),
+            windows: Vec::new(),
+        },
+    );
+
+    // Assert
+    assert_eq!(history.len(), windows.len());
+    for (window, stored) in windows.iter().zip(&history) {
+        let stored_window = stored.window.as_ref().expect("a windows row");
+        assert_eq!(
+            class_token(window.class),
+            stored_window.length_class.as_str()
+        );
+        assert_eq!(
+            started_token(window.started),
+            stored_window.started.as_str()
+        );
+        assert_eq!(report_token(ReportState::Windows), stored.report().as_str());
+        assert_eq!(source_token(ReadingSource::Poll), stored.source.as_str());
+    }
+    let [no_windows] = empty.as_slice() else {
+        panic!("one no_windows row: {empty:?}");
+    };
+    assert_eq!(
+        report_token(ReportState::NoWindows),
+        no_windows.report().as_str()
+    );
+    assert_eq!(
+        source_token(ReadingSource::Response),
+        routectl_usage::AccountReadingSource::Response.as_str(),
+        "the history token for a response reading"
+    );
 }
 
 /// The aggregate carries the accounts panel at its own version.

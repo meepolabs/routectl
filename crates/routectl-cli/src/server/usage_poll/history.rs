@@ -10,7 +10,7 @@ use routectl_usage::{
 /// The history rows for one accepted poll reading of `account`: one row
 /// per window, or a single `no_windows` row for a complete report that the
 /// account has none.
-pub(super) fn rows(account: &str, accepted: &AcceptedReading) -> Vec<AccountReadingRow> {
+pub fn rows(account: &str, accepted: &AcceptedReading) -> Vec<AccountReadingRow> {
     let row = |window| AccountReadingRow {
         ts_ms: epoch_ms(accepted.observed_at),
         account: account.to_owned(),

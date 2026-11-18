@@ -125,7 +125,7 @@ impl ReloadRig {
     fn snapshot_accounts(&self) -> Vec<String> {
         self.job
             .state()
-            .snapshot(&self.swap.load().config)
+            .snapshot(&self.swap.load().config, &std::collections::BTreeSet::new())
             .seats
             .into_iter()
             .map(|seat| seat.account)

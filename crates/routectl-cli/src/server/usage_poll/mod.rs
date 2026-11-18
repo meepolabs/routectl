@@ -19,8 +19,11 @@ mod client;
 #[cfg(test)]
 pub(super) use self::client::build_failure as client_build_failure;
 mod history;
+#[cfg(test)]
+pub use self::history::rows as history_rows_for_tests;
 mod schedule;
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -76,8 +79,13 @@ impl UsagePollState {
     /// Every managed seat of `config` with its poll state, and each vendor's
     /// pause still in effect. Reads memory only: one short lock, no I/O.
     /// A seat the schedule has not swept yet reads as never attempted with
-    /// no due time.
-    pub fn snapshot(&self, config: &Config) -> PollStateSnapshot {
+    /// no due time. A seat in `awaiting_login` is one the poll skips until a
+    /// fresh login, so its sweep state was dropped and reads the same way.
+    pub fn snapshot(
+        &self,
+        config: &Config,
+        awaiting_login: &BTreeSet<String>,
+    ) -> PollStateSnapshot {
         let now_ms = self.clock.now_ms();
         let schedule = self.schedule.lock();
         let seats = managed_seats(config)
@@ -87,6 +95,7 @@ impl UsagePollState {
                 let state = schedule.seat(&seat.account);
                 Some(SeatPollSnapshot {
                     vendor,
+                    awaiting_login: awaiting_login.contains(&seat.account),
                     last_attempt_ms: state.and_then(schedule::SeatState::last_attempt_ms),
                     last_result: state
                         .and_then(schedule::SeatState::last_outcome)
@@ -126,7 +135,11 @@ impl PollStateSnapshot {
             .iter()
             .find(|seat| seat.account == account)
             .map_or(PollApplicability::NotPolled, |seat| {
-                PollApplicability::Polled(seat.vendor)
+                if seat.awaiting_login {
+                    PollApplicability::AwaitingLogin(seat.vendor)
+                } else {
+                    PollApplicability::Polled(seat.vendor)
+                }
             })
     }
 }
@@ -138,6 +151,9 @@ pub struct SeatPollSnapshot {
     pub account: String,
     /// The vendor whose usage endpoint the seat is polled at.
     pub vendor: UsageVendor,
+    /// Whether the router holds the seat as needing a fresh login, so the
+    /// poll skips it until one lands.
+    pub awaiting_login: bool,
     /// When the seat was last polled (epoch ms), if it has been.
     pub last_attempt_ms: Option<i64>,
     /// The last poll's result token, if it has been polled.
@@ -151,6 +167,9 @@ pub struct SeatPollSnapshot {
 pub enum PollApplicability {
     /// A managed login polled at this vendor's usage endpoint.
     Polled(UsageVendor),
+    /// A managed login of this vendor the poll skips until a fresh login,
+    /// since its token is known dead.
+    AwaitingLogin(UsageVendor),
     /// Any other credential: an API key, a cloud credential, a forwarded
     /// one, or a login of a vendor with no usage endpoint.
     NotPolled,

@@ -25,6 +25,7 @@ use axum::extract::{Query, State};
 use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
 
+use routectl_router::{AccountIdentities, AccountIdentity};
 use routectl_usage::{
     AggRow, DeadlineGuard, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb, aggregate,
     errors_by_class, latest_quota_by_seat, open_readonly_fastfail,
@@ -33,7 +34,6 @@ use routectl_usage::{
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 use crate::server::status_gate::USAGE_BUDGET_MS;
 
-use super::accounts::{ConfiguredAccounts, Identity, configured_accounts_of};
 use super::usage_health::{LedgerHealth, WindowObservation, window_observation};
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
@@ -249,7 +249,7 @@ async fn build_window(
     let as_of = now_utc_rfc3339();
     // Read beside `as_of` too, so a reload during the ledger read cannot pair
     // the snapshots with a config they were not filtered against.
-    let configured = configured_accounts_of(&state.router.view());
+    let configured = state.router.view().account_identities();
     let panel = guard_panel(
         &state.builder_capacity,
         SCHEMA_VERSION,
@@ -286,7 +286,7 @@ fn build_panel(
     token: &'static str,
     bounds: WindowBounds,
     health: LedgerHealth,
-    configured: &ConfiguredAccounts,
+    configured: &AccountIdentities,
     as_of: String,
 ) -> Panel<UsagePanel> {
     let deadline = Instant::now() + Duration::from_millis(USAGE_BUDGET_MS);
@@ -314,7 +314,7 @@ fn collect(
     token: &'static str,
     bounds: WindowBounds,
     health: LedgerHealth,
-    configured: &ConfiguredAccounts,
+    configured: &AccountIdentities,
     deadline: Instant,
 ) -> Result<UsagePanel, &'static str> {
     let guard = DeadlineGuard::install(db, deadline).map_err(|e| query_error_code(&e))?;
@@ -334,13 +334,14 @@ fn collect(
 /// names no configured account and is dropped with the retired ones.
 fn configured_quota(
     snapshots: Vec<QuotaSnapshot>,
-    configured: &ConfiguredAccounts,
+    configured: &AccountIdentities,
 ) -> Vec<UsageQuota> {
     snapshots
         .into_iter()
         .filter_map(|snapshot| {
-            let (account, identity) = configured.get_key_value(snapshot.seat.as_deref()?)?;
-            Some(map_quota(account.clone(), identity.clone(), snapshot))
+            let account = snapshot.seat.clone()?;
+            let identity = configured.get(&account)?.clone();
+            Some(map_quota(account, identity, snapshot))
         })
         .collect()
 }
@@ -446,7 +447,7 @@ fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup 
     }
 }
 
-fn map_quota(account: String, identity: Identity, snapshot: QuotaSnapshot) -> UsageQuota {
+fn map_quota(account: String, identity: AccountIdentity, snapshot: QuotaSnapshot) -> UsageQuota {
     UsageQuota {
         seat: account,
         provider_entry: identity.provider_entry,
@@ -864,6 +865,52 @@ mod tests {
         assert!(unlabeled["login_label"].is_null(), "{unlabeled}");
     }
 
+    /// A login two entries name is one quota row under the smaller entry,
+    /// the identity `/status/accounts` gives it, whatever the model order.
+    #[tokio::test]
+    async fn a_login_under_two_entries_reports_the_smaller_entry() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_seat_quota_ledger(
+            &path,
+            &[(
+                "w",
+                Some("anthropic#work"),
+                Some("anthropic-api"),
+                Some("allowed"),
+                Some(0.3),
+                None,
+            )],
+        );
+        let router = router_of(&[
+            (
+                "a-model",
+                "zeta",
+                anthropic_block(),
+                "oauth://anthropic#work".into(),
+            ),
+            (
+                "b-model",
+                "alpha",
+                anthropic_block(),
+                "oauth://anthropic#work".into(),
+            ),
+        ]);
+        let state = state_over_router(path.clone(), router);
+
+        // Act
+        let (_, json) = get_usage(state, "/status/usage?window=all").await;
+
+        // Assert
+        let [row] = quota_rows(&json).as_slice() else {
+            panic!("one quota row: {json}");
+        };
+        assert_eq!(row["seat"], "anthropic#work", "{row}");
+        assert_eq!(row["provider_entry"], "alpha", "{row}");
+        assert_eq!(row["login_label"], "work", "{row}");
+    }
+
     /// The filter reads the config being served at request time: a reload
     /// that drops a login drops its snapshot on the next read, with the
     /// ledger unchanged.
@@ -975,8 +1022,8 @@ mod tests {
         assert_eq!(json["unavailable"], "db_unavailable");
     }
 
-    fn identity() -> Identity {
-        Identity {
+    fn identity() -> AccountIdentity {
+        AccountIdentity {
             provider_entry: "seat-a".into(),
             login_label: Some("a".into()),
         }
@@ -1970,7 +2017,7 @@ mod tests {
             "all",
             ALL_TIME,
             LedgerHealth::default(),
-            &ConfiguredAccounts::new(),
+            &AccountIdentities::default(),
             expired,
         );
         let after = collect(
@@ -1978,7 +2025,7 @@ mod tests {
             "all",
             ALL_TIME,
             LedgerHealth::default(),
-            &ConfiguredAccounts::new(),
+            &AccountIdentities::default(),
             Instant::now() + Duration::from_mins(10),
         );
 
@@ -2046,7 +2093,7 @@ mod tests {
             "all",
             ALL_TIME,
             LedgerHealth::default(),
-            &ConfiguredAccounts::new(),
+            &AccountIdentities::default(),
             started + Duration::from_millis(USAGE_BUDGET_MS),
         );
         let elapsed = started.elapsed();

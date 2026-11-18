@@ -1,11 +1,14 @@
 //! Route-target status facade for the /status surface.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use routectl_auth::SecretRef;
 use routectl_core::EligibilityReason;
 
 use super::Router;
+use super::learned_lanes::egress_entries;
+use crate::config::Config;
 use crate::quota::freshness::ObservationStamp;
 use crate::quota::key::seat_key_for_served_identity;
 use crate::quota::reduce::RejectionReason;
@@ -14,7 +17,7 @@ use crate::quota::usage_body::{BodyError, UsageVendor};
 use crate::quota::view::{AcceptedReading, AccountReadings};
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::{CircuitPhase, ProviderGateStatus};
-use crate::seat_pool::SeatTarget;
+use crate::seat_pool::{SeatTarget, credential_account, seat_identity};
 use crate::state_key::StateKey;
 
 /// One dispatch target's read-only health for the status surface: a
@@ -176,6 +179,26 @@ impl Router {
         out
     }
 
+    /// Every credential account this router's dispatch targets name, with
+    /// the display identity each is reported under on every surface. Reads
+    /// the same targets as [`Self::status_targets`] without their gates. A
+    /// forwarded target names no account and is not listed.
+    #[must_use]
+    pub fn account_identities(&self) -> AccountIdentities {
+        let mut identities = AccountIdentities::default();
+        for model in self.resolved_models.values() {
+            for target in self.projection_targets(model) {
+                let Some(account) = target.account.as_deref() else {
+                    continue;
+                };
+                let login_label =
+                    oauth_login_label(target_secret_ref(model, &target.provider_name));
+                identities.add(account, &target.provider_name, login_label);
+            }
+        }
+        identities
+    }
+
     /// Land one polled usage body for `account` (a credential account key,
     /// `provider#label` or the bare provider), fetched under the credential
     /// `generation` acquired before its token was read.
@@ -319,6 +342,93 @@ fn oauth_login_label(secret_ref: Option<&SecretRef>) -> Option<String> {
     }
 }
 
+/// One credential account's display identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountIdentity {
+    /// The `[providers]` entry the account is reported under: for an account
+    /// several entries name, the lexicographically smallest of them, so
+    /// every surface agrees whatever the model order.
+    pub provider_entry: String,
+    /// The `<label>` of an `oauth://<provider>#<label>` credential; `None`
+    /// for an unlabeled login and any other credential.
+    pub login_label: Option<String>,
+}
+
+/// Credential accounts keyed by account, each with its display identity.
+/// The one place the provider-entry rule lives: every surface that names an
+/// account reads its entry and label from here, never from the key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountIdentities(BTreeMap<String, AccountIdentity>);
+
+impl AccountIdentities {
+    /// The accounts `config`'s models dispatch on, walked the way the factory
+    /// resolves them (a model's own entry, or each configured member of the
+    /// pool it names), for a caller that holds no built router. A model whose
+    /// provider would fail to build is still walked, so this can list an
+    /// account [`Router::account_identities`] omits, never the reverse.
+    #[must_use]
+    pub fn from_config(config: &Config) -> Self {
+        let mut identities = Self::default();
+        for model in config.models.values() {
+            for entry_name in egress_entries(config, &model.provider) {
+                let Some(entry) = config.providers.get(entry_name) else {
+                    continue;
+                };
+                let secret_ref = entry
+                    .api_key_ref()
+                    .and_then(|uri| SecretRef::parse(uri).ok());
+                let seat = seat_identity(secret_ref.as_ref());
+                let forwarded = entry.forwarded_base_url().is_some();
+                if let Some(account) = credential_account(seat.as_deref(), entry_name, forwarded) {
+                    identities.add(&account, entry_name, oauth_login_label(secret_ref.as_ref()));
+                }
+            }
+        }
+        identities
+    }
+
+    fn add(&mut self, account: &str, entry: &str, login_label: Option<String>) {
+        match self.0.get_mut(account) {
+            Some(kept) => {
+                if entry < kept.provider_entry.as_str() {
+                    entry.clone_into(&mut kept.provider_entry);
+                }
+                if kept.login_label.is_none() {
+                    kept.login_label = login_label;
+                }
+            }
+            None => {
+                self.0.insert(
+                    account.to_string(),
+                    AccountIdentity {
+                        provider_entry: entry.to_string(),
+                        login_label,
+                    },
+                );
+            }
+        }
+    }
+
+    /// `account`'s identity, or `None` for an account not listed.
+    #[must_use]
+    pub fn get(&self, account: &str) -> Option<&AccountIdentity> {
+        self.0.get(account)
+    }
+
+    /// Whether `account` is listed.
+    #[must_use]
+    pub fn contains(&self, account: &str) -> bool {
+        self.0.contains_key(account)
+    }
+
+    /// Every account with its identity, in account order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &AccountIdentity)> {
+        self.0
+            .iter()
+            .map(|(account, identity)| (account.as_str(), identity))
+    }
+}
+
 /// Why a polled usage body did not reach the account meter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolledUsageRejection {
@@ -415,3 +525,7 @@ mod login_label_tests;
 #[cfg(test)]
 #[path = "account_readings_tests.rs"]
 mod account_readings_tests;
+
+#[cfg(test)]
+#[path = "account_identity_tests.rs"]
+mod account_identity_tests;

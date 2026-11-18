@@ -216,7 +216,7 @@ impl Router {
 
 /// The provider entries a model naming `provider` egresses through: every
 /// configured member of the pool it names, or the entry itself.
-fn egress_entries<'a>(config: &'a Config, provider: &'a str) -> Vec<&'a str> {
+pub(super) fn egress_entries<'a>(config: &'a Config, provider: &'a str) -> Vec<&'a str> {
     if let Some(pool) = config.pools.get(provider) {
         return pool
             .members

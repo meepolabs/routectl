@@ -10,7 +10,7 @@
 //! runs, and its outcome applies only under that generation, so a re-login or
 //! another refresh that lands while the job is in flight wins over it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -20,7 +20,7 @@ use arc_swap::ArcSwap;
 use routectl_auth::{DefinitiveCause, OAuthStore, RefreshOutcome, SecretRef};
 use routectl_core::sanitize_for_log;
 use routectl_router::runtime_state::{MarkOutcome, UnusableCause};
-use routectl_router::{Config, Router};
+use routectl_router::{AccountIdentities, Config, Router};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
@@ -177,36 +177,15 @@ fn settle_refreshed(router: &Router, seat: &ManagedSeat, generation: u64) {
 }
 
 /// The deduplicated managed-login seats the config's models dispatch
-/// through, in account order. A seat is reached through a model's own
+/// through, in account order, each under the provider entry every surface
+/// reports its account under. A seat is reached through a model's own
 /// provider entry or through a member of the pool it names; a stored
 /// credential no entry names is never listed.
 pub(crate) fn managed_seats(config: &Config) -> Vec<ManagedSeat> {
-    let mut seats: BTreeMap<String, ManagedSeat> = BTreeMap::new();
-    for model in config.models.values() {
-        for entry_name in egress_entries(config, &model.provider) {
-            if let Some(seat) = managed_seat_of(config, entry_name) {
-                keep_smallest_entry(&mut seats, seat);
-            }
-        }
-    }
-    seats.into_values().collect()
-}
-
-fn keep_smallest_entry(seats: &mut BTreeMap<String, ManagedSeat>, seat: ManagedSeat) {
-    match seats.get_mut(&seat.account) {
-        Some(kept) if seat.entry < kept.entry => *kept = seat,
-        Some(_) => {}
-        None => {
-            seats.insert(seat.account.clone(), seat);
-        }
-    }
-}
-
-fn egress_entries<'a>(config: &'a Config, provider: &'a str) -> Vec<&'a str> {
-    config.pools.get(provider).map_or_else(
-        || vec![provider],
-        |pool| pool.members.iter().map(String::as_str).collect(),
-    )
+    AccountIdentities::from_config(config)
+        .iter()
+        .filter_map(|(_, identity)| managed_seat_of(config, &identity.provider_entry))
+        .collect()
 }
 
 fn managed_seat_of(config: &Config, entry_name: &str) -> Option<ManagedSeat> {
@@ -230,7 +209,7 @@ fn managed_seat_of(config: &Config, entry_name: &str) -> Option<ManagedSeat> {
 }
 
 /// Accounts the router holds as unusable for a cause only a login clears.
-pub(super) fn accounts_awaiting_login(router: &Router) -> BTreeSet<String> {
+pub(crate) fn accounts_awaiting_login(router: &Router) -> BTreeSet<String> {
     router
         .status_targets(Instant::now())
         .into_iter()

@@ -25,7 +25,7 @@ use crate::local_time::{self, CivilInstant, LocalZone, unix_ms};
 
 use routectl_core::render_operator_text;
 use routectl_router::prices::{PriceSubject, effective_pricing};
-use routectl_router::{Config, PriceDimension};
+use routectl_router::{AccountIdentities, Config, PriceDimension};
 use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupDim, KCalibration,
     NearLosslessAttributionSummary, ObservationTotals, OpenError, QueryError, QueryMetrics,
@@ -42,7 +42,6 @@ use crate::commands::pricing::{
 };
 use crate::commands::text_table::render_table;
 use crate::commands::usage_cache_ignore::{CACHE_IGNORE_READ_BUDGET, cache_ignore_block};
-use crate::server::seat_driver::managed_seats;
 
 /// Parsed `routectl usage` arguments, already validated by clap.
 #[derive(Debug, Clone)]
@@ -972,19 +971,17 @@ pub fn build_window_report(
     })
 }
 
-/// The snapshots of the managed logins `config` dispatches through. A seat
-/// logged out of and removed from the config, and a row with no seat, keep
-/// their ledger rows for the traffic figures but print no quota line.
+/// The snapshots of the accounts `config` dispatches on, the set the status
+/// surface lists. A seat logged out of and removed from the config, and a
+/// row with no seat, keep their ledger rows for the traffic figures but print
+/// no quota line.
 fn configured_quota(config: &Config, snapshots: Vec<QuotaSnapshot>) -> Vec<QuotaSnapshot> {
-    let configured: BTreeSet<String> = managed_seats(config)
-        .into_iter()
-        .map(|seat| seat.account)
-        .collect();
+    let configured = AccountIdentities::from_config(config);
     snapshots
         .into_iter()
         .filter(|q| {
             q.seat
-                .as_ref()
+                .as_deref()
                 .is_some_and(|seat| configured.contains(seat))
         })
         .collect()

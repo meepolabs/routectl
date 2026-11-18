@@ -11,7 +11,6 @@
 //! name the private field, so it can never obtain a `&Router`, call
 //! `.complete`/`.stream`, or touch `.config`.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,9 +21,9 @@ use routectl_router::prices::{PriceBook, PriceTable};
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
-    AccountReadings, EffectiveView, FidelitySnapshot, FieldRepairCounters, LaneBudgetExhaustions,
-    LaneLossyRepairs, ObservationStamp, PoolEligibility, Router, derive_effective_view,
-    shipped_beta_seed_scope,
+    AccountIdentities, AccountReadings, EffectiveView, FidelitySnapshot, FieldRepairCounters,
+    LaneBudgetExhaustions, LaneLossyRepairs, ObservationStamp, PoolEligibility, Router,
+    derive_effective_view, shipped_beta_seed_scope,
 };
 use routectl_usage::{AggRow, RowCost};
 
@@ -36,7 +35,7 @@ use crate::commands::pricing::PriceSnapshot;
 use crate::commands::usage::cost_for_row;
 use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedEntry, resolve_entries};
 use crate::server::capability_rebuild::WarmReport;
-use crate::server::seat_driver::managed_seats;
+use crate::server::seat_driver::accounts_awaiting_login;
 use crate::server::usage_poll::{PollStateSnapshot, UsagePollState};
 
 /// Owns the live-router read handle for the status surface. Loads a fresh
@@ -138,19 +137,17 @@ impl StatusRouterView {
         self.router.account_readings(now)
     }
 
-    /// Each managed login's account and the provider entry it is reported
-    /// under, from the served config.
-    pub fn managed_seat_entries(&self) -> BTreeMap<String, String> {
-        managed_seats(&self.router.config)
-            .into_iter()
-            .map(|seat| (seat.account, seat.entry))
-            .collect()
+    /// Every configured credential account with the display identity every
+    /// surface reports it under.
+    pub fn account_identities(&self) -> AccountIdentities {
+        self.router.account_identities()
     }
 
-    /// The usage poll's state for the served config's managed logins. One
+    /// The usage poll's state for the served config's managed logins, with
+    /// the logins the router holds as awaiting a fresh login told apart. One
     /// short lock on the poll schedule; no I/O.
     pub fn usage_poll_snapshot(&self, state: &UsagePollState) -> PollStateSnapshot {
-        state.snapshot(&self.router.config)
+        state.snapshot(&self.router.config, &accounts_awaiting_login(&self.router))
     }
 
     /// Live seat counts for every pool, read from the same side-effect-free
@@ -359,7 +356,7 @@ mod tests {
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();
         let _readings: AccountReadings = view.account_readings(&ObservationStamp::now());
-        let _entries: BTreeMap<String, String> = view.managed_seat_entries();
+        let _identities: AccountIdentities = view.account_identities();
         let _effective: EffectiveView = view.effective_view(None, None);
         let book = Arc::new(PriceBook::new(std::path::PathBuf::from(
             "absent-prices.json",

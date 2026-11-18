@@ -172,7 +172,7 @@ fn expected(kind: Kind, before: Counters) -> Expected {
 
 fn last_result(rig: &Rig, job: &super::UsagePollJob, account: &str) -> Option<&'static str> {
     job.state()
-        .snapshot(&rig.router().config)
+        .snapshot(&rig.router().config, &std::collections::BTreeSet::new())
         .seats
         .into_iter()
         .find(|seat| seat.account == account)

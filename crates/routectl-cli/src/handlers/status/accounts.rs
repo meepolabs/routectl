@@ -3,8 +3,8 @@
 //! background usage poll state, plus the meter's refusal totals, the reading
 //! history counters and the usage poll driver's health.
 //!
-//! Built from memory only: one router snapshot (route targets, managed seats,
-//! meter readings), one poll-state snapshot and two counter reads. No usage
+//! Built from memory only: one router snapshot (account identities, meter
+//! readings), one poll-state snapshot and two counter reads. No usage
 //! ledger, no vendor I/O. Every wire type is owned here and mapped from the
 //! internal read shapes, so a router-side rename never changes the wire.
 //!
@@ -15,19 +15,18 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
 
-use routectl_router::router::RouteTargetStatus;
 use routectl_router::{
-    AccountReading, AccountReadings, AccountWindow, LastReading, LengthClass, ObservationStamp,
-    ReadingSource, RejectionTotals, ReportState, Started, UsageVendor,
+    AccountIdentities, AccountIdentity, AccountReading, AccountReadings, AccountWindow,
+    LastReading, LengthClass, ObservationStamp, ReadingSource, RejectionTotals, ReportState,
+    Started, UsageVendor,
 };
 
-use super::health::{SeatDriverRow, map_seat_driver};
 use super::router_view::StatusRouterView;
 use super::usage_health::AccountReadingHistory;
 use super::vocabulary::codes;
@@ -54,7 +53,7 @@ pub(super) struct AccountsPanel {
     /// The reading history writer's running counters.
     history: AccountReadingHistory,
     /// The background usage poll driver's health.
-    poll_driver: SeatDriverRow,
+    poll_driver: PollDriverRow,
 }
 
 /// One configured account. `account` is the key other panels join on;
@@ -112,17 +111,30 @@ struct LastAcceptedRow {
 /// The account's background usage poll state. Every key is always present.
 #[derive(Debug, Clone, Copy, Serialize)]
 struct PollRow {
-    /// `polled` for a managed login the running poll reads, else
+    /// `polled` for a managed login the running poll reads,
+    /// `awaiting_login` for one it skips until a fresh login, else
     /// `not_polled` (an API-key or cloud credential, a login of a vendor
     /// with no usage endpoint, or a daemon running no poll).
     applicability: &'static str,
-    /// `anthropic` or `codex` when polled.
+    /// `anthropic` or `codex` when polled or awaiting a login.
     vendor: Option<&'static str>,
     last_attempt_ms: Option<i64>,
     /// The last poll's outcome token.
     last_result: Option<&'static str>,
     /// When the account is next due, as of the poll's last sweep.
     next_due_ms: Option<i64>,
+}
+
+/// The usage poll driver's health. Owned here so the health panel's driver
+/// row can change under its own version without moving this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct PollDriverRow {
+    running: bool,
+    last_sweep_ms: Option<i64>,
+    last_good_sweep_ms: Option<i64>,
+    sweeps: u64,
+    transient: u64,
+    definitive: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -145,10 +157,8 @@ struct Rejections {
 
 /// Everything the panel is built from, read once.
 pub(super) struct AccountSources {
-    pub(super) targets: Vec<RouteTargetStatus>,
-    /// Each managed login's account and the provider entry it is reported
-    /// under.
-    pub(super) managed_entries: BTreeMap<String, String>,
+    /// Every configured account with its display identity.
+    pub(super) identities: AccountIdentities,
     pub(super) readings: AccountReadings,
     /// `None` on a daemon running no usage poll.
     pub(super) poll: Option<PollStateSnapshot>,
@@ -156,69 +166,9 @@ pub(super) struct AccountSources {
     pub(super) poll_driver: SeatDriverHealthSnapshot,
 }
 
-/// One configured account's display identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Identity {
-    pub(super) provider_entry: String,
-    pub(super) login_label: Option<String>,
-}
-
-/// Every configured credential account, keyed by account, with its display
-/// identity.
-pub(super) type ConfiguredAccounts = BTreeMap<String, Identity>;
-
-/// The configured accounts of one router snapshot.
-pub(super) fn configured_accounts_of(view: &StatusRouterView) -> ConfiguredAccounts {
-    configured_accounts(
-        &view.route_targets(Instant::now()),
-        &view.managed_seat_entries(),
-    )
-}
-
-/// The credential accounts the route targets name. The provider entry of a
-/// managed login is the one the seat driver reports it under; any other
-/// account takes the smallest entry among its targets, the same rule.
-fn configured_accounts(
-    targets: &[RouteTargetStatus],
-    managed_entries: &BTreeMap<String, String>,
-) -> ConfiguredAccounts {
-    let mut accounts = ConfiguredAccounts::new();
-    for target in targets {
-        let Some(account) = target.account.as_ref() else {
-            continue;
-        };
-        match accounts.get_mut(account) {
-            Some(kept) => {
-                if target.provider_name < kept.provider_entry {
-                    kept.provider_entry.clone_from(&target.provider_name);
-                }
-                if kept.login_label.is_none() {
-                    kept.login_label.clone_from(&target.login_label);
-                }
-            }
-            None => {
-                accounts.insert(
-                    account.clone(),
-                    Identity {
-                        provider_entry: target.provider_name.clone(),
-                        login_label: target.login_label.clone(),
-                    },
-                );
-            }
-        }
-    }
-    for (account, identity) in &mut accounts {
-        if let Some(entry) = managed_entries.get(account) {
-            identity.provider_entry.clone_from(entry);
-        }
-    }
-    accounts
-}
-
 pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
     let AccountSources {
-        targets,
-        managed_entries,
+        identities,
         readings,
         poll,
         history,
@@ -229,11 +179,11 @@ pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
         .into_iter()
         .map(|reading| (reading.account.clone(), reading))
         .collect();
-    let accounts = configured_accounts(&targets, &managed_entries)
-        .into_iter()
+    let accounts = identities
+        .iter()
         .map(|(account, identity)| {
-            let reading = by_account.remove(&account);
-            let poll_row = map_poll(poll.as_ref(), &account);
+            let reading = by_account.remove(account);
+            let poll_row = map_poll(poll.as_ref(), account);
             map_account(account, identity, reading, poll_row)
         })
         .collect();
@@ -255,13 +205,13 @@ pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
         rejections: map_rejections(readings.rejections),
         refused_by_admission: readings.refused_by_admission,
         history,
-        poll_driver: map_seat_driver(poll_driver),
+        poll_driver: map_poll_driver(poll_driver),
     }
 }
 
 fn map_account(
-    account: String,
-    identity: Identity,
+    account: &str,
+    identity: &AccountIdentity,
     reading: Option<AccountReading>,
     poll: PollRow,
 ) -> AccountRow {
@@ -270,9 +220,9 @@ fn map_account(
             (reading.report, reading.windows, reading.last_accepted)
         });
     AccountRow {
-        account,
-        provider_entry: identity.provider_entry,
-        login_label: identity.login_label,
+        account: account.to_owned(),
+        provider_entry: identity.provider_entry.clone(),
+        login_label: identity.login_label.clone(),
         report: report_token(report),
         windows: windows.iter().map(map_window).collect(),
         last_accepted: last_accepted.map(map_last_accepted),
@@ -304,21 +254,41 @@ fn map_last_accepted(last: LastReading) -> LastAcceptedRow {
 }
 
 fn map_poll(poll: Option<&PollStateSnapshot>, account: &str) -> PollRow {
-    let vendor = match poll.map(|snapshot| snapshot.applicability(account)) {
-        Some(PollApplicability::Polled(vendor)) => Some(vendor),
-        Some(PollApplicability::NotPolled) | None => None,
+    let applicability = poll.map_or(PollApplicability::NotPolled, |snapshot| {
+        snapshot.applicability(account)
+    });
+    let vendor = match applicability {
+        PollApplicability::Polled(vendor) | PollApplicability::AwaitingLogin(vendor) => {
+            Some(vendor)
+        }
+        PollApplicability::NotPolled => None,
     };
     let seat = poll.and_then(|snapshot| snapshot.seats.iter().find(|seat| seat.account == account));
     PollRow {
-        applicability: if vendor.is_some() {
-            "polled"
-        } else {
-            "not_polled"
-        },
+        applicability: applicability_token(applicability),
         vendor: vendor.map(vendor_token),
         last_attempt_ms: seat.and_then(|seat| seat.last_attempt_ms),
         last_result: seat.and_then(|seat| seat.last_result),
         next_due_ms: seat.and_then(|seat| seat.next_due_ms),
+    }
+}
+
+const fn applicability_token(applicability: PollApplicability) -> &'static str {
+    match applicability {
+        PollApplicability::Polled(_) => "polled",
+        PollApplicability::AwaitingLogin(_) => "awaiting_login",
+        PollApplicability::NotPolled => "not_polled",
+    }
+}
+
+const fn map_poll_driver(health: SeatDriverHealthSnapshot) -> PollDriverRow {
+    PollDriverRow {
+        running: health.running,
+        last_sweep_ms: health.last_sweep_ms,
+        last_good_sweep_ms: health.last_good_sweep_ms,
+        sweeps: health.sweeps,
+        transient: health.transient,
+        definitive: health.definitive,
     }
 }
 
@@ -392,8 +362,7 @@ fn read_sources(
     poll_driver: SeatDriverHealthSnapshot,
 ) -> AccountSources {
     AccountSources {
-        targets: view.route_targets(Instant::now()),
-        managed_entries: view.managed_seat_entries(),
+        identities: view.account_identities(),
         readings: view.account_readings(&ObservationStamp::now()),
         poll: poll_state.map(|state| view.usage_poll_snapshot(state)),
         history,

@@ -5559,9 +5559,13 @@ always present; times are epoch ms and durations ms.
     read.
   - `last_accepted`: `observed_at_ms` and `source` of the latest accepted
     reading, or null.
-  - `poll`: `applicability` (`polled` for a managed Anthropic or Codex login
-    the running poll reads, else `not_polled`), `vendor` (`anthropic`,
-    `codex` or null), `last_attempt_ms`, `last_result` (the last poll's
+  - `poll`: `applicability`, one of a closed set: `polled` for a managed
+    Anthropic or Codex login the running poll reads; `awaiting_login` for
+    one the router holds as revoked or not logged in, which the poll skips
+    until a fresh login (its schedule state is dropped, so the fields below
+    read null until it is polled again); `not_polled` for any other
+    credential or a daemon running no poll. `vendor` (`anthropic`, `codex`,
+    or null for `not_polled`), `last_attempt_ms`, `last_result` (the last poll's
     outcome: `accepted`, `no_windows`, `token_not_ready`, `paused`,
     `redirect`, `auth`, `http`, `timeout`, `transport`, `too_large`,
     `malformed` or `superseded`) and `next_due_ms`, each null before the
@@ -5576,8 +5580,10 @@ always present; times are epoch ms and durations ms.
 - `history`: the `account_readings` history writer's counts of accepted
   readings, `enqueued`, `dropped_full`, `dropped_closed`, `persisted` and
   `write_errors`.
-- `poll_driver`: the usage poll driver's health, the same keys and values as
-  `/status/health` `usage_poll_driver`.
+- `poll_driver`: the usage poll driver's health: `running`,
+  `last_sweep_ms`, `last_good_sweep_ms`, `sweeps`, `transient` and
+  `definitive`, today the same values as `/status/health`
+  `usage_poll_driver`.
 
 Every count resets on restart. The panel carries no token, credential
 reference, response body or header, and no vendor account id.

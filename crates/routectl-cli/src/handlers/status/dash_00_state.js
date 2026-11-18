@@ -106,8 +106,8 @@
   var BACKOFF_STEPS_MS = [10000, 20000, 30000];
   // Per-GET AbortController budget, covering both the /status aggregate and
   // the all-history /status/usage read. Sized so the server's own usage panel
-  // budget, plus a reserve for the three cheap panels and the response write,
-  // lands inside it: the server then sheds a slow ledger read as an
+  // budget, plus a reserve for the four cheap panels (health, config, doctor,
+  // accounts) and the response write, lands inside it: the server then sheds a slow ledger read as an
   // unavailable panel instead of the browser aborting the whole round. Still
   // under the 5s cadence, so a slow round cannot overlap its next attempt.
   var TIMEOUT_MS = 3500;

@@ -141,7 +141,9 @@ async fn an_accepted_poll_lands_on_the_meter_and_enqueues_one_history_observatio
     }
     assert_eq!(rig.drain_writer(), 2);
     assert_eq!(rig.counters.account_readings_enqueued(), 2);
-    let snapshot = job.state().snapshot(&router.config);
+    let snapshot = job
+        .state()
+        .snapshot(&router.config, &std::collections::BTreeSet::new());
     let results: Vec<_> = snapshot
         .seats
         .iter()
@@ -170,7 +172,9 @@ async fn a_codex_login_with_no_account_id_is_auth_and_sends_nothing() {
 
     // Assert
     assert_eq!(rig.codex_hits().await, 0);
-    let snapshot = job.state().snapshot(&router.config);
+    let snapshot = job
+        .state()
+        .snapshot(&router.config, &std::collections::BTreeSet::new());
     let codex = snapshot
         .seats
         .iter()
@@ -194,7 +198,9 @@ async fn a_token_inside_the_refresh_lead_is_not_sent() {
 
     // Assert
     assert_eq!(rig.anthropic_hits().await, 0);
-    let snapshot = job.state().snapshot(&router.config);
+    let snapshot = job
+        .state()
+        .snapshot(&router.config, &std::collections::BTreeSet::new());
     assert_eq!(snapshot.seats[0].last_result, Some("token_not_ready"));
 }
 
@@ -319,7 +325,10 @@ async fn a_relogin_between_token_read_and_apply_is_superseded() {
             )),
             "{step:?}: premise, the store's login"
         );
-        let snapshot = job.inner.state().snapshot(&router.config);
+        let snapshot = job
+            .inner
+            .state()
+            .snapshot(&router.config, &std::collections::BTreeSet::new());
         assert_eq!(
             snapshot.seats[0].last_result,
             Some("superseded"),
@@ -365,7 +374,10 @@ async fn a_store_reload_the_router_has_not_seen_yet_supersedes_the_poll() {
         0,
         "premise: the router fence alone would admit the body"
     );
-    let snapshot = job.inner.state().snapshot(&router.config);
+    let snapshot = job
+        .inner
+        .state()
+        .snapshot(&router.config, &std::collections::BTreeSet::new());
     assert_eq!(snapshot.seats[0].last_result, Some("superseded"));
     assert_eq!(rig.reading(ANTHROPIC_SEAT).report, ReportState::NoReading);
     assert_eq!(rig.drain_writer(), 0, "no history row");
@@ -480,7 +492,7 @@ async fn shutdown_during_a_hung_response_returns_promptly_and_applies_nothing() 
         stopped_after < Duration::from_secs(1),
         "stopped after {stopped_after:?}"
     );
-    let snapshot = state.snapshot(&rig.router().config);
+    let snapshot = state.snapshot(&rig.router().config, &std::collections::BTreeSet::new());
     assert_eq!(snapshot.seats[0].last_attempt_ms, None, "no apply");
     assert_eq!(rig.reading(ANTHROPIC_SEAT).report, ReportState::NoReading);
     assert_eq!(rig.drain_writer(), 0, "writer queue unchanged");
@@ -508,9 +520,13 @@ async fn the_snapshot_reports_each_seat_and_an_active_vendor_pause() {
 
     // Act
     sweep(&job, &router).await;
-    let snapshot = job.state().snapshot(&router.config);
+    let snapshot = job
+        .state()
+        .snapshot(&router.config, &std::collections::BTreeSet::new());
     rig.clock.set(polled_at + 3 * MINUTE_MS);
-    let after_pause = job.state().snapshot(&router.config);
+    let after_pause = job
+        .state()
+        .snapshot(&router.config, &std::collections::BTreeSet::new());
 
     // Assert
     let seats: Vec<_> = snapshot
