@@ -430,12 +430,3 @@
     return span;
   }
   // ---- end tab:doctor --------------------------------------------------
-
-  var BUILDERS = {
-    overview: buildOverview,
-    usage: buildUsage,
-    routing: buildRouting,
-    health: buildHealth,
-    config: buildConfig,
-    doctor: buildDoctor
-  };

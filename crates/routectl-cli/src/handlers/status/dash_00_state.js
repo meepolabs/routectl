@@ -11,8 +11,8 @@
   var EXPECTED = { usage: 7, health: 9, config: 6, doctor: 32, query: 4, accounts: 1 };
 
   // The four panels of the aggregate round, each with its own envelope +
-  // freshness. NOT the same list as TABS: a tab is a view, a source is a
-  // fetch.
+  // freshness. NOT the same list as the views (VIEWS in dash_80_views.js): a
+  // view is what a tab shows, a source is a fetch.
   var GET_SOURCES = ['usage', 'health', 'config', 'doctor'];
   // The two QUERY reads, each its OWN source. Both speak `/status/query`, but
   // Usage asks for a series-less roll-up and Overview asks for a bucketed one,
@@ -57,45 +57,6 @@
   function sourceLabel(name) {
     return SOURCE_LABELS[name] || name;
   }
-
-  var TABS = ['overview', 'usage', 'routing', 'health', 'config', 'doctor'];
-  var TAB_LABELS = {
-    overview: 'Overview',
-    usage: 'Usage',
-    routing: 'Routing',
-    health: 'Health',
-    config: 'Config',
-    doctor: 'Doctor'
-  };
-
-  // Which sources feed each tab. The poll loop re-renders a tab only when one
-  // of ITS sources lands, so a dead QUERY degrades Overview and Usage and
-  // leaves the four GET-backed tabs untouched. The FIRST entry is the tab's
-  // primary source: it drives the freshness line, the tab badge, and the
-  // whole-tab state card, so a multi-source tab names the source that owns its
-  // subject first (Routing is about the CONFIGURED chains; the ledger and
-  // health only describe them).
-  var TAB_SOURCES = {
-    overview: [QUERY_SERIES_SOURCE, 'usage'],
-    usage: [QUERY_SOURCE],
-    routing: ['config', USAGE_ALL_SOURCE, 'health'],
-    health: ['health', 'usage'],
-    config: ['config'],
-    doctor: ['doctor']
-  };
-
-  // The windowless tabs. Config and Doctor report CURRENT state; Routing
-  // attributes over ALL HISTORY. None of the three is a windowed aggregate,
-  // so the picker dims and goes inert on all of them rather than promising a
-  // filter that does not reach the figures.
-  var WINDOWLESS_TABS = { routing: true, config: true, doctor: true };
-
-  // What a windowless tab's figures actually span, for the verdict strip.
-  var WINDOWLESS_SPAN = {
-    routing: 'all history',
-    config: 'current state',
-    doctor: 'current state'
-  };
 
   var WINDOWS = ['today', 'week', 'month', 'all'];
 

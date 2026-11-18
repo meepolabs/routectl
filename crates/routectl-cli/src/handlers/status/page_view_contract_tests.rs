@@ -39,6 +39,7 @@ pub(super) const NAMED_PARTS: &[(&str, &str)] = &[
         "dash_73_tab_doctor.js",
         include_str!("dash_73_tab_doctor.js"),
     ),
+    ("dash_80_views.js", include_str!("dash_80_views.js")),
     ("dash_90_chrome.js", include_str!("dash_90_chrome.js")),
 ];
 

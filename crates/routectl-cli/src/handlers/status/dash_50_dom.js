@@ -567,14 +567,14 @@
   // =====================================================================
   // Per-tab section builders.
   //
-  // One contiguous marker-delimited block per tab, in TABS order, each ending
-  // with its registration in BUILDERS. Every builder:
+  // One contiguous marker-delimited block per tab, in VIEWS order, each
+  // registered as a view's `build` in dash_80_views.js. Every builder:
   //   1. consults `stateCard(rec)` first and returns it when non-null, so
   //      loading / unavailable / incompatible / dead states are uniform;
   //   2. reads a query-backed tab's data through `queryView()` (adapter
   //      properties only, never raw JSON) and a GET-backed tab's through
-  //      `rec.data` / `SOURCES[<name>].data` per TAB_SOURCES;
-  //   3. wraps EVERY section that reads a TAB_SOURCES entry other than the
+  //      `rec.data` / `SOURCES[<name>].data` per the view's `sources`;
+  //   3. wraps EVERY section that reads a `sources` entry other than the
   //      primary in `safeSection(SOURCES[<name>], build)`, so a secondary
   //      source's fault costs that section only -- renderActiveTab's
   //      try/catch replaces the whole tab and is the floor, not the plan;

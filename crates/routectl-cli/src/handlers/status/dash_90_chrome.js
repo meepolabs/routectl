@@ -94,7 +94,7 @@
 
   // ---- chrome: hash routing (dumb view state) --------------------------
 
-  // Grammar: `#tab[/window]`. `tab` is one of TABS; the optional `window` is
+  // Grammar: `#tab[/window]`. `tab` is a VIEWS id; the optional `window` is
   // one of WINDOWS. An unknown or absent tab canonicalizes to `overview`, an
   // unknown or absent window to `today`. The hash carries VIEW STATE ONLY --
   // applyHash mutates activeTab / selectedWindow and nothing about fetch
@@ -109,7 +109,7 @@
     var h = location.hash;
     var raw = (h.charAt(0) === '#') ? h.slice(1) : h;
     var parts = raw.split(HASH_SEP);
-    activeTab = (TABS.indexOf(parts[0]) >= 0) ? parts[0] : 'overview';
+    activeTab = viewFor(parts[0]) ? parts[0] : VIEWS[0].id;
     selectedWindow = (WINDOWS.indexOf(parts[1]) >= 0) ? parts[1] : 'today';
   }
 
@@ -129,27 +129,17 @@
 
   // ---- chrome: window picker -------------------------------------------
 
-  // What a windowless tab shows INSTEAD of a window, as a label beside the
-  // dimmed picker. Without it the picker reads as broken rather than as not
-  // applicable, and Routing in particular would look like it were still
-  // filtered to the window the buttons show.
-  var WINDOWLESS_LABEL = {
-    routing: 'All history',
-    config: 'Current state',
-    doctor: 'Current state'
-  };
-
   // The picker reflects the live selection and goes DIM + inert on the
   // windowless tabs: Config and Doctor report current state and Routing
   // attributes over all history, so a window on any of them would promise a
   // filter that does not reach the figures.
   function updateWindowSel() {
     var group = el('windowsel');
-    var tab = activeTab;
-    var windowless = !!WINDOWLESS_TABS[tab];
+    var span = viewFor(activeTab).span;
+    var windowless = !!span;
     group.setAttribute('data-windowless', windowless ? 'true' : 'false');
     group.title = windowless
-      ? 'this tab is not windowed - it shows ' + WINDOWLESS_SPAN[tab]
+      ? 'this tab is not windowed - it shows ' + span
       : '';
     var buttons = group.querySelectorAll('button');
     Array.prototype.forEach.call(buttons, function (b) {
@@ -157,7 +147,7 @@
       b.setAttribute('aria-pressed', active ? 'true' : 'false');
       b.disabled = terminal || windowless;
     });
-    syncWindowlessLabel(group, windowless ? WINDOWLESS_LABEL[tab] : null);
+    syncWindowlessLabel(group, windowless ? spanLabel(span) : null);
   }
 
   // The label lives beside the picker, created on demand and hidden when the
@@ -175,7 +165,7 @@
   }
 
   function onWindowChange(w) {
-    if (terminal || WINDOWLESS_TABS[activeTab] || w === selectedWindow) { return; }
+    if (terminal || viewFor(activeTab).span || w === selectedWindow) { return; }
     selectedWindow = w;
     updateWindowSel();
     writeHash();
@@ -230,7 +220,7 @@
   // One click listener per pane root and one on the modal host, installed
   // once: the nodes beneath them are rebuilt every render, the roots are not.
   function initActions() {
-    var roots = TABS.map(function (n) { return el('pane-' + n); });
+    var roots = VIEWS.map(function (view) { return el('pane-' + view.id); });
     roots.push(el('modal-host'));
     roots.forEach(function (root) {
       if (!root) { return; }
@@ -249,7 +239,8 @@
     // The seat modal belongs to the Overview provider row: leaving the tab
     // dismisses it rather than leaving it to reappear on return.
     if (changed) { seatModalProvider = null; }
-    TABS.forEach(function (n) {
+    VIEWS.forEach(function (view) {
+      var n = view.id;
       var tab = el('tab-' + n);
       var pane = el('pane-' + n);
       var sel = n === name;

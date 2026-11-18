@@ -59,6 +59,7 @@ const SCRIPT_PARTS: &[&str] = &[
     include_str!("dash_71_tab_health.js"),
     include_str!("dash_72_tab_config.js"),
     include_str!("dash_73_tab_doctor.js"),
+    include_str!("dash_80_views.js"),
     include_str!("dash_90_chrome.js"),
 ];
 
@@ -1024,15 +1025,18 @@ mod tests {
     /// server's `query` wire version through SOURCE_PANEL -- an unmapped source
     /// would compare against `undefined` and degrade a live source to the
     /// client's incompatible fallback), and the transport is WIRED to them (each
-    /// tab routed to its own record, and the outcome written to the record the
-    /// round was issued for rather than to a hardcoded one). Two records with
-    /// one of them unreachable is the same bug at one remove.
+    /// view routed to its own record through its registered query source, each
+    /// record asking for its own shape, and the outcome written to the record
+    /// the round was issued for rather than to a hardcoded one). Two records
+    /// with one of them unreachable is the same bug at one remove.
+    ///
+    /// Mutation check: point Overview's first VIEWS source at `QUERY_SOURCE`
+    /// -> red.
     #[test]
     fn dashboard_query_shapes_have_their_own_source_records() {
         let script = script();
         let sources = string_array("GET_SOURCES");
         let panel_map = literal_body("SOURCE_PANEL", '{', '}');
-        let tab_sources = literal_body("TAB_SOURCES", '{', '}');
 
         // The two source keys, read from their own declarations so a rename
         // moves this test with them rather than pinning a spelling twice.
@@ -1079,35 +1083,60 @@ mod tests {
              resolves an unmapped source to itself); rename it and it needs its own entry"
         );
 
-        // Each query-backed tab's PRIMARY source (the first TAB_SOURCES entry)
-        // is the read that tab actually issues, and the two must not be the same
-        // record. TAB_SOURCES names the CONSTANTS, so this reads the identifiers.
-        let overview = tab_source_primary(&tab_sources, "overview");
-        let usage = tab_source_primary(&tab_sources, "usage");
+        // Each query-backed view's PRIMARY source (its first `sources` entry)
+        // is the read that view actually issues, and the two must not be the
+        // same record. VIEWS names the CONSTANTS, so this reads the identifiers.
         assert_eq!(
-            overview, "QUERY_SERIES_SOURCE",
+            view_primary("overview"),
+            "QUERY_SERIES_SOURCE",
             "Overview must read the bucketed QUERY source; it is the only one whose payload \
              carries the series its sparklines are drawn from"
         );
         assert_eq!(
-            usage, "QUERY_SOURCE",
+            view_primary("usage"),
+            "QUERY_SOURCE",
             "Usage must read the series-less QUERY source, the shape it actually requests"
         );
 
-        // WIRING. `querySourceFor` is what actually routes a round's response,
-        // so its two arms must name the same records TAB_SOURCES does -- a
-        // swapped arm leaves both records declared and both tabs rendering from
-        // one shape, which is the collapse this split undid.
-        let routing = function_body("querySourceFor");
-        assert_eq!(
-            returned_after(&routing, "'overview'").as_deref(),
-            Some("QUERY_SERIES_SOURCE"),
-            "querySourceFor must route Overview's round to the bucketed source record"
+        // WIRING. `querySourceFor` is what actually routes a round's response:
+        // it must resolve the view's registered query source, and that must be
+        // the view's primary when it is one of the two QUERY reads -- a
+        // separate per-view arm could drift from VIEWS and leave both records
+        // declared with both views rendering from one shape.
+        let routing = compact(&function_body("querySourceFor"));
+        assert!(
+            routing.contains("viewfor(tab)") && routing.contains("viewquerysource(view)"),
+            "querySourceFor must route a view's round through its registered query source"
         );
-        assert_eq!(
-            returned_after(&routing, "'usage'").as_deref(),
-            Some("QUERY_SOURCE"),
-            "querySourceFor must route Usage's round to the series-less source record"
+        let query_source = compact(&function_body("viewQuerySource"));
+        assert!(
+            query_source.contains("varprimary=view.sources[0];")
+                && query_source.contains(
+                    "if(primary===query_series_source||primary===query_source){returnprimary;}"
+                )
+                && query_source.ends_with("returnnull;"),
+            "viewQuerySource must return the view's primary source exactly when it is a QUERY \
+             read, and null otherwise"
+        );
+
+        // Each record asks for ITS OWN shape: the bucketed record a series at
+        // provider grain, the series-less one none, at the group-by grain.
+        let shape = compact(&function_body("shapeFor"));
+        assert!(
+            shape.contains(
+                "if(source===query_series_source){returnfindshape(selectedwindow,'provider',true);}"
+            ),
+            "shapeFor must ask for a series for the bucketed QUERY source"
+        );
+        assert!(
+            shape.contains(
+                "if(source===query_source){returnfindshape(selectedwindow,selectedgroupby,false);}"
+            ),
+            "shapeFor must ask for no series, at the group-by grain, for the series-less source"
+        );
+        assert!(
+            compact(&function_body("queryBodyFor")).contains("shapefor(querysourcefor(tab))"),
+            "queryBodyFor must build the body from the view's own query source"
         );
 
         // The round must ASK which record it is writing, and hand it on.
@@ -1140,6 +1169,9 @@ mod tests {
     /// 400/405 on Overview's shape and a 400/405 on Usage's shape are
     /// unrelated deterministic refusals, so recording one must never
     /// suppress retries of the other.
+    ///
+    /// Mutation check: point Overview's first VIEWS source at `QUERY_SOURCE`
+    /// -> red (two views would share one marker).
     #[test]
     fn dashboard_query_rejection_marker_is_keyed_per_source() {
         let script = script();
@@ -1185,25 +1217,42 @@ mod tests {
             );
         }
 
+        // A marker per source is a marker per view only while each query-backed
+        // view issues its OWN source: two views registering one query source
+        // would share one marker, so a refusal of one view's shape would
+        // suppress the other's retries.
+        let mut query_primaries: Vec<String> = views::view_entries(&script)
+            .into_iter()
+            .filter_map(|view| view.sources.into_iter().next())
+            .filter(|primary| primary == "QUERY_SOURCE" || primary == "QUERY_SERIES_SOURCE")
+            .collect();
+        query_primaries.sort();
+        assert_eq!(
+            query_primaries,
+            vec!["QUERY_SERIES_SOURCE", "QUERY_SOURCE"],
+            "each QUERY source must be the primary of exactly one view, or two views share \
+             one rejection marker"
+        );
+
         // DRIFT GUARD: the reset path that clears a stale marker must derive
-        // the tab set from `TABS`, not from a literal pair of query-backed
-        // tab names. A hardcoded pair silently drops a future third
-        // query-backed tab from the reset, leaving its source suppressed
+        // the view set from `VIEWS`, not from a literal pair of query-backed
+        // view ids. A hardcoded pair silently drops a future third
+        // query-backed view from the reset, leaving its source suppressed
         // under a key its own next round will never produce again -- the
-        // same class of bug this whole marker split exists to fix, one tab
+        // same class of bug this whole marker split exists to fix, one view
         // wider.
         let reset = function_body("queryInputChanged");
         assert!(
             !reset.contains("['overview', 'usage']")
                 && !reset.contains("[\"overview\", \"usage\"]"),
-            "queryInputChanged must not hardcode the query-backed tab pair; \
-             iterate `TABS` and let queryBodyFor/querySourceFor filter out \
-             non-query tabs, so a new query-backed tab is covered automatically"
+            "queryInputChanged must not hardcode the query-backed view pair; \
+             iterate `VIEWS` and let queryBodyFor/querySourceFor filter out \
+             non-query views, so a new query-backed view is covered automatically"
         );
         assert!(
-            reset.contains("TABS.forEach"),
-            "queryInputChanged's marker reset must iterate `TABS` (the \
-             canonical, self-maintaining tab list), not a locally hardcoded set"
+            reset.contains("VIEWS.forEach"),
+            "queryInputChanged's marker reset must iterate `VIEWS` (the \
+             canonical, self-maintaining view list), not a locally hardcoded set"
         );
     }
 
@@ -1219,21 +1268,6 @@ mod tests {
                     .trim_matches(|c| c == '\'' || c == '"')
                     .to_string()
             })
-    }
-
-    /// The identifier a function body `return`s at its first `return` after
-    /// `anchor`. Reads the WIRING of a dispatch arm rather than its text, so a
-    /// reformatted arm still checks and a repointed one still fails.
-    fn returned_after(body: &str, anchor: &str) -> Option<String> {
-        let at = body.find(anchor)?;
-        let after = &body[at + anchor.len()..];
-        let at = after.find("return")? + "return".len();
-        let word: String = after[at..]
-            .trim_start()
-            .chars()
-            .take_while(|c| is_ident_char(*c))
-            .collect();
-        (!word.is_empty()).then_some(word)
     }
 
     /// The body of `function <name>(...) { ... }` in the dashboard script,
@@ -1272,22 +1306,14 @@ mod tests {
         panic!("`{name}` body is not closed");
     }
 
-    /// The first entry of a `TAB_SOURCES` list, as the identifier it is written
-    /// as in the script.
-    fn tab_source_primary(tab_sources: &str, tab: &str) -> String {
-        let at = tab_sources
-            .find(&format!("{tab}:"))
-            .unwrap_or_else(|| panic!("TAB_SOURCES declares `{tab}`"));
-        tab_sources[at..]
-            .split('[')
-            .nth(1)
-            .unwrap_or_else(|| panic!("TAB_SOURCES `{tab}` opens a source list"))
-            .split([',', ']'])
+    /// The first `sources` entry of a registered view, as the identifier it is
+    /// written as in the script.
+    fn view_primary(id: &str) -> String {
+        views::view_entry(id)
+            .sources
+            .into_iter()
             .next()
-            .unwrap_or_else(|| panic!("TAB_SOURCES `{tab}` names at least one source"))
-            .trim()
-            .trim_matches(|c| c == '\'' || c == '"')
-            .to_string()
+            .unwrap_or_else(|| panic!("view `{id}` names at least one source"))
     }
 
     /// Drift guard on the QUERY retry contract: which codes back off, and the
@@ -1864,5 +1890,10 @@ mod tests {
     mod morph {
         use super::*;
         include!("page_morph_tests.rs");
+    }
+
+    mod views {
+        use super::*;
+        include!("page_views_tests.rs");
     }
 }

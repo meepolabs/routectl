@@ -7696,6 +7696,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   learned value).
   Also carries
   `BUILDERS`, the per-tab `buildX` registry the render dispatch reads
+- `src/handlers/status/dash_80_views.js` -- dashboard SCRIPT part 14 of 15:
+  `VIEWS`, the one view registry (`{id, label, sources, span, build}`, array
+  order = tab order). `sources[0]` is a view's primary source (freshness line,
+  tab badge, whole-view state card, and the QUERY a query-backed view issues,
+  via `viewQuerySource`); a non-null `span` makes the view windowless and is
+  the label beside the dimmed picker (`spanLabel`). `viewFor` looks a view up
+  by id. `page::tests::views` pins the markup tab / badge / pane / status /
+  body ids to the VIEWS ids in order
 - `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 14 of 14:
   the page chrome and the load-time wiring. The 1s age ticker, the four inline
   `data:` SVG favicons and the `faviconState` rollup, the refresh control, the

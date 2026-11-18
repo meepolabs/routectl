@@ -138,7 +138,7 @@
   // source. A tab that does NOT read the source is left alone -- this is
   // what keeps a dead QUERY confined to Overview and Usage.
   function renderSourceChanged(name) {
-    if (TAB_SOURCES[activeTab].indexOf(name) >= 0) { renderActiveTab(); }
+    if (viewFor(activeTab).sources.indexOf(name) >= 0) { renderActiveTab(); }
     renderVerdict();
     syncTabBadges();
   }
@@ -163,11 +163,12 @@
     var status = el('status-' + tab);
     var body = el('body-' + tab);
     if (!pane || !body) { return; }
-    var primary = SOURCES[TAB_SOURCES[tab][0]];
+    var view = viewFor(tab);
+    var primary = SOURCES[view.sources[0]];
     var pass = { faults: Object.create(null), touched: Object.create(null), overlay: null };
     renderPass = pass;
     try {
-      morphPanel(body, BUILDERS[tab](primary));
+      morphPanel(body, view.build(primary));
     } catch (e) {
       pass.faults[primary.name] = true;
       pass.touched[primary.name] = true;
@@ -317,7 +318,7 @@
   // inside a builder would rebuild the tab that is mid-build.
   //
   // INVARIANT for multi-source tab builders: every section that reads a
-  // TAB_SOURCES entry goes through this helper, with that entry's own record.
+  // view's `sources` entry goes through this helper, with that entry's own record.
   // The tab-level try/catch replaces the whole tab, so a secondary source's
   // throw reaching it would blank content the primary source rendered
   // correctly while the status line still reported the primary live.
@@ -600,10 +601,9 @@
   // aggregate elsewhere -- so the count and the span beside it always describe
   // the same read. One derivation each, never both.
   function verdictStats() {
-    var span = WINDOWLESS_TABS[activeTab]
-      ? WINDOWLESS_SPAN[activeTab]
-      : WINDOW_SPAN[selectedWindow];
-    var primaryName = TAB_SOURCES[activeTab][0];
+    var view = viewFor(activeTab);
+    var span = view.span || WINDOW_SPAN[selectedWindow];
+    var primaryName = view.sources[0];
     var view = primaryName === QUERY_SOURCE ? queryView()
       : (primaryName === QUERY_SERIES_SOURCE ? querySeriesView() : null);
     if (view) { return humanCount(view.totals.requests) + ' req ' + span; }
@@ -644,7 +644,7 @@
   // local clock beyond the skew tolerance says so rather than reading as a
   // negative age.
   function activeAgeText() {
-    var asOf = SOURCES[TAB_SOURCES[activeTab][0]].asOf;
+    var asOf = SOURCES[viewFor(activeTab).sources[0]].asOf;
     if (!asOf) { return 'age unknown'; }
     var then = new Date(asOf);
     if (isNaN(then.getTime())) { return 'age unknown'; }
@@ -689,9 +689,9 @@
   // render badges as unusable rather than carrying the badge computed from the
   // last payload that did render.
   function syncTabBadges() {
-    TABS.forEach(function (tab) {
-      var rec = SOURCES[TAB_SOURCES[tab][0]];
-      setTabBadge(tab, effectiveState(rec) === 'invalid_payload'
+    VIEWS.forEach(function (view) {
+      var rec = SOURCES[view.sources[0]];
+      setTabBadge(view.id, effectiveState(rec) === 'invalid_payload'
         ? { label: 'n/a', kind: 'muted' }
         : rec.badge);
     });

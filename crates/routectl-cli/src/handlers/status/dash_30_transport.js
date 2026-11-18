@@ -76,14 +76,14 @@
   // QUERY-only backoff even though they arrive over a 200.
   var QUERY_RETRY_CODES = { db_busy: true, db_unavailable: true, query_timeout: true };
 
-  // The request body for a tab, or null when the tab is not query-backed. The
-  // shape is looked up whole from QUERY_SHAPES for the live selection and
+  // The request body for a view, or null when the view is not query-backed.
+  // The shape is looked up whole from QUERY_SHAPES for the live selection and
   // copied field-for-field -- nothing is overwritten afterwards, so every body
   // this page can emit is a declared shape the drift test has validated. Only
   // the optional provider scope is added on top (the server accepts it against
   // any shape).
   function queryBodyFor(tab) {
-    var shape = shapeFor(tab);
+    var shape = shapeFor(querySourceFor(tab));
     if (!shape) { return null; }
     var body = {};
     Object.keys(shape).forEach(function (k) { body[k] = shape[k]; });
@@ -91,27 +91,28 @@
     return body;
   }
 
-  // Overview asks for a series; Usage deliberately does not (no chart, and a
-  // byte-identical non-series read path). Usage's grain follows the group-by
+  // The request shape each query source stands for. The bucketed source asks
+  // for a series; the series-less one deliberately does not (no chart, and a
+  // byte-identical non-series read path), and its grain follows the group-by
   // toggle.
-  function shapeFor(tab) {
-    if (tab === 'overview') {
+  function shapeFor(source) {
+    if (source === QUERY_SERIES_SOURCE) {
       return findShape(selectedWindow, 'provider', true);
     }
-    if (tab === 'usage') {
+    if (source === QUERY_SOURCE) {
       return findShape(selectedWindow, selectedGroupBy, false);
     }
     return null;
   }
 
-  // The source record a tab's QUERY response belongs to, or null when the tab is
-  // not query-backed. One record per SHAPE, not one per route: the two shapes
-  // answer with different payloads, so a single record would let whichever tab
-  // polled last define what the other renders from.
+  // The source record a view's QUERY response belongs to, or null when the
+  // view is not query-backed: its registered query source (see
+  // viewQuerySource). One record per SHAPE, not one per route: the two shapes
+  // answer with different payloads, so a single record would let whichever
+  // view polled last define what the other renders from.
   function querySourceFor(tab) {
-    if (tab === 'overview') { return QUERY_SERIES_SOURCE; }
-    if (tab === 'usage') { return QUERY_SOURCE; }
-    return null;
+    var view = viewFor(tab);
+    return view ? viewQuerySource(view) : null;
   }
 
   function findShape(window, groupBy, wantBucket) {
@@ -291,12 +292,12 @@
     // active tab's: the two shapes can go stale on different tab switches,
     // and clearing only the active one would leave the inactive source
     // suppressed under a key its own next round will never produce again.
-    // Iterates ALL tabs (not just the two current query-backed ones) so a
-    // future query-backed tab is covered automatically -- queryBodyFor
-    // returns null for a non-query tab, which the guard below filters out.
-    TABS.forEach(function (tab) {
-      var tabBody = queryBodyFor(tab);
-      var tabSource = querySourceFor(tab);
+    // Iterates ALL views (not just the two current query-backed ones) so a
+    // future query-backed view is covered automatically -- queryBodyFor
+    // returns null for a non-query view, which the guard below filters out.
+    VIEWS.forEach(function (view) {
+      var tabBody = queryBodyFor(view.id);
+      var tabSource = querySourceFor(view.id);
       if (!tabBody || !tabSource) { return; }
       if (queryRejectedKeyBySource[tabSource] !== queryBodyKey(tabBody)) {
         delete queryRejectedKeyBySource[tabSource];
