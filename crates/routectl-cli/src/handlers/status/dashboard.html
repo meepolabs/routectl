@@ -30,7 +30,7 @@
     The persistent verdict strip: a state dot, ONE plain-language sentence,
     the window's req/span figures, the window picker, and the poll
     indicator. It carries no cost figure by design -- cost is a
-    Usage/Overview reading, and repeating it here would show the same fact
+    Now/Traffic reading, and repeating it here would show the same fact
     twice.
   -->
   <div class="verdict" id="verdict">
@@ -55,21 +55,21 @@
   </div>
 
   <div class="tabbar" id="tabbar" role="tablist" aria-label="Status views">
-    <button type="button" class="tab" id="tab-overview" role="tab" data-tab="overview"
-      aria-controls="pane-overview" aria-selected="true" tabindex="0">
-      Overview<span class="tab-badge" id="badge-overview" hidden></span>
+    <button type="button" class="tab" id="tab-now" role="tab" data-tab="now"
+      aria-controls="pane-now" aria-selected="true" tabindex="0">
+      Now<span class="tab-badge" id="badge-now" hidden></span>
     </button>
-    <button type="button" class="tab" id="tab-usage" role="tab" data-tab="usage"
-      aria-controls="pane-usage" aria-selected="false" tabindex="-1">
-      Usage<span class="tab-badge" id="badge-usage" hidden></span>
+    <button type="button" class="tab" id="tab-accounts" role="tab" data-tab="accounts"
+      aria-controls="pane-accounts" aria-selected="false" tabindex="-1">
+      Accounts<span class="tab-badge" id="badge-accounts" hidden></span>
     </button>
-    <button type="button" class="tab" id="tab-routing" role="tab" data-tab="routing"
-      aria-controls="pane-routing" aria-selected="false" tabindex="-1">
-      Routing<span class="tab-badge" id="badge-routing" hidden></span>
+    <button type="button" class="tab" id="tab-traffic" role="tab" data-tab="traffic"
+      aria-controls="pane-traffic" aria-selected="false" tabindex="-1">
+      Traffic<span class="tab-badge" id="badge-traffic" hidden></span>
     </button>
-    <button type="button" class="tab" id="tab-health" role="tab" data-tab="health"
-      aria-controls="pane-health" aria-selected="false" tabindex="-1">
-      Health<span class="tab-badge" id="badge-health" hidden></span>
+    <button type="button" class="tab" id="tab-models" role="tab" data-tab="models"
+      aria-controls="pane-models" aria-selected="false" tabindex="-1">
+      Models<span class="tab-badge" id="badge-models" hidden></span>
     </button>
     <button type="button" class="tab" id="tab-config" role="tab" data-tab="config"
       aria-controls="pane-config" aria-selected="false" tabindex="-1">
@@ -84,26 +84,27 @@
   <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
 
   <!--
-    One pane per tab, each a shell of a freshness line plus a body the tab's
-    `buildX` fills. The pane markup is IDENTICAL across tabs on purpose: the
-    tab's whole rendering lives in its dash_6x/dash_7x tab source.
+    One pane per view, each a shell of a freshness line plus a body the
+    view's `build` fills. The pane markup is IDENTICAL across views on
+    purpose: a view's whole rendering is composed in dash_80_views.js from
+    the dash_6x/dash_7x section sources.
   -->
   <main>
-    <section class="pane" id="pane-overview" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
-      <div class="section-status" id="status-overview"></div>
-      <div id="body-overview"></div>
+    <section class="pane" id="pane-now" role="tabpanel" aria-labelledby="tab-now" tabindex="0">
+      <div class="section-status" id="status-now"></div>
+      <div id="body-now"></div>
     </section>
-    <section class="pane" id="pane-usage" role="tabpanel" aria-labelledby="tab-usage" tabindex="0" hidden>
-      <div class="section-status" id="status-usage"></div>
-      <div id="body-usage"></div>
+    <section class="pane" id="pane-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0" hidden>
+      <div class="section-status" id="status-accounts"></div>
+      <div id="body-accounts"></div>
     </section>
-    <section class="pane" id="pane-routing" role="tabpanel" aria-labelledby="tab-routing" tabindex="0" hidden>
-      <div class="section-status" id="status-routing"></div>
-      <div id="body-routing"></div>
+    <section class="pane" id="pane-traffic" role="tabpanel" aria-labelledby="tab-traffic" tabindex="0" hidden>
+      <div class="section-status" id="status-traffic"></div>
+      <div id="body-traffic"></div>
     </section>
-    <section class="pane" id="pane-health" role="tabpanel" aria-labelledby="tab-health" tabindex="0" hidden>
-      <div class="section-status" id="status-health"></div>
-      <div id="body-health"></div>
+    <section class="pane" id="pane-models" role="tabpanel" aria-labelledby="tab-models" tabindex="0" hidden>
+      <div class="section-status" id="status-models"></div>
+      <div id="body-models"></div>
     </section>
     <section class="pane" id="pane-config" role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden>
       <div class="section-status" id="status-config"></div>
@@ -116,7 +117,7 @@
   </main>
 
   <!--
-    Host for the one overlay this page has (the Overview seat modal). It sits
+    Host for the one overlay this page has (the Now seat modal). It sits
     OUTSIDE <main> because every pane carries an entry animation, and an
     animated ancestor establishes a containing block for `position: fixed` --
     a modal rendered inside a pane would be centered on the pane, not the

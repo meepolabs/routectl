@@ -570,11 +570,11 @@
     var pools = Array.isArray(rec.data.pools) ? rec.data.pools : [];
     var empty = pools.filter(function (p) { return Number(p.eligible) <= 0 && Number(p.configured) > 0; });
     if (empty.length) {
-      return { kind: 'bad', text: 'No usable seat in ' + namedFew(empty.map(poolName)) + ' - see Health' };
+      return { kind: 'bad', text: 'No usable seat in ' + namedFew(empty.map(poolName)) + ' - see Accounts' };
     }
     var short = pools.filter(function (p) { return Number(p.eligible) < Number(p.configured); });
     if (short.length) {
-      return { kind: 'warn', text: 'Some seats unusable in ' + namedFew(short.map(poolName)) + ' - see Health' };
+      return { kind: 'warn', text: 'Some seats unusable in ' + namedFew(short.map(poolName)) + ' - see Accounts' };
     }
     var blocked = [];
     (rec.data.targets || []).forEach(function (t) {
@@ -582,7 +582,7 @@
       if (blocked.indexOf(t.nickname) < 0) { blocked.push(t.nickname); }
     });
     if (blocked.length) {
-      return { kind: 'warn', text: namedFew(blocked) + ' not usable right now - see Health' };
+      return { kind: 'warn', text: namedFew(blocked) + ' not usable right now - see Accounts' };
     }
     return null;
   }

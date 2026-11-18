@@ -91,7 +91,7 @@
   var selectedWindow = 'today';
   var selectedGroupBy = 'model';
   var selectedProvider = null;     // provider scope, null = every provider
-  var activeTab = 'overview';
+  var activeTab = 'now';
 
   var terminal = false;            // set on 403; stops every loop permanently
   var running = false;             // one aggregate round in flight at a time

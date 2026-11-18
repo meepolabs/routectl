@@ -95,11 +95,13 @@
   // ---- chrome: hash routing (dumb view state) --------------------------
 
   // Grammar: `#tab[/window]`. `tab` is a VIEWS id; the optional `window` is
-  // one of WINDOWS. An unknown or absent tab canonicalizes to `overview`, an
-  // unknown or absent window to `today`. The hash carries VIEW STATE ONLY --
-  // applyHash mutates activeTab / selectedWindow and nothing about fetch
-  // state. Because it writes those directly, its CALLER owns detecting a move
-  // and refreshing the QUERY (see the hashchange listener); a selection change
+  // one of WINDOWS. An old tab token opens its successor view
+  // (canonicalViewId), an unknown or absent tab the first view, and an
+  // unknown or absent window `today`; selectTab then rewrites the hash
+  // canonical in place. The hash carries VIEW STATE ONLY -- applyHash mutates
+  // activeTab / selectedWindow and nothing about fetch state. Because it
+  // writes those directly, its CALLER owns detecting a move and refreshing
+  // the QUERY (see the hashchange listener); a selection change
   // that skips that refresh lets a stale generation repaint the new selection.
   // The separator is built from its char code so this script carries no
   // slash-leading string literal (see the mutation-channel scan in page.rs).
@@ -109,7 +111,7 @@
     var h = location.hash;
     var raw = (h.charAt(0) === '#') ? h.slice(1) : h;
     var parts = raw.split(HASH_SEP);
-    activeTab = viewFor(parts[0]) ? parts[0] : VIEWS[0].id;
+    activeTab = canonicalViewId(parts[0]);
     selectedWindow = (WINDOWS.indexOf(parts[1]) >= 0) ? parts[1] : 'today';
   }
 
@@ -129,10 +131,10 @@
 
   // ---- chrome: window picker -------------------------------------------
 
-  // The picker reflects the live selection and goes DIM + inert on the
-  // windowless tabs: Config and Doctor report current state and Routing
-  // attributes over all history, so a window on any of them would promise a
-  // filter that does not reach the figures.
+  // The picker reflects the live selection and goes DIM + inert on every
+  // view that registers a `span` (see VIEWS): such a view reports what it
+  // spans instead of a window, so a live picker would promise a filter that
+  // does not reach its figures.
   function updateWindowSel() {
     var group = el('windowsel');
     var span = viewFor(activeTab).span;
@@ -236,7 +238,7 @@
   function selectTab(name) {
     var changed = activeTab !== name;
     activeTab = name;
-    // The seat modal belongs to the Overview provider row: leaving the tab
+    // The seat modal belongs to the Now provider row: leaving the tab
     // dismisses it rather than leaving it to reappear on return.
     if (changed) { seatModalProvider = null; }
     VIEWS.forEach(function (view) {

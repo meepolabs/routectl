@@ -47,11 +47,12 @@ the concatenation for it.
 - The console must be clean: no errors, no warnings.
 - Watch **two full healthy poll rounds**. The poll indicator advances, the
   as_of age resets each round, and no tab enters a stale or error state.
-- Click through all six tabs. Each renders content, not an error card.
-- Load straight to `#overview` AND straight to `#usage`, then switch between
+- Click through all six tabs (Now, Accounts, Traffic, Models, Config,
+  Doctor). Each renders content, not an error card.
+- Load straight to `#now` AND straight to `#traffic`, then switch between
   the two in **both orders**. Both tabs must render content on every visit.
-  The two tabs issue DIFFERENT `/status/query` shapes -- Overview bucketed,
-  Usage series-less -- into their own source records, and a payload of one
+  The two tabs issue DIFFERENT `/status/query` shapes -- Now bucketed,
+  Traffic series-less -- into their own source records, and a payload of one
   shape cannot render the other tab. A tab that shows the
   `invalid_payload` card here while its transport reads live means the two
   reads have been collapsed back onto one record.
@@ -65,16 +66,16 @@ banner, no retry signal -- silently mislabeled data.
 
 - Throttle the network (devtools "Slow 3G" or a request-level delay) so QUERY
   responses take seconds to resolve.
-- On Overview, switch **Today -> Week -> Today rapidly**, and while those are
+- On Now, switch **Today -> Week -> Today rapidly**, and while those are
   still in flight also change the group-by and scope to a provider card.
 - Let everything settle, then check that the controls, the URL hash, the
   section labels, AND the figures all describe the **FINAL** selection.
 - No late response may repaint an earlier selection: a figure that belongs to
   Today under a Week label, or an unscoped total under a provider scope, is
   the bug.
-- Repeat on Usage with its group-by picker.
+- Repeat on Traffic with its group-by picker.
 - Supersede a SLOW read: on a ledger large enough that the All window takes
-  most of a second, select All, then pick another window (or, on Usage, another
+  most of a second, select All, then pick another window (or, on Traffic, another
   group-by) while that read is still running. The server answers the new QUERY
   `db_busy` until the aborted read lets go of its permit. The panel must stay
   in Loading and fill with the new selection within about a second: no red
@@ -97,8 +98,8 @@ banner, no retry signal -- silently mislabeled data.
 
 ## 4. Window and visual truthfulness
 
-- Routing, Config, and Doctor must **disable** the window picker (dimmed,
-  inert, labeled "All history"). Overview, Usage, and Health keep it live.
+- Accounts, Models, Config, and Doctor must **disable** the window picker
+  (dimmed, inert, labeled "Current state"). Now and Traffic keep it live.
 - A **sparse series draws gaps as BREAKS, never bridged**: produce traffic
   with an idle stretch in the middle of the window and confirm the sparkline
   and segment charts leave a hole instead of interpolating across it.
@@ -130,14 +131,14 @@ banner, no retry signal -- silently mislabeled data.
   has no row for, never `0`. No provider id or host from the table appears.
 - The cache write figure keeps an unreported write apart from a zero. In a
   ledger copy, give one model only rows whose provider sent no write field
-  (`cache_write_tokens` NULL) and another a row that reported `0`. On Usage,
+  (`cache_write_tokens` NULL) and another a row that reported `0`. On Traffic,
   CACHE READ / WRITE reads a faint `-` on the write side for the first and
   `0` for the second; scoped to a provider with no reported write, the
-  Overview WRITE tile reads `-` and its note says no cache write was reported.
+  Now WRITE tile reads `-` and its note says no cache write was reported.
 - Expanded Config model rows stay readable at 1440, 1024, 390 and 390 at 200%
   text: no label runs into another pair's value, nothing is cut off at the
   row edge, and a pair too wide for its column drops the value under its
-  label. The Overview EST. COST, TIME TO FIRST TOKEN and CACHE HIT notes
+  label. The Now EST. COST, TIME TO FIRST TOKEN and CACHE HIT notes
   wrap instead of truncating (check 720 and 1024 px, and 1440 at 200% text),
   and hovering each shows the full sentence.
 
@@ -172,12 +173,12 @@ banner, no retry signal -- silently mislabeled data.
 - The capability-writes card shows three separate counters, all faint at
   zero on a healthy daemon.
 
-## 6. Health tab learned negatives
+## 6. Models tab learned negatives
 
 - Serve a config with two nicknames on ONE upstream of one provider entry and
   a third nickname on a different upstream, against a ledger holding a
   `broken` row for the shared `<provider>#<upstream>` lane and nothing for the
-  other. On the Health tab, the learned-negatives chip for that capability
+  other. On the Models tab, the learned-negatives chip for that capability
   must appear on the card of EVERY nickname that maps to the shared lane, and
   the third nickname's card must read `none`. A card reading `none` for a
   nickname on a lane the ledger holds a negative for means the client joined
@@ -192,7 +193,7 @@ banner, no retry signal -- silently mislabeled data.
   `verified` row whose class is missing or unrecognized, so a row seeded
   without one never reaches the registry and the check passes vacuously.
 
-## 7. Health tab eligibility, pool seats and the seat driver
+## 7. Models and Accounts tabs: eligibility, pool seats and the seat driver
 
 - Serve a config with a pool of two `oauth://anthropic#<label>` members,
   one logged in and one never logged in, against a throwaway credentials
@@ -213,26 +214,26 @@ banner, no retry signal -- silently mislabeled data.
   and `0` (not `-`) for zero counts. After a minute the last sweep
   age appears and `sweeps` reads `1`.
 - With both pool seats logged out, the status line at the top reads `No
-  usable seat in <pool> - see Health` in red, never "All routes healthy".
+  usable seat in <pool> - see Accounts` in red, never "All routes healthy".
   With one of two seats out it reads `Some seats unusable in <pool> - see
-  Health` in amber; with both logged in it reads `All routes healthy`. A
+  Accounts` in amber; with both logged in it reads `All routes healthy`. A
   rate-limited or breaker-open seat also turns the line amber while it lasts.
 - With a seat still unusable, block `/status/usage?window=all` in the
   browser devtools (request blocking; it is the one source fetched on its
   own, while config, health and doctor ride the `/status` aggregate) and wait
   two polls. The status line reports BOTH: `No usable seat in <pool> - see
-  Health; all-history usage unavailable` (red with every seat out, amber with
+  Accounts; all-history usage unavailable` (red with every seat out, amber with
   some), never the seat sentence alone and never "Routing healthy - ...".
   Log every seat in with the block still on: the line reads `Routing healthy
   - all-history usage unavailable` in amber.
-- The Health tab badge counts each target with an eligibility reason or a
-  non-closed breaker once: two logged-out seats badge `2`, and a seat that is
+- The Accounts and Models tab badges each count every target with an
+  eligibility reason or a non-closed breaker once: two logged-out seats badge `2`, and a seat that is
   both logged out and breaker-open still counts once. The favicon turns amber
   with it.
-- The Routing "Live target state" row for the same target shows a red dot,
+- The Traffic "Live target state" row for the same target shows a red dot,
   a non-green pill (`no seat` when every seat is out, otherwise the reason),
   and `<n> of <m> not eligible`; never `unknown - nothing dispatched to it
-  yet`. The Health card's state pill shows the same label, never a green `ok`.
+  yet`. The Models card's state pill shows the same label, never a green `ok`.
 - Select a fix command with the mouse and wait through three polls with
   nothing changing: the selection stays, and Ctrl+C copies the full command.
   The `since <age> ago` text beside it keeps advancing (ages update every

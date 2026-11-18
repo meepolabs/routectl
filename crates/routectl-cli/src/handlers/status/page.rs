@@ -1017,8 +1017,8 @@ mod tests {
 
     /// Drift guard on the per-shape QUERY source split.
     ///
-    /// Overview reads `/status/query` bucketed and Usage reads it series-less;
-    /// the two payloads are not interchangeable, since Overview's sparklines
+    /// Now reads `/status/query` bucketed and Traffic reads it series-less;
+    /// the two payloads are not interchangeable, since Now's sparklines
     /// cannot be drawn from a payload whose `series` is null. They therefore get
     /// their OWN source records, and this pins both halves of the split: the two
     /// records EXIST (each declared, distinct, and validated against the
@@ -1030,7 +1030,7 @@ mod tests {
     /// the round was issued for rather than to a hardcoded one). Two records
     /// with one of them unreachable is the same bug at one remove.
     ///
-    /// Mutation check: point Overview's first VIEWS source at `QUERY_SOURCE`
+    /// Mutation check: point Now's first VIEWS source at `QUERY_SOURCE`
     /// -> red.
     #[test]
     fn dashboard_query_shapes_have_their_own_source_records() {
@@ -1087,15 +1087,15 @@ mod tests {
         // is the read that view actually issues, and the two must not be the
         // same record. VIEWS names the CONSTANTS, so this reads the identifiers.
         assert_eq!(
-            view_primary("overview"),
+            view_primary("now"),
             "QUERY_SERIES_SOURCE",
-            "Overview must read the bucketed QUERY source; it is the only one whose payload \
+            "Now must read the bucketed QUERY source; it is the only one whose payload \
              carries the series its sparklines are drawn from"
         );
         assert_eq!(
-            view_primary("usage"),
+            view_primary("traffic"),
             "QUERY_SOURCE",
-            "Usage must read the series-less QUERY source, the shape it actually requests"
+            "Traffic must read the series-less QUERY source, the shape its usage cards request"
         );
 
         // WIRING. `querySourceFor` is what actually routes a round's response:
@@ -1166,11 +1166,11 @@ mod tests {
 
     /// The deterministic-refusal marker (`queryRejectedKeyBySource`) must be
     /// keyed per query source, mirroring the source-record split above: a
-    /// 400/405 on Overview's shape and a 400/405 on Usage's shape are
+    /// 400/405 on Now's shape and a 400/405 on Traffic's shape are
     /// unrelated deterministic refusals, so recording one must never
     /// suppress retries of the other.
     ///
-    /// Mutation check: point Overview's first VIEWS source at `QUERY_SOURCE`
+    /// Mutation check: point Now's first VIEWS source at `QUERY_SOURCE`
     /// -> red (two views would share one marker).
     #[test]
     fn dashboard_query_rejection_marker_is_keyed_per_source() {
@@ -1243,8 +1243,7 @@ mod tests {
         // wider.
         let reset = function_body("queryInputChanged");
         assert!(
-            !reset.contains("['overview', 'usage']")
-                && !reset.contains("[\"overview\", \"usage\"]"),
+            !reset.contains("['now', 'traffic']") && !reset.contains("[\"now\", \"traffic\"]"),
             "queryInputChanged must not hardcode the query-backed view pair; \
              iterate `VIEWS` and let queryBodyFor/querySourceFor filter out \
              non-query views, so a new query-backed view is covered automatically"
@@ -1470,7 +1469,7 @@ mod tests {
         }
     }
 
-    /// The written cache volume the Overview and Usage tabs show is the
+    /// The written cache volume the Now and Traffic views show is the
     /// both-era write total. The per-lifetime query fields cover only rows
     /// written before the ledger recorded a total, so reading them would drop
     /// every current write from the figure.
@@ -1900,5 +1899,10 @@ mod tests {
     mod browser {
         use super::*;
         include!("page_browser_tests.rs");
+    }
+
+    mod browser_views {
+        use super::*;
+        include!("page_browser_views_tests.rs");
     }
 }

@@ -7488,9 +7488,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   strip (state dot + one plain-language sentence + req/span + window picker +
   poll indicator, which reports the as_of AGE of the active tab's data; carries
   no cost figure by design), the six-tab bar
-  (Overview default, then Usage / Routing / Health / Config / Doctor), the
-  banner, one identical pane shell per tab (`status-<tab>` +
-  `body-<tab>`, the status line reporting only a NOT-current source), and the
+  (Now default, then Accounts / Traffic / Models / Config / Doctor, in VIEWS
+  order), the banner, one identical pane shell per view (`status-<view>` +
+  `body-<view>`, the status line reporting only a NOT-current source), and the
   `modal-host` overlay host outside `<main>` (a pane's entry animation would
   otherwise become the containing block for a fixed-position modal). Never
   served alone; carries no `<link>`/`<script src>`
@@ -7620,7 +7620,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   computed against the as_of of the record it came from (`panelNowMs(rec)`,
   `ageSince`); there is no page-global render clock
 - `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 8 of
-  14: the Overview tab, MULTI-SOURCE (`query_series` primary -- the bucketed
+  14: the Overview sections, the whole of the Now view, MULTI-SOURCE (`query_series` primary -- the bucketed
   read whose series feeds the sparklines -- plus `usage` for the
   seat surface). The provider row leads with an all-providers AGGREGATE card
   built from the query `totals` (the scope reset), then the busiest
@@ -7644,15 +7644,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   is `providerRowSection`, named for the row rather than its subject because the
   script parts share one function scope with Config's provider TABLE builder
 - `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 9 of 14:
-  the Usage tab, single-source (`query`). Renders the group-by picker
+  the Usage sections, the head of the Traffic view, single-source (`query`). Renders the group-by picker
   (model/alias/provider, re-issuing the non-series query through
   `queryInputChanged`) outside the section boundary, then one two-line card per
   query group ranked by requests, with zero-traffic groups omitted and their
   count reported in the header
 - `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 10 of
-  14: the Routing tab, MULTI-SOURCE (`config` primary, plus `usage_all` and
-  `health`) and WINDOWLESS (in `WINDOWLESS_TABS` beside Config and Doctor: the
-  picker dims and goes inert, with an "All history" label beside it). The
+  14: the Routing sections, built under the Usage sections in the Traffic
+  view, MULTI-SOURCE (built around `config`, plus `usage_all` and `health`);
+  its figures span ALL HISTORY whatever the picker says, and its header and
+  note say so. The
   configured chains render from the config `aliases` and the live per-target
   circuit state from health, both as EXACT facts, visually separated from the
   estimated block whose per-step traffic comes from the sole
@@ -7664,7 +7665,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   worst-circuit rule Health shares. Each of the three sources is wrapped in its
   own `safeSection`, so health going dark costs the state list alone
 - `src/handlers/status/dash_71_tab_health.js` -- dashboard SCRIPT part 11 of
-  14: the Health tab, MULTI-SOURCE (`health` primary, plus `usage`). Per-target
+  14: the Health sections, with no view entry point of its own: the target
+  section (`healthTargetSection`) is the Models view, and the pool, seat-driver
+  and quota sections are the Accounts view. MULTI-SOURCE (`health`, plus
+  `usage` for the quota tiles). Per-target
   cards collapse a pooled model's seats by nickname through the same
   worst-circuit rule Routing uses and split into needs-attention / healthy /
   not-observed sections (a target with no settled outcome is `unknown`, never
@@ -7716,7 +7720,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `BUILDERS`, the per-tab `buildX` registry the render dispatch reads
 - `src/handlers/status/dash_80_views.js` -- dashboard SCRIPT part 14 of 15:
   `VIEWS`, the one view registry (`{id, label, sources, span, build}`, array
-  order = tab order). `sources[0]` is a view's primary source (freshness line,
+  order = tab order): Now (the Overview sections), Accounts (pools, seat
+  driver, seat quota), Traffic (Usage then Routing), Models (the health target
+  section), Config and Doctor, with the `buildAccounts` / `buildTraffic` /
+  `buildModels` compositions. Accounts, Models, Config and Doctor carry the
+  `current state` span; Now and Traffic are windowed. `LEGACY_VIEW_IDS` and
+  `canonicalViewId` map the old tab tokens (overview -> now, usage and
+  routing -> traffic, health -> accounts) so an old link opens the view that
+  took over its content. `sources[0]` is a view's primary source (freshness line,
   tab badge, whole-view state card, and the QUERY a query-backed view issues,
   via `viewQuerySource`); a non-null `span` makes the view windowless and is
   the label beside the dimmed picker (`spanLabel`). `viewFor` looks a view up
@@ -7725,8 +7736,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 14 of 14:
   the page chrome and the load-time wiring. The 1s age ticker, the four inline
   `data:` SVG favicons and the `faviconState` rollup, the refresh control, the
-  URL-hash read/write (tab + window + scope), the window picker including the
-  WINDOWLESS dimming and its "All history" label, tab selection with keyboard
+  URL-hash read/write (view + window; an old tab token is canonicalized
+  through `canonicalViewId` and the hash rewritten in place), the window
+  picker including its dimming and span label on every view with a `span`, tab selection with keyboard
   navigation, and the single load-time statement that starts the loops
 - `src/handlers/status/dashboard-manual-checklist.md` -- the client's ONLY
   coverage for behavior. The `dash_*.js` sources have no runtime harness (the

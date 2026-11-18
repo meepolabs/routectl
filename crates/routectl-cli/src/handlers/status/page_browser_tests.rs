@@ -384,7 +384,7 @@ fn assert_flags(obs: &[&Value], flags: &[&str]) {
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_overview_provider_button_keeps_focus_across_rounds() {
-    let report = run_scenario(&scenario("overview-provider-focus", "overview"));
+    let report = run_scenario(&scenario("overview-provider-focus", "now"));
 
     let obs = observations(&report.result);
 
@@ -395,7 +395,7 @@ fn page_browser_overview_provider_button_keeps_focus_across_rounds() {
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_usage_group_by_button_keeps_focus_across_rounds() {
-    let report = run_scenario(&scenario("usage-groupby-focus", "usage"));
+    let report = run_scenario(&scenario("usage-groupby-focus", "traffic"));
 
     let obs = observations(&report.result);
 
@@ -446,7 +446,7 @@ fn page_browser_doctor_fix_command_selection_survives_rounds() {
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_seat_dialog_stays_open_with_focus_inside() {
-    let report = run_scenario(&scenario("seat-dialog-focus", "overview"));
+    let report = run_scenario(&scenario("seat-dialog-focus", "now"));
 
     let obs = observations(&report.result);
 
@@ -456,7 +456,7 @@ fn page_browser_seat_dialog_stays_open_with_focus_inside() {
 
 #[test]
 fn the_released_page_carries_no_driver() {
-    let served = page_with_driver(&scenario("any", "overview"));
+    let served = page_with_driver(&scenario("any", "now"));
 
     assert!(
         DRIVER.contains(DRIVER_MARKER),

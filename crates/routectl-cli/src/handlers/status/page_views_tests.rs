@@ -3,11 +3,12 @@
 // `page::tests`, so the script helpers there (`script`, `strip_js_comments`,
 // `skip_string_literal`, ...) are in scope; do not add `use` lines here.
 
-/// One registered view as written in the script: its id and its `sources`
-/// entries as the identifiers or literals they are written as.
+/// One registered view as written in the script: its id, its tab label and
+/// its `sources` entries as the identifiers or literals they are written as.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ViewEntry {
     pub(super) id: String,
+    pub(super) label: String,
     pub(super) sources: Vec<String>,
 }
 
@@ -97,9 +98,11 @@ pub(super) fn view_entries(src: &str) -> Vec<ViewEntry> {
         .iter()
         .map(|object| {
             let id = field_text(object, "id").expect("every view declares an `id`");
+            let label = field_text(object, "label").expect("every view declares a `label`");
             let sources = field_text(object, "sources").expect("every view declares `sources`");
             ViewEntry {
                 id: unquote(&id),
+                label: unquote(&label),
                 sources: sources
                     .trim_matches(|c| c == '[' || c == ']')
                     .split(',')
@@ -154,13 +157,48 @@ fn registered_view_ids() -> Vec<String> {
 /// The markup carries one tab, badge, pane, status line and body per view,
 /// in VIEWS order.
 ///
-/// Mutation check: swap the `health` and `config` entries in VIEWS -> red.
+/// Mutation check: swap the `models` and `config` entries in VIEWS -> red.
 #[test]
 fn markup_view_elements_follow_the_view_registry_in_order() {
     let ids = registered_view_ids();
 
     assert_eq!(ids.len(), 6, "the registry must parse into its six views");
     assert_eq!(markup_view_drift(MARKUP, &ids), Vec::<&str>::new());
+}
+
+/// The visible text of each tab button in `markup`, in order: the text
+/// between the button's opening tag and its badge.
+fn markup_tab_labels(markup: &str) -> Vec<String> {
+    let markup = strip_html_comments(markup);
+    markup
+        .match_indices("role=\"tab\"")
+        .map(|(at, _)| {
+            let rest = &markup[at..];
+            let open_end = rest.find('>').expect("the tab tag closes") + 1;
+            let text_end = rest.find("<span").expect("every tab carries its badge");
+            rest[open_end..text_end].trim().to_string()
+        })
+        .collect()
+}
+
+/// The tab bar reads the six views in order, and each tab's text is its
+/// view's registered label.
+///
+/// Mutation check: relabel the Accounts tab in the markup -> red.
+#[test]
+fn tab_labels_read_the_six_views_in_order() {
+    let registered: Vec<String> = view_entries(&script())
+        .into_iter()
+        .map(|v| v.label)
+        .collect();
+
+    let shown = markup_tab_labels(MARKUP);
+
+    assert_eq!(
+        shown,
+        ["Now", "Accounts", "Traffic", "Models", "Config", "Doctor"]
+    );
+    assert_eq!(registered, shown);
 }
 
 #[test]
@@ -195,10 +233,12 @@ fn the_view_registry_parser_reads_ids_and_sources_in_order() {
         vec![
             ViewEntry {
                 id: "a".to_string(),
+                label: "A".to_string(),
                 sources: vec!["Q_SRC".to_string(), "usage".to_string()],
             },
             ViewEntry {
                 id: "b".to_string(),
+                label: "B, b".to_string(),
                 sources: vec!["config".to_string()],
             },
         ]

@@ -23,19 +23,10 @@
   //      age and says freshness is unknown; no provider time-to-live is
   //      invented to classify it.
   //
-  // The second multi-source tab: target state comes from health, per-seat
-  // quota from the usage ledger. Each section is wrapped in its OWN
-  // `safeSection` against its OWN source record, so a dark health source
-  // costs the target list alone and a dark ledger costs the quota tiles
-  // alone.
-  function buildHealth(rec) {
-    var stack = tabStack();
-    stack.appendChild(healthTargetSection(rec));
-    stack.appendChild(healthPoolSection(rec));
-    stack.appendChild(healthDriverSection(rec));
-    stack.appendChild(healthQuotaSection());
-    return stack;
-  }
+  // Each section below is wrapped in its OWN `safeSection` against its OWN
+  // source record, so a dark health source costs the health sections alone
+  // and a dark ledger costs the quota tiles alone. The views that compose
+  // them are in dash_80_views.js.
 
   function healthTargetSection(rec) {
     var wrap = routingSection('Dispatch targets', stateCard(rec)
