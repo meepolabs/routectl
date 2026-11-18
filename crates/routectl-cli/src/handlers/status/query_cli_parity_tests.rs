@@ -341,6 +341,7 @@ fn endpoint_result(fx: &Fixture, window: &str, group_by: &str) -> QueryResult {
         now_utc_rfc3339(),
         &zone,
         now,
+        &ReadLimit::from(Instant::now() + Duration::from_secs(30)),
     );
     panel
         .data

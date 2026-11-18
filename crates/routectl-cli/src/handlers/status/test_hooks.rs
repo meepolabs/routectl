@@ -103,6 +103,14 @@ pub(crate) struct StatusTestHooks {
     /// that request, and a builder that returned early through some other path
     /// would not prove the same thing about the one that degrades.
     pub(crate) fail_health_builder: bool,
+    /// Make every `/status/query` read stall on its blocking worker, holding the
+    /// ledger-read gate, until its cancel flag is set or its deadline passes.
+    ///
+    /// A real scan long enough to abandon mid-read would need a ledger sized to
+    /// the machine running the suite. The stall stops on exactly the two signals
+    /// the progress handler checks, so what a test observes is the request's
+    /// drop reaching the read, not how fast a scan happens to be.
+    pub(crate) stall_query_read: bool,
 }
 
 impl StatusTestHooks {
@@ -113,6 +121,7 @@ impl StatusTestHooks {
             Self {
                 fidelity_observer: Some(observer),
                 fail_health_builder: false,
+                stall_query_read: false,
             },
             events,
         )

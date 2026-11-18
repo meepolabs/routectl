@@ -50,6 +50,7 @@ fn a_bucket_token_returns_a_series_at_the_resolved_width() {
         crate::handlers::status::utc_rfc3339(now_ms),
         &crate::local_time::LocalZone::utc(),
         now,
+        &ReadLimit::from(far_deadline()),
     );
     let json = serde_json::to_value(&panel).expect("the panel renders");
 
@@ -97,6 +98,7 @@ fn a_trailing_window_series_anchors_its_grid_at_the_window_start() {
             crate::handlers::status::utc_rfc3339(now_ms),
             &zone,
             now,
+            &ReadLimit::from(far_deadline()),
         );
         let json = serde_json::to_value(&panel).expect("the panel renders");
 

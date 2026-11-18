@@ -166,6 +166,10 @@ pub struct StatusState {
     /// it is released by the blocking work ending -- not by a cancelled
     /// request's future dropping. See [`BuilderCapacity`].
     pub builder_capacity: BuilderCapacity,
+    /// The one-permit gate `/status/query` reads the ledger under, apart from
+    /// [`Self::builder_capacity`] so a long query read never holds a permit
+    /// the GET panels need. See [`query::LedgerReadGate`].
+    ledger_read: query::LedgerReadGate,
     /// Read-only view of the usage writer's shared health counters, for the
     /// writer-health and capability-write reads the doctor and health panels
     /// report.
@@ -211,6 +215,7 @@ impl StatusState {
             daemon_meta: DaemonMetaHandle::new(daemon_meta),
             observability: PanelObservability::default(),
             builder_capacity: BuilderCapacity::default(),
+            ledger_read: query::LedgerReadGate::default(),
             usage_health,
             fidelity_gate: Arc::default(),
             warm_report: WarmReport::not_run(),
@@ -472,6 +477,24 @@ where
         }
         Err(TryAcquire::Closed) => return Panel::unavailable(schema_version, code),
     };
+    run_blocking_panel(permit, schema_version, code, builder).await
+}
+
+/// The blocking half of [`guard_panel`], for a caller that took its permit
+/// from a pool of its own: run `builder` on a blocking worker under
+/// `catch_unwind`, holding `permit` until the blocking work ends. A panic or a
+/// failed join degrades to an unavailable panel carrying `code`.
+pub(super) async fn run_blocking_panel<T, F>(
+    permit: OwnedSemaphorePermit,
+    schema_version: u32,
+    code: &'static str,
+    builder: F,
+) -> Panel<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Panel<T> + Send + 'static,
+{
+    let probe = builder_probe::current();
     builder_probe::submitted(&probe);
     let joined = tokio::task::spawn_blocking(move || {
         // The permit is owned here, so it drops when this closure exits by any
@@ -734,22 +757,23 @@ mod tests {
     /// The price book is read (a stat, and a reparse when the file changed)
     /// only inside each builder's blocking closure: the async side of a
     /// config, doctor or query build hands the book or an unpinned pricer
-    /// into `guard_panel` and never reads it. Each file's text before its
-    /// `guard_panel(` call must name no book read; the reads after it are the
-    /// positive control.
+    /// into the call that moves it to a blocking worker (`guard_panel`, or
+    /// `run_blocking_panel` for the query's own gate) and never reads it. Each
+    /// file's text before that call must name no book read; the reads after it
+    /// are the positive control.
     #[test]
     fn the_price_book_is_read_only_inside_the_blocking_builder() {
         let reads = book_read_tokens();
         let builders = [
-            ("config.rs", include_str!("config.rs")),
-            ("query.rs", include_str!("query.rs")),
-            ("doctor.rs", include_str!("doctor.rs")),
+            ("config.rs", include_str!("config.rs"), "guard_panel"),
+            ("query.rs", include_str!("query.rs"), "run_blocking_panel"),
+            ("doctor.rs", include_str!("doctor.rs"), "guard_panel"),
         ];
-        for (name, src) in builders {
+        for (name, src, entry) in builders {
             let production = production_source::production_source(src);
             let split = production
-                .find(&format!("{}{}", "guard_panel", "("))
-                .unwrap_or_else(|| panic!("{name} builds under guard_panel"));
+                .find(&format!("{entry}("))
+                .unwrap_or_else(|| panic!("{name} builds under {entry}"));
             let (before, after) = production.split_at(split);
             for read in &reads {
                 assert!(

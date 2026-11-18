@@ -17,7 +17,8 @@
 //!
 //! | number | where | what it bounds |
 //! |---|---|---|
-//! | [`STATUS_MAX_INFLIGHT`] = 4 | this module | admitted concurrent `/status*` requests, and equally concurrent blocking panel builders |
+//! | [`STATUS_MAX_INFLIGHT`] = 4 | this module | admitted concurrent `/status*` requests, and equally concurrent blocking GET panel builders |
+//! | ledger-read gate = 1 permit | `handlers::status::query` | concurrent `/status/query` ledger reads; a second one answers `db_busy` without waiting |
 //! | [`QUERY_BUDGET_MS`] = 2000 | this module | one `/status/query` grouped aggregate |
 //! | [`USAGE_BUDGET_MS`] = 2500 | this module | one whole `/status/usage` panel build |
 //! | [`AGGREGATE_RESERVE_MS`] = 1000 | this module | room the `/status` aggregate leaves after the usage budget for its other panels and the response write |
@@ -43,33 +44,44 @@
 //! `the_query_route_budgets_sum_inside_the_browser_query_abort` test reads it
 //! out of the served script and fails when the sum no longer fits.
 //!
+//! **What the query budget covers.** The query deadline is fixed right after
+//! the body parse, BEFORE the ledger-read gate and the `spawn_blocking`
+//! submission, so the blocking-worker queue spends the same budget as the read.
+//! The gate itself never waits: a held gate answers `db_busy` at once. A read
+//! whose budget ran out in the queue, or whose request was dropped there,
+//! answers `query_timeout` without opening the ledger.
+//!
 //! **What the identity does NOT bound.** It covers the two BUDGETED stretches,
 //! not end-to-end request time, so 3000 <= 3500 is necessary but not sufficient
-//! for "the server always sheds before the browser aborts". Unbudgeted time sits
-//! between and around them:
+//! for "the server always sheds before the browser aborts". Some time inside
+//! the budget is still out of the deadline's reach, and some sits after it:
 //!
-//! - the wait for a builder capacity permit. Capacity is held through the
-//!   blocking work and so survives cancellation, which is deliberate -- but it
-//!   means a replacement request admitted after a client abort can wait on a
-//!   detached builder before its own budget even starts. The query deadline is
-//!   anchored inside the build for exactly this reason: it measures the QUERY,
-//!   not the queueing.
-//! - `spawn_blocking` worker-queue delay.
-//! - opening the ledger, the `earliest_ts_start` anchor probe, the caller-side
-//!   fold, and JSON serialization -- none reachable by the SQLite progress
-//!   handler (see Occupancy below).
+//! - opening the ledger and the `earliest_ts_start` anchor probe, which no
+//!   progress handler covers, and the Rust work of the folds between
+//!   statement steps, which checks the cancel flag per row but not the
+//!   deadline.
+//! - JSON serialization and the response write, after the read.
 //!
-//! So a saturated surface CAN exceed 3500ms and be client-aborted rather than
+//! So a slow surface CAN exceed 3500ms and be client-aborted rather than
 //! returning a clean `query_timeout`. That is a degradation, not a correctness
-//! break: the panel is read-only and the client retries. Bounding it would take
-//! an end-to-end deadline started after the body read and threaded through the
-//! capacity wait, which is a separate change from sizing these budgets.
+//! break: the panel is read-only and the client retries.
+//!
+//! **Cancellation.** The request future holds a guard that sets the read's
+//! cancel flag when it drops, so a client that aborts mid-read stops it: a
+//! queued read checks the flag before opening the ledger, a running statement
+//! sees it through the SQLite progress handler, and the Rust folds check it per
+//! row. The gate's permit lives in the blocking closure and is freed when the
+//! read ends, which after an abort is the next check, not the deadline.
 //!
 //! **Occupancy.** The capacity unit is ADMITTED REQUESTS, and an admitted
 //! request holds at most one blocking builder at a time (the `/status`
-//! aggregate composes its panels sequentially), so worst-case occupancy is
-//! [`STATUS_MAX_INFLIGHT`] builders each held for roughly
-//! `max(QUERY_BUDGET_MS, USAGE_BUDGET_MS)` = 2500ms. Roughly, not exactly: the deadline
+//! aggregate composes its panels sequentially). The GET panels share
+//! [`STATUS_MAX_INFLIGHT`] builder permits, each held for roughly
+//! [`USAGE_BUDGET_MS`] = 2500ms at worst; a `/status/query` read holds the
+//! ledger-read gate's one permit instead, for roughly [`QUERY_BUDGET_MS`], and
+//! never a builder permit, so a long query read cannot delay a live panel. It
+//! still counts as one admitted request while its response future lives.
+//! Roughly, not exactly: the deadline
 //! is checked from a SQLite progress handler every `PROGRESS_OPS` VM ops, and
 //! opening the ledger, the `earliest_ts_start` anchor probe, the caller-side
 //! fold and the JSON serialization all sit outside its reach, so a builder can
@@ -111,7 +123,8 @@ use crate::server::request_id::{self, RequestId};
 
 /// Ceiling on concurrent in-flight `/status*` requests across the WHOLE
 /// subtree. The unit is ADMITTED HTTP REQUESTS, and it is equally the ceiling
-/// on concurrent blocking panel builders -- see this module's own docs for that
+/// on concurrent blocking GET panel builders (a `/status/query` read runs under
+/// its own one-permit gate instead) -- see this module's own docs for that
 /// equivalence and for the timing numbers it composes with. A concurrent
 /// fan-out inside the aggregate would silently multiply the builder count by
 /// four while this const stayed at its face value.

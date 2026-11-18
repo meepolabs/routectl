@@ -1,5 +1,7 @@
 use super::*;
 
+use super::super::Availability;
+use super::super::test_hooks::StatusTestHooks;
 use crate::commands::usage::MAX_BUCKETS;
 use crate::handlers::status::DaemonMeta;
 use crate::server::AppState;
@@ -10,6 +12,7 @@ use routectl_router::{Config, Router};
 use routectl_usage::{CostStatus, QueryGroup, QueryMetrics, QuerySeries, SeriesBucket, open};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -430,3 +433,4 @@ async fn an_expired_deadline_sheds_query_timeout_end_to_end() {
 include!("query_wire_tests.rs");
 include!("query_series_tests.rs");
 include!("query_price_pickup_tests.rs");
+include!("query_gate_tests.rs");

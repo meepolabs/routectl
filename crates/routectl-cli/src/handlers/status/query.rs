@@ -11,12 +11,20 @@
 //!     echoes the serde error text or any byte of the body, and the ledger is
 //!     never opened on this path.
 //!   - **200** -- everything else, including every data-source failure. The
-//!     aggregate runs under the same isolation as the other panels
-//!     (`guard_panel`'s blocking worker + `catch_unwind`, a per-request
-//!     read-only fast-fail open), so a missing, busy, mismatched, or
-//!     over-budget ledger degrades to an unavailable `Panel`, never a 500 --
-//!     and the payload is serialized explicitly so a render failure degrades
-//!     the same way instead of escaping as a fourth regime.
+//!     aggregate runs under the same panic isolation as the other panels (a
+//!     blocking worker + `catch_unwind`, a per-request read-only fast-fail
+//!     open), so a missing, busy, mismatched, or over-budget ledger degrades
+//!     to an unavailable `Panel`, never a 500 -- and the payload is serialized
+//!     explicitly so a render failure degrades the same way instead of
+//!     escaping as a fourth regime.
+//!
+//! The read does NOT take a GET panel's builder capacity. It runs under its
+//! own one-permit [`LedgerReadGate`], taken without waiting: a second query
+//! while one is reading answers `db_busy` at once, and a long read never holds
+//! a permit the live panels need. The read's deadline is fixed before the gate
+//! and the blocking-worker queue, so both count against it, and a request
+//! dropped mid-read sets the read's [`CancelFlag`], which stops it at the next
+//! check and frees the gate.
 //!
 //! Cost is resolved through the read-only router facade's pricer, which pins
 //! ONE config snapshot and ONE price-table snapshot for the whole request: a
@@ -39,8 +47,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use routectl_usage::{
-    GroupDim, QueryResult, QuerySeries, QuerySpec, earliest_ts_start, open_readonly_fastfail, query,
+    CancelFlag, GroupDim, QueryResult, QuerySeries, QuerySpec, ReadLimit, earliest_ts_start,
+    open_readonly_fastfail, query,
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::commands::usage::{BucketUnit, WindowFlag, resolve_bucket, window_bounds};
 use crate::server::status_gate::QUERY_BUDGET_MS;
@@ -48,7 +58,7 @@ use crate::server::status_gate::QUERY_BUDGET_MS;
 use super::router_view::QueryPricer;
 use super::usage::{open_error_code, query_error_code};
 use super::vocabulary::codes;
-use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
+use super::{Panel, StatusState, now_utc_rfc3339, run_blocking_panel};
 
 /// Wire-shape version of the query payload. Additive changes (a new metric, a
 /// new `group_by` or `window` token) do NOT bump it; a semantic change to an
@@ -104,6 +114,65 @@ const MAX_BODY_BYTES: usize = 8 * 1024;
 /// on its own. The derivation lives in `crate::server::status_gate`'s module
 /// docs.
 pub(super) const BODY_READ_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The one-permit gate every `/status/query` ledger read runs under.
+///
+/// Taken WITHOUT waiting: a held gate answers `db_busy` at once. A queue would
+/// let client retries pile up behind an abandoned read and spend their budgets
+/// waiting. The permit is moved into the blocking closure, so it is released
+/// when the read ends, never by the request future dropping; what makes an
+/// abandoned read end early is the cancel its request sets on drop.
+///
+/// One instance per [`StatusState`], i.e. one per serve process.
+pub(super) struct LedgerReadGate(Arc<Semaphore>);
+
+impl Default for LedgerReadGate {
+    fn default() -> Self {
+        Self(Arc::new(Semaphore::new(1)))
+    }
+}
+
+impl LedgerReadGate {
+    /// Take the permit, or the unavailable code to answer with: `db_busy`
+    /// while another read holds it. Nothing closes the semaphore; a closed
+    /// one is matched by value rather than unwrapped (`panic = "abort"`).
+    pub(super) fn try_acquire(&self) -> Result<OwnedSemaphorePermit, &'static str> {
+        Arc::clone(&self.0)
+            .try_acquire_owned()
+            .map_err(|err| match err {
+                TryAcquireError::NoPermits => codes::DB_BUSY,
+                TryAcquireError::Closed => codes::DB_UNAVAILABLE,
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn available_permits(&self) -> usize {
+        self.0.available_permits()
+    }
+}
+
+/// Sets its flag when dropped. Held by the request future, so a client that
+/// drops the request stops the blocking read it started. It also fires after a
+/// read that already finished, where there is nothing left to stop.
+struct CancelOnDrop(CancelFlag);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// The read limit for a request whose body has just been parsed: its budget
+/// starts now, before the gate and the blocking-worker queue.
+fn request_read_limit() -> ReadLimit {
+    ReadLimit::from(Instant::now() + Duration::from_millis(QUERY_BUDGET_MS))
+}
+
+/// Whether `limit` has already stopped the read: its flag is set or its
+/// deadline has passed.
+fn read_stopped(limit: &ReadLimit) -> bool {
+    limit.cancel.is_cancelled() || Instant::now() >= limit.deadline
+}
 
 /// The closed request vocabulary. `deny_unknown_fields` plus the closed
 /// enums make every out-of-vocabulary body -- an unknown key, an unknown token,
@@ -278,7 +347,8 @@ pub(super) async fn handler(
     let Ok(parsed) = parse_body(&body) else {
         return invalid_query();
     };
-    render(build(&state, parsed, OffsetDateTime::now_utc()).await)
+    let limit = request_read_limit();
+    render(build(&state, parsed, OffsetDateTime::now_utc(), limit).await)
 }
 
 /// Serialize a finished panel. Rendering is EXPLICIT rather than through the
@@ -319,36 +389,30 @@ fn invalid_query() -> Response {
         .into_response()
 }
 
-/// Run the aggregate under panel isolation and record its availability edge.
+/// Run the aggregate under the ledger-read gate and panel isolation, and record
+/// its availability edge.
+///
+/// `limit` is fixed by the caller before this is entered, so the gate and the
+/// blocking-worker queue spend the same budget the read does. Dropping this
+/// future sets `limit`'s flag.
 ///
 /// The two request modes have their own edge detectors: a series read has a
 /// distinct failure profile (a wider GROUP BY over a larger temp b-tree), so
 /// sharing one detector would let a healthy aggregate poll mask a consistently
-/// failing series poll. Exactly ONE of them sees each request.
+/// failing series poll. Exactly ONE of them sees each request, busy and
+/// timed-out answers included.
 async fn build(
     state: &StatusState,
     parsed: ParsedQuery,
     now: OffsetDateTime,
+    limit: ReadLimit,
 ) -> Panel<QueryResult> {
+    let _cancel_on_drop = CancelOnDrop(limit.cancel.clone());
     let is_series = parsed.bucket.is_some();
-    let db_path = state.usage_db_path.clone();
-    // ONE pinned config snapshot for the whole request; its price tables are
-    // pinned once on the blocking worker.
-    let pricer = state.pricer();
-    // Stamped before the blocking read so a lock wait cannot skew the
-    // freshness marker.
-    let as_of = now_utc_rfc3339();
-    let panel = guard_panel(
-        &state.builder_capacity,
-        SCHEMA_VERSION,
-        codes::DB_UNAVAILABLE,
-        move || {
-            let zone = LocalZone::load();
-            let (spec, bucket) = parsed.resolve(&zone, now);
-            build_panel(&db_path, spec, bucket, &pricer.pin(), as_of, &zone, now)
-        },
-    )
-    .await;
+    let panel = match state.ledger_read.try_acquire() {
+        Ok(permit) => read_under_permit(state, permit, parsed, now, limit).await,
+        Err(code) => Panel::unavailable(SCHEMA_VERSION, code),
+    };
     if is_series {
         state.observability.query_series.record(&panel);
     } else {
@@ -357,13 +421,61 @@ async fn build(
     panel
 }
 
-/// Open the ledger read-only, run the deadline-bounded grouped aggregate, and
-/// map the outcome to a panel. Runs on a blocking worker (SQLite is
-/// synchronous); the connection is opened and dropped within this call.
+/// Hand the read to a blocking worker that owns `permit` until it ends.
+async fn read_under_permit(
+    state: &StatusState,
+    permit: OwnedSemaphorePermit,
+    parsed: ParsedQuery,
+    now: OffsetDateTime,
+    limit: ReadLimit,
+) -> Panel<QueryResult> {
+    let db_path = state.usage_db_path.clone();
+    // ONE pinned config snapshot for the whole request; its price tables are
+    // pinned once on the blocking worker.
+    let pricer = state.pricer();
+    // Stamped before the blocking read so a lock wait cannot skew the
+    // freshness marker.
+    let as_of = now_utc_rfc3339();
+    #[cfg(test)]
+    let stall = state.test_hooks.stall_query_read;
+    run_blocking_panel(permit, SCHEMA_VERSION, codes::DB_UNAVAILABLE, move || {
+        #[cfg(test)]
+        if stall {
+            stall_until_stopped(&limit);
+        }
+        let zone = LocalZone::load();
+        let (spec, bucket) = parsed.resolve(&zone, now);
+        build_panel(
+            &db_path,
+            spec,
+            bucket,
+            &pricer.pin(),
+            as_of,
+            &zone,
+            now,
+            &limit,
+        )
+    })
+    .await
+}
+
+/// Stand in for a read that runs until its limit stops it, the way the
+/// progress handler stops a long statement. See
+/// `StatusTestHooks::stall_query_read`.
+#[cfg(test)]
+fn stall_until_stopped(limit: &ReadLimit) {
+    while !read_stopped(limit) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Open the ledger read-only, run the grouped aggregate under `limit`, and map
+/// the outcome to a panel. Runs on a blocking worker (SQLite is synchronous);
+/// the connection is opened and dropped within this call.
 ///
-/// The deadline is anchored here rather than at request arrival so the budget
-/// measures the QUERY, not the time the request spent waiting for a
-/// concurrency permit or a blocking worker.
+/// A limit that has already stopped the read (its request was dropped while
+/// this waited for a worker, or the budget ran out in the queue) answers
+/// `query_timeout` before the ledger is opened.
 ///
 /// A requested series resolves its grid here, since an all-time window anchors
 /// on the ledger's earliest row -- an O(log n) index probe, run before the
@@ -371,6 +483,11 @@ async fn build(
 /// bound and the resolved anchor never falls below it, so replacing
 /// `spec.from_ms` with that anchor selects the SAME rows and leaves the groups
 /// and totals identical to the non-series path.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's parts are resolved on the async side and the \
+              blocking worker; bundling them would only rename the list"
+)]
 fn build_panel(
     db_path: &Path,
     mut spec: QuerySpec,
@@ -379,8 +496,11 @@ fn build_panel(
     as_of: String,
     zone: &LocalZone,
     now: OffsetDateTime,
+    limit: &ReadLimit,
 ) -> Panel<QueryResult> {
-    let deadline = Instant::now() + Duration::from_millis(QUERY_BUDGET_MS);
+    if read_stopped(limit) {
+        return Panel::unavailable(SCHEMA_VERSION, codes::QUERY_TIMEOUT);
+    }
     let mut db = match open_readonly_fastfail(db_path) {
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
@@ -416,7 +536,7 @@ fn build_panel(
             }
         }
     };
-    match query(&mut db, &spec, |row| pricer.price(row), deadline) {
+    match query(&mut db, &spec, |row| pricer.price(row), limit.clone()) {
         Ok(mut result) => {
             if let Some(series) = empty_series {
                 result.series = Some(series);
