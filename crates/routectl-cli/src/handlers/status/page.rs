@@ -1660,7 +1660,6 @@ mod tests {
     #[test]
     fn the_query_route_budgets_sum_inside_the_browser_query_abort() {
         let timeout_ms = script_ms("QUERY_TIMEOUT_MS");
-        let cadence_ms = script_ms("BASE_MS");
 
         let body_read_ms = u64::try_from(super::super::query::BODY_READ_TIMEOUT.as_millis())
             .expect("body read timeout fits in u64 ms");
@@ -1671,10 +1670,71 @@ mod tests {
             "BODY_READ_TIMEOUT + QUERY_BUDGET_MS = {server_ms}ms exceeds the browser QUERY \
              abort QUERY_TIMEOUT_MS = {timeout_ms}ms"
         );
+    }
+
+    /// The condition of the `if (...) {` each `queryRound()` call in `body`
+    /// opens, whitespace removed. A call that is not the first statement of an
+    /// `if` block yields an empty condition, so an unguarded call reads as
+    /// missing the guard rather than borrowing an earlier, unrelated `if`.
+    fn query_round_call_conditions(body: &str) -> Vec<String> {
+        let code: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        code.match_indices("queryRound();")
+            .map(|(at, _)| {
+                let Some(before) = code[..at].strip_suffix("){") else {
+                    return String::new();
+                };
+                before
+                    .rfind("if(")
+                    .map(|open| before[open + "if(".len()..].to_string())
+                    .filter(|cond| !cond.contains('{') && !cond.contains(';'))
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The QUERY abort outlasts the GET cadence (see
+    /// `crate::server::status_gate`'s module docs), so the per-round nudge in
+    /// `runRound` must skip while a query is in flight; otherwise every round
+    /// would supersede a slow read before it could answer.
+    #[test]
+    fn the_cadence_nudge_never_supersedes_an_in_flight_query() {
+        let conditions = query_round_call_conditions(&function_body("runRound"));
+
         assert!(
-            timeout_ms < cadence_ms,
-            "QUERY_TIMEOUT_MS = {timeout_ms}ms must stay under the BASE_MS = {cadence_ms}ms cadence"
+            !conditions.is_empty(),
+            "runRound must nudge the QUERY with a `queryRound()` call"
         );
+        for cond in &conditions {
+            let conjuncts: Vec<&str> = cond.split("&&").collect();
+            assert!(
+                !cond.contains("||") && conjuncts.contains(&"!queryInFlight()"),
+                "runRound's nudge `if ({cond})` must require `!queryInFlight()` as a conjunct"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_round_call_condition_is_read_from_its_enclosing_if() {
+        let cases = [
+            (
+                "guarded",
+                "if (a < 0 && !queryInFlight() && b()) { queryRound(); }",
+                "a<0&&!queryInFlight()&&b()",
+            ),
+            ("unguarded", "x(); queryRound();", ""),
+            (
+                "after an unrelated if",
+                "if (!queryInFlight()) { y(); } queryRound();",
+                "",
+            ),
+        ];
+        for (label, body, expected) in cases {
+            assert_eq!(
+                query_round_call_conditions(body),
+                vec![expected.to_string()],
+                "{label}"
+            );
+        }
     }
 
     #[test]

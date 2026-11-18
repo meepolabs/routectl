@@ -4847,7 +4847,8 @@ integration on the response shape before 1.0.
 
 The server runs one query read at a time. A query that arrives while another
 is still reading answers at once with an unavailable panel carrying `db_busy`;
-retry it once the first answers. The read's time budget starts when the body
+retry it once the first answers. The read has 10 s; a read that runs longer
+answers `query_timeout`. The budget starts when the body
 has been read, so time spent waiting for a worker counts against it, and a
 read whose budget ran out before it started answers `query_timeout` without
 touching the ledger. A client that disconnects mid-read stops its read, so the

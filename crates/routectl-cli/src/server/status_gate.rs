@@ -19,12 +19,13 @@
 //! |---|---|---|
 //! | [`STATUS_MAX_INFLIGHT`] = 4 | this module | admitted concurrent `/status*` requests, and equally concurrent blocking GET panel builders |
 //! | ledger-read gate = 1 permit | `handlers::status::query` | concurrent `/status/query` ledger reads; a second one answers `db_busy` without waiting |
-//! | [`QUERY_BUDGET_MS`] = 2000 | this module | one `/status/query` grouped aggregate |
+//! | [`QUERY_BUDGET_MS`] = 10000 | this module | one `/status/query` ledger read, from the body parse to the answer |
 //! | [`USAGE_BUDGET_MS`] = 2500 | this module | one whole `/status/usage` panel build |
 //! | [`AGGREGATE_RESERVE_MS`] = 1000 | this module | room the `/status` aggregate leaves after the usage budget for its other panels and the response write |
 //! | `SERVED_CACHE_READ_BUDGET` = 250ms | `commands::doctor::cache_section` | the doctor panel's cache-ignore ledger read, one share of [`AGGREGATE_RESERVE_MS`] |
 //! | `BODY_READ_TIMEOUT` = 1000ms | `handlers::status::query` | how long that route waits for the client's request body |
-//! | `TIMEOUT_MS` = 3500 / `QUERY_TIMEOUT_MS` = 3500 | `dash_00_state.js` | the browser's own aborts: the GET one covers `/status` and `/status/usage`, the QUERY one covers `/status/query` only |
+//! | `TIMEOUT_MS` = 3500 / `QUERY_TIMEOUT_MS` = 12000 | `dash_00_state.js` | the browser's own aborts: the GET one covers `/status` and `/status/usage`, the QUERY one covers `/status/query` only |
+//! | `BASE_MS` = 5000 | `dash_00_state.js` | the dashboard's GET poll cadence, which also nudges the visible query |
 //!
 //! **The sum identity.** On `/status/query` the body read and the panel
 //! deadline are SERIAL in one handler (the handler awaits `to_bytes` under
@@ -33,16 +34,27 @@
 //! must stay inside the client's QUERY abort:
 //!
 //! ```text
-//! BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 1000 + 2000 = 3000 <= 3500 (QUERY_TIMEOUT_MS)
+//! BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 1000 + 10000 = 11000 <= 12000 (QUERY_TIMEOUT_MS)
 //! ```
 //!
-//! Raising either term alone inverts it: at 2000 + 2000 = 4000 the browser
-//! aborts before the server can shed its own panel, turning a clean
-//! `query_timeout` into a client-side timeout. Whoever changes one term must
-//! re-derive the sum. The third number lives in JavaScript, so no compile-time
-//! assertion can carry it; `handlers::status::page`'s
+//! The remaining 1000ms is slack for the unbudgeted time listed below. Raising
+//! either term alone spends that slack first: at 2000 + 10000 = 12000 the sum
+//! still fits but nothing is left for the ledger open or the response write,
+//! and one millisecond more inverts it, so the browser aborts before the server
+//! can shed its own panel, turning a clean `query_timeout` into a client-side
+//! timeout. Whoever changes one term must re-derive the sum. The third number
+//! lives in JavaScript, so no compile-time assertion can carry it;
+//! `handlers::status::page`'s
 //! `the_query_route_budgets_sum_inside_the_browser_query_abort` test reads it
 //! out of the served script and fails when the sum no longer fits.
+//!
+//! **The query abort outlasts the poll cadence.** `QUERY_TIMEOUT_MS` = 12000 is
+//! longer than `BASE_MS` = 5000, so a slow query read spans more than one GET
+//! round. Each round nudges the visible query, and the nudge is skipped while a
+//! query is in flight (`queryInFlight()` in `dash_30_transport.js`); without
+//! that check a nudge would abort and reissue the slow read every 5000ms, and
+//! it could never finish. The same page test module pins the check in the
+//! served script.
 //!
 //! **What the query budget covers.** The query deadline is fixed right after
 //! the body parse, BEFORE the ledger-read gate and the `spawn_blocking`
@@ -52,7 +64,7 @@
 //! answers `query_timeout` without opening the ledger.
 //!
 //! **What the identity does NOT bound.** It covers the two BUDGETED stretches,
-//! not end-to-end request time, so 3000 <= 3500 is necessary but not sufficient
+//! not end-to-end request time, so 11000 <= 12000 is necessary but not sufficient
 //! for "the server always sheds before the browser aborts". Some time inside
 //! the budget is still out of the deadline's reach, and some sits after it:
 //!
@@ -62,7 +74,7 @@
 //!   deadline.
 //! - JSON serialization and the response write, after the read.
 //!
-//! So a slow surface CAN exceed 3500ms and be client-aborted rather than
+//! So a slow surface CAN exceed 12000ms and be client-aborted rather than
 //! returning a clean `query_timeout`. That is a degradation, not a correctness
 //! break: the panel is read-only and the client retries.
 //!
@@ -78,10 +90,10 @@
 //! aggregate composes its panels sequentially). The GET panels share
 //! [`STATUS_MAX_INFLIGHT`] builder permits, each held for roughly
 //! [`USAGE_BUDGET_MS`] = 2500ms at worst; a `/status/query` read holds the
-//! ledger-read gate's one permit instead, for roughly [`QUERY_BUDGET_MS`], and
-//! never a builder permit, so a long query read cannot delay a live panel. It
-//! still counts as one admitted request while its response future lives.
-//! Roughly, not exactly: the deadline
+//! ledger-read gate's one permit instead, for roughly [`QUERY_BUDGET_MS`] =
+//! 10000ms at worst, and never a builder permit, so a long query read cannot
+//! delay a live panel. It still counts as one admitted request while its
+//! response future lives. Roughly, not exactly: the deadline
 //! is checked from a SQLite progress handler every `PROGRESS_OPS` VM ops, and
 //! opening the ledger, the `earliest_ts_start` anchor probe, the caller-side
 //! fold and the JSON serialization all sit outside its reach, so a builder can
@@ -145,20 +157,23 @@ use crate::server::request_id::{self, RequestId};
 /// immediately as a 503 (never queues).
 pub const STATUS_MAX_INFLIGHT: usize = 4;
 
-/// Wall-clock budget for ONE `/status/query` grouped aggregate, milliseconds.
-/// Deliberately a hardcoded const, not a config knob: like
-/// [`STATUS_MAX_INFLIGHT`] it bounds a fixed-cost diagnostic read rather than
-/// expressing an operator preference. An overrun sheds as an unavailable panel
-/// (`query_timeout`), never a 500.
+/// Wall-clock budget for ONE `/status/query` ledger read, milliseconds,
+/// counted from the body parse (worker queue time included). Deliberately a
+/// hardcoded const, not a config knob: like [`STATUS_MAX_INFLIGHT`] it bounds
+/// a fixed-cost diagnostic read rather than expressing an operator preference.
+/// An overrun sheds as an unavailable panel (`query_timeout`), never a 500.
 ///
 /// Sized to bound a runaway scan without cutting a legitimate large-ledger read
 /// short. A fine-grained GROUP BY is NOT sub-second at scale: on a million-row
 /// window it measures around 1.0s unpriced-aggregate and around 1.2s with a
-/// bucketed series, so a 1000ms budget shed real reads.
+/// bucketed series, and an all-history window over a multi-million-row ledger
+/// read from a cold page cache takes several seconds. The read
+/// runs alone under the ledger-read gate and holds no GET builder permit, so a
+/// long budget here delays no live panel.
 ///
 /// Raising it is not a local decision -- it is one term of the sum identity in
 /// this module's own docs, and cannot move without the other.
-pub const QUERY_BUDGET_MS: u64 = 2000;
+pub const QUERY_BUDGET_MS: u64 = 10_000;
 
 /// Wall-clock budget for ONE `/status/usage` panel build, milliseconds,
 /// covering the WHOLE collection (all five ledger reads on one connection),

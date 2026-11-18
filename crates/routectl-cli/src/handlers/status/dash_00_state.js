@@ -113,13 +113,15 @@
   // covering the whole exchange -- connect, send, server work, and body decode
   // (see safeRequest); the client enforces no decomposition of it.
   // /status/query is the one route that reads a client-supplied body and then
-  // runs a grouped ledger scan, and those two server-side budgets are sized to
-  // sum below this. Those budgets do not cover
-  // queueing, so a saturated surface can still abort here rather than returning
-  // a served-but-unavailable panel; that is why a timeout is treated as
-  // transport failure and backed off, not as a panel verdict. Still under the 5s
-  // cadence, so a slow QUERY cannot overlap its own next scheduled attempt.
-  var QUERY_TIMEOUT_MS = 3500;
+  // runs a grouped ledger scan, and those two server-side budgets (1s body
+  // read + 10s read) are sized to sum below this with 1s of slack. Some server
+  // time sits outside those budgets (opening the ledger, the response write),
+  // so a slow surface can still abort here rather than returning a
+  // served-but-unavailable panel; that is why a timeout is treated as
+  // transport failure and backed off, not as a panel verdict. Longer than the
+  // 5s cadence: the cadence nudge skips while a QUERY is in flight
+  // (queryInFlight), so a slow QUERY is never superseded by its own top-up.
+  var QUERY_TIMEOUT_MS = 12000;
   var SKEW_TOLERANCE_SEC = 2;      // future as_of within this is not clock skew
   var FRESH_SLACK_MS = 3000;       // grace past the due round before "stale"
 
