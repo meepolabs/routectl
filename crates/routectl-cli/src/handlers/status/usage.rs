@@ -7,8 +7,8 @@
 //! and maps the result to an aggregates-only DTO. It never caches a
 //! connection, never touches the writer handle, and never exposes request
 //! rows, ids, bodies, or prompts -- only rollups, windowed totals, the
-//! per-seat quota snapshots, the would-trim summary, and the window's
-//! observation totals with its completeness verdict.
+//! per-seat quota snapshots, and the window's observation totals with its
+//! completeness verdict.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,9 +22,8 @@ use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 use routectl_usage::{
-    AggRow, DeadlineGuard, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb,
-    WouldTrimSummary, aggregate, errors_by_class, latest_quota_by_seat, open_readonly_fastfail,
-    would_trim_summary,
+    AggRow, DeadlineGuard, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb, aggregate,
+    errors_by_class, latest_quota_by_seat, open_readonly_fastfail,
 };
 
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
@@ -41,8 +40,11 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 /// `excluded_<scope>` counts). At 6 the totals and every group gained
 /// `cache_write_tokens` and `cache_write_present`, the cache writes of both
 /// ledger eras; `cache_write_5m` / `cache_write_1h` now cover only rows written
-/// before the ledger recorded a write total, which leave them NULL.
-pub const SCHEMA_VERSION: u32 = 6;
+/// before the ledger recorded a write total, which leave them NULL. At 7 the
+/// panel dropped its `would_trim` block: no dashboard view rendered it, so the
+/// panel no longer pays for that windowed ledger read. The summary stays
+/// available from `routectl usage --detail` and the doctor `would_trim` panel.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The `window` query parameter for `GET /status/usage`.
 #[derive(Debug, Deserialize)]
@@ -52,8 +54,8 @@ pub(super) struct WindowQuery {
 
 /// Aggregates-only usage payload. Carries per-`(alias, provider, model,
 /// upstream)` rollups, windowed totals, one latest quota snapshot per seat,
-/// the would-trim summary, and the window's observation totals. It never
-/// carries request rows, ids, bodies, or prompts.
+/// and the window's observation totals. It never carries request rows, ids,
+/// bodies, or prompts.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct UsagePanel {
     /// The resolved calendar window token: `today`, `week`, `month`, `all`.
@@ -65,7 +67,6 @@ pub(super) struct UsagePanel {
     totals: UsageTotals,
     groups: Vec<UsageGroup>,
     quota: Vec<UsageQuota>,
-    would_trim: UsageWouldTrim,
     /// The window's summed per-request observation counts, its ledger gaps,
     /// and whether its rows are complete.
     observation: WindowObservation,
@@ -205,17 +206,6 @@ struct UsageQuota {
     reset_ms: Option<i64>,
 }
 
-/// Windowed steady-state would-trim opportunity summary.
-#[derive(Debug, Clone, Default, Serialize)]
-struct UsageWouldTrim {
-    candidate_requests: i64,
-    would_trim_tokens: i64,
-    verdict_met: i64,
-    verdict_unmet: i64,
-    verdict_cold: i64,
-    verdict_unpriced: i64,
-}
-
 /// Map the `window` query value to its flag and canonical token. An unknown
 /// or absent value defaults to `today`.
 fn parse_window(raw: Option<&str>) -> (WindowFlag, &'static str) {
@@ -294,11 +284,11 @@ fn build_panel(
     }
 }
 
-/// Run the five read-only ledger queries and assemble the DTO. On a query
+/// Run the four read-only ledger queries and assemble the DTO. On a query
 /// failure, returns the mapped shed code.
 ///
 /// ONE deadline covers the whole collection rather than any single statement:
-/// three of the reads full-scan the ledger on the all-time window the
+/// several of the reads full-scan the ledger on the all-time window the
 /// dashboard polls, so bounding one of them would not bound the panel. The
 /// guard is per-CONNECTION and this connection is opened per request, so a
 /// single install reaches every statement below with no stale-handler risk
@@ -316,19 +306,9 @@ fn collect(
     let breakdown =
         errors_by_class(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     let quota = latest_quota_by_seat(db).map_err(|e| query_error_code(&e))?;
-    let would_trim =
-        would_trim_summary(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     let observation = window_observation(db, bounds.from_ms, bounds.to_ms, health)
         .map_err(|e| query_error_code(&e))?;
-    Ok(assemble(
-        token,
-        bounds,
-        rows,
-        breakdown,
-        quota,
-        would_trim,
-        observation,
-    ))
+    Ok(assemble(token, bounds, rows, breakdown, quota, observation))
 }
 
 /// Fold the query results into the wire DTO. Totals are summed over the
@@ -349,7 +329,6 @@ fn assemble(
     rows: Vec<AggRow>,
     breakdown: Vec<(GroupKey, String, i64)>,
     quota: Vec<QuotaSnapshot>,
-    would_trim: WouldTrimSummary,
     observation: WindowObservation,
 ) -> UsagePanel {
     let mut per_group: std::collections::HashMap<GroupKey, BTreeMap<String, i64>> =
@@ -394,7 +373,6 @@ fn assemble(
         totals,
         groups,
         quota: quota.into_iter().map(map_quota).collect(),
-        would_trim: map_would_trim(would_trim),
         observation,
     }
 }
@@ -447,17 +425,6 @@ fn map_quota(snapshot: QuotaSnapshot) -> UsageQuota {
         // Ledger quota resets are epoch SECONDS; scale to ms so the `_ms`
         // field name is truthful and the client's ms formatter is correct.
         reset_ms: snapshot.reset.and_then(|s| s.checked_mul(1000)),
-    }
-}
-
-const fn map_would_trim(summary: WouldTrimSummary) -> UsageWouldTrim {
-    UsageWouldTrim {
-        candidate_requests: summary.candidate_requests,
-        would_trim_tokens: summary.would_trim_tokens,
-        verdict_met: summary.verdict_met,
-        verdict_unmet: summary.verdict_unmet,
-        verdict_cold: summary.verdict_cold,
-        verdict_unpriced: summary.verdict_unpriced,
     }
 }
 
@@ -621,9 +588,8 @@ mod tests {
     async fn empty_healthy_ledger_renders_available_with_zeroed_data() {
         // A fresh, healthy WAL ledger with no rows must render an AVAILABLE
         // panel (data present, unavailable null) rather than shedding to
-        // db_unavailable. Regression: the would-trim summary's verdict
-        // aggregates returned SQL NULL over zero rows, which the row mapping
-        // read as a non-nullable i64 and surfaced as a query error.
+        // db_unavailable: a SUM over zero rows is SQL NULL, and a read that
+        // maps it as a non-nullable i64 surfaces a query error.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         // Create the ledger (WAL, migrated) but insert no rows.
@@ -641,8 +607,6 @@ mod tests {
             "empty healthy ledger must carry a data payload: {json}"
         );
         assert_eq!(json["data"]["totals"]["requests"], 0);
-        assert_eq!(json["data"]["would_trim"]["candidate_requests"], 0);
-        assert_eq!(json["data"]["would_trim"]["verdict_met"], 0);
         assert_eq!(
             json["data"]["quota"].as_array().map(Vec::len),
             Some(0),
@@ -1062,7 +1026,6 @@ mod tests {
                 1,
             )],
             Vec::new(),
-            WouldTrimSummary::default(),
             WindowObservation {
                 from_ms: 0,
                 to_ms: 100,
@@ -1089,13 +1052,7 @@ mod tests {
             );
         }
         // The aggregate shape IS present.
-        for expected in [
-            "totals",
-            "groups",
-            "would_trim",
-            "requests",
-            "errors_by_class",
-        ] {
+        for expected in ["totals", "groups", "requests", "errors_by_class"] {
             assert!(
                 text.contains(expected),
                 "missing aggregate field {expected}"
@@ -1486,7 +1443,7 @@ mod tests {
             json["unavailable"].is_null(),
             "a migrated v12 DB must read as available: {json}"
         );
-        assert_eq!(json["schema_version"], 6);
+        assert_eq!(json["schema_version"], 7);
         assert_eq!(json["data"]["totals"]["requests"], 2);
     }
 
@@ -1528,16 +1485,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_panel_reports_schema_version_six() {
+    async fn usage_panel_reports_schema_version_seven_without_would_trim() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_ledger(
             &path,
             &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
         );
-        let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["schema_version"], 6);
+        for uri in ["/status/usage", "/status/usage?window=all"] {
+            let (status, json) = get_usage(state_with_ledger(path.clone()), uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(json["schema_version"], 7, "{uri}");
+            let data = json["data"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{uri} must carry a data object: {json}"));
+            assert!(data.contains_key("observation"), "{uri}: {json}");
+            assert!(
+                !data.contains_key("would_trim"),
+                "{uri} must not carry would_trim: {json}"
+            );
+        }
     }
 
     /// Build a `StatusState` over the caller's usage handle, whose counters

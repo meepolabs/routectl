@@ -1311,7 +1311,6 @@ class WeldTests(unittest.TestCase):
         cases = [
             ("UsagePanel", sorted(data), "usage.rs"),
             ("UsageTotals", sorted(data["totals"]), "usage.rs"),
-            ("UsageWouldTrim", sorted(data["would_trim"]), "usage.rs"),
             ("WindowObservation", sorted(data["observation"]), "usage_health.rs"),
         ]
         for struct, keys, source in cases:

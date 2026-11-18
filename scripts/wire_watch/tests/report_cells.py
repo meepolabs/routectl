@@ -87,13 +87,9 @@ def usage_text() -> str:
         "excluded_model": 0, "excluded_target": 0, "excluded_probe_run": 0, "gap_rows": 0, "gap_dropped": 0,
         "complete": True,
     }
-    would_trim = {
-        "candidate_requests": 0, "would_trim_tokens": 0, "verdict_met": 0, "verdict_unmet": 0,
-        "verdict_cold": 0, "verdict_unpriced": 0,
-    }
     data = {
         "window": "all", "from_ms": 0, "to_ms": 1, "totals": totals, "groups": [], "quota": [],
-        "would_trim": would_trim, "observation": observation,
+        "observation": observation,
     }
     return json.dumps({
         "schema_version": evidence.USAGE_SCHEMA_VERSION,

@@ -2928,7 +2928,7 @@ the per-window observation totals include them. A body that fails to
 parse writes no row.
 
 **Walk counts on the status surface.** The `observation` block on
-`/status/usage` (usage panel schema 6, for the requested window) and on
+`/status/usage` (usage panel schema 7, for the requested window) and on
 `/status/doctor` (doctor schema 32, for today) sums five walk counts over
 every `requests` row in the window, token-count rows included:
 `request_caused_failures` (failed attempts the request itself caused,
@@ -4845,7 +4845,7 @@ the count of requests that reported a cache-write value (an observed zero
 counts, a request reporting nothing does not). `cache_write_5m` and
 `cache_write_1h` sum only rows written before usage schema 21; newer rows
 leave those columns empty, so read `cache_write_tokens` for the write
-volume. The `/status/usage` panel (schema 6) carries the same two fields,
+volume. The `/status/usage` panel (schema 7) carries the same two fields,
 with the same meaning, on its `totals` and on every group, and the
 dashboard's cache-write figures read `cache_write_tokens`.
 
