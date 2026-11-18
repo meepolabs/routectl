@@ -517,6 +517,8 @@ pub(super) const fn busy_or_unavailable(code: Option<ErrorCode>) -> &'static str
 #[cfg(test)]
 #[path = "usage_equivalence_tests.rs"]
 mod equivalence_tests;
+#[cfg(test)]
+pub(super) mod fixture;
 
 #[cfg(test)]
 #[path = "usage_cache_write_surfaces_tests.rs"]

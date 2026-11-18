@@ -28,6 +28,8 @@ mod health;
 mod learned_seed;
 mod page;
 #[cfg(test)]
+mod panel_fixtures;
+#[cfg(test)]
 pub(crate) mod production_source;
 mod query;
 mod router_view;

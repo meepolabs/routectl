@@ -7063,6 +7063,24 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/learned_seed.rs` -- `cfg(test)` fixtures for the served
   doctor and health tests: a one-model config and a router warmed from a seeded
   ledger through the serve bootstrap's own warm
+- `src/handlers/status/panel_fixtures.rs` -- `cfg(test)` fully populated
+  payloads: the shared fixture config, clock and route targets, `aggregate_json()`
+  for `/status`, and the density walk (no empty array, no always-null key, beyond
+  named exceptions) the sidecar runs over every panel fixture
+- `src/handlers/status/usage/fixture.rs` -- `cfg(test)` `populated_usage()`: the
+  usage envelope folded by the panel's own `assemble`
+- `src/handlers/status/health/fixture.rs` -- `cfg(test)` `populated_health()`:
+  every target eligibility state, pools, seat driver, learned rows and wire-check
+  rows, through the panel's own mappers
+- `src/handlers/status/config/fixture.rs` -- `cfg(test)` `populated_config()`:
+  the fixture config's effective view priced by a refreshed and a shipped table,
+  through the panel's `build_panel`
+- `src/handlers/status/doctor/fixture.rs` -- `cfg(test)` `populated_doctor()`: a
+  no-network report in the router's DTOs (never gathered: the gather probes the
+  credential store) beside the panel's reachability mapper and live lane counters
+- `src/handlers/status/query/fixture.rs` -- `cfg(test)` `populated_query()`
+  (grouped) and `populated_query_series()` (bucketed): a seeded ledger read
+  through the route's `build_panel` and the facade's pricer
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>

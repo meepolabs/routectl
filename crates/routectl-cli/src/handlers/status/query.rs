@@ -634,6 +634,8 @@ pub(super) fn build_panel(
 }
 
 #[cfg(test)]
+pub(super) mod fixture;
+#[cfg(test)]
 #[path = "query_tests.rs"]
 mod tests;
 
