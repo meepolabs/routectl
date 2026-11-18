@@ -237,3 +237,78 @@ fn the_table_accepts_well_formed_rows_and_refuses_a_mixed_or_unknown_shape() {
         .expect("count");
     assert_eq!(rows, 3);
 }
+
+/// A `windows` row with the four invariant-bearing columns set.
+fn window_case(
+    name: &str,
+    window_secs: i64,
+    length_class: &'static str,
+    used: f64,
+    started: &'static str,
+) -> (String, RowCase<'static>) {
+    (
+        name.to_string(),
+        (
+            "",
+            "windows",
+            Some(window_secs),
+            None,
+            Some(length_class),
+            Some(used),
+            Some(9),
+            Some(started),
+        ),
+    )
+}
+
+#[test]
+fn the_table_holds_window_rows_to_the_accepted_reading_invariants() {
+    // Arrange
+    let dir = TempDir::new().expect("tempdir");
+    let db = open(dir.path().join("usage.db")).expect("open fresh");
+    let accepted = [
+        window_case("the shortest window", 1, "short", 0.5, "yes"),
+        window_case("one day is short", 86_400, "short", 0.5, "yes"),
+        window_case("one day and a second is long", 86_401, "long", 0.5, "yes"),
+        window_case("31 days", 2_678_400, "long", 0.5, "yes"),
+        window_case("nothing used", 18_000, "short", 0.0, "yes"),
+        window_case("fully used", 18_000, "short", 1.0, "yes"),
+        window_case("unstarted with nothing used", 18_000, "short", 0.0, "no"),
+        window_case("unknown start with use", 18_000, "short", 0.5, "unknown"),
+    ];
+    let refused = [
+        window_case("a zero length", 0, "short", 0.5, "yes"),
+        window_case("a negative length", -1, "short", 0.5, "yes"),
+        window_case("31 days and a second", 2_678_401, "long", 0.5, "yes"),
+        window_case("one day classed long", 86_400, "long", 0.5, "yes"),
+        window_case(
+            "one day and a second classed short",
+            86_401,
+            "short",
+            0.5,
+            "yes",
+        ),
+        window_case("used below zero", 18_000, "short", -0.01, "yes"),
+        window_case("used above one", 18_000, "short", 1.01, "yes"),
+        window_case("NaN used, stored as NULL", 18_000, "short", f64::NAN, "yes"),
+        window_case("unstarted with use", 18_000, "short", 0.01, "no"),
+    ];
+
+    // Act + Assert
+    for (name, case) in &accepted {
+        insert(db.conn(), "poll", case).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    for (name, case) in &refused {
+        let err = insert(db.conn(), "poll", case).expect_err(name);
+        assert_eq!(
+            err.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation),
+            "{name}"
+        );
+    }
+    let rows: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM account_readings", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(rows, i64::try_from(accepted.len()).expect("small"));
+}

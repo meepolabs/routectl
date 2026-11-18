@@ -110,6 +110,13 @@ fn a_fresh_file_and_an_upgraded_previous_file_carry_the_same_account_readings_sh
     let current = (SCHEMA_VERSION, SCHEMA_VERSION.to_string());
     assert_eq!(stamps(&conn), current);
     assert_eq!(stamps(fresh.conn()), current);
+    let impossible_window = "INSERT INTO account_readings (ts_ms, account, source, report, \
+         window_secs, length_class, used, started) \
+         VALUES (1, 'acct', 'poll', 'windows', -1, 'long', 2.0, 'no')";
+    assert!(
+        conn.execute(impossible_window, []).is_err(),
+        "the upgraded table carries the window CHECKs"
+    );
 }
 
 #[test]

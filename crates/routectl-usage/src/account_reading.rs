@@ -190,25 +190,74 @@ pub fn insert_account_readings(
     Ok(inserted)
 }
 
+/// What one history write did, for the writer's health bookkeeping.
+#[derive(Debug)]
+pub enum HistoryWrite {
+    /// Every row of the observation committed.
+    Committed,
+    /// The observation was dropped for a reason that says nothing about the
+    /// database's ability to take writes: no connection (the open failure was
+    /// already counted on the shared counter), or a row the table refused.
+    Dropped,
+    /// The observation was dropped because SQLite stopped accepting writes;
+    /// the writer routes this through its shared failure path.
+    StorageFailed(rusqlite::Error),
+}
+
 /// The writer's handling of one observation: commit its rows and count the
 /// outcome. A missing connection (the writer is running degraded) or a failed
 /// insert drops the observation and counts one history write error.
 ///
-/// Kept off the writer's shared `write_errors` on purpose: that counter gates
-/// capability pre-flight and the ledger health reading, and a lost history row
-/// says nothing about either.
+/// Only a storage failure is handed back for the shared `write_errors`, which
+/// gates capability pre-flight and the ledger health reading: a full, read-only
+/// or broken database fails every later write too, while a refused row says
+/// nothing about either.
 pub fn persist_account_readings(
     conn: Option<&Connection>,
     rows: &[AccountReadingRow],
     counters: &UsageCounters,
-) {
-    let outcome = conn.map_or(Err(None), |conn| {
-        insert_account_readings(conn, rows).map_err(Some)
-    });
-    match outcome {
-        Ok(_) => counters.incr_account_readings_persisted(),
-        Err(err) => note_write_error(err.as_ref(), rows.len(), counters),
+) -> HistoryWrite {
+    let Some(conn) = conn else {
+        note_write_error(None, rows.len(), counters);
+        return HistoryWrite::Dropped;
+    };
+    match insert_account_readings(conn, rows) {
+        Ok(_) => {
+            counters.incr_account_readings_persisted();
+            HistoryWrite::Committed
+        }
+        Err(err) => {
+            note_write_error(Some(&err), rows.len(), counters);
+            if is_storage_failure(&err) {
+                HistoryWrite::StorageFailed(err)
+            } else {
+                HistoryWrite::Dropped
+            }
+        }
     }
+}
+
+/// Whether `err` says the database itself cannot take writes, as opposed to
+/// refusing one row. BUSY and LOCKED count: they surface only after the
+/// connection's busy timeout has run out.
+fn is_storage_failure(err: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode;
+    matches!(
+        err.sqlite_error_code(),
+        Some(
+            ErrorCode::DiskFull
+                | ErrorCode::SystemIoFailure
+                | ErrorCode::ReadOnly
+                | ErrorCode::DatabaseCorrupt
+                | ErrorCode::NotADatabase
+                | ErrorCode::CannotOpen
+                | ErrorCode::DatabaseBusy
+                | ErrorCode::DatabaseLocked
+                | ErrorCode::PermissionDenied
+                | ErrorCode::FileLockingProtocolFailed
+                | ErrorCode::NoLargeFileSupport
+        )
+    )
 }
 
 fn note_write_error(err: Option<&rusqlite::Error>, rows: usize, counters: &UsageCounters) {

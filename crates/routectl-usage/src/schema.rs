@@ -548,6 +548,12 @@ pub const CREATE_LEDGER_GAPS_TS_INDEX: &str =
 /// the table CHECK enforces. `reset_ms` is NULL when the source reported no
 /// reset. Carries no token, header or body.
 ///
+/// A `windows` row also holds the accepted-reading invariants: a length of one
+/// second to 31 days, a used fraction in `[0, 1]`, the `short` class exactly
+/// for a length of at most one day, and nothing used on an unstarted window.
+/// Those CHECKs read NULL (pass) on a `no_windows` row, whose shape the first
+/// CHECK already pins.
+///
 /// The `source`, `report`, `length_class` and `started` CHECK tokens MUST
 /// match the `as_str` of the matching enum in `account_reading.rs`. Each
 /// column's CHECK stays on that column's own line: the weld test reads it
@@ -573,7 +579,11 @@ CREATE TABLE IF NOT EXISTS account_readings (
         OR (report = 'no_windows'
             AND window_secs IS NULL AND scope IS NULL AND length_class IS NULL
             AND used IS NULL AND reset_ms IS NULL AND started IS NULL)
-    )
+    ),
+    CHECK (window_secs BETWEEN 1 AND 2678400),
+    CHECK (used BETWEEN 0.0 AND 1.0),
+    CHECK (length_class = CASE WHEN window_secs <= 86400 THEN 'short' ELSE 'long' END),
+    CHECK (started <> 'no' OR used = 0.0)
 )";
 
 /// Index over `account_readings.ts_ms` (v23): the retention prune and

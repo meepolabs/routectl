@@ -491,11 +491,7 @@ fn run_writer(
                 state.commit_capability_batch(batch, &counters)
             }
             WriterCommand::AccountReadings(rows) => {
-                crate::account_reading::persist_account_readings(
-                    state.conn.as_ref(),
-                    &rows,
-                    &counters,
-                );
+                state.persist_account_readings(&rows, &counters);
             }
         }
         state.persist_ledger_gaps(&counters);
@@ -967,6 +963,23 @@ impl WriterState {
         }
     }
 
+    /// Persist one account-reading observation. History keeps its own error
+    /// counter for every drop; a storage failure also goes through the shared
+    /// failure path, so a database that stopped taking writes turns the
+    /// writer's health red even while no request or capability row is written.
+    fn persist_account_readings(
+        &mut self,
+        rows: &[crate::account_reading::AccountReadingRow],
+        counters: &Arc<UsageCounters>,
+    ) {
+        use crate::account_reading::{HistoryWrite, persist_account_readings};
+        match persist_account_readings(self.conn.as_ref(), rows, counters) {
+            HistoryWrite::Committed => self.mark_healthy(),
+            HistoryWrite::Dropped => {}
+            HistoryWrite::StorageFailed(err) => self.record_failure(Some(err), counters),
+        }
+    }
+
     /// Count a write failure, emit a rate-limited ERROR, and log the
     /// healthy->degraded transition exactly once on its leading edge.
     fn record_failure(&mut self, err: Option<rusqlite::Error>, counters: &Arc<UsageCounters>) {
@@ -1200,6 +1213,10 @@ INSERT OR IGNORE INTO requests (
     ?81, ?82,
     ?83, ?84
 )";
+
+#[cfg(test)]
+#[path = "writer_history_tests.rs"]
+mod history_tests;
 
 #[cfg(test)]
 mod tests {
