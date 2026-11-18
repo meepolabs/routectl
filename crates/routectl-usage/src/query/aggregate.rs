@@ -590,21 +590,61 @@ pub fn errors_by_class(
     Ok(rows)
 }
 
-pub const LATEST_QUOTA_BY_SEAT_SQL: &str = "\
-SELECT seat, provider_kind, ts_start, quota_claim, quota_status,
-       quota_overage_status, quota_utilization, quota_overage_utilization,
-       quota_reset
-FROM (
-    SELECT seat, provider_kind, ts_start, quota_claim, quota_status,
-           quota_overage_status, quota_utilization, quota_overage_utilization,
-           quota_reset,
-           ROW_NUMBER() OVER (
-               PARTITION BY seat ORDER BY ts_start DESC, rowid DESC) AS rn
-    FROM requests
-    WHERE quota_status IS NOT NULL OR quota_utilization IS NOT NULL
+/// Row eligibility of the latest-quota read: the row carries quota data. Also
+/// the predicate of the v22 partial `(seat, ts_start)` index, which SQLite
+/// uses only where a query's WHERE implies it; a weld test pins the two equal.
+macro_rules! quota_rows {
+    () => {
+        "quota_status IS NOT NULL OR quota_utilization IS NOT NULL"
+    };
+}
+
+#[cfg(test)]
+pub const QUOTA_ROWS_PREDICATE: &str = quota_rows!();
+
+/// One seek per seat over the partial quota index: the recursive `seats`
+/// steps from each seat to the next larger one, and the NULL seat, which no
+/// `>` step reaches, is probed on its own. Each bucket then takes its newest
+/// row by rowid.
+pub const LATEST_QUOTA_BY_SEAT_SQL: &str = concat!(
+    "\
+WITH RECURSIVE seats(seat) AS (
+    SELECT (SELECT lowest.seat FROM requests AS lowest
+            WHERE (",
+    quota_rows!(),
+    ") AND lowest.seat IS NOT NULL
+            ORDER BY lowest.seat LIMIT 1)
+    UNION ALL
+    SELECT (SELECT higher.seat FROM requests AS higher
+            WHERE (",
+    quota_rows!(),
+    ") AND higher.seat > seats.seat
+            ORDER BY higher.seat LIMIT 1)
+    FROM seats
+    WHERE seats.seat IS NOT NULL
+),
+buckets(seat) AS (
+    SELECT seat FROM seats WHERE seat IS NOT NULL
+    UNION ALL
+    SELECT NULL WHERE EXISTS (
+        SELECT 1 FROM requests AS unseated
+        WHERE (",
+    quota_rows!(),
+    ") AND unseated.seat IS NULL)
 )
-WHERE rn = 1
-ORDER BY seat";
+SELECT latest.seat, latest.provider_kind, latest.ts_start, latest.quota_claim,
+       latest.quota_status, latest.quota_overage_status, latest.quota_utilization,
+       latest.quota_overage_utilization, latest.quota_reset
+FROM buckets
+JOIN requests AS latest ON latest.rowid = (
+    SELECT newest.rowid FROM requests AS newest
+    WHERE (",
+    quota_rows!(),
+    ") AND newest.seat IS buckets.seat
+    ORDER BY newest.ts_start DESC, newest.rowid DESC
+    LIMIT 1)
+ORDER BY latest.seat"
+);
 
 /// The most recent quota-bearing row PER SEAT -- one snapshot per credential
 /// identity, newest first within each seat (`ts_start DESC, rowid DESC`).

@@ -12,7 +12,7 @@ use super::*;
 use crate::db::{UsageDb, open};
 use crate::query::{
     AGG_SQL, ERRORS_BY_CLASS_BUCKETED_SQL, ERRORS_BY_CLASS_SQL, LATEST_QUOTA_BY_SEAT_SQL,
-    QUERY_AGG_SQL, SERIES_AGG_SQL,
+    QUERY_AGG_SQL, QUOTA_ROWS_PREDICATE, SERIES_AGG_SQL,
 };
 
 const AGG_INDEX: &str = "idx_requests_agg";
@@ -204,7 +204,7 @@ fn partial_predicate(ddl: &str) -> &str {
 }
 
 #[test]
-fn the_quota_index_is_seat_then_time_over_the_latest_quota_predicate() {
+fn the_quota_index_is_seat_then_time_over_exactly_the_latest_quota_predicate() {
     // Arrange
     let (_dir, db) = fresh_db();
 
@@ -214,8 +214,60 @@ fn the_quota_index_is_seat_then_time_over_the_latest_quota_predicate() {
 
     // Assert
     assert_eq!(columns, ["seat", "ts_start"]);
+    assert_eq!(predicate, QUOTA_ROWS_PREDICATE);
+}
+
+#[test]
+fn every_requests_reference_in_the_latest_quota_read_carries_the_quota_predicate() {
+    // Arrange
+    let guarded = format!("WHERE ({QUOTA_ROWS_PREDICATE}) AND ");
+
+    // Act
+    let references = LATEST_QUOTA_BY_SEAT_SQL
+        .matches("FROM requests AS ")
+        .count();
+    let filtered = LATEST_QUOTA_BY_SEAT_SQL.matches(&guarded).count();
+
+    // Assert: the one `JOIN requests` is the rowid lookup of the chosen row.
+    assert!(references > 0, "the read must name requests");
+    assert_eq!(filtered, references);
+}
+
+#[test]
+fn the_latest_quota_read_seeks_the_quota_index_and_never_scans_requests() {
+    // Arrange
+    let (_dir, db) = fresh_db();
+    let aliases = ["lowest", "higher", "unseated", "newest"];
+
+    // Act
+    let plan = plan(db.conn(), LATEST_QUOTA_BY_SEAT_SQL);
+
+    // Assert
+    for alias in aliases {
+        let prefix = format!("SEARCH {alias} ");
+        assert!(
+            plan.iter()
+                .any(|d| d.starts_with(&prefix) && d.contains(&format!("INDEX {QUOTA_INDEX} "))),
+            "{alias} must seek {QUOTA_INDEX}; plan was {plan:?}"
+        );
+    }
     assert!(
-        LATEST_QUOTA_BY_SEAT_SQL.contains(&format!("WHERE {predicate}\n")),
-        "the latest-quota read must filter on the index predicate `{predicate}` verbatim"
+        plan.iter()
+            .any(|d| d == "SEARCH latest USING INTEGER PRIMARY KEY (rowid=?)"),
+        "the chosen row must be read by rowid; plan was {plan:?}"
+    );
+    let scans: Vec<&String> = plan
+        .iter()
+        .filter(|d| {
+            d.starts_with("SCAN ")
+                && !matches!(
+                    d.as_str(),
+                    "SCAN seats" | "SCAN buckets" | "SCAN CONSTANT ROW"
+                )
+        })
+        .collect();
+    assert!(
+        scans.is_empty(),
+        "no table scan expected; plan was {plan:?}"
     );
 }

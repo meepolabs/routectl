@@ -352,6 +352,7 @@ fn every_requests_reader_applies_predicate_or_is_exempt() {
         }
     }
     unguarded.sort();
+    unguarded.dedup();
 
     // Assert: the unguarded set IS the exemption list, so a new reader and a
     // stale exemption both fail.

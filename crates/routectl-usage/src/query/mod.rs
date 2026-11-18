@@ -298,7 +298,7 @@ use crate::db::UsageDb;
 #[cfg(test)]
 pub use aggregate::{
     AGG_SQL, ERRORS_BY_CLASS_BUCKETED_SQL, ERRORS_BY_CLASS_SQL, LATEST_QUOTA_BY_SEAT_SQL,
-    QUERY_AGG_SQL, SERIES_AGG_SQL,
+    QUERY_AGG_SQL, QUOTA_ROWS_PREDICATE, SERIES_AGG_SQL,
 };
 
 #[cfg(test)]
@@ -308,3 +308,7 @@ mod tests;
 #[cfg(test)]
 #[path = "inference_rows_tests.rs"]
 mod inference_rows_tests;
+
+#[cfg(test)]
+#[path = "quota_seat_tests.rs"]
+mod quota_seat_tests;
