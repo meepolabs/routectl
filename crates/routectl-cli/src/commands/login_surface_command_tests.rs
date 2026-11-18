@@ -1060,6 +1060,46 @@ fn a_snapshot_that_fails_validation_is_skipped_unwritten_and_is_not_an_error() {
     assert!(shown.ends_with("Nothing was written."), "{shown}");
 }
 
+/// The invalid-snapshot skip prints each finding as one line with no
+/// terminal control byte, whatever the validator interpolated into it.
+#[test]
+fn an_invalid_skip_renders_each_finding_terminal_safe() {
+    // Arrange: one finding carrying an OSC title set and a newline, and a
+    // plain one as the control.
+    let reason = SkipReason::Invalid {
+        errors: vec![
+            "provider `p#\u{1b}]0;TITLE\u{7}\nconfig: forged line` must not contain `#`"
+                .to_string(),
+            "model `ghost` references unknown provider or pool `nobody`".to_string(),
+        ],
+    };
+
+    // Act
+    let shown = skip_line(&reason);
+
+    // Assert
+    assert!(!shown.contains(['\u{1b}', '\u{7}']), "{shown:?}");
+    assert!(
+        !shown
+            .lines()
+            .any(|line| line.starts_with("config: forged line")),
+        "{shown:?}"
+    );
+    assert!(shown.contains("must not contain"), "{shown:?}");
+    assert!(
+        shown.contains("`nobody`"),
+        "control finding kept: {shown:?}"
+    );
+    assert_eq!(
+        shown
+            .lines()
+            .filter(|line| line.starts_with("  - "))
+            .count(),
+        2,
+        "{shown:?}"
+    );
+}
+
 /// A candidate the gate rejects for a reason the DELTA causes is a
 /// reported value, not a nonzero exit: a valid pool already at the member
 /// ceiling, which the join would push past it.

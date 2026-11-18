@@ -185,8 +185,9 @@ pub fn split_seat_state_key(state_key: &str) -> Option<(&str, &str)> {
 pub fn check_state_key_name(role: &str, name: &str) -> Result<(), String> {
     if name.contains(SEAT_KEY_SEPARATOR) {
         return Err(format!(
-            "{role} `{name}` must not contain `{SEAT_KEY_SEPARATOR}` \
-             (reserved as the seat-pool state-key separator)"
+            "{role} `{}` must not contain `{SEAT_KEY_SEPARATOR}` \
+             (reserved as the seat-pool state-key separator)",
+            routectl_core::render_operator_name(name),
         ));
     }
     Ok(())

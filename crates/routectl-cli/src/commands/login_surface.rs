@@ -53,7 +53,7 @@ use routectl_router::{
 };
 use toml_edit::DocumentMut;
 
-use super::config::validation_report;
+use super::config::{safe_line, validation_report};
 use super::edit_pipeline::{
     RelockValidationError, confirm_high_consequence, gate, inherit_pool_cloak,
     insert_provider_block, parse_document, preflight, render_gate_errors, set_accepts_new_logins,
@@ -640,7 +640,7 @@ impl std::fmt::Display for SkipReason {
                     errors.len()
                 )?;
                 for error in errors {
-                    write!(f, "\n  - {error}")?;
+                    write!(f, "\n  - {}", safe_line(error))?;
                 }
                 f.write_str("\nNothing was written")
             }

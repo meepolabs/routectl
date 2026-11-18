@@ -6,7 +6,7 @@ use crate::config::entry_shape::{parse_base_url, shape_refusals};
 use crate::config::provider_descriptor::{Format, vendor_containment, vendor_row};
 use crate::config::{Config, PoolEntry, PoolKey, PoolKeyField, ProviderEntry};
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
-use routectl_core::{Result, render_operator_name};
+use routectl_core::{Result, render_operator_name, render_operator_text};
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use std::collections::BTreeMap;
@@ -241,8 +241,9 @@ pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> R
                  Anthropic wire shape, so this model cannot work on it: set \
                  `format = \"bedrock-converse\"` on [providers.{provider}] (the \
                  vendor-neutral lane), or point this model at an Anthropic upstream.",
-                upstream = model.upstream,
-                provider = model.provider,
+                nickname = render_operator_name(nickname),
+                upstream = render_operator_text(&model.upstream),
+                provider = render_operator_name(&model.provider),
             ));
         }
     }
@@ -347,7 +348,8 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
     // check (must be either a known model nickname OR another alias
     // key). Cycle detection is a separate pass below; it walks the
     // graph structure rather than per-entry semantics.
-    for (alias, value) in &config.aliases {
+    for (alias_key, value) in &config.aliases {
+        let alias = render_operator_name(alias_key);
         if value.is_empty() {
             errors.push(format!(
                 "alias `{alias}`: chain is empty -- an alias with no targets \
@@ -365,8 +367,9 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
             }
             if !config.models.contains_key(nickname) {
                 errors.push(format!(
-                    "alias `{alias}`: target `{nickname}` is not a known \
-                     model nickname in [models] and is not an alias key"
+                    "alias `{alias}`: target `{}` is not a known \
+                     model nickname in [models] and is not an alias key",
+                    render_operator_name(nickname),
                 ));
             }
         }
@@ -434,9 +437,12 @@ fn detect_alias_cycles_dfs(
             .iter()
             .position(|p| p == current)
             .expect("path_set/path invariant: current must be present in path");
-        let mut cycle_path: Vec<&str> = path[idx..].iter().map(String::as_str).collect();
-        cycle_path.push(current);
-        let entry_alias = path[idx].clone();
+        let mut cycle_path: Vec<_> = path[idx..]
+            .iter()
+            .map(|alias| render_operator_name(alias))
+            .collect();
+        cycle_path.push(render_operator_name(current));
+        let entry_alias = render_operator_name(&path[idx]);
         errors.push(format!(
             "alias `{entry_alias}`: cycle detected: {}",
             cycle_path.join(" -> ")

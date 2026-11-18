@@ -134,8 +134,9 @@ pub(crate) const MAX_REPORTED_LINE_CHARS: usize = 512;
 /// its message, so this one render point control-char-filters the whole
 /// suite's output: a config key bearing a newline plus an ANSI sequence would
 /// otherwise span lines and forge a fabricated report entry. Mirrors the
-/// filtering the doctor render applies to the same validator messages.
-fn safe_line(message: &str) -> String {
+/// filtering the doctor render applies to the same validator messages, and
+/// every other printer of these lines (the edit gate, login's skip) uses it.
+pub(crate) fn safe_line(message: &str) -> String {
     sanitize_for_log_with_cap(message, MAX_REPORTED_LINE_CHARS)
 }
 

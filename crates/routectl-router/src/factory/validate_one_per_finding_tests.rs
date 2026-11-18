@@ -125,3 +125,83 @@ fn a_single_finding_keeps_its_exact_wording() {
         ]
     );
 }
+
+/// Text a hostile key injects after its newline, as if it were a finding of
+/// its own.
+const INJECTED: &str = "config: forged line";
+
+/// A key holding a newline stays inside its own finding: the count is the
+/// number of real findings, and no entry starts with the injected text.
+#[test]
+fn a_newline_bearing_key_is_one_finding() {
+    let hostile = format!("a\\u001b[31mRED\\n{INJECTED}");
+    let separator_hostile = format!("p#\\n{INJECTED}");
+    let rows = [
+        (
+            "alias name, empty chain",
+            format!("{}[aliases]\n\"{hostile}\" = []\n", provider("p")),
+            1,
+        ),
+        (
+            "alias name and target, unknown target",
+            format!(
+                "{}[aliases]\n\"{hostile}\" = \"{hostile}-target\"\n",
+                provider("p")
+            ),
+            1,
+        ),
+        (
+            "alias names, cycle",
+            format!(
+                "{}[aliases]\n\"{hostile}\" = \"b\"\nb = \"{hostile}\"\n",
+                provider("p")
+            ),
+            1,
+        ),
+        (
+            "provider name, separator-bearing",
+            provider(&separator_hostile),
+            1,
+        ),
+        (
+            "model nickname equal to another provider's name",
+            format!(
+                "{}{}[models.\"{separator_hostile}\"]\nprovider = \"p\"\nupstream = \"u\"\n",
+                provider("p"),
+                provider(&separator_hostile),
+            ),
+            3,
+        ),
+    ];
+    for (label, text, count) in rows {
+        let errors = errors_of(&text);
+
+        assert_eq!(errors.len(), count, "{label}: {errors:?}");
+        for error in &errors {
+            assert!(!error.contains('\n'), "{label}: {error:?}");
+            assert!(!error.starts_with(INJECTED), "{label}: {error:?}");
+            assert!(!error.contains('\u{1b}'), "{label}: {error:?}");
+        }
+        assert!(
+            errors.iter().any(|e| e.contains(INJECTED)),
+            "{label}: the key is still named: {errors:?}"
+        );
+    }
+}
+
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_newline_bearing_name_in_the_bedrock_invoke_gate_is_one_finding() {
+    let text = format!(
+        "[providers.p]\nformat = \"bedrock-invoke\"\n\
+         cloud = {{ name = \"aws\", region = \"us-west-2\" }}\n\
+         credential = \"aws://chain\"\nauth = \"aws-sigv4\"\n\
+         [models.\"m\\n{INJECTED}\"]\nprovider = \"p\"\nupstream = \"gpt\\n{INJECTED}\"\n"
+    );
+
+    let errors = errors_of(&text);
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(!errors[0].contains('\n'), "{errors:?}");
+    assert!(errors[0].contains(INJECTED), "{errors:?}");
+}

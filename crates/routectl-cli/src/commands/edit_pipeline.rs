@@ -20,7 +20,7 @@ use routectl_router::{
 };
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike};
 
-use super::config::validation_report;
+use super::config::{safe_line, validation_report};
 use super::parse_error_redaction::redact_parse_error;
 
 /// The `edit_fn` closure's error shared by the config-mutating commands: the
@@ -68,13 +68,22 @@ pub(crate) fn gate(candidate_text: &str) -> std::result::Result<Config, Vec<Stri
 }
 
 pub(crate) fn render_gate_errors(errors: &[String]) {
-    eprintln!(
+    // A failed stderr write leaves nothing better to report it on.
+    let _ = write_gate_errors(&mut std::io::stderr().lock(), errors);
+}
+
+/// The gate's refusal block: a count, then each finding on its own
+/// terminal-safe line.
+fn write_gate_errors(out: &mut impl std::io::Write, errors: &[String]) -> std::io::Result<()> {
+    writeln!(
+        out,
         "config rejected ({} error(s)); nothing written:",
         errors.len()
-    );
+    )?;
     for e in errors {
-        eprintln!("  - {e}");
+        writeln!(out, "  - {}", safe_line(e))?;
     }
+    Ok(())
 }
 
 /// Prompt before a high-consequence (egress-defining) edit. `--yes`
@@ -312,6 +321,38 @@ mod tests {
 
     /// Every retired key in the file is named in the one refusal, not only
     /// the first.
+    /// Each gate finding prints as one line with no terminal control byte,
+    /// whatever the validator interpolated into it.
+    #[test]
+    fn gate_errors_render_one_terminal_safe_line_each() {
+        let rows = [
+            ("plain", "pool `east`: `members` is empty", "pool `east`"),
+            (
+                "OSC title set",
+                "provider `p#\u{1b}]0;TITLE\u{7}` must not contain `#`",
+                "must not contain",
+            ),
+            (
+                "CSI recolor and newline",
+                "alias `a\u{1b}[31mRED\nconfig: forged line`: chain is empty",
+                "chain is empty",
+            ),
+        ];
+        for (row, finding, kept) in rows {
+            let mut out = Vec::new();
+
+            write_gate_errors(&mut out, &[finding.to_string()]).expect("write to a Vec");
+
+            let shown = String::from_utf8(out).expect("utf8");
+            assert_eq!(shown.lines().count(), 2, "row `{row}`: {shown:?}");
+            assert!(shown.contains(kept), "row `{row}`: {shown:?}");
+            assert!(
+                !shown.contains(['\u{1b}', '\u{7}']),
+                "row `{row}`: {shown:?}"
+            );
+        }
+    }
+
     #[test]
     fn preflight_names_every_retired_key_at_once() {
         let clean = format!(

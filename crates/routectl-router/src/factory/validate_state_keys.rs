@@ -9,7 +9,7 @@
 
 use crate::config::Config;
 use crate::seat_pool::check_state_key_name;
-use routectl_core::{Error, MAX_PROVIDER_NAME_BYTES, Result};
+use routectl_core::{Error, MAX_PROVIDER_NAME_BYTES, Result, render_operator_name};
 
 /// Reject a separator-bearing model nickname or provider name, a provider name
 /// longer than [`MAX_PROVIDER_NAME_BYTES`], and a model
@@ -38,10 +38,11 @@ pub(super) fn validate_state_key_names(config: &Config) -> Result<()> {
         errors.extend(check_state_key_name("model nickname", nickname).err());
         if config.providers.contains_key(nickname) && entry.provider != *nickname {
             errors.push(format!(
-                "model nickname `{nickname}` equals provider name `{nickname}` but the model \
+                "model nickname `{shown}` equals provider name `{shown}` but the model \
                  dispatches through `{}`; both would key the same runtime state (circuit \
                  breaker, rate limit, probes) -- rename the model or the provider",
-                entry.provider
+                render_operator_name(&entry.provider),
+                shown = render_operator_name(nickname),
             ));
         }
     }

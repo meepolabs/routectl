@@ -5073,9 +5073,14 @@ log lines:
   spans or recolors a line.
 - Seat labels are shown. A pool line names each member with the seat its
   `credential` pins (`work-seat=work`), filtered the same way.
-- Credentials appear only by scheme (`env://`, `file://`, `oauth://`).
-  The variable name, file path or value behind a reference is never
-  printed.
+- An `env://` or `file://` credential appears only by its scheme: the
+  variable name, file path or value behind it is never printed. An
+  `oauth://` reference may be shown with its vendor and seat label
+  (`oauth://anthropic#work`); neither is secret, and the token itself is
+  never printed.
+- Each finding is one line. A name holding a newline cannot split a
+  finding in two, and `provider add`, `login` and `init` print a rejected
+  edit's findings with the same filter as `config check`.
 
 `config show` prints the post-merge view: `env://`, `file://`, and
 `oauth://` references remain as opaque URIs (they are non-secret
