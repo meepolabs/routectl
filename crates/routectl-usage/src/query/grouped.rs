@@ -34,7 +34,7 @@ use super::{AggRow, GroupKey, QueryError};
 const SERIES_BUCKET_CAP: usize = 1000;
 
 /// Label for a group whose grouping column is NULL (no target was dispatched).
-const UNATTRIBUTED: &str = "(unattributed)";
+pub const UNATTRIBUTED: &str = "(unattributed)";
 
 /// A resolved time-bucket grid: uniform-width buckets anchored at
 /// [`QuerySpec::from_ms`].

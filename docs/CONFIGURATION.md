@@ -4850,7 +4850,18 @@ on a trailing window starts its buckets at the window's start); `group_by` is on
 `model`, `alias`, `provider`, `seat` (`seat` groups by the credential
 identity each request was served under; a request with none recorded reads
 as `(unattributed)`); optional `alias` and `provider` keys narrow
-the result to one routing alias or served provider. Do not build a durable
+the result to one routing alias or served provider.
+
+Each group carries its `label` and `metrics`. A `seat` group also carries
+three identity fields, resolved from the served config the same way
+`/status/accounts` resolves them: `account` (the recorded seat, the key
+`/status/accounts` lists it under), `provider_entry` (the `[providers]` entry
+it is reported under) and `login_label` (the `<label>` of an
+`oauth://<provider>#<label>` login, null for an unlabeled one). A recorded
+seat the config no longer names keeps its `account` with null
+`provider_entry` and `login_label`, and the `(unattributed)` group carries
+null for all three. Read these fields; never split the label. Groups of the
+other groupings carry no identity fields. Do not build a durable
 integration on the response shape before 1.0.
 
 The server runs one query read at a time. A query that arrives while another

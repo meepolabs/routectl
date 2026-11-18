@@ -4,11 +4,12 @@ use super::super::Availability;
 use super::super::test_hooks::StatusTestHooks;
 use crate::commands::usage::MAX_BUCKETS;
 use crate::handlers::status::DaemonMeta;
+use crate::handlers::status::accounts::tests::{anthropic_block, codex_block, router_of};
 use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::Request as HttpRequest;
-use routectl_router::{Config, Router};
+use routectl_router::{AccountIdentities, Config, Router};
 use routectl_usage::{CostStatus, QueryGroup, QueryMetrics, QuerySeries, SeriesBucket, open};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -365,6 +366,173 @@ async fn group_by_seat_rolls_rows_up_by_their_recorded_seat() {
         ]
     );
     assert_eq!(json["data"]["totals"]["requests"], 4);
+}
+
+/// A router serving `anthropic#work` through two entries (`zeta`, `alpha`)
+/// and the unlabeled `codex` login.
+fn work_and_codex_router() -> Router {
+    router_of(&[
+        (
+            "a-model",
+            "zeta",
+            anthropic_block(),
+            "oauth://anthropic#work".into(),
+        ),
+        (
+            "b-model",
+            "alpha",
+            anthropic_block(),
+            "oauth://anthropic#work".into(),
+        ),
+        (
+            "c-model",
+            "codex-one",
+            codex_block(),
+            "oauth://codex".into(),
+        ),
+    ])
+}
+
+fn state_over_router(db_path: PathBuf, router: Router) -> Arc<StatusState> {
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let mut status = StatusState::from_app(&app, None, DaemonMeta::for_test());
+    status.usage_db_path = db_path;
+    Arc::new(status)
+}
+
+fn group_by_label<'a>(json: &'a Value, label: &str) -> &'a Value {
+    json["data"]["groups"]
+        .as_array()
+        .expect("groups array")
+        .iter()
+        .find(|group| group["label"] == label)
+        .unwrap_or_else(|| panic!("no group {label}: {json}"))
+}
+
+/// Each seat group names its account with the identity `/status/accounts`
+/// gives it: a configured labeled login carries all three fields (under the
+/// smaller of the two entries naming it), an unlabeled login a null label, a
+/// ledger seat the config no longer names its account and two nulls, and
+/// `(unattributed)` three nulls.
+#[tokio::test]
+async fn seat_groups_carry_the_account_identity_of_the_served_config() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("usage.db");
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+    seed_seated_ledger(
+        &path,
+        now,
+        &[
+            Some("anthropic#work"),
+            Some("codex"),
+            Some("anthropic#gone"),
+            None,
+        ],
+    );
+    let state = state_over_router(path, work_and_codex_router());
+
+    // Act
+    let (status, json) = send(state, QUERY_METHOD, r#"{"window":"all","group_by":"seat"}"#).await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["schema_version"], 4, "an additive change: {json}");
+    let rows: [(&str, Value, Value, Value); 4] = [
+        (
+            "anthropic#work",
+            Value::from("anthropic#work"),
+            Value::from("alpha"),
+            Value::from("work"),
+        ),
+        (
+            "codex",
+            Value::from("codex"),
+            Value::from("codex-one"),
+            Value::Null,
+        ),
+        (
+            "anthropic#gone",
+            Value::from("anthropic#gone"),
+            Value::Null,
+            Value::Null,
+        ),
+        ("(unattributed)", Value::Null, Value::Null, Value::Null),
+    ];
+    for (label, account, entry, login) in rows {
+        let group = group_by_label(&json, label).as_object().expect("group");
+        assert_eq!(group["account"], account, "{label}");
+        assert!(group.contains_key("provider_entry"), "{label}");
+        assert_eq!(group["provider_entry"], entry, "{label}");
+        assert!(group.contains_key("login_label"), "{label}");
+        assert_eq!(group["login_label"], login, "{label}");
+        assert_eq!(group["metrics"]["requests"], 1, "{label}");
+    }
+}
+
+/// Groups of every other grouping keep exactly their label and metrics: no
+/// identity key appears, on the route, even over a config naming seats.
+#[tokio::test]
+async fn non_seat_groups_carry_no_identity_keys() {
+    for group_by in ["model", "alias", "provider"] {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+        seed_seated_ledger(&path, now, &[Some("anthropic#work"), None]);
+        let state = state_over_router(path, work_and_codex_router());
+
+        // Act
+        let body = format!(r#"{{"window":"all","group_by":"{group_by}"}}"#);
+        let (status, json) = send(state, QUERY_METHOD, &body).await;
+
+        // Assert
+        assert_eq!(status, StatusCode::OK, "{group_by}");
+        for group in json["data"]["groups"].as_array().expect("groups") {
+            let mut keys: Vec<&str> = group
+                .as_object()
+                .expect("group")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["label", "metrics"], "{group_by}: {group}");
+        }
+    }
+}
+
+/// A non-seat grouping's wire payload is the grouped result exactly as it
+/// serialized before seat groups were named.
+#[test]
+fn non_seat_payloads_serialize_as_the_grouped_result() {
+    for group_by in [GroupDim::Model, GroupDim::Alias, GroupDim::Provider] {
+        // Arrange
+        let result = QueryResult {
+            groups: vec![QueryGroup {
+                label: "anthropic#work".to_string(),
+                metrics: QueryMetrics::default(),
+            }],
+            totals: QueryMetrics::default(),
+            series: Some(QuerySeries {
+                bucket_ms: 3_600_000,
+                buckets: vec![SeriesBucket {
+                    start_ms: 0,
+                    metrics: QueryMetrics::default(),
+                }],
+            }),
+        };
+        let identities = work_and_codex_router().account_identities();
+
+        // Act
+        let payload = name_groups(result.clone(), group_by, &identities);
+
+        // Assert
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            serde_json::to_value(&result).unwrap(),
+            "{group_by:?}"
+        );
+    }
 }
 
 /// Seed one `ok` row at `ts` per entry of `seats`, each recording that seat

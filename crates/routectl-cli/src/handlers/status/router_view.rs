@@ -85,6 +85,13 @@ pub struct UnpinnedPricer {
 }
 
 impl UnpinnedPricer {
+    /// Every configured credential account of the pinned snapshot, with its
+    /// display identity, so a result's seat names and its prices read one
+    /// config.
+    pub fn account_identities(&self) -> AccountIdentities {
+        self.router.account_identities()
+    }
+
     /// Read the book once (a stat, and a reparse when the file changed) and
     /// pin the tables every row of the result prices against. Call it on the
     /// blocking worker that prices the rows.

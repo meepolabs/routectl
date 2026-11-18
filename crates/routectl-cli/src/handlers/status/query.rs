@@ -29,7 +29,8 @@
 //! Cost is resolved through the read-only router facade's pricer, which pins
 //! ONE config snapshot and ONE price-table snapshot for the whole request: a
 //! hot-swap or a new price table mid-query can never make two rows of one
-//! result price against different rate tables.
+//! result price against different rate tables. A `seat` grouping names each
+//! group's account from that same snapshot.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -43,12 +44,13 @@ use axum::response::{IntoResponse, Response};
 use time::OffsetDateTime;
 
 use crate::local_time::LocalZone;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use routectl_router::AccountIdentities;
 use routectl_usage::{
-    CancelFlag, GroupDim, QueryResult, QuerySeries, QuerySpec, ReadLimit, earliest_ts_start,
-    open_readonly_fastfail, query,
+    CancelFlag, GroupDim, QueryMetrics, QueryResult, QuerySeries, QuerySpec, QueryTotals,
+    ReadLimit, UNATTRIBUTED, earliest_ts_start, open_readonly_fastfail, query,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
@@ -76,9 +78,10 @@ use super::{Panel, StatusState, now_utc_rfc3339, run_blocking_panel};
 /// `latency_p50_ms` / `latency_p95_ms`, a mean and a maximum, are now
 /// `ttft_avg_ms` / `ttft_max_ms` / `latency_avg_ms` / `latency_max_ms`.
 /// Added alongside, without a bump of their own: the `seat` grouping, the
-/// `last24h` / `last7d` windows, and per metric set `errors_by_class`,
+/// `last24h` / `last7d` windows, per metric set `errors_by_class`,
 /// `cache_read_present`, `server_tool_present` and
-/// `client_disconnect_pre_dispatch`.
+/// `client_disconnect_pre_dispatch`, and on every seat group `account`,
+/// `provider_entry` and `login_label`.
 pub const SCHEMA_VERSION: u32 = 4;
 
 /// The one method this route answers. Not expressible as an axum
@@ -258,6 +261,79 @@ pub(super) struct ParsedQuery {
     bucket: Option<BucketUnit>,
 }
 
+/// The query payload on the wire: the grouped result, with every group of a
+/// `seat` grouping naming its account.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct QueryPayload {
+    groups: Vec<GroupRow>,
+    totals: QueryTotals,
+    series: Option<QuerySeries>,
+}
+
+/// One group. A seat group also carries its account identity; a group of
+/// any other grouping carries only its label and metrics.
+#[derive(Debug, Clone, Serialize)]
+struct GroupRow {
+    label: String,
+    #[serde(flatten)]
+    seat: Option<SeatIdentity>,
+    metrics: QueryMetrics,
+}
+
+/// A seat group's identity, resolved from the served config, never parsed
+/// from the label.
+#[derive(Debug, Clone, Serialize)]
+struct SeatIdentity {
+    /// The ledger's seat value, the key `/status/accounts` lists the account
+    /// under; null for the `(unattributed)` group.
+    account: Option<String>,
+    /// The `[providers]` entry the account is reported under; null for an
+    /// account the served config no longer names.
+    provider_entry: Option<String>,
+    /// The `<label>` of its `oauth://<provider>#<label>` login; null for an
+    /// unlabeled login and an account the served config no longer names.
+    login_label: Option<String>,
+}
+
+/// `result` as the wire payload, each group of a `seat` grouping named from
+/// `identities`.
+fn name_groups(
+    result: QueryResult,
+    group_by: GroupDim,
+    identities: &AccountIdentities,
+) -> QueryPayload {
+    let groups = result
+        .groups
+        .into_iter()
+        .map(|group| GroupRow {
+            seat: (group_by == GroupDim::Seat).then(|| seat_identity(&group.label, identities)),
+            label: group.label,
+            metrics: group.metrics,
+        })
+        .collect();
+    QueryPayload {
+        groups,
+        totals: result.totals,
+        series: result.series,
+    }
+}
+
+fn seat_identity(label: &str, identities: &AccountIdentities) -> SeatIdentity {
+    if label == UNATTRIBUTED {
+        return SeatIdentity {
+            account: None,
+            provider_entry: None,
+            login_label: None,
+        };
+    }
+    let identity = identities.get(label);
+    SeatIdentity {
+        account: Some(label.to_owned()),
+        provider_entry: identity.map(|id| id.provider_entry.clone()),
+        login_label: identity.and_then(|id| id.login_label.clone()),
+    }
+}
+
 /// Parse a request body against the closed vocabulary. Every failure is the
 /// SAME opaque unit error: the caller emits one fixed code, so no parse detail
 /// can reach the wire.
@@ -356,7 +432,7 @@ pub(super) async fn handler(
 /// 500 -- a fourth response regime this route does not declare. Any payload
 /// that will not render degrades to the same unavailable panel a data-source
 /// failure produces; the fallback carries no `data`, so it cannot fail in turn.
-fn render(panel: Panel<QueryResult>) -> Response {
+fn render<T: Serialize>(panel: Panel<T>) -> Response {
     match serde_json::to_vec(&panel) {
         Ok(bytes) => (
             StatusCode::OK,
@@ -364,7 +440,7 @@ fn render(panel: Panel<QueryResult>) -> Response {
             bytes,
         )
             .into_response(),
-        Err(_) => Json(Panel::<QueryResult>::unavailable(
+        Err(_) => Json(Panel::<T>::unavailable(
             SCHEMA_VERSION,
             codes::DB_UNAVAILABLE,
         ))
@@ -406,7 +482,7 @@ async fn build(
     parsed: ParsedQuery,
     now: OffsetDateTime,
     limit: ReadLimit,
-) -> Panel<QueryResult> {
+) -> Panel<QueryPayload> {
     let _cancel_on_drop = CancelOnDrop(limit.cancel.clone());
     let is_series = parsed.bucket.is_some();
     let panel = match state.ledger_read.try_acquire() {
@@ -428,11 +504,12 @@ async fn read_under_permit(
     parsed: ParsedQuery,
     now: OffsetDateTime,
     limit: ReadLimit,
-) -> Panel<QueryResult> {
+) -> Panel<QueryPayload> {
     let db_path = state.usage_db_path.clone();
     // ONE pinned config snapshot for the whole request; its price tables are
     // pinned once on the blocking worker.
     let pricer = state.pricer();
+    let identities = pricer.account_identities();
     // Stamped before the blocking read so a lock wait cannot skew the
     // freshness marker.
     let as_of = now_utc_rfc3339();
@@ -445,7 +522,8 @@ async fn read_under_permit(
         }
         let zone = LocalZone::load();
         let (spec, bucket) = parsed.resolve(&zone, now);
-        build_panel(
+        let group_by = spec.group_by;
+        let panel = build_panel(
             &db_path,
             spec,
             bucket,
@@ -454,7 +532,15 @@ async fn read_under_permit(
             &zone,
             now,
             &limit,
-        )
+        );
+        Panel {
+            schema_version: panel.schema_version,
+            as_of: panel.as_of,
+            data: panel
+                .data
+                .map(|result| name_groups(result, group_by, &identities)),
+            unavailable: panel.unavailable,
+        }
     })
     .await
 }

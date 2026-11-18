@@ -67,7 +67,11 @@ fn wire_shape_pins_every_metric_token() {
         totals: metrics(1, CostStatus::Partial, Some(1.25), Some(3.5)),
         series: None,
     };
-    let panel = Panel::available(SCHEMA_VERSION, "2026-08-02T00:00:00Z".to_string(), result);
+    let panel = Panel::available(
+        SCHEMA_VERSION,
+        "2026-08-02T00:00:00Z".to_string(),
+        name_groups(result, GroupDim::Model, &AccountIdentities::default()),
+    );
 
     // Built in parts: one literal for the whole envelope exceeds the
     // `json!` macro recursion limit.
@@ -233,7 +237,11 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
             ],
         }),
     };
-    let panel = Panel::available(SCHEMA_VERSION, "2026-08-02T00:00:00Z".to_string(), result);
+    let panel = Panel::available(
+        SCHEMA_VERSION,
+        "2026-08-02T00:00:00Z".to_string(),
+        name_groups(result, GroupDim::Model, &AccountIdentities::default()),
+    );
 
     let first_bucket = serde_json::json!({
         "start_ms": 1000000,
