@@ -420,9 +420,11 @@ impl Router {
     }
 
     /// The current credential generation of the account of the target keyed
-    /// by `state_key`, read without admitting anything. Test seam.
-    #[cfg(test)]
-    pub(super) fn credential_generation_for_tests(&self, state_key: &str) -> u64 {
+    /// by `state_key`, read without admitting anything or creating a
+    /// record; 0 when the account has none. Test seam.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn credential_generation_for_tests(&self, state_key: &str) -> u64 {
         self.account_for_state_key(state_key)
             .and_then(|account| self.credential_accounts.lock().get(&account).copied())
             .map_or(0, |record| record.generation())

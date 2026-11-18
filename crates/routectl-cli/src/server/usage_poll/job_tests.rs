@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
+use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{
     AcceptedReading, LengthClass, ReadingSource, ReadingWindow, ReportState, Started, UsageVendor,
 };
@@ -22,7 +23,8 @@ use wiremock::ResponseTemplate;
 
 use super::client::UsagePollClient;
 use super::rig::{
-    ANTHROPIC_HOST, ANTHROPIC_SEAT, CODEX_SEAT, Rig, TOKEN_MARKER, unix_now, write_credentials,
+    ANTHROPIC_HOST, ANTHROPIC_SEAT, CODEX_SEAT, Rig, TOKEN_MARKER, state_key_of, unix_now,
+    write_credentials,
 };
 use super::{PollApplicability, PollAttempt, UsagePollJob, history};
 use crate::server::seat_driver::{
@@ -196,17 +198,30 @@ async fn a_token_inside_the_refresh_lead_is_not_sent() {
     assert_eq!(snapshot.seats[0].last_result, Some("token_not_ready"));
 }
 
+/// Which halves of a credentials reload land between the token read and
+/// `apply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReloginStep {
+    /// Only the router's reset of the seat; the store is not reloaded.
+    RouterOnly,
+    /// Only the store's reload, before the router hears of it; with
+    /// `new_login`, a new record is written to disk first.
+    StoreOnly { new_login: bool },
+    /// A new record on disk reloaded into the store, then the router's
+    /// reset of the changed seat.
+    StoreThenRouter,
+}
+
 /// Re-logs `account` in after the job read its token and fetched, before
-/// the outcome is applied, as a credentials reload does: with
-/// `rewrite_file`, a new record on disk reloaded into the store, then the
-/// router's reset of the changed seat. Every other seat runs untouched.
+/// the outcome is applied, as a credentials reload does, per `step`. Every
+/// other seat runs untouched.
 pub(super) struct ReloginDuringRun<'a> {
     pub(super) inner: &'a UsagePollJob,
     pub(super) account: &'static str,
     pub(super) rig_store: Arc<routectl_auth::OAuthStore>,
     pub(super) creds: std::path::PathBuf,
     pub(super) router: Arc<routectl_router::Router>,
-    pub(super) rewrite_file: bool,
+    pub(super) step: ReloginStep,
 }
 
 impl SeatJob for ReloginDuringRun<'_> {
@@ -224,22 +239,34 @@ impl SeatJob for ReloginDuringRun<'_> {
         let router = Arc::clone(&self.router);
         let creds = self.creds.clone();
         let account = seat.account.clone();
-        let rewrite_file = self.rewrite_file;
+        let step = self.step;
         let relogs = seat.account == self.account;
         async move {
             let attempt = fetched.await;
             if !relogs {
                 return attempt;
             }
-            if rewrite_file {
+            let write_new_login = || {
                 write_credentials(
                     &creds,
                     &[(&account, "synthetic-relogin-token", unix_now() + 7200, None)],
                 );
-                let changed = store.reload_from_disk().await.expect("reload");
-                router.lift_oauth_credential_parks(changed.iter());
-            } else {
-                router.lift_oauth_credential_parks([account.as_str()]);
+            };
+            match step {
+                ReloginStep::RouterOnly => {
+                    router.lift_oauth_credential_parks([account.as_str()]);
+                }
+                ReloginStep::StoreOnly { new_login } => {
+                    if new_login {
+                        write_new_login();
+                    }
+                    store.reload_from_disk().await.expect("reload");
+                }
+                ReloginStep::StoreThenRouter => {
+                    write_new_login();
+                    let changed = store.reload_from_disk().await.expect("reload");
+                    router.lift_oauth_credential_parks(changed.iter());
+                }
             }
             attempt
         }
@@ -258,7 +285,60 @@ impl SeatJob for ReloginDuringRun<'_> {
 
 #[tokio::test]
 async fn a_relogin_between_token_read_and_apply_is_superseded() {
-    // Arrange: only the Anthropic seat, its body valid.
+    // (step, the token the store holds after it)
+    let rows = [
+        (ReloginStep::StoreThenRouter, "synthetic-relogin-token"),
+        (ReloginStep::RouterOnly, TOKEN_MARKER),
+    ];
+    for (step, stored_token) in rows {
+        // Arrange: only the Anthropic seat, its body valid.
+        let mut rig =
+            Rig::with_seats(&[(ANTHROPIC_SEAT, TOKEN_MARKER, unix_now() + 3600, None)]).await;
+        answer_both_ok(&rig).await;
+        let router = rig.router();
+        let poll = rig.job();
+        let job = ReloginDuringRun {
+            inner: &poll,
+            account: ANTHROPIC_SEAT,
+            rig_store: Arc::clone(&rig.store),
+            creds: rig.creds.clone(),
+            router: Arc::clone(&router),
+            step,
+        };
+        rig.sight_then_pass_boot_spread(job.inner);
+
+        // Act
+        sweep(&job, &router).await;
+
+        // Assert: the body was fetched with the old token, then refused.
+        assert_eq!(rig.anthropic_hits().await, 1, "{step:?}: premise, fetched");
+        assert_eq!(
+            rig.store.peek_access_token(ANTHROPIC_SEAT).await,
+            routectl_auth::PeekedAccessToken::Ready(routectl_auth::oauth::SecretToken::new(
+                stored_token
+            )),
+            "{step:?}: premise, the store's login"
+        );
+        let snapshot = job.inner.state().snapshot(&router.config);
+        assert_eq!(
+            snapshot.seats[0].last_result,
+            Some("superseded"),
+            "{step:?}"
+        );
+        assert_eq!(
+            rig.reading(ANTHROPIC_SEAT).report,
+            ReportState::NoReading,
+            "{step:?}"
+        );
+        assert_eq!(rig.drain_writer(), 0, "{step:?}: no history row");
+        assert_eq!(rig.counters.account_readings_enqueued(), 0, "{step:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_store_reload_the_router_has_not_seen_yet_supersedes_the_poll() {
+    // Arrange: the store reloads a new login while the poll is in flight,
+    // and the router has not reset the seat yet.
     let mut rig = Rig::with_seats(&[(ANTHROPIC_SEAT, TOKEN_MARKER, unix_now() + 3600, None)]).await;
     answer_both_ok(&rig).await;
     let router = rig.router();
@@ -269,27 +349,59 @@ async fn a_relogin_between_token_read_and_apply_is_superseded() {
         rig_store: Arc::clone(&rig.store),
         creds: rig.creds.clone(),
         router: Arc::clone(&router),
-        rewrite_file: true,
+        step: ReloginStep::StoreOnly { new_login: true },
     };
     rig.sight_then_pass_boot_spread(job.inner);
+    let state_key = state_key_of(&router, ANTHROPIC_SEAT);
 
     // Act
     sweep(&job, &router).await;
 
-    // Assert: the body was fetched with the old token, then refused.
+    // Assert: fetched with the old token, the router's generation never
+    // moved, and still nothing landed.
     assert_eq!(rig.anthropic_hits().await, 1, "premise: fetched");
     assert_eq!(
-        rig.store.peek_access_token(ANTHROPIC_SEAT).await,
-        routectl_auth::PeekedAccessToken::Ready(routectl_auth::oauth::SecretToken::new(
-            "synthetic-relogin-token"
-        )),
-        "premise: re-logged in"
+        router.credential_generation_for_tests(&state_key),
+        0,
+        "premise: the router fence alone would admit the body"
     );
     let snapshot = job.inner.state().snapshot(&router.config);
     assert_eq!(snapshot.seats[0].last_result, Some("superseded"));
     assert_eq!(rig.reading(ANTHROPIC_SEAT).report, ReportState::NoReading);
     assert_eq!(rig.drain_writer(), 0, "no history row");
     assert_eq!(rig.counters.account_readings_enqueued(), 0);
+}
+
+#[tokio::test]
+async fn a_seat_awaiting_login_is_not_polled_until_its_mark_is_lifted() {
+    for cause in [UnusableCause::Revoked, UnusableCause::NotLoggedIn] {
+        // Arrange
+        let rig = Rig::with_seats(&[(ANTHROPIC_SEAT, TOKEN_MARKER, unix_now() + 3600, None)]).await;
+        answer_both_ok(&rig).await;
+        let job = rig.job();
+        let router = rig.router();
+        assert!(
+            router
+                .mark_credential_unusable_for_tests(&state_key_of(&router, ANTHROPIC_SEAT), cause),
+            "{cause:?}: premise, marked"
+        );
+        rig.sight_then_pass_boot_spread(&job);
+
+        // Act
+        sweep(&job, &router).await;
+        let hits_while_marked = rig.anthropic_hits().await;
+        router.lift_oauth_credential_parks([ANTHROPIC_SEAT]);
+        rig.sight_then_pass_boot_spread(&job);
+        sweep(&job, &router).await;
+
+        // Assert
+        assert_eq!(hits_while_marked, 0, "{cause:?}: not polled while marked");
+        assert_eq!(
+            rig.anthropic_hits().await,
+            1,
+            "{cause:?}: polled once lifted"
+        );
+    }
 }
 
 /// A plain-http backend that reads one request head, reports it, and then

@@ -4,7 +4,7 @@ use crate::oauth::file_io;
 use crate::oauth::types::{TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
-use super::{LocalProbe, OAuthStore, PeekedAccessToken, REFRESH_LEAD_SECS};
+use super::{LocalProbe, OAuthStore, PeekedAccessToken, PeekedCredential, REFRESH_LEAD_SECS};
 
 impl OAuthStore {
     /// Read the stable account id recorded for `provider`, if any.
@@ -31,14 +31,32 @@ impl OAuthStore {
     /// refresh path is about to rotate; `NotReady` inside that window;
     /// `Missing` when the seat has no record.
     pub async fn peek_access_token(&self, seat: &str) -> PeekedAccessToken {
+        peek_token(self.inner.file.read().await.get(seat))
+    }
+
+    /// [`Self::peek_access_token`] plus the seat's recorded account id and
+    /// the store's reload generation, all read under one guard. The same
+    /// guarantees hold: no refresh, no write, no cooldown change.
+    pub async fn peek_credential(&self, seat: &str) -> PeekedCredential {
         let guard = self.inner.file.read().await;
-        match guard.get(seat) {
-            None => PeekedAccessToken::Missing,
-            Some(rec) if rec.near_expiry(REFRESH_LEAD_SECS, unix_now()) => {
-                PeekedAccessToken::NotReady
-            }
-            Some(rec) => PeekedAccessToken::Ready(rec.access_token.clone()),
+        // A reload bumps the counter while it holds the write guard, so
+        // under this read guard the counter matches the cache read here.
+        let reload_generation = self.reload_generation();
+        let record = guard.get(seat);
+        PeekedCredential {
+            token: peek_token(record),
+            account_id: record.and_then(|rec| rec.account.account_id.clone()),
+            reload_generation,
         }
+    }
+
+    /// How many reloads from disk have completed. A value that differs
+    /// from the one [`Self::peek_credential`] returned means the cache may
+    /// hold another login for the seat than the one peeked.
+    pub fn reload_generation(&self) -> u64 {
+        self.inner
+            .reload_gen
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Read the per-credential `session_id` recorded for `provider`
@@ -328,6 +346,14 @@ impl OAuthStore {
     /// shadowing the `SecretStore::delete(&SecretRef)` trait method.
     pub async fn logout(&self, provider: &str) -> OAuthResult<bool> {
         self.remove_provider(provider).await
+    }
+}
+
+fn peek_token(record: Option<&TokenRecord>) -> PeekedAccessToken {
+    match record {
+        None => PeekedAccessToken::Missing,
+        Some(rec) if rec.near_expiry(REFRESH_LEAD_SECS, unix_now()) => PeekedAccessToken::NotReady,
+        Some(rec) => PeekedAccessToken::Ready(rec.access_token.clone()),
     }
 }
 

@@ -230,7 +230,7 @@ fn managed_seat_of(config: &Config, entry_name: &str) -> Option<ManagedSeat> {
 }
 
 /// Accounts the router holds as unusable for a cause only a login clears.
-fn accounts_awaiting_login(router: &Router) -> BTreeSet<String> {
+pub(super) fn accounts_awaiting_login(router: &Router) -> BTreeSet<String> {
     router
         .status_targets(Instant::now())
         .into_iter()

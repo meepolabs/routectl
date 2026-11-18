@@ -390,22 +390,43 @@ impl TargetView {
 pub(super) struct Containment {
     pub(super) credentials_file: Vec<u8>,
     pub(super) targets: Vec<TargetView>,
+    /// Each target's state key and its account's credential generation.
+    pub(super) generations: Vec<(String, u64)>,
     pub(super) pools: Vec<PoolEligibility>,
 }
 
 impl Containment {
     pub(super) fn read(rig: &Rig) -> Self {
         let router = rig.router();
+        let targets: Vec<TargetView> = router
+            .status_targets(Instant::now())
+            .into_iter()
+            .map(TargetView::of)
+            .collect();
+        let generations = targets
+            .iter()
+            .map(|target| {
+                let generation = router.credential_generation_for_tests(&target.state_key);
+                (target.state_key.clone(), generation)
+            })
+            .collect();
         Self {
             credentials_file: std::fs::read(&rig.creds).expect("read the credentials file"),
-            targets: router
-                .status_targets(Instant::now())
-                .into_iter()
-                .map(TargetView::of)
-                .collect(),
+            targets,
+            generations,
             pools: router.pool_eligibility(Instant::now()),
         }
     }
+}
+
+/// The state key of the router target on `account`.
+pub(super) fn state_key_of(router: &Router, account: &str) -> String {
+    router
+        .status_targets(Instant::now())
+        .into_iter()
+        .find(|target| target.account.as_deref() == Some(account))
+        .expect("the account's target")
+        .state_key
 }
 
 /// One account's accepted reading and placement-safe view, with the age

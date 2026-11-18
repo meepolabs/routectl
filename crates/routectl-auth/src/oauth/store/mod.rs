@@ -100,6 +100,35 @@ pub enum PeekedAccessToken {
     Missing,
 }
 
+/// Outcome of [`OAuthStore::peek_credential`]: one seat's access token and
+/// recorded account id, read under one guard together with the store's
+/// reload generation, so the two never come from different logins and a
+/// caller can tell whether a reload has run since. `Debug` shows neither
+/// the token nor the account id.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PeekedCredential {
+    /// The access token, as [`OAuthStore::peek_access_token`] reads it.
+    pub token: PeekedAccessToken,
+    /// The account id recorded with that token, if any.
+    pub account_id: Option<String>,
+    /// The store's reload generation at the read; compare it with
+    /// [`OAuthStore::reload_generation`] later.
+    pub reload_generation: u64,
+}
+
+impl std::fmt::Debug for PeekedCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeekedCredential")
+            .field("token", &self.token)
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("reload_generation", &self.reload_generation)
+            .finish()
+    }
+}
+
 /// Outcome of [`OAuthStore::open_default_degradable`]. A resolvable
 /// config path ALWAYS yields `Present` (the store may be degraded -- see
 /// [`OAuthStore::open_or_degraded`]); only a genuinely absent config

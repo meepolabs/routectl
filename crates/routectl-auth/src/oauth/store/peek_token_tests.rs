@@ -130,3 +130,97 @@ async fn debug_of_a_ready_token_does_not_show_the_token() {
         "Debug leaked the token: {rendered}"
     );
 }
+
+const ACCOUNT_MARKER: &str = "acct-peek-marker-2c91";
+
+/// `store_with_seat` with `ACCOUNT_MARKER` recorded as the seat's account id.
+async fn store_with_account(
+    path: &Path,
+    seat: &str,
+    expires_at: u64,
+) -> (OAuthStore, Arc<ScriptedRefreshFlow>) {
+    let seed = OAuthStore::open(path).await.unwrap();
+    let mut record = token_record(TOKEN_MARKER, expires_at);
+    record.account.account_id = Some(ACCOUNT_MARKER.into());
+    seed.write_record(seat, record).await.unwrap();
+    drop(seed);
+    let flow = Arc::new(ScriptedRefreshFlow::new(ScriptedRefresh::Mint(
+        "tok-minted".into(),
+    )));
+    let store = OAuthStore::open_with_scripted_refresh_for_tests(path, flow.clone())
+        .await
+        .unwrap();
+    (store, flow)
+}
+
+#[tokio::test]
+async fn a_credential_peek_reads_token_and_account_id_without_side_effects() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    let fresh = unix_now() + REFRESH_LEAD_SECS + 600;
+    let (store, flow) = store_with_account(&path, LABELED_SEAT, fresh).await;
+    let before = file_state(&path);
+
+    // Act
+    let peeked = store.peek_credential(LABELED_SEAT).await;
+    let missing = store.peek_credential("anthropic#seat-b").await;
+
+    // Assert
+    assert_eq!(file_state(&path), before, "peek must not write the file");
+    assert_eq!(flow.post_count(), 0, "peek must not refresh");
+    let PeekedAccessToken::Ready(token) = &peeked.token else {
+        panic!("a fresh token must be Ready, got {peeked:?}");
+    };
+    assert_eq!(token.expose(), TOKEN_MARKER);
+    assert_eq!(peeked.account_id.as_deref(), Some(ACCOUNT_MARKER));
+    assert_eq!(missing.token, PeekedAccessToken::Missing);
+    assert_eq!(missing.account_id, None);
+}
+
+#[tokio::test]
+async fn a_credential_peek_reports_the_reload_generation_a_reload_advances() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    let fresh = unix_now() + REFRESH_LEAD_SECS + 600;
+    let (store, _flow) = store_with_account(&path, LABELED_SEAT, fresh).await;
+    let peeked = store.peek_credential(LABELED_SEAT).await;
+    assert_eq!(
+        store.reload_generation(),
+        peeked.reload_generation,
+        "premise: no reload yet"
+    );
+
+    // Act
+    store.reload_from_disk().await.unwrap();
+
+    // Assert
+    assert_ne!(store.reload_generation(), peeked.reload_generation);
+    assert_eq!(
+        store.peek_credential(LABELED_SEAT).await.reload_generation,
+        store.reload_generation()
+    );
+}
+
+#[tokio::test]
+async fn debug_of_a_credential_peek_shows_neither_token_nor_account_id() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    let fresh = unix_now() + REFRESH_LEAD_SECS + 600;
+    let (store, _flow) = store_with_account(&path, LABELED_SEAT, fresh).await;
+    let peeked = store.peek_credential(LABELED_SEAT).await;
+    assert!(
+        matches!(peeked.token, PeekedAccessToken::Ready(_)) && peeked.account_id.is_some(),
+        "fixture must yield a token and an account id to redact"
+    );
+
+    // Act
+    let rendered = format!("{peeked:?}");
+
+    // Assert
+    for secret in [TOKEN_MARKER, ACCOUNT_MARKER] {
+        assert!(!rendered.contains(secret), "Debug leaked: {rendered}");
+    }
+}

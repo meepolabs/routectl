@@ -38,7 +38,8 @@ pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
 pub use store::{
-    DefinitiveCause, LocalProbe, OAuthStore, OpenOutcome, PeekedAccessToken, RefreshOutcome,
+    DefinitiveCause, LocalProbe, OAuthStore, OpenOutcome, PeekedAccessToken, PeekedCredential,
+    RefreshOutcome,
 };
 
 /// Where the credentials store lives by default

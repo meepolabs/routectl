@@ -9,6 +9,8 @@
 //! `Router::observe_polled_usage`, accepted bodies only) and the reading
 //! history (accepted readings only). Eligibility, the breaker, credential
 //! marks and the token are never touched, whatever the endpoint answered.
+//! A credentials reload between the token read and `apply` supersedes the
+//! poll, since the router learns of a re-login only after the store does.
 //!
 //! Nothing here logs or carries in an error the token, the response body or
 //! headers, or a vendor account id.
@@ -21,7 +23,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use routectl_auth::{OAuthStore, PeekedAccessToken};
+use routectl_auth::{OAuthStore, PeekedAccessToken, PeekedCredential};
 use routectl_core::sanitize_for_log;
 use routectl_router::{
     AcceptedReading, Config, ObservationStamp, PolledUsageRejection, Router, UsageVendor,
@@ -36,7 +38,7 @@ use self::client::{FetchResult, SeatCredential, UsagePollClient};
 use self::schedule::{PollOutcome, PollSchedule, RandomJitter, SeatCandidate};
 use crate::handlers::status::DaemonMeta;
 use crate::server::seat_driver::{
-    ManagedSeat, SeatJob, SeatVerdict, managed_seats, run_seat_driver,
+    ManagedSeat, SeatJob, SeatVerdict, accounts_awaiting_login, managed_seats, run_seat_driver,
 };
 
 /// The wall clock the schedule runs on, in epoch ms. Injected so tests can
@@ -161,6 +163,8 @@ pub(super) enum PollAttempt {
     Attempted {
         vendor: UsageVendor,
         attempted_ms: i64,
+        /// The store's reload generation when the credential was read.
+        reload_generation: u64,
         result: AttemptResult,
     },
 }
@@ -247,11 +251,15 @@ impl SeatJob for UsagePollJob {
 
     /// The managed seats the schedule finds due, at most one per vendor.
     /// A seat counts from the meter's last accepted reading of any source,
-    /// so a seat taking traffic is not polled.
+    /// so a seat taking traffic is not polled. A seat awaiting a fresh login
+    /// is left out, as the refresh job leaves it out: its token is known
+    /// dead, and the login that revives it starts its schedule afresh.
     fn due(&self, router: &Router) -> Vec<ManagedSeat> {
         let readings = router.account_readings(&ObservationStamp::now());
+        let dead = accounts_awaiting_login(router);
         let seats: Vec<(ManagedSeat, UsageVendor)> = managed_seats(&router.config)
             .into_iter()
+            .filter(|seat| !dead.contains(&seat.account))
             .filter_map(|seat| usage_vendor(&seat.provider).map(|vendor| (seat, vendor)))
             .collect();
         let candidates: Vec<SeatCandidate<'_>> = seats
@@ -285,10 +293,13 @@ impl SeatJob for UsagePollJob {
             let Some(vendor) = vendor else {
                 return PollAttempt::NotPolled;
             };
-            let result = fetch_usage(&store, &client, &account, vendor).await;
+            let credential = store.peek_credential(&account).await;
+            let reload_generation = credential.reload_generation;
+            let result = fetch_usage(&client, credential, vendor).await;
             PollAttempt::Attempted {
                 vendor,
                 attempted_ms,
+                reload_generation,
                 result,
             }
         }
@@ -304,18 +315,23 @@ impl SeatJob for UsagePollJob {
         let PollAttempt::Attempted {
             vendor,
             attempted_ms,
+            reload_generation,
             result,
         } = attempt
         else {
             return SeatVerdict::Quiet;
         };
-        let outcome = match result {
-            AttemptResult::TokenNotReady => PollOutcome::TokenNotReady,
-            AttemptResult::NoAccountId => PollOutcome::Auth,
-            AttemptResult::Fetched(FetchResult::Ok(body)) => {
-                self.land_body(router, seat, vendor, &body, generation)
+        let outcome = if self.store.reload_generation() == reload_generation {
+            match result {
+                AttemptResult::TokenNotReady => PollOutcome::TokenNotReady,
+                AttemptResult::NoAccountId => PollOutcome::Auth,
+                AttemptResult::Fetched(FetchResult::Ok(body)) => {
+                    self.land_body(router, seat, vendor, &body, generation)
+                }
+                AttemptResult::Fetched(failure) => failure_outcome(&failure),
             }
-            AttemptResult::Fetched(failure) => failure_outcome(&failure),
+        } else {
+            PollOutcome::Superseded
         };
         self.state
             .schedule
@@ -362,31 +378,24 @@ pub(super) fn spawn_usage_poll_driver(
 }
 
 async fn fetch_usage(
-    store: &OAuthStore,
     client: &UsagePollClient,
-    account: &str,
+    credential: PeekedCredential,
     vendor: UsageVendor,
 ) -> AttemptResult {
-    let PeekedAccessToken::Ready(token) = store.peek_access_token(account).await else {
+    let PeekedAccessToken::Ready(token) = credential.token else {
         return AttemptResult::TokenNotReady;
     };
-    let credential = match vendor {
+    let seat_credential = match vendor {
         UsageVendor::Anthropic => SeatCredential::Anthropic { token: &token },
-        UsageVendor::Codex => {
-            let Some(account_id) = store.peek_account_id(account).await else {
-                return AttemptResult::NoAccountId;
-            };
-            return AttemptResult::Fetched(
-                client
-                    .fetch(SeatCredential::Codex {
-                        token: &token,
-                        account_id: Some(&account_id),
-                    })
-                    .await,
-            );
-        }
+        UsageVendor::Codex => match credential.account_id.as_deref() {
+            Some(account_id) => SeatCredential::Codex {
+                token: &token,
+                account_id: Some(account_id),
+            },
+            None => return AttemptResult::NoAccountId,
+        },
     };
-    AttemptResult::Fetched(client.fetch(credential).await)
+    AttemptResult::Fetched(client.fetch(seat_credential).await)
 }
 
 /// The usage endpoint vendor of a managed login's provider, or `None` for a
