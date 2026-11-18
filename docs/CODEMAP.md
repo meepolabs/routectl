@@ -6368,6 +6368,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   marking or clearing under it; keeps the memory-only `SeatDriverHealth` that
   `DaemonMeta` holds. Spawned by `spawn_reload_pipeline` when a credential
   store exists; tests in `seat_driver_tests.rs`
+- `src/server/usage_poll/mod.rs` -- the background usage poll's module hub.
+- `src/server/usage_poll/client.rs` -- the usage poll's HTTP client: the two
+  compile-time vendor usage URLs, a no-redirect https-only client with 5 s
+  connect / 10 s total timeouts, the body cut at `MAX_USAGE_BODY_BYTES`, the
+  lane's first-party identity headers, and the closed `FetchResult`; tests in
+  `client_tests.rs`
 - `src/server/capability_health.rs` -- bridges the router's
   capability-persistence gate to the usage writer whose health answers it,
   installed at boot after the writer exists and before publication.

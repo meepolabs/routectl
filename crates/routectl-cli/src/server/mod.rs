@@ -40,6 +40,7 @@ pub mod seat_driver;
 pub mod secrets;
 mod serve;
 pub mod status_gate;
+mod usage_poll;
 mod warm_open;
 
 pub(crate) use config_load::parse_config_only;

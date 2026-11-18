@@ -183,9 +183,9 @@ pub(crate) mod stream_completion;
 
 // Shared parser for the standard HTTP `Retry-After` response header.
 // Gated on the provider features that bring in `reqwest` + `time`
-// (every provider does). Crate-internal: provider egresses call this
-// directly, and the router only ever sees the parsed `Duration` via
-// `Error::Upstream` -- it never reaches the module by path.
+// (every provider does). The module stays crate-internal; only the parser
+// is exported, for callers outside the provider egresses that read a
+// vendor's rate-limit reply themselves.
 #[cfg(any(
     feature = "openai-compat",
     feature = "anthropic-api",
@@ -194,6 +194,14 @@ pub(crate) mod stream_completion;
     feature = "gemini"
 ))]
 pub(crate) mod retry_after;
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
+pub use retry_after::parse_retry_after;
 
 // Shared lifter for the upstream provider correlation id (`x-request-id` /
 // `x-oai-request-id` / `cf-ray`) off a response header map. Same feature
