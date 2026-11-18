@@ -11,8 +11,10 @@ use super::*;
 
 use std::time::Instant;
 
+use crate::quota::curation::ANTHROPIC_PROVIDER_KIND;
 use crate::quota::freshness::accept_reset;
 use crate::quota::key::seat_key_for_secret_ref;
+use crate::quota::placement::{SeatQuota, seat_tiers};
 use crate::quota::window::{Billing, QuotaWindow, Utilization};
 
 const SEAT_PROVIDER: &str = "anthropic";
@@ -277,6 +279,61 @@ fn an_incoming_unknown_leaves_unknown_once_the_stored_reading_expired() {
     );
 }
 
+/// An unknown header arriving after the stored window expired speaks for that
+/// window at its own stamp, so a reading observed before it and delivered
+/// after it must not revive the window. Positive control: the same delayed
+/// reading without the unknown header is accepted and places the seat.
+#[test]
+fn a_delayed_reading_older_than_an_unknown_after_expiry_never_revives_the_window() {
+    let t0 = stamp_at(Duration::ZERO);
+    let t2 = stamp_at(Duration::from_mins(90));
+    let t3 = stamp_at(Duration::from_hours(2));
+    let first = snapshot(
+        t0,
+        known(0.70, &t0, Duration::from_hours(1)),
+        QuotaWindow::Unknown,
+    );
+    let delayed = snapshot(
+        t2,
+        known(0.10, &t2, Duration::from_hours(2)),
+        QuotaWindow::Unknown,
+    );
+    let rows = [
+        ("unknown header at t3 merged first", true),
+        ("no unknown header", false),
+    ];
+    for (name, with_unknown) in rows {
+        let store = store();
+        store.observe(&seat(None), first.clone());
+        if with_unknown {
+            store.observe(
+                &seat(None),
+                snapshot(t3, QuotaWindow::Unknown, QuotaWindow::Unknown),
+            );
+        }
+
+        store.observe(&seat(None), delayed.clone());
+
+        let fast = store.reading_for(&seat(None), &t3).expect("a reading").fast;
+        let tiers = seat_tiers(
+            &store,
+            &[Some(seat(None))],
+            Some(ANTHROPIC_PROVIDER_KIND),
+            &t3,
+        );
+        if with_unknown {
+            assert_eq!(fast, QuotaWindow::Unknown, "row: {name}");
+            assert_eq!(tiers, vec![SeatQuota::Unknown], "row: {name}");
+        } else {
+            assert_eq!(fraction_of(&fast, "fast"), 0.10, "row: {name}");
+            assert!(
+                matches!(tiers.as_slice(), [SeatQuota::BelowCap { .. }]),
+                "row: {name}: {tiers:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn an_incoming_unknown_leaves_unknown_when_no_prior_reading_exists() {
     let store = store();
@@ -522,7 +579,10 @@ fn rejections_are_counted_by_reason() {
 #[test]
 fn the_rejection_warn_reports_every_reason_total() {
     let store = store();
+    // The captured reason is first: a contradiction keeps the stored reading,
+    // so the line must not claim the seat lost its evidence.
     let reasons = [
+        (RejectionReason::Contradictory, "contradictory_total"),
         (
             RejectionReason::InvalidUtilization,
             "invalid_utilization_total",
@@ -530,7 +590,6 @@ fn the_rejection_warn_reports_every_reason_total() {
         (RejectionReason::ExpiredReset, "expired_reset_total"),
         (RejectionReason::ImplausibleReset, "implausible_reset_total"),
         (RejectionReason::Overflow, "overflow_total"),
-        (RejectionReason::Contradictory, "contradictory_total"),
         (RejectionReason::UnknownLength, "unknown_length_total"),
         (RejectionReason::InvalidStarted, "invalid_started_total"),
         (RejectionReason::MalformedBody, "malformed_body_total"),
@@ -553,6 +612,10 @@ fn the_rejection_warn_reports_every_reason_total() {
     for (_, field) in reasons {
         assert_eq!(warns[0].field(field), Some("1"), "{field} on the WARN");
     }
+    assert_eq!(
+        warns[0].message,
+        "upstream subscription-quota observation rejected; prior accepted state kept"
+    );
 }
 
 /// The counters are EXACT while the WARN is throttled -- a seat producing

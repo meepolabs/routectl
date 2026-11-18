@@ -16,10 +16,17 @@
 //! - A partial observation never erases: a key it omits keeps its own reading
 //!   and keeps aging on its own stamp, so read-time expiry still bites.
 //! - A complete observation (windows or `NoWindows`) drops every stored window
-//!   older than itself that it omits, and sets a floor: a window observed before
-//!   that floor arriving late is discarded, so a late partial cannot bring back
-//!   a window the complete report said no longer applies. A later window
-//!   supersedes `NoWindows`.
+//!   it omits that is not newer than itself, and sets a floor: a partial window
+//!   observed at or before that floor is discarded, so a late partial cannot
+//!   bring back a window the complete report said no longer applies. Stamps
+//!   are not unique, so the tie goes to the complete report: an equal-stamp
+//!   window it omits is dropped and an equal-stamp partial is barred, while
+//!   its own windows are taken. A later window supersedes `NoWindows`.
+//! - A response header that names a window unknown speaks for it when the
+//!   stored window is no longer in effect (or none is stored): it leaves an
+//!   ordering mark at its stamp, and a reading observed before the mark is
+//!   discarded, so a delayed older reading cannot revive a lapsed window.
+//!   Over a window still in effect it is no evidence and leaves no mark.
 //! - Contradiction: a newer reading for a running window whose reset matches
 //!   the stored one within [`RESET_TOLERANCE`] but whose used fraction is LOWER
 //!   describes the same window going backwards. Within
@@ -135,9 +142,13 @@ pub struct AccountMeter {
     /// Orders nothing; reported as the projection's observation instant.
     latest: ObservationStamp,
     windows: HashMap<WindowKey, StoredWindow>,
-    /// Stamp of the newest accepted complete report; windows observed before
-    /// it are not taken.
+    /// Stamp of the newest accepted complete report; partial windows observed
+    /// at or before it are not taken.
     complete_floor: Option<ObservationStamp>,
+    /// Per key, the stamp of the newest unknown header that spoke for a window
+    /// not in effect; readings observed before it are not taken. Holds at most
+    /// the curated header keys.
+    unknown_marks: HashMap<WindowKey, ObservationStamp>,
     last_accepted: Option<LastAccepted>,
     billing: Billing,
     billing_observed: ObservationStamp,
@@ -150,6 +161,7 @@ impl AccountMeter {
             latest: observed,
             windows: HashMap::new(),
             complete_floor: None,
+            unknown_marks: HashMap::new(),
             last_accepted: None,
             billing: Billing::Unknown,
             billing_observed: observed,
@@ -192,19 +204,20 @@ impl AccountMeter {
         let source = observation.source();
         let mut next = self.clone();
         next.latest = newer(self.latest, observed);
-        let incoming = match observation.report() {
-            ObservationReport::Partial(set) => set.as_slice(),
+        let (incoming, is_complete) = match observation.report() {
+            ObservationReport::Partial(set) => (set.as_slice(), false),
             ObservationReport::Complete(set) => {
                 next.apply_complete(&observed, set.as_slice());
-                set.as_slice()
+                (set.as_slice(), true)
             }
             ObservationReport::NoWindows => {
                 next.apply_complete(&observed, &[]);
-                &[]
+                (&[][..], true)
             }
         };
         for reading in incoming {
-            if let Some(stored) = self.merged_window(reading, &observed, source)? {
+            if let Some(stored) = self.merged_window(reading, &observed, source, is_complete)? {
+                next.unknown_marks.remove(reading.key());
                 next.windows.insert(reading.key().clone(), stored);
             }
         }
@@ -217,8 +230,8 @@ impl AccountMeter {
         Ok(next)
     }
 
-    /// Drop every window a complete report at `observed` omits and is newer
-    /// than, and raise the floor to `observed`.
+    /// Drop every window a complete report at `observed` omits and is not
+    /// older than, and raise the floor to `observed`.
     fn apply_complete(&mut self, observed: &ObservationStamp, reported: &[WindowReading]) {
         if self
             .complete_floor
@@ -228,24 +241,34 @@ impl AccountMeter {
         }
         self.windows.retain(|key, stored| {
             reported.iter().any(|w| w.key() == key)
-                || stored.observed.monotonic() >= observed.monotonic()
+                || stored.observed.monotonic() > observed.monotonic()
         });
         self.complete_floor = Some(*observed);
     }
 
     /// The window to store for `reading`, `None` to keep what is stored, or
-    /// `Contradictory`.
+    /// `Contradictory`. `is_complete` says `reading` belongs to a complete
+    /// report, which takes an equal-stamp tie against the floor.
     fn merged_window(
         &self,
         reading: &WindowReading,
         observed: &ObservationStamp,
         source: ReadingSource,
+        is_complete: bool,
     ) -> Result<Option<StoredWindow>, RejectionReason> {
-        let below_floor = self
-            .complete_floor
-            .is_some_and(|floor| observed.monotonic() < floor.monotonic());
+        let below_floor = self.complete_floor.is_some_and(|floor| {
+            observed.monotonic() < floor.monotonic()
+                || (!is_complete && observed.monotonic() == floor.monotonic())
+        });
+        let below_mark = self
+            .unknown_marks
+            .get(reading.key())
+            .is_some_and(|mark| observed.monotonic() < mark.monotonic());
         let stored = self.windows.get(reading.key());
-        if below_floor || stored.is_some_and(|s| observed.monotonic() < s.observed.monotonic()) {
+        if below_floor
+            || below_mark
+            || stored.is_some_and(|s| observed.monotonic() < s.observed.monotonic())
+        {
             return Ok(None);
         }
         let reading = match stored {
@@ -263,9 +286,10 @@ impl AccountMeter {
     ///
     /// The snapshot's known FAST and SLOW windows become a partial
     /// observation keyed by their curated lengths, account-wide, with an
-    /// unknown started state (headers do not say); an unknown window is simply
-    /// omitted, so it never erases. A snapshot with no known window still
-    /// records its arrival and its billing state.
+    /// unknown started state (headers do not say); an unknown window is
+    /// omitted, so it never erases, and marks its key when the stored window
+    /// is no longer in effect (see the module's merge rule). A snapshot with
+    /// no known window still records its arrival and its billing state.
     pub(super) fn merged_header(&self, snapshot: &QuotaSnapshot) -> Result<Self, RejectionReason> {
         let mut next = match header_observation(snapshot)? {
             Some(observation) => self.merged(&observation)?,
@@ -275,6 +299,13 @@ impl AccountMeter {
                 next
             }
         };
+        for key in self.unknown_header_keys(snapshot) {
+            let mark = next
+                .unknown_marks
+                .get(&key)
+                .map_or(snapshot.observed, |mark| newer(*mark, snapshot.observed));
+            next.unknown_marks.insert(key, mark);
+        }
         next.billing = self.merged_billing(snapshot);
         if snapshot.billing != Billing::Unknown
             && snapshot.observed.monotonic() >= self.billing_observed.monotonic()
@@ -282,6 +313,26 @@ impl AccountMeter {
             next.billing_observed = snapshot.observed;
         }
         Ok(next)
+    }
+
+    /// The curated keys `snapshot` names unknown whose stored window, if any,
+    /// is older than the snapshot and no longer in effect at it.
+    fn unknown_header_keys(&self, snapshot: &QuotaSnapshot) -> Vec<WindowKey> {
+        let observed = &snapshot.observed;
+        [
+            (WindowRole::Fast, &snapshot.fast),
+            (WindowRole::Slow, &snapshot.slow),
+        ]
+        .into_iter()
+        .filter(|(_, window)| matches!(window, QuotaWindow::Unknown))
+        .filter_map(|(role, _)| role_key(&role))
+        .filter(|key| {
+            self.windows.get(key).is_none_or(|stored| {
+                stored.observed.monotonic() <= observed.monotonic()
+                    && !stored.is_effective(observed)
+            })
+        })
+        .collect()
     }
 
     /// The billing state to keep. A known incoming state wins unless it is

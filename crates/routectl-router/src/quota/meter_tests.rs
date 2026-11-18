@@ -248,6 +248,260 @@ fn a_complete_report_drops_older_omitted_windows_and_bars_late_ones() {
     );
 }
 
+/// One step of a tie scenario: a partial or complete report at a stamp.
+enum Step {
+    Partial(ObservationStamp, Vec<(WindowKey, f64)>),
+    Complete(ObservationStamp, Vec<(WindowKey, f64)>),
+    NoWindows(ObservationStamp),
+}
+
+fn apply(store: &QuotaStore, step: &Step) {
+    let readings = |at: &ObservationStamp, windows: &[(WindowKey, f64)]| {
+        windows
+            .iter()
+            .map(|(k, used)| running(k.clone(), *used, mins(60), at))
+            .collect::<Vec<_>>()
+    };
+    let observation = match step {
+        Step::Partial(at, windows) => partial(ReadingSource::Response, *at, readings(at, windows)),
+        Step::Complete(at, windows) => observation(
+            ReadingSource::Poll,
+            *at,
+            ObservationReport::Complete(WindowSet::new(readings(at, windows)).expect("a set")),
+        ),
+        Step::NoWindows(at) => observation(ReadingSource::Poll, *at, ObservationReport::NoWindows),
+    };
+    store
+        .observe_account(&seat("a"), &observation)
+        .expect("an ordering decision is never a refusal");
+}
+
+/// A tie scenario: name, steps, then the expected report state and the used
+/// fractions held for the five-hour and seven-day keys.
+type TieRow = (
+    &'static str,
+    Vec<Step>,
+    ReportState,
+    Option<f64>,
+    Option<f64>,
+);
+
+/// Stamps are not unique, so a tie needs a rule: a complete report wins
+/// against every window stamped equal to it (an omitted one is dropped, a
+/// partial arriving after it is barred), while its own windows stay; between
+/// two complete reports the later merged one wins. Equality
+/// is on the monotonic clock alone; the wall clock orders nothing.
+#[test]
+fn an_equal_stamp_tie_goes_to_the_complete_report() {
+    let clock = Clock::new();
+    let s = clock.at(mins(5));
+    let same_tick_other_wall = ObservationStamp::from_parts(s.wall() + mins(1), s.monotonic());
+    let earlier = clock.at(mins(4));
+    let five = || key(FIVE_HOURS, None);
+    let seven = || key(SEVEN_DAYS, None);
+    let rows: Vec<TieRow> = vec![
+        (
+            "partial then NoWindows",
+            vec![Step::Partial(s, vec![(five(), 0.10)]), Step::NoWindows(s)],
+            ReportState::NoWindows,
+            None,
+            None,
+        ),
+        (
+            "NoWindows then partial",
+            vec![Step::NoWindows(s), Step::Partial(s, vec![(five(), 0.10)])],
+            ReportState::NoWindows,
+            None,
+            None,
+        ),
+        (
+            "NoWindows then partial on the same tick with another wall clock",
+            vec![
+                Step::NoWindows(s),
+                Step::Partial(same_tick_other_wall, vec![(five(), 0.10)]),
+            ],
+            ReportState::NoWindows,
+            None,
+            None,
+        ),
+        (
+            "partial then complete omitting it",
+            vec![
+                Step::Partial(s, vec![(five(), 0.10)]),
+                Step::Complete(s, vec![(seven(), 0.30)]),
+            ],
+            ReportState::Windows,
+            None,
+            Some(0.30),
+        ),
+        (
+            "complete then partial it omitted",
+            vec![
+                Step::Complete(s, vec![(seven(), 0.30)]),
+                Step::Partial(s, vec![(five(), 0.10)]),
+            ],
+            ReportState::Windows,
+            None,
+            Some(0.30),
+        ),
+        (
+            "partial then complete reporting the same key",
+            vec![
+                Step::Partial(s, vec![(five(), 0.10)]),
+                Step::Complete(s, vec![(five(), 0.30)]),
+            ],
+            ReportState::Windows,
+            Some(0.30),
+            None,
+        ),
+        (
+            "complete then partial for a key it reported",
+            vec![
+                Step::Complete(s, vec![(five(), 0.30)]),
+                Step::Partial(s, vec![(five(), 0.40)]),
+            ],
+            ReportState::Windows,
+            Some(0.30),
+            None,
+        ),
+        (
+            "NoWindows then complete with windows",
+            vec![Step::NoWindows(s), Step::Complete(s, vec![(five(), 0.10)])],
+            ReportState::Windows,
+            Some(0.10),
+            None,
+        ),
+        (
+            "complete with windows then NoWindows",
+            vec![Step::Complete(s, vec![(five(), 0.10)]), Step::NoWindows(s)],
+            ReportState::NoWindows,
+            None,
+            None,
+        ),
+        (
+            "complete with windows drops an older omitted one",
+            vec![
+                Step::Partial(earlier, vec![(five(), 0.10)]),
+                Step::Complete(s, vec![(seven(), 0.30)]),
+            ],
+            ReportState::Windows,
+            None,
+            Some(0.30),
+        ),
+    ];
+    for (name, steps, report, five_used, seven_used) in rows {
+        let store = store();
+
+        for step in &steps {
+            apply(&store, step);
+        }
+
+        assert_eq!(store.report_for(&seat("a")), report, "row: {name}");
+        assert_eq!(used_of(&store, &five()), five_used, "row: {name}");
+        assert_eq!(used_of(&store, &seven()), seven_used, "row: {name}");
+        let fast = store.reading_for(&seat("a"), &s).expect("an entry").fast;
+        assert_eq!(
+            matches!(fast, QuotaWindow::Known { .. }),
+            five_used.is_some(),
+            "row: {name}: the projection follows the stored window"
+        );
+    }
+}
+
+// ---- Ordering after an unknown header ----
+
+/// A header naming a window unknown after the stored one expired (or with
+/// none stored) speaks for that window at its own stamp: a reading observed
+/// before it, from any source and for either curated role, never lands after
+/// it. A reading observed after it still does.
+#[test]
+fn an_unknown_header_bars_older_readings_of_an_ineffective_window() {
+    let clock = Clock::new();
+    let (t0, t2, t3, t4) = (
+        clock.at(mins(0)),
+        clock.at(mins(90)),
+        clock.at(mins(120)),
+        clock.at(mins(130)),
+    );
+    let all_unknown = |at| QuotaSnapshot {
+        observed: at,
+        fast: QuotaWindow::Unknown,
+        slow: QuotaWindow::Unknown,
+        billing: Billing::Unknown,
+    };
+    let rows = [
+        ("expired FAST, delayed poll", FIVE_HOURS, true, t2, None),
+        ("expired SLOW, delayed poll", SEVEN_DAYS, true, t2, None),
+        ("nothing stored, delayed poll", FIVE_HOURS, false, t2, None),
+        ("expired FAST, newer poll", FIVE_HOURS, true, t4, Some(0.10)),
+    ];
+    for (name, length, seeded, delayed_at, expected) in rows {
+        let store = store();
+        let window = key(length, None);
+        if seeded {
+            apply_seed(&store, &window, t0);
+        }
+        assert!(store.observe(&seat("a"), all_unknown(t3)), "row: {name}");
+
+        store
+            .observe_account(
+                &seat("a"),
+                &partial(
+                    ReadingSource::Poll,
+                    delayed_at,
+                    vec![running(window.clone(), 0.10, mins(240), &delayed_at)],
+                ),
+            )
+            .expect("a late arrival is not a refusal");
+
+        let held = store
+            .account(&seat("a"))
+            .and_then(|m| m.window(&window).cloned())
+            .filter(|w| *w.observed() == delayed_at)
+            .map(|w| w.reading().used().fraction());
+        assert_eq!(held, expected, "row: {name}");
+    }
+}
+
+/// A window stored at `at` running 0.70 and resetting 60 minutes past the
+/// base, so it has expired by the time the tests' unknown header arrives.
+fn apply_seed(store: &QuotaStore, window: &WindowKey, at: ObservationStamp) {
+    store
+        .observe_account(
+            &seat("a"),
+            &partial(
+                ReadingSource::Poll,
+                at,
+                vec![running(window.clone(), 0.70, mins(60), &at)],
+            ),
+        )
+        .expect("accepted");
+}
+
+/// An unknown header leaves no mark while the stored window is still in
+/// effect, exactly as before: a delayed reading newer than the stored one
+/// still lands.
+#[test]
+fn an_unknown_header_over_an_effective_window_leaves_ordering_alone() {
+    let clock = Clock::new();
+    let (t0, t1, t2) = (clock.at(mins(0)), clock.at(mins(10)), clock.at(mins(20)));
+    let store = store();
+    assert!(store.observe(&seat("a"), header(t0, 0.50, mins(60))));
+    assert!(store.observe(
+        &seat("a"),
+        QuotaSnapshot {
+            observed: t2,
+            fast: QuotaWindow::Unknown,
+            slow: QuotaWindow::Unknown,
+            billing: Billing::Unknown,
+        }
+    ));
+
+    assert!(store.observe(&seat("a"), header(t1, 0.60, mins(61))));
+
+    assert_eq!(used_of(&store, &key(FIVE_HOURS, None)), Some(0.60));
+}
+
 // ---- Contradiction rule ----
 
 #[test]

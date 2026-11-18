@@ -369,8 +369,7 @@ impl QuotaStore {
             unknown_length_total = totals.unknown_length,
             invalid_started_total = totals.invalid_started,
             malformed_body_total = totals.malformed_body,
-            "upstream subscription-quota window refused; seat reads as \
-             no-evidence for that window",
+            "upstream subscription-quota observation rejected; prior accepted state kept",
         );
     }
 
