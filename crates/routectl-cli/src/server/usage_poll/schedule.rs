@@ -12,7 +12,17 @@
 //! not seen before, with no reading and no attempt, is due at a random point
 //! in its first 5 minutes so a fresh daemon does not poll every seat at
 //! once. A sweep returns at most one seat per vendor, so a long suspend
-//! never ends in a burst.
+//! never ends in a burst. Every deadline (cadence, backoff, the end of a
+//! vendor pause, first sight) carries the seat's jitter, so no two seats
+//! and no two attempts share a fixed beat.
+//!
+//! The clock is wall time and may step backward. A last attempt or a
+//! reading stamped later than `now` counts from `now` (from the first sweep
+//! that saw the reading), and a first-sight due time or pause end further
+//! out than its longest span from `now` is pulled in to that span, so a
+//! step back delays a seat or vendor by at most its own longest wait, never
+//! until the old epoch comes round again. A deadline that saturates at the
+//! clock ceiling is never due.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -38,6 +48,9 @@ const MAX_BACKOFF_MS: i64 = 15 * MINUTE_MS;
 const MAX_VENDOR_PAUSE_MS: u64 = 60 * 60_000;
 /// The vendor pause after a 429 that names no wait.
 const DEFAULT_VENDOR_PAUSE_MS: i64 = 15 * MINUTE_MS;
+/// A deadline that saturated at the clock ceiling: never due, since it
+/// cannot be told apart from a real deadline that has passed.
+const UNREACHABLE_MS: i64 = i64::MAX;
 
 /// The closed result of one seat's poll, as the poll job lands it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,9 +184,27 @@ pub(super) struct SeatState {
     last_attempt_ms: Option<i64>,
     last_outcome: Option<PollOutcome>,
     error_streak: u32,
+    /// The end of the last vendor pause this seat was held by.
+    pause_end_ms: Option<i64>,
+    /// A last-accepted reading stamped ahead of the clock, and the sweep
+    /// time it is counted from instead.
+    future_reading: Option<(i64, i64)>,
 }
 
 impl SeatState {
+    fn fresh(now_ms: i64, jitter: &mut dyn JitterSource) -> Self {
+        Self {
+            first_due_ms: now_ms.saturating_add(draw_ms_capped(jitter, BOOT_SPREAD_MS)),
+            jitter_ms: draw_ms_capped(jitter, MAX_JITTER_MS),
+            next_due_ms: now_ms,
+            last_attempt_ms: None,
+            last_outcome: None,
+            error_streak: 0,
+            pause_end_ms: None,
+            future_reading: None,
+        }
+    }
+
     /// When the seat was next due as of the last sweep, in epoch ms.
     pub(super) const fn next_due_ms(&self) -> i64 {
         self.next_due_ms
@@ -191,18 +222,69 @@ impl SeatState {
         self.error_streak
     }
 
-    fn due_at(&self, last_accepted_ms: Option<i64>) -> i64 {
-        let cadence_due = match last_accepted_ms.max(self.last_attempt_ms) {
+    fn cadence_due(&self, last_accepted_ms: Option<i64>) -> i64 {
+        match last_accepted_ms.max(self.last_attempt_ms) {
             None => self.first_due_ms,
             Some(base) => base
                 .saturating_add(POLL_INTERVAL_MS)
                 .saturating_add(self.jitter_ms),
-        };
-        let backoff_due = self.last_attempt_ms.map_or(i64::MIN, |attempt| {
-            attempt.saturating_add(backoff_ms(self.error_streak))
-        });
-        cadence_due.max(backoff_due)
+        }
     }
+
+    fn due_at(&self, cadence_due: i64) -> i64 {
+        let backoff_due = self.last_attempt_ms.map_or(i64::MIN, |attempt| {
+            attempt
+                .saturating_add(backoff_ms(self.error_streak))
+                .saturating_add(self.jitter_ms)
+        });
+        let pause_due = self
+            .pause_end_ms
+            .map_or(i64::MIN, |end| end.saturating_add(self.jitter_ms));
+        cadence_due.max(backoff_due).max(pause_due)
+    }
+
+    /// Hold the seat until `pause_until` plus its jitter while the vendor
+    /// is paused, and forget a pause end it has already waited out.
+    fn track_pause(&mut self, now_ms: i64, pause_until: Option<i64>) {
+        if pause_until.is_some() {
+            self.pause_end_ms = pause_until;
+        } else if self
+            .pause_end_ms
+            .is_some_and(|end| now_ms >= end.saturating_add(self.jitter_ms))
+        {
+            self.pause_end_ms = None;
+        }
+    }
+
+    /// Re-anchor every stored time later than `now_ms` to `now_ms`.
+    fn rebase_after_clock_step(&mut self, now_ms: i64) {
+        let boot_bound = now_ms.saturating_add(draw_bound(BOOT_SPREAD_MS));
+        self.first_due_ms = self.first_due_ms.min(boot_bound);
+        self.last_attempt_ms = self.last_attempt_ms.map(|attempt| attempt.min(now_ms));
+        let pause_bound = now_ms.saturating_add(draw_bound(MAX_VENDOR_PAUSE_MS));
+        self.pause_end_ms = self.pause_end_ms.map(|end| end.min(pause_bound));
+    }
+
+    /// The last-accepted reading time to count from: a reading stamped
+    /// ahead of the clock counts from the sweep that first saw it.
+    fn reading_base(&mut self, now_ms: i64, last_accepted_ms: Option<i64>) -> Option<i64> {
+        let reading = last_accepted_ms?;
+        if reading <= now_ms {
+            self.future_reading = None;
+            return Some(reading);
+        }
+        match self.future_reading {
+            Some((seen, anchor)) if seen == reading => Some(anchor.min(now_ms)),
+            _ => {
+                self.future_reading = Some((reading, now_ms));
+                Some(now_ms)
+            }
+        }
+    }
+}
+
+fn draw_bound(max_ms: u64) -> i64 {
+    i64::try_from(max_ms).unwrap_or(i64::MAX)
 }
 
 /// The error backoff after `streak` consecutive errors: 5, 10, then 15
@@ -249,6 +331,14 @@ impl VendorPauses {
         }
     }
 
+    fn rebase_after_clock_step(&mut self, now_ms: i64) {
+        let bound = now_ms.saturating_add(draw_bound(MAX_VENDOR_PAUSE_MS));
+        for vendor in [UsageVendor::Anthropic, UsageVendor::Codex] {
+            let slot = self.slot(vendor);
+            *slot = slot.map(|until| until.min(bound));
+        }
+    }
+
     fn expire(&mut self, now_ms: i64) {
         for vendor in [UsageVendor::Anthropic, UsageVendor::Codex] {
             let slot = self.slot(vendor);
@@ -283,35 +373,44 @@ impl<J: JitterSource> PollSchedule<J> {
     /// per vendor, the due seat that has waited longest, unless the vendor
     /// is paused. State for a seat not in `seats` is dropped; a seat seen
     /// for the first time gets a random first due time within 5 minutes.
+    /// A paused vendor's seats come due at the pause end plus each seat's
+    /// own jitter.
     pub(super) fn sweep(&mut self, now_ms: i64, seats: &[SeatCandidate<'_>]) -> Vec<usize> {
         self.seats
             .retain(|account, _| seats.iter().any(|seat| seat.account == account));
-        self.pauses.expire(now_ms);
+        self.pauses.rebase_after_clock_step(now_ms);
         let mut picks = PerVendorPick::default();
         for (index, seat) in seats.iter().enumerate() {
-            let due_at = self.refresh_due(now_ms, seat);
-            if now_ms >= due_at && self.pauses.until(seat.vendor).is_none() {
-                picks.offer(seat.vendor, due_at, index);
+            let pause_until = self.pauses.until(seat.vendor);
+            let rank = self.refresh_due(now_ms, seat, pause_until);
+            if rank.due_at != UNREACHABLE_MS && now_ms >= rank.due_at {
+                picks.offer(seat.vendor, rank, index);
             }
         }
+        self.pauses.expire(now_ms);
         picks.into_sorted_indices()
     }
 
-    fn refresh_due(&mut self, now_ms: i64, seat: &SeatCandidate<'_>) -> i64 {
+    fn refresh_due(
+        &mut self,
+        now_ms: i64,
+        seat: &SeatCandidate<'_>,
+        pause_until: Option<i64>,
+    ) -> DueRank {
         let jitter = &mut self.jitter;
         let state = self
             .seats
             .entry(seat.account.to_string())
-            .or_insert_with(|| SeatState {
-                first_due_ms: now_ms.saturating_add(draw_ms_capped(jitter, BOOT_SPREAD_MS)),
-                jitter_ms: draw_ms_capped(jitter, MAX_JITTER_MS),
-                next_due_ms: now_ms,
-                last_attempt_ms: None,
-                last_outcome: None,
-                error_streak: 0,
-            });
-        state.next_due_ms = state.due_at(seat.last_accepted_ms);
-        state.next_due_ms
+            .or_insert_with(|| SeatState::fresh(now_ms, jitter));
+        state.track_pause(now_ms, pause_until);
+        state.rebase_after_clock_step(now_ms);
+        let reading = state.reading_base(now_ms, seat.last_accepted_ms);
+        let cadence_due = state.cadence_due(reading);
+        state.next_due_ms = state.due_at(cadence_due);
+        DueRank {
+            due_at: state.next_due_ms,
+            cadence_due,
+        }
     }
 
     /// Land one poll's `outcome` for `account` on `vendor`, attempted at
@@ -352,21 +451,30 @@ impl<J: JitterSource> PollSchedule<J> {
     }
 }
 
+/// How a due seat ranks for its vendor's one pick: earliest due first,
+/// and among seats a shared floor (a vendor pause) made equally due, the
+/// one whose own cadence came due first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DueRank {
+    due_at: i64,
+    cadence_due: i64,
+}
+
 /// The earliest-due seat per vendor seen so far in a sweep.
 #[derive(Default)]
 struct PerVendorPick {
-    anthropic: Option<(i64, usize)>,
-    codex: Option<(i64, usize)>,
+    anthropic: Option<(DueRank, usize)>,
+    codex: Option<(DueRank, usize)>,
 }
 
 impl PerVendorPick {
-    fn offer(&mut self, vendor: UsageVendor, due_at: i64, index: usize) {
+    fn offer(&mut self, vendor: UsageVendor, rank: DueRank, index: usize) {
         let slot = match vendor {
             UsageVendor::Anthropic => &mut self.anthropic,
             UsageVendor::Codex => &mut self.codex,
         };
-        if slot.is_none_or(|(kept_due, _)| due_at < kept_due) {
-            *slot = Some((due_at, index));
+        if slot.is_none_or(|(kept, _)| rank < kept) {
+            *slot = Some((rank, index));
         }
     }
 

@@ -369,7 +369,10 @@ fn time_arithmetic_saturates_at_the_extremes() {
     }
     assert_eq!(schedule.pause_until(UsageVendor::Codex), Some(i64::MAX));
     assert!(schedule.sweep(i64::MIN, &seats).is_empty());
-    assert_eq!(schedule.seat("codex").unwrap().next_due_ms(), i64::MAX);
+    assert_eq!(
+        schedule.seat("codex").unwrap().next_due_ms(),
+        i64::MIN + 60 * MIN + MIN
+    );
 }
 
 #[test]
@@ -499,4 +502,215 @@ fn the_os_seeded_jitter_stays_inside_the_requested_range() {
     let mut jitter = RandomJitter::from_os();
 
     assert!((0..200).all(|_| jitter.draw_ms(60_000) <= 60_000));
+}
+
+const YEAR: i64 = 365 * 24 * 60 * MIN;
+
+/// Each row: the outcome that ends the attempt, then the backoff it sets
+/// before the seat's jitter is added.
+#[test]
+fn every_backoff_deadline_carries_the_seat_jitter() {
+    let jitter_ms = 37 * SEC;
+    let mut schedule = PollSchedule::new(FixedJitter(u64::try_from(jitter_ms).unwrap()));
+    let seats = [seat("codex", UsageVendor::Codex, Some(START_MS))];
+    let rows = [
+        ("streak 1", PollOutcome::Timeout, 5 * MIN),
+        ("streak 2", PollOutcome::Http(500), 10 * MIN),
+        ("streak 3", PollOutcome::Transport, 15 * MIN),
+        ("capped", PollOutcome::Malformed, 15 * MIN),
+    ];
+    let mut now = START_MS + 5 * MIN + jitter_ms;
+    for (name, outcome, backoff) in rows {
+        assert_eq!(schedule.sweep(now, &seats), vec![0], "{name}: not due");
+
+        schedule.record("codex", UsageVendor::Codex, now, outcome);
+
+        let due = now + backoff + jitter_ms;
+        assert!(schedule.sweep(due - 1, &seats).is_empty(), "{name}");
+        assert_eq!(schedule.seat("codex").unwrap().next_due_ms(), due, "{name}");
+        now = due;
+    }
+}
+
+#[test]
+fn a_vendor_pause_ends_at_each_seats_own_jitter() {
+    let jitter_ms = 23 * SEC;
+    let mut schedule = PollSchedule::new(FixedJitter(u64::try_from(jitter_ms).unwrap()));
+    let seats = [
+        seat("anthropic:a", UsageVendor::Anthropic, Some(START_MS)),
+        seat("anthropic:b", UsageVendor::Anthropic, Some(START_MS)),
+    ];
+    let now = START_MS + 5 * MIN + jitter_ms;
+    assert_eq!(schedule.sweep(now, &seats), vec![0]);
+    schedule.record(
+        "anthropic:a",
+        UsageVendor::Anthropic,
+        now,
+        PollOutcome::Paused(Some(Duration::from_mins(2))),
+    );
+    let pause_end = now + 2 * MIN;
+
+    assert!(schedule.sweep(pause_end, &seats).is_empty());
+    assert!(schedule.sweep(pause_end + jitter_ms - 1, &seats).is_empty());
+    assert_eq!(
+        picked(&seats, &schedule.sweep(pause_end + jitter_ms, &seats)),
+        vec!["anthropic:b"]
+    );
+}
+
+#[test]
+fn a_backward_clock_step_after_an_attempt_delays_the_seat_by_at_most_one_backoff() {
+    let mut schedule = PollSchedule::new(MaxJitter);
+    let seats = [seat("codex", UsageVendor::Codex, Some(START_MS))];
+    let attempt_at = START_MS + 6 * MIN;
+    assert_eq!(schedule.sweep(attempt_at, &seats), vec![0]);
+    for _ in 0..3 {
+        schedule.record(
+            "codex",
+            UsageVendor::Codex,
+            attempt_at,
+            PollOutcome::Timeout,
+        );
+    }
+    let stepped_back = attempt_at - YEAR;
+
+    assert!(schedule.sweep(stepped_back, &seats).is_empty());
+
+    assert_eq!(
+        schedule.sweep(stepped_back + 15 * MIN + MIN, &seats),
+        vec![0]
+    );
+}
+
+#[test]
+fn a_backward_clock_step_after_a_429_pauses_the_vendor_at_most_an_hour() {
+    let mut schedule = PollSchedule::new(MaxJitter);
+    let seats = [
+        seat("anthropic:a", UsageVendor::Anthropic, Some(START_MS)),
+        seat("anthropic:b", UsageVendor::Anthropic, Some(START_MS)),
+    ];
+    let attempt_at = START_MS + 6 * MIN;
+    assert_eq!(schedule.sweep(attempt_at, &seats), vec![0]);
+    schedule.record(
+        "anthropic:a",
+        UsageVendor::Anthropic,
+        attempt_at,
+        PollOutcome::Paused(Some(Duration::from_hours(1))),
+    );
+    let stepped_back = attempt_at - YEAR;
+
+    assert!(schedule.sweep(stepped_back, &seats).is_empty());
+    assert!(
+        schedule
+            .pause_until(UsageVendor::Anthropic)
+            .is_some_and(|until| until <= stepped_back + 60 * MIN)
+    );
+
+    assert_eq!(
+        schedule.sweep(stepped_back + 60 * MIN + MIN, &seats).len(),
+        1
+    );
+}
+
+#[test]
+fn a_backward_clock_step_before_the_first_poll_keeps_the_boot_spread() {
+    let mut schedule = PollSchedule::new(MaxJitter);
+    let seats = [seat("codex", UsageVendor::Codex, None)];
+    assert!(schedule.sweep(START_MS, &seats).is_empty());
+    let stepped_back = START_MS - YEAR;
+
+    assert!(schedule.sweep(stepped_back, &seats).is_empty());
+
+    assert_eq!(schedule.sweep(stepped_back + 5 * MIN, &seats), vec![0]);
+}
+
+#[test]
+fn a_forward_clock_step_makes_seats_due_at_once_but_one_per_vendor() {
+    let mut schedule = PollSchedule::new(RandomJitter::seeded(11));
+    let seats = [
+        seat("anthropic:a", UsageVendor::Anthropic, Some(START_MS)),
+        seat("anthropic:b", UsageVendor::Anthropic, Some(START_MS + SEC)),
+        seat(
+            "anthropic:c",
+            UsageVendor::Anthropic,
+            Some(START_MS + 2 * SEC),
+        ),
+        seat("codex", UsageVendor::Codex, Some(START_MS)),
+    ];
+    assert!(schedule.sweep(START_MS + MIN, &seats).is_empty());
+
+    let indices = schedule.sweep(START_MS + YEAR, &seats);
+
+    let vendors: Vec<UsageVendor> = indices.iter().map(|&index| seats[index].vendor).collect();
+    assert_eq!(vendors, vec![UsageVendor::Anthropic, UsageVendor::Codex]);
+}
+
+/// A reading stamped after the sweep's clock counts from the sweep that
+/// first saw it, and does not slide forward on later sweeps.
+#[test]
+fn a_reading_stamped_in_the_future_counts_from_when_it_was_first_seen() {
+    let jitter_ms = 11 * SEC;
+    let mut schedule = PollSchedule::new(FixedJitter(u64::try_from(jitter_ms).unwrap()));
+    let seats = [seat(
+        "anthropic",
+        UsageVendor::Anthropic,
+        Some(START_MS + YEAR),
+    )];
+
+    assert!(schedule.sweep(START_MS, &seats).is_empty());
+    assert!(schedule.sweep(START_MS + 3 * MIN, &seats).is_empty());
+    assert!(
+        schedule
+            .sweep(START_MS + 5 * MIN + jitter_ms - 1, &seats)
+            .is_empty()
+    );
+
+    assert_eq!(
+        schedule.sweep(START_MS + 5 * MIN + jitter_ms, &seats),
+        vec![0]
+    );
+}
+
+#[test]
+fn a_seat_recorded_at_the_clock_ceiling_is_not_due_on_every_sweep() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("anthropic", UsageVendor::Anthropic, Some(START_MS))];
+    assert_eq!(schedule.sweep(i64::MAX, &seats), vec![0]);
+
+    schedule.record(
+        "anthropic",
+        UsageVendor::Anthropic,
+        i64::MAX,
+        PollOutcome::Accepted,
+    );
+
+    for _ in 0..3 {
+        assert!(schedule.sweep(i64::MAX, &seats).is_empty());
+    }
+}
+
+#[test]
+fn a_backward_clock_step_while_a_seat_waits_out_its_pause_jitter_is_bounded() {
+    let jitter_ms = 23 * SEC;
+    let mut schedule = PollSchedule::new(FixedJitter(u64::try_from(jitter_ms).unwrap()));
+    let seats = [
+        seat("anthropic:a", UsageVendor::Anthropic, Some(START_MS)),
+        seat("anthropic:b", UsageVendor::Anthropic, Some(START_MS)),
+    ];
+    let now = START_MS + 5 * MIN + jitter_ms;
+    assert_eq!(schedule.sweep(now, &seats), vec![0]);
+    schedule.record(
+        "anthropic:a",
+        UsageVendor::Anthropic,
+        now,
+        PollOutcome::Paused(Some(Duration::from_mins(2))),
+    );
+    assert!(schedule.sweep(now + 2 * MIN, &seats).is_empty());
+    assert_eq!(schedule.pause_until(UsageVendor::Anthropic), None);
+    let stepped_back = now - YEAR;
+    assert!(schedule.sweep(stepped_back, &seats).is_empty());
+
+    let indices = schedule.sweep(stepped_back + 60 * MIN + jitter_ms, &seats);
+
+    assert_eq!(indices.len(), 1);
 }
