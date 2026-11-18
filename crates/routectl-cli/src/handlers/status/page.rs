@@ -47,6 +47,7 @@ const STYLE_PARTS: &[&str] = &[
 ];
 const SCRIPT_PARTS: &[&str] = &[
     include_str!("dash_00_state.js"),
+    include_str!("dash_05_idiomorph.js"),
     include_str!("dash_10_format.js"),
     include_str!("dash_20_query_vocab.js"),
     include_str!("dash_30_transport.js"),
@@ -1858,5 +1859,10 @@ mod tests {
     mod style {
         use super::*;
         include!("page_style_tests.rs");
+    }
+
+    mod morph {
+        use super::*;
+        include!("page_morph_tests.rs");
     }
 }

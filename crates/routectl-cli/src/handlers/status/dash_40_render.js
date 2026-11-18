@@ -164,23 +164,20 @@
     var body = el('body-' + tab);
     if (!pane || !body) { return; }
     var primary = SOURCES[TAB_SOURCES[tab][0]];
-    var pass = { faults: Object.create(null), touched: Object.create(null) };
+    var pass = { faults: Object.create(null), touched: Object.create(null), overlay: null };
     renderPass = pass;
-    // The overlay host is emptied here and refilled by the one section that
-    // owns it, so an overlay whose owning section is no longer drawn -- another
-    // tab, a state card in its place -- cannot outlive it.
-    var host = el('modal-host');
-    if (host) { host.replaceChildren(); }
     try {
-      paintBody(tab, body, BUILDERS[tab](primary));
+      morphPanel(body, BUILDERS[tab](primary));
     } catch (e) {
       pass.faults[primary.name] = true;
       pass.touched[primary.name] = true;
-      body.replaceChildren(errorCard('invalid_payload',
+      pass.overlay = null;
+      morphPanel(body, errorCard('invalid_payload',
         'this section could not be rendered from the payload it received'));
     } finally {
       renderPass = null;
     }
+    paintOverlay(pass.overlay);
     // What this pass ACTUALLY drew decides the fault map: a source every one of
     // whose sections built cleanly here has recovered, whatever an earlier pass
     // recorded, and a source that threw here is faulted even on a payload that
@@ -201,15 +198,32 @@
     }
   }
 
-  // Tabs whose markup carries no event listeners, so a repaint may keep the
-  // nodes a poll did not change: a selected fix command survives the poll.
-  var PATCHED_TABS = { health: true };
+  // The one way a pane body or the modal host is updated: `parent`'s children
+  // are brought in line with `node` in place, so an element the rebuild keeps
+  // (matched by id, else by tag) is the same node afterward and focus or a
+  // text selection on it survives. A node only, never markup: the morph
+  // library parses a string argument as HTML, and every text on this page is
+  // wire data.
+  function morphPanel(parent, node) {
+    if (!(node instanceof Node)) {
+      throw new TypeError('morphPanel takes a DOM node, never markup');
+    }
+    Idiomorph.morph(parent, node, { morphStyle: 'innerHTML' });
+  }
 
-  function paintBody(tab, body, fresh) {
-    if (!PATCHED_TABS[tab]) { body.replaceChildren(fresh); return; }
-    var wrap = document.createElement('div');
-    wrap.appendChild(fresh);
-    patchChildren(body, wrap);
+  // The modal host shows the overlay the pass just built, or nothing: an
+  // overlay whose owning section was not drawn this pass -- another tab, a
+  // state card in its place, a tab that failed to render -- cannot outlive it.
+  // Offered during the build (offerOverlay) and drawn after it, so an overlay
+  // that stays open is morphed, not torn down and rebuilt.
+  function paintOverlay(node) {
+    var host = el('modal-host');
+    if (!host) { return; }
+    morphPanel(host, node || document.createDocumentFragment());
+  }
+
+  function offerOverlay(node) {
+    if (renderPass) { renderPass.overlay = node; }
   }
 
   // The sections built during the current render pass: which sources they read

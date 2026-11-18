@@ -7495,7 +7495,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per-tab layouts. Cascade order is load-bearing and is the `STYLE_PARTS`
   declaration order, so these rules land last and may lean on the component
   vocabulary above
-- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 13: the
+- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 14: the
   client's shared state. `EXPECTED` (per-source wire versions, `accounts`
   pinned though no view reads it yet), the seven DATA
   SOURCES -- `usage`/`health`/`config`/`doctor` off the GET `/status`
@@ -7523,14 +7523,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `WINDOWLESS_TABS`, the selection state (window / group-by / provider scope /
   active tab), `SOURCES`, `RENDER_FAULTS`, `setSource`, and the one-line
   `effectiveState` ternary
-- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 2 of 13:
+- `src/handlers/status/dash_05_idiomorph.js` -- dashboard SCRIPT part 2 of 14:
+  the vendored idiomorph v0.8.0 `dist/idiomorph.js` (0BSD), byte-for-byte
+  upstream, sha256
+  `4cda2ad0d39c630100957eeb5ec3115f84d57351c6c313579d2441cf48e9880d` (pinned
+  by `page::tests::morph`). Declares one name, `Idiomorph`; page code reaches
+  it only through `morphPanel` in `dash_40_render.js`, which takes a DOM node
+  and never markup, and updates every pane body and the modal host in place
+- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 3 of 14:
   number and time humanizers matched to the CLI's usage formatters
   (`humanCount` mirrors `human_count`, `num0` coercion, percent / timestamp /
   relative-age / duration text) plus `WINDOW_SPAN` and the `LABELS` token
   vocabulary with `labelFor`/`labelCell`, so a wire token renders as
   plain-language text in exactly one place
-- `src/handlers/status/dash_20_query_vocab.js` -- dashboard SCRIPT part 3 of
-  13: the `/status/query` field vocabulary and its adapter. `QUERY_METRICS`
+- `src/handlers/status/dash_20_query_vocab.js` -- dashboard SCRIPT part 4 of
+  14: the `/status/query` field vocabulary and its adapter. `QUERY_METRICS`
   (numeric) + `QUERY_TOKENS` (pass-through, e.g. `cost_status`) are the ONLY
   home of raw query field names, consumed solely by the thin `QueryAdapter`
   flat-extraction layer (num0 coercion on the numeric half, no rename, no
@@ -7541,7 +7548,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   COMPLETE request vocabulary -- every selectable window x every group_by x
   each series mode -- written as strict JSON so the Rust guard can feed each
   shape to the server's own parser verbatim
-- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 4 of 13:
+- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 5 of 14:
   every fetch on the page. `safeRequest` is the SOLE fetch call site and the
   shared outcome classifier (`ok`/`overloaded`/`forbidden`/`rejected`/
   `timeout`/`network`), so the GET poll and the QUERY aggregate cannot drift in
@@ -7568,7 +7575,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`runRound`/`tick`/
   `scheduleNext`), the visibility-aware refresh, and the independent
   `usage_all` round with its own controller, generation, and schedule
-- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 5 of 13: the
+- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 6 of 14: the
   render dispatch and every per-source error boundary. `renderPanel` validates
   `schema_version` BEFORE reading `data`, then enforces the envelope invariant
   (exactly one of a meaningful `data` xor an `unavailable` code; zero or both
@@ -7585,7 +7592,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   it live beside an error card. Also the shared state cards (skeleton, error,
   incompatible, empty), the banner, the verdict strip, the poll indicator, and
   the tab badges
-- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 6 of 13: the
+- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 7 of 14: the
   DOM construction vocabulary, `textContent` only and never `innerHTML`.
   Column descriptors and table builders (`mkTable`/`trow`/`xrow` expandable
   rows/`buildDefList`/`buildExpander`), the state-dot and token pills, the
@@ -7594,8 +7601,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   bucket's own `start_ms` rather than bridging a gap. Every data-age figure is
   computed against the as_of of the record it came from (`panelNowMs(rec)`,
   `ageSince`); there is no page-global render clock
-- `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 7 of
-  13: the Overview tab, MULTI-SOURCE (`query_series` primary -- the bucketed
+- `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 8 of
+  14: the Overview tab, MULTI-SOURCE (`query_series` primary -- the bucketed
   read whose series feeds the sparklines -- plus `usage` for the
   seat surface). The provider row leads with an all-providers AGGREGATE card
   built from the query `totals` (the scope reset), then the busiest
@@ -7618,14 +7625,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   surface and leaves the KPI and provider blocks live. The provider row builder
   is `providerRowSection`, named for the row rather than its subject because the
   script parts share one function scope with Config's provider TABLE builder
-- `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 8 of 13:
+- `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 9 of 14:
   the Usage tab, single-source (`query`). Renders the group-by picker
   (model/alias/provider, re-issuing the non-series query through
   `queryInputChanged`) outside the section boundary, then one two-line card per
   query group ranked by requests, with zero-traffic groups omitted and their
   count reported in the header
-- `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 9 of
-  13: the Routing tab, MULTI-SOURCE (`config` primary, plus `usage_all` and
+- `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 10 of
+  14: the Routing tab, MULTI-SOURCE (`config` primary, plus `usage_all` and
   `health`) and WINDOWLESS (in `WINDOWLESS_TABS` beside Config and Doctor: the
   picker dims and goes inert, with an "All history" label beside it). The
   configured chains render from the config `aliases` and the live per-target
@@ -7638,8 +7645,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   can resolve to several health targets (one per seat), collapsed by the
   worst-circuit rule Health shares. Each of the three sources is wrapped in its
   own `safeSection`, so health going dark costs the state list alone
-- `src/handlers/status/dash_71_tab_health.js` -- dashboard SCRIPT part 10 of
-  13: the Health tab, MULTI-SOURCE (`health` primary, plus `usage`). Per-target
+- `src/handlers/status/dash_71_tab_health.js` -- dashboard SCRIPT part 11 of
+  14: the Health tab, MULTI-SOURCE (`health` primary, plus `usage`). Per-target
   cards collapse a pooled model's seats by nickname through the same
   worst-circuit rule Routing uses and split into needs-attention / healthy /
   not-observed sections (a target with no settled outcome is `unknown`, never
@@ -7652,8 +7659,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   distinguishing a missing snapshot, a null utilization, and a measured `0`.
   Each source has its own `safeSection`, so a dark ledger costs the quota tiles
   alone and a dark health source leaves the quota tiles live
-- `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 11 of
-  13: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
+- `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 12 of
+  14: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
   tab -- the payload is validated in one place before any section is built, so
   a version mismatch or a malformed panel never partially renders config
   vocabulary. Renders a source strip (config path, load age, resolved
@@ -7670,8 +7677,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the capability overrides (default-closed disclosure),
   and the retry-class policy whose columns are exactly retry cap / fallback /
   breaker debit (the wire's `debits_breaker`) / source
-- `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 12 of
-  13: the Doctor tab, the second single-source FAIL-CLOSED tab (`doctor`) --
+- `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 13 of
+  14: the Doctor tab, the second single-source FAIL-CLOSED tab (`doctor`) --
   `validatedReport` checks every finding severity against the fixed
   `Pass|Warn|Fail` triad and every reachability verdict against
   `reachable|degraded|unknown` before a section is built, so an unknown token
@@ -7689,7 +7696,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   learned value).
   Also carries
   `BUILDERS`, the per-tab `buildX` registry the render dispatch reads
-- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 13 of 13:
+- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 14 of 14:
   the page chrome and the load-time wiring. The 1s age ticker, the four inline
   `data:` SVG favicons and the `faviconState` rollup, the refresh control, the
   URL-hash read/write (tab + window + scope), the window picker including the

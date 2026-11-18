@@ -7,8 +7,9 @@
 /// Every script part by file name, in `SCRIPT_PARTS` order. Welded to
 /// `SCRIPT_PARTS` by `named_parts_are_the_assembled_script_parts`, so a part
 /// added to the page without a name here fails rather than escaping the scans.
-const NAMED_PARTS: &[(&str, &str)] = &[
+pub(super) const NAMED_PARTS: &[(&str, &str)] = &[
     ("dash_00_state.js", include_str!("dash_00_state.js")),
+    ("dash_05_idiomorph.js", include_str!("dash_05_idiomorph.js")),
     ("dash_10_format.js", include_str!("dash_10_format.js")),
     (
         "dash_20_query_vocab.js",
@@ -235,6 +236,18 @@ fn duplicate_table_id(src: &str) -> Option<String> {
     None
 }
 
+/// The number of places in `parts` (comments stripped) that name the
+/// `data-action` attribute in any quote style, or reach it through `dataset`.
+fn data_action_writes(parts: &[(&str, &str)]) -> usize {
+    parts
+        .iter()
+        .map(|(_, src)| {
+            let code = strip_js_comments(src);
+            code.matches("data-action").count() + code.matches("dataset").count()
+        })
+        .sum()
+}
+
 #[test]
 fn named_parts_are_the_assembled_script_parts() {
     let named: Vec<&str> = NAMED_PARTS.iter().map(|(_, src)| *src).collect();
@@ -322,23 +335,45 @@ fn action_drift_reports_unhandled_and_unused_actions() {
     assert_eq!(unused, vec!["spare"]);
 }
 
-/// Builders reach `data-action` only through `setAction`, so the literal scan
-/// above sees every action name.
+/// Builders reach `data-action` only through `setAction`, in any quote style
+/// or through `dataset`, so the literal scan of `setAction` calls sees every
+/// action name.
+///
+/// Mutation check: add `btn.setAttribute("data-action", "x");` to
+/// groupByButton -> red.
 #[test]
-fn builders_set_data_action_only_through_set_action() {
-    let hits: usize = builder_parts()
-        .iter()
-        .map(|(_, src)| strip_js_comments(src).matches("'data-action'").count())
-        .sum();
+fn builders_write_data_action_only_inside_set_action() {
+    let builders = builder_parts();
 
-    assert!(
-        function_body("setAction").contains("'data-action'"),
+    assert_eq!(
+        data_action_writes(&[("setAction", &function_body("setAction"))]),
+        1,
         "setAction must be the writer of `data-action`"
     );
     assert_eq!(
-        hits, 1,
-        "only setAction may write `data-action` in a builder part"
+        data_action_writes(&builders),
+        1,
+        "only setAction may name `data-action` in a builder part"
     );
+}
+
+#[test]
+fn the_data_action_scan_counts_every_spelling_and_ignores_comments() {
+    let setter = "function setAction(n, a) { n.setAttribute('data-action', a); }\n\
+                  // a note about data-action in prose\n";
+    let double =
+        format!("{setter}function b(x) {{ x.setAttribute(\"data-action\", \"missing\"); }}");
+    let template = format!("{setter}function b(x) {{ x.setAttribute(`data-action`, 'm'); }}");
+    let dataset = format!("{setter}function b(x) {{ x.dataset.action = 'missing'; }}");
+
+    assert_eq!(data_action_writes(&[("dash_62_synthetic.js", setter)]), 1);
+    for src in [&double, &template, &dataset] {
+        assert_eq!(
+            data_action_writes(&[("dash_62_synthetic.js", src.as_str())]),
+            2,
+            "a second writer must be counted: {src}"
+        );
+    }
 }
 
 /// Table ids are literals and unique across the whole script, so a table's

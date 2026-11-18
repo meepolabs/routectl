@@ -478,42 +478,6 @@
     return stack;
   }
 
-  // Bring `parent`'s children in line with `fresh` (a freshly built node) by
-  // keeping every existing node whose replacement would be identical, only
-  // updating a changed text node's value, and replacing what differs. A text
-  // selection is anchored to the node it sits in, so a selected command
-  // survives a poll that changed nothing around it, while an age that ticked
-  // beside it still updates. Only for markup with no event listeners: a kept
-  // node keeps the old node's handlers.
-  function patchChildren(parent, fresh) {
-    var next = Array.prototype.slice.call(fresh.childNodes);
-    next.forEach(function (node, i) {
-      var cur = parent.childNodes[i];
-      if (!cur) { parent.appendChild(node); return; }
-      patchNode(parent, cur, node);
-    });
-    while (parent.childNodes.length > next.length) { parent.removeChild(parent.lastChild); }
-  }
-
-  function patchNode(parent, cur, node) {
-    if (cur.isEqualNode(node)) { return; }
-    if (cur.nodeType === 3 && node.nodeType === 3) { cur.nodeValue = node.nodeValue; return; }
-    if (cur.nodeType === 1 && cur.nodeName === node.nodeName && sameAttributes(cur, node)) {
-      patchChildren(cur, node);
-      return;
-    }
-    parent.replaceChild(node, cur);
-  }
-
-  function sameAttributes(a, b) {
-    if (a.attributes.length !== b.attributes.length) { return false; }
-    for (var i = 0; i < a.attributes.length; i++) {
-      var attr = a.attributes[i];
-      if (b.getAttribute(attr.name) !== attr.value) { return false; }
-    }
-    return true;
-  }
-
   // A big figure: the numeral plus an optional faint unit slot on either side
   // (a leading one for a currency mark, a trailing one for a magnitude). A zero
   // or absent value de-emphasizes whole -- a zero is faint, never an error.

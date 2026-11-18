@@ -389,41 +389,40 @@
   // list is a detour off the reading, not part of it -- and it deliberately
   // carries no footer figure over the seats it lists.
   //
-  // Drawn into the page-level modal host rather than into the section, because
-  // the panes are animated and an animated ancestor would make the fixed
-  // backdrop center on the pane instead of the viewport.
+  // Offered to the page-level modal host (offerOverlay) rather than drawn into
+  // the section, because the panes are animated and an animated ancestor would
+  // make the fixed backdrop center on the pane instead of the viewport.
   //
-  // Draws nothing when nothing is open, or when the open provider no longer has
-  // seats in the payload that just landed: a modal over a credential the panel
-  // has stopped reporting would show a snapshot nothing backs.
+  // Offers nothing when nothing is open, or when the open provider no longer
+  // has seats in the payload that just landed: a modal over a credential the
+  // panel has stopped reporting would show a snapshot nothing backs.
   function renderSeatModal(seats) {
-    var host = el('modal-host');
-    if (!host) { return; }
     var rows = (seatModalProvider !== null && seats)
       ? seats.byProvider[seatModalProvider]
       : null;
-    if (!rows || !rows.length) {
-      host.replaceChildren();
-      return;
-    }
+    if (!rows || !rows.length) { return; }
+    offerOverlay(seatModalNode(seatModalProvider, rows, seats.nowMs));
+  }
+
+  function seatModalNode(provider, rows, nowMs) {
     // The backdrop's action closes the modal only for a click on the backdrop
     // ITSELF (see ACTIONS), so a click inside the dialog never dismisses it.
     var backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
     setAction(backdrop, 'seat-backdrop', null);
     var dialog = document.createElement('div');
-    dialog.id = 'overview-seats-dialog-' + idKey(seatModalProvider);
+    dialog.id = 'overview-seats-dialog-' + idKey(provider);
     dialog.className = 'modal';
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
-    dialog.setAttribute('aria-label', seatModalProvider + ' seats');
-    dialog.appendChild(seatModalHead(seatModalProvider, rows));
+    dialog.setAttribute('aria-label', provider + ' seats');
+    dialog.appendChild(seatModalHead(provider, rows));
     var body = document.createElement('div');
     body.className = 'modal-body qlist qlist--card';
-    rows.forEach(function (q) { body.appendChild(quotaTile(q, seats.nowMs)); });
+    rows.forEach(function (q) { body.appendChild(quotaTile(q, nowMs)); });
     dialog.appendChild(body);
     backdrop.appendChild(dialog);
-    host.replaceChildren(backdrop);
+    return backdrop;
   }
 
   function seatModalHead(provider, rows) {
