@@ -20,9 +20,11 @@ out -- and it would make this gap invisible in the coverage story. Naming the
 gap here is the honest alternative.
 
 1. **The single-flight generation guard** (`dash_30_transport.js`). Each QUERY
-   aborts the previous one and bumps a generation counter; a response whose
-   generation is no longer current is dropped instead of rendered. Nothing
-   automated observes this. It is the rule section 2 exercises.
+   aborts the previous one, and every fetched source (the aggregate, the
+   all-history usage read and both QUERY shapes) applies an answer only while
+   its epoch and state key are still current. The headless browser tests
+   drive the late-answer orderings with held answers; nothing automated
+   drives a real slow ledger, which is what section 2 exercises.
 2. **Per-pass fault reconciliation** (`dash_40_render.js`, `dash_50_dom.js`).
    Which sources are recorded as faulted on a pass, and the pane status line /
    tab badge / page verdict / favicon that each fault drives, are pure DOM

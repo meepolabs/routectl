@@ -461,9 +461,7 @@
     clearTimeout(queryTimer);
     clearTimeout(usageAllTimer);
     clearInterval(ageTimer);
-    if (queryCtrl) { queryCtrl.abort(); queryCtrl = null; }
-    if (usageAllCtrl) { usageAllCtrl.abort(); usageAllCtrl = null; }
-    usageAllGeneration += 1;
+    invalidateEveryFetch();
     setBanner('terminal',
       'This dashboard must be opened via the loopback or bound address ' +
       '(for example http://127.0.0.1:8787). Polling has stopped.');

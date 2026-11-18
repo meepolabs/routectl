@@ -1,7 +1,7 @@
   // ---- transport -------------------------------------------------------
 
-  // NO automated runtime harness covers this part. The single-flight
-  // generation guard below is verified BY HAND only -- see
+  // The browser tests drive the late-answer cases of the response-currency
+  // guard below; the rest of this part is verified BY HAND -- see
   // dashboard-manual-checklist.md beside this source, and run it before
   // shipping a change here.
 
@@ -38,6 +38,53 @@
     return safeRequest(url, null, ctrl, TIMEOUT_MS);
   }
 
+  // ---- response currency -----------------------------------------------
+
+  // Every independently fetched source has its own epoch: the number of the
+  // newest request issued for it, bumped again when the page goes terminal.
+  // A request takes a ticket (source, epoch, state key) when it is issued,
+  // and its answer applies only while BOTH still hold: no newer request for
+  // the source was issued since (the epoch), and the page still wants the
+  // source for that same state (the key, see wantedFetchKey). Aborting a
+  // superseded request is only an optimization: an answer already on its way,
+  // or a fetch that never honours the signal, is stopped here.
+  var AGGREGATE_FETCH = 'aggregate';
+  var FETCH_SOURCES = [AGGREGATE_FETCH, USAGE_ALL_SOURCE, QUERY_SOURCE, QUERY_SERIES_SOURCE];
+  var FETCH_EPOCHS = {};
+  FETCH_SOURCES.forEach(function (name) { FETCH_EPOCHS[name] = 0; });
+
+  function issueFetchTicket(source, key) {
+    FETCH_EPOCHS[source] += 1;
+    return { source: source, epoch: FETCH_EPOCHS[source], key: key };
+  }
+
+  function fetchTicketIsCurrent(ticket) {
+    return ticket.epoch === FETCH_EPOCHS[ticket.source] &&
+      ticket.key === wantedFetchKey(ticket.source);
+  }
+
+  // The state key the page wants `source` answered for right now. A QUERY
+  // source is wanted only while the active view issues it, and then for the
+  // body it would send; a GET source asks for one fixed URL, so its key is
+  // its own name.
+  function wantedFetchKey(source) {
+    if (source !== QUERY_SOURCE && source !== QUERY_SERIES_SOURCE) { return source; }
+    var body = queryBodyFor(activeTab);
+    return (body && querySourceFor(activeTab) === source) ? queryBodyKey(body) : null;
+  }
+
+  // Terminal: no answer to any request issued so far may apply, and none of
+  // them is worth waiting for.
+  function invalidateEveryFetch() {
+    FETCH_SOURCES.forEach(function (name) { FETCH_EPOCHS[name] += 1; });
+    [aggregateCtrl, usageAllCtrl, queryCtrl].forEach(function (ctrl) {
+      if (ctrl) { ctrl.abort(); }
+    });
+    aggregateCtrl = null;
+    usageAllCtrl = null;
+    queryCtrl = null;
+  }
+
   // ---- QUERY transport -------------------------------------------------
 
   // QUERY carries its OWN backoff state. A failing aggregate must never be
@@ -47,7 +94,6 @@
   var queryBackoffIndex = -1;      // -1 = follow the GET cadence; 0..n = index
   var queryTimer = null;
   var queryCtrl = null;            // in-flight controller, for single-flight
-  var queryGeneration = 0;         // bumped on every selection change
   // The body key a 400/405 refused, PER QUERY SOURCE. Overview and Usage
   // request different shapes against the same endpoint, so a refusal of one
   // shape says nothing about the other; keying by source keeps a rejected
@@ -132,15 +178,15 @@
     return JSON.stringify([body.window, body.group_by, body.bucket || '', body.provider || '']);
   }
 
-  // Issue one QUERY. Single-flight: an in-flight request is aborted and the
-  // generation bumped, so a late response from the OLD selection can never
-  // repaint the new one (it is dropped at the guard below rather than
-  // rendered). Never reuses a consumed Request; the body is stringified per
-  // logical key.
-  function queryStatus(body) {
+  // Issue one QUERY for `source`. Single-flight: an in-flight request (for
+  // either query source) is aborted, and this one's ticket supersedes every
+  // earlier request for `source`, so a late response from the OLD selection
+  // can never repaint the new one (it is dropped at the ticket check below
+  // rather than rendered). Never reuses a consumed Request; the body is
+  // stringified per logical key.
+  function queryStatus(source, body) {
     if (queryCtrl) { queryCtrl.abort(); queryOwnAbortPending = true; }
-    queryGeneration += 1;
-    var generation = queryGeneration;
+    var ticket = issueFetchTicket(source, queryBodyKey(body));
     var ctrl = new AbortController();
     queryCtrl = ctrl;
     var init = {
@@ -150,9 +196,9 @@
     };
     return safeRequest('/status/query', init, ctrl, QUERY_TIMEOUT_MS).then(function (out) {
       if (queryCtrl === ctrl) { queryCtrl = null; }
-      // The generation guard: a newer selection has already been issued, so
-      // this response describes a selection the operator has left.
-      if (generation !== queryGeneration) { return { stale: true }; }
+      // A newer request for this source was issued, or the operator has left
+      // the selection (or the view) this response describes.
+      if (!fetchTicketIsCurrent(ticket)) { return { stale: true }; }
       return out;
     });
   }
@@ -161,9 +207,9 @@
   // schedule from its outcome. Returns a promise that never rejects.
   //
   // Deliberately carries NO in-flight guard of its own: single-flight is
-  // enforced inside queryStatus, which aborts the previous request and bumps
-  // the generation. A guard here would make an input change unable to
-  // supersede a hung request -- exactly the case the generation guard exists
+  // enforced inside queryStatus, which aborts the previous request and issues
+  // a newer ticket. A guard here would make an input change unable to
+  // supersede a hung request -- exactly the case the ticket check exists
   // for -- so callers that must NOT supersede (the 5s nudge) check
   // queryInFlight() instead.
   function queryRound() {
@@ -174,7 +220,7 @@
     if (queryRejectedKeyBySource[source] === key) { return Promise.resolve(); }
     queryLastAttemptKey = key;
     queryLastAttemptAtMs = Date.now();
-    return queryStatus(body).then(function (out) {
+    return queryStatus(source, body).then(function (out) {
       if (!out || out.stale) { return; }
       if (retrySupersededBusy(out)) { return; }
       queryOwnAbortPending = false;
@@ -264,8 +310,8 @@
   }
 
   // Every input that changes what the QUERY asks for funnels through here:
-  // it aborts the in-flight request (via the generation bump inside
-  // queryStatus), clears any stale deterministic-refusal marker, and
+  // it aborts the in-flight request (queryStatus supersedes it), clears any
+  // stale deterministic-refusal marker, and
   // refreshes immediately so an active tab never shows another selection's
   // numbers.
   //
@@ -279,10 +325,11 @@
     var body = queryBodyFor(activeTab);
     if (!body) {
       clearTimeout(queryTimer);
+      // No view issues a QUERY now, so wantedFetchKey drops whatever the
+      // aborted request still returns.
       if (queryCtrl) {
         queryCtrl.abort();
         queryCtrl = null;
-        queryGeneration += 1;
         queryOwnAbortPending = true;
       }
       queryBusyRetryIndex = -1;
@@ -357,10 +404,17 @@
   // One aggregate round. The four GET panels always render from it; the
   // QUERY aggregate is scheduled separately (its own cadence, its own
   // backoff), and is only nudged here so a healthy page keeps the visible
-  // query-backed tab in step with the 5s poll.
+  // query-backed tab in step with the 5s poll. Its controller is
+  // module-level so going terminal can abort it.
+  var aggregateCtrl = null;
+
   function runRound() {
-    var aggCtrl = new AbortController();
-    return fetchStatus('/status', aggCtrl).then(function (agg) {
+    var ctrl = new AbortController();
+    aggregateCtrl = ctrl;
+    var ticket = issueFetchTicket(AGGREGATE_FETCH, AGGREGATE_FETCH);
+    return fetchStatus('/status', ctrl).then(function (agg) {
+      if (aggregateCtrl === ctrl) { aggregateCtrl = null; }
+      if (!fetchTicketIsCurrent(ticket)) { return { stale: true }; }
       if (agg.kind === 'forbidden') { enterTerminal(); return { terminal: true }; }
       if (agg.kind !== 'ok') {
         markTransport(agg.kind);
@@ -396,22 +450,20 @@
   var usageAllTimer = null;
   var usageAllInFlight = false;
   var usageAllCtrl = null;         // in-flight controller, aborted on terminal
-  var usageAllGeneration = 0;      // bumped when an in-flight read is invalidated
 
   function usageAllRound() {
     if (terminal || usageAllInFlight) { return Promise.resolve(); }
     usageAllInFlight = true;
     var ctrl = new AbortController();
     usageAllCtrl = ctrl;
-    var generation = usageAllGeneration;
-    // A response that lands after the page went terminal (or after this read
-    // was invalidated) describes a page state the operator has left: dropping
-    // it is what keeps a live Routing repaint from appearing under the
-    // terminal banner.
+    var ticket = issueFetchTicket(USAGE_ALL_SOURCE, USAGE_ALL_SOURCE);
+    // A response that lands after the page went terminal describes a page
+    // state the operator has left: dropping it is what keeps a live Routing
+    // repaint from appearing under the terminal banner.
     function settled() {
       if (usageAllCtrl === ctrl) { usageAllCtrl = null; }
       usageAllInFlight = false;
-      return !terminal && generation === usageAllGeneration;
+      return fetchTicketIsCurrent(ticket);
     }
     return fetchStatus(USAGE_ALL_URL, ctrl).then(function (out) {
       if (!settled()) { return; }

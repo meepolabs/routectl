@@ -1910,4 +1910,9 @@ mod tests {
         use super::*;
         include!("page_browser_url_tests.rs");
     }
+
+    mod browser_epoch {
+        use super::*;
+        include!("page_browser_epoch_tests.rs");
+    }
 }
