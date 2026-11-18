@@ -5,18 +5,19 @@
 //! shutdown still drains rather than waiting out its deadline. Without a
 //! store neither driver runs.
 //!
-//! Hermetic: the config home is a tempdir whose credentials file holds no
-//! login, so the one managed seat has no token and the poll cannot send
-//! anything; no test here lets a sweep interval elapse either.
+//! Hermetic: the managed store is opened at a tempdir credentials file that
+//! holds no login, named to the daemon directly rather than through the
+//! process environment, so the one managed seat has no token and the poll
+//! cannot send anything; no test here lets a sweep interval elapse either.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_router::{CURRENT_CONFIG_VERSION, Config, ObservationStamp, ReportState, Router};
-use routectl_testkit::{ScopedEnv, with_capture};
+use routectl_testkit::with_capture;
 use routectl_usage::{
     AccountReadingRow, AccountReadingSource, AccountReadingWindow, UsageWriter, WindowLengthClass,
     WindowStarted,
@@ -94,10 +95,21 @@ struct Daemon {
     handle: tokio::task::JoinHandle<routectl_core::Result<()>>,
 }
 
+/// Where the daemon's credentials come from.
+enum Credentials {
+    /// The routectl-managed store, opened by the daemon itself at this file.
+    ManagedAt(PathBuf),
+    /// A caller-supplied resolver: the daemon has no managed store.
+    Injected(Arc<dyn SecretStore>),
+}
+
 impl Daemon {
-    /// Serve `config`. `secrets: None` opens the credential store under the
-    /// current config home, as production does.
-    async fn spawn(config: Config, secrets: Option<Arc<dyn SecretStore>>) -> Self {
+    /// Serve `config` over `credentials`.
+    async fn spawn(config: Config, credentials: Credentials) -> Self {
+        let (secrets, credentials_path) = match credentials {
+            Credentials::ManagedAt(path) => (None, Some(path)),
+            Credentials::Injected(store) => (Some(store), None),
+        };
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
@@ -112,6 +124,7 @@ impl Daemon {
             DaemonTestSeams {
                 router_observer: Some(observer_tx),
                 shutdown: Some(shutdown),
+                credentials_path,
                 ..DaemonTestSeams::default()
             },
         ));
@@ -161,13 +174,12 @@ impl Daemon {
 /// meter holds no reading for the seat, and shutdown drains the writer with
 /// the poll's handle already released.
 #[tokio::test]
-#[serial_test::serial]
 async fn with_a_store_both_drivers_run_a_restart_reads_no_reading_and_the_writer_drains() {
     // Arrange
-    let home = tempfile::tempdir().expect("config home");
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", home.path());
-    super::rig::write_credentials(&home.path().join("routectl").join("credentials.json"), &[]);
-    let usage_db = home.path().join("usage.db");
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let creds = dir.path().join("credentials.json");
+    super::rig::write_credentials(&creds, &[]);
+    let usage_db = dir.path().join("usage.db");
     seed_history(&usage_db).await;
     assert_eq!(
         history_rows(&usage_db),
@@ -177,7 +189,7 @@ async fn with_a_store_both_drivers_run_a_restart_reads_no_reading_and_the_writer
 
     // Act
     let (outcome, events) = with_capture(async {
-        let daemon = Daemon::spawn(config(&usage_db), None).await;
+        let daemon = Daemon::spawn(config(&usage_db), Credentials::ManagedAt(creds)).await;
         let health = daemon.health().await;
         let reading = daemon
             .router
@@ -222,7 +234,11 @@ async fn without_a_store_neither_driver_runs() {
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
 
     // Act
-    let daemon = Daemon::spawn(config(&dir.path().join("usage.db")), Some(secrets)).await;
+    let daemon = Daemon::spawn(
+        config(&dir.path().join("usage.db")),
+        Credentials::Injected(secrets),
+    )
+    .await;
     let health = daemon.health().await;
     daemon.shut_down().await;
 

@@ -16,6 +16,8 @@
 //! headers, or a vendor account id.
 
 mod client;
+#[cfg(test)]
+pub(super) use self::client::build_failure as client_build_failure;
 mod history;
 mod schedule;
 
@@ -345,7 +347,10 @@ impl SeatJob for UsagePollJob {
 /// Spawn the background usage poll over `store`'s managed logins, its
 /// health and poll state published on `daemon_meta`. Returns `None`, after
 /// one ERROR, when the poll's HTTP client cannot be built: the daemon then
-/// serves without the poll, and its health reads as not running.
+/// serves without the poll, and its health reads as not running. Returns
+/// `None`, after one ERROR, when `daemon_meta` already carries a poll: a
+/// second driver would poll every seat again on its own schedule while
+/// `/status` showed only the first.
 ///
 /// The caller spawns this only after the provider factory has run: the
 /// first Codex identity read installs the pinned default for the whole
@@ -368,7 +373,13 @@ pub(super) fn spawn_usage_poll_driver(
             return None;
         }
     };
-    daemon_meta.install_usage_poll_state(job.state());
+    if daemon_meta.install_usage_poll_state(job.state()).is_err() {
+        tracing::error!(
+            job = UsagePollJob::KIND,
+            "a usage poll already runs for this daemon; the second one is not started",
+        );
+        return None;
+    }
     Some(tokio::spawn(run_seat_driver(
         job,
         Arc::clone(router_swap),

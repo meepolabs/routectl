@@ -72,9 +72,13 @@ impl DaemonMeta {
     }
 
     /// Publish the usage poll's state. The first install wins: the daemon
-    /// spawns one poll for its lifetime.
-    pub(crate) fn install_usage_poll_state(&self, state: UsagePollState) {
-        let _ = self.usage_poll_state.set(state);
+    /// runs one poll for its lifetime, so a later install is refused and
+    /// handed back.
+    pub(crate) fn install_usage_poll_state(
+        &self,
+        state: UsagePollState,
+    ) -> Result<(), UsagePollState> {
+        self.usage_poll_state.set(state)
     }
 
     /// Record that the live config was loaded (or reloaded) now. Called at

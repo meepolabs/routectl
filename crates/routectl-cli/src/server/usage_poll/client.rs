@@ -126,8 +126,11 @@ impl UsagePollClient {
     /// Build the production client. Fails only when no TLS backend can be
     /// initialized.
     pub fn new() -> reqwest::Result<Self> {
+        let builder = base_builder();
+        #[cfg(test)]
+        let builder = build_failure::apply(builder);
         Ok(Self {
-            client: base_builder().build()?,
+            client: builder.build()?,
         })
     }
 
@@ -248,6 +251,44 @@ impl UsagePollClient {
         }
         Self {
             client: builder.build().expect("test usage client"),
+        }
+    }
+}
+
+/// Makes [`UsagePollClient::new`] fail on this thread while a guard is held,
+/// through reqwest's own builder error rather than a substitute one.
+#[cfg(test)]
+pub(in crate::server) mod build_failure {
+    use std::cell::Cell;
+
+    use reqwest::ClientBuilder;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Fails every client build on this thread until dropped.
+    #[must_use = "dropping the guard disarms the failure immediately"]
+    pub struct Armed(());
+
+    pub fn arm() -> Armed {
+        ARMED.with(|armed| armed.set(true));
+        Armed(())
+    }
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            ARMED.with(|armed| armed.set(false));
+        }
+    }
+
+    /// A ceiling below the client's TLS 1.2 floor leaves no version to
+    /// offer, which reqwest refuses at build time.
+    pub(super) fn apply(builder: ClientBuilder) -> ClientBuilder {
+        if ARMED.with(Cell::get) {
+            builder.max_tls_version(reqwest::tls::Version::TLS_1_0)
+        } else {
+            builder
         }
     }
 }

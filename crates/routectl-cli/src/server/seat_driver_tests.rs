@@ -844,35 +844,77 @@ async fn the_driver_logs_one_error_only_when_it_stops_without_a_shutdown_signal(
     }
 }
 
-/// Both background drivers (the refresh and the usage poll) run only with a
-/// credential store, each reporting into its own health, and the poll's
-/// state is published only when it runs. The seat has no stored login, so
-/// the poll has no token to send whatever it finds due.
-#[tokio::test]
-#[serial_test::serial]
-async fn the_reload_pipeline_runs_both_drivers_only_with_a_credential_store_and_joins_them() {
-    let rows: [(&str, bool); 2] = [("with a credential store", true), ("without one", false)];
-    for (name, with_store) in rows {
-        // Arrange
-        let rig = Rig::new(&[], ScriptedRefresh::Mint("unused".into())).await;
-        let meta = Arc::new(crate::handlers::status::DaemonMeta::new(
-            "127.0.0.1:0".into(),
-        ));
-        let secrets: Arc<dyn SecretStore> = rig.store.clone();
-        let (shutdown_tx, shutdown_rx) = watch::channel(());
+/// How the reload pipeline under test meets the usage poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollWiring {
+    /// No credential store: neither driver is spawned.
+    NoStore,
+    /// A credential store: both drivers run.
+    Store,
+    /// A credential store, but the poll's HTTP client cannot be built.
+    StoreClientBuildFails,
+    /// A credential store, then a second poll spawn on the same daemon.
+    StoreSecondPollSpawn,
+}
 
-        // Act
-        let handles = spawn_reload_pipeline(
+/// What one row of the reload-pipeline lifecycle test observed.
+struct PipelineRun {
+    extra_handles: usize,
+    refresh_running: bool,
+    poll_running: bool,
+    poll_state_published: bool,
+    second_spawn_started: bool,
+    poll_errors: usize,
+    drained: routectl_usage::ShutdownOutcome,
+}
+
+/// Run the reload pipeline as `wiring` says over a real usage writer, read
+/// both drivers while it runs, then stop it and drain the writer.
+/// `baseline_handles` is the pipeline's task count without a store.
+async fn run_pipeline(wiring: PollWiring, baseline_handles: usize) -> PipelineRun {
+    let rig = Rig::new(&[], ScriptedRefresh::Mint("unused".into())).await;
+    let meta = Arc::new(crate::handlers::status::DaemonMeta::new(
+        "127.0.0.1:0".into(),
+    ));
+    let secrets: Arc<dyn SecretStore> = rig.store.clone();
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let (usage, writer) = routectl_usage::UsageWriter::start(
+        rig.config.usage.db_path.clone(),
+        routectl_usage::CHANNEL_CAPACITY,
+        0,
+    );
+    let with_store = wiring != PollWiring::NoStore;
+
+    let (run, events) = with_capture(async {
+        let client_fails = (wiring == PollWiring::StoreClientBuildFails)
+            .then(crate::server::usage_poll::client_build_failure::arm);
+        let mut handles = spawn_reload_pipeline(
             rig.config.clone(),
             None,
             with_store.then(|| rig.store.clone()),
             secrets,
             rig.swap.clone(),
             Arc::new(ArcSwap::from_pointee(ActivationState::default())),
-            routectl_usage::handle_with_closed_channel(),
-            shutdown_rx,
+            usage.clone(),
+            shutdown_rx.clone(),
             meta.clone(),
         );
+        drop(client_fails);
+        let extra_handles = handles.len().saturating_sub(baseline_handles);
+        let second = (wiring == PollWiring::StoreSecondPollSpawn)
+            .then(|| {
+                crate::server::usage_poll::spawn_usage_poll_driver(
+                    &rig.store,
+                    &usage,
+                    &rig.swap,
+                    &shutdown_rx,
+                    &meta,
+                )
+            })
+            .flatten();
+        let second_spawn_started = second.is_some();
+        handles.extend(second);
+        drop(usage);
         settle().await;
         let refresh_running = meta.seat_driver_health().snapshot().running;
         let poll_running = meta.usage_poll_driver_health().snapshot().running;
@@ -884,18 +926,101 @@ async fn the_reload_pipeline_runs_both_drivers_only_with_a_credential_store_and_
         let poll_state_published = status.daemon_meta.usage_poll_state().is_some();
         shutdown_tx.send(()).unwrap();
         await_reload_tasks(handles).await;
+        (
+            extra_handles,
+            refresh_running,
+            poll_running,
+            poll_state_published,
+            second_spawn_started,
+        )
+    })
+    .await;
+    let drained = tokio::task::spawn_blocking(move || writer.shutdown())
+        .await
+        .expect("the writer shutdown does not panic");
+    let (extra_handles, refresh_running, poll_running, poll_state_published, second_spawn_started) =
+        run;
+    assert!(
+        !meta.seat_driver_health().snapshot().running
+            && !meta.usage_poll_driver_health().snapshot().running,
+        "{wiring:?}: both drivers stopped once the pipeline is joined"
+    );
+    PipelineRun {
+        extra_handles,
+        refresh_running,
+        poll_running,
+        poll_state_published,
+        second_spawn_started,
+        poll_errors: events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::ERROR && event.target.ends_with("usage_poll")
+            })
+            .count(),
+        drained,
+    }
+}
+
+/// Both background drivers (the refresh and the usage poll) run only with a
+/// credential store, each reporting into its own health, and the poll's
+/// state is published only when it runs. A poll whose client cannot be
+/// built, or a second poll on a daemon that already runs one, is refused
+/// with one ERROR and no task, the refresh unaffected. Every row stops its
+/// drivers and drains a real usage writer, so no refused poll keeps a usage
+/// handle alive. The seat has no stored login, so the poll has no token to
+/// send whatever it finds due.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_reload_pipeline_runs_both_drivers_only_with_a_credential_store_and_joins_them() {
+    // (wiring, extra tasks, refresh, poll, poll state, poll ERRORs)
+    let rows = [
+        (PollWiring::NoStore, 0, false, false, false, 0),
+        (PollWiring::Store, 2, true, true, true, 0),
+        (PollWiring::StoreClientBuildFails, 1, true, false, false, 1),
+        (PollWiring::StoreSecondPollSpawn, 2, true, true, true, 1),
+    ];
+    let baseline_handles = {
+        let rig = Rig::new(&[], ScriptedRefresh::Mint("unused".into())).await;
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let handles = spawn_reload_pipeline(
+            rig.config.clone(),
+            None,
+            None,
+            rig.store.clone(),
+            rig.swap.clone(),
+            Arc::new(ArcSwap::from_pointee(ActivationState::default())),
+            routectl_usage::handle_with_closed_channel(),
+            shutdown_rx,
+            Arc::new(crate::handlers::status::DaemonMeta::new(
+                "127.0.0.1:0".into(),
+            )),
+        );
+        let count = handles.len();
+        shutdown_tx.send(()).unwrap();
+        await_reload_tasks(handles).await;
+        count
+    };
+    for (wiring, extra_handles, refresh, poll, poll_state, poll_errors) in rows {
+        // Act
+        let run = run_pipeline(wiring, baseline_handles).await;
 
         // Assert
-        assert_eq!(refresh_running, with_store, "{name}: refresh driver");
-        assert_eq!(poll_running, with_store, "{name}: usage poll driver");
-        assert_eq!(poll_state_published, with_store, "{name}: poll state");
-        assert!(
-            !meta.seat_driver_health().snapshot().running,
-            "{name}: refresh driver stopped once the pipeline is joined"
+        assert_eq!(
+            run.extra_handles, extra_handles,
+            "{wiring:?}: tasks spawned"
         );
-        assert!(
-            !meta.usage_poll_driver_health().snapshot().running,
-            "{name}: usage poll driver stopped once the pipeline is joined"
+        assert_eq!(run.refresh_running, refresh, "{wiring:?}: refresh driver");
+        assert_eq!(run.poll_running, poll, "{wiring:?}: usage poll driver");
+        assert_eq!(
+            run.poll_state_published, poll_state,
+            "{wiring:?}: poll state"
+        );
+        assert!(!run.second_spawn_started, "{wiring:?}: a second poll task");
+        assert_eq!(run.poll_errors, poll_errors, "{wiring:?}: poll ERRORs");
+        assert_eq!(
+            run.drained,
+            routectl_usage::ShutdownOutcome::Drained,
+            "{wiring:?}: the writer drains once the pipeline is joined"
         );
     }
 }

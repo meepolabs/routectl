@@ -393,6 +393,7 @@ async fn spawn_daemon_full(
                 confirmation_observer: Some(confirm_tx),
                 status_hooks,
                 shutdown: None,
+                credentials_path: None,
             },
         )
         .await

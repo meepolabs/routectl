@@ -166,6 +166,15 @@ pub(crate) struct DaemonTestSeams {
     /// The real signal path is covered against the real binary in a child process
     /// (`tests/serve_shutdown.rs`).
     pub(crate) shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Opens the routectl-managed credential store at THIS file instead of the
+    /// default location, when no store is injected.
+    ///
+    /// The store is then the production one in every other respect (its OAuth
+    /// arm drives the credentials watcher and both background drivers), so a test
+    /// can boot the full managed-store lifecycle without pointing the process-wide
+    /// config home anywhere: setting that variable from a running test is visible
+    /// to every other thread, and a lapse would open the real store.
+    pub(crate) credentials_path: Option<PathBuf>,
 }
 
 /// `serve_on_listener_with_secrets` with the built ROUTER injectable.
@@ -249,6 +258,17 @@ async fn serve_inner(
         routectl_router::wire_check_env::resolve_wire_check_params(routectl_core::process_env)
             .map_err(|e| Error::Config(e.to_string()))?;
 
+    #[cfg(test)]
+    let DaemonTestSeams {
+        injected_router,
+        router_observer,
+        usage_observer,
+        confirmation_observer,
+        status_hooks,
+        shutdown,
+        credentials_path,
+    } = seams;
+
     // Composite resolver: oauth:// refs flow through OAuthStore (the
     // routectl-managed credentials.json), everything else through
     // MemoryStore. Built ONCE up here so the same `Arc<dyn
@@ -259,6 +279,12 @@ async fn serve_inner(
     let (secrets, oauth_store) = match secrets {
         Some(injected) => (injected, None),
         None => {
+            #[cfg(test)]
+            let composite = match credentials_path {
+                Some(path) => CompositeStore::open_at(path).await?,
+                None => CompositeStore::open_default().await?,
+            };
+            #[cfg(not(test))]
             let composite = CompositeStore::open_default().await?;
             let oauth_store = composite.oauth_store();
             let secrets: Arc<dyn SecretStore> = Arc::new(composite);
@@ -270,15 +296,6 @@ async fn serve_inner(
     // warms, the writer, the layer stack, the listener, the reload wiring -- runs
     // exactly as it does in production, which is what makes a test over it a test of
     // the assembled daemon rather than of a harness.
-    #[cfg(test)]
-    let DaemonTestSeams {
-        injected_router,
-        router_observer,
-        usage_observer,
-        confirmation_observer,
-        status_hooks,
-        shutdown,
-    } = seams;
     #[cfg(test)]
     let router = match injected_router {
         Some(injected) => injected,

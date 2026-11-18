@@ -5500,8 +5500,11 @@ is contacted and redirects are never followed.
 
 - A seat is polled only after 5 minutes (plus a per-seat random jitter of up to
   a minute) without a fresh reading from either a response or an earlier poll,
-  so a seat taking traffic is not polled. A fresh daemon spreads its first polls
-  over the first 5 minutes, and each sweep polls at most one seat per vendor.
+  so a seat taking traffic is not polled. A fresh daemon gives each seat a
+  random first due time within its first 5 minutes. The poll sweeps once a
+  minute and polls at most one seat per vendor per sweep, so seats of one vendor
+  that are due together are polled one per minute, and a larger set of one
+  vendor's seats takes correspondingly longer than 5 minutes to be read.
 - A seat whose access token is about to expire is skipped: the poll never
   refreshes a token, it waits for the refresh job.
 - A failed poll backs that seat off for 5, then 10, then 15 minutes (the cap)
