@@ -4859,8 +4859,18 @@ Every metric set (groups, totals, and each series bucket) carries both cost
 channels side by side: `cost_usd` is real spend under `cost_status`, and
 `equivalent_cost_usd` is the API-equivalent value of the set's subscription
 rows under the same complete-or-absent rule the CLI cell applies. Both are
-`null` rather than `0` when nothing contributed, both sum bucket-wise to
-`totals`, and neither is ever folded into the other.
+`null` rather than `0` when nothing contributed, and neither is ever folded
+into the other.
+
+The groups and `totals` are priced over the whole window, and are the same
+whether or not a `bucket` series was requested. Each series bucket is priced
+and derived over its own requests alone. The counts of the buckets (requests,
+tokens, errors) sum to `totals`, but their costs and cache-hit shares need
+not. A cache write with no recorded lifetime leaves the window's cost of its
+requests unpriced, while a bucket that holds none of that write prices the
+same requests' share in it; and a set of requests sharing the keys listed
+under `cache_hit_pct` below counts toward a bucket's hit share only when it
+reported cache reads in that bucket.
 
 Every metric set also carries `cache_write_tokens`, the cache-write tokens
 of every lifetime summed over both ledger eras, and `cache_write_present`,
