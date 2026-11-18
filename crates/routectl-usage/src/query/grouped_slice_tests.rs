@@ -1,10 +1,9 @@
 // The sliced read: a window read in parallel ts_start slices under one rowid
 // watermark answers exactly as one slice does, cuts its span where the
 // contract says, ignores rows appended after its watermark, and stops every
-// slice together. Split from `grouped_tests.rs` to keep each file under the
-// size ceiling; `include!`d into the same `tests` module so the fixtures there
-// stay in scope. All imports come from the host file -- do not add `use` lines
-// here.
+// slice together. `include!`d into the `tests` module of `grouped_tests.rs` so
+// the fixtures there stay in scope. All imports come from the host file -- do
+// not add `use` lines here.
 
 const SLICE_WIDTH_MS: i64 = 10_000;
 const SLICED_TO_MS: i64 = 4 * SLICE_WIDTH_MS;
@@ -704,6 +703,56 @@ fn only_a_span_of_a_week_or_more_from_the_earliest_row_is_sliced() {
     }
 }
 
+#[test]
+fn a_row_above_the_watermark_does_not_change_how_the_window_is_cut() {
+    // Arrange: six days of rows, too short a span to slice, then a late row
+    // above the watermark whose old start time would stretch the span past a
+    // week.
+    const T: i64 = 1_700_000_000_000;
+    let (dir, mut db) = open_db();
+    for (i, ts_start) in [T, T + 6 * DAY_MS].into_iter().enumerate() {
+        insert_dense(
+            db.conn(),
+            &DenseRow::new(format!("span-{i}"), ts_start, &LANES[0]),
+        );
+    }
+    let spec = QuerySpec {
+        to_ms: T + 6 * DAY_MS + 1,
+        ..sliced_spec(GroupDim::Model)
+    };
+    let before = read(&mut db, &spec, &forced(1));
+    let watermark = max_rowid(&db);
+    insert_dense(
+        db.conn(),
+        &DenseRow::new("late-old".to_owned(), T - 30 * DAY_MS, &LANES[0]),
+    );
+    let path = dir.path().join("usage.db");
+    let opens = std::sync::atomic::AtomicUsize::new(0);
+    let counting = |_: usize, _: &ReadLimit| -> Result<UsageDb, QueryError> {
+        opens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(crate::db::open_readonly_fastfail(&path).expect("open slice"))
+    };
+    let plan_at = |watermark: Option<i64>| ReadPlan {
+        slices: None,
+        watermark,
+        open_slice: Some(&counting),
+    };
+
+    // Act
+    let cut = read(&mut db, &spec, &plan_at(Some(watermark)));
+    let opened_at_watermark = opens.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let uncut = read(&mut db, &spec, &plan_at(None));
+    let opened_above = opens.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Assert: the control shows the late row stretches the plan of a read
+    // that counts it; the read below the watermark plans and answers as
+    // before the row existed.
+    assert_eq!(opened_above, 3, "control: a read counting the row");
+    assert_eq!(uncut.totals.requests, 3, "control: the late row is visible");
+    assert_eq!(opened_at_watermark, 0, "slice connections opened");
+    assert_eq!(cut, before);
+}
+
 /// Late rows: one per lane in every slice, each an error with a class and a
 /// cache-write split, so every statement of the read would see them.
 fn insert_late_rows(conn: &rusqlite::Connection, tag: &str) {
@@ -989,5 +1038,82 @@ fn a_real_slice_error_wins_over_its_siblings_interrupts() {
             again.expect("a read after the failed one").totals.requests,
             96
         );
+    }
+}
+
+#[test]
+fn a_panicking_slice_stops_an_earlier_blocked_slice_at_once() {
+    for (blocked, panicking) in [(1, 3), (1, 2)] {
+        // Arrange: an earlier slice waits for the stop (bounded well past the
+        // promptness bound below), and a later one panics opening its
+        // connection once the earlier one is waiting. The caller joins in
+        // range order, so it reaches the panicking slice only after the
+        // blocked one has ended.
+        let (dir, mut db) = open_db();
+        seed_dense(&db, "base");
+        let path = dir.path().join("usage.db");
+        let blocked_waiting = std::sync::atomic::AtomicBool::new(false);
+        let blocked_saw_stop = std::sync::atomic::AtomicBool::new(false);
+        let hook = |index: usize, slice_limit: &ReadLimit| -> Result<UsageDb, QueryError> {
+            if index == panicking {
+                let bound = Instant::now() + Duration::from_secs(10);
+                while !blocked_waiting.load(std::sync::atomic::Ordering::SeqCst)
+                    && Instant::now() < bound
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                panic!("slice {index} failed");
+            }
+            if index == blocked {
+                blocked_waiting.store(true, std::sync::atomic::Ordering::SeqCst);
+                if wait_for_stop(slice_limit) {
+                    blocked_saw_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            Ok(crate::db::open_readonly_fastfail(&path).expect("open slice"))
+        };
+        let plan = ReadPlan {
+            slices: Some(4),
+            watermark: None,
+            open_slice: Some(&hook),
+        };
+        let caller = CancelFlag::default();
+        let limit = ReadLimit {
+            deadline: no_deadline(),
+            cancel: caller.clone(),
+        };
+        let started = Instant::now();
+
+        // Act
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            query_with(
+                &mut db,
+                &sliced_spec(GroupDim::Model),
+                unpriced,
+                limit,
+                &plan,
+            )
+        }));
+        let elapsed = started.elapsed();
+        let after = read(&mut db, &sliced_spec(GroupDim::Model), &forced(4));
+
+        // Assert: the panic reaches the caller, the blocked slice was stopped
+        // rather than timing out, the caller's flag is untouched, and its
+        // connection reads on.
+        let payload = outcome.expect_err("the slice's panic reaches the caller");
+        assert_eq!(
+            payload.downcast_ref::<String>().map(String::as_str),
+            Some(format!("slice {panicking} failed").as_str()),
+        );
+        assert!(
+            blocked_saw_stop.load(std::sync::atomic::Ordering::SeqCst),
+            "slice {blocked} was never stopped"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "slice {panicking}: the read took {elapsed:?} to end"
+        );
+        assert!(!caller.is_cancelled(), "slice {panicking}");
+        assert_eq!(after.totals.requests, 96, "slice {panicking}");
     }
 }

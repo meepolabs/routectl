@@ -9,12 +9,22 @@
 //! flight at once and split the sort.
 //!
 //! Every slice runs the same three statements over its own sub-range, in its
-//! own transaction, all bound to one watermark taken before any slice starts:
-//! `requests` rows are appended (a row is written when its request completes,
-//! so a late row can carry an old `ts_start`) and only the oldest are ever
-//! deleted, so the rows at or below the watermark are one fixed set whichever
-//! snapshot a slice reads them from. The slices partition that set by
-//! `ts_start`, so each row is read exactly once.
+//! own transaction, all bound to one watermark taken before any slice starts.
+//! What that guarantees, given how `requests` changes (rows are appended, a
+//! row is written when its request completes so a late row can carry an old
+//! `ts_start`, and the only delete is the retention prune of rows older than
+//! a cutoff):
+//!
+//! - A row appended after the watermark is counted by no slice and plays no
+//!   part in how the window is cut.
+//! - The slices partition the window by `ts_start`, so no row is ever counted
+//!   twice.
+//! - The slices do NOT share one snapshot. A retention prune that commits
+//!   while the slices are starting is seen by the slices whose transactions
+//!   begin after it and not by those that began before, so the answer can
+//!   count a set between the pre-prune and post-prune ledgers. Only rows
+//!   older than the prune's cutoff can differ, and those lie in the oldest
+//!   slices of a window that reaches back past the retention horizon.
 //!
 //! Slices return raw, unpriced fine rows; the merge sums them per
 //! `(fine group, bucket)` and the caller prices and folds the merged rows once,
@@ -27,9 +37,9 @@ use std::thread::{Builder, Scope, ScopedJoinHandle};
 use crate::db::{OpenError, UsageDb, open_readonly_fastfail};
 
 use super::aggregate::{BucketedFineRow, ClassesByRow, FineRow, ReadWindow, read_error_classes};
-use super::aggregate::{earliest_ts_start, read_fine_rows};
+use super::aggregate::{earliest_ts_start_below, read_fine_rows};
 use super::cache_lifetimes::{LifetimesByRow, merge_lifetimes, read_lifetimes};
-use super::deadline::{DeadlineGuard, ReadLimit};
+use super::deadline::{CancelFlag, DeadlineGuard, ReadLimit};
 use super::grouped::QuerySpec;
 use super::{AggRow, QueryError};
 
@@ -69,10 +79,10 @@ impl ReadPlan<'_> {
 }
 
 /// One slice's raw read.
-struct SliceRows {
-    fine: Vec<BucketedFineRow>,
-    lifetimes: LifetimesByRow,
-    classes: ClassesByRow,
+pub(super) struct SliceRows {
+    pub fine: Vec<BucketedFineRow>,
+    pub lifetimes: LifetimesByRow,
+    pub classes: ClassesByRow,
 }
 
 /// The whole window's rows, merged across slices: one fine row per
@@ -87,10 +97,11 @@ pub(super) struct MergedRead {
 /// Read `spec`'s window on `db` (whose read limit is already installed) and on
 /// up to [`SLICES`] - 1 further connections, and merge the slices.
 ///
-/// The first slice that fails cancels its siblings; every slice is joined
-/// before this returns, and the first error that is not an interrupt is the
-/// answer (an interrupt when every failure was one). No partial result is
-/// ever returned.
+/// The first slice that fails or panics cancels its siblings; every slice is
+/// joined before this returns, and the first error that is not an interrupt
+/// is the answer (an interrupt when every failure was one). A slice's panic
+/// is re-raised on the calling thread once every slice has ended. No partial
+/// result is ever returned.
 pub(super) fn read_merged(
     db: &UsageDb,
     spec: &QuerySpec,
@@ -101,7 +112,7 @@ pub(super) fn read_merged(
         Some(watermark) => watermark,
         None => read_watermark(db)?,
     };
-    let ranges = plan_ranges(db, spec, plan.slices)?;
+    let ranges = plan_ranges(db, spec, watermark, plan.slices)?;
     let path = db.path().to_path_buf();
     let open_fastfail = |_: usize, _: &ReadLimit| {
         open_readonly_fastfail(&path).map_err(|err| slice_open_error(&err))
@@ -113,7 +124,7 @@ pub(super) fn read_merged(
         open: plan.open_slice.unwrap_or(&open_fastfail),
     };
     let results = slices.run(db, &ranges);
-    Ok(merge(first_failure(results)?))
+    merge(first_failure(results)?, limit)
 }
 
 /// The ledger's highest rowid, 0 when it is empty. Over every row, not only
@@ -128,17 +139,19 @@ fn read_watermark(db: &UsageDb) -> Result<i64, QueryError> {
 }
 
 /// The `[from, to)` ranges `spec`'s window is read in. The earliest-row probe
-/// runs only when the window is long enough for its answer to matter.
+/// runs only when the window is long enough for its answer to matter, and
+/// sees only the rows at or below `watermark`, the rows the slices count.
 fn plan_ranges(
     db: &UsageDb,
     spec: &QuerySpec,
+    watermark: i64,
     forced: Option<usize>,
 ) -> Result<Vec<(i64, i64)>, QueryError> {
     let span = i128::from(spec.to_ms) - i128::from(spec.from_ms);
     if forced.is_none() && span < i128::from(SLICE_MIN_SPAN_MS) {
         return Ok(vec![(spec.from_ms, spec.to_ms)]);
     }
-    let earliest = earliest_ts_start(db, spec.from_ms)?;
+    let earliest = earliest_ts_start_below(db, spec.from_ms, watermark)?;
     Ok(slice_ranges(spec.from_ms, earliest, spec.to_ms, forced))
 }
 
@@ -210,15 +223,14 @@ impl SliceJob<'_> {
                 .map(|(offset, &range)| self.spawn(scope, offset + 1, range))
                 .collect();
             let mut results = Vec::with_capacity(ranges.len());
+            let first_slice = CancelOnUnwind(&self.limit.cancel);
             results.push(self.stop_on_error(self.read_on(db, first)));
+            drop(first_slice);
             for slice in pending {
                 results.push(match slice {
-                    Pending::Thread(handle) => handle.join().unwrap_or_else(|panic| {
-                        // The scope joins the remaining slices before the
-                        // panic leaves it; stop them first.
-                        self.limit.cancel.cancel();
-                        std::panic::resume_unwind(panic)
-                    }),
+                    Pending::Thread(handle) => handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
                     Pending::Inline(index, range) => self.read_other(index, range),
                 });
             }
@@ -254,8 +266,9 @@ impl SliceJob<'_> {
     /// Read a slice after the first on its own connection, under its own copy
     /// of the read limit.
     fn read_other(&self, index: usize, range: (i64, i64)) -> Result<SliceRows, QueryError> {
+        let _stop_siblings_on_panic = CancelOnUnwind(&self.limit.cancel);
         let read = || {
-            self.limit.cancel.check()?;
+            self.limit.check()?;
             let mut db = (self.open)(index, self.limit)?;
             let guard = DeadlineGuard::install(&mut db, self.limit.clone())?;
             self.read_on(&guard, range)
@@ -266,8 +279,8 @@ impl SliceJob<'_> {
     /// Read one range on `db`: both side reads and the aggregate, in one
     /// transaction.
     fn read_on(&self, db: &UsageDb, (from_ms, to_ms): (i64, i64)) -> Result<SliceRows, QueryError> {
-        let cancel = &self.limit.cancel;
-        cancel.check()?;
+        let limit = self.limit;
+        limit.check()?;
         let window = ReadWindow {
             from_ms,
             to_ms,
@@ -278,9 +291,9 @@ impl SliceJob<'_> {
         };
         let width = self.spec.bucket.map(|bucket| bucket.width_ms);
         let tx = db.conn().unchecked_transaction()?;
-        let lifetimes = read_lifetimes(&tx, &window, width, cancel)?;
-        let classes = read_error_classes(&tx, &window, width, cancel)?;
-        let fine = read_fine_rows(&tx, &window, width, cancel)?;
+        let lifetimes = read_lifetimes(&tx, &window, width, limit)?;
+        let classes = read_error_classes(&tx, &window, width, limit)?;
+        let fine = read_fine_rows(&tx, &window, width, limit)?;
         // A read-only transaction has nothing to commit; finishing releases
         // the snapshot.
         tx.finish()?;
@@ -300,6 +313,21 @@ impl SliceJob<'_> {
             self.limit.cancel.cancel();
         }
         result
+    }
+}
+
+/// Sets the flag when dropped by an unwinding panic. A slice holds one for
+/// its whole body, so a slice that panics stops its siblings at once rather
+/// than when the caller reaches its handle: the caller joins in range order
+/// and may be waiting on an earlier slice, and the scope joins every thread
+/// before the panic leaves it.
+struct CancelOnUnwind<'a>(&'a CancelFlag);
+
+impl Drop for CancelOnUnwind<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.cancel();
+        }
     }
 }
 
@@ -356,13 +384,14 @@ fn clone_sqlite_error(err: &rusqlite::Error) -> rusqlite::Error {
 /// Merge the slices by `(fine group, bucket)`, in a fixed order so the
 /// caller's fold sums the same rows in the same order however the window was
 /// cut. A key read by one slice only is taken as read, so a single-slice read
-/// passes through no merge step.
-fn merge(slices: Vec<SliceRows>) -> MergedRead {
+/// passes through no merge step. Checks `limit` once per fine row.
+pub(super) fn merge(slices: Vec<SliceRows>, limit: &ReadLimit) -> Result<MergedRead, QueryError> {
     let mut fine: HashMap<_, FineRow> = HashMap::new();
     let mut lifetimes = LifetimesByRow::new();
     let mut classes = ClassesByRow::new();
     for slice in slices {
         for (row, bucket) in slice.fine {
+            limit.check()?;
             match fine.entry((row.agg.key.clone(), bucket)) {
                 Entry::Occupied(mut merged) => merge_fine(merged.get_mut(), row),
                 Entry::Vacant(slot) => {
@@ -415,11 +444,11 @@ fn merge(slices: Vec<SliceRows>) -> MergedRead {
                 b_bucket,
             ))
     });
-    MergedRead {
+    Ok(MergedRead {
         rows,
         lifetimes,
         classes,
-    }
+    })
 }
 
 /// Add the class counts of `from` into `into`.

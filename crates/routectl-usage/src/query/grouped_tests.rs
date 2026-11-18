@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::db::open;
-use crate::query::aggregate::{ReadWindow, SERIES_AGG_SQL, read_error_classes};
+use crate::query::CancelFlag;
+use crate::query::aggregate::{ReadWindow, SERIES_AGG_SQL, read_error_classes, read_fine_rows};
 use crate::query::cache_lifetimes::read_lifetimes;
-use crate::query::slices::ReadPlan;
+use crate::query::slices::{ReadPlan, SliceRows, merge};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 

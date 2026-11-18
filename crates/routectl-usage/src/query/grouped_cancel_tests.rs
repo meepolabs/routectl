@@ -1,9 +1,9 @@
-// The cancel flag on the read limit: the progress handler, the up-front check,
-// and the per-row checks in the Rust loops (fine-row fold, error-class read,
-// cache-write lifetimes parse). Split from `grouped_tests.rs` to keep each file
-// under the size ceiling; `include!`d into the same `tests` module so the
-// fixtures there stay in scope. All imports come from the host file -- do not
-// add `use` lines here.
+// The read limit's cancel flag and deadline: the progress handler, the
+// up-front check, and the per-row checks in the Rust loops (fine-row fold,
+// slice merge, fine-row, error-class and cache-write lifetimes reads).
+// `include!`d into the `tests` module of `grouped_tests.rs` so the fixtures
+// there stay in scope. All imports come from the host file -- do not add `use`
+// lines here.
 
 /// A far-future limit carrying `cancel`.
 fn limit_with(cancel: &CancelFlag) -> ReadLimit {
@@ -11,6 +11,24 @@ fn limit_with(cancel: &CancelFlag) -> ReadLimit {
         deadline: no_deadline(),
         cancel: cancel.clone(),
     }
+}
+
+/// A limit whose deadline has already passed and whose flag is unset.
+fn expired() -> ReadLimit {
+    ReadLimit::from(
+        Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("instant predates the process start"),
+    )
+}
+
+/// The two ways a read is stopped, as limits: its flag set, its deadline
+/// passed.
+fn stopped_limits() -> [(&'static str, ReadLimit); 2] {
+    [
+        ("cancelled", limit_with(&cancelled())),
+        ("deadline passed", expired()),
+    ]
 }
 
 /// A flag that is already set.
@@ -156,43 +174,133 @@ fn a_flag_set_from_inside_the_price_closure_interrupts_at_the_next_fine_row() {
 }
 
 #[test]
-fn a_set_flag_interrupts_each_side_read_row_loop() {
-    // One row per side-read loop: each read runs with no progress handler
-    // installed, so only its own per-row check can return the interrupt.
-    type SideRead = fn(&rusqlite::Transaction<'_>, &CancelFlag) -> Result<usize, QueryError>;
-    let cases: [(&str, SideRead); 4] = [
-        ("error classes, unbucketed", |tx, cancel| {
-            read_error_classes(tx, &whole_window(), None, cancel).map(|c| c.len())
+fn a_stopped_limit_interrupts_each_read_row_loop() {
+    // One row per read loop and stop kind: each read runs with no progress
+    // handler installed, so only its own per-row check can return the
+    // interrupt; an expired deadline is seen by nothing else.
+    type Read = fn(&rusqlite::Transaction<'_>, &ReadLimit) -> Result<usize, QueryError>;
+    let cases: [(&str, Read); 6] = [
+        ("fine rows, unbucketed", |tx, limit| {
+            read_fine_rows(tx, &whole_window(), None, limit).map(|r| r.len())
         }),
-        ("error classes, bucketed", |tx, cancel| {
-            read_error_classes(tx, &whole_window(), Some(1000), cancel).map(|c| c.len())
+        ("fine rows, bucketed", |tx, limit| {
+            read_fine_rows(tx, &whole_window(), Some(1000), limit).map(|r| r.len())
         }),
-        ("cache-write lifetimes, unbucketed", |tx, cancel| {
-            read_lifetimes(tx, &whole_window(), None, cancel).map(|l| l.len())
+        ("error classes, unbucketed", |tx, limit| {
+            read_error_classes(tx, &whole_window(), None, limit).map(|c| c.len())
         }),
-        ("cache-write lifetimes, bucketed", |tx, cancel| {
-            read_lifetimes(tx, &whole_window(), Some(1000), cancel).map(|l| l.len())
+        ("error classes, bucketed", |tx, limit| {
+            read_error_classes(tx, &whole_window(), Some(1000), limit).map(|c| c.len())
+        }),
+        ("cache-write lifetimes, unbucketed", |tx, limit| {
+            read_lifetimes(tx, &whole_window(), None, limit).map(|l| l.len())
+        }),
+        ("cache-write lifetimes, bucketed", |tx, limit| {
+            read_lifetimes(tx, &whole_window(), Some(1000), limit).map(|l| l.len())
         }),
     ];
     let (_dir, db) = open_db();
     seed_three_fine_rows(&db);
     for (read, run) in cases {
+        for (stop, limit) in stopped_limits() {
+            let tx = db.conn().unchecked_transaction().expect("begin read");
+
+            // Act
+            let completed = run(&tx, &ReadLimit::unbounded());
+            let interrupted = run(&tx, &limit);
+
+            // Assert: the unbounded limit reads every fine row (the control),
+            // the stopped one sheds.
+            assert_eq!(
+                completed.expect(read),
+                3,
+                "{read}: control read every fine row"
+            );
+            assert!(
+                matches!(interrupted, Err(QueryError::Interrupted)),
+                "{read}, {stop}: expected an interrupt, got {interrupted:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_stopped_limit_interrupts_the_slice_merge() {
+    // Arrange: two slices' raw rows, read without a limit.
+    let (_dir, db) = open_db();
+    seed_three_fine_rows(&db);
+    let slice = || {
         let tx = db.conn().unchecked_transaction().expect("begin read");
+        let fine = read_fine_rows(&tx, &whole_window(), None, &ReadLimit::unbounded())
+            .expect("read fine rows");
+        SliceRows {
+            fine,
+            lifetimes: Default::default(),
+            classes: Default::default(),
+        }
+    };
 
+    for (stop, limit) in stopped_limits() {
         // Act
-        let completed = run(&tx, &CancelFlag::default());
-        let interrupted = run(&tx, &cancelled());
+        let completed =
+            merge(vec![slice(), slice()], &ReadLimit::unbounded()).map(|m| m.rows.len());
+        let interrupted = merge(vec![slice(), slice()], &limit).map(|m| m.rows.len());
 
-        // Assert: the unset flag reads every fine row (the control), the set
-        // one sheds.
-        assert_eq!(
-            completed.expect(read),
-            3,
-            "{read}: control read every fine row"
-        );
+        // Assert
+        assert_eq!(completed.expect("merge"), 3, "{stop}: control");
         assert!(
             matches!(interrupted, Err(QueryError::Interrupted)),
-            "{read}: expected an interrupt, got {interrupted:?}"
+            "{stop}: expected an interrupt, got {interrupted:?}"
+        );
+    }
+}
+
+#[test]
+fn a_price_closure_that_outlasts_the_deadline_interrupts_at_the_next_fine_row() {
+    // One row per fold path: the plain group fold and the group-and-bucket fold.
+    let cases = [
+        ("groups", None),
+        (
+            "groups and buckets",
+            Some(BucketSpec {
+                width_ms: 1000,
+                count: 10,
+            }),
+        ),
+    ];
+    for (path, bucket) in cases {
+        // Arrange: three fine rows; the first one priced holds the thread
+        // until the deadline has passed. The ledger is small enough that the
+        // progress handler never runs, so only the fold's own check can stop
+        // the read.
+        let (_dir, mut db) = open_db();
+        seed_three_fine_rows(&db);
+        let query_spec = QuerySpec {
+            bucket,
+            ..spec(GroupDim::Model)
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let priced = std::cell::Cell::new(0_usize);
+        let outlasting = |_row: &AggRow| {
+            priced.set(priced.get() + 1);
+            while Instant::now() <= deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            RowCost::Unpriced(Vec::new())
+        };
+
+        // Act
+        let interrupted = query(&mut db, &query_spec, outlasting, deadline);
+
+        // Assert
+        assert!(
+            matches!(interrupted, Err(QueryError::Interrupted)),
+            "{path}: expected an interrupt, got {interrupted:?}"
+        );
+        assert_eq!(
+            priced.get(),
+            1,
+            "{path}: the fold must stop at the next fine row"
         );
     }
 }

@@ -738,9 +738,10 @@ pub const V22_INDEXES: &[&str] = &[
 /// `meta.schema_version` row, all in one transaction. No column or row
 /// changes.
 ///
-/// Building the indexes reads the whole `requests` table once, so on a large
-/// ledger this step is the slow part of the first open after an upgrade; a
-/// failure or crash rolls back every index with the stamps.
+/// Each of the three `CREATE INDEX` builds scans the whole `requests` table
+/// on its own, so the table is read three times and on a large ledger this
+/// step is the slow part of the first open after an upgrade; a failure or
+/// crash rolls back every index with the stamps.
 ///
 /// A v21 binary can be handed the file back after the version stamps are
 /// lowered: it never names an index, and SQLite maintains all three on its

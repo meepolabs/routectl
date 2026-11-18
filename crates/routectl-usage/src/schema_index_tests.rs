@@ -11,8 +11,8 @@ use tempfile::TempDir;
 use super::*;
 use crate::db::{UsageDb, open};
 use crate::query::{
-    AGG_SQL, ERRORS_BY_CLASS_BUCKETED_SQL, ERRORS_BY_CLASS_SQL, LATEST_QUOTA_BY_SEAT_SQL,
-    QUERY_AGG_SQL, QUOTA_ROWS_PREDICATE, SERIES_AGG_SQL,
+    AGG_SQL, ERROR_ROWS_PREDICATE, ERRORS_BY_CLASS_BUCKETED_SQL, ERRORS_BY_CLASS_SQL,
+    LATEST_QUOTA_BY_SEAT_SQL, QUERY_AGG_SQL, QUOTA_ROWS_PREDICATE, SERIES_AGG_SQL,
 };
 
 const AGG_INDEX: &str = "idx_requests_agg";
@@ -201,6 +201,22 @@ fn partial_predicate(ddl: &str) -> &str {
     ddl.split_once(" WHERE ")
         .map(|(_, predicate)| predicate.trim())
         .expect("a partial index carries a WHERE")
+}
+
+#[test]
+fn the_error_index_is_over_exactly_the_error_class_statements_predicate() {
+    // Arrange
+    let guarded = format!("AND {ERROR_ROWS_PREDICATE}\n");
+
+    // Act
+    let predicate = partial_predicate(CREATE_ERROR_ROWS_INDEX);
+
+    // Assert: the index holds exactly the rows the statements read, and each
+    // statement filters on that same predicate.
+    assert_eq!(predicate, ERROR_ROWS_PREDICATE);
+    for (name, sql) in ERROR_STATEMENTS {
+        assert_eq!(sql.matches(&guarded).count(), 1, "{name}");
+    }
 }
 
 #[test]

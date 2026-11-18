@@ -24,7 +24,7 @@ use crate::db::UsageDb;
 
 use super::aggregate::ClassesByRow;
 use super::cache_lifetimes::attach;
-use super::deadline::{CancelFlag, DeadlineGuard, ReadLimit};
+use super::deadline::{DeadlineGuard, ReadLimit};
 use super::slices::{MergedRead, ReadPlan, read_merged};
 use super::{AggRow, GroupKey, QueryError};
 
@@ -335,14 +335,15 @@ pub struct QueryResult {
 
 /// Run one windowed, filtered, priced, grouped aggregate.
 ///
-/// Every figure describes one fixed set of rows: the read first takes the
-/// ledger's highest rowid as a watermark and every statement counts only rows
-/// at or below it. A window whose span from its earliest row is a week or more
-/// is read in parallel `ts_start` slices, each on its own read-only connection
-/// and in its own transaction; since the ledger only appends rows and deletes
-/// its oldest, the rows under the watermark are the same set in every slice's
-/// snapshot, and the slices partition them, so the answer equals a single read
-/// of that set. A shorter window is one slice on `db` alone.
+/// The read first takes the ledger's highest rowid as a watermark and every
+/// statement counts only rows at or below it, so a row appended during the
+/// read is never counted. A window whose span from its earliest row is a week
+/// or more is read in parallel `ts_start` slices, each on its own read-only
+/// connection and in its own transaction; the slices partition the window, so
+/// no row is counted twice. They do not share one snapshot: a retention prune
+/// committing while they start can drop rows older than its cutoff from some
+/// slices and not others (see the `slices` module).
+/// A shorter window is one slice on `db` alone, one snapshot.
 ///
 /// `limit` is a [`ReadLimit`] or a bare deadline
 /// [`Instant`](std::time::Instant). A progress handler on every connection
@@ -351,9 +352,10 @@ pub struct QueryResult {
 /// [`QueryError::Interrupted`]; a [`DeadlineGuard`] removes the handler from
 /// `db` on every exit path -- return, error, and unwind alike -- so the
 /// connection is left as it was found. The Rust loops over each statement's
-/// rows also check the cancel flag once per row, since rows already computed
-/// (a grouped result, the `price` closure's own work) run no VM instructions
-/// for the handler to count. A slice that fails stops the others; every slice
+/// rows, the slice merge and the fold also check the whole limit (deadline
+/// and flag) once per row, since rows already computed (a grouped result, the
+/// `price` closure's own work) run no VM instructions for the handler to
+/// count. A slice that fails or panics stops the others; every slice
 /// has ended before this returns, the first failure that is not an interrupt
 /// is the error, and no partial result is ever returned.
 ///
@@ -381,7 +383,7 @@ pub(super) fn query_with(
     limit: ReadLimit,
     plan: &ReadPlan<'_>,
 ) -> Result<QueryResult, QueryError> {
-    limit.cancel.check()?;
+    limit.check()?;
     // The read stops its own slices through a child flag, leaving the
     // caller's flag as the caller set it.
     let limit = ReadLimit {
@@ -413,7 +415,7 @@ fn read_and_fold(
         check_bucket(bucket, spec.from_ms)?;
     }
     let read = read_merged(db, spec, limit, plan)?;
-    let (groups, buckets) = fold(spec, read, &price, &limit.cancel)?;
+    let (groups, buckets) = fold(spec, read, &price, limit)?;
 
     let mut totals = GroupAcc::default();
     for acc in groups.values() {
@@ -452,7 +454,7 @@ fn fold(
     spec: &QuerySpec,
     read: MergedRead,
     price: &impl Fn(&AggRow) -> RowCost,
-    cancel: &CancelFlag,
+    limit: &ReadLimit,
 ) -> Result<Folded, QueryError> {
     let MergedRead {
         rows,
@@ -462,7 +464,7 @@ fn fold(
     let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
     let mut buckets: BTreeMap<i64, GroupAcc> = BTreeMap::new();
     for (mut fine, bucket_ix) in rows {
-        cancel.check()?;
+        limit.check()?;
         if let Some(bucket) = spec.bucket
             && (bucket_ix < 0 || bucket_ix >= bucket.count as i64)
         {

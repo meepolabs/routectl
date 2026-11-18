@@ -6,7 +6,7 @@ use rusqlite::{Connection, Row, Transaction};
 
 use crate::db::UsageDb;
 
-use super::deadline::CancelFlag;
+use super::deadline::ReadLimit;
 use super::{AggRow, GroupKey, QueryError};
 
 /// The most recent quota-bearing snapshot for one seat. Mirrors the `quota_*`
@@ -68,6 +68,9 @@ macro_rules! error_rows {
         "outcome NOT IN ('ok', 'client_disconnect', 'cancelled')"
     };
 }
+
+#[cfg(test)]
+pub const ERROR_ROWS_PREDICATE: &str = error_rows!();
 
 macro_rules! agg_base_columns {
     () => {
@@ -375,8 +378,10 @@ pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64
     Ok((fine, bucket))
 }
 
+/// `?2` is a rowid watermark, kept out of index selection by the same unary
+/// `+` as `below_watermark!` in the parent module.
 const EARLIEST_TS_START_SQL: &str = concat!(
-    "SELECT MIN(ts_start) FROM requests WHERE ts_start >= ?1 AND ",
+    "SELECT MIN(ts_start) FROM requests WHERE ts_start >= ?1 AND +rowid <= ?2 AND ",
     inference_rows!()
 );
 
@@ -390,10 +395,20 @@ const EARLIEST_TS_START_SQL: &str = concat!(
 /// bound the aggregate applies, so an anchor derived from this can never pull in
 /// a row the unbucketed query excludes.
 pub fn earliest_ts_start(db: &UsageDb, from_ms: i64) -> Result<Option<i64>, QueryError> {
+    earliest_ts_start_below(db, from_ms, i64::MAX)
+}
+
+/// [`earliest_ts_start`] over only the rows at or below rowid `watermark`, so
+/// a read that counts those rows alone also plans on them alone.
+pub(super) fn earliest_ts_start_below(
+    db: &UsageDb,
+    from_ms: i64,
+    watermark: i64,
+) -> Result<Option<i64>, QueryError> {
     let mut stmt = db.conn().prepare(EARLIEST_TS_START_SQL)?;
     // `MIN` over zero rows is a single SQL NULL row, not an absent row, so the
     // empty ledger arrives as `Ok(None)` rather than `QueryReturnedNoRows`.
-    let earliest = stmt.query_row([from_ms], |row| row.get::<_, Option<i64>>(0))?;
+    let earliest = stmt.query_row([from_ms, watermark], |row| row.get::<_, Option<i64>>(0))?;
     Ok(earliest)
 }
 
@@ -529,7 +544,7 @@ pub(super) fn read_fine_rows(
     tx: &Transaction<'_>,
     window: &ReadWindow<'_>,
     bucket_width_ms: Option<i64>,
-    cancel: &CancelFlag,
+    limit: &ReadLimit,
 ) -> Result<Vec<BucketedFineRow>, QueryError> {
     let mut out = Vec::new();
     let base = rusqlite::params![
@@ -543,7 +558,7 @@ pub(super) fn read_fine_rows(
         None => {
             let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
             for row in stmt.query_map(base, map_fine_row)? {
-                cancel.check()?;
+                limit.check()?;
                 out.push((row?, 0));
             }
         }
@@ -559,7 +574,7 @@ pub(super) fn read_fine_rows(
                 window.anchor_ms,
             ];
             for row in stmt.query_map(params, map_fine_row_bucketed)? {
-                cancel.check()?;
+                limit.check()?;
                 out.push(row?);
             }
         }
@@ -577,11 +592,11 @@ pub(super) fn read_error_classes(
     tx: &Transaction<'_>,
     window: &ReadWindow<'_>,
     bucket_width_ms: Option<i64>,
-    cancel: &CancelFlag,
+    limit: &ReadLimit,
 ) -> Result<ClassesByRow, QueryError> {
     let mut out = ClassesByRow::new();
     let mut fold = |row: &Row<'_>| -> Result<(), QueryError> {
-        cancel.check()?;
+        limit.check()?;
         let key = read_group_key(row)?;
         let bucket: i64 = row.get(GROUP_KEY_COLUMNS)?;
         let class: String = row.get(GROUP_KEY_COLUMNS + 1)?;

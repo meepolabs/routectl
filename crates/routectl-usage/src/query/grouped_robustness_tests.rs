@@ -62,14 +62,13 @@ fn seed_bulk(db: &UsageDb, count: i64) {
 #[test]
 fn a_panicking_price_closure_still_detaches_the_progress_handler() {
     // Arrange: a ledger big enough that a full scan runs past a progress
-    // callback interval, plus an ALREADY-EXPIRED deadline. The panicking query
-    // is windowed down to a single row, so its own statement finishes inside
-    // one interval and the handler never gets to fire on it.
+    // callback interval, plus a deadline the price closure outlasts before it
+    // panics, so the handler left behind would hold an EXPIRED deadline. The
+    // panicking query is windowed down to a single row, so its own statement
+    // finishes inside one interval and the handler never gets to fire on it.
     let (_dir, mut db) = open_db();
     seed_bulk(&db, 4000);
-    let expired = Instant::now()
-        .checked_sub(Duration::from_secs(1))
-        .expect("instant predates the process start");
+    let deadline = Instant::now() + Duration::from_millis(200);
     let one_row = QuerySpec {
         from_ms: 100,
         to_ms: 101,
@@ -81,7 +80,13 @@ fn a_panicking_price_closure_still_detaches_the_progress_handler() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        query(&mut db, &one_row, |_row| panic!("pricing blew up"), expired)
+        let outlast_then_panic = |_row: &AggRow| -> RowCost {
+            while Instant::now() <= deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("pricing blew up")
+        };
+        query(&mut db, &one_row, outlast_then_panic, deadline)
     }));
     std::panic::set_hook(hook);
 

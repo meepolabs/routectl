@@ -11,7 +11,7 @@
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::db::UsageDb;
 
@@ -59,15 +59,6 @@ impl CancelFlag {
             parent: Some(Arc::new(self.clone())),
         }
     }
-
-    /// [`QueryError::Interrupted`] once the flag is set. Cheap enough to call
-    /// once per row in a Rust loop over a statement's results.
-    pub(super) fn check(&self) -> Result<(), QueryError> {
-        if self.is_cancelled() {
-            return Err(QueryError::Interrupted);
-        }
-        Ok(())
-    }
 }
 
 /// What bounds one read: an absolute deadline and a cancel flag. A bare
@@ -78,6 +69,36 @@ pub struct ReadLimit {
     pub deadline: Instant,
     /// The read is interrupted once this flag is set.
     pub cancel: CancelFlag,
+}
+
+/// How far off the deadline of [`ReadLimit::unbounded`] lies: longer than
+/// any read runs, short enough that adding it to [`Instant::now`] never
+/// overflows.
+const UNBOUNDED_READ: Duration = Duration::from_hours(365 * 24);
+
+impl ReadLimit {
+    /// A limit no read reaches: a deadline a year off and a flag nobody holds.
+    pub(super) fn unbounded() -> Self {
+        Self::from(Instant::now() + UNBOUNDED_READ)
+    }
+
+    /// Whether the read is stopped: its deadline has passed or its flag is
+    /// set. The same test the progress handler applies.
+    fn is_stopped(&self) -> bool {
+        self.cancel.is_cancelled() || Instant::now() > self.deadline
+    }
+
+    /// [`QueryError::Interrupted`] once the deadline has passed or the flag is
+    /// set. Cheap enough to call once per row in a Rust loop over a
+    /// statement's results, where the progress handler cannot reach: rows
+    /// already computed, and the caller's own work on them, run no VM
+    /// instructions for it to count.
+    pub(super) fn check(&self) -> Result<(), QueryError> {
+        if self.is_stopped() {
+            return Err(QueryError::Interrupted);
+        }
+        Ok(())
+    }
 }
 
 impl From<Instant> for ReadLimit {
@@ -105,7 +126,7 @@ const PROGRESS_OPS: i32 = 10_000;
 ///
 /// Either condition can overshoot by up to one callback quantum, and the
 /// handler can only interrupt work SQLite itself is doing -- a caller-side
-/// fold between statements runs to completion unless it checks the flag
+/// fold between statements runs to completion unless it checks the limit
 /// itself.
 ///
 /// The guard holds the only borrow of the [`UsageDb`] for its lifetime and
@@ -125,11 +146,9 @@ impl<'a> DeadlineGuard<'a> {
     ///
     /// Returns [`QueryError::Sqlite`] when the handler cannot be installed.
     pub fn install(db: &'a mut UsageDb, limit: impl Into<ReadLimit>) -> Result<Self, QueryError> {
-        let ReadLimit { deadline, cancel } = limit.into();
-        db.conn_mut().progress_handler(
-            PROGRESS_OPS,
-            Some(move || cancel.is_cancelled() || Instant::now() > deadline),
-        )?;
+        let limit = limit.into();
+        db.conn_mut()
+            .progress_handler(PROGRESS_OPS, Some(move || limit.is_stopped()))?;
         Ok(Self { db })
     }
 }
