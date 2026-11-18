@@ -39,11 +39,12 @@
 //!
 //! Each account holds one window per reported length and scope; the merge
 //! rule lives in [`super::meter`]. Two entry points feed it:
-//! [`QuotaStore::observe_account`] takes a validated, source-tagged
+//! [`QuotaStore::observe_account_uncounted`] takes a validated, source-tagged
 //! observation, and [`QuotaStore::observe`] adapts one response-header
 //! snapshot onto a partial observation of the curated windows. Both are
-//! refused whole when a reading contradicts the stored one for its window,
-//! and the refusal is counted.
+//! refused whole when a reading contradicts the stored one for its window;
+//! `observe` counts the refusal, and the observation's caller counts its own
+//! with [`QuotaStore::record_rejection`].
 //!
 //! [`QuotaStore::reading_for`] projects an account back onto the two-role
 //! snapshot placement reads, applying read-time expiry.
@@ -272,25 +273,71 @@ impl QuotaStore {
         .is_ok()
     }
 
-    /// Merge one validated observation into `key`'s meter.
+    /// Merge one validated observation into `key`'s meter, counting a
+    /// rejection.
     ///
     /// Refused as [`ObserveRefusal::NotAdmitted`] (counted in
     /// [`QuotaStore::refused_by_admission_total`], no entry created) when
     /// `key` is outside the configured seat set, and as
     /// [`ObserveRefusal::Rejected`] (counted by reason, stored state
     /// unchanged) when the merge refuses it.
+    #[cfg(test)]
     pub fn observe_account(
         &self,
         key: &SeatKey,
         observation: &AccountObservation,
     ) -> Result<(), ObserveRefusal> {
-        self.merge(key, *observation.observed(), |meter| {
+        let outcome = self.observe_account_uncounted(key, observation);
+        self.count_refusal(key, outcome)
+    }
+
+    /// Merge one validated observation into `key`'s meter, leaving a
+    /// rejection for the caller to count.
+    ///
+    /// Refused as [`ObserveRefusal::NotAdmitted`] (counted here in
+    /// [`QuotaStore::refused_by_admission_total`], no entry created) when
+    /// `key` is outside the configured seat set, and as
+    /// [`ObserveRefusal::Rejected`] (stored state unchanged, NOT counted) when
+    /// the merge refuses it. The caller passes that reason to
+    /// [`QuotaStore::record_rejection`] exactly once, after releasing any lock
+    /// the rejection WARN must not be written under.
+    pub fn observe_account_uncounted(
+        &self,
+        key: &SeatKey,
+        observation: &AccountObservation,
+    ) -> Result<(), ObserveRefusal> {
+        self.merge_uncounted(key, *observation.observed(), |meter| {
             meter.merged(observation)
         })
     }
 
+    /// Count `outcome` when it is a [`ObserveRefusal::Rejected`], and return
+    /// it unchanged.
+    fn count_refusal(
+        &self,
+        key: &SeatKey,
+        outcome: Result<(), ObserveRefusal>,
+    ) -> Result<(), ObserveRefusal> {
+        if let Err(ObserveRefusal::Rejected(reason)) = outcome {
+            self.record_rejection(key, reason);
+        }
+        outcome
+    }
+
+    /// [`QuotaStore::merge_uncounted`], counting a rejection once the meter
+    /// lock is released.
+    fn merge(
+        &self,
+        key: &SeatKey,
+        observed: ObservationStamp,
+        merge: impl FnOnce(&AccountMeter) -> Result<AccountMeter, RejectionReason>,
+    ) -> Result<(), ObserveRefusal> {
+        let outcome = self.merge_uncounted(key, observed, merge);
+        self.count_refusal(key, outcome)
+    }
+
     /// Apply `merge` to `key`'s meter (a fresh one stamped `observed` when it
-    /// has none) and store the result.
+    /// has none) and store the result; a rejection is returned, not counted.
     ///
     /// Holds `seats` across BOTH the admission check and the insert (nesting
     /// `admitted` inside it via a brief, immediately-released acquisition)
@@ -300,7 +347,7 @@ impl QuotaStore {
     /// takes them strictly sequentially, never together. That one-directional
     /// discipline is what closes the TOCTOU: there is no interleaving where a
     /// retired seat's write survives a concurrent prune.
-    fn merge(
+    fn merge_uncounted(
         &self,
         key: &SeatKey,
         observed: ObservationStamp,
@@ -320,11 +367,7 @@ impl QuotaStore {
                 guard.insert(key.clone(), meter);
                 Ok(())
             }
-            Err(reason) => {
-                drop(guard);
-                self.record_rejection(key, reason);
-                Err(ObserveRefusal::Rejected(reason))
-            }
+            Err(reason) => Err(ObserveRefusal::Rejected(reason)),
         }
     }
 

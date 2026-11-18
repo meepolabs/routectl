@@ -51,11 +51,18 @@ const ANTHROPIC_SCOPED_WEEKLY_PREFIX: &str = "seven_day_";
 
 const CODEX_WINDOW_MEMBERS: [&str; 2] = ["primary_window", "secondary_window"];
 
+/// The longest usage body either reducer reads. A parsed JSON tree can take
+/// many times its text's size, so a longer body is refused before parsing;
+/// a fetcher cuts its read at this same bound.
+pub const MAX_USAGE_BODY_BYTES: usize = 64 * 1024;
+
 /// Why a usage body did not reduce to an observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyError {
     /// The body was empty or whitespace only.
     Empty,
+    /// The body was longer than [`MAX_USAGE_BODY_BYTES`].
+    TooLarge,
     /// The body was not one complete JSON value.
     NotJson,
     /// An object in the body carried one member name twice.
@@ -307,9 +314,12 @@ fn rfc3339(raw: &str) -> Result<SystemTime, BodyError> {
         .ok_or(BodyError::Window(RejectionReason::Overflow))
 }
 
-/// Parse a body whose top level must be a JSON object, refusing duplicate keys
-/// at every depth.
+/// Parse a body whose top level must be a JSON object, refusing a body longer
+/// than [`MAX_USAGE_BODY_BYTES`] and duplicate keys at every depth.
 fn parse_object(body: &[u8]) -> Result<Map<String, Value>, BodyError> {
+    if body.len() > MAX_USAGE_BODY_BYTES {
+        return Err(BodyError::TooLarge);
+    }
     if body.trim_ascii().is_empty() {
         return Err(BodyError::Empty);
     }

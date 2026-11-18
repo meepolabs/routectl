@@ -328,3 +328,127 @@ fn a_polled_idle_seat_projects_a_known_empty_fast_window() {
         "{fast:?}"
     );
 }
+
+/// A seat polled as running near its cap, then polled as idle while that
+/// window is still in effect, keeps its running reading: the idle body is
+/// refused, counted once, and never ranks the seat as the emptiest.
+#[test]
+fn an_idle_body_over_a_window_still_running_is_refused_and_keeps_the_reading() {
+    // Arrange
+    let router = router();
+    let generation = router.acquire_credential_generation(ACCOUNT);
+    router
+        .observe_polled_usage(
+            ACCOUNT,
+            UsageVendor::Anthropic,
+            &anthropic_running(95, &rfc3339_in(Duration::from_hours(3))),
+            generation,
+        )
+        .expect("accepted");
+
+    // Act
+    let result = router.observe_polled_usage(
+        ACCOUNT,
+        UsageVendor::Anthropic,
+        &anthropic_idle(),
+        generation,
+    );
+
+    // Assert
+    assert_eq!(
+        result,
+        Err(PolledUsageRejection::Rejected(
+            RejectionReason::Contradictory
+        ))
+    );
+    let held = reading(&router);
+    assert_eq!(held.windows[0].window.started, Started::Yes);
+    assert!((held.windows[0].window.used - 0.95).abs() < 1e-9);
+    assert_eq!(
+        router
+            .account_readings(&ObservationStamp::now())
+            .rejections
+            .contradictory,
+        1
+    );
+}
+
+/// Records, for every WARN, whether the credential account map was free.
+struct LockProbe {
+    accounts: Arc<parking_lot::Mutex<super::super::credential_park::CredentialAccounts>>,
+    free_at_warn: Arc<std::sync::Mutex<Vec<bool>>>,
+}
+
+impl tracing::Subscriber for LockProbe {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            let is_free = self.accounts.try_lock().is_some();
+            self.free_at_warn.lock().expect("probe lock").push(is_free);
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Every dispatch admission takes the credential account map, so a refused
+/// poll's WARN is written only after the map is released.
+#[test]
+fn a_refused_poll_warns_with_the_credential_account_map_released() {
+    let rows: [(&str, Vec<u8>); 2] = [
+        ("meter refusal", anthropic_idle()),
+        ("body refusal", b"<html>".to_vec()),
+    ];
+    for (name, refused) in rows {
+        // Arrange
+        let router = router();
+        let generation = router.acquire_credential_generation(ACCOUNT);
+        router
+            .observe_polled_usage(
+                ACCOUNT,
+                UsageVendor::Anthropic,
+                &anthropic_running(95, &rfc3339_in(Duration::from_hours(3))),
+                generation,
+            )
+            .expect("accepted");
+        let free_at_warn = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let probe = LockProbe {
+            accounts: Arc::clone(&router.credential_accounts),
+            free_at_warn: Arc::clone(&free_at_warn),
+        };
+        // A second live dispatch keeps callsite registration off the
+        // single-dispatch fast path, which another thread could otherwise
+        // resolve as never-interested before this probe is installed.
+        let _keepalive = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
+        // Act
+        let result = tracing::subscriber::with_default(probe, || {
+            router.observe_polled_usage(ACCOUNT, UsageVendor::Anthropic, &refused, generation)
+        });
+
+        // Assert
+        assert!(result.is_err(), "row: {name}: {result:?}");
+        assert_eq!(
+            *free_at_warn.lock().expect("probe lock"),
+            vec![true],
+            "row: {name}: one WARN, written with the map released"
+        );
+    }
+}

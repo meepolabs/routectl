@@ -200,19 +200,27 @@ impl Router {
         }
         let reduced = vendor.reduce(body, ObservationStamp::now());
         // The merge runs under the generation check's lock, so a re-login
-        // cannot land between the check and the merge.
+        // cannot land between the check and the merge. Every dispatch
+        // admission takes that lock, so a refusal is counted (and its WARN
+        // written) only after it is released.
         let outcome = self
             .under_current_generation(account, generation, || match &reduced {
                 Ok(observation) => self
                     .quota_store
-                    .observe_account(&key, observation)
+                    .observe_account_uncounted(&key, observation)
                     .map(|()| AcceptedReading::of(observation))
                     .map_err(PolledUsageRejection::from),
                 Err(error) => Err(PolledUsageRejection::Body(*error)),
             })
             .ok_or(PolledUsageRejection::Superseded)?;
-        if let Err(PolledUsageRejection::Body(error)) = outcome {
-            self.quota_store.record_rejection(&key, error.reason());
+        match outcome {
+            Err(PolledUsageRejection::Body(error)) => {
+                self.quota_store.record_rejection(&key, error.reason());
+            }
+            Err(PolledUsageRejection::Rejected(reason)) => {
+                self.quota_store.record_rejection(&key, reason);
+            }
+            _ => {}
         }
         outcome
     }

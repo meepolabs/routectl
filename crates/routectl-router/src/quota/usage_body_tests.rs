@@ -427,6 +427,33 @@ fn malformed_bodies_reduce_to_their_named_error() {
 
 /// The bound is exactly the per-observation maximum, so the too-many row above
 /// fails on the count and not on some other property of the fixture.
+/// `body` padded with trailing JSON whitespace to exactly `len` bytes.
+fn padded_to(body: &str, len: usize) -> String {
+    format!("{body}{}", " ".repeat(len - body.len()))
+}
+
+/// A body of exactly the limit reduces; one byte more is refused before it is
+/// parsed, for either vendor.
+#[test]
+fn the_body_size_bound_accepts_exactly_the_maximum() {
+    for vendor in [Vendor::Anthropic, Vendor::Codex] {
+        let body = match vendor {
+            Vendor::Anthropic => ANTHROPIC_RUNNING,
+            Vendor::Codex => CODEX_RUNNING,
+        };
+
+        let at_limit = reduce(vendor, &padded_to(body, MAX_USAGE_BODY_BYTES));
+        let over_limit = reduce(vendor, &padded_to(body, MAX_USAGE_BODY_BYTES + 1));
+
+        assert!(at_limit.is_ok(), "{vendor:?}: {at_limit:?}");
+        assert_eq!(
+            over_limit.map(|_| ()),
+            Err(BodyError::TooLarge),
+            "{vendor:?}"
+        );
+    }
+}
+
 #[test]
 fn the_window_count_bound_accepts_exactly_the_maximum() {
     let body = anthropic_with_many_scoped_weeklies(MAX_WINDOWS_PER_OBSERVATION);

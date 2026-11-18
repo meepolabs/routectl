@@ -178,7 +178,7 @@ pub use quota::meter::ReportState;
 pub use quota::reading::{LengthClass, ReadingSource, Started};
 pub use quota::reduce::RejectionReason;
 pub use quota::store::RejectionTotals;
-pub use quota::usage_body::{BodyError, UsageVendor};
+pub use quota::usage_body::{BodyError, MAX_USAGE_BODY_BYTES, UsageVendor};
 pub use quota::view::{
     AcceptedReading, AccountReading, AccountReadings, AccountWindow, LastReading, ReadingWindow,
     STALE_AFTER,

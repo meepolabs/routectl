@@ -34,7 +34,10 @@
 //!   endpoint rounds) and the reading is accepted at the higher of the two;
 //!   further than that it is refused as `Contradictory` and nothing advances.
 //!   An unstarted window's reset is provisional (it slides with each poll), so
-//!   it never takes part in this comparison.
+//!   it never takes part in this comparison. An unstarted reading for a key
+//!   whose stored window is running and still in effect at its stamp is
+//!   refused as `Contradictory` too: a window cannot stop before its reset,
+//!   and taking it would turn the fullest window into an empty one.
 //!
 //! # Why the window map is bounded
 //!
@@ -403,12 +406,16 @@ impl AccountMeter {
 
 /// `incoming` reconciled against the window stored for its key: itself, the
 /// same reading lifted to the stored used fraction when it is lower by no
-/// more than the slack, or `Contradictory` when it is lower by more.
+/// more than the slack, or `Contradictory` when it is lower by more or when
+/// it calls unstarted a window still running at its stamp.
 fn reconciled(
     stored: &StoredWindow,
     incoming: &WindowReading,
     observed: &ObservationStamp,
 ) -> Result<WindowReading, RejectionReason> {
+    if incoming.started() == Started::No && stored.is_effective(observed) {
+        return Err(RejectionReason::Contradictory);
+    }
     let (Some(stored_reset), Some(incoming_reset)) = (stored.reading.reset(), incoming.reset())
     else {
         return Ok(incoming.clone());
@@ -416,11 +423,7 @@ fn reconciled(
     let same_reset = abs_diff(stored_reset.at(), incoming_reset.at()) <= RESET_TOLERANCE;
     let stored_used = stored.reading.used().fraction();
     let drop = stored_used - incoming.used().fraction();
-    if incoming.started() == Started::No
-        || !stored.is_effective(observed)
-        || !same_reset
-        || drop <= 0.0
-    {
+    if !stored.is_effective(observed) || !same_reset || drop <= 0.0 {
         return Ok(incoming.clone());
     }
     if drop > CONTRADICTION_SLACK + SLACK_EPSILON {

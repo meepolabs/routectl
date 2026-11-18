@@ -248,6 +248,41 @@ fn a_complete_report_drops_older_omitted_windows_and_bars_late_ones() {
     );
 }
 
+/// A complete report that omits the five-hour window drops a running one,
+/// and the projection then has no FAST evidence: unknown, never room.
+#[test]
+fn a_complete_report_omitting_the_five_hour_window_projects_fast_unknown() {
+    let rows: [(&str, bool); 2] = [("weekly only", true), ("no windows", false)];
+    for (name, reports_weekly) in rows {
+        // Arrange
+        let clock = Clock::new();
+        let store = store();
+        let (t0, t1) = (clock.at(mins(0)), clock.at(mins(1)));
+        seed(&store, &Before::PollRunning, t0);
+        let report = if reports_weekly {
+            ObservationReport::Complete(
+                WindowSet::new(vec![running(key(SEVEN_DAYS, None), 0.20, mins(3_000), &t1)])
+                    .expect("a set"),
+            )
+        } else {
+            ObservationReport::NoWindows
+        };
+
+        // Act
+        store
+            .observe_account(&seat("a"), &observation(ReadingSource::Poll, t1, report))
+            .expect("accepted");
+
+        // Assert
+        assert_eq!(used_of(&store, &key(FIVE_HOURS, None)), None, "row: {name}");
+        assert_eq!(
+            store.reading_for(&seat("a"), &t1).expect("an entry").fast,
+            QuotaWindow::Unknown,
+            "row: {name}"
+        );
+    }
+}
+
 /// One step of a tie scenario: a partial or complete report at a stamp.
 enum Step {
     Partial(ObservationStamp, Vec<(WindowKey, f64)>),
@@ -596,50 +631,150 @@ fn a_drop_with_a_different_reset_is_a_new_window_not_a_contradiction() {
     assert_eq!(used_of(&store, &five), Some(0.05));
 }
 
-/// An unstarted window's reset is provisional (where it would end if it began
-/// now); it is never compared as a running window's expiry.
-#[test]
-fn an_unstarted_reading_never_counts_as_a_contradiction() {
-    let clock = Clock::new();
-    let store = store();
-    let (t0, t1) = (clock.at(mins(0)), clock.at(mins(1)));
+/// What is stored before an unstarted five-hour reading arrives.
+enum Before {
+    Nothing,
+    PollRunning,
+    HeaderRunning,
+    Unstarted,
+}
+
+fn seed(store: &QuotaStore, before: &Before, at: ObservationStamp) {
     let five = key(FIVE_HOURS, None);
-    store
-        .observe_account(
+    match before {
+        Before::Nothing => {}
+        Before::PollRunning => store
+            .observe_account(
+                &seat("a"),
+                &partial(
+                    ReadingSource::Poll,
+                    at,
+                    vec![running(five, 0.95, mins(180), &at)],
+                ),
+            )
+            .expect("accepted"),
+        Before::HeaderRunning => assert!(store.observe(&seat("a"), header(at, 0.95, mins(180)))),
+        Before::Unstarted => store
+            .observe_account(
+                &seat("a"),
+                &partial(ReadingSource::Poll, at, vec![unstarted(five, None, &at)]),
+            )
+            .expect("accepted"),
+    }
+}
+
+fn unstarted(key: WindowKey, reset: Option<Duration>, at: &ObservationStamp) -> WindowReading {
+    WindowReading::new(key, 0.0, reset.map(|r| base_wall() + r), Started::No, at)
+        .expect("a valid unstarted window")
+}
+
+/// One unstarted-reading case: name, what is stored at minute 0, the minute
+/// the unstarted reading arrives, its provisional reset, and whether it is
+/// taken.
+type UnstartedRow = (&'static str, Before, u64, Option<Duration>, bool);
+
+/// A window cannot stop before its reset, so an unstarted reading over a
+/// running window still in effect is a contradiction and never makes room;
+/// once that window's reset has passed, a new window may be unstarted. An
+/// unstarted reading's own reset is provisional and is never compared as a
+/// running window's expiry.
+#[test]
+fn an_unstarted_reading_is_refused_only_over_a_running_window_still_in_effect() {
+    let rows: [UnstartedRow; 7] = [
+        (
+            "over a polled running window",
+            Before::PollRunning,
+            1,
+            None,
+            false,
+        ),
+        (
+            "with a provisional reset over a polled running window",
+            Before::PollRunning,
+            1,
+            Some(mins(1) + Duration::from_secs(FIVE_HOURS)),
+            false,
+        ),
+        (
+            "over a header running window",
+            Before::HeaderRunning,
+            1,
+            None,
+            false,
+        ),
+        (
+            "over a running window whose reset has passed",
+            Before::PollRunning,
+            181,
+            None,
+            true,
+        ),
+        ("over an unstarted window", Before::Unstarted, 1, None, true),
+        ("over nothing", Before::Nothing, 1, None, true),
+        (
+            "with a provisional reset over nothing",
+            Before::Nothing,
+            1,
+            Some(mins(1) + Duration::from_secs(FIVE_HOURS)),
+            true,
+        ),
+    ];
+    for (name, before, minute, reset, accepted) in rows {
+        // Arrange
+        let clock = Clock::new();
+        let store = store();
+        let five = key(FIVE_HOURS, None);
+        let (t0, t1) = (clock.at(mins(0)), clock.at(mins(minute)));
+        seed(&store, &before, t0);
+        let held_before = store.account(&seat("a"));
+
+        // Act
+        let result = store.observe_account(
             &seat("a"),
             &partial(
                 ReadingSource::Poll,
-                t0,
-                vec![running(five.clone(), 0.40, mins(60), &t0)],
+                t1,
+                vec![unstarted(five.clone(), reset, &t1)],
             ),
-        )
-        .expect("accepted");
-    let unstarted = WindowReading::new(
-        five.clone(),
-        0.0,
-        Some(base_wall() + mins(61)),
-        Started::No,
-        &t1,
-    )
-    .expect("an unstarted window with a provisional reset");
+        );
 
-    store
-        .observe_account(
-            &seat("a"),
-            &partial(ReadingSource::Poll, t1, vec![unstarted]),
-        )
-        .expect("accepted");
-
-    assert_eq!(used_of(&store, &five), Some(0.0));
-    let fast = store.reading_for(&seat("a"), &t1).expect("an entry").fast;
-    let QuotaWindow::Known { reset_at, .. } = fast else {
-        panic!("a fresh unstarted FAST window is known: {fast:?}");
-    };
-    assert_eq!(
-        reset_at.at(),
-        base_wall() + mins(1) + crate::quota::view::STALE_AFTER,
-        "a provisional reset is not a running window's expiry"
-    );
+        // Assert
+        let fast = store.reading_for(&seat("a"), &t1).expect("an entry").fast;
+        if accepted {
+            assert_eq!(result, Ok(()), "row: {name}");
+            assert_eq!(used_of(&store, &five), Some(0.0), "row: {name}");
+            let QuotaWindow::Known {
+                utilization,
+                reset_at,
+            } = fast
+            else {
+                panic!("row: {name}: a fresh unstarted FAST window is known: {fast:?}");
+            };
+            assert_eq!(utilization.fraction(), 0.0, "row: {name}");
+            assert_eq!(
+                reset_at.at(),
+                base_wall() + mins(minute) + crate::quota::view::STALE_AFTER,
+                "row: {name}: a provisional reset is not a running window's expiry"
+            );
+            assert_eq!(store.rejection_totals().contradictory, 0, "row: {name}");
+        } else {
+            assert_eq!(
+                result,
+                Err(ObserveRefusal::Rejected(RejectionReason::Contradictory)),
+                "row: {name}"
+            );
+            assert_eq!(
+                store.account(&seat("a")),
+                held_before,
+                "row: {name}: nothing advances"
+            );
+            let QuotaWindow::Known { utilization, .. } = fast else {
+                panic!("row: {name}: the running window stands: {fast:?}");
+            };
+            assert_eq!(utilization.fraction(), 0.95, "row: {name}");
+            assert_eq!(store.rejection_totals().contradictory, 1, "row: {name}");
+        }
+    }
 }
 
 /// The contradiction rule also governs header-only traffic.
