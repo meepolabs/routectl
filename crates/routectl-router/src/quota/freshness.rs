@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime};
 /// the wall clock is what a `reset_at` is expressed in and can step
 /// backwards, while the monotonic clock cannot be compared against an
 /// upstream timestamp but does age reliably.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationStamp {
     /// Wall clock at observation, comparable against an upstream reset.
     wall: SystemTime,

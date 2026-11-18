@@ -93,14 +93,94 @@ fn an_unstarted_window_at_zero_without_a_reset_is_accepted() {
     assert_eq!(reading.reset(), None);
 }
 
+/// The shape a source reports for a window whose clock starts on first use:
+/// the reset sits exactly one window length after the observation.
 #[test]
-fn an_unstarted_window_carrying_a_reset_is_refused() {
+fn an_unstarted_window_with_a_reset_one_length_out_is_accepted_and_stays_unstarted() {
     let observed = observed();
-    let reset = observed.wall() + Duration::from_hours(1);
+    let reset = observed.wall() + Duration::from_secs(SEVEN_DAYS_SECS);
+
+    let reading = WindowReading::new(
+        key(SEVEN_DAYS_SECS, None),
+        0.0,
+        Some(reset),
+        Started::No,
+        &observed,
+    )
+    .expect("the sliding unstarted shape is valid");
+
+    assert_eq!(reading.started(), Started::No);
+    assert_eq!(reading.used().fraction(), 0.0);
+    assert_eq!(reading.reset().map(ValidatedReset::at), Some(reset));
+}
+
+/// An unstarted reset goes through the same bound as a running one, so a
+/// unit error cannot ride in on the unstarted path.
+#[test]
+fn an_unstarted_reset_is_bounded_by_its_own_window_length() {
+    let observed = observed();
+    let length = Duration::from_secs(FIVE_HOURS_SECS);
+    let rows: [(&str, Duration, Result<(), RejectionReason>); 4] = [
+        ("at length + tolerance", length + RESET_TOLERANCE, Ok(())),
+        (
+            "one second past length + tolerance",
+            length + RESET_TOLERANCE + Duration::from_secs(1),
+            Err(RejectionReason::ImplausibleReset),
+        ),
+        (
+            "seven days on a five-hour window",
+            Duration::from_secs(SEVEN_DAYS_SECS),
+            Err(RejectionReason::ImplausibleReset),
+        ),
+        (
+            "equal to the observation",
+            Duration::ZERO,
+            Err(RejectionReason::ExpiredReset),
+        ),
+    ];
+
+    for (name, offset, expected) in rows {
+        let reset = observed.wall() + offset;
+        let result = WindowReading::new(
+            key(FIVE_HOURS_SECS, None),
+            0.0,
+            Some(reset),
+            Started::No,
+            &observed,
+        );
+
+        assert_eq!(
+            result.map(|r| assert_eq!(r.reset().map(ValidatedReset::at), Some(reset))),
+            expected,
+            "row: {name}"
+        );
+    }
+}
+
+#[test]
+fn an_unstarted_reset_whose_bound_overflows_is_refused() {
+    let edge = SystemTime::UNIX_EPOCH + Duration::from_secs(i64::MAX as u64 - 10);
+    let observed = ObservationStamp::from_parts(edge, Instant::now());
 
     let refused = WindowReading::new(
         key(FIVE_HOURS_SECS, None),
         0.0,
+        Some(edge + Duration::from_secs(1)),
+        Started::No,
+        &observed,
+    );
+
+    assert_eq!(refused, Err(RejectionReason::Overflow));
+}
+
+#[test]
+fn an_unstarted_window_with_usage_and_a_reset_is_refused() {
+    let observed = observed();
+    let reset = observed.wall() + Duration::from_secs(FIVE_HOURS_SECS);
+
+    let refused = WindowReading::new(
+        key(FIVE_HOURS_SECS, None),
+        0.01,
         Some(reset),
         Started::No,
         &observed,
@@ -266,6 +346,82 @@ fn an_empty_window_set_is_refused() {
         WindowSet::new(Vec::new()),
         Err(RejectionReason::MalformedBody)
     );
+}
+
+// ---- Observation stamp ----
+
+fn later(stamp: &ObservationStamp, wall: Duration, monotonic: Duration) -> ObservationStamp {
+    ObservationStamp::from_parts(stamp.wall() + wall, stamp.monotonic() + monotonic)
+}
+
+fn set_at(stamps: &[ObservationStamp]) -> WindowSet {
+    let windows = stamps
+        .iter()
+        .zip(1..)
+        .map(|(stamp, hours)| started(key(hours * 3_600, None), 0.25, stamp).expect("valid"))
+        .collect();
+    WindowSet::new(windows).expect("distinct keys")
+}
+
+#[test]
+fn an_observation_whose_windows_share_its_stamp_is_accepted() {
+    let observed = observed();
+    let reports = [
+        (
+            "partial",
+            ObservationReport::Partial(set_at(&[observed, observed])),
+        ),
+        (
+            "complete",
+            ObservationReport::Complete(set_at(&[observed, observed])),
+        ),
+        ("no windows", ObservationReport::NoWindows),
+    ];
+
+    for (name, report) in reports {
+        let observation = AccountObservation::new(ReadingSource::Poll, observed, report.clone())
+            .unwrap_or_else(|e| panic!("row {name}: {e:?}"));
+
+        assert_eq!(observation.report(), &report, "row: {name}");
+    }
+}
+
+/// A window validated against a later stamp was bounded from a later instant,
+/// so attaching it to an earlier observation would stretch its reset.
+#[test]
+fn an_observation_carrying_a_window_from_another_stamp_is_refused() {
+    let observed = observed();
+    let rows = [
+        (
+            "later on both clocks",
+            later(&observed, Duration::from_mins(1), Duration::from_mins(1)),
+        ),
+        (
+            "same wall, later monotonic",
+            later(&observed, Duration::ZERO, Duration::from_secs(1)),
+        ),
+    ];
+
+    for (name, other) in rows {
+        for (shape, stamps) in [
+            ("only window", vec![other]),
+            ("second window", vec![observed, other]),
+        ] {
+            let reports = [
+                ObservationReport::Partial(set_at(&stamps)),
+                ObservationReport::Complete(set_at(&stamps)),
+            ];
+            for report in reports {
+                let refused = AccountObservation::new(ReadingSource::Response, observed, report);
+
+                assert_eq!(
+                    refused.map(|_| ()),
+                    Err(RejectionReason::MalformedBody),
+                    "row: {name}, {shape}"
+                );
+            }
+        }
+    }
 }
 
 // ---- Derive discipline ----

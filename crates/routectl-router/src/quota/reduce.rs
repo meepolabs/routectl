@@ -85,8 +85,9 @@ pub enum RejectionReason {
     #[cfg_attr(not(test), allow(dead_code))]
     InvalidStarted,
     /// A usage body or window set did not have the one shape it must: missing
-    /// or mistyped members, a non-canonical scope, a duplicate window, or too
-    /// many windows.
+    /// or mistyped members, a non-canonical scope, a duplicate window, too
+    /// many windows, or a window validated against another observation's
+    /// stamp.
     #[cfg_attr(not(test), allow(dead_code))]
     MalformedBody,
 }

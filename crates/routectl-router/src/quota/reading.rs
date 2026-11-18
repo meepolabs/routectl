@@ -137,7 +137,9 @@ impl WindowKey {
 pub enum Started {
     /// The window is running and resets at its reported reset.
     Yes,
-    /// The window has not started: nothing used and no reset yet.
+    /// The window has not started: nothing used. A reset, when the source
+    /// reports one, is where the window would end if it began at the
+    /// observation (it slides with every poll), never evidence that it began.
     No,
     /// The source does not report whether the window has started.
     Unknown,
@@ -159,6 +161,7 @@ pub struct WindowReading {
     used: Utilization,
     reset: Option<ValidatedReset>,
     started: Started,
+    validated_at: ObservationStamp,
 }
 
 impl WindowReading {
@@ -167,9 +170,10 @@ impl WindowReading {
     /// Refused `InvalidUtilization` for a non-finite or negative `used` (a
     /// value above 1.0 saturates to exhausted). Refused `InvalidStarted` when
     /// the started state disagrees with the rest: an unstarted window with any
-    /// usage or with a reset, or a window that is or may be running without a
-    /// reset. A reset is accepted only through [`accept_reset`] against the
-    /// window's OWN length, and refused with that check's reason otherwise.
+    /// usage, or a window that is or may be running without a reset. Any
+    /// reported reset, an unstarted window's included, is accepted only
+    /// through [`accept_reset`] against the window's OWN length, and refused
+    /// with that check's reason otherwise.
     pub fn new(
         key: WindowKey,
         used: f64,
@@ -178,21 +182,23 @@ impl WindowReading {
         observed: &ObservationStamp,
     ) -> Result<Self, RejectionReason> {
         let used = Utilization::new(used).ok_or(RejectionReason::InvalidUtilization)?;
-        let reset = match (started, reset_at) {
-            (Started::No, None) if used.fraction() == 0.0 => None,
-            (Started::No, _) | (Started::Yes | Started::Unknown, None) => {
-                return Err(RejectionReason::InvalidStarted);
-            }
-            (Started::Yes | Started::Unknown, Some(at)) => Some(
+        let unstarted_with_usage = started == Started::No && used.fraction() != 0.0;
+        let running_without_reset = started != Started::No && reset_at.is_none();
+        if unstarted_with_usage || running_without_reset {
+            return Err(RejectionReason::InvalidStarted);
+        }
+        let reset = reset_at
+            .map(|at| {
                 accept_reset(at, observed, key.length(), RESET_TOLERANCE)
-                    .map_err(|rejection| RejectionReason::from_reset(&rejection))?,
-            ),
-        };
+                    .map_err(|rejection| RejectionReason::from_reset(&rejection))
+            })
+            .transpose()?;
         Ok(Self {
             key,
             used,
             reset,
             started,
+            validated_at: *observed,
         })
     }
 
@@ -211,7 +217,9 @@ impl WindowReading {
         &self.used
     }
 
-    /// The validated reset; `None` only for an unstarted window.
+    /// The validated reset; `None` only for an unstarted window. For an
+    /// unstarted window a present reset is provisional: read [`Self::started`]
+    /// before treating it as the end of a running window.
     pub const fn reset(&self) -> Option<ValidatedReset> {
         self.reset
     }
@@ -267,9 +275,9 @@ pub enum ObservationReport {
 
 /// One source-tagged, stamped observation of an account's windows.
 ///
-/// Every window in it must have been validated against `observed`, the same
-/// stamp the observation carries, so each reset was bounded from the instant
-/// the store will age it from.
+/// Every window in it was validated against `observed`, the same stamp the
+/// observation carries, so each reset was bounded from the instant the store
+/// will age it from; [`AccountObservation::new`] refuses any other pairing.
 #[derive(Debug, Clone)]
 pub struct AccountObservation {
     source: ReadingSource,
@@ -278,17 +286,27 @@ pub struct AccountObservation {
 }
 
 impl AccountObservation {
-    /// An observation from `source`, read at `observed`.
-    pub const fn new(
+    /// An observation from `source`, read at `observed`, or refused as
+    /// `MalformedBody` when any window in `report` was validated against a
+    /// different stamp: a reset bounded from a later instant would outlive
+    /// the window it describes once aged from an earlier one.
+    pub fn new(
         source: ReadingSource,
         observed: ObservationStamp,
         report: ObservationReport,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, RejectionReason> {
+        let windows = match &report {
+            ObservationReport::Partial(set) | ObservationReport::Complete(set) => set.as_slice(),
+            ObservationReport::NoWindows => &[],
+        };
+        if windows.iter().any(|w| w.validated_at != observed) {
+            return Err(RejectionReason::MalformedBody);
+        }
+        Ok(Self {
             source,
             observed,
             report,
-        }
+        })
     }
 
     /// Where the observation came from.
