@@ -714,3 +714,91 @@ fn a_backward_clock_step_while_a_seat_waits_out_its_pause_jitter_is_bounded() {
 
     assert_eq!(indices.len(), 1);
 }
+
+/// Each row lands one outcome a minute after the last and reads the failure
+/// run's start. The first failure stamps it, later failures keep it, an
+/// accepted poll clears it, and an outcome that says nothing about the
+/// endpoint leaves it as it was.
+#[test]
+fn failure_since_marks_the_first_failure_of_a_run_and_clears_on_acceptance() {
+    let first_failure = START_MS + 3 * MIN;
+    let second_run = START_MS + 9 * MIN;
+    let rows: [(PollOutcome, Option<i64>); 12] = [
+        (PollOutcome::TokenNotReady, None),
+        (PollOutcome::Superseded, None),
+        (PollOutcome::Timeout, Some(first_failure)),
+        (PollOutcome::Http(503), Some(first_failure)),
+        (PollOutcome::TokenNotReady, Some(first_failure)),
+        (PollOutcome::Superseded, Some(first_failure)),
+        (PollOutcome::Paused(None), Some(first_failure)),
+        (PollOutcome::Accepted, None),
+        (
+            PollOutcome::Paused(Some(Duration::from_mins(2))),
+            Some(second_run),
+        ),
+        (PollOutcome::Malformed, Some(second_run)),
+        (PollOutcome::NoWindows, None),
+        (PollOutcome::Auth, Some(START_MS + 12 * MIN)),
+    ];
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("codex", UsageVendor::Codex, None)];
+    schedule.sweep(START_MS, &seats);
+    for (minute, (outcome, expected)) in (1_i64..).zip(rows) {
+        let now = START_MS + minute * MIN;
+
+        schedule.record("codex", UsageVendor::Codex, now, outcome);
+
+        assert_eq!(
+            schedule.seat("codex").unwrap().failure_since_ms(),
+            expected,
+            "minute {minute}: {outcome:?}"
+        );
+    }
+}
+
+/// Every failing kind starts a run on its own, and every accepting kind ends
+/// one: a run started by any failure reads as failing until acceptance.
+#[test]
+fn each_failing_outcome_starts_a_run_and_each_accepting_outcome_ends_it() {
+    for outcome in ALL_OUTCOMES {
+        let mut schedule = PollSchedule::new(FixedJitter(0));
+        let seats = [seat("codex", UsageVendor::Codex, None)];
+        schedule.sweep(START_MS, &seats);
+        schedule.record("codex", UsageVendor::Codex, START_MS, PollOutcome::Timeout);
+        let failing = outcome.verdict() == SeatVerdict::Transient;
+
+        schedule.record("codex", UsageVendor::Codex, START_MS + MIN, outcome);
+
+        let since = schedule.seat("codex").unwrap().failure_since_ms();
+        let expected = match outcome {
+            PollOutcome::Accepted | PollOutcome::NoWindows => None,
+            _ => Some(START_MS),
+        };
+        assert_eq!(since, expected, "{outcome:?} after a failure");
+        let mut fresh = PollSchedule::new(FixedJitter(0));
+        fresh.sweep(START_MS, &seats);
+        fresh.record("codex", UsageVendor::Codex, START_MS, outcome);
+        assert_eq!(
+            fresh.seat("codex").unwrap().failure_since_ms(),
+            failing.then_some(START_MS),
+            "{outcome:?} from a clean seat"
+        );
+    }
+}
+
+#[test]
+fn a_backward_clock_step_pulls_the_failure_start_back_to_now() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("codex", UsageVendor::Codex, None)];
+    let failed_at = START_MS + 10 * MIN;
+    schedule.sweep(START_MS, &seats);
+    schedule.record("codex", UsageVendor::Codex, failed_at, PollOutcome::Timeout);
+    let stepped_back = failed_at - YEAR;
+
+    schedule.sweep(stepped_back, &seats);
+
+    assert_eq!(
+        schedule.seat("codex").unwrap().failure_since_ms(),
+        Some(stepped_back)
+    );
+}

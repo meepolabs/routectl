@@ -711,3 +711,133 @@ fn codex_body_with_both_windows_null_reduces_to_no_windows() {
 
     assert_eq!(observation.report(), &ObservationReport::NoWindows);
 }
+
+// ---- Codex additional rate limits ----
+
+/// A Codex body whose `additional_rate_limits` is `entries` (raw JSON).
+fn codex_with_additional(entries: &str) -> String {
+    format!(
+        r#"{{"plan_type": "plus", "rate_limit": {{"allowed": true, "limit_reached": false, "primary_window": {}, "secondary_window": null}}, "additional_rate_limits": {entries}}}"#,
+        codex_five_hour("30")
+    )
+}
+
+fn additional_entry(metered_feature: &str, primary: &str, secondary: &str) -> String {
+    format!(
+        r#"{{"limit_name": "GPT-5.3-Codex-Spark", "metered_feature": "{metered_feature}", "rate_limit": {{"allowed": true, "limit_reached": false, "primary_window": {primary}, "secondary_window": {secondary}}}}}"#
+    )
+}
+
+#[test]
+fn codex_additional_rate_limits_become_windows_scoped_by_metered_feature() {
+    let short = codex_window_json(
+        "12",
+        "18000",
+        "7200",
+        &(OBSERVED_EPOCH_SECS + 7_200).to_string(),
+    );
+    let weekly_unstarted = codex_window_json(
+        "0",
+        "604800",
+        "604800",
+        &(OBSERVED_EPOCH_SECS + SEVEN_DAYS_SECS).to_string(),
+    );
+    let body = codex_with_additional(&format!(
+        "[{}]",
+        additional_entry("codex_bengalfox", &short, &weekly_unstarted)
+    ));
+
+    let observation = reduce(Vendor::Codex, &body).expect("a valid body");
+
+    let got: Vec<(u64, Option<&str>, f64, Started)> = windows(&observation)
+        .iter()
+        .map(|w| {
+            (
+                w.key().length_secs(),
+                w.key().scope().map(Scope::as_str),
+                w.used().fraction(),
+                w.started(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (FIVE_HOURS_SECS, None, 0.30, Started::Yes),
+            (FIVE_HOURS_SECS, Some("codex_bengalfox"), 0.12, Started::Yes),
+            (SEVEN_DAYS_SECS, Some("codex_bengalfox"), 0.0, Started::No),
+        ]
+    );
+}
+
+#[test]
+fn codex_additional_rate_limits_that_carry_no_window_add_none() {
+    let rows: [(&str, String); 4] = [
+        ("member absent", codex_body(&codex_five_hour("30"), "null")),
+        ("member null", codex_with_additional("null")),
+        ("empty list", codex_with_additional("[]")),
+        (
+            "entry with a null rate limit",
+            codex_with_additional(
+                r#"[{"limit_name": "x", "metered_feature": "codex_x", "rate_limit": null}]"#,
+            ),
+        ),
+    ];
+    for (name, body) in rows {
+        let observation = reduce(Vendor::Codex, &body).expect("a valid body");
+
+        assert_eq!(windows(&observation).len(), 1, "row: {name}");
+    }
+}
+
+#[test]
+fn a_malformed_codex_additional_rate_limit_refuses_the_whole_body() {
+    let window = codex_five_hour("12");
+    let rows: [(&str, String, BodyError); 5] = [
+        (
+            "non-canonical metered feature",
+            codex_with_additional(&format!(
+                "[{}]",
+                additional_entry("Codex-Spark", &window, "null")
+            )),
+            BodyError::NonCanonicalScope,
+        ),
+        (
+            "missing metered feature",
+            codex_with_additional(r#"[{"limit_name": "x", "rate_limit": null}]"#),
+            BodyError::MissingMember,
+        ),
+        (
+            "not a list",
+            codex_with_additional(r#"{"codex_x": null}"#),
+            BodyError::WrongType,
+        ),
+        (
+            "two entries with one feature",
+            codex_with_additional(&format!(
+                "[{}, {}]",
+                additional_entry("codex_x", &window, "null"),
+                additional_entry("codex_x", &window, "null")
+            )),
+            BodyError::DuplicateWindow,
+        ),
+        (
+            "more windows than one observation carries",
+            codex_with_additional(&format!(
+                "[{}]",
+                (0..MAX_WINDOWS_PER_OBSERVATION)
+                    .map(|i| additional_entry(&format!("codex_{i}"), &window, "null"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            BodyError::TooManyWindows,
+        ),
+    ];
+    for (name, body, expected) in rows {
+        assert_eq!(
+            reduce(Vendor::Codex, &body).err(),
+            Some(expected),
+            "row: {name}"
+        );
+    }
+}

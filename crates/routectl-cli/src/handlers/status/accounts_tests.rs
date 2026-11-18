@@ -566,6 +566,7 @@ fn poll_state_maps_per_account_and_vendor_pauses_are_listed() {
             last_attempt_ms: Some(1_000),
             last_result: Some("malformed"),
             next_due_ms: Some(301_000),
+            failure_since_ms: Some(400),
         }],
         paused_until_ms: vec![(UsageVendor::Codex, 7_000)],
     };
@@ -592,14 +593,14 @@ fn poll_state_maps_per_account_and_vendor_pauses_are_listed() {
         find("anthropic#work"),
         serde_json::json!({
             "applicability": "polled", "vendor": "anthropic", "last_attempt_ms": 1_000,
-            "last_result": "malformed", "next_due_ms": 301_000,
+            "last_result": "malformed", "next_due_ms": 301_000, "failure_since_ms": 400,
         })
     );
     assert_eq!(
         find("#gamma"),
         serde_json::json!({
             "applicability": "not_polled", "vendor": null, "last_attempt_ms": null,
-            "last_result": null, "next_due_ms": null,
+            "last_result": null, "next_due_ms": null, "failure_since_ms": null,
         })
     );
     assert_eq!(

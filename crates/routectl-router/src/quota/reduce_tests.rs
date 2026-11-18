@@ -1,12 +1,10 @@
-//! Tests for the two provider reducers, driven from captured wire values.
+//! Tests for the Anthropic header reducer, driven from captured wire values.
 //!
-//! Three of these pin refusals rather than results, and those are the ones
+//! Two of these pin refusals rather than results, and those are the ones
 //! that matter. The bare-reset test pins a refusal that CANNOT be observed
 //! from the corpus, because on every captured envelope the bare reset happens
 //! to equal the 5h one -- so a reducer that pairs them passes every other test
-//! here. The millis test pins the same class one level down. And the Codex
-//! test pins an ABSENCE as intended behavior, so a later reader does not
-//! "fix" it into a guessed FAST window.
+//! here. The millis test pins the same class one level down.
 
 use super::*;
 
@@ -21,19 +19,6 @@ const CAPTURED_5H_RESET_SECS: u64 = 1_781_001_000;
 const CAPTURED_7D_RESET_SECS: u64 = 1_781_049_600;
 const CAPTURED_5H_UTILIZATION: &str = "0.02";
 const CAPTURED_7D_UTILIZATION: &str = "0.17";
-
-/// Captured Codex values from the live chatgpt-oauth surface: an integer
-/// percent on the 0-100 scale and an epoch-SECONDS reset.
-const CAPTURED_CODEX_PERCENT: &str = "16";
-const CAPTURED_CODEX_RESET_SECS: u64 = 1_786_210_114;
-
-/// The fraction the shipped ledger mapping derives from
-/// `CAPTURED_CODEX_PERCENT`, pinned in that module's own tests. Restated here
-/// as the both-ways oracle: the two sites live in different crates, and the
-/// ledger one is a private method on a CLI type the router cannot call, so the
-/// equivalence is asserted against the same input and the same expected value
-/// rather than by invoking it.
-const LEDGER_CODEX_FRACTION: f64 = 0.16;
 
 fn epoch_secs(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -69,27 +54,6 @@ fn captured_anthropic() -> AnthropicUnifiedQuota {
         ("fallback-percentage".into(), "0.5".into()),
     ];
     quota
-}
-
-fn captured_codex() -> CodexQuota {
-    let mut quota = CodexQuota::default();
-    quota.active_limit = Some("premium".into());
-    quota.primary_used_percent = Some(CAPTURED_CODEX_PERCENT.into());
-    quota.primary_reset_at = Some(CAPTURED_CODEX_RESET_SECS.to_string());
-    quota.extras = vec![
-        ("primary-window-minutes".into(), "10080".into()),
-        ("secondary-window-minutes".into(), "0".into()),
-        ("secondary-used-percent".into(), "0".into()),
-    ];
-    quota
-}
-
-/// Observed a day into the captured Codex window.
-fn codex_observed() -> ObservationStamp {
-    ObservationStamp::from_parts(
-        epoch_secs(CAPTURED_CODEX_RESET_SECS) - Duration::from_hours(24),
-        Instant::now(),
-    )
 }
 
 /// The fraction and reset of a known window, or a panic naming the role that
@@ -263,139 +227,4 @@ fn an_overage_claim_reads_as_overage_billing() {
     let snapshot = reduce_anthropic(&quota, &observed).snapshot;
 
     assert_eq!(snapshot.billing, Billing::Overage);
-}
-
-#[test]
-fn a_captured_codex_envelope_yields_one_slow_window_with_fast_unknown() {
-    let observed = codex_observed();
-
-    let snapshot = reduce_codex(&captured_codex(), &observed).snapshot;
-
-    assert_eq!(
-        snapshot.fast,
-        QuotaWindow::Unknown,
-        "Codex curates no fast window, so its fast cap is dormant. INTENDED: the only \
-         captured plan reports a seven-day primary window and an unused secondary, so \
-         there is no short recovering window to place on"
-    );
-    let (slow_fraction, slow_reset) = known(&snapshot.slow, "slow");
-    assert_eq!(slow_fraction, LEDGER_CODEX_FRACTION);
-    assert_eq!(slow_reset, epoch_secs(CAPTURED_CODEX_RESET_SECS));
-    assert_eq!(
-        snapshot.billing,
-        Billing::Unknown,
-        "active-limit names the plan limit in force, not the budget billed against"
-    );
-}
-
-#[test]
-fn the_codex_percent_conversion_agrees_with_the_ledger_mapping() {
-    // Arrange: the same captured `primary-used-percent` the shipped ledger
-    // mapping is pinned against. That mapping is a private method on a CLI
-    // type, and this crate is BELOW the CLI in the dependency graph, so the
-    // equivalence is asserted against the shared input and the shared expected
-    // fraction rather than by calling it. Both sites converting the same
-    // percent is a real drift hazard, which is what this pins.
-    let observed = codex_observed();
-
-    // Act
-    let snapshot = reduce_codex(&captured_codex(), &observed).snapshot;
-
-    // Assert
-    let (fraction, reset) = known(&snapshot.slow, "slow");
-    assert_eq!(
-        fraction, LEDGER_CODEX_FRACTION,
-        "the routing reducer and the ledger mapping must derive the same fraction from the \
-         same captured percent"
-    );
-    assert_eq!(
-        reset,
-        epoch_secs(CAPTURED_CODEX_RESET_SECS),
-        "both sites read the reset as epoch SECONDS; a thousand-fold rescale here is the \
-         defect class the plausibility bound refuses"
-    );
-}
-
-#[test]
-fn an_unparseable_codex_percent_yields_a_cap_dormant_snapshot() {
-    let observed = codex_observed();
-    let mut quota = captured_codex();
-    quota.primary_used_percent = Some("abc".into());
-
-    let snapshot = reduce_codex(&quota, &observed).snapshot;
-
-    assert_eq!(snapshot.fast, QuotaWindow::Unknown);
-    assert_eq!(snapshot.slow, QuotaWindow::Unknown);
-}
-
-#[test]
-fn an_empty_codex_reset_yields_no_known_window() {
-    // Arrange: the wire sends an empty string for an unused window's reset.
-    let observed = codex_observed();
-    let mut quota = captured_codex();
-    quota.primary_reset_at = Some(String::new());
-
-    let snapshot = reduce_codex(&quota, &observed).snapshot;
-
-    assert_eq!(snapshot.slow, QuotaWindow::Unknown);
-}
-
-#[test]
-fn a_codex_percent_above_one_hundred_saturates_to_exhausted() {
-    let observed = codex_observed();
-    let mut quota = captured_codex();
-    quota.primary_used_percent = Some("140".into());
-
-    let snapshot = reduce_codex(&quota, &observed).snapshot;
-
-    let (fraction, _) = known(&snapshot.slow, "slow");
-    assert_eq!(
-        fraction, 1.0,
-        "an upstream over its own limit means exhausted, never empty"
-    );
-}
-
-#[test]
-fn a_negative_codex_percent_is_refused_rather_than_clamped_to_empty() {
-    let observed = codex_observed();
-    let mut quota = captured_codex();
-    quota.primary_used_percent = Some("-5".into());
-
-    let snapshot = reduce_codex(&quota, &observed).snapshot;
-
-    assert_eq!(snapshot.slow, QuotaWindow::Unknown);
-}
-
-#[test]
-fn an_over_scale_codex_percent_saturates_to_exhausted_rather_than_unknown() {
-    // The bound is not "refuse anything odd". An upstream reporting past its
-    // own limit is stating the window is SPENT, so it saturates to exhausted;
-    // treating it as no-information would hand the seat back its headroom,
-    // which is the direction that manufactures placement on a drained seat.
-    // The ledger's sibling mapping records the same value raw instead, and the
-    // module docs at both sites say so.
-    let mut quota = captured_codex();
-    quota.primary_used_percent = Some("140".to_string());
-
-    let snapshot = reduce_codex(&quota, &codex_observed()).snapshot;
-
-    let QuotaWindow::Known { utilization, .. } = &snapshot.slow else {
-        panic!("an over-scale percent must stay a Known reading, not collapse to Unknown");
-    };
-    assert!(
-        (utilization.fraction() - 1.0).abs() < f64::EPSILON,
-        "140 percent saturates to a full window, not to an empty one"
-    );
-}
-
-#[test]
-fn an_uninterpretable_codex_percent_is_cap_dormant() {
-    // The other half of the same boundary: a value that cannot be read at all
-    // yields no window, so placement falls back rather than acting on a guess.
-    let mut quota = captured_codex();
-    quota.primary_used_percent = Some("not-a-number".to_string());
-
-    let snapshot = reduce_codex(&quota, &codex_observed()).snapshot;
-
-    assert_eq!(snapshot.slow, QuotaWindow::Unknown);
 }

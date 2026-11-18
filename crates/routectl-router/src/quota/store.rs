@@ -39,8 +39,9 @@
 //!
 //! Each account holds one window per reported length and scope; the merge
 //! rule lives in [`super::meter`]. Two entry points feed it:
-//! [`QuotaStore::observe_account_uncounted`] takes a validated, source-tagged
-//! observation, and [`QuotaStore::observe`] adapts one response-header
+//! [`QuotaStore::observe_account`] (and its uncounted twin) takes a validated,
+//! source-tagged observation, from the poll or from the Codex response
+//! headers, and [`QuotaStore::observe`] adapts one Anthropic response-header
 //! snapshot onto a partial observation of the curated windows. Both are
 //! refused whole when a reading contradicts the stored one for its window;
 //! `observe` counts the refusal, and the observation's caller counts its own
@@ -281,7 +282,6 @@ impl QuotaStore {
     /// `key` is outside the configured seat set, and as
     /// [`ObserveRefusal::Rejected`] (counted by reason, stored state
     /// unchanged) when the merge refuses it.
-    #[cfg(test)]
     pub fn observe_account(
         &self,
         key: &SeatKey,

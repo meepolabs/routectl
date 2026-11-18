@@ -1,5 +1,6 @@
-//! Background usage poll: reads each idle managed seat's usage endpoint so
-//! the account meter holds a reading for seats that carry no traffic.
+//! Background usage poll: reads each managed seat's usage endpoint once it
+//! has gone 5 minutes without an accepted reading (from a response or a
+//! poll), so the account meter holds a reading for idle seats.
 //! `client` is the only code that talks to a vendor usage endpoint.
 //!
 //! [`UsagePollJob`] is a [`SeatJob`]: the seat driver acquires each seat's
@@ -101,6 +102,7 @@ impl UsagePollState {
                         .and_then(schedule::SeatState::last_outcome)
                         .map(PollOutcome::as_str),
                     next_due_ms: state.map(schedule::SeatState::next_due_ms),
+                    failure_since_ms: state.and_then(schedule::SeatState::failure_since_ms),
                     account: seat.account,
                 })
             })
@@ -160,6 +162,9 @@ pub struct SeatPollSnapshot {
     pub last_result: Option<&'static str>,
     /// When the seat is next due (epoch ms) as of the last sweep.
     pub next_due_ms: Option<i64>,
+    /// When the seat's current run of failed polls began (epoch ms); `None`
+    /// before any failure and once a poll is accepted again.
+    pub failure_since_ms: Option<i64>,
 }
 
 /// Whether the background poll reads an account's usage.
@@ -269,8 +274,10 @@ impl SeatJob for UsagePollJob {
     type Outcome = PollAttempt;
 
     /// The managed seats the schedule finds due, at most one per vendor.
-    /// A seat counts from the meter's last accepted reading of any source,
-    /// so a seat taking traffic is not polled. A seat awaiting a fresh login
+    /// A seat counts from the meter's last accepted reading of any source:
+    /// an accepted response or poll reading suppresses the poll, traffic
+    /// alone does not (a response without an accepted quota reading leaves
+    /// the seat due). A seat awaiting a fresh login
     /// is left out, as the refresh job leaves it out: its token is known
     /// dead, and the login that revives it starts its schedule afresh.
     fn due(&self, router: &Router) -> Vec<ManagedSeat> {

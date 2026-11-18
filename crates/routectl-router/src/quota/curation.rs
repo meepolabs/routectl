@@ -21,13 +21,13 @@
 //!
 //! # Why the absence of a row is data
 //!
-//! Codex has no FAST row, and that is the point of putting curation in a table
-//! an auditor can read. On the only Codex evidence routectl has captured, the
-//! window the upstream calls `primary` runs 10080 minutes -- seven days, a
-//! SLOW window by any honest reading -- and the secondary window is declared
-//! unused. There is no short recovering window to curate, so Codex gets no
-//! FAST row and its FAST cap is DORMANT. Reading a role off the NAME `primary`
-//! would invent a placement signal from a word.
+//! Codex has no row, and that is the point of putting curation in a table an
+//! auditor can read. Codex names its windows by slot (`primary`,
+//! `secondary`), and a slot says nothing about length: one plan reports a
+//! five-hour primary, another a seven-day one. Its windows reach the account
+//! meter keyed by the length each reports (`codex_headers`), never through a
+//! row, so its FAST cap is DORMANT by construction. Reading a role off the
+//! NAME `primary` would invent a placement signal from a word.
 
 use std::time::Duration;
 
@@ -37,7 +37,8 @@ use super::window::WindowRole;
 /// crate spells it.
 pub const ANTHROPIC_PROVIDER_KIND: &str = routectl_core::provider_kind::config::ANTHROPIC_API;
 
-/// Provider kind of the Codex subscription egress.
+/// Provider kind of the Codex subscription egress, which curates no row.
+#[cfg(test)]
 pub const CODEX_PROVIDER_KIND: &str = routectl_core::provider_kind::config::OPENAI_RESPONSES;
 
 /// Upstream id of Anthropic's five-hour window -- the one CAPACITY-WINDOW
@@ -69,7 +70,7 @@ pub struct CuratedWindow {
     /// dormant: nothing looks it up, so nothing caps it.
     pub provider_kind: &'static str,
     /// The upstream's own id for the window, as it appears in the header
-    /// suffix (`5h`, `7d`, `primary`).
+    /// suffix (`5h`, `7d`).
     pub source_id: &'static str,
     /// What this window means for a placement decision.
     pub role: WindowRole,
@@ -88,8 +89,8 @@ pub struct CuratedWindow {
 /// Anthropic reports a five-hour window that recovers inside the lifetime of a
 /// conversation (FAST, the placement signal, smoothed at half full) and a
 /// seven-day window where being nearly full is a durable fact about the seat
-/// (SLOW, a near-exhaustion guard). Codex reports one seven-day window and
-/// declares its second unused, so it gets the SLOW row and no FAST one.
+/// (SLOW, a near-exhaustion guard). Codex curates nothing (see the module
+/// docs).
 const CURATED_WINDOWS: &[CuratedWindow] = &[
     CuratedWindow {
         provider_kind: ANTHROPIC_PROVIDER_KIND,
@@ -101,13 +102,6 @@ const CURATED_WINDOWS: &[CuratedWindow] = &[
     CuratedWindow {
         provider_kind: ANTHROPIC_PROVIDER_KIND,
         source_id: "7d",
-        role: WindowRole::Slow,
-        duration: Duration::from_hours(24 * 7),
-        threshold: 0.9,
-    },
-    CuratedWindow {
-        provider_kind: CODEX_PROVIDER_KIND,
-        source_id: "primary",
         role: WindowRole::Slow,
         duration: Duration::from_hours(24 * 7),
         threshold: 0.9,
@@ -128,8 +122,8 @@ pub fn rows_for(provider_kind: &str) -> impl Iterator<Item = &'static CuratedWin
 /// The curated row for one provider kind and role, or `None` when that
 /// provider curates no window in that role.
 ///
-/// `None` is the dormant answer, not an error: it is how "Codex has no FAST
-/// window" reaches a caller.
+/// `None` is the dormant answer, not an error: it is how "Codex curates no
+/// FAST window" reaches a caller.
 pub fn row_for(provider_kind: &str, role: &WindowRole) -> Option<&'static CuratedWindow> {
     rows_for(provider_kind).find(|row| &row.role == role)
 }

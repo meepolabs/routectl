@@ -16,9 +16,15 @@
 //! vendor pause, first sight) carries the seat's jitter, so no two seats
 //! and no two attempts share a fixed beat.
 //!
-//! The clock is wall time and may step backward. A last attempt or a
-//! reading stamped later than `now` counts from `now` (from the first sweep
-//! that saw the reading), and a first-sight due time or pause end further
+//! Each seat keeps when its current run of failed polls began (an error or a
+//! 429, counted from the first; cleared by an accepted poll; a missing token
+//! or a superseded poll changes nothing), which is what a "poll failing for
+//! N minutes" check reads.
+//!
+//! The clock is wall time and may step backward. A last attempt or failure
+//! run start later than `now` is pulled back to `now`, a reading stamped
+//! later than `now` counts from `now` (from the first sweep that saw the
+//! reading), and a first-sight due time or pause end further
 //! out than its longest span from `now` is pulled in to that span, so a
 //! step back delays a seat or vendor by at most its own longest wait, never
 //! until the old epoch comes round again. A deadline that saturates at the
@@ -121,6 +127,13 @@ impl PollOutcome {
         matches!(self, Self::Accepted | Self::NoWindows)
     }
 
+    /// Whether the outcome counts as the endpoint failing for this seat: every
+    /// error, and a 429 that paused the vendor. A missing token and a
+    /// re-login race say nothing about the endpoint.
+    const fn is_failure(self) -> bool {
+        self.is_error() || matches!(self, Self::Paused(_))
+    }
+
     /// Whether the outcome extends the seat's error backoff. A 429 pauses
     /// the vendor instead; a missing token or a re-login race says nothing
     /// about the endpoint.
@@ -184,6 +197,9 @@ pub(super) struct SeatState {
     last_attempt_ms: Option<i64>,
     last_outcome: Option<PollOutcome>,
     error_streak: u32,
+    /// When the current run of failed polls began; `None` while the last
+    /// poll that said anything about the endpoint succeeded.
+    failure_since_ms: Option<i64>,
     /// The end of the last vendor pause this seat was held by.
     pause_end_ms: Option<i64>,
     /// A last-accepted reading stamped ahead of the clock, and the sweep
@@ -200,6 +216,7 @@ impl SeatState {
             last_attempt_ms: None,
             last_outcome: None,
             error_streak: 0,
+            failure_since_ms: None,
             pause_end_ms: None,
             future_reading: None,
         }
@@ -216,6 +233,11 @@ impl SeatState {
 
     pub(super) const fn last_outcome(&self) -> Option<PollOutcome> {
         self.last_outcome
+    }
+
+    /// When the current run of failed polls began, in epoch ms.
+    pub(super) const fn failure_since_ms(&self) -> Option<i64> {
+        self.failure_since_ms
     }
 
     #[cfg(test)]
@@ -262,6 +284,7 @@ impl SeatState {
         let boot_bound = now_ms.saturating_add(draw_bound(BOOT_SPREAD_MS));
         self.first_due_ms = self.first_due_ms.min(boot_bound);
         self.last_attempt_ms = self.last_attempt_ms.map(|attempt| attempt.min(now_ms));
+        self.failure_since_ms = self.failure_since_ms.map(|since| since.min(now_ms));
         let pause_bound = now_ms.saturating_add(draw_bound(MAX_VENDOR_PAUSE_MS));
         self.pause_end_ms = self.pause_end_ms.map(|end| end.min(pause_bound));
     }
@@ -435,8 +458,12 @@ impl<J: JitterSource> PollSchedule<J> {
         state.jitter_ms = draw_ms_capped(&mut self.jitter, MAX_JITTER_MS);
         if outcome.is_success() {
             state.error_streak = 0;
-        } else if outcome.is_error() {
-            state.error_streak = state.error_streak.saturating_add(1);
+            state.failure_since_ms = None;
+        } else if outcome.is_failure() {
+            state.failure_since_ms.get_or_insert(now_ms);
+            if outcome.is_error() {
+                state.error_streak = state.error_streak.saturating_add(1);
+            }
         }
     }
 

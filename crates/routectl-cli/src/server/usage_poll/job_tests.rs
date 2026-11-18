@@ -181,6 +181,11 @@ async fn a_codex_login_with_no_account_id_is_auth_and_sends_nothing() {
         .find(|seat| seat.account == CODEX_SEAT)
         .expect("the codex seat");
     assert_eq!(codex.last_result, Some("auth"));
+    assert_eq!(
+        codex.failure_since_ms, codex.last_attempt_ms,
+        "the first failure starts the failing run the snapshot reports"
+    );
+    assert!(codex.failure_since_ms.is_some());
     assert_eq!(rig.reading(CODEX_SEAT).report, ReportState::NoReading);
 }
 

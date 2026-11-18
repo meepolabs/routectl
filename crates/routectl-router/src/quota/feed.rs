@@ -41,9 +41,10 @@ use std::sync::Arc;
 use routectl_core::upstream_meta::UpstreamMeta;
 use routectl_core::{ChatChunk, ChatResponse};
 
+use super::codex_headers::{CodexHeaderReduction, reduce_codex_headers};
 use super::freshness::ObservationStamp;
 use super::key::SeatKey;
-use super::reduce::{Reduction, reduce_anthropic, reduce_codex};
+use super::reduce::{Reduction, reduce_anthropic};
 use super::store::QuotaStore;
 
 /// Feed the reading carried by a completed NON-STREAMING response.
@@ -102,23 +103,34 @@ impl FirstChunkFeed {
 /// merges nothing: merging an all-`Unknown` reading would be harmless under the
 /// merge rule but would still advance the stored observation instant, which is
 /// what orders later readings.
+///
+/// The Anthropic family goes through the curated two-role adapter; the Codex
+/// family becomes a partial observation of every window it reports, keyed by
+/// the length each one reports.
 fn feed_meta(store: &QuotaStore, seat: &SeatKey, meta: &UpstreamMeta) {
     let observed = ObservationStamp::now();
-    let reduction = if let Some(quota) = meta.anthropic_unified.as_ref() {
-        reduce_anthropic(quota, &observed)
+    if let Some(quota) = meta.anthropic_unified.as_ref() {
+        let Reduction {
+            snapshot,
+            rejections,
+        } = reduce_anthropic(quota, &observed);
+        for reason in rejections {
+            store.record_rejection(seat, reason);
+        }
+        store.observe(seat, snapshot);
     } else if let Some(quota) = meta.codex.as_ref() {
-        reduce_codex(quota, &observed)
-    } else {
-        return;
-    };
-    let Reduction {
-        snapshot,
-        rejections,
-    } = reduction;
-    for reason in rejections {
-        store.record_rejection(seat, reason);
+        let CodexHeaderReduction {
+            observation,
+            rejections,
+        } = reduce_codex_headers(quota, observed);
+        for reason in rejections {
+            store.record_rejection(seat, reason);
+        }
+        if let Some(observation) = observation {
+            // A refusal is counted inside; the feed has no caller to tell.
+            let _ = store.observe_account(seat, &observation);
+        }
     }
-    store.observe(seat, snapshot);
 }
 
 #[cfg(test)]

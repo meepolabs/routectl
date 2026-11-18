@@ -123,6 +123,9 @@ struct PollRow {
     last_result: Option<&'static str>,
     /// When the account is next due, as of the poll's last sweep.
     next_due_ms: Option<i64>,
+    /// When the account's current run of failed polls began; null before a
+    /// failure and once a poll is accepted again.
+    failure_since_ms: Option<i64>,
 }
 
 /// The usage poll driver's health. Owned here so the health panel's driver
@@ -270,6 +273,7 @@ fn map_poll(poll: Option<&PollStateSnapshot>, account: &str) -> PollRow {
         last_attempt_ms: seat.and_then(|seat| seat.last_attempt_ms),
         last_result: seat.and_then(|seat| seat.last_result),
         next_due_ms: seat.and_then(|seat| seat.next_due_ms),
+        failure_since_ms: seat.and_then(|seat| seat.failure_since_ms),
     }
 }
 

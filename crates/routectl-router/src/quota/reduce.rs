@@ -11,7 +11,8 @@
 //! # Why these are strict where the ledger's quota mapping is loose
 //!
 //! `UsageCapture::observe_quota` in the CLI crate reads the same two vendor
-//! families and converts the same Codex percent, and the bounds there are
+//! families (the Codex one is reduced by the sibling `codex_headers`) and
+//! converts the same Codex percent, and the bounds there are
 //! DELIBERATELY loose -- it admits Anthropic fractions well above 1.0 and
 //! Codex percentages far above 100 so that a weird upstream value is still
 //! RECORDED in the observability columns rather than silently dropped. These
@@ -39,17 +40,16 @@
 
 use std::time::{Duration, SystemTime};
 
-use routectl_core::upstream_meta::{AnthropicUnifiedQuota, CodexQuota, OVERAGE_CLAIM};
+use routectl_core::upstream_meta::{AnthropicUnifiedQuota, OVERAGE_CLAIM};
 
 use super::curation::{
-    ANTHROPIC_FAST_SOURCE_ID, ANTHROPIC_PROVIDER_KIND, CODEX_PROVIDER_KIND, CuratedWindow,
-    RESET_TOLERANCE, row_for,
+    ANTHROPIC_FAST_SOURCE_ID, ANTHROPIC_PROVIDER_KIND, CuratedWindow, RESET_TOLERANCE, row_for,
 };
 use super::freshness::{ObservationStamp, ResetRejection, accept_reset};
 use super::window::{Billing, QuotaWindow, Utilization, WindowRole};
 
-/// Scale of the Codex `primary-used-percent` value, which is a 0-100 percent
-/// rather than the 0-1 fraction the normalized shape carries.
+/// Scale of a vendor's 0-100 used percent, against the 0-1 fraction the
+/// normalized shape carries.
 pub(super) const PERCENT_SCALE: f64 = 100.0;
 
 /// Why one REPORTED window was refused, in a fixed closed set so the counters
@@ -164,31 +164,6 @@ pub fn reduce_anthropic(quota: &AnthropicUnifiedQuota, observed: &ObservationSta
     }
 }
 
-/// Reduce the Codex quota family onto the normalized snapshot, plus every
-/// reported window the trust rules refused.
-///
-/// Codex yields a SLOW window and nothing else, and that comes out of the
-/// curated table rather than out of this function: there is no curated Codex
-/// FAST row, so the FAST lookup returns nothing and the window stays
-/// `Unknown`. Billing stays `Unknown` too -- `active-limit` names which plan
-/// limit is in force, not which budget the request billed against, and reading
-/// it as billing evidence would be the same unknown-as-known confusion the
-/// tri-state exists to prevent.
-pub fn reduce_codex(quota: &CodexQuota, observed: &ObservationStamp) -> Reduction {
-    let mut rejections = Vec::new();
-    let fast = codex_window(quota, observed, &WindowRole::Fast, &mut rejections);
-    let slow = codex_window(quota, observed, &WindowRole::Slow, &mut rejections);
-    Reduction {
-        snapshot: QuotaSnapshot {
-            observed: *observed,
-            fast,
-            slow,
-            billing: Billing::Unknown,
-        },
-        rejections,
-    }
-}
-
 /// The Anthropic window for one role, or `Unknown` when it is uncurated or
 /// unreadable.
 fn anthropic_window(
@@ -213,30 +188,6 @@ fn anthropic_window(
         observed,
         row,
         fraction,
-        rejections,
-    )
-}
-
-/// The Codex window for one role, or `Unknown` when it is uncurated or
-/// unreadable.
-fn codex_window(
-    quota: &CodexQuota,
-    observed: &ObservationStamp,
-    role: &WindowRole,
-    rejections: &mut Vec<RejectionReason>,
-) -> QuotaWindow {
-    let Some(row) = row_for(CODEX_PROVIDER_KIND, role) else {
-        return QuotaWindow::Unknown;
-    };
-    // The captured family types exactly one window's values, and the curated
-    // Codex row is that window; a further Codex row would need its own
-    // capture and its own accessor rather than a guess at a suffix.
-    assemble(
-        quota.primary_used_percent.as_deref(),
-        quota.primary_reset_at.as_deref(),
-        observed,
-        row,
-        percent_as_fraction,
         rejections,
     )
 }
@@ -310,11 +261,6 @@ fn extra<'a>(extras: &'a [(String, String)], suffix: &str) -> Option<&'a str> {
 /// Parse a raw 0-1 fraction string.
 fn fraction(raw: &str) -> Option<Utilization> {
     Utilization::new(raw.parse::<f64>().ok()?)
-}
-
-/// Parse a raw 0-100 percent string onto the 0-1 fraction scale.
-fn percent_as_fraction(raw: &str) -> Option<Utilization> {
-    Utilization::new(raw.parse::<f64>().ok()? / PERCENT_SCALE)
 }
 
 /// Parse an epoch-SECONDS instant. Seconds is the scale both vendor families

@@ -4,7 +4,7 @@
 //! the reason the five facts share one row: a duplicate role, a threshold off
 //! its scale, a zero duration and a tolerance wider than the window it guards
 //! are each a mismatch BETWEEN columns, and none of them is visible from a
-//! single field. The Codex-has-no-FAST-row assertion is here for the same
+//! single field. The Codex-has-no-row assertion is here for the same
 //! reason -- it is the absence of a row, so only a test over the whole table
 //! can pin it.
 
@@ -113,25 +113,14 @@ fn anthropic_curates_the_five_hour_window_fast_and_the_seven_day_window_slow() {
 }
 
 #[test]
-fn codex_curates_only_a_slow_window_so_its_fast_cap_is_dormant_by_construction() {
-    let slow = row_for(CODEX_PROVIDER_KIND, &WindowRole::Slow).expect("a curated SLOW row");
-
+fn codex_curates_no_row_so_its_fast_cap_is_dormant_by_construction() {
     assert_eq!(
-        slow.source_id, "primary",
-        "the captured Codex window is the one the upstream calls primary"
+        rows_for(CODEX_PROVIDER_KIND).count(),
+        0,
+        "Codex windows are keyed by the length each reports, never by a curated slot: a \
+         primary is five hours on one plan and seven days on another"
     );
-    assert_eq!(
-        slow.duration,
-        Duration::from_hours(24 * 7),
-        "the captured primary window declares 10080 minutes, which is SLOW however it is named"
-    );
-    assert!(
-        row_for(CODEX_PROVIDER_KIND, &WindowRole::Fast).is_none(),
-        "Codex must curate NO fast window: the only captured evidence reports a seven-day \
-         primary and an unused secondary, so there is no short recovering window to cap. This \
-         absence is intended behavior -- the fast cap stays dormant -- and inventing a role \
-         from the name primary would manufacture a placement signal from a word"
-    );
+    assert!(row_for(CODEX_PROVIDER_KIND, &WindowRole::Fast).is_none());
 }
 
 #[test]

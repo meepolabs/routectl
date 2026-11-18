@@ -157,8 +157,14 @@ pub fn reduce_anthropic_body(
 ///
 /// Windows come only from `rate_limit.primary_window` and
 /// `rate_limit.secondary_window`, each `null` or `{used_percent,
-/// limit_window_seconds, reset_after_seconds, reset_at}`. A window whose
+/// limit_window_seconds, reset_after_seconds, reset_at}`, and from each
+/// `additional_rate_limits[]` entry's `rate_limit` windows. A window whose
 /// `reset_after_seconds` is at least its length has not started.
+///
+/// An additional limit's windows are scoped by its `metered_feature`, the
+/// vendor's limit id (`limit_name` is a display name). A `metered_feature`
+/// that is not a canonical scope refuses the whole body: skipping that entry
+/// would let a complete report drop a window the account still has.
 pub fn reduce_codex_body(
     body: &[u8],
     observed: ObservationStamp,
@@ -170,10 +176,49 @@ pub fn reduce_codex_body(
     let mut windows = Vec::new();
     for name in CODEX_WINDOW_MEMBERS {
         if let Some(window) = object_or_null(member(rate_limit, name)?)? {
-            push_bounded(&mut windows, codex_window(window, &observed)?)?;
+            push_bounded(&mut windows, codex_window(window, None, &observed)?)?;
+        }
+    }
+    for entry in codex_additional_limits(&members)? {
+        let scope = Scope::new(
+            member(entry, "metered_feature")?
+                .as_str()
+                .ok_or(BodyError::WrongType)?,
+        )
+        .map_err(|_| BodyError::NonCanonicalScope)?;
+        let Some(rate_limit) = object_or_null(member(entry, "rate_limit")?)? else {
+            continue;
+        };
+        for name in CODEX_WINDOW_MEMBERS {
+            let Some(window) = rate_limit
+                .get(name)
+                .map(object_or_null)
+                .transpose()?
+                .flatten()
+            else {
+                continue;
+            };
+            push_bounded(
+                &mut windows,
+                codex_window(window, Some(scope.clone()), &observed)?,
+            )?;
         }
     }
     complete(windows, observed)
+}
+
+/// The `additional_rate_limits` entries; an absent or `null` member is none.
+fn codex_additional_limits(
+    members: &Map<String, Value>,
+) -> Result<Vec<&Map<String, Value>>, BodyError> {
+    match members.get("additional_rate_limits") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .map(|entry| entry.as_object().ok_or(BodyError::WrongType))
+            .collect(),
+        Some(_) => Err(BodyError::WrongType),
+    }
 }
 
 fn anthropic_window_key(name: &str) -> Result<Option<WindowKey>, BodyError> {
@@ -212,6 +257,7 @@ fn anthropic_window(
 
 fn codex_window(
     window: &Map<String, Value>,
+    scope: Option<Scope>,
     observed: &ObservationStamp,
 ) -> Result<WindowReading, BodyError> {
     let used = percent_as_fraction(member(window, "used_percent")?)?;
@@ -223,7 +269,7 @@ fn codex_window(
     } else {
         Started::Yes
     };
-    let key = WindowKey::new(length_secs, None)?;
+    let key = WindowKey::new(length_secs, scope)?;
     Ok(WindowReading::new(
         key,
         used,

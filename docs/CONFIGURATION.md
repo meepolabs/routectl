@@ -2435,8 +2435,8 @@ seat can still be picked there, which is what makes these cases resolve
 exactly as they did before quota placement existed: a fresh process
 before any response or poll has been observed, a seat whose reading has lapsed
 past its own window, a provider routectl curates no short recovering
-window for (the Codex subscription egress is one -- it reports a
-seven-day window and no short one), and a pool where some seats are
+window for (the Codex subscription egress is one: its readings are
+listed on `/status/accounts` but do not place), and a pool where some seats are
 observed and the rest are not.
 
 Concretely, among the seats the existing health and rate-limit filters
@@ -5503,15 +5503,17 @@ reloads once per seat per token lifetime.
 ### Background usage poll
 
 While `routectl serve` runs, a second background job reads the subscription
-usage of the same managed logins the refresh covers, for the seats that carry
-no traffic. Anthropic seats are read from `https://api.anthropic.com/api/oauth/usage`
+usage of the same managed logins the refresh covers, for the seats that have
+no fresh accepted reading. Anthropic seats are read from `https://api.anthropic.com/api/oauth/usage`
 and Codex seats from `https://chatgpt.com/backend-api/wham/usage`, each with the
 seat's own access token (and, for Codex, its ChatGPT account id). No other host
 is contacted and redirects are never followed.
 
 - A seat is polled only after 5 minutes (plus a per-seat random jitter of up to
-  a minute) without a fresh reading from either a response or an earlier poll,
-  so a seat taking traffic is not polled. A fresh daemon gives each seat a
+  a minute) without an accepted reading from either a response or an earlier
+  poll. It is an accepted reading that suppresses the poll, not traffic: a
+  seat whose responses carry no quota headers, or whose header reading is
+  refused, is still polled. A fresh daemon gives each seat a
   random first due time within its first 5 minutes. The poll sweeps once a
   minute and polls at most one seat per vendor per sweep, so seats of one vendor
   that are due together are polled one per minute, and a larger set of one
@@ -5580,7 +5582,15 @@ always present; times are epoch ms and durations ms.
     outcome: `accepted`, `no_windows`, `token_not_ready`, `paused`,
     `redirect`, `auth`, `http`, `timeout`, `transport`, `too_large`,
     `malformed` or `superseded`) and `next_due_ms`, each null before the
-    poll has attempted or scheduled the seat.
+    poll has attempted or scheduled the seat. `failure_since_ms` is when the
+    seat's current run of failed polls began: set by the first `paused`,
+    `redirect`, `auth`, `http`, `timeout`, `transport`, `too_large` or
+    `malformed` result after an accepted poll (or since the daemon started),
+    kept through further failures, cleared to null by an `accepted` or
+    `no_windows` result, and left as it was by `token_not_ready` and
+    `superseded`. It is the input for "a usage poll failing for 15 minutes":
+    `now - failure_since_ms`. A backward wall-clock step pulls it back to
+    the new time, never into the future.
 - `vendor_pauses`: each vendor whose polling is paused after a 429, with
   `vendor` and `paused_until_ms`.
 - `rejections`: the meter's running refusal counts by reason

@@ -2352,6 +2352,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Returns a `Reduction` (the snapshot plus every REPORTED window refused,
   partitioned by `RejectionReason`: invalid utilization, expired / implausible
   reset, overflow) -- an absent window is dormant, not a rejection
+- `src/quota/codex_headers.rs` -- reducer from the Codex `x-codex-*`
+  response-header family onto one partial response `AccountObservation`:
+  every slot (`primary`, `secondary`, each extra limit's family scoped
+  `codex_<limit>`) keyed by its reported `window-minutes`, started from
+  `reset-after-seconds`; a slot with no length is refused `UnknownLength`
 - `src/quota/usage_body.rs` -- pure reducers from the Anthropic and Codex
   usage-endpoint bodies onto one `Complete` or `NoWindows` poll
   `AccountObservation`, or a typed `BodyError`. Anthropic windows come only

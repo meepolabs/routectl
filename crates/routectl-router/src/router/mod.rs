@@ -3589,6 +3589,10 @@ mod quota_feed_dispatch_tests;
 #[path = "quota_placement_dispatch_tests.rs"]
 mod quota_placement_dispatch_tests;
 
+#[cfg(all(test, feature = "openai-responses"))]
+#[path = "codex_reading_dispatch_tests.rs"]
+mod codex_reading_dispatch_tests;
+
 #[cfg(test)]
 #[path = "prefix_rewrite_dispatch_tests.rs"]
 mod prefix_rewrite_dispatch_tests;

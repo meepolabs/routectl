@@ -48,6 +48,7 @@
 //! submodule it depends on, so the module a type lives in stays visible at
 //! every call site while the shape is still moving.
 
+pub mod codex_headers;
 pub mod curation;
 pub mod feed;
 pub mod freshness;

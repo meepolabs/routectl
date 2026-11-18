@@ -49,9 +49,14 @@
 //!
 //! # Why the window map is bounded
 //!
-//! Response headers produce at most the curated keys, and a poll is complete,
-//! so each poll replaces the window set it reported last time; a key no source
-//! still reports does not accumulate. At most one dropped window is kept.
+//! Anthropic response headers produce at most the curated keys, a Codex
+//! response at most [`MAX_WINDOWS_PER_OBSERVATION`] keys (the windows it
+//! names, each keyed by its reported length and limit), and a poll is
+//! complete, so each poll replaces the window set it reported last time. A key
+//! only a Codex response named stays until a poll omits it; its read-time
+//! expiry still applies. At most one dropped window is kept.
+//!
+//! [`MAX_WINDOWS_PER_OBSERVATION`]: super::reading::MAX_WINDOWS_PER_OBSERVATION
 
 use std::collections::HashMap;
 use std::time::Duration;
