@@ -5705,26 +5705,39 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `QueryError` (`Sqlite` + `Interrupted`, the latter distinguishing a fired
   query deadline from a real DB fault, + `InvalidBucket` for a time-bucket grid
   that violates its width/count invariants) and its hand-written
-  `From<rusqlite::Error>`, which is what makes `Interrupted` reachable from
-  EVERY query function without any of them taking a deadline parameter;
-  `GroupKey` (whose `provider_kind` is a COST dimension, not a display one: it
+  `From<rusqlite::Error>`, which is what makes `Interrupted` (a fired deadline
+  OR a set cancel flag) reachable from EVERY query function without any of
+  them taking a deadline parameter;
+  `GroupKey` at the fine `(model, provider, upstream, alias, provider_kind,
+  seat)` grain (`provider_kind` is a COST dimension, not a display one: it
   carries the kind PERSISTED with the row so each era of a re-kinded provider
   prices by what it was, and a surface reporting at the kind-agnostic grain
-  coalesces the partitions back together after pricing), `AggRow` and re-exports
-  the whole read-side surface from its submodules so every symbol stays at
-  `routectl_usage::` unchanged. Also the `inference_rows!` predicate every
-  inference-population reader splices in to exclude token-count rows, and
+  coalesces the partitions back together after pricing; `seat` is the
+  persisted credential identity, never derived from `provider`), `AggRow` and
+  re-exports the whole read-side surface from its submodules so every symbol
+  stays at `routectl_usage::` unchanged. Also the `inference_rows!` predicate
+  every inference-population reader splices in to exclude token-count rows,
+  `below_watermark!` (the `+rowid <= ?5` term every grouped-read statement
+  carries, kept out of index selection by the unary `+`), and
   `cache_write_total_expr!`, the one both-era write-total expression (the v21
   total, else legacy 5m + 1h) behind `AggRow::cache_write_tokens` /
   `cache_write_present`
-- `src/query/deadline.rs` -- `DeadlineGuard::install(&mut UsageDb, deadline)`:
-  the connection-level read deadline shared by the ledger readers
+- `src/query/deadline.rs` -- the connection-level read limit shared by the
+  ledger readers: `ReadLimit` (an absolute deadline plus a `CancelFlag`; a bare
+  `Instant` converts into one with a never-set flag), `CancelFlag` (one-way,
+  clones share it; a crate-internal `child` is set whenever its parent is, so a
+  read stops its own slices without setting its caller's flag), and
+  `DeadlineGuard::install(&mut UsageDb, impl Into<ReadLimit>)`, a progress
+  handler that interrupts the running statement once either fires and is
+  detached on drop
 - `src/query/aggregate.rs` -- aggregate + breakdown queries over the requests
   table; exports `aggregate`, `errors_by_class` (flat per-group failure-class
   breakdown, same window predicate + group key as `aggregate`, sums to
   `AggRow::errors`), `ttfbs`, `latest_quota_by_seat` (newest quota-bearing row
   PER `seat`, eligibility `quota_status OR quota_utilization` non-NULL, NULL-seat
-  rows kept as their own bucket), `QuotaSnapshot` (carries `seat` +
+  rows kept as their own bucket; one seek per seat over the v22 partial
+  `(seat, ts_start)` index via a recursive seat walk, the predicate shared with
+  the index DDL through `quota_rows!`), `QuotaSnapshot` (carries `seat` +
   `provider_kind`, the discriminator for the vendor-shared `quota_*` columns),
   `earliest_ts_start` (`MIN(ts_start)` at or after a caller-supplied lower bound,
   `None` when no row qualifies, so a caller can anchor an unbounded window off
@@ -5734,22 +5747,42 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `query_agg_select!` / `query_agg_from_where!` / `agg_group_by!` `concat!`
   macros over this module's base column list, so no statement can drift past the
   shared row mappers -- the series statement is the SAME select plus one trailing
-  `(ts_start - ?1) / ?5 AS bucket` column and `, bucket` on the GROUP BY
-- `src/query/grouped.rs` -- the grouped, priced, deadline-bounded aggregate:
-  exports `query(db, &QuerySpec, price, deadline)` plus `QuerySpec`,
+  `(ts_start - ?7) / ?6 AS bucket` column (`?6` width, `?7` anchor) and
+  `, bucket` on the GROUP BY. The crate-internal `ReadWindow` (window,
+  filters, rowid watermark, bucket anchor) is the one bind set `read_fine_rows`,
+  `read_error_classes` and the lifetime read share, each checking the
+  `ReadLimit` per row; `error_rows!` is the one error predicate behind
+  `AggRow::errors`, the class read and the v22 error-rows index
+- `src/query/grouped.rs` -- the grouped, priced, limit-bounded aggregate:
+  exports `query(db, &QuerySpec, price, limit)` (`limit` a `ReadLimit` or a
+  bare deadline `Instant`) plus `QuerySpec`,
   `GroupDim`, `RowCost`, `QueryResult`, `QueryGroup`, `QueryMetrics` /
   `QueryTotals`, `CostStatus`, and the time-series types `BucketSpec` /
-  `QuerySeries` / `SeriesBucket`. One statement reads at the fine
-  `(model, provider, upstream, alias, provider_kind)` grain with alias/provider
-  filters as
-  BIND params; the fold prices each fine row through the caller's closure
-  BEFORE upstream is dropped, rolls to the coarse `GroupDim` (sums additive,
-  MAX-across-MAX, ratios kept as numerator/denominator pairs), derives the
-  display metrics as `Option` (absent, never 0, when no row was eligible), and
-  folds totals from the same accumulators. `QuerySpec::bucket` switches on the
-  bucketed statement and folds each row ONCE into both the coarse groups and a
-  per-bucket accumulator map, so groups / totals / series reconcile by
-  construction; the caller-resolved grid is re-checked here (`width_ms > 0`,
+  `QuerySeries` / `SeriesBucket`. `GroupDim` is THE one grouping list every
+  usage reader offers (`model`, `alias`, `provider`, `seat`; `ALL`, `as_str`,
+  `parse`, `label`, NULL reading as `(unattributed)`), shared by `routectl
+  usage --by` and `/status/query`. The read (`slices.rs`) returns raw fine
+  rows at the `(model, provider, upstream, alias, provider_kind, seat)` grain
+  with alias/provider filters as BIND params; the fold prices each fine row
+  through the caller's closure BEFORE upstream is dropped (on the calling
+  thread, after the slices merge), rolls to the coarse `GroupDim` (sums
+  additive, MAX-across-MAX, ratios kept as numerator/denominator pairs),
+  derives the display metrics as `Option` (absent, never 0, when no row was
+  eligible), and folds totals from the same accumulators. `QueryMetrics`
+  carries per-set `errors_by_class` (summing to `errors`), the
+  `cache_read_present` / `server_tool_present` / `cache_write_present`
+  presence counts, `client_disconnect_pre_dispatch`, `ttft_avg_ms` /
+  `ttft_max_ms` / `latency_avg_ms` / `latency_max_ms` (a request-weighted
+  mean and an observed maximum, no percentile), `throughput_tok_s` as summed
+  generation output over summed generation time, `ctx_avg` / `ctx_peak` over
+  fresh input plus cache read plus cache write, a token-weighted
+  `cache_hit_pct`, and `missing_price_dimensions` (sorted, deduplicated labels
+  the pricer reported). `QuerySpec::bucket` switches on the bucketed
+  statement: each bucket is priced over its own rows and the groups over the
+  same rows merged across buckets first, so groups are the whole window's
+  with or without a series and the additive counts reconcile by construction
+  while costs and the hit share need not; the caller-resolved grid is
+  re-checked here (`width_ms > 0`,
   `count` in `1..=1000`, and the last bucket start computed in `i128` so it
   cannot overflow the dense fill) as this crate's trust boundary, and a row whose
   bucket index falls outside the grid is refused before it reaches either
@@ -5757,14 +5790,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   buckets densify
   through the same `finish` an empty group takes, while a window matching no row
   at all yields an EMPTY series rather than a thousand synthetic zeros. Cost
-  enters only via the closure, so the crate stays a leaf; the deadline is
-  installed through the shared `DeadlineGuard` (`query/deadline.rs`), surfaces
+  enters only via the closure, so the crate stays a leaf; the limit is
+  installed through the shared `DeadlineGuard` (`query/deadline.rs`) under a
+  child cancel flag, is checked per row in the Rust loops, surfaces
   as `QueryError::Interrupted` and is detached on every exit path, unwinding
   included; a cost sum that an extreme configured
   rate overflowed to non-finite is a VALUE outcome (`cost_usd: None` +
   `unpriced`), never an assert, because the fold is network-reachable and the
-  release profile aborts on panic. `RowCost::Subscription(Option<f64>)` carries
-  the API-equivalent value of a subscription row, folded into a SEPARATE
+  release profile aborts on panic. `RowCost` is `Subscription(Option<f64>,
+  Vec<String>)` / `Priced(f64)` / `Unpriced(Vec<String>)`, the label lists
+  naming used dimensions with no rate; the subscription arm's API-equivalent
+  value is folded into a SEPARATE
   `equivalent_usd` / `any_equivalent` accumulator pair and surfaced as
   `QueryMetrics::equivalent_cost_usd` -- `priced_usd` never sees a notional
   dollar, so real spend and replacement value cannot conflate, and each channel
@@ -5909,20 +5945,27 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/db.rs` -- `UsageDb`, `open`, `open_readonly`, `open_readonly_fastfail`,
   `OpenError`: usage-DB connection open (writer and read-only)
 - `src/schema.rs` -- the ledger DDL (`requests`, `capability_learn_events`,
-  `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (21); each
+  `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (22); each
   version's columns are commented in the DDL itself. Also the v21
   `CREATE_CACHE_WRITE_TS_START_INDEX` partial index (`WHERE cache_write_tokens
-  > 0`) the per-lifetime write read filters on
+  > 0`) the per-lifetime write read filters on, and the three v22 read
+  indexes: `CREATE_AGG_COVERING_INDEX` (`ts_start` then every column the
+  aggregate statements read), `CREATE_ERROR_ROWS_INDEX` (partial over the
+  error predicate) and `CREATE_QUOTA_SEAT_INDEX` (partial `(seat, ts_start)`
+  over quota-bearing rows); their column sets and predicates are welded to the
+  statements by `schema_index_tests.rs`
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table (one `migrate_vN_to_vM` step per version, the appended-column
-  lists `V18`/`V19`/`V20`/`V21_REQUESTS_COLUMNS`); also `purge_legacy_capability_observations(conn)`, a
+  lists `V18`/`V19`/`V20`/`V21_REQUESTS_COLUMNS`, and `V22_INDEXES`, the three
+  `IF NOT EXISTS` indexes the column-free v21 -> v22 step creates); also `purge_legacy_capability_observations(conn)`, a
   one-shot data step (no version bump) that deletes NULL-vocabulary
   non-tombstone `capability_events` rows below the latest tombstone's rowid,
   guarded by the `META_LEGACY_CAPABILITY_PURGE` marker (value = deleted count,
   marker and delete in one transaction); called from the writer's open, not
   from `db::open`
 - `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path, target)`
-  runs the additive `STEPS` (21 down to 16) to a target in `SUPPORTED_TARGETS`;
+  runs the additive `STEPS` (22 down to 16; 22 -> 21 keeps the v22 indexes and
+  checks the v21 `requests` shape) to a target in `SUPPORTED_TARGETS`;
   a refusal is a `DowngradeError` that leaves the file untouched
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
   `requests` rows older than the configured retention window, and
@@ -6447,21 +6490,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and `cancelled_aggregate_requests_do_not_free_builder_capacity` abort saturating
   requests and assert no new blocking work starts until the detached builders
   finish (the next request is DELAYED, not shed). Also owns
-  `QUERY_BUDGET_MS = 2000`, the per-request wall-clock budget for one
-  `/status/query` grouped aggregate, `USAGE_BUDGET_MS = 2500`, the budget
+  `QUERY_BUDGET_MS = 10_000`, the per-request wall-clock budget for one
+  `/status/query` ledger read counted from the body parse (worker-queue time
+  included; the read runs under that route's own one-permit ledger-read gate,
+  never a GET builder permit), `USAGE_BUDGET_MS = 2500`, the budget
   for one whole `/status/usage` collection (an overrun of either sheds as the
   `query_timeout` unavailable panel), and `AGGREGATE_RESERVE_MS = 1000`, the
   room the `/status` aggregate leaves after the usage budget for its other
   panels and the response write (bounds nothing at runtime). The MODULE doc
   block carries the coupled timing numbers once -- these three, `STATUS_MAX_INFLIGHT`,
-  `handlers/status/query.rs`'s `BODY_READ_TIMEOUT`, and the dashboard's two
-  aborts -- plus the two sum identities
-  (`BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 3000 <= QUERY_TIMEOUT_MS` and
+  the ledger-read gate, `handlers/status/query.rs`'s `BODY_READ_TIMEOUT`, and
+  the dashboard's two aborts and `BASE_MS` cadence -- plus the two sum identities
+  (`BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 11000 <= 12000 QUERY_TIMEOUT_MS` and
   `USAGE_BUDGET_MS + AGGREGATE_RESERVE_MS = 3500 <= TIMEOUT_MS`, both pinned
   against the served script by `handlers/status/page.rs` tests; they bound
   the BUDGETED stretches and explicitly NOT end-to-end request time: the
-  builder-capacity wait, worker queueing, ledger open, anchor probe, fold and
-  serialization sit outside them) and the
+  ledger open, anchor probe and serialization sit outside the query
+  deadline's reach), why
+  the query abort may outlast the 5000ms cadence (the nudge skips while a
+  query is in flight), the cancel-on-drop path, and the
   occupancy relationship; each const's own comment points there instead of
   repeating it. No const here is a config knob (no `config_classify` section)
 - `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching
@@ -6871,7 +6918,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   closure, so the permit is released by the blocking work ending -- on return,
   on error, and (in unwind builds) on panic -- and NOT by a cancelled request's
   future or `JoinHandle` dropping; a closed semaphore degrades to an unavailable
-  panel, never an unwrap (release is `panic = "abort"`). The `/status` aggregate
+  panel, never an unwrap (release is `panic = "abort"`). Its blocking half is
+  `run_blocking_panel(permit, ..)`, which `/status/query` calls directly with
+  the permit of its own one-permit `LedgerReadGate` (a `StatusState` field
+  apart from `BuilderCapacity`), so a query read never holds a GET builder
+  permit. The `/status` aggregate
   composes the four REAL panel builders SEQUENTIALLY (four awaits, no
   `tokio::join!`), so an admitted request holds at most ONE blocking builder at a
   time and `STATUS_MAX_INFLIGHT` names a single unit -- admitted requests AND
@@ -6924,6 +6975,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   would read as one. `fail_health_builder` panics the health builder BEFORE the
   emitter, which is the shape `guard_panel` really degrades, and is what lets the
   aggregate's health-failure fallback be exercised over a real request.
+  `stall_query_read` parks every `/status/query` read on its blocking worker,
+  holding the ledger-read gate, until its cancel flag or deadline fires, so a
+  test observes a dropped request reaching the read.
   Per-daemon rather than process-global -- a test binary runs its cases
   concurrently, so a global slot is claimed by whichever daemon boots first
   (measured on the sibling router-swap seam: the global shape failed every case at
@@ -6944,22 +6998,30 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   provenance tokens `override`/`learned`, signal-tier
   tokens) plus the `unavailable` reason codes
   (`no_data`/`schema_mismatch`/`db_busy`/`db_unavailable`/`config_unavailable`/`doctor_unavailable`/`no_config_path`/`query_timeout`)
-- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 3),
+- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 4),
   the grouped windowed aggregate. Three EXCLUSIVE regimes: 405 (method is not
   `QUERY`, guarded by the handler's first extractor), 400 (body outside the
   closed vocabulary -- `deny_unknown_fields` + closed `window`
-  {today,week,month,all} / `group_by` {model,provider,alias} / `bucket`
-  {hour,day} enums + optional
+  {today,week,month,last24h,last7d,all} / `group_by` (deserialized straight
+  into the usage crate's `GroupDim`, so it is exactly that shared list) /
+  `bucket` {hour,day} + optional
   alias/provider filters -- or over `MAX_BODY_BYTES` (8 KiB), or still arriving
   at the `BODY_READ_TIMEOUT` (1s) read deadline that stops a stalled send from
   parking a concurrency permit; all refused with the FIXED envelope
-  `{"schema_version":3,"error":{"code":"invalid_query",...}}` that never echoes
+  `{"schema_version":4,"error":{"code":"invalid_query",...}}` that never echoes
   serde text or body bytes and never opens the ledger), and 200 for everything
   else including every data-source failure. Runs `routectl_usage::query` under
-  the same isolation as the panels (`guard_panel` blocking worker +
-  `catch_unwind`, per-request `open_readonly_fastfail`), priced through the
+  `run_blocking_panel` (blocking worker + `catch_unwind`, per-request
+  `open_readonly_fastfail`) holding the permit of `LedgerReadGate`, a
+  one-permit semaphore taken WITHOUT waiting (a held gate answers `db_busy` at
+  once) and released when the blocking read ends; priced through the
   facade's `QueryPricer` (ONE pinned config snapshot per request) and bounded by
-  `QUERY_BUDGET_MS`; a fired deadline sheds `query_timeout`, open/query failures
+  a `ReadLimit` of `QUERY_BUDGET_MS` fixed right after the body parse, before
+  the gate and the worker queue. The request future holds `CancelOnDrop`, which
+  sets the read's `CancelFlag` when it drops, so an abandoned read stops at its
+  next check; a read already stopped when its worker starts answers
+  `query_timeout` without opening the ledger, a fired limit sheds
+  `query_timeout`, and open/query failures
   reuse the usage panel's shed-code mapping. Serializes the crate's
   `QueryResult` EXPLICITLY (`render`, not the `Json` responder, whose own
   failure arm would be a bare 500 outside the three regimes -- a render failure
@@ -7038,20 +7100,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
   `guard_panel`'s blocking worker, runs
-  `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`would_trim_summary`/`window_observation` over the
+  `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`window_observation` over the
   `window_bounds` window, and maps to the aggregates-only `UsagePanel` DTO
-  (schema_version 6: per-`(alias,provider,model,upstream)` rollups, each with
+  (schema_version 7, which dropped the `would_trim` block: per-`(alias,provider,model,upstream)` rollups, each with
   the both-era `cache_write_tokens` / `cache_write_present`, + windowed
   totals + one per-seat quota snapshot each (`seat` + `provider_kind`, per-row
-  `ts_start_ms` freshness) + would-trim summary + the window's `observation`
+  `ts_start_ms` freshness) + the window's `observation`
   block with its walk counts; per-group and totals
   `errors_by_class` failure-class breakdown, `client_disconnect_total` +
   `cancelled_total` +
   reporting-only `cache_read_present` denominator; NEVER request
   rows/ids/bodies/prompts). The ledger reads group at a FINER grain than the
   panel reports (they carry each row's persisted `provider_kind` so cost is
-  era-resolvable), so `assemble` coalesces the era partitions -- metrics and
-  error-class maps alike -- back to the documented
+  era-resolvable, and its `seat`), so `assemble` coalesces the era and seat
+  partitions -- metrics and error-class maps alike -- back to the documented
   `(alias,provider,model,upstream)` grain before emitting, leaving the panel's
   group cardinality and wire shape unchanged. Ledger-open/query failures classify to the shed
   codes `no_data`/`schema_mismatch`/`db_busy`/`db_unavailable` (busy/lock read
@@ -7061,7 +7123,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `query_error_code` also owns the `query_timeout` arm
   (`QueryError::Interrupted`). `build_panel` anchors ONE `USAGE_BUDGET_MS`
   deadline inside the blocking closure and `collect` installs a single
-  `DeadlineGuard` on the per-request connection, so all five reads share one
+  `DeadlineGuard` on the per-request connection, so all four reads share one
   budget and an overrun sheds `query_timeout` instead of starving a worker
 - `src/handlers/status/health.rs` -- `/status/health` (schema_version 9).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
@@ -7312,7 +7374,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Overview and Usage naming different primaries in `TAB_SOURCES` and the
   transport wiring (`querySourceFor` arms, `queryRound` resolution,
   `applyQueryOutcome` writing only its `source` parameter) asserted from the
-  extracted function bodies
+  extracted function bodies; (8) every `queryRound()` nudge in `runRound` sits
+  under an `if` requiring `!queryInFlight()`; (9) `queryRound` diverts a
+  superseded `db_busy` answer to `retrySupersededBusy` before
+  `applyQueryOutcome`, on a bounded `SUPERSEDED_BUSY_RETRY_MS` schedule that
+  ends before the first backoff step and never names the backoff ladder
 - `src/handlers/status/dashboard.html` -- dashboard MARKUP only: the verdict
   strip (state dot + one plain-language sentence + req/span + window picker +
   poll indicator, which reports the as_of AGE of the active tab's data; carries
@@ -7363,8 +7429,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   aggregate's usage panel stays today-scoped for the readers that want today
   (the Health quota tiles, the Overview seat surface, the verdict strip). Also
   holds the cadence and budget constants (`BASE_MS`, the shared
-  `BACKOFF_STEPS_MS` ladder, `TIMEOUT_MS` = 3500 and `QUERY_TIMEOUT_MS` = 3500
-  -- see `server::status_gate` for the coupled-timing derivation),
+  `BACKOFF_STEPS_MS` ladder, `TIMEOUT_MS` = 3500 and `QUERY_TIMEOUT_MS` = 12000,
+  longer than the 5s cadence -- see `server::status_gate` for the
+  coupled-timing derivation),
   `WINDOWLESS_TABS`, the selection state (window / group-by / provider scope /
   active tab), `SOURCES`, `RENDER_FAULTS`, `setSource`, and the one-line
   `effectiveState` ternary
@@ -7392,15 +7459,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `timeout`/`network`), so the GET poll and the QUERY aggregate cannot drift in
   failure vocabulary. `queryStatus` issues `method:'QUERY'` +
   `Content-Type: application/json` + a stable stringified body +
-  `cache:'no-store'` under the ~3500ms budget, SINGLE-FLIGHT (aborts the
-  previous request and bumps a GENERATION so a late old response cannot
-  repaint a newer selection), on backoff state SEPARATE from the GET loop's (a
+  `cache:'no-store'` under the `QUERY_TIMEOUT_MS` abort, SINGLE-FLIGHT (aborts
+  the previous request and bumps a GENERATION so a late old response cannot
+  repaint a newer selection; `queryInFlight()` makes `runRound`'s per-round
+  nudge skip while a query or a short busy retry is outstanding, so a slow read
+  is never superseded by its own top-up), on backoff state SEPARATE from the GET loop's (a
   QUERY failure never slows the healthy 5s GET cadence): 403 terminal,
   400/405 -> incompatible and not retried until the input changes, and
   503/network/timeout plus the 200-borne `QUERY_RETRY_CODES`
   (`db_busy`/`db_unavailable`/`query_timeout`) -> QUERY-only 10/20/30s backoff
   off the shared `BACKOFF_STEPS_MS` ladder, over which QUERY and GET keep
-  separate indexes. `shapeFor(tab)` picks the request shape and
+  separate indexes. A `db_busy` answer that follows the page's OWN abort
+  (`queryOwnAbortPending`) is the server still releasing the aborted read's
+  gate permit, so `retrySupersededBusy` re-arms the same round on the short
+  `SUPERSEDED_BUSY_RETRY_MS` schedule (150/300/600ms) with the panel left
+  loading, outside the backoff ladder and before `applyQueryOutcome`.
+  `shapeFor(tab)` picks the request shape and
   `querySourceFor(tab)` the record its response lands in, so each round writes
   the source belonging to the shape it asked for. Also the aggregate round
   (`runRound`/`tick`/
@@ -8303,10 +8377,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `rate_covers(Option<f64>)` is the one completeness predicate (a present,
   non-negative rate; a known `0` counts). `missing_equivalence_dimensions(&PricingConfig) -> Vec<String>` is the
   DIAGNOSTIC half of the equivalent's complete-or-absent gate: the same
-  `rate_covers` rule `usage::rates_cover_used_dimensions` applies, minus
+  `rate_covers` rule `usage::uncovered_used_dimensions` applies, minus
   the token counts, returning the labels (`input`, `output`, `cache read`, and
   `cache write <duration>` for 5m, 1h and every other priced lifetime) that do
-  not resolve. `cache_write_spelling_conflicts` lists the lifetimes a pricing
+  not resolve; `dimension_label(PriceDimension)` is the one spelling of those
+  labels, shared with the usage report's missing-price lists and doctor's
+  price fields. `cache_write_spelling_conflicts` lists the lifetimes a pricing
   block prices under both its legacy key and `cache_write_per_mtok` at
   different values (the legacy key wins), for doctor. Reasoning is not among them --
   a disjoint-reasoning row bills thinking at the OUTPUT rate. Consumed by
@@ -8314,18 +8390,24 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`sections.rs`).
 - `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB
   (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO
-  week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges
-  computed in LOCAL time against an injected `&LocalZone` and
+  week)/`--this-month`), the trailing `--last-24h`/`--last-7d` (exact durations
+  ending now, never zone-adjusted) and `--all`, flattened from
+  `UsageWindowArgs` into one `WindowFlag`, plus ad-hoc `--since D [--until E]`
+  ranges, computed in LOCAL time against an injected `&LocalZone` and
   `OffsetDateTime` `now` (`window_bounds`, `since_bounds`); no flag + no `--since` prints a multi-window summary.
-  `build_window_report` aggregates, rolls fine `AggRow`s up to `--by
-  model|provider|alias` (or a single total), and bifurcates cost: a provider
-  whose `[providers.X] credential` starts `oauth://` is subscription (`n/a
-  (subscription)`, no $), an API-key provider prices its summed tokens via
+  `build_window_report` runs the SAME grouped `routectl_usage::query`
+  `/status/query` serves, grouped by `--by` (a `GroupDim`: any token of the
+  shared grouping list, model when absent; every report ends with a `total`
+  row kept apart from the groups) under a far-off read limit, and renders
+  the query's `QueryMetrics` per `DisplayRow` (plus the `+sub` flag and the
+  `--detail` nearest-rank TTFT p50/p95 from `ttfbs`), so the CLI and the
+  endpoint cannot disagree on a figure. Cost bifurcates per fine row through
+  `cost_for_row(config, &PriceSnapshot, row)`, the pricing closure shared
+  with `/status/query`: a provider whose `[providers.X] credential` starts
+  `oauth://` is subscription (`n/a (subscription)`, no $), an API-key
+  provider prices its summed tokens via
   `routectl_router::prices::effective_pricing` -> `rates_from_pricing` ->
-  `estimate_cost_tokens` (`$X.XX` or `n/a` when unpriced) through
-  `cost_for_row(config, &PriceSnapshot, row)`, which yields the usage crate's
-  `RowCost` tri-state and is shared with `/status/query`'s pricing closure so
-  the two surfaces can never disagree about what a row costs. The
+  `estimate_cost_tokens` (`$X.XX` or `n/a` when unpriced). The
   `PriceSubject` is the row's served model, served provider entry (never a
   pool) and upstream, with the PERSISTED `provider_kind` selecting a
   first-party table provider only when that entry is gone from config; per
@@ -8336,25 +8418,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   subsumed in the output count for every other kind), never from current
   config, so re-kinding a provider in place cannot reprice history; a row whose
   kind is absent AND that reported nonzero reasoning fails CLOSED as
-  `Unpriced` rather than guessing a structure. Both cost arms share ONE body:
-  `resolve_row_rates` (rate resolution + reasoning structure) and `price_row`
-  (token math) are called by `priced_usd` and by `equivalent_usd` alike, so an
-  API-equivalent figure and a real price can never disagree on basis. The
-  subscription arm alone wraps that body in `rates_cover_used_dimensions`
-  (complete-or-absent: any dimension with a nonzero count and no rate per
-  `pricing::rate_covers` withholds the whole figure; a known `0` is a price), yielding
-  `RowCost::Subscription(Option<f64>)`. The priced arm applies the same gate.
-  `Acc` accumulates the equivalent in its own `equivalent_usd` /
-  `any_equivalent` pair, a non-finite per-row product reading absent before it
-  can poison the sum, and `cost_cell` renders both channels in one cell
+  `Unpriced` rather than guessing a structure. Both cost arms share ONE body,
+  `complete_price` (rate resolution, reasoning structure, `price_row` token
+  math), so an API-equivalent figure and a real price can never disagree on
+  basis; it is complete-or-absent for both arms (any used dimension with no
+  rate per `pricing::rate_covers`, writes of no known lifetime, or reasoning
+  of an unknown structure withholds the whole figure; a known `0` is a price)
+  and returns the missing labels (`dimension_label` spellings plus the
+  unknown-lifetime / unknown-reasoning labels) that `RowCost` carries into
+  `QueryMetrics::missing_price_dimensions`. `cost_cell` renders the real and
+  equivalent channels in one cell
   (`n/a (sub ~$12.34)`, `$5.00 (+sub ~$12.34)`) falling back to the
   equivalent-free strings when no equivalent resolved -- never summed, no new
-  column.
-  Cost prices each row's cache writes per lifetime (`lifetime_priceable_writes`;
-  writes with no known lifetime leave the row unpriced rather than under-priced).
-  `--detail` adds the `cache_wr` column (write total of every lifetime) +
-  nearest-rank p95/max latency
-  + wall-time + server-tool counts, plus the advisory would-trim / shadow /
+  column. Every operator- or ledger-sourced string printed to the terminal
+  (group labels, seat / quota tokens, suppressed-session kind and model,
+  reduction decision tokens) passes through `routectl_core::render_operator_text`,
+  which strips control characters and escape sequences.
+  `--detail` adds the `cost`, `ctx_peak`/`ctx_avg`, `cache_wr` (write total
+  of every lifetime), `ttft_p50`/`ttft_p95`, `tok/s` and `srv_tools` columns and
+  a one-line latency / throughput / streaming-share summary, plus the advisory would-trim / shadow /
   near-lossless blocks and `render_reduction`: the lossless-minifier outcome
   block (per-decision histogram, summed raw counters, read-time-derived
   `bytes/4` token estimate) which renders NO ratio and NO cost figure and
@@ -8368,15 +8450,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   reference -- never the raw session key -- the provider kind, the model, the
   suppressed-request count and both suppression instants), newest first, with a
   cap-hit truncation line and the same drop-counter validity caveat, suppressed
-  entirely on a window with no suppression. Both the per-group and the footer
-  cache-hit-rate flow through ONE shared denominator rule --
-  `cache_prompt_den` (`input + cache_read_billed + cache_write_tokens`, the
-  both-era write total, the cache-INCLUSIVE prompt total, summed only over rows
-  with `cache_read_present > 0`) fed to `cache_hit_ratio(num, den)` (`None` on
-  a degenerate `den <= 0`, rendered `-` not `0%`), so a mixed-provider window
-  can never show two contradictory hit%. Footer also reports the total error
-  count. `OpenError::NoData` -> friendly stdout + exit 0; `VersionTooNew` ->
-  hard error. Also the project's LOCAL-CALENDAR AUTHORITY for the read surfaces:
+  entirely on a window with no suppression. Both the per-group `hit%` and the
+  footer's cache hit read the query's token-weighted `cache_hit_pct` (absent
+  renders `-` / `n/a`, never `0%`), so the report and the endpoint share one
+  rule. The footer also reports client disconnects (with the pre-dispatch
+  share) and cancellations. `OpenError::NoData` -> friendly stdout + exit 0;
+  `VersionTooNew` -> hard error. Also the project's LOCAL-CALENDAR AUTHORITY for the read surfaces:
   beside the window math it owns `MAX_BUCKETS` and `resolve_bucket(zone, unit,
   from_ms, to_ms, first_row_ms, now)`, the pure DB-free resolver `/status/query`'s series mode
   calls -- it re-anchors an all-time window to the earliest row's local midnight
@@ -8389,8 +8468,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `render_cache_ignore`, `CACHE_IGNORE_READ_BUDGET`: the `routectl usage
   --detail` cache-ignore block
 - `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to
-  20|19|18|17|16 [--db P]`: the offline rollback over
-  `routectl_usage::downgrade_to` (a v21 file taken to 16 runs every step);
+  21|20|19|18|17|16 [--db P]`: the offline rollback over
+  `routectl_usage::downgrade_to` (a v22 file taken to 16 runs every step);
   prints the re-stamped path, exits 1 on refusal
 - `src/commands/opening_accuracy/mod.rs` -- `routectl usage
   --opening-accuracy`, the read-only context meter release-gate report over an
