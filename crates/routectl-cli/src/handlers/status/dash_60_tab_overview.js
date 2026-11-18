@@ -83,17 +83,13 @@
 
   // Scope every figure on this tab to one provider. Picking a DIFFERENT provider
   // while scoped moves the scope rather than lifting it; the aggregate card
-  // (label null) is the reset. The query is re-issued through the standard
-  // input-changed path (which aborts the in-flight request and bumps the
-  // generation, so a late response for the previous scope cannot repaint this
-  // one), and only this tab repaints -- the GET-backed siblings read no query
-  // source.
+  // (label null) is the reset. A view-state change: commitViewState re-issues
+  // the query through the standard input-changed path (which aborts the
+  // in-flight request and bumps the generation, so a late response for the
+  // previous scope cannot repaint this one) and records it in the address.
   function onProviderScope(label) {
     if (selectedProvider === label) { return; }
-    selectedProvider = label;
-    queryInputChanged();
-    renderActiveTab();
-    renderVerdict();
+    commitViewState({ scope: label });
   }
 
   function onProviderOverflow() {

@@ -174,7 +174,7 @@ fn page_browser_a_broken_source_shows_its_error_card_inside_the_view() {
 }
 
 /// An old tab token opens the view that took over its content and the hash
-/// is rewritten to that view's id, keeping a window segment.
+/// is rewritten to that view's id, a window segment kept as the range.
 ///
 /// Mutation check: drop `health: 'accounts'` from LEGACY_VIEW_IDS -> red.
 #[test]
@@ -185,7 +185,7 @@ fn page_browser_old_tab_tokens_open_their_successor_view() {
         ("overview", "now", "#now"),
         ("usage", "traffic", "#traffic"),
         ("routing", "traffic", "#traffic"),
-        ("usage/week", "traffic", "#traffic/week"),
+        ("usage/week", "traffic", "#traffic?range=week"),
         ("nowhere", "now", "#now"),
     ];
     for (hash, view, canonical) in rows {

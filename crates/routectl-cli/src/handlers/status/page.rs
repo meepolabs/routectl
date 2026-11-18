@@ -1905,4 +1905,9 @@ mod tests {
         use super::*;
         include!("page_browser_views_tests.rs");
     }
+
+    mod browser_url {
+        use super::*;
+        include!("page_browser_url_tests.rs");
+    }
 }

@@ -72,17 +72,13 @@
       ['grouped by ' + selectedGroupBy, WINDOW_SPAN[selectedWindow]]);
   }
 
-  // Switch the grouping dimension. The query is re-issued through the standard
-  // input-changed path (which aborts the in-flight request and bumps the
-  // generation, so a late response for the previous dimension cannot repaint
-  // this one), and only this tab repaints -- no sibling tab reads the query
-  // source.
+  // Switch the grouping dimension. A view-state change: commitViewState
+  // re-issues the query through the standard input-changed path (which aborts
+  // the in-flight request and bumps the generation, so a late response for the
+  // previous dimension cannot repaint this one) and records it in the address.
   function onGroupBy(dim) {
     if (terminal || dim === selectedGroupBy) { return; }
-    selectedGroupBy = dim;
-    queryInputChanged();
-    renderActiveTab();
-    renderVerdict();
+    commitViewState({ group: dim });
   }
 
   function groupByStrip() {

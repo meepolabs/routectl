@@ -92,41 +92,167 @@
     syncRefreshBtn();
   }
 
-  // ---- chrome: hash routing (dumb view state) --------------------------
+  // ---- chrome: URL view state ------------------------------------------
 
-  // Grammar: `#tab[/window]`. `tab` is a VIEWS id; the optional `window` is
-  // one of WINDOWS. An old tab token opens its successor view
-  // (canonicalViewId), an unknown or absent tab the first view, and an
-  // unknown or absent window `today`; selectTab then rewrites the hash
-  // canonical in place. The hash carries VIEW STATE ONLY -- applyHash mutates
-  // activeTab / selectedWindow and nothing about fetch state. Because it
-  // writes those directly, its CALLER owns detecting a move and refreshing
-  // the QUERY (see the hashchange listener); a selection change
-  // that skips that refresh lets a stale generation repaint the new selection.
-  // The separator is built from its char code so this script carries no
-  // slash-leading string literal (see the mutation-channel scan in page.rs).
+  // The view state lives in the fragment: `#<view>` optionally followed by
+  // `?range=&scope=&group=&sort=`, in that key order, each key omitted at its
+  // default. It serializes the page-global selection (activeTab,
+  // selectedWindow, selectedProvider, selectedGroupBy, selectedSort) and is
+  // never a second store. Open rows, dialogs, focus and scroll stay out of it.
+  //
+  // The fragment is untrusted: anyone can hand the developer a link. Each key
+  // is read with URLSearchParams, whose `get` returns the FIRST of a
+  // duplicate, and checked against a closed vocabulary; a value outside it
+  // falls back to the default and the address is rewritten canonical with
+  // replaceState. scope is the one open value. It reaches the QUERY body and
+  // labels drawn with textContent, so it is only trimmed and bounded.
+  //
+  // A link from before the query keys, `#<view>[/<window>]`, still opens: an
+  // old tab token goes through canonicalViewId, and the window segment is the
+  // range when no valid `range` key is given.
+  //
+  // Only the functions in this section touch location or history; a page test
+  // pins that. The separator is built from its char code so this script
+  // carries no slash-leading string literal (see the mutation-channel scan in
+  // page.rs).
   var HASH_SEP = String.fromCharCode(47);
+  var QUERY_MARK = '?';
+  var VIEW_STATE_KEYS = ['range', 'scope', 'group', 'sort'];
+  var SCOPE_MAX_CHARS = 128;
+  // The server refuses a blank provider and counts U+0085 as blank, which
+  // String.prototype.trim does not strip.
+  var SCOPE_EDGE_SPACE = /^[\s\u0085]+|[\s\u0085]+$/g;
+  var SORT_DIRS = ['asc', 'desc'];
+  // Sortable tables by id, each with the column ids it sorts by. A sort key
+  // naming a table or column not registered here is dropped.
+  var SORT_TABLES = {};
+  var selectedSort = null;         // `<table>.<column>.<dir>`, null = unsorted
 
-  function applyHash() {
-    var h = location.hash;
-    var raw = (h.charAt(0) === '#') ? h.slice(1) : h;
-    var parts = raw.split(HASH_SEP);
-    activeTab = canonicalViewId(parts[0]);
-    selectedWindow = (WINDOWS.indexOf(parts[1]) >= 0) ? parts[1] : 'today';
+  function defaultViewState() {
+    return { view: VIEWS[0].id, range: WINDOWS[0], scope: null, group: GROUP_BYS[0][0], sort: null };
   }
 
-  // Write the canonical hash for the current view state, only when it
-  // differs from the current one (loop-safe: replaceState never fires
-  // hashchange, and the guard stops a location.hash-assignment fallback from
-  // looping). The window segment is omitted for the `today` default.
-  function writeHash() {
-    var next = '#' + activeTab + (selectedWindow !== 'today' ? HASH_SEP + selectedWindow : '');
-    if (location.hash === next) { return; }
-    if (history.replaceState) {
-      history.replaceState(null, '', next);
-    } else {
-      location.hash = next;
+  function currentViewState() {
+    return {
+      view: activeTab,
+      range: selectedWindow,
+      scope: selectedProvider,
+      group: selectedGroupBy,
+      sort: selectedSort
+    };
+  }
+
+  // The selection a QUERY body is filled from. The view picks the request
+  // shape; sort orders rows on the page and never reaches the request.
+  function queryInputKey(state) {
+    return JSON.stringify([state.range, state.scope, state.group]);
+  }
+
+  function firstWindow(candidates) {
+    for (var i = 0; i < candidates.length; i++) {
+      if (WINDOWS.indexOf(candidates[i]) >= 0) { return candidates[i]; }
     }
+    return WINDOWS[0];
+  }
+
+  function scopeParam(raw) {
+    if (raw === null) { return null; }
+    var scope = raw.replace(SCOPE_EDGE_SPACE, '');
+    return (scope !== '' && scope.length <= SCOPE_MAX_CHARS) ? scope : null;
+  }
+
+  function isGroupBy(token) {
+    return GROUP_BYS.some(function (g) { return g[0] === token; });
+  }
+
+  function isSortKey(token) {
+    if (token === null) { return false; }
+    var parts = token.split('.');
+    if (parts.length !== 3 || SORT_DIRS.indexOf(parts[2]) < 0) { return false; }
+    if (!Object.prototype.hasOwnProperty.call(SORT_TABLES, parts[0])) { return false; }
+    return SORT_TABLES[parts[0]].indexOf(parts[1]) >= 0;
+  }
+
+  function parseViewHash(hash) {
+    var raw = (hash.charAt(0) === '#') ? hash.slice(1) : hash;
+    var mark = raw.indexOf(QUERY_MARK);
+    var path = (mark >= 0 ? raw.slice(0, mark) : raw).split(HASH_SEP);
+    var params = new URLSearchParams(mark >= 0 ? raw.slice(mark + 1) : '');
+    var group = params.get('group');
+    var sort = params.get('sort');
+    return {
+      view: canonicalViewId(path[0]),
+      range: firstWindow([params.get('range'), path[1]]),
+      scope: scopeParam(params.get('scope')),
+      group: isGroupBy(group) ? group : GROUP_BYS[0][0],
+      sort: isSortKey(sort) ? sort : null
+    };
+  }
+
+  function formatViewHash(state) {
+    var defaults = defaultViewState();
+    var params = new URLSearchParams();
+    VIEW_STATE_KEYS.forEach(function (key) {
+      if (state[key] !== null && state[key] !== defaults[key]) { params.append(key, state[key]); }
+    });
+    var query = params.toString();
+    return '#' + state.view + (query ? QUERY_MARK + query : '');
+  }
+
+  function writeViewHash(state, push) {
+    var hash = formatViewHash(state);
+    if (location.hash === hash) { return; }
+    if (push) {
+      history.pushState(null, '', hash);
+    } else {
+      history.replaceState(null, '', hash);
+    }
+  }
+
+  // Make `next` the page selection and repaint it. With `refetch`, a move
+  // re-issues the QUERY once through queryInputChanged, which supersedes any
+  // in-flight read for the old selection and resets both query sources. A
+  // changed range, scope or group resets them BEFORE the repaint, so the view
+  // shows its loading state rather than another selection's figures under the
+  // new labels; a view switch alone first repaints the view's own last
+  // payload, which was fetched for this same selection.
+  function applyViewState(next, refetch) {
+    var prior = currentViewState();
+    var inputsMoved = queryInputKey(prior) !== queryInputKey(next);
+    var viewMoved = prior.view !== next.view;
+    activeTab = next.view;
+    selectedWindow = next.range;
+    selectedProvider = next.scope;
+    selectedGroupBy = next.group;
+    selectedSort = next.sort;
+    // The seat modal belongs to the Now provider row: leaving the view
+    // dismisses it rather than leaving it to reappear on return.
+    if (viewMoved) { seatModalProvider = null; }
+    if (refetch && inputsMoved) { queryInputChanged(); }
+    paintTabs();
+    updateWindowSel();
+    renderActiveTab();
+    renderVerdict();
+    if (refetch && viewMoved && !inputsMoved) { queryInputChanged(); }
+  }
+
+  // The one path for a user's change to the view state: apply it and push ONE
+  // history entry, so Back returns to the selection before it.
+  function commitViewState(change) {
+    var next = currentViewState();
+    Object.keys(change).forEach(function (key) { next[key] = change[key]; });
+    applyViewState(next, true);
+    writeViewHash(next, true);
+  }
+
+  // Read the address into the page, on load and on every hashchange (Back,
+  // Forward, an edited or followed link), and rewrite it canonical in place:
+  // a cleanup is not a history step. On load nothing has been asked yet, so
+  // the first round's nudge issues the QUERY.
+  function syncFromLocation(refetch) {
+    var next = parseViewHash(location.hash);
+    applyViewState(next, refetch);
+    writeViewHash(next, false);
   }
 
   // ---- chrome: window picker -------------------------------------------
@@ -168,11 +294,7 @@
 
   function onWindowChange(w) {
     if (terminal || viewFor(activeTab).span || w === selectedWindow) { return; }
-    selectedWindow = w;
-    updateWindowSel();
-    writeHash();
-    queryInputChanged();
-    renderVerdict();
+    commitViewState({ range: w });
   }
 
   function initWindowSel() {
@@ -232,29 +354,21 @@
 
   // ---- chrome: tabs ----------------------------------------------------
 
-  // Selecting a tab switches the visible pane, follows the window picker's
-  // applicability, and -- for a query-backed tab -- refreshes its QUERY at
-  // once rather than waiting for the next scheduled round.
+  // Selecting a tab is a view-state change like any other: it switches the
+  // visible pane, follows the window picker's applicability, and refreshes a
+  // query-backed view's QUERY at once rather than waiting for the next round.
   function selectTab(name) {
-    var changed = activeTab !== name;
-    activeTab = name;
-    // The seat modal belongs to the Now provider row: leaving the tab
-    // dismisses it rather than leaving it to reappear on return.
-    if (changed) { seatModalProvider = null; }
+    commitViewState({ view: name });
+  }
+
+  function paintTabs() {
     VIEWS.forEach(function (view) {
-      var n = view.id;
-      var tab = el('tab-' + n);
-      var pane = el('pane-' + n);
-      var sel = n === name;
+      var sel = view.id === activeTab;
+      var tab = el('tab-' + view.id);
       tab.setAttribute('aria-selected', sel ? 'true' : 'false');
       tab.tabIndex = sel ? 0 : -1;
-      pane.hidden = !sel;
+      el('pane-' + view.id).hidden = !sel;
     });
-    updateWindowSel();
-    writeHash();
-    renderActiveTab();
-    renderVerdict();
-    if (changed) { queryInputChanged(); }
   }
 
   function onTabKey(e, tabs, i) {
@@ -277,34 +391,19 @@
       t.addEventListener('click', function () { selectTab(t.getAttribute('data-tab')); });
       t.addEventListener('keydown', function (e) { onTabKey(e, tabs, i); });
     });
-    selectTab(activeTab);
   }
 
   document.addEventListener('DOMContentLoaded', function () {
-    // Restore view state from the hash BEFORE the first tick so the initial
-    // render lands on the requested tab/window.
-    applyHash();
     initWindowSel();
     initActions();
     initTabs();
     initRefresh();
-    renderVerdict();
+    // Restore view state from the address BEFORE the first tick so the
+    // initial render lands on the requested view and selection.
+    syncFromLocation(false);
     syncTabBadges();
     updateFavicon();
-    // Back/forward or a manual hash edit re-applies view state; the sync
-    // path canonicalizes any bogus hash. applyHash writes activeTab and
-    // selectedWindow DIRECTLY, so selectTab's own change check cannot see the
-    // move -- capture the prior selection here and refresh the QUERY whenever
-    // either half of it changed. Without this, an in-flight QUERY for the old
-    // selection would repaint the new one.
-    window.addEventListener('hashchange', function () {
-      var priorTab = activeTab;
-      var priorWindow = selectedWindow;
-      applyHash();
-      var moved = activeTab !== priorTab || selectedWindow !== priorWindow;
-      selectTab(activeTab);
-      if (moved) { queryInputChanged(); }
-    });
+    window.addEventListener('hashchange', function () { syncFromLocation(true); });
     // A hidden tab throttles the poll timer, so re-evaluate staleness (and
     // the icon) whenever the tab regains attention.
     document.addEventListener('visibilitychange', updateFavicon);
