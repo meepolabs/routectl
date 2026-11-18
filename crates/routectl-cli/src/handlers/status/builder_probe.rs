@@ -99,7 +99,7 @@ mod active {
         /// This is the number a capacity assertion must read, not [`started`]:
         /// submission is what the handler DECIDES to do, whereas starting also
         /// depends on how fast the blocking pool picks jobs up. A fan-out
-        /// submits all four of a request's builders before any of them can be
+        /// submits all five of a request's builders before any of them can be
         /// observed to start, so a test that waits for arrivals has to guess
         /// how long to wait for stragglers, while a test that reads submissions
         /// sees the full decision the instant the handler has made it.

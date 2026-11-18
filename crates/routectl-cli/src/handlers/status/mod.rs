@@ -16,6 +16,7 @@
 //! same listener auth layer as `/v1/*`; token-less loopback keeps the
 //! zero-auth dev path. `/v1/*` inherits none of the status-only middleware.
 
+mod accounts;
 pub(crate) mod builder_probe;
 mod config;
 mod daemon_meta;
@@ -83,7 +84,7 @@ use router_view::{StatusRouterHandle, UnpinnedPricer};
 ///
 /// Waiting on it cannot deadlock. Tower admits at most [`STATUS_MAX_INFLIGHT`]
 /// requests, and an admitted request holds at most ONE builder permit at a time
-/// (the `/status` aggregate awaits its four panels sequentially, in
+/// (the `/status` aggregate awaits its five panels sequentially, in
 /// `status_aggregate`), so there is no hold-and-wait edge to close a cycle
 /// with. In the uncancelled steady state it is therefore never contended; it
 /// blocks only in the case it exists for, a permit still held by a detached
@@ -283,6 +284,7 @@ pub struct PanelObservability {
     pub config: PanelCounters,
     pub doctor: PanelCounters,
     pub query: PanelCounters,
+    pub accounts: PanelCounters,
     /// The `/status/query` series mode. Tracked apart from `query` because a
     /// series read fails on its own terms (a wider GROUP BY over a larger temp
     /// b-tree), and one shared detector would let a healthy aggregate poll mask
@@ -298,6 +300,7 @@ impl Default for PanelObservability {
             config: PanelCounters::new("config"),
             doctor: PanelCounters::new("doctor"),
             query: PanelCounters::new("status_query"),
+            accounts: PanelCounters::new("accounts"),
             query_series: PanelCounters::new("status_query_series"),
         }
     }
@@ -526,10 +529,11 @@ pub fn status_router() -> AxumRouter<Arc<StatusState>> {
         .route("/status/health", get(health::handler))
         .route("/status/config", get(config::handler))
         .route("/status/doctor", get(doctor::handler))
+        .route("/status/accounts", get(accounts::handler))
         .route("/status/query", any(query::handler))
 }
 
-/// The `/status` aggregate: composes the four panels into one envelope.
+/// The `/status` aggregate: composes the five panels into one envelope.
 ///
 /// Each panel is an INDEPENDENT envelope carrying its own `schema_version`,
 /// `as_of`, and availability -- there is deliberately no outer envelope
@@ -547,16 +551,17 @@ struct AggregatePanels {
     health: Panel<health::HealthPanel>,
     config: Panel<config::ConfigPanel>,
     doctor: Panel<doctor::DoctorPanel>,
+    accounts: Panel<accounts::AccountsPanel>,
 }
 
 async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusAggregate> {
-    // Compose the four guarded builders SEQUENTIALLY: each spawns its own
+    // Compose the five guarded builders SEQUENTIALLY: each spawns its own
     // `spawn_blocking` job, so awaiting them one at a time keeps a single
     // admitted request to at most ONE in-flight blocking builder. That is what
     // makes `STATUS_MAX_INFLIGHT` name a single unit -- admitted requests and
     // in-flight builders are then numerically identical. A concurrent join
-    // would fan one admitted request into four blocking jobs, so the cap would
-    // admit up to four times as many builders as requests. Each builder still
+    // would fan one admitted request into five blocking jobs, so the cap would
+    // admit up to five times as many builders as requests. Each builder still
     // isolates its own source failure / panic through `guard_panel`, and these
     // are the SAME builders the per-panel endpoints call -- no divergent second
     // mapping.
@@ -576,12 +581,14 @@ async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusA
     let health = health::build_with_emission(&state, emission.clone()).await;
     let config = config::build(&state).await;
     let doctor = doctor::build_with_emission(&state, emission).await;
+    let accounts = accounts::build(&state).await;
     Json(StatusAggregate {
         panels: AggregatePanels {
             usage,
             health,
             config,
             doctor,
+            accounts,
         },
     })
 }
@@ -609,6 +616,7 @@ mod tests {
         "/status/health",
         "/status/config",
         "/status/doctor",
+        "/status/accounts",
     ];
 
     #[tokio::test]
@@ -715,6 +723,7 @@ mod tests {
             ("usage.rs", include_str!("usage.rs"), &panel_forbidden),
             ("query.rs", include_str!("query.rs"), &panel_forbidden),
             ("health.rs", include_str!("health.rs"), &panel_forbidden),
+            ("accounts.rs", include_str!("accounts.rs"), &panel_forbidden),
             ("config.rs", include_str!("config.rs"), &panel_forbidden),
             ("doctor.rs", include_str!("doctor.rs"), &panel_forbidden),
             (
@@ -1180,8 +1189,8 @@ mod tests {
         assert!(panels["usage"]["as_of"].is_null());
         assert_eq!(panels["usage"]["schema_version"], 7);
 
-        // The three siblings are available and untouched.
-        for name in ["health", "config", "doctor"] {
+        // The siblings are available and untouched.
+        for name in ["health", "config", "doctor", "accounts"] {
             assert!(
                 panels[name]["unavailable"].is_null(),
                 "{name} panel should be available"
@@ -1196,5 +1205,6 @@ mod tests {
         assert_eq!(panels["health"]["schema_version"], 9);
         assert_eq!(panels["config"]["schema_version"], 6);
         assert_eq!(panels["doctor"]["schema_version"], 32);
+        assert_eq!(panels["accounts"]["schema_version"], 1);
     }
 }

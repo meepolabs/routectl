@@ -74,6 +74,7 @@ const POLLING_PATHS: &[&str] = &[
     "/status/health",
     "/status/config",
     "/status/doctor",
+    "/status/accounts",
     "/status/query",
 ];
 

@@ -51,6 +51,17 @@ impl UsageHealthView {
         }
     }
 
+    /// The account reading history writer's five counters, read once.
+    pub(super) fn account_reading_history(&self) -> AccountReadingHistory {
+        AccountReadingHistory {
+            enqueued: self.counters.account_readings_enqueued(),
+            dropped_full: self.counters.account_readings_dropped_full(),
+            dropped_closed: self.counters.account_readings_dropped_closed(),
+            persisted: self.counters.account_readings_persisted(),
+            write_errors: self.counters.account_readings_write_errors(),
+        }
+    }
+
     /// The three request-row loss counters, read once.
     pub(super) fn ledger_health(&self) -> LedgerHealth {
         LedgerHealth {
@@ -83,6 +94,23 @@ impl LedgerHealth {
     const fn has_unrecorded_loss(&self) -> bool {
         self.dropped_closed > 0 || self.write_errors > 0
     }
+}
+
+/// The account reading history counters, process-lifetime and monotonic
+/// (they reset only on restart). Each counts observations, not rows: one
+/// accepted reading is one observation whatever its window count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub(super) struct AccountReadingHistory {
+    /// Observations accepted into the writer channel.
+    pub enqueued: u64,
+    /// Observations the full writer channel refused.
+    pub dropped_full: u64,
+    /// Observations refused because the writer channel was closed.
+    pub dropped_closed: u64,
+    /// Observations whose rows all committed.
+    pub persisted: u64,
+    /// Observations the writer could not commit; none of their rows landed.
+    pub write_errors: u64,
 }
 
 /// One window's ledger observation totals and whether its rows are complete.

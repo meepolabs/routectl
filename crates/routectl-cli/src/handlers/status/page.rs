@@ -545,6 +545,10 @@ mod tests {
                 "query".to_string(),
                 crate::handlers::status::query::SCHEMA_VERSION,
             ),
+            (
+                "accounts".to_string(),
+                crate::handlers::status::accounts::SCHEMA_VERSION,
+            ),
         ]
         .into_iter()
         .collect();

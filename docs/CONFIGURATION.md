@@ -5521,6 +5521,67 @@ is contacted and redirects are never followed.
   the same keys as `seat_driver`; a poll failure counts as `transient` and never
   as `definitive`.
 
+#### Account readings on `/status/accounts`
+
+The running daemon's `/status/accounts` panel (schema 1, also under
+`panels.accounts` on the `/status` aggregate) shows every configured
+credential account with what the account meter holds for it and the usage
+poll's state. It is read from memory only: no usage database read and no
+vendor request, so it is cheap at the dashboard's poll rate. Every key is
+always present; times are epoch ms and durations ms.
+
+- `accounts`: one row per credential account a model dispatches on, in
+  account order: each `oauth://` login once, however many entries or models
+  name it, and each other own credential (an `env://` or `file://` key, an
+  AWS cloud credential) as `#<entry>`. A forwarded credential is not an
+  account, and an account the config no longer names is not listed, even
+  while the meter still counts it. Each row carries:
+  - `account`, the key other panels carry (the `/status/health` targets'
+    `account`); `provider_entry`, the `[providers]` entry it is reported
+    under (for a login two entries name, the lexicographically smallest);
+    and `login_label`, the `<label>` of an `oauth://<provider>#<label>`
+    login (null for an unlabeled login and any other credential). The three
+    are separate keys: never split `account` to find the other two.
+  - `report`: `no_reading` (nothing accepted since the daemon started),
+    `windows`, or `no_windows` (the latest complete poll said the account
+    has no usage windows). An API-key or cloud account always reads
+    `no_reading` with no windows.
+  - `windows`: each held window, ordered by length then scope, with `class`
+    (`short` up to 24 hours, `long` beyond), `length_secs`, `scope` (null for
+    an account-wide window), `used` (fraction 0 to 1), `remaining` (`1 -
+    used`, null while the reading is stale, so a stale reading never shows
+    room), `reset_at_ms` (null when not reported; for an unstarted window,
+    where it would end if it began at the reading), `started` (`yes`, `no`
+    or `unknown`), `source` (`response` for a response header, `poll` for
+    the usage poll), `observed_at_ms`, `age_ms` (null when the clocks cannot
+    order it) and `stale`. A reading is stale once it is more than 7 minutes
+    old, once a running window's reset has passed, or when its age cannot be
+    read.
+  - `last_accepted`: `observed_at_ms` and `source` of the latest accepted
+    reading, or null.
+  - `poll`: `applicability` (`polled` for a managed Anthropic or Codex login
+    the running poll reads, else `not_polled`), `vendor` (`anthropic`,
+    `codex` or null), `last_attempt_ms`, `last_result` (the last poll's
+    outcome: `accepted`, `no_windows`, `token_not_ready`, `paused`,
+    `redirect`, `auth`, `http`, `timeout`, `transport`, `too_large`,
+    `malformed` or `superseded`) and `next_due_ms`, each null before the
+    poll has attempted or scheduled the seat.
+- `vendor_pauses`: each vendor whose polling is paused after a 429, with
+  `vendor` and `paused_until_ms`.
+- `rejections`: the meter's running refusal counts by reason
+  (`invalid_utilization`, `expired_reset`, `implausible_reset`, `overflow`,
+  `contradictory`, `unknown_length`, `invalid_started`, `malformed_body`),
+  and `refused_by_admission`, readings refused because their account is not
+  configured.
+- `history`: the `account_readings` history writer's counts of accepted
+  readings, `enqueued`, `dropped_full`, `dropped_closed`, `persisted` and
+  `write_errors`.
+- `poll_driver`: the usage poll driver's health, the same keys and values as
+  `/status/health` `usage_poll_driver`.
+
+Every count resets on restart. The panel carries no token, credential
+reference, response body or header, and no vendor account id.
+
 ### Credential pools (multiple accounts per provider)
 
 A single OAuth provider can hold more than one credential ("seat") in

@@ -77,7 +77,6 @@ impl UsagePollState {
     /// pause still in effect. Reads memory only: one short lock, no I/O.
     /// A seat the schedule has not swept yet reads as never attempted with
     /// no due time.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn snapshot(&self, config: &Config) -> PollStateSnapshot {
         let now_ms = self.clock.now_ms();
         let schedule = self.schedule.lock();
@@ -122,7 +121,6 @@ pub struct PollStateSnapshot {
 
 impl PollStateSnapshot {
     /// Whether the poll reads `account`'s usage, and from which vendor.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn applicability(&self, account: &str) -> PollApplicability {
         self.seats
             .iter()

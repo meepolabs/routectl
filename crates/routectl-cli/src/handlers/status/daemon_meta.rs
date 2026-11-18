@@ -140,7 +140,6 @@ impl DaemonMetaHandle {
 
     /// The usage poll's read-only state, or `None` on a daemon that runs no
     /// poll.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn usage_poll_state(&self) -> Option<&UsagePollState> {
         self.inner.usage_poll_state.get()
     }

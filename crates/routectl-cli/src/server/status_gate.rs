@@ -139,7 +139,7 @@ use crate::server::request_id::{self, RequestId};
 /// its own one-permit gate instead) -- see this module's own docs for that
 /// equivalence and for the timing numbers it composes with. A concurrent
 /// fan-out inside the aggregate would silently multiply the builder count by
-/// four while this const stayed at its face value.
+/// five while this const stayed at its face value.
 ///
 /// The builder half of the ceiling holds UNCONDITIONALLY, cancellation
 /// included. This layer's permit lives in the response future, so a client that
@@ -1297,7 +1297,7 @@ mod tests {
     /// The capacity UNIT: `STATUS_MAX_INFLIGHT` bounds admitted requests AND,
     /// because no handler fans one admitted request into several builders, the
     /// concurrent BLOCKING panel builders behind them. The `/status` aggregate
-    /// is the only route that could break that equality -- it builds four
+    /// is the only route that could break that equality -- it builds five
     /// panels -- so it is the one this pins.
     ///
     /// Same idiom as the shed tests above: park work in-flight, count arrivals,
@@ -1306,9 +1306,9 @@ mod tests {
     /// invisible from the wire -- a fan-out answers 200 on every panel too.
     ///
     /// Far more requests than permits are fired, so the excess sheds and only
-    /// admitted ones can build. With the aggregate awaiting its four builders
+    /// admitted ones can build. With the aggregate awaiting its five builders
     /// sequentially the plateau is `STATUS_MAX_INFLIGHT`; a concurrent join
-    /// parks `4 * STATUS_MAX_INFLIGHT`.
+    /// parks `5 * STATUS_MAX_INFLIGHT`.
     ///
     /// Every assertion is deferred until AFTER `release`: a parked builder
     /// occupies a blocking worker that no unwind can reclaim, so a panic while
@@ -1334,7 +1334,7 @@ mod tests {
         let router = Router::new(Arc::new(Config::default()));
         let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
-        // all, so all four panels are genuinely in play.
+        // all, so all five panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         status.usage_db_path = dir.path().join("absent-usage.db");
         let app = apply_overload_layers(status_router().with_state(Arc::new(status)));
@@ -1363,7 +1363,7 @@ mod tests {
         // side the instant a handler decides to hand a builder to
         // `spawn_blocking`, so once the admitted requests have parked their
         // builders, every builder those requests will ever submit is already
-        // counted. A fan-out submits all four of a request's builders before
+        // counted. A fan-out submits all five of a request's builders before
         // any can be observed to start, so it registers here immediately --
         // no settle window, and nothing for a slow blocking pool to hide.
         let parked = probe.submitted();
@@ -1396,7 +1396,7 @@ mod tests {
         );
     }
 
-    /// Build a status app whose four panels all reach a real builder, plus the
+    /// Build a status app whose five panels all reach a real builder, plus the
     /// temp dir keeping its config path alive. Shared by the cancellation tests
     /// so they exercise the same wiring the capacity test above does.
     fn cancellation_test_app() -> (axum::Router, tempfile::TempDir) {
@@ -1417,7 +1417,7 @@ mod tests {
         let router = Router::new(Arc::new(Config::default()));
         let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
-        // all, so all four panels are genuinely in play.
+        // all, so all five panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         status.usage_db_path = dir.path().join("absent-usage.db");
         (
@@ -1550,7 +1550,7 @@ mod tests {
 
     /// CANCELLATION, aggregate route: the same property via `GET /status`.
     ///
-    /// Worth its own case because the aggregate is the route that composes four
+    /// Worth its own case because the aggregate is the route that composes five
     /// builders, so it is the one where a regression to a concurrent fan-out
     /// would break the permit accounting. The `uri` is the only difference from
     /// the single-panel case, which is the point: the permit lives in
@@ -1589,7 +1589,7 @@ mod tests {
         }
         // The aggregate is SEQUENTIAL, so each cancelled request had submitted
         // exactly its first builder -- the count is the saturation plateau, not
-        // four times it.
+        // five times it.
         let submitted_before = probe.submitted();
 
         let follow_up = {
@@ -1629,15 +1629,15 @@ mod tests {
              capacity: {submitted_while_detached} builders submitted, expected \
              {submitted_before}"
         );
-        // Capacity recovers and the whole aggregate completes -- all four of its
+        // Capacity recovers and the whole aggregate completes -- all five of its
         // builders ran through the same permit-owning path, which is also the
         // no-deadlock check (a sequential aggregate re-acquiring per panel must
         // not starve itself).
         assert_eq!(served.status(), StatusCode::OK);
         assert_eq!(
             probe.submitted(),
-            submitted_before + 4,
-            "the delayed aggregate must build all four panels once released"
+            submitted_before + 5,
+            "the delayed aggregate must build all five panels once released"
         );
     }
 

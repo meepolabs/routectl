@@ -97,7 +97,7 @@ struct ReasonCount {
 /// from zero. `running` is false on a daemon with no credential store, which
 /// runs neither driver.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct SeatDriverRow {
+pub(super) struct SeatDriverRow {
     running: bool,
     last_sweep_ms: Option<i64>,
     last_good_sweep_ms: Option<i64>,
@@ -349,7 +349,7 @@ impl DriverHealth {
     }
 }
 
-const fn map_seat_driver(health: SeatDriverHealthSnapshot) -> SeatDriverRow {
+pub(super) const fn map_seat_driver(health: SeatDriverHealthSnapshot) -> SeatDriverRow {
     SeatDriverRow {
         running: health.running,
         last_sweep_ms: health.last_sweep_ms,

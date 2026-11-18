@@ -6994,6 +6994,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `status_requires_auth` holds (tokens configured OR a non-loopback bind),
   beneath the same listener auth layer as `/v1/*` (the auth layer sits UNDER
   the host guard); token-less loopback keeps the zero-auth dev path
+- `src/handlers/status/accounts.rs` -- `/status/accounts` (schema_version 1):
+  each configured credential account with its account, provider entry and
+  login label, its account-meter windows under the stale rule, and its usage
+  poll state; plus vendor pauses, refusal totals, history counters and the
+  poll driver's health. Memory-only, wire types owned here.
 - `src/handlers/status/builder_probe.rs` -- test-only observation seam inside
   `guard_panel`, letting a test count and park blocking
   panel builders (the concurrency invariant is invisible from the wire, since

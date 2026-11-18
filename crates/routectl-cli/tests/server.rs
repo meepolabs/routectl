@@ -1266,6 +1266,7 @@ const STATUS_PATHS: &[&str] = &[
     "/status/health",
     "/status/config",
     "/status/doctor",
+    "/status/accounts",
 ];
 
 #[tokio::test]
