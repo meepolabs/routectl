@@ -5945,6 +5945,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   boot (no-op drain on failure), drains the opaque `WriterMessage` channel into
   `requests` / `capability_events`, records `ledger_gaps`, and `shutdown` ->
   `ShutdownOutcome`; see its module doc
+- `src/account_reading.rs` -- `AccountReadingRow` (one `account_readings`
+  history row; `report()` derives `windows` / `no_windows` from whether it
+  carries an `AccountReadingWindow`) and the token enums
+  `AccountReadingSource`, `AccountReadingReport`, `WindowLengthClass`,
+  `WindowStarted`, whose `as_str` values are the table's CHECK tokens
 - `src/cache_writes.rs` -- `cache_write_columns(total, lifetimes) ->
   CacheWriteColumns`, the one builder of the v21 `cache_write_tokens` /
   `cache_write_lifetimes` bound values (a split with no total takes its sum;

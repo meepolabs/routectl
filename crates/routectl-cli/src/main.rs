@@ -315,9 +315,9 @@ enum UsageCmd {
     /// version stepped over is accepted; no column, row or table is changed,
     /// and opening the file with this binary migrates it forward again.
     Downgrade {
-        /// The schema version to stamp: 21, or 20 through 16, which step
-        /// through every version in between (20 steps through 21, 19 through
-        /// 21 and 20, and so on down to 16).
+        /// The schema version to stamp: 22, or 21 through 16, which step
+        /// through every version in between (21 steps through 22, 20 through
+        /// 22 and 21, and so on down to 16).
         #[arg(
             long,
             value_parser = clap::value_parser!(i64).range(
@@ -1888,7 +1888,7 @@ mod tests {
             true,
         ),
         ("usage", &[], true),
-        ("usage downgrade", &["--to", "21"], true),
+        ("usage downgrade", &["--to", "22"], true),
         ("rc env", &[], true),
         ("rc regen-ca", &[], true),
         ("capability purge", &["p#m", "web_search"], true),
@@ -1964,11 +1964,11 @@ mod tests {
         assert!(missing.is_empty(), "unclassified subcommands: {missing:?}");
     }
 
-    /// `usage downgrade` takes `--to 21` through `--to 16` and nothing else,
+    /// `usage downgrade` takes `--to 22` through `--to 16` and nothing else,
     /// and the report flags do not mix with it.
     #[test]
     fn usage_downgrade_parses_only_the_supported_targets() {
-        for target in [21_i64, 20, 19, 18, 17, 16] {
+        for target in [22_i64, 21, 20, 19, 18, 17, 16] {
             let value = target.to_string();
             let parsed = Cli::try_parse_from(["routectl", "usage", "downgrade", "--to", &value])
                 .expect("parses");
@@ -1985,7 +1985,7 @@ mod tests {
         }
         for argv in [
             ["routectl", "usage", "downgrade", "--to", "15"].as_slice(),
-            ["routectl", "usage", "downgrade", "--to", "22"].as_slice(),
+            ["routectl", "usage", "downgrade", "--to", "23"].as_slice(),
             ["routectl", "usage", "downgrade"].as_slice(),
             ["routectl", "usage", "--today", "downgrade", "--to", "16"].as_slice(),
         ] {

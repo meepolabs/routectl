@@ -9,6 +9,7 @@
 //! call `try_send`, which never blocks; a dedicated OS thread owns the
 //! blocking connection and performs the INSERTs.
 
+mod account_reading;
 mod cache_writes;
 mod capability_ack;
 mod capability_batch;
@@ -35,6 +36,10 @@ mod writer;
 // the writer message's payload, constructed only inside the admission, and
 // publishing it would invite a downstream producer to build one and bypass the
 // admission's accounting.
+pub use account_reading::{
+    AccountReadingReport, AccountReadingRow, AccountReadingSource, AccountReadingWindow,
+    WindowLengthClass, WindowStarted,
+};
 pub use cache_writes::{CacheWriteColumns, cache_write_columns};
 pub use capability_ack::CapabilityEventReceipt;
 pub use capability_batch::{

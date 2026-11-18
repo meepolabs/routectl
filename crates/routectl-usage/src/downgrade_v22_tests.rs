@@ -15,6 +15,13 @@ const V22_INDEX_NAMES: [&str; 3] = [
     "idx_requests_quota_seat",
 ];
 
+/// A v22 file as the rollback path leaves it: a fresh current file with rows,
+/// stepped down to 22.
+fn v22_with_rows(path: &std::path::Path) {
+    fresh_with_rows(path);
+    downgrade_to(path, 22).expect("step the fresh file down to 22");
+}
+
 fn index_names(conn: &Connection) -> Vec<String> {
     conn.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?1, ?2, ?3) \
@@ -28,10 +35,10 @@ fn index_names(conn: &Connection) -> Vec<String> {
 }
 
 #[test]
-fn downgrade_22_to_21_restamps_only_and_a_reopen_climbs_back_to_22() {
-    // Arrange: a fresh v22 file with a row.
+fn downgrade_22_to_21_restamps_only_and_a_reopen_climbs_back_to_current() {
+    // Arrange: a v22 file with a row.
     let (_dir, path) = temp_db_path();
-    fresh_with_rows(&path);
+    v22_with_rows(&path);
     let before = file_state(&path);
     assert_eq!(before.user_version, 22, "the fixture starts at v22");
 
@@ -67,7 +74,7 @@ fn downgrades_a_v22_file_through_every_step() {
     for target in [21, 20, 19, 18, 17, 16] {
         // Arrange
         let (_dir, path) = temp_db_path();
-        fresh_with_rows(&path);
+        v22_with_rows(&path);
         let before = file_state(&path);
 
         // Act
@@ -88,9 +95,9 @@ fn downgrades_a_v22_file_through_every_step() {
 
 #[test]
 fn refuses_a_v22_file_whose_requests_is_not_the_v21_shape() {
-    // Arrange: a fresh v22 file with one extra column appended.
+    // Arrange: a v22 file with one extra column appended.
     let (_dir, path) = temp_db_path();
-    fresh_with_rows(&path);
+    v22_with_rows(&path);
     Connection::open(&path)
         .expect("reopen")
         .execute_batch("ALTER TABLE requests ADD COLUMN extra_col INTEGER")

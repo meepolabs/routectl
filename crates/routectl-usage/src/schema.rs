@@ -16,7 +16,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -538,6 +538,48 @@ CREATE TABLE IF NOT EXISTS ledger_gaps (
 /// unindexed window read would scan it.
 pub const CREATE_LEDGER_GAPS_TS_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_ledger_gaps_ts_ms ON ledger_gaps (ts_ms, dropped)";
+
+/// DDL for the `account_readings` table (v23).
+///
+/// One row per window of an accepted account-meter observation, or one
+/// `no_windows` row for a complete report that the account has none: `ts_ms`
+/// is when the observation was read (epoch-millis), `account` the account it
+/// is for. The window columns are NULL exactly on a `no_windows` row, which
+/// the table CHECK enforces. `reset_ms` is NULL when the source reported no
+/// reset. Carries no token, header or body.
+///
+/// The `source`, `report`, `length_class` and `started` CHECK tokens MUST
+/// match the `as_str` of the matching enum in `account_reading.rs`. Each
+/// column's CHECK stays on that column's own line: the weld test reads it
+/// there. `id` is an explicit `INTEGER PRIMARY KEY` so a `VACUUM` never
+/// renumbers rows.
+pub const CREATE_ACCOUNT_READINGS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS account_readings (
+    id           INTEGER PRIMARY KEY,
+    ts_ms        INTEGER NOT NULL,
+    account      TEXT    NOT NULL,
+    source       TEXT    NOT NULL CHECK (source IN ('response', 'poll')),
+    report       TEXT    NOT NULL CHECK (report IN ('windows', 'no_windows')),
+    window_secs  INTEGER,
+    scope        TEXT,
+    length_class TEXT    CHECK (length_class IN ('short', 'long')),
+    used         REAL,
+    reset_ms     INTEGER,
+    started      TEXT    CHECK (started IN ('yes', 'no', 'unknown')),
+    CHECK (
+        (report = 'windows'
+            AND window_secs IS NOT NULL AND length_class IS NOT NULL
+            AND used IS NOT NULL AND started IS NOT NULL)
+        OR (report = 'no_windows'
+            AND window_secs IS NULL AND scope IS NULL AND length_class IS NULL
+            AND used IS NULL AND reset_ms IS NULL AND started IS NULL)
+    )
+)";
+
+/// Index over `account_readings.ts_ms` (v23): the retention prune and
+/// time-windowed history reads.
+pub const CREATE_ACCOUNT_READINGS_TS_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_account_readings_ts_ms ON account_readings (ts_ms)";
 
 /// DDL for the `meta` key/value table. Holds the DB creation timestamp
 /// and a human-readable copy of the schema version. Survives migrations.

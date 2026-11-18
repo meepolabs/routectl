@@ -1,4 +1,4 @@
-//! Offline schema downgrade: v22 -> v21 -> v20 -> v19 -> v18 -> v17 -> v16.
+//! Offline schema downgrade: v23 -> v22 -> v21 -> v20 -> v19 -> v18 -> v17 -> v16.
 //!
 //! A binary refuses a file stamped with a newer schema version than it
 //! understands (`VersionTooNew`), so rolling a host back to an earlier binary
@@ -6,6 +6,11 @@
 //! strictly additive forward step, so every downgrade is a re-stamp, never a
 //! rewrite:
 //!
+//! - 23 -> 22: v23 created `account_readings` with its `idx_account_readings_ts_ms`
+//!   index, which a v22 binary never names. The table, its rows and its index
+//!   stay, so a later reopen by a v23 binary reads the history again. Like the
+//!   18 -> 17 step's `ledger_gaps` check, the shape check covers the table's
+//!   columns, not its CHECKs or index.
 //! - 22 -> 21: v22 only created three read indexes on `requests`, which a
 //!   v21 binary never names and SQLite maintains on its inserts. The indexes
 //!   stay; the shape check is the v21 one, so `requests` must be exactly the
@@ -82,6 +87,10 @@ struct Step {
 /// Every downgrade step, newest first. A downgrade runs a contiguous run of
 /// them, starting at the file's version, until it reaches the target.
 const STEPS: &[Step] = &[
+    Step {
+        from: 23,
+        verify_shape: verify_additive_v23,
+    },
     Step {
         from: 22,
         verify_shape: verify_additive_v21,
@@ -245,6 +254,21 @@ const V18_LEDGER_GAPS_COLUMNS: &[FrozenColumn] = &[
     ("dropped", "INTEGER", true, 0),
 ];
 
+/// The `account_readings` columns as v23 created them, in physical order.
+const V23_ACCOUNT_READINGS_COLUMNS: &[FrozenColumn] = &[
+    ("id", "INTEGER", false, 1),
+    ("ts_ms", "INTEGER", true, 0),
+    ("account", "TEXT", true, 0),
+    ("source", "TEXT", true, 0),
+    ("report", "TEXT", true, 0),
+    ("window_secs", "INTEGER", false, 0),
+    ("scope", "TEXT", false, 0),
+    ("length_class", "TEXT", false, 0),
+    ("used", "REAL", false, 0),
+    ("reset_ms", "INTEGER", false, 0),
+    ("started", "TEXT", false, 0),
+];
+
 /// The `capability_events` columns as v16 created them, in physical order. A
 /// frozen record of the historical shape -- it must not follow later DDL
 /// edits.
@@ -352,8 +376,8 @@ pub enum DowngradeError {
 /// Stamp the usage DB at `path` down to schema version `target`, so a binary
 /// built for that version opens it.
 ///
-/// Runs every step from the file's version down to `target` -- 22 -> 21,
-/// then 21 -> 20, then 20 -> 19,
+/// Runs every step from the file's version down to `target` -- 23 -> 22,
+/// then 22 -> 21, then 21 -> 20, then 20 -> 19,
 /// then 19 -> 18, then 18 -> 17, then 17 -> 16, stopping at `target` -- in
 /// one transaction. Each step checks
 /// its tables are exactly the earlier shape plus the additive set the forward
@@ -500,6 +524,12 @@ fn appended(
     columns
         .iter()
         .map(|&(name, declared_type)| (name, declared_type, false, 0))
+}
+
+/// The 23 -> 22 shape check: `account_readings` is exactly its v23 shape.
+/// `requests` is left to the older steps: v23 added nothing to it.
+fn verify_additive_v23(conn: &Connection) -> Result<(), DowngradeError> {
+    verify_table(conn, "account_readings", &[V23_ACCOUNT_READINGS_COLUMNS])
 }
 
 /// The 22 -> 21 and 21 -> 20 shape check: `requests` is exactly the v20 shape
@@ -674,3 +704,7 @@ mod v21_tests;
 #[cfg(test)]
 #[path = "downgrade_v22_tests.rs"]
 mod v22_tests;
+
+#[cfg(test)]
+#[path = "downgrade_account_readings_tests.rs"]
+mod account_readings_tests;

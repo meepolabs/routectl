@@ -4682,12 +4682,16 @@ database re-stamped first. Each schema step it undoes only appended
 nullable columns or created a table or index that the earlier binary never
 names, so the rollback is a re-stamp, not a rewrite:
 
-- `--to 21` undoes v22: the three read indexes on `requests`
-  (`idx_requests_agg`, `idx_requests_errors`, `idx_requests_quota_seat`)
-  stay in place. A v21 binary never names them, and SQLite keeps them up
-  to date on its inserts, so starting the v22 binary again needs no rebuild.
-- `--to 20` undoes v22 (when the file is at v22) and then v21: the two
-  cache-write columns on `requests` (`cache_write_tokens`,
+- `--to 22` undoes v23: the `account_readings` table (the account usage
+  reading history), its rows and its index stay in place. A v22 binary never
+  reads or writes it. Starting the v23 binary again reads the history back.
+- `--to 21` undoes v23 (when the file is at v23) and then v22: the three
+  read indexes on `requests` (`idx_requests_agg`, `idx_requests_errors`,
+  `idx_requests_quota_seat`) stay in place. A v21 binary never names them,
+  and SQLite keeps them up to date on its inserts, so starting a v22 or
+  later binary again needs no rebuild.
+- `--to 20` undoes every step above the file's version down to v21, then
+  v21: the two cache-write columns on `requests` (`cache_write_tokens`,
   `cache_write_lifetimes`) and their values stay in place. A v20 binary
   names every `requests` column it writes, so its rows leave them NULL, and
   it reports only the older `cache_write_5m` / `cache_write_1h` columns, so
@@ -4714,7 +4718,7 @@ names, so the rollback is a re-stamp, not a rewrite:
 
 ```bash
 systemctl --user stop routectl        # or however the daemon runs
-./routectl usage downgrade --to 21    # [--db /path/to/usage.db]; --to 20, 19, 18, 17 or 16 for an older binary
+./routectl usage downgrade --to 22    # [--db /path/to/usage.db]; --to 21, 20, 19, 18, 17 or 16 for an older binary
 # install and start the previous binary
 ```
 

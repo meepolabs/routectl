@@ -56,9 +56,9 @@ fn request_ids(conn: &Connection) -> Vec<String> {
         .expect("collect")
 }
 
-/// A genuine v21 file with two rows: a current file with the v22 indexes
-/// dropped and both stamps set to 21. v22 changed nothing else, so this is
-/// exactly what a v21 binary leaves behind.
+/// A genuine v21 file with two rows: a current file with the v22 indexes and
+/// the later `account_readings` table dropped and both stamps set to 21, which
+/// is exactly what a v21 binary leaves behind.
 fn v21_file(path: &Path) {
     let db = open(path).expect("open fresh");
     let conn = db.conn();
@@ -77,7 +77,8 @@ fn v21_file(path: &Path) {
             .expect("drop v22 index");
     }
     conn.execute_batch(
-        "UPDATE meta SET value = '21' WHERE key = 'schema_version';
+        "DROP TABLE account_readings;
+         UPDATE meta SET value = '21' WHERE key = 'schema_version';
          PRAGMA user_version = 21;",
     )
     .expect("stamp v21");
@@ -93,14 +94,16 @@ fn wait_persisted(writer: &UsageWriter, want: u64) {
 }
 
 #[test]
-fn a_fresh_file_is_stamped_22_with_all_three_read_indexes() {
+fn a_fresh_file_is_stamped_current_with_all_three_read_indexes() {
     // Arrange + Act
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open fresh");
 
     // Assert
-    assert_eq!(SCHEMA_VERSION, 22);
-    assert_eq!(stamps(db.conn()), (22, "22".to_string()));
+    assert_eq!(
+        stamps(db.conn()),
+        (SCHEMA_VERSION, SCHEMA_VERSION.to_string())
+    );
     let names: Vec<String> = v22_indexes(db.conn()).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, V22_INDEX_NAMES);
 }
@@ -123,11 +126,14 @@ fn the_writer_migrates_a_v21_ledger_to_the_fresh_v22_state_with_rows_intact() {
     wait_persisted(&writer, 1);
     drop(handle);
     writer.shutdown();
-    let db = open(&path).expect("reopen at v22");
+    let db = open(&path).expect("reopen at the current version");
 
-    // Assert: both stamps read 22, the three indexes match a fresh file's,
-    // and the v21 rows survive beside the new one.
-    assert_eq!(stamps(db.conn()), (22, "22".to_string()));
+    // Assert: both stamps read current, the three indexes match a fresh
+    // file's, and the v21 rows survive beside the new one.
+    assert_eq!(
+        stamps(db.conn()),
+        (SCHEMA_VERSION, SCHEMA_VERSION.to_string())
+    );
     assert_eq!(v22_indexes(db.conn()), fresh);
     assert_eq!(fresh.len(), 3, "a fresh file has all three indexes");
     assert_eq!(
@@ -135,8 +141,11 @@ fn the_writer_migrates_a_v21_ledger_to_the_fresh_v22_state_with_rows_intact() {
         ["v21-row-a", "v21-row-b", "v22-row"]
     );
 
-    // Assert: re-running the ladder on a v22 file is a no-op.
-    assert_eq!(migrate_to_current(db.conn(), 0).expect("re-run"), 22);
+    // Assert: re-running the ladder on a current file is a no-op.
+    assert_eq!(
+        migrate_to_current(db.conn(), 0).expect("re-run"),
+        SCHEMA_VERSION
+    );
     assert_eq!(v22_indexes(db.conn()), fresh);
 }
 
@@ -185,6 +194,6 @@ fn an_injected_failure_on_the_second_v22_index_rolls_back_every_index_and_both_s
     // Assert: once the fault is gone the same file migrates normally.
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .expect("clear authorizer");
-    assert_eq!(migrate_to_current(&conn, 0).expect("retry"), 22);
+    assert_eq!(migrate_to_current(&conn, 0).expect("retry"), SCHEMA_VERSION);
     assert_eq!(v22_indexes(&conn).len(), 3);
 }

@@ -10,7 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::capability_event::TOMBSTONE_VERDICT;
 use crate::schema::{
-    CREATE_AGG_COVERING_INDEX, CREATE_CACHE_WRITE_TS_START_INDEX, CREATE_CAPABILITY_EVENTS_TABLE,
+    CREATE_ACCOUNT_READINGS_TABLE, CREATE_ACCOUNT_READINGS_TS_INDEX, CREATE_AGG_COVERING_INDEX,
+    CREATE_CACHE_WRITE_TS_START_INDEX, CREATE_CAPABILITY_EVENTS_TABLE,
     CREATE_CAPABILITY_EVENTS_TS_INDEX, CREATE_CAPABILITY_LEARN_EVENTS_TABLE,
     CREATE_ERROR_ROWS_INDEX, CREATE_LEDGER_GAPS_TABLE, CREATE_LEDGER_GAPS_TS_INDEX,
     CREATE_META_TABLE, CREATE_QUOTA_SEAT_INDEX, CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX,
@@ -762,6 +763,28 @@ fn migrate_v21_to_v22(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v22 -> v23 step atomically: create the `account_readings`
+/// table and its `ts_ms` index, bump `PRAGMA user_version` to 23, and update
+/// the human-readable `meta.schema_version` row, all in one transaction.
+///
+/// The step only creates; it never reads or writes `requests`, so its cost
+/// does not grow with the ledger. A v22 binary never names the new table, so
+/// the file can be handed back after the version stamps are lowered. A fresh
+/// or downgraded-then-reopened file reaches this arm too, hence `IF NOT
+/// EXISTS`.
+fn migrate_v22_to_v23(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(CREATE_ACCOUNT_READINGS_TABLE)?;
+    tx.execute_batch(CREATE_ACCOUNT_READINGS_TS_INDEX)?;
+    tx.execute_batch("PRAGMA user_version = 23")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "23"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -828,6 +851,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             19 => migrate_v19_to_v20(conn)?,
             20 => migrate_v20_to_v21(conn)?,
             21 => migrate_v21_to_v22(conn)?,
+            22 => migrate_v22_to_v23(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
@@ -901,3 +925,7 @@ mod tests;
 #[cfg(test)]
 #[path = "migrate_v22_tests.rs"]
 mod v22_tests;
+
+#[cfg(test)]
+#[path = "migrate_account_readings_tests.rs"]
+mod account_readings_tests;
