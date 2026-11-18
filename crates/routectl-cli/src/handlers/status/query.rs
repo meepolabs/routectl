@@ -488,7 +488,7 @@ fn stall_until_stopped(limit: &ReadLimit) {
     reason = "the request's parts are resolved on the async side and the \
               blocking worker; bundling them would only rename the list"
 )]
-fn build_panel(
+pub(super) fn build_panel(
     db_path: &Path,
     mut spec: QuerySpec,
     bucket: Option<BucketUnit>,
