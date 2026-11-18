@@ -2162,3 +2162,6 @@ mod member_refusal;
 
 #[path = "reload_placeholder_lapse_tests.rs"]
 mod placeholder_lapse;
+
+#[path = "reload_forget_readings_tests.rs"]
+mod forget_readings;

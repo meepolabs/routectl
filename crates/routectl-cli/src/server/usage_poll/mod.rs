@@ -15,10 +15,16 @@
 //!
 //! Nothing here logs or carries in an error the token, the response body or
 //! headers, or a vendor account id.
+//!
+//! In a test build the client resolves no host name (see
+//! `client::network_fence`), so a daemon a test boots never polls a vendor,
+//! whatever logins and models its fixture holds.
 
 mod client;
 #[cfg(test)]
 pub(super) use self::client::build_failure as client_build_failure;
+#[cfg(any(test, feature = "test-utils"))]
+pub use self::client::network_fence::{FenceProbe, probe_production_client};
 mod history;
 #[cfg(test)]
 pub use self::history::rows as history_rows_for_tests;

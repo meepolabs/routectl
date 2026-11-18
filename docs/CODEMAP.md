@@ -8963,6 +8963,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   checks every successful attempt against a loopback mock and logs the INFO
   status line with `source="env"`; unset samples only first-N past 8; an
   invalid value refuses start naming the variable, never the value
+- `tests/usage_poll_fence.rs` -- holds that an integration-test build's
+  usage poll client (the one every booted daemon builds) resolves neither
+  vendor host, so no test daemon can send a token to a vendor
 - `tests/serve_shutdown.rs` -- real-binary signal integration tests (graceful
   SIGTERM shutdown, SIGHUP reload-trigger log line); signals and reaps a
   hermetic child process; also boots the shipped example

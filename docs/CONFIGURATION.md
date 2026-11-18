@@ -5529,7 +5529,10 @@ is contacted and redirects are never followed.
 - An accepted reading feeds [quota-aware placement](#quota-aware-seat-placement)
   exactly as a response header reading does, and is written to the usage
   database's `account_readings` history. The poll's state and the meter are
-  memory-only: after a restart every seat starts with no reading.
+  memory-only: after a restart every seat starts with no reading. A seat whose
+  stored login changes (a `routectl login` of another account, a hand edit)
+  also starts again with no reading when the credentials file reloads;
+  routectl's own token refreshes keep it.
 - `/status/health` shows the poll driver's health as `usage_poll_driver`, with
   the same keys as `seat_driver`; a poll failure counts as `transient` and never
   as `definitive`.

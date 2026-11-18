@@ -240,6 +240,14 @@ impl QuotaStore {
         guard.retain(|key, _| new_admitted.contains(key));
     }
 
+    /// Drop everything held for `key`: its windows, the kept five-hour
+    /// window, the ordering marks and the complete-report floor. The account
+    /// then reads as never observed. Admission is unchanged, so the next
+    /// reading starts it afresh.
+    pub fn forget(&self, key: &SeatKey) {
+        self.seats.lock().remove(key);
+    }
+
     /// Whether `key` is in the configured seat set.
     pub fn admits(&self, key: &SeatKey) -> bool {
         self.admitted.lock().contains(key)

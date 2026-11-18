@@ -9,6 +9,15 @@
 //! keep referring to `common::scenarios::*` and the bare helpers
 //! (`common::user_msg`, etc.) unchanged, while `replay` stays local to
 //! this crate (it depends on cli-side fixtures and harness code).
+//!
+//! A daemon booted here (`serve_on_listener` and its siblings) runs the
+//! background usage poll whenever a credential store opens, and the poll
+//! sends a managed login's token to its vendor once the seat is due. That
+//! never leaves a test: integration tests build this crate with its
+//! `test-utils` feature, under which the poll's HTTP client resolves no host
+//! name (`tests/usage_poll_fence.rs` holds that). Do not weaken that fence
+//! to make a poll reach a stub; a poll test belongs in the crate, against a
+//! TLS front with its host pinned.
 
 pub mod readiness;
 pub mod replay;

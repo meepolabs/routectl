@@ -172,12 +172,15 @@ impl UsagePollClient {
 }
 
 fn base_builder() -> ClientBuilder {
-    Client::builder()
+    let builder = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .https_only(true)
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(TOTAL_TIMEOUT)
+        .timeout(TOTAL_TIMEOUT);
+    #[cfg(any(test, feature = "test-utils"))]
+    let builder = network_fence::apply(builder);
+    builder
 }
 
 /// A header value reqwest redacts from its own `Debug` output. A value that
@@ -251,6 +254,79 @@ impl UsagePollClient {
         }
         Self {
             client: builder.build().expect("test usage client"),
+        }
+    }
+}
+
+/// Keeps every test build's poll client off the network.
+///
+/// A test that boots a daemon with a managed login, a stored token and a
+/// model on it would otherwise poll the vendor with that token once the seat
+/// came due. In a unit test (`cfg(test)`) or an integration test (the
+/// `test-utils` feature, which only this crate's own dev-dependency turns
+/// on), every client this module builds resolves no host name and uses no
+/// proxy, so it cannot open a connection to any vendor; a name pinned with
+/// `ClientBuilder::resolve` (the TLS-front test client) still resolves. A
+/// release build has neither, so this module does not exist there.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod network_fence {
+    use std::sync::{Arc, Mutex};
+
+    use reqwest::ClientBuilder;
+    use reqwest::dns::{Name, Resolve, Resolving};
+
+    use super::{SeatCredential, UsagePollClient};
+
+    /// Every host name a fenced client was asked to resolve, process-wide.
+    static REFUSED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    struct RefuseEveryName;
+
+    impl Resolve for RefuseEveryName {
+        fn resolve(&self, name: Name) -> Resolving {
+            REFUSED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(name.as_str().to_owned());
+            Box::pin(std::future::ready(Err(
+                "the usage poll resolves no host name in a test build".into(),
+            )))
+        }
+    }
+
+    pub(super) fn apply(builder: ClientBuilder) -> ClientBuilder {
+        builder.no_proxy().dns_resolver(Arc::new(RefuseEveryName))
+    }
+
+    /// What one fetch through the production client did.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FenceProbe {
+        /// The fetch outcome token for the Anthropic and then the Codex seat.
+        pub outcomes: Vec<&'static str>,
+        /// Every host name any fenced client was refused, process-wide.
+        pub refused_hosts: Vec<String>,
+    }
+
+    /// Fetch both vendors' usage through the client the daemon builds, with
+    /// a synthetic token, and report what happened.
+    pub async fn probe_production_client() -> FenceProbe {
+        let client = UsagePollClient::new().expect("the production client builds");
+        let token = routectl_auth::oauth::SecretToken::new("fence-probe-token");
+        let anthropic = client
+            .fetch(SeatCredential::Anthropic { token: &token })
+            .await;
+        let codex = client
+            .fetch(SeatCredential::Codex {
+                token: &token,
+                account_id: Some("fence-probe-account"),
+            })
+            .await;
+        FenceProbe {
+            outcomes: vec![anthropic.as_str(), codex.as_str()],
+            refused_hosts: REFUSED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         }
     }
 }

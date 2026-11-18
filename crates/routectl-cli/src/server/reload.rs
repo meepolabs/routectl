@@ -532,7 +532,9 @@ pub(super) async fn handle_credentials_reload(
 /// Lift the parks of the OAuth seats a credentials reload changed, on the
 /// router published at that reload's commit point, sparing every seat that
 /// router holds as a placeholder: its unusable mark is the build's own
-/// evidence about the record just read.
+/// evidence about the record just read. Every changed seat's meter readings
+/// are then forgotten, placeholder or not: they were read under the login the
+/// reload replaced.
 fn lift_changed_seat_parks(
     router_swap: &Arc<ArcSwap<Router>>,
     changed_seats: &std::collections::BTreeSet<String>,
@@ -543,6 +545,10 @@ fn lift_changed_seat_parks(
             .iter()
             .filter(|seat| !published.is_placeholder_account(seat)),
     );
+    // After the lift: it starts each seat's next credential generation, so a
+    // poll fetched under the replaced login is refused from here on, and one
+    // that merged before it is erased now.
+    published.forget_account_readings(changed_seats.iter().map(String::as_str));
     log_lifted_parks(&resets, "credentials");
 }
 

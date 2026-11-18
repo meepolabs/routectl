@@ -1,4 +1,10 @@
 //! Listener bind, axum router build, serve loop, and bounded drain.
+//!
+//! The serve path spawns the background usage poll whenever a credential
+//! store opens, which sends each due managed login's token to its vendor. In
+//! a test build (unit or integration) that client resolves no host name
+//! (`usage_poll::client::network_fence`), so no daemon a test boots can poll a
+//! vendor, whatever logins and models its fixture holds.
 
 use std::path::PathBuf;
 use std::sync::Arc;

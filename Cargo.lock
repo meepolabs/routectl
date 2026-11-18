@@ -2725,6 +2725,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "routectl-auth",
+ "routectl-cli",
  "routectl-core",
  "routectl-providers",
  "routectl-router",

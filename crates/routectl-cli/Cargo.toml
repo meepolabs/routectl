@@ -132,6 +132,11 @@ time = { workspace = true, features = ["local-offset"] }
 #   cargo test -p routectl-cli --features live-integration --profile test-release \
 #     --test live_matrix -- --nocapture --test-threads=1
 live-integration = []
+# Test and bench builds only, through this crate's own dev-dependency below:
+# fences the usage poll's HTTP client off the network (no host name
+# resolves, no proxy), so a daemon an integration test boots can never send a
+# fixture or real token to a vendor. The release binary is built without it.
+test-utils = []
 # Bench-only: swaps the perf bench global allocator to dhat's heap
 # profiler (see benches/hotpath.rs). Never a default feature; enabled via
 # `--features routectl-cli/dhat` by scripts/bench.sh --profile heap.
@@ -156,6 +161,9 @@ routectl-providers = { workspace = true, features = ["test-utils"] }
 # The auth store's scripted refresh seam, so daemon tests can script token
 # refresh results without a vendor endpoint. Test and bench builds only.
 routectl-auth = { workspace = true, features = ["test-utils"] }
+# This crate's own `test-utils` feature, for its integration tests: they link
+# the library without `cfg(test)`, so the usage poll fence needs a feature.
+routectl-cli = { path = ".", features = ["test-utils"] }
 wiremock.workspace = true
 futures = { workspace = true }
 # `io-util` adds `AsyncReadExt`/`AsyncWriteExt` (`read_exact`/`write_all`),

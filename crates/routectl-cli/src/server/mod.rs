@@ -48,6 +48,12 @@ pub use config_load::{LoadedConfig, load_effective_config, load_effective_config
 pub(crate) use router_build::{build_router_from_config, log_advisory_warnings};
 pub use secrets::CompositeStore;
 pub use serve::{serve, serve_on_listener, serve_on_listener_with_secrets};
+/// The usage poll's test-build network fence, for the integration tests that
+/// prove it is on in their build.
+#[cfg(feature = "test-utils")]
+pub use usage_poll::{
+    FenceProbe as UsagePollFenceProbe, probe_production_client as probe_usage_poll_fence,
+};
 
 #[cfg(test)]
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};

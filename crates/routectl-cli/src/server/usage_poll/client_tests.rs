@@ -599,3 +599,18 @@ async fn no_result_rendering_carries_the_token_account_id_or_body() {
         assert!(!client_debug.contains(secret));
     }
 }
+
+/// The unit-test build carries the same fence the integration tests prove:
+/// the client every daemon builds resolves no vendor host.
+#[tokio::test]
+async fn the_production_client_resolves_no_vendor_host_in_a_test_build() {
+    let probe = super::network_fence::probe_production_client().await;
+
+    assert_eq!(probe.outcomes, vec!["transport", "transport"], "{probe:?}");
+    for host in ["api.anthropic.com", "chatgpt.com"] {
+        assert!(
+            probe.refused_hosts.iter().any(|refused| refused == host),
+            "{host}: {probe:?}"
+        );
+    }
+}

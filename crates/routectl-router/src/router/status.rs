@@ -248,6 +248,16 @@ impl Router {
         outcome
     }
 
+    /// Forget every meter reading held for each of `accounts` (credential
+    /// account keys), so a reading taken under a replaced login never
+    /// describes the login that replaced it. Only the meter changes.
+    pub fn forget_account_readings<'a>(&self, accounts: impl IntoIterator<Item = &'a str>) {
+        for account in accounts {
+            self.quota_store
+                .forget(&seat_key_for_served_identity(account));
+        }
+    }
+
     /// Every configured account's meter readings as of `now`, with the stale
     /// rule applied per window, plus the meter's refusal totals. Read-only.
     pub fn account_readings(&self, now: &ObservationStamp) -> AccountReadings {
