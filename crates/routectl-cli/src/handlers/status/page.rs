@@ -1896,4 +1896,9 @@ mod tests {
         use super::*;
         include!("page_views_tests.rs");
     }
+
+    mod browser {
+        use super::*;
+        include!("page_browser_tests.rs");
+    }
 }
