@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use routectl_auth::SecretRef;
 use routectl_core::EligibilityReason;
 
 use super::Router;
@@ -35,6 +36,11 @@ pub struct RouteTargetStatus {
     /// own credential), or `None` for a target forwarding the client's
     /// credential.
     pub account: Option<String>,
+    /// The login label of the target's `oauth://<provider>#<label>`
+    /// credential: `None` for an unlabeled OAuth seat, any other credential
+    /// scheme, and a target forwarding the client's credential. Distinct
+    /// from `seat_label`, which names the pool member's provider entry.
+    pub login_label: Option<String>,
     /// The learned lane this target's capability facts key on, taken from the
     /// dispatch target chain expansion builds. `None` only for a provider
     /// entry carrying the reserved separator, which config validation refuses.
@@ -146,10 +152,13 @@ impl Router {
         let mut out = Vec::new();
         for model in self.resolved_models.values() {
             for target in self.projection_targets(model) {
+                let login_label =
+                    oauth_login_label(target_secret_ref(model, &target.provider_name));
                 out.push(RouteTargetStatus {
                     gate: self.gate_status_for(&target.state_key, target.account.as_deref(), now),
                     nickname: model.nickname.clone(),
                     seat_label: model.seats.as_ref().map(|_| target.provider_name.clone()),
+                    login_label,
                     account: target.account.as_deref().map(str::to_string),
                     provider_name: target.provider_name,
                     upstream: target.upstream,
@@ -228,6 +237,27 @@ impl Router {
     }
 }
 
+/// The credential reference a target of `model` dispatching through
+/// `provider_name` authenticates with: the member seat's own for a pooled
+/// model, the model's for a single-target one.
+fn target_secret_ref<'m>(model: &'m ResolvedModel, provider_name: &str) -> Option<&'m SecretRef> {
+    match model.seats.as_deref() {
+        Some(seats) => seats
+            .iter()
+            .find(|seat| seat.provider_name == provider_name)?
+            .auth_secret_ref
+            .as_ref(),
+        None => model.auth_secret_ref.as_ref(),
+    }
+}
+
+fn oauth_login_label(secret_ref: Option<&SecretRef>) -> Option<String> {
+    match secret_ref {
+        Some(SecretRef::OAuth { label, .. }) => label.clone(),
+        _ => None,
+    }
+}
+
 /// One pool's live seat counts: how many seats it has, how many a request
 /// could dispatch to right now, and why each of the others cannot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,3 +322,7 @@ impl PoolSeatTotals {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "status_login_label_tests.rs"]
+mod login_label_tests;

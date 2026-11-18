@@ -31,6 +31,7 @@ fn sample_target(circuit: CircuitPhase) -> RouteTargetStatus {
         seat_label: Some("seat-a".into()),
         learned_lane: StateKey::parse("anthropic#claude-opus-wire"),
         account: Some("anthropic#seat-a".into()),
+        login_label: Some("seat-a".into()),
         gate: ProviderGateStatus {
             reason: None,
             rpm_available: Some(12.0),
@@ -61,6 +62,7 @@ fn target_with_ages(
         seat_label: Some("seat-a".into()),
         learned_lane: StateKey::parse("anthropic#claude-opus-wire"),
         account: Some("anthropic#seat-a".into()),
+        login_label: Some("seat-a".into()),
         gate: ProviderGateStatus {
             reason: None,
             rpm_available: Some(12.0),
@@ -324,6 +326,38 @@ fn map_target_carries_event_surface_fields() {
     assert_eq!(mapped.circuit, "half_open_ready");
     assert_eq!(mapped.rpm_available, Some(12.0));
     assert!(mapped.half_open_probe_in_flight);
+}
+
+/// The seat's account key, its provider entry and its login label are three
+/// wire keys, so a reader never splits the account to find the label. A
+/// target with no login label still carries the key, as null.
+#[test]
+fn a_target_row_carries_account_provider_name_and_login_label_as_separate_keys() {
+    let rows: [(&str, Option<&str>, Value); 2] = [
+        ("labeled oauth seat", Some("work"), Value::from("work")),
+        ("no login label", None, Value::Null),
+    ];
+    for (name, label, expected) in rows {
+        let mut target = sample_target(CircuitPhase::Closed);
+        target.provider_name = "member-a".into();
+        target.account = Some("anthropic#work".into());
+        target.login_label = label.map(str::to_string);
+
+        let wire = serde_json::to_value(map_target(target, 1_000, None)).unwrap();
+
+        let obj = wire.as_object().unwrap();
+        assert_eq!(obj["account"], Value::from("anthropic#work"), "{name}");
+        assert_eq!(obj["provider_name"], Value::from("member-a"), "{name}");
+        assert!(obj.contains_key("login_label"), "{name}");
+        assert_eq!(obj["login_label"], expected, "{name}");
+    }
+}
+
+/// The login label is an added field, which the panel's versioning rule says
+/// does not bump the schema.
+#[test]
+fn the_health_schema_version_stays_9() {
+    assert_eq!(SCHEMA_VERSION, 9);
 }
 
 #[test]

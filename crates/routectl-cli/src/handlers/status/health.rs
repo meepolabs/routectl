@@ -31,9 +31,10 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::lane_cell::{ResolvedEntry, lapse_deadline_ms};
 use crate::server::seat_driver::SeatDriverHealthSnapshot;
 
-/// Wire-shape version of the health panel payload. Any change to the payload,
-/// an added field included, bumps it, and the dashboard's expected version
-/// moves with it in the same change.
+/// Wire-shape version of the health panel payload. A removed or renamed field,
+/// or a field whose meaning changes, bumps it, and the dashboard's expected
+/// version moves with it in the same change. An added field does not bump:
+/// readers ignore keys they do not know.
 ///
 /// 9: each target carries `account` and `eligibility`, and the panel gained
 /// `pools` and `seat_driver`.
@@ -126,6 +127,9 @@ struct TargetHealth {
     /// credential), or `None` for a target forwarding the client's
     /// credential.
     account: Option<String>,
+    /// The login label of an `oauth://<provider>#<label>` seat, or `None`
+    /// for an unlabeled seat, any other credential and a forwarded one.
+    login_label: Option<String>,
     eligibility: TargetEligibility,
     /// Snake_case circuit phase owned by this module (see [`circuit_token`]).
     circuit: &'static str,
@@ -287,6 +291,7 @@ fn map_target(target: RouteTargetStatus, now_ms: i64, fix: Option<String>) -> Ta
         upstream: target.upstream,
         seat_label: target.seat_label,
         account: target.account,
+        login_label: target.login_label,
         eligibility,
         circuit: circuit_token(target.gate.circuit),
         rpm_available: target.gate.rpm_available,

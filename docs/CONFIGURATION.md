@@ -5062,7 +5062,10 @@ Two structured panels render after the sections:
   Each `/status/health` target row also carries `account`, the credential
   account its park and unusable mark cover (`<provider>[#<label>]` for an
   `oauth://` seat, `#<entry>` for any other own credential, null for a
-  forwarded one), and `eligibility`: `reason` is why a request cannot
+  forwarded one), `login_label`, the `<label>` of an
+  `oauth://<provider>#<label>` credential (null for an unlabeled seat, any
+  other credential and a forwarded one; `seat_label` is the pool member's
+  provider entry, not the login), and `eligibility`: `reason` is why a request cannot
   dispatch to the target right now (`credential_unusable`, `account_parked`,
   `breaker_open` or `rate_limited`, read from the same side-effect-free
   snapshot placement reads; null when it can), `cause` the unusable cause
