@@ -67,7 +67,7 @@ fn parts_attaching_listeners(parts: &[(&str, &str)]) -> Vec<String> {
 
 /// The character index just past the call's closing parenthesis, given the
 /// index of its opening one.
-fn call_end(chars: &[char], open: usize) -> usize {
+pub(super) fn call_end(chars: &[char], open: usize) -> usize {
     let mut depth = 0i32;
     let mut i = open;
     while i < chars.len() {
@@ -93,7 +93,7 @@ fn call_end(chars: &[char], open: usize) -> usize {
 /// The argument texts of every CALL of `name` in `src` (comments stripped),
 /// split at the call's own top-level commas. The function's declaration is
 /// not a call and is skipped.
-fn call_args(src: &str, name: &str) -> Vec<Vec<String>> {
+pub(super) fn call_args(src: &str, name: &str) -> Vec<Vec<String>> {
     let src = strip_js_comments(src);
     let chars: Vec<char> = src.chars().collect();
     let needle: Vec<char> = format!("{name}(").chars().collect();
@@ -120,7 +120,7 @@ fn call_args(src: &str, name: &str) -> Vec<Vec<String>> {
     calls
 }
 
-fn split_args(body: &[char]) -> Vec<String> {
+pub(super) fn split_args(body: &[char]) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut depth = 0i32;
@@ -155,7 +155,7 @@ fn split_args(body: &[char]) -> Vec<String> {
 
 /// The value of a single-quoted string literal, or `None` for any other
 /// expression.
-fn quoted_literal(arg: &str) -> Option<String> {
+pub(super) fn quoted_literal(arg: &str) -> Option<String> {
     let inner = arg.strip_prefix('\'')?.strip_suffix('\'')?;
     (!inner.contains('\'')).then(|| inner.to_string())
 }

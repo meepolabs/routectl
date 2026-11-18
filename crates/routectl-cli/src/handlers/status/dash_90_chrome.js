@@ -105,7 +105,8 @@
   // duplicate, and checked against a closed vocabulary; a value outside it
   // falls back to the default and the address is rewritten canonical with
   // replaceState. scope is the one open value. It reaches the QUERY body and
-  // labels drawn with textContent, so it is only trimmed and bounded.
+  // labels drawn with textContent, so it is only trimmed, bounded and
+  // refused when it carries a control or format character (see scopeParam).
   //
   // A link from before the query keys, `#<view>[/<window>]`, still opens: an
   // old tab token goes through canonicalViewId, and the window segment is the
@@ -119,13 +120,23 @@
   var QUERY_MARK = '?';
   var VIEW_STATE_KEYS = ['range', 'scope', 'group', 'sort'];
   var SCOPE_MAX_CHARS = 128;
+  // The edge trim below backtracks quadratically on a long run of spaces, so
+  // a raw value longer than this is dropped before it runs.
+  var SCOPE_RAW_MAX_CHARS = SCOPE_MAX_CHARS * 4;
   // The server refuses a blank provider and counts U+0085 as blank, which
   // String.prototype.trim does not strip.
   var SCOPE_EDGE_SPACE = /^[\s\u0085]+|[\s\u0085]+$/g;
+  // Provider names are config identifiers. A control or format character
+  // (zero-width, bidi override) only makes a label read as a provider it is
+  // not.
+  var SCOPE_HIDDEN_CHAR = /[\p{Cc}\p{Cf}]/u;
   var SORT_DIRS = ['asc', 'desc'];
-  // Sortable tables by id, each with the column ids it sorts by. A sort key
-  // naming a table or column not registered here is dropped.
-  var SORT_TABLES = {};
+  // Sortable tables by id, each with the column ids it sorts by (the `sortBy`
+  // ids its mkTable call declares; a page test keeps the two equal). A sort
+  // key naming a table or column not registered here is dropped.
+  var SORT_TABLES = {
+    'config-models': ['model', 'provider', 'upstream']
+  };
   var selectedSort = null;         // `<table>.<column>.<dir>`, null = unsorted
 
   function defaultViewState() {
@@ -156,13 +167,29 @@
   }
 
   function scopeParam(raw) {
-    if (raw === null) { return null; }
+    if (raw === null || raw.length > SCOPE_RAW_MAX_CHARS) { return null; }
     var scope = raw.replace(SCOPE_EDGE_SPACE, '');
-    return (scope !== '' && scope.length <= SCOPE_MAX_CHARS) ? scope : null;
+    if (scope === '' || scope.length > SCOPE_MAX_CHARS) { return null; }
+    return SCOPE_HIDDEN_CHAR.test(scope) ? null : scope;
   }
 
   function isGroupBy(token) {
     return GROUP_BYS.some(function (g) { return g[0] === token; });
+  }
+
+  // The `sort-column` action: a header click on `<table>.<column>` sorts that
+  // column ascending, then descending, then back to builder order.
+  function onSortColumn(arg) {
+    if (terminal) { return; }
+    var next = nextSortKey(selectedSort, arg);
+    if (next !== null && !isSortKey(next)) { return; }
+    commitViewState({ sort: next });
+  }
+
+  function nextSortKey(current, column) {
+    if (current === column + '.asc') { return column + '.desc'; }
+    if (current === column + '.desc') { return null; }
+    return column + '.asc';
   }
 
   function isSortKey(token) {
@@ -319,6 +346,7 @@
     'provider-scope': function (arg) { onProviderScope(arg); },
     'provider-overflow': function () { onProviderOverflow(); },
     'group-by': function (arg) { if (arg) { onGroupBy(arg); } },
+    'sort-column': function (arg) { if (arg) { onSortColumn(arg); } },
     'seat-open': function (arg) { if (arg) { openSeatModal(arg); } },
     'seat-close': function () { closeSeatModal(); },
     // Only a click on the backdrop itself closes; a click that bubbled up

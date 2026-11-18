@@ -250,6 +250,29 @@
     return chain.then(function () { return out; });
   });
 
+  // How long the page's own load handler ran; that handler is where the page
+  // first reads the address. This snippet runs while the page is still
+  // parsing, after the page script registered its handler, so the mark comes
+  // before that handler and the listener below runs after it. A test that
+  // sets `routectlUrlLoadAddress` has it written in place here, before the
+  // handler reads it: a command line cannot carry a long address. Only this
+  // first load is timed, since headless virtual time stops the page clock in
+  // the tasks that come after it.
+  var loadMark = performance.now();
+  var loadHandledMs = null;
+  if (typeof window.routectlUrlLoadAddress === 'string') {
+    history.replaceState(null, '', window.routectlUrlLoadAddress);
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    loadHandledMs = performance.now() - loadMark;
+  });
+
+  d.scenario('url-scope-load-timing', function () {
+    return waitSettled().then(function () {
+      return { handled_ms: loadHandledMs, hash: location.hash, view: activeView() };
+    });
+  });
+
   // A scope that looks like markup is drawn as text: the label carries it
   // verbatim and no element is made from it.
   d.scenario('url-scope-text', function () {

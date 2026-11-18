@@ -214,14 +214,40 @@ fn scope_cases() -> Vec<ScopeCase> {
             Some("first"),
             "#now?scope=first",
         ),
+        scope_case(
+            "padding inside the raw bound trimmed",
+            &format!("{}x", "%20".repeat(511)),
+            Some("x"),
+            "#now?scope=x",
+        ),
+        scope_case(
+            "padding past the raw bound dropped",
+            &format!("{}x", "%20".repeat(512)),
+            None,
+            "#now",
+        ),
+        scope_case(
+            "zero-width space dropped",
+            "anthro%E2%80%8Bpic",
+            None,
+            "#now",
+        ),
+        scope_case("bidi override dropped", "%E2%80%AEcipohtna", None, "#now"),
+        scope_case("C0 control dropped", "anthro%01pic", None, "#now"),
+        scope_case("inner tab dropped", "anthro%09pic", None, "#now"),
+        scope_case("inner next-line dropped", "anthro%C2%85pic", None, "#now"),
     ]
 }
 
 /// The scope value classes the URLSearchParams parser can produce: each is
-/// trimmed, kept at up to 128 chars and dropped when blank or longer, and the
-/// QUERY sent for it carries exactly the kept value or no provider at all.
+/// trimmed, kept at up to 128 chars and dropped when blank or longer, longer
+/// than 512 before the trim, or carrying a control or format character, and
+/// the QUERY sent for it carries exactly the kept value or no provider at all.
+/// Non-ASCII text that is neither (the euro sign, U+FFFD) is kept.
 ///
-/// Mutation check: drop the length bound in scopeParam -> red (129/200 rows).
+/// Mutation checks: drop the length bound in scopeParam -> red (129/200
+/// rows); drop the control/format test -> red (the five dropped-character
+/// rows); drop the raw bound -> red (past-the-raw-bound row).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_scope_from_the_address_is_trimmed_bounded_and_sent_as_given() {
@@ -240,6 +266,61 @@ fn page_browser_a_scope_from_the_address_is_trimmed_bounded_and_sent_as_given() 
         assert_eq!(bodies.len(), 1, "{name}: one QUERY per arrival {report:#}");
         let provider = bodies[0].get("provider").and_then(Value::as_str);
         assert_eq!(provider, case.scope.as_deref(), "{name}: {report:#}");
+    }
+}
+
+/// A scope far past the raw bound is dropped without the edge trim ever
+/// running. Each row is one page load on that address, timed across the
+/// page's own load handler, which reads it; the address is then canonical.
+///
+/// Rows: 300,000 spaces then one letter (the shape a long link takes), and a
+/// letter, 300,000 spaces and a letter, the input the edge-trim regex
+/// backtracks on (the trim alone takes over a second at 80,000 spaces in
+/// Chrome). Positive control: the plain-scope row is kept, so the handler
+/// read the address the row wrote.
+///
+/// Mutation check: run the edge trim before the raw bound -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_an_overlong_scope_is_dropped_before_any_regex_runs() {
+    let spaces = "+".repeat(300_000);
+    let rows = [
+        (
+            "plain scope",
+            "#config?scope=anthropic".to_owned(),
+            "#config?scope=anthropic",
+        ),
+        (
+            "spaces then a letter",
+            format!("#config?scope={spaces}b"),
+            "#config",
+        ),
+        (
+            "spaces between letters",
+            format!("#config?scope=a{spaces}b"),
+            "#config",
+        ),
+    ];
+    for (name, address, canonical) in rows {
+        let set = format!(
+            "window.routectlUrlLoadAddress = {};",
+            serde_json::to_string(&address).expect("an address serializes")
+        );
+        let snippets: &'static [&'static str] =
+            Box::leak(vec![&*Box::leak(set.into_boxed_str()), URL_DRIVER].into_boxed_slice());
+        let scenario = browser::Scenario {
+            name: "url-scope-load-timing",
+            hash: "config",
+            snippets,
+            budget_ms: URL_BUDGET_MS,
+        };
+
+        let report = browser::run_scenario(&scenario).result;
+
+        assert_eq!(report["view"], "config", "`{name}`");
+        assert_eq!(report["hash"], canonical, "`{name}`");
+        let ms = report["handled_ms"].as_f64().expect("a duration");
+        assert!(ms < 50.0, "`{name}`: the load handler took {ms} ms");
     }
 }
 
@@ -336,7 +417,9 @@ fn page_browser_open_rows_dialogs_focus_and_scroll_stay_out_of_the_address() {
 
 // ---- source scan: where location and history are touched -------------------
 
-/// The spellings the guard's sites pattern matches.
+/// The spellings the guard's sites pattern matches, plus the other ways a
+/// script reaches the address: the document's own URL, navigation by method,
+/// and a bracket access on location or history.
 const SITE_NEEDLES: &[&str] = &[
     "location.hash",
     "location.search",
@@ -347,7 +430,61 @@ const SITE_NEEDLES: &[&str] = &[
     "hashchange",
     "popstate",
     "decodeURI",
+    "document.URL",
+    "location.assign",
+    "location.replace",
+    "location[",
+    "history[",
 ];
+
+/// Globals that hold the address. Any code reference to one, not only the
+/// spellings above, is a site: `var h = history; h.back()` or `location = x`.
+const ADDRESS_GLOBALS: &[&str] = &["location", "history"];
+
+/// Objects through which a global is reached as a member: `window.location`
+/// is the same object as `location`.
+const GLOBAL_HOLDERS: &[&str] = &["window", "self", "globalThis", "document"];
+
+/// Offsets in `code` (comments already stripped) of each identifier `name`
+/// that refers to the global: outside string literals, not part of a longer
+/// identifier, and either bare or a member of a global holder (`x.history` on
+/// any other object is not the global).
+fn global_references(code: &str, name: &str) -> Vec<usize> {
+    let chars: Vec<(usize, char)> = code.char_indices().collect();
+    let word: Vec<char> = name.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i].1;
+        if matches!(c, '\'' | '"' | '`') {
+            let plain: Vec<char> = chars.iter().map(|(_, c)| *c).collect();
+            i = skip_string_literal(&plain, i);
+            continue;
+        }
+        let at_word = chars.len() - i >= word.len()
+            && chars[i..i + word.len()]
+                .iter()
+                .map(|(_, c)| *c)
+                .eq(word.iter().copied());
+        let starts = i == 0 || !is_ident_char(chars[i - 1].1);
+        let ends = chars
+            .get(i + word.len())
+            .is_none_or(|(_, c)| !is_ident_char(*c));
+        if at_word && starts && ends {
+            let mut j = i;
+            while j > 0 && chars[j - 1].1.is_whitespace() {
+                j -= 1;
+            }
+            if j == 0 || chars[j - 1].1 != '.' || member_of_global_holder(&chars[..j - 1]) {
+                found.push(chars[i].0);
+            }
+            i += word.len();
+            continue;
+        }
+        i += 1;
+    }
+    found
+}
 
 /// The codec functions allowed to touch location and history.
 const CODEC_FUNCTIONS: &[&str] = &[
@@ -408,16 +545,22 @@ fn stray_url_sites(src: &str) -> (Vec<(&'static str, usize)>, usize) {
     let listeners: Vec<usize> = code.match_indices(URL_LISTENER).map(|(at, _)| at).collect();
     assert_eq!(listeners.len(), 1, "exactly one address listener");
     allowed.push(listeners[0]..listeners[0] + URL_LISTENER.len());
-    let mut stray = Vec::new();
-    let mut total = 0;
+    let mut sites: Vec<(&'static str, usize)> = Vec::new();
     for needle in SITE_NEEDLES {
-        for (at, _) in code.match_indices(needle) {
-            total += 1;
-            if !allowed.iter().any(|span| span.contains(&at)) {
-                stray.push((*needle, at));
-            }
-        }
+        sites.extend(code.match_indices(needle).map(|(at, _)| (*needle, at)));
     }
+    for name in ADDRESS_GLOBALS {
+        sites.extend(
+            global_references(&code, name)
+                .into_iter()
+                .map(|at| (*name, at)),
+        );
+    }
+    let total = sites.len();
+    let stray = sites
+        .into_iter()
+        .filter(|(_, at)| !allowed.iter().any(|span| span.contains(at)))
+        .collect();
     (stray, total)
 }
 
@@ -443,18 +586,116 @@ fn the_page_touches_location_and_history_only_in_the_view_state_codec() {
     assert!(total >= 6, "the scan found only {total} sites");
 }
 
-/// The scan reports a site outside the codec, and one inside it is allowed.
-#[test]
-fn the_url_site_scan_flags_a_read_outside_the_codec() {
+/// Whether `before` (the text ahead of a `.`) ends in a global holder name.
+fn member_of_global_holder(before: &[(usize, char)]) -> bool {
+    let mut end = before.len();
+    while end > 0 && before[end - 1].1.is_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && is_ident_char(before[start - 1].1) {
+        start -= 1;
+    }
+    let object: String = before[start..end].iter().map(|(_, c)| *c).collect();
+    let preceded_by_dot = start > 0 && before[start - 1].1 == '.';
+    !preceded_by_dot && GLOBAL_HOLDERS.contains(&object.as_str())
+}
+
+/// A synthetic page whose codec functions all read `location.hash`, plus the
+/// one listener, followed by `extra`.
+fn synthetic_codec_page(extra: &str) -> String {
     let codec: String = CODEC_FUNCTIONS
         .iter()
         .map(|name| format!("function {name}() {{ return location.hash; }}\n"))
         .collect();
-    let clean = format!("{codec}{URL_LISTENER}\n");
-    let dirty = format!("{clean}function other() {{ history.pushState(null, '', '#x'); }}\n");
+    format!("{codec}{URL_LISTENER}\n{extra}")
+}
 
-    assert_eq!(stray_url_sites(&clean).0, Vec::new());
-    let (stray, _) = stray_url_sites(&dirty);
-    assert_eq!(stray.len(), 1, "{stray:?}");
-    assert_eq!(stray[0].0, "history.pushState");
+/// Each spelling outside the codec is reported under the needle or global
+/// that names it. Every row also yields the bare-global hit where it spells
+/// `location` or `history`, so the row's expected list is exact.
+#[test]
+fn the_url_site_scan_flags_a_read_outside_the_codec() {
+    let rows: &[(&str, &str, &[&str])] = &[
+        (
+            "pushState",
+            "history.pushState(null, '', '#x');",
+            &["history.pushState", "history"],
+        ),
+        ("document URL", "var u = document.URL;", &["document.URL"]),
+        (
+            "assign",
+            "location.assign('#x');",
+            &["location.assign", "location"],
+        ),
+        (
+            "replace",
+            "location.replace('#x');",
+            &["location.replace", "location"],
+        ),
+        (
+            "location bracket",
+            "var h = location['hash'];",
+            &["location[", "location"],
+        ),
+        (
+            "history bracket",
+            "history['back']();",
+            &["history[", "history"],
+        ),
+        ("history alias", "var h = history; h.back();", &["history"]),
+        ("location write", "location = '#x';", &["location"]),
+        ("window member", "var l = window.location;", &["location"]),
+        (
+            "document member",
+            "document.location.hash = 'x';",
+            &["location.hash", "location"],
+        ),
+    ];
+    for (name, extra, expected) in rows {
+        let src = synthetic_codec_page(&format!("function other() {{ {extra} }}\n"));
+
+        let mut flagged: Vec<&str> = stray_url_sites(&src).0.iter().map(|(n, _)| *n).collect();
+        flagged.sort_unstable();
+        let mut want = expected.to_vec();
+        want.sort_unstable();
+
+        assert_eq!(flagged, want, "`{name}`: {extra}");
+    }
+}
+
+/// The negative controls: the codec's own uses, a member of another object
+/// named like a global, a longer identifier, a global's bare name inside a
+/// string, and anything in a comment are not sites. (A full needle such as
+/// `location.hash` is flagged even inside a string: a string can become a
+/// bracket key or an evaluated name.)
+#[test]
+fn the_url_site_scan_ignores_members_strings_comments_and_the_codec() {
+    let rows: &[(&str, &str)] = &[
+        ("codec only", ""),
+        (
+            "member of another object",
+            "var n = rec.history.length; x.location = 1;",
+        ),
+        (
+            "longer identifier",
+            "var historyRows = 1; var relocation = 2;",
+        ),
+        (
+            "bare words in a string",
+            "var label = 'all-history usage at this location';",
+        ),
+        ("comment", "// history.pushState(location.hash)\n"),
+    ];
+    for (name, extra) in rows {
+        let src = synthetic_codec_page(extra);
+
+        let (stray, total) = stray_url_sites(&src);
+
+        assert_eq!(stray, Vec::new(), "`{name}`");
+        assert!(
+            total >= CODEC_FUNCTIONS.len(),
+            "`{name}`: the codec reads went unseen"
+        );
+    }
 }

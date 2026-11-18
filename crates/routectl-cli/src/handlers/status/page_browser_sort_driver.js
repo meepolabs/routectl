@@ -1,0 +1,198 @@
+// ---- scenarios: the shared sortable table ---------------------------------
+//
+// Test-only snippet injected after page_browser_driver.js. A scenario that
+// needs a reading the fixtures do not carry sets `configPatch`, which rewrites
+// the config panel of every /status answer before the page sees it; the
+// models it edits are the ones the real panel serialized.
+(function (d) {
+  'use strict';
+
+  var TABLE = 'config-models';
+  var configPatch = null;
+
+  var inner = window.fetch;
+  window.fetch = function (input, init) {
+    var url = new URL(String(input), location.href);
+    return inner(input, init).then(function (resp) {
+      if (url.pathname !== '/status' || !resp.ok || !configPatch) { return resp; }
+      var patch = configPatch;
+      return resp.json().then(function (json) {
+        patch(json.panels.config.data.models, json.panels.config.data);
+        return new Response(JSON.stringify(json), {
+          status: resp.status,
+          statusText: resp.statusText,
+          headers: resp.headers
+        });
+      });
+    });
+  };
+
+  function byId(id) {
+    var node = document.getElementById(id);
+    if (!node) { throw new Error('no element #' + id); }
+    return node;
+  }
+
+  function headerButton(column) {
+    return byId(TABLE + '-sort-k' + column);
+  }
+
+  function modelRows() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll('#' + TABLE + ' tbody tr.exp-row'));
+  }
+
+  // The nicknames in the order the table shows them.
+  function order() {
+    return modelRows().map(function (tr) {
+      return tr.querySelector('th[scope="row"]').textContent;
+    });
+  }
+
+  // Every row's detail row sits right after it.
+  function detailsFollowRows() {
+    return modelRows().every(function (tr) {
+      var next = tr.nextElementSibling;
+      return !!next && next.id === tr.id + '-detail';
+    });
+  }
+
+  // Which header says it is sorted, and how: { <column label>: aria-sort }.
+  function ariaSort() {
+    var out = {};
+    var heads = document.querySelectorAll('#' + TABLE + ' thead th[aria-sort]');
+    Array.prototype.forEach.call(heads, function (th) {
+      out[th.textContent] = th.getAttribute('aria-sort');
+    });
+    return out;
+  }
+
+  function tableReport(base) {
+    return {
+      order: order(),
+      aria_sort: ariaSort(),
+      hash: location.hash,
+      added: history.length - base,
+      details_follow_rows: detailsFollowRows()
+    };
+  }
+
+  function waitForTable() {
+    return d.waitUntil('the models table', function () {
+      return document.getElementById(TABLE) && modelRows().length > 0;
+    });
+  }
+
+  // Header clicks sort ascending then descending, and the address follows;
+  // the descending order survives a reload; a third click restores builder
+  // order. The driver runs on each load; sessionStorage says which side of
+  // the reload this one is.
+  var RELOAD_KEY = 'routectl-sort-reload';
+  d.scenario('sort-click-reload', function () {
+    var before = sessionStorage.getItem(RELOAD_KEY);
+    if (before === null) {
+      return waitForTable().then(function () {
+        var base = history.length;
+        var out = { unsorted: tableReport(base) };
+        headerButton('provider').click();
+        out.asc = tableReport(base);
+        headerButton('provider').click();
+        out.desc = tableReport(base);
+        sessionStorage.setItem(RELOAD_KEY, JSON.stringify(out));
+        location.reload();
+        return new Promise(function () {});
+      });
+    }
+    return waitForTable().then(function () {
+      var out = JSON.parse(before);
+      var base = history.length;
+      out.reloaded = tableReport(base);
+      headerButton('provider').click();
+      out.cleared = tableReport(base);
+      return out;
+    });
+  });
+
+  // A sort keeps the focused header and an open row's nodes, and so do the
+  // refreshes after it.
+  d.scenario('sort-keeps-nodes', function () {
+    var header;
+    var toggle;
+    var detail;
+    var unsorted;
+    function observe() {
+      return {
+        order: order(),
+        same_header: header === document.getElementById(header.id),
+        header_focused: document.activeElement === header,
+        same_detail: detail === document.getElementById(detail.id),
+        expanded: byId(toggle.id).getAttribute('aria-expanded') === 'true',
+        detail_shown: !byId(detail.id).hidden,
+        details_follow_rows: detailsFollowRows(),
+        aria_sort: ariaSort(),
+        figure: document.querySelector('#body-config .cfgstrip').textContent
+      };
+    }
+    return waitForTable().then(function () {
+      toggle = byId(TABLE + '-kglm-toggle');
+      toggle.click();
+      detail = byId(TABLE + '-kglm-detail');
+      unsorted = order();
+      header = headerButton('upstream');
+      header.focus();
+      header.click();
+      var sorted = observe();
+      return d.acrossRounds('/status', 2, observe).then(function (rounds) {
+        return { unsorted: unsorted, sorted: sorted, rounds: rounds };
+      });
+    });
+  });
+
+  // A reading with an absent upstream and two models sharing one, served in
+  // reverse nickname order so a sort that kept builder order on a tie would
+  // show.
+  d.scenario('sort-null-and-tie', function () {
+    configPatch = function (models) {
+      models.reverse();
+      models.forEach(function (m) {
+        if (m.nickname === 'bedclaude') { m.upstream = null; }
+      });
+    };
+    return waitForTable().then(function () {
+      var base = history.length;
+      var out = { unsorted: tableReport(base) };
+      out.null_cell = byId(TABLE + '-kbedclaude').querySelectorAll('td')[2].textContent;
+      headerButton('upstream').click();
+      out.asc = tableReport(base);
+      headerButton('upstream').click();
+      out.desc = tableReport(base);
+      return out;
+    });
+  });
+
+  function sectionReport() {
+    var body = byId('body-config');
+    return {
+      titles: Array.prototype.map.call(body.querySelectorAll('.card-title'),
+        function (n) { return n.textContent; }),
+      tables: Array.prototype.map.call(body.querySelectorAll('table'),
+        function (t) { return t.id; }),
+      error_cards: body.querySelectorAll('.unavailable-msg').length
+    };
+  }
+
+  // Two models sharing a nickname error the models section alone. The first
+  // observation is the same page before the duplicate arrives.
+  d.scenario('sort-duplicate-key', function () {
+    return waitForTable().then(function () {
+      var out = { clean: sectionReport() };
+      configPatch = function (models) {
+        models.push(JSON.parse(JSON.stringify(models[0])));
+      };
+      return d.waitFor('/status', 1).then(function () {
+        out.duplicate = sectionReport();
+        return out;
+      });
+    });
+  });
+})(window.routectlDriver);

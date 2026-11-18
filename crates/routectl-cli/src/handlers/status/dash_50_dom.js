@@ -22,6 +22,7 @@
   //   <table>-<idKey(row key)>        a table row
   //   <row id>-toggle / -detail       that row's disclosure button / detail row
   //   <table>-wrap                    the table's scroll container
+  //   <table>-sort-<idKey(column)>    a sortable column's header button
   //   <view>-<name>-<idKey(key)>      a control keyed by data (a provider card)
   //   <view>-<name>-<idKey(key)>...   a repeated list item (see uniqueItemId)
   //
@@ -65,12 +66,31 @@
     if (arg !== null && arg !== undefined) { node.setAttribute('data-arg', String(arg)); }
   }
 
+  // A sortable column: `id` names it in the address
+  // (`sort=<table>.<id>.<asc|desc>`) and `value(row)` is what it sorts by, a
+  // number or a string of one type per column, or null when the row has none.
+  function sortBy(col, id, value) {
+    var out = {};
+    Object.keys(col).forEach(function (k) { out[k] = col[k]; });
+    out.sortId = id;
+    out.sortValue = value;
+    return out;
+  }
+
   // Build a table with a visually-hidden caption, `scope="col"` headers,
   // and per-column alignment metadata. `id` is the table's stable id (see the
   // scheme above). `opts.expandable` prepends a leading control column whose
-  // cells carry a disclosure button.
+  // cells carry a disclosure button. `opts.sortable` turns each `sortBy`
+  // column header into a button; it needs `opts.rowKey(row)`, and its rows
+  // are added through fillRows.
   function mkTable(id, caption, cols, opts) {
     var expandable = !!(opts && opts.expandable);
+    var sortable = !!(opts && opts.sortable);
+    var rowKey = (opts && opts.rowKey) || null;
+    if (sortable && typeof rowKey !== 'function') {
+      throw new Error(id + ': a sortable table needs a rowKey');
+    }
+    var sort = sortable ? tableSort(id, cols) : null;
     var t = document.createElement('table');
     t.id = id;
     var cap = document.createElement('caption');
@@ -89,18 +109,95 @@
       hr.appendChild(eth);
     }
     cols.forEach(function (col) {
-      var th = document.createElement('th');
-      th.scope = 'col';
-      th.textContent = col.label;
-      if (col.title) { th.title = col.title; }
-      if (col.num) { th.className = 'num'; }
-      hr.appendChild(th);
+      hr.appendChild(headerCell(id, col, sortable && !!col.sortId, sort));
     });
     thead.appendChild(hr);
     t.appendChild(thead);
     var tb = document.createElement('tbody');
     t.appendChild(tb);
-    return { t: t, tb: tb, cols: cols, id: id, expandable: expandable };
+    return { t: t, tb: tb, cols: cols, id: id, expandable: expandable, rowKey: rowKey, sort: sort };
+  }
+
+  // One column header. A sortable one holds a button carrying the
+  // `sort-column` action, and the header of the sorted column says which way
+  // through `aria-sort`.
+  function headerCell(tableId, col, sortable, sort) {
+    var th = document.createElement('th');
+    th.scope = 'col';
+    if (col.title) { th.title = col.title; }
+    if (col.num) { th.className = 'num'; }
+    if (!sortable) {
+      th.textContent = col.label;
+      return th;
+    }
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = tableId + '-sort-' + idKey(col.sortId);
+    btn.className = 'sort-btn';
+    btn.textContent = col.label;
+    setAction(btn, 'sort-column', tableId + '.' + col.sortId);
+    if (sort && sort.col === col) {
+      th.setAttribute('aria-sort', sort.dir === 'desc' ? 'descending' : 'ascending');
+    }
+    th.appendChild(btn);
+    return th;
+  }
+
+  // The page's sort selection (`selectedSort`, `<table>.<column>.<dir>`) as it
+  // applies to table `tableId`: the sorted column and direction, or null.
+  function tableSort(tableId, cols) {
+    if (!selectedSort) { return null; }
+    var parts = selectedSort.split('.');
+    if (parts[0] !== tableId) { return null; }
+    for (var i = 0; i < cols.length; i++) {
+      if (cols[i].sortId === parts[1]) { return { col: cols[i], dir: parts[2] }; }
+    }
+    return null;
+  }
+
+  // Add `rows` to a keyed table through `emit(row, key)`: in builder order
+  // when the table is unsorted, else sorted on a copy by the sorted column,
+  // absent values last in both directions and ties by row key ascending. A
+  // row without a non-empty string key, or with another row's key, throws:
+  // two rows sharing an id cannot both keep their nodes, so the section's
+  // boundary draws its error card instead.
+  function fillRows(tbl, rows, emit) {
+    var keyed = rows.map(function (row) { return { row: row, key: tbl.rowKey(row) }; });
+    checkRowKeys(tbl.id, keyed);
+    if (tbl.sort) {
+      var value = tbl.sort.col.sortValue;
+      keyed.forEach(function (k) { k.value = value(k.row); });
+      keyed.sort(rowComparator(tbl.sort.dir === 'desc' ? -1 : 1));
+    }
+    keyed.forEach(function (k) { emit(k.row, k.key); });
+  }
+
+  function checkRowKeys(tableId, keyed) {
+    var seen = Object.create(null);
+    keyed.forEach(function (k) {
+      if (typeof k.key !== 'string' || k.key === '') {
+        throw new Error(tableId + ': a row has no key');
+      }
+      if (seen[k.key]) { throw new Error(tableId + ': two rows share a key'); }
+      seen[k.key] = true;
+    });
+  }
+
+  function isAbsentSortValue(v) {
+    return v === null || v === undefined || (typeof v === 'number' && isNaN(v));
+  }
+
+  function rowComparator(sign) {
+    return function (a, b) {
+      var aAbsent = isAbsentSortValue(a.value);
+      var bAbsent = isAbsentSortValue(b.value);
+      if (aAbsent !== bAbsent) { return aAbsent ? 1 : -1; }
+      if (!aAbsent) {
+        var byValue = a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
+        if (byValue) { return byValue * sign; }
+      }
+      return a.key < b.key ? -1 : (a.key > b.key ? 1 : 0);
+    };
   }
 
   // A table wrapped so it scrolls INSIDE its card: the page itself never

@@ -48,6 +48,23 @@ td.wrap {
   max-width: 24rem;
 }
 
+/* ---- sortable column headers ---- */
+.sort-btn {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.sort-btn:hover { color: var(--fg); }
+.sort-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+th[aria-sort] .sort-btn { color: var(--fg); }
+th[aria-sort="ascending"] .sort-btn::after { content: " ^"; }
+th[aria-sort="descending"] .sort-btn::after { content: " v"; }
+
 /* ---- expandable rows ---- */
 .exp-cell { width: 1.6rem; text-align: center; }
 .exp-btn {

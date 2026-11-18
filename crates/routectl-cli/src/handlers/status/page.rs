@@ -1911,6 +1911,11 @@ mod tests {
         include!("page_browser_url_tests.rs");
     }
 
+    mod browser_sort {
+        use super::*;
+        include!("page_browser_sort_tests.rs");
+    }
+
     mod browser_epoch {
         use super::*;
         include!("page_browser_epoch_tests.rs");

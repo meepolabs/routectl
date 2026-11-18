@@ -5,7 +5,10 @@
   // malformed payload replaces the entire tab rather than rendering the parts
   // that happen to parse. Single-source, so the tab-wide `safeSection` IS that
   // posture -- there is no second record to confine a failure to, and no
-  // section is built before the whole payload has been validated below.
+  // section is built before the whole payload has been validated below. The
+  // one exception is a section whose rows cannot be drawn as given (two models
+  // sharing a nickname): that is a fault of its rows, not of the vocabulary,
+  // so it errors that section alone.
   function buildConfig(rec) {
     return safeSection(rec, buildConfigLive);
   }
@@ -36,7 +39,9 @@
     // activation inventory describes what routectl WOULD do, so both stay
     // useful on a config that names nothing yet.
     appendIfAny(stack, data.aliases, aliasSection);
-    appendIfAny(stack, data.models, modelSection);
+    appendIfAny(stack, data.models, function (models) {
+      return safeSection(rec, function () { return modelSection(models); });
+    });
     appendIfAny(stack, data.providers, providerSection);
     appendIfAny(stack, data.capabilities, capabilitySection);
     appendIfAny(stack, data.activation, activationSection);
@@ -162,17 +167,26 @@
   // One row per `[models.X]` entry. The model facts (window, output fill,
   // prices, each with its source) sit in the detail row: they are reference figures an operator opens, not a reading to
   // scan.
+  // Sortable by its three visible columns and keyed by nickname, which the
+  // config makes unique; a payload breaking that throws in fillRows.
   function modelSection(models) {
-    var tbl = mkTable('config-models', 'Configured models',
-      [R('model'), C('provider'), C('upstream')], { expandable: true });
-    models.forEach(function (m) { modelRow(tbl, m); });
+    var tbl = mkTable('config-models', 'Configured models', [
+      sortBy(R('model'), 'model', function (m) { return textSortValue(m.nickname); }),
+      sortBy(C('provider'), 'provider', function (m) { return textSortValue(m.provider); }),
+      sortBy(C('upstream'), 'upstream', function (m) { return textSortValue(m.upstream); })
+    ], { expandable: true, sortable: true, rowKey: function (m) { return m.nickname; } });
+    fillRows(tbl, models, function (m, key) { modelRow(tbl, m, key); });
     return card('Models', 'what each name dispatches to, and where its facts come from',
       tableScroll(tbl));
   }
 
-  function modelRow(tbl, m) {
+  function textSortValue(v) {
+    return typeof v === 'string' ? v : null;
+  }
+
+  function modelRow(tbl, m, key) {
     var prices = Array.isArray(m.prices) ? m.prices : [];
-    xrow(tbl, m.nickname,
+    xrow(tbl, key,
       [m.nickname, m.provider, m.upstream],
       presentPairs([
         ['provider kind', m.provider_kind],
