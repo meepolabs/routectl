@@ -81,14 +81,10 @@ pub struct Offer {
 
 impl Offer {
     /// The `--login` vendor to hand `provider add` for this offer: an oauth
-    /// offer maps to `anthropic`, every other source to `None`. This mapping
-    /// is only sound because detection restricts oauth offers to the
-    /// `anthropic` login id (see `detect::OAUTH_OFFERABLE_IDS`); an offer for
-    /// another id would be wired as an anthropic login. Keep the two in
-    /// lockstep.
+    /// offer's own vendor, every other source `None`.
     pub const fn provider_add_login(&self) -> Option<&'static str> {
         match self.source {
-            OfferSource::Oauth => Some("anthropic"),
+            OfferSource::Oauth { vendor } => Some(vendor),
             _ => None,
         }
     }
@@ -98,7 +94,7 @@ impl Offer {
     /// offer, or a family with no single base-URL format.
     pub fn provider_add_format(&self) -> Option<&'static str> {
         use routectl_core::provider_kind::config as family;
-        if self.source == OfferSource::Oauth {
+        if matches!(self.source, OfferSource::Oauth { .. }) {
             return None;
         }
         match self.kind.as_str() {
@@ -113,7 +109,11 @@ impl Offer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfferSource {
-    Oauth,
+    /// A managed login of `vendor`, one of the logins `provider add --login`
+    /// builds.
+    Oauth {
+        vendor: &'static str,
+    },
     Env,
     Forwarded,
     /// Synthesis-only: a credential the operator will type at the interactive
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_add_flags_map_oauth_to_the_login_and_the_rest_to_a_format() {
+    fn provider_add_flags_map_oauth_to_its_vendor_login_and_the_rest_to_a_format() {
         let offer = |kind: &str, source| Offer {
             provider_name: "claude".into(),
             kind: kind.into(),
@@ -396,9 +396,20 @@ mod tests {
         };
         let rows = [
             (
-                "oauth",
-                offer("anthropic-api", OfferSource::Oauth),
+                "anthropic oauth",
+                offer(
+                    "anthropic-api",
+                    OfferSource::Oauth {
+                        vendor: "anthropic",
+                    },
+                ),
                 Some("anthropic"),
+                None,
+            ),
+            (
+                "codex oauth",
+                offer("openai-responses", OfferSource::Oauth { vendor: "codex" }),
+                Some("codex"),
                 None,
             ),
             (

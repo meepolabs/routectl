@@ -29,7 +29,7 @@ use routectl_cli::commands::init::{self, CredentialCapture, InitArgs, InitIo, Of
 use routectl_cli::commands::provider_add::{self, AddIo, AddResult, ProviderAddArgs};
 use routectl_core::Result;
 use routectl_router::{
-    Auth, CURRENT_CONFIG_VERSION as CURRENT, Config, build_provider, parse_config,
+    Auth, CURRENT_CONFIG_VERSION as CURRENT, Config, ProviderEntry, build_provider, parse_config,
 };
 use routectl_testkit::ScopedEnv;
 use tokio::net::TcpListener;
@@ -464,6 +464,74 @@ async fn empty_offer_api_key_capture_wires_a_file_backed_provider() {
     );
     let store: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
     assert_config_boots(&text, "anthropic", store).await;
+}
+
+// ---------------------------------------------------------------------
+// Detected managed login -> provider entry: a stored login of each vendor
+// `provider add --login` builds is detected from credentials.json, offered,
+// and written as that vendor's own entry under `--yes`.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+#[serial_test::serial]
+async fn yes_writes_a_detected_login_as_the_vendors_own_entry() {
+    let rows = [
+        (
+            "anthropic",
+            MODEL_ID,
+            "anthropic-messages",
+            "https://api.anthropic.com",
+        ),
+        (
+            "codex",
+            "gpt-5",
+            "openai-responses",
+            "https://chatgpt.com/backend-api/codex",
+        ),
+    ];
+    for (vendor, model, format, base_url) in rows {
+        // Arrange
+        let _xdg = scope_xdg();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        provision_login_token(vendor);
+
+        // Act
+        init::run_with_io(
+            &path,
+            init_args(false, true, Some(model), false),
+            &StubInitIo::default(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("row `{vendor}`: init failed: {e}"));
+
+        // Assert
+        let text = std::fs::read_to_string(&path).unwrap();
+        let config = parse_config(&text).expect("produced config reparses");
+        routectl_cli::commands::config::check(&config, Some(&text))
+            .await
+            .unwrap_or_else(|e| panic!("row `{vendor}`: config check refused: {e}"));
+        let written = config.providers.get(vendor).expect("vendor entry written");
+        let credential = format!("oauth://{vendor}");
+        let expected = ProviderEntry::for_managed_login(vendor, credential.as_str())
+            .expect("vendor has a managed entry");
+        assert_eq!(
+            serde_json::to_value(written).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+            "row `{vendor}`:\n{text}"
+        );
+        assert_eq!(written.api_key_ref(), Some(credential.as_str()));
+        for line in [
+            format!("format = \"{format}\""),
+            format!("base_url = \"{base_url}\""),
+        ] {
+            assert!(
+                text.contains(&line),
+                "row `{vendor}` lacks `{line}`:\n{text}"
+            );
+        }
+        assert_eq!(default_alias_of(&config).as_deref(), Some(vendor));
+    }
 }
 
 // ---------------------------------------------------------------------

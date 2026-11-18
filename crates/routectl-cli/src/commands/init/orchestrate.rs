@@ -154,13 +154,15 @@ fn capture_missing_credential(args: &InitArgs, io: &dyn InitIo) -> Option<Offer>
 }
 
 /// The synthesized oauth offer for the empty-offer capture branch: the
-/// `anthropic` login id (the sole id `provider add` builds an oauth block for),
-/// wired post-confirm through `io.login` exactly as a detected oauth offer is.
+/// `anthropic` login, wired post-confirm through `io.login` exactly as a
+/// detected oauth offer is.
 fn oauth_capture_offer() -> Offer {
     Offer {
         provider_name: "anthropic".to_string(),
         kind: "anthropic-api".to_string(),
-        source: OfferSource::Oauth,
+        source: OfferSource::Oauth {
+            vendor: "anthropic",
+        },
         credential_class: "oauth".to_string(),
     }
 }
@@ -636,7 +638,9 @@ mod tests {
         let offers = vec![Offer {
             provider_name: "a".into(),
             kind: "anthropic-api".into(),
-            source: OfferSource::Oauth,
+            source: OfferSource::Oauth {
+                vendor: "anthropic",
+            },
             credential_class: "oauth".into(),
         }];
         assert_eq!(io.select_offers(&offers), vec![0, 2]);
@@ -1224,16 +1228,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_oauth_offer_still_wires_end_to_end() {
-        // The finding-1 restriction removes only the MISROUTING non-anthropic
-        // oauth offers; the supported anthropic oauth offer must still compose
-        // through the `anthropic` sentinel into an `oauth://anthropic` ref.
+    async fn anthropic_oauth_offer_wires_end_to_end() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let offer = Offer {
             provider_name: "anthropic".to_string(),
             kind: "anthropic-api".to_string(),
-            source: OfferSource::Oauth,
+            source: OfferSource::Oauth {
+                vendor: "anthropic",
+            },
             credential_class: "oauth".to_string(),
         };
         let fake = FakeInitIo {

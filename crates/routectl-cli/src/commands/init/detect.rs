@@ -10,6 +10,7 @@ use routectl_auth::{LocalProbe, env_ref};
 use routectl_router::{ActivationStatus, Config, compute_activation};
 
 use super::{Offer, OfferSource};
+use crate::commands::provider_add::LOGIN_VALUES;
 use crate::commands::provider_env::env_var_for_kind;
 
 /// Provider kinds an env-detected credential may be OFFERED for. Restricted
@@ -21,13 +22,11 @@ use crate::commands::provider_env::env_var_for_kind;
 /// surfaced by no offer even when it resolves.
 const ENV_OFFERABLE_KINDS: &[&str] = &[routectl_core::provider_kind::config::ANTHROPIC_API];
 
-/// OAuth login ids `init` may OFFER. `Offer::provider_add_login` hands every
-/// oauth offer to `provider add --login anthropic`, so an offer for any other
-/// activated login id (`codex`, `xai`, `antigravity`) would wire
-/// `oauth://anthropic` under a foreign name; such an id is surfaced by no
-/// offer until that mapping carries the vendor. Mirrors
-/// [`ENV_OFFERABLE_KINDS`].
-const OAUTH_OFFERABLE_IDS: &[&str] = &["anthropic"];
+/// OAuth login ids `init` may OFFER: exactly the managed logins `provider add
+/// --login` builds an entry for, since init writes providers only through
+/// `provider add`. An activated id outside this set (`xai`, `antigravity`) is
+/// surfaced by no offer.
+const OAUTH_OFFERABLE_IDS: &[&str] = &LOGIN_VALUES;
 
 /// The config kind the forwarded (MITM/RC) lane routes through.
 const FORWARDED_KIND: &str = routectl_core::provider_kind::config::ANTHROPIC_API;
@@ -61,16 +60,22 @@ pub fn detect_offers(config: &Config, probes: &[(&str, LocalProbe)]) -> Vec<Offe
 fn collect_oauth_offers(config: &Config, probes: &[(&str, LocalProbe)], offers: &mut Vec<Offer>) {
     let state = compute_activation(probes, config);
     for (oauth_id, entry) in state.iter() {
-        if matches!(entry.status, ActivationStatus::Activated)
-            && OAUTH_OFFERABLE_IDS.contains(&oauth_id)
-        {
-            offers.push(Offer {
-                provider_name: oauth_id.to_string(),
-                kind: entry.provider_kind.to_string(),
-                source: OfferSource::Oauth,
-                credential_class: "oauth".to_string(),
-            });
+        if !matches!(entry.status, ActivationStatus::Activated) {
+            continue;
         }
+        let Some(vendor) = OAUTH_OFFERABLE_IDS
+            .iter()
+            .copied()
+            .find(|id| *id == oauth_id)
+        else {
+            continue;
+        };
+        offers.push(Offer {
+            provider_name: oauth_id.to_string(),
+            kind: entry.provider_kind.to_string(),
+            source: OfferSource::Oauth { vendor },
+            credential_class: "oauth".to_string(),
+        });
     }
 }
 
@@ -118,7 +123,7 @@ pub(super) fn forwarded_offer() -> Offer {
 /// explicitly (declaration order); ties break on kind then provider name.
 const fn offer_sort_key(offer: &Offer) -> (u8, &str, &str) {
     let source_rank = match offer.source {
-        OfferSource::Oauth => 0,
+        OfferSource::Oauth { .. } => 0,
         OfferSource::Env => 1,
         OfferSource::Forwarded => 2,
         OfferSource::ApiKeyPrompt => 3,
@@ -139,63 +144,74 @@ mod tests {
     /// The conventional var whose presence drives the sole env offer.
     const ANTHROPIC_ENV_VAR: &str = "ANTHROPIC_API_KEY";
 
-    #[test]
-    #[serial_test::serial]
-    fn oauth_present_cataloged_kind_yields_an_offer() {
-        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
-        let cfg = Config::default();
-        let offers = detect_offers(&cfg, &[("anthropic", LocalProbe::Present)]);
-
-        assert_eq!(offers.len(), 1);
-        let offer = &offers[0];
-        assert_eq!(offer.source, OfferSource::Oauth);
-        assert_eq!(offer.kind, "anthropic-api");
-        assert_eq!(offer.provider_name, "anthropic");
-        assert_eq!(offer.credential_class, "oauth");
-    }
+    /// Managed logins `provider add --login` does not build.
+    const NON_OFFERABLE_IDS: [&str; 2] = ["xai", "antigravity"];
 
     #[test]
     #[serial_test::serial]
-    fn oauth_missing_expired_or_non_offerable_yields_no_offer() {
+    fn activated_anthropic_and_codex_probes_each_yield_an_offer_of_their_vendor() {
         let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
-        // `codex` missing / `xai` expired -> Unresolved. `antigravity`
-        // (gemini) activates on the present probe, but it is outside
-        // `OAUTH_OFFERABLE_IDS` (no oauth constructor for it), so it still
-        // yields no offer.
+
         let offers = detect_offers(
             &cfg,
             &[
-                ("codex", LocalProbe::Missing),
-                ("xai", LocalProbe::Expired),
-                ("antigravity", LocalProbe::Present),
+                ("anthropic", LocalProbe::Present),
+                ("codex", LocalProbe::Present),
             ],
         );
+
+        let expected = [
+            ("anthropic", "anthropic-api"),
+            ("codex", "openai-responses"),
+        ]
+        .map(|(vendor, kind)| Offer {
+            provider_name: vendor.to_string(),
+            kind: kind.to_string(),
+            source: OfferSource::Oauth { vendor },
+            credential_class: "oauth".to_string(),
+        });
+        assert_eq!(offers, expected);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn activated_xai_and_antigravity_probes_yield_no_offer() {
+        let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
+        let cfg = Config::default();
+        let probes = NON_OFFERABLE_IDS.map(|id| (id, LocalProbe::Present));
+        let activation = compute_activation(&probes, &cfg);
+        for id in NON_OFFERABLE_IDS {
+            let status = activation.get(id).map(|entry| entry.status);
+            assert_eq!(
+                status,
+                Some(ActivationStatus::Activated),
+                "`{id}` must be activated in the fixture"
+            );
+        }
+
+        let offers = detect_offers(&cfg, &probes);
+
         assert!(
             offers.is_empty(),
-            "no activated oauth entry, got {offers:?}"
+            "an activated id outside the offerable set must not be offered, got {offers:?}"
         );
     }
 
     #[test]
     #[serial_test::serial]
-    fn activated_non_anthropic_oauth_id_is_not_offered() {
+    fn unresolved_offerable_probes_yield_no_offer() {
         let _guard = ScopedEnv::unset(ANTHROPIC_ENV_VAR);
         let cfg = Config::default();
-        // `xai` -> openai-compat and `codex` -> openai-responses are BOTH
-        // cataloged, so a `Present` probe activates each. But `provider add`
-        // has no oauth constructor for either: every oauth offer funnels
-        // through the `anthropic` sentinel, so offering these would misroute
-        // them to `oauth://anthropic` under a foreign name. They must yield no
-        // offer.
-        let offers = detect_offers(
-            &cfg,
-            &[("xai", LocalProbe::Present), ("codex", LocalProbe::Present)],
-        );
-        assert!(
-            offers.iter().all(|o| o.source != OfferSource::Oauth),
-            "a non-anthropic activated oauth id must not be offered, got {offers:?}"
-        );
+        let rows = [
+            ("missing", LocalProbe::Missing),
+            ("expired", LocalProbe::Expired),
+            ("store unavailable", LocalProbe::StoreUnavailable),
+        ];
+        for (row, probe) in rows {
+            let offers = detect_offers(&cfg, &[("anthropic", probe), ("codex", probe)]);
+            assert!(offers.is_empty(), "row `{row}`: got {offers:?}");
+        }
     }
 
     #[test]
@@ -278,7 +294,13 @@ mod tests {
         let sources: Vec<OfferSource> = first.iter().map(|o| o.source).collect();
         assert_eq!(
             sources,
-            vec![OfferSource::Oauth, OfferSource::Env, OfferSource::Forwarded],
+            vec![
+                OfferSource::Oauth {
+                    vendor: "anthropic"
+                },
+                OfferSource::Env,
+                OfferSource::Forwarded
+            ],
         );
     }
 }

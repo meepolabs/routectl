@@ -7953,9 +7953,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   wizard prompt AND the inherited credential seams; `RealInitIo` delegates the
   `AddIo` half to `RealAddIo`), the `InitArgs` flag surface, the leaf types
   passed between steps (`Offer` + `OfferSource`
-  {Oauth/Env/Forwarded/ApiKeyPrompt} + `ModelWiring`;
+  {Oauth{vendor}/Env/Forwarded/ApiKeyPrompt} + `ModelWiring`;
   `Offer::provider_add_login` / `provider_add_format` map an oauth offer to
-  `--login anthropic` and every other offer to its `--format`), the
+  `--login <its vendor>` and every other offer to its `--format`), the
   `CredentialCapture` choice enum {OauthLogin/ApiKey/Skip}, the single-sourced
   `next_steps` renderer (run-doctor hint + `SERVE_COMMAND` + sample curl,
   shared with a later doctor path) and its `SERVE_COMMAND`/`DOCTOR_NEXT_HINT`
@@ -7984,7 +7984,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the passed config/probes only). Forks no new detection logic: the oauth arm
   feeds shipped local probes through `routectl_router::compute_activation`
   (the SAME inventory the server activation path consumes, one `Activated`
-  entry -> one offer), the env arm reuses the conventional-var table
+  entry of a `provider add --login` vendor -> one offer), the env arm reuses the conventional-var table
   (`ENV_OFFERABLE_KINDS` restricted to `anthropic-api`, offered only when
   `env_ref` resolves non-empty NOW), the forwarded arm keys off a `[mitm]`
   block's presence; `forwarded_offer()` is `pub(super)` so detection and the

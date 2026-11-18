@@ -133,7 +133,7 @@ fn selected_in_order(selected: &[Offer], offers: &[Offer]) -> Vec<Offer> {
 
 const fn source_rank(source: OfferSource) -> u8 {
     match source {
-        OfferSource::Oauth => 0,
+        OfferSource::Oauth { .. } => 0,
         OfferSource::Env => 1,
         OfferSource::Forwarded => 2,
         OfferSource::ApiKeyPrompt => 3,
@@ -171,7 +171,7 @@ fn nick_taken(candidate: &str, provider: &str, existing: &Config, used: &BTreeSe
 fn provider_args_for(offer: &Offer) -> ProviderAddArgs {
     let (credential_source, api_key_env) = match offer.source {
         OfferSource::Forwarded => (Some("forwarded".to_string()), None),
-        OfferSource::Oauth => (None, None),
+        OfferSource::Oauth { .. } => (None, None),
         OfferSource::Env => (None, env_var_for_kind(&offer.kind).map(str::to_string)),
         // No env var and no forwarded source: `provider add` falls through to
         // its interactive hidden-key prompt and captures to the managed store.
@@ -199,13 +199,17 @@ mod tests {
     use super::*;
     use routectl_router::ModelEntry;
 
+    const ANTHROPIC_LOGIN: OfferSource = OfferSource::Oauth {
+        vendor: "anthropic",
+    };
+
     fn offer(name: &str, kind: &str, source: OfferSource) -> Offer {
         Offer {
             provider_name: name.to_string(),
             kind: kind.to_string(),
             source,
             credential_class: match source {
-                OfferSource::Oauth => "oauth",
+                OfferSource::Oauth { .. } => "oauth",
                 OfferSource::Env => "env",
                 OfferSource::Forwarded => "forwarded",
                 OfferSource::ApiKeyPrompt => "api-key",
@@ -233,7 +237,7 @@ mod tests {
     #[test]
     fn maps_each_source_to_the_expected_provider_add_args() {
         let offers = vec![
-            offer("claude-sub", "anthropic-api", OfferSource::Oauth),
+            offer("claude-sub", "anthropic-api", ANTHROPIC_LOGIN),
             offer("claude-env", "anthropic-api", OfferSource::Env),
             offer("claude-fwd", "anthropic-api", OfferSource::Forwarded),
         ];
@@ -351,7 +355,7 @@ mod tests {
         let offers = vec![
             offer("alpha", "anthropic-api", OfferSource::Forwarded),
             offer("bravo", "openai-compat", OfferSource::Env),
-            offer("charlie", "anthropic-api", OfferSource::Oauth),
+            offer("charlie", "anthropic-api", ANTHROPIC_LOGIN),
         ];
         let ids = &[("alpha", "m-a"), ("bravo", "m-b"), ("charlie", "m-c")];
 
@@ -435,7 +439,7 @@ mod tests {
     #[test]
     fn two_offers_sharing_a_name_get_distinct_nicks() {
         let offers = vec![
-            offer("anthropic", "anthropic-api", OfferSource::Oauth),
+            offer("anthropic", "anthropic-api", ANTHROPIC_LOGIN),
             offer("anthropic", "anthropic-api", OfferSource::Env),
         ];
         let a = answers(
@@ -495,7 +499,7 @@ mod tests {
     #[test]
     fn re_init_with_the_same_answers_emits_byte_identical_args() {
         let offers = vec![
-            offer("claude", "anthropic-api", OfferSource::Oauth),
+            offer("claude", "anthropic-api", ANTHROPIC_LOGIN),
             offer("grok", "openai-compat", OfferSource::Env),
         ];
         let a = answers(
