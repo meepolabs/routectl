@@ -4,3 +4,5 @@
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod client;
+#[cfg_attr(not(test), allow(dead_code))]
+mod schedule;

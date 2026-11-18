@@ -6374,6 +6374,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   connect / 10 s total timeouts, the body cut at `MAX_USAGE_BODY_BYTES`, the
   lane's first-party identity headers, and the closed `FetchResult`; tests in
   `client_tests.rs`
+- `src/server/usage_poll/schedule.rs` -- the usage poll's pure schedule:
+  per-seat due time (5 min after the last reading or attempt plus 0-60 s
+  jitter, random first due within 5 min), error backoff 5/10/15 min, at most
+  one seat per vendor per sweep, the capped per-vendor 429 pause, and the
+  closed `PollOutcome` with its `SeatVerdict` mapping; tests in
+  `schedule_tests.rs`
 - `src/server/capability_health.rs` -- bridges the router's
   capability-persistence gate to the usage writer whose health answers it,
   installed at boot after the writer exists and before publication.

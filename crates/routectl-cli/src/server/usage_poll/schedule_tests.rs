@@ -1,0 +1,502 @@
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use routectl_router::UsageVendor;
+
+use super::{JitterSource, PollOutcome, PollSchedule, RandomJitter, SeatCandidate, SeatState};
+use crate::server::seat_driver::SeatVerdict;
+
+const SEC: i64 = 1_000;
+const MIN: i64 = 60 * SEC;
+/// An arbitrary wall-clock origin, far from zero so subtraction stays positive.
+const START_MS: i64 = 1_800_000_000_000;
+
+/// Draws the same value every time (clamped to the requested maximum).
+struct FixedJitter(u64);
+
+impl JitterSource for FixedJitter {
+    fn draw_ms(&mut self, max_ms: u64) -> u64 {
+        self.0.min(max_ms)
+    }
+}
+
+/// Draws the maximum the schedule asks for, so first-sight due times land
+/// at the end of the boot spread and jitter at its 60 s ceiling.
+struct MaxJitter;
+
+impl JitterSource for MaxJitter {
+    fn draw_ms(&mut self, max_ms: u64) -> u64 {
+        max_ms
+    }
+}
+
+/// Returns more than asked, as a faulty source might.
+struct OversizedJitter;
+
+impl JitterSource for OversizedJitter {
+    fn draw_ms(&mut self, _max_ms: u64) -> u64 {
+        u64::MAX
+    }
+}
+
+fn seat(account: &str, vendor: UsageVendor, last_accepted_ms: Option<i64>) -> SeatCandidate<'_> {
+    SeatCandidate {
+        account,
+        vendor,
+        last_accepted_ms,
+    }
+}
+
+fn picked<'a>(seats: &[SeatCandidate<'a>], indices: &[usize]) -> Vec<&'a str> {
+    indices.iter().map(|&index| seats[index].account).collect()
+}
+
+const ALL_OUTCOMES: [PollOutcome; 13] = [
+    PollOutcome::Accepted,
+    PollOutcome::NoWindows,
+    PollOutcome::TokenNotReady,
+    PollOutcome::Paused(None),
+    PollOutcome::Paused(Some(Duration::MAX)),
+    PollOutcome::Redirect,
+    PollOutcome::Auth,
+    PollOutcome::Http(500),
+    PollOutcome::Timeout,
+    PollOutcome::Transport,
+    PollOutcome::TooLarge,
+    PollOutcome::Malformed,
+    PollOutcome::Superseded,
+];
+
+#[test]
+fn seat_with_reading_is_due_only_after_five_minutes_plus_its_jitter() {
+    let jitter_ms = 37 * SEC;
+    let mut schedule = PollSchedule::new(FixedJitter(u64::try_from(jitter_ms).unwrap()));
+    let reading_at = START_MS;
+    let seats = [seat("anthropic", UsageVendor::Anthropic, Some(reading_at))];
+
+    let at_four_min = schedule.sweep(reading_at + 4 * MIN, &seats);
+    let just_before = schedule.sweep(reading_at + 5 * MIN + jitter_ms - 1, &seats);
+    let at_due = schedule.sweep(reading_at + 5 * MIN + jitter_ms, &seats);
+
+    assert!(at_four_min.is_empty());
+    assert!(just_before.is_empty());
+    assert_eq!(at_due, vec![0]);
+}
+
+#[test]
+fn a_fresher_reading_from_any_source_pushes_the_due_time_out() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let old = [seat("anthropic", UsageVendor::Anthropic, Some(START_MS))];
+    let fresh = [seat(
+        "anthropic",
+        UsageVendor::Anthropic,
+        Some(START_MS + 4 * MIN),
+    )];
+
+    assert_eq!(schedule.sweep(START_MS + 5 * MIN, &old), vec![0]);
+    assert!(schedule.sweep(START_MS + 5 * MIN, &fresh).is_empty());
+    assert_eq!(schedule.sweep(START_MS + 9 * MIN, &fresh), vec![0]);
+}
+
+#[test]
+fn the_last_attempt_also_starts_the_interval() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("anthropic", UsageVendor::Anthropic, Some(START_MS))];
+    let attempt_at = START_MS + 6 * MIN;
+    schedule.sweep(attempt_at, &seats);
+
+    schedule.record(
+        "anthropic",
+        UsageVendor::Anthropic,
+        attempt_at,
+        PollOutcome::TokenNotReady,
+    );
+
+    assert!(schedule.sweep(attempt_at + 5 * MIN - 1, &seats).is_empty());
+    assert_eq!(schedule.sweep(attempt_at + 5 * MIN, &seats), vec![0]);
+}
+
+#[test]
+fn jitter_is_redrawn_after_each_attempt() {
+    let mut schedule = PollSchedule::new(RandomJitter::seeded(7));
+    let seats = [seat("anthropic", UsageVendor::Anthropic, None)];
+    let mut gaps = BTreeSet::new();
+    let mut now = START_MS + 10 * MIN;
+    for _ in 0..8 {
+        schedule.sweep(now, &seats);
+        schedule.record(
+            "anthropic",
+            UsageVendor::Anthropic,
+            now,
+            PollOutcome::Accepted,
+        );
+        schedule.sweep(now, &seats);
+        let next_due = schedule
+            .seat("anthropic")
+            .map(SeatState::next_due_ms)
+            .unwrap();
+        let gap = next_due - now;
+        assert!(
+            (5 * MIN..=6 * MIN).contains(&gap),
+            "gap {gap} outside 5-6 min"
+        );
+        gaps.insert(gap);
+        now = next_due;
+    }
+
+    assert!(gaps.len() > 1, "jitter never changed: {gaps:?}");
+}
+
+#[test]
+fn boot_due_times_are_pairwise_distinct_and_inside_five_minutes() {
+    let accounts: Vec<String> = (0..12).map(|n| format!("anthropic:seat-{n}")).collect();
+    let seats: Vec<SeatCandidate<'_>> = accounts
+        .iter()
+        .map(|account| seat(account, UsageVendor::Anthropic, None))
+        .collect();
+    let mut schedule = PollSchedule::new(RandomJitter::seeded(42));
+
+    schedule.sweep(START_MS, &seats);
+
+    let due: Vec<i64> = accounts
+        .iter()
+        .map(|account| schedule.seat(account).map(SeatState::next_due_ms).unwrap())
+        .collect();
+    let distinct: BTreeSet<i64> = due.iter().copied().collect();
+    assert_eq!(distinct.len(), due.len(), "boot due times collide: {due:?}");
+    assert!(
+        due.iter()
+            .all(|&at| (START_MS..=START_MS + 5 * MIN).contains(&at)),
+        "{due:?}"
+    );
+}
+
+#[test]
+fn a_boot_seat_is_not_due_before_its_drawn_time() {
+    let mut schedule = PollSchedule::new(MaxJitter);
+    let seats = [seat("anthropic", UsageVendor::Anthropic, None)];
+
+    assert!(schedule.sweep(START_MS, &seats).is_empty());
+    assert!(schedule.sweep(START_MS + 5 * MIN - 1, &seats).is_empty());
+    assert_eq!(schedule.sweep(START_MS + 5 * MIN, &seats), vec![0]);
+}
+
+#[test]
+fn after_a_long_gap_one_sweep_yields_one_seat_per_vendor() {
+    let mut schedule = PollSchedule::new(RandomJitter::seeded(3));
+    let seats = [
+        seat(
+            "anthropic:a",
+            UsageVendor::Anthropic,
+            Some(START_MS + 3 * SEC),
+        ),
+        seat("anthropic:b", UsageVendor::Anthropic, Some(START_MS)),
+        seat(
+            "anthropic:c",
+            UsageVendor::Anthropic,
+            Some(START_MS + 2 * SEC),
+        ),
+        seat("anthropic:d", UsageVendor::Anthropic, Some(START_MS + MIN)),
+        seat("codex:a", UsageVendor::Codex, Some(START_MS)),
+        seat("codex:b", UsageVendor::Codex, Some(START_MS + MIN)),
+    ];
+
+    let indices = schedule.sweep(START_MS + 2 * 60 * MIN, &seats);
+
+    let vendors: Vec<UsageVendor> = indices.iter().map(|&index| seats[index].vendor).collect();
+    assert_eq!(vendors, vec![UsageVendor::Anthropic, UsageVendor::Codex]);
+}
+
+#[test]
+fn the_vendor_pick_is_the_seat_that_has_waited_longest() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [
+        seat(
+            "anthropic:a",
+            UsageVendor::Anthropic,
+            Some(START_MS + 3 * SEC),
+        ),
+        seat("anthropic:b", UsageVendor::Anthropic, Some(START_MS)),
+        seat(
+            "anthropic:c",
+            UsageVendor::Anthropic,
+            Some(START_MS + 2 * SEC),
+        ),
+    ];
+
+    let indices = schedule.sweep(START_MS + 2 * 60 * MIN, &seats);
+
+    assert_eq!(picked(&seats, &indices), vec!["anthropic:b"]);
+}
+
+/// Each row: the outcome that ends the attempt, then the gap from that
+/// attempt to the seat's next due time (jitter fixed at zero).
+#[test]
+fn error_backoff_reads_5_10_15_15_minutes_and_success_clears_it() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("codex", UsageVendor::Codex, Some(START_MS))];
+    let rows = [
+        (PollOutcome::Timeout, 5 * MIN, 1),
+        (PollOutcome::Http(500), 10 * MIN, 2),
+        (PollOutcome::Transport, 15 * MIN, 3),
+        (PollOutcome::Malformed, 15 * MIN, 4),
+        (PollOutcome::Accepted, 5 * MIN, 0),
+        (PollOutcome::Auth, 5 * MIN, 1),
+    ];
+    let mut now = START_MS + 5 * MIN;
+    for (outcome, expected_gap, expected_streak) in rows {
+        assert_eq!(schedule.sweep(now, &seats), vec![0], "{outcome:?}: not due");
+
+        schedule.record("codex", UsageVendor::Codex, now, outcome);
+        schedule.sweep(now, &seats);
+
+        let state = schedule.seat("codex").unwrap();
+        assert_eq!(state.next_due_ms() - now, expected_gap, "{outcome:?}");
+        assert_eq!(state.error_streak(), expected_streak, "{outcome:?}");
+        assert!(
+            schedule.sweep(now + expected_gap - 1, &seats).is_empty(),
+            "{outcome:?}"
+        );
+        now += expected_gap;
+    }
+}
+
+#[test]
+fn backoff_holds_even_when_a_header_reading_is_old() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("codex", UsageVendor::Codex, Some(START_MS))];
+    let mut now = START_MS + 5 * MIN;
+    for _ in 0..3 {
+        schedule.sweep(now, &seats);
+        schedule.record("codex", UsageVendor::Codex, now, PollOutcome::Timeout);
+        now += 5 * MIN;
+    }
+    let attempt_at = now - 5 * MIN;
+
+    assert!(schedule.sweep(attempt_at + 15 * MIN - 1, &seats).is_empty());
+    assert_eq!(schedule.sweep(attempt_at + 15 * MIN, &seats), vec![0]);
+}
+
+/// Each row: the 429's `Retry-After`, then how long the vendor stays paused.
+#[test]
+fn a_429_pauses_only_its_vendor_for_the_capped_wait() {
+    let rows: [(&str, Option<Duration>, i64); 6] = [
+        ("120 s", Some(Duration::from_mins(2)), 120 * SEC),
+        ("7200 s capped", Some(Duration::from_hours(2)), 60 * MIN),
+        ("absent", None, 15 * MIN),
+        ("zero", Some(Duration::ZERO), 0),
+        ("u64::MAX s", Some(Duration::from_secs(u64::MAX)), 60 * MIN),
+        ("Duration::MAX", Some(Duration::MAX), 60 * MIN),
+    ];
+    for (name, retry_after, expected_pause) in rows {
+        let mut schedule = PollSchedule::new(FixedJitter(0));
+        let seats = [
+            seat("anthropic:a", UsageVendor::Anthropic, Some(START_MS)),
+            seat("anthropic:b", UsageVendor::Anthropic, Some(START_MS)),
+            seat("codex", UsageVendor::Codex, Some(START_MS)),
+        ];
+        let now = START_MS + 5 * MIN;
+        assert_eq!(schedule.sweep(now, &seats), vec![0, 2], "{name}");
+
+        schedule.record(
+            "anthropic:a",
+            UsageVendor::Anthropic,
+            now,
+            PollOutcome::Paused(retry_after),
+        );
+
+        assert_eq!(
+            schedule.pause_until(UsageVendor::Anthropic),
+            Some(now + expected_pause),
+            "{name}"
+        );
+        assert_eq!(schedule.pause_until(UsageVendor::Codex), None, "{name}");
+        if expected_pause > 0 {
+            assert_eq!(
+                picked(&seats, &schedule.sweep(now + expected_pause - 1, &seats)),
+                vec!["codex"],
+                "{name}"
+            );
+        }
+        assert_eq!(
+            picked(&seats, &schedule.sweep(now + expected_pause, &seats)),
+            vec!["anthropic:b", "codex"],
+            "{name}"
+        );
+        assert_eq!(schedule.pause_until(UsageVendor::Anthropic), None, "{name}");
+    }
+}
+
+#[test]
+fn a_429_does_not_extend_the_seat_error_backoff() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("anthropic", UsageVendor::Anthropic, Some(START_MS))];
+    let now = START_MS + 5 * MIN;
+    schedule.sweep(now, &seats);
+
+    schedule.record(
+        "anthropic",
+        UsageVendor::Anthropic,
+        now,
+        PollOutcome::Paused(None),
+    );
+
+    assert_eq!(schedule.seat("anthropic").unwrap().error_streak(), 0);
+}
+
+#[test]
+fn time_arithmetic_saturates_at_the_extremes() {
+    let mut schedule = PollSchedule::new(OversizedJitter);
+    let seats = [
+        seat("anthropic", UsageVendor::Anthropic, Some(i64::MAX)),
+        seat("codex", UsageVendor::Codex, None),
+    ];
+
+    assert!(schedule.sweep(i64::MAX - 1, &seats).is_empty());
+    schedule.record(
+        "codex",
+        UsageVendor::Codex,
+        i64::MAX,
+        PollOutcome::Paused(Some(Duration::MAX)),
+    );
+    for _ in 0..5 {
+        schedule.record(
+            "anthropic",
+            UsageVendor::Anthropic,
+            i64::MAX,
+            PollOutcome::Timeout,
+        );
+    }
+    assert_eq!(schedule.pause_until(UsageVendor::Codex), Some(i64::MAX));
+    assert!(schedule.sweep(i64::MIN, &seats).is_empty());
+    assert_eq!(schedule.seat("codex").unwrap().next_due_ms(), i64::MAX);
+}
+
+#[test]
+fn an_oversized_jitter_draw_is_clamped_to_the_spread() {
+    let mut schedule = PollSchedule::new(OversizedJitter);
+    let seats = [seat("anthropic", UsageVendor::Anthropic, Some(START_MS))];
+
+    schedule.sweep(START_MS, &seats);
+
+    assert_eq!(
+        schedule.seat("anthropic").unwrap().next_due_ms(),
+        START_MS + 6 * MIN
+    );
+}
+
+#[test]
+fn state_for_a_seat_no_longer_managed_is_dropped_on_the_next_sweep() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let both = [
+        seat("anthropic", UsageVendor::Anthropic, Some(START_MS)),
+        seat("codex", UsageVendor::Codex, Some(START_MS)),
+    ];
+    let now = START_MS + 5 * MIN;
+    schedule.sweep(now, &both);
+    schedule.record("codex", UsageVendor::Codex, now, PollOutcome::Timeout);
+    assert!(schedule.seat("codex").is_some());
+
+    schedule.sweep(now + MIN, &both[..1]);
+
+    assert!(schedule.seat("codex").is_none());
+    assert!(schedule.seat("anthropic").is_some());
+}
+
+#[test]
+fn a_seat_that_returns_starts_fresh() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("codex", UsageVendor::Codex, Some(START_MS))];
+    let now = START_MS + 5 * MIN;
+    schedule.sweep(now, &seats);
+    schedule.record("codex", UsageVendor::Codex, now, PollOutcome::Http(503));
+    schedule.sweep(now, &[]);
+
+    schedule.sweep(now + MIN, &seats);
+
+    let state = schedule.seat("codex").unwrap();
+    assert_eq!(state.error_streak(), 0);
+    assert_eq!(state.last_attempt_ms(), None);
+}
+
+#[test]
+fn a_late_outcome_for_a_dropped_seat_creates_no_state_but_still_pauses_its_vendor() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+
+    schedule.record(
+        "anthropic",
+        UsageVendor::Anthropic,
+        START_MS,
+        PollOutcome::Paused(None),
+    );
+
+    assert!(schedule.seat("anthropic").is_none());
+    assert_eq!(
+        schedule.pause_until(UsageVendor::Anthropic),
+        Some(START_MS + 15 * MIN)
+    );
+}
+
+#[test]
+fn record_keeps_the_last_attempt_and_its_outcome() {
+    let mut schedule = PollSchedule::new(FixedJitter(0));
+    let seats = [seat("codex", UsageVendor::Codex, None)];
+    schedule.sweep(START_MS, &seats);
+
+    schedule.record(
+        "codex",
+        UsageVendor::Codex,
+        START_MS + SEC,
+        PollOutcome::Redirect,
+    );
+
+    let state = schedule.seat("codex").unwrap();
+    assert_eq!(state.last_attempt_ms(), Some(START_MS + SEC));
+    assert_eq!(state.last_outcome(), Some(PollOutcome::Redirect));
+}
+
+#[test]
+fn no_poll_outcome_maps_to_a_definitive_verdict() {
+    for outcome in ALL_OUTCOMES {
+        assert_ne!(outcome.verdict(), SeatVerdict::Definitive, "{outcome:?}");
+    }
+}
+
+/// Each row: an outcome and the verdict the driver's health counts it as.
+#[test]
+fn poll_outcomes_map_to_quiet_or_transient() {
+    let rows = [
+        (PollOutcome::Accepted, SeatVerdict::Quiet),
+        (PollOutcome::NoWindows, SeatVerdict::Quiet),
+        (PollOutcome::TokenNotReady, SeatVerdict::Quiet),
+        (PollOutcome::Superseded, SeatVerdict::Quiet),
+        (PollOutcome::Paused(None), SeatVerdict::Transient),
+        (PollOutcome::Redirect, SeatVerdict::Transient),
+        (PollOutcome::Auth, SeatVerdict::Transient),
+        (PollOutcome::Http(500), SeatVerdict::Transient),
+        (PollOutcome::Timeout, SeatVerdict::Transient),
+        (PollOutcome::Transport, SeatVerdict::Transient),
+        (PollOutcome::TooLarge, SeatVerdict::Transient),
+        (PollOutcome::Malformed, SeatVerdict::Transient),
+    ];
+    for (outcome, verdict) in rows {
+        assert_eq!(outcome.verdict(), verdict, "{outcome:?}");
+    }
+}
+
+#[test]
+fn outcome_tokens_are_distinct_per_kind() {
+    let tokens: BTreeSet<&str> = ALL_OUTCOMES
+        .iter()
+        .map(|outcome| outcome.as_str())
+        .collect();
+
+    assert_eq!(tokens.len(), 12);
+}
+
+#[test]
+fn the_os_seeded_jitter_stays_inside_the_requested_range() {
+    let mut jitter = RandomJitter::from_os();
+
+    assert!((0..200).all(|_| jitter.draw_ms(60_000) <= 60_000));
+}
