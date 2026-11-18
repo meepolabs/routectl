@@ -322,7 +322,7 @@ impl SeatDriverHealth {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct SweepTally {
+pub(super) struct SweepTally {
     transient: u64,
     definitive: u64,
 }
@@ -398,7 +398,7 @@ const fn exit_for(changed: Result<(), watch::error::RecvError>) -> DriverExit {
 }
 
 /// One sequential pass over the due seats.
-async fn sweep<J: SeatJob>(job: &J, router: &Router) -> SweepTally {
+pub(super) async fn sweep<J: SeatJob>(job: &J, router: &Router) -> SweepTally {
     let mut tally = SweepTally::default();
     for seat in job.due(router) {
         let generation = router.acquire_credential_generation(&seat.account);

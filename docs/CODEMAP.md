@@ -6374,6 +6374,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   connect / 10 s total timeouts, the body cut at `MAX_USAGE_BODY_BYTES`, the
   lane's first-party identity headers, and the closed `FetchResult`; tests in
   `client_tests.rs`
+- `src/server/usage_poll/history.rs` -- maps an accepted poll reading to
+  `account_readings` history rows (one per window, or one `no_windows` row).
 - `src/server/usage_poll/schedule.rs` -- the usage poll's pure schedule:
   per-seat due time (5 min after the last reading or attempt plus 0-60 s
   jitter, random first due within 5 min), error backoff 5/10/15 min, at most

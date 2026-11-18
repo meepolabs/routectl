@@ -10,7 +10,10 @@ use tokio::net::TcpListener;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-use super::{ANTHROPIC_USAGE_URL, CODEX_USAGE_URL, FetchResult, SeatCredential, UsagePollClient};
+use super::{
+    ANTHROPIC_USAGE_URL, CODEX_USAGE_URL, FetchResult, MAX_USAGE_RETRY_AFTER, SeatCredential,
+    UsagePollClient,
+};
 
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
 const CODEX_HOST: &str = "chatgpt.com";
@@ -129,6 +132,51 @@ fn the_production_client_targets_only_the_usage_constants() {
         assert_eq!(request.url().as_str(), url);
         assert_eq!(request.method(), reqwest::Method::GET);
         assert!(request.headers().get("chatgpt-account-id").is_none());
+    }
+}
+
+#[test]
+fn the_bearer_and_account_id_are_sensitive_and_absent_from_request_debug() {
+    let client = UsagePollClient::new().expect("the production client builds");
+    let token = SecretToken::new(TOKEN_SENTINEL);
+    let credentials = [
+        ("anthropic", SeatCredential::Anthropic { token: &token }),
+        (
+            "codex",
+            SeatCredential::Codex {
+                token: &token,
+                account_id: Some(ACCOUNT_SENTINEL),
+            },
+        ),
+    ];
+
+    for (vendor, credential) in credentials {
+        let request = client.request(credential).build().expect("request builds");
+
+        let headers = request.headers();
+        assert!(
+            headers
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("a bearer")
+                .is_sensitive(),
+            "{vendor}: authorization"
+        );
+        if vendor == "codex" {
+            assert!(
+                headers
+                    .get("chatgpt-account-id")
+                    .expect("an account id")
+                    .is_sensitive(),
+                "{vendor}: account id"
+            );
+        }
+        let rendered = format!("{request:?}");
+        for secret in [TOKEN_SENTINEL, ACCOUNT_SENTINEL] {
+            assert!(
+                !rendered.contains(secret),
+                "{vendor}: the request Debug carried a credential"
+            );
+        }
     }
 }
 
@@ -383,6 +431,48 @@ async fn a_reply_slower_than_the_total_timeout_is_a_timeout() {
     assert_eq!(result, FetchResult::Timeout);
 }
 
+/// A plain-http backend that sends a chunked 200 head and one chunk at
+/// once, then holds the connection open without finishing the body.
+async fn dripping_backend(hold: Duration) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(n) if n > 0 => head.extend_from_slice(&buf[..n]),
+                        _ => return,
+                    }
+                }
+                let out = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n";
+                if socket.write_all(out).await.is_err() || socket.flush().await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(hold).await;
+                let _ = socket.write_all(b"1\r\n}\r\n0\r\n\r\n").await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn a_body_that_drips_past_the_total_timeout_is_a_timeout() {
+    let backend = dripping_backend(Duration::from_secs(12)).await;
+    let front = TlsFront::start(ANTHROPIC_HOST, backend).await;
+    let client = UsagePollClient::with_fronts_for_tests(&[(ANTHROPIC_HOST, &front)]);
+    let token = SecretToken::new(TOKEN_SENTINEL);
+
+    let result = client
+        .fetch(SeatCredential::Anthropic { token: &token })
+        .await;
+
+    assert_eq!(result, FetchResult::Timeout);
+}
+
 #[tokio::test]
 async fn an_unreachable_host_is_a_transport_failure() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -438,6 +528,38 @@ async fn a_429_carries_its_retry_after_wait() {
         FetchResult::RateLimited(None),
         "absent"
     );
+}
+
+#[tokio::test]
+async fn a_429_wait_is_capped_at_one_hour() {
+    let cases = [
+        ("an hour and a second", "retry-after", "3601"),
+        (
+            "the largest delta seconds",
+            "retry-after",
+            "18446744073709551615",
+        ),
+        (
+            "the largest milliseconds",
+            "retry-after-ms",
+            "18446744073709551615",
+        ),
+    ];
+    let stubs = Stubs::start().await;
+    for (name, header, value) in cases {
+        stubs
+            .answer_anthropic(ResponseTemplate::new(429).insert_header(header, value))
+            .await;
+
+        let result = stubs.fetch_anthropic().await;
+
+        assert_eq!(
+            result,
+            FetchResult::RateLimited(Some(MAX_USAGE_RETRY_AFTER)),
+            "{name}"
+        );
+    }
+    assert_eq!(MAX_USAGE_RETRY_AFTER, Duration::from_hours(1));
 }
 
 #[tokio::test]

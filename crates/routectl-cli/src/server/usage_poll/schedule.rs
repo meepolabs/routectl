@@ -218,6 +218,7 @@ impl SeatState {
         self.last_outcome
     }
 
+    #[cfg(test)]
     pub(super) const fn error_streak(&self) -> u32 {
         self.error_streak
     }

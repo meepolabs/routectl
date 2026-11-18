@@ -38,6 +38,10 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 
+/// The longest `Retry-After` wait a 429 is reported with. The value comes
+/// from the vendor and is turned into a deadline, so it is bounded here.
+pub const MAX_USAGE_RETRY_AFTER: Duration = Duration::from_hours(1);
+
 /// One seat's credential, naming the vendor whose endpoint it is sent to.
 pub enum SeatCredential<'a> {
     /// An Anthropic managed login's access token.
@@ -67,7 +71,8 @@ pub enum FetchResult {
     Transport,
     /// The body was longer than [`MAX_USAGE_BODY_BYTES`].
     TooLarge,
-    /// 429, with the parsed `Retry-After` wait when one was sent.
+    /// 429, with the parsed `Retry-After` wait when one was sent, capped at
+    /// [`MAX_USAGE_RETRY_AFTER`].
     RateLimited(Option<Duration>),
 }
 
@@ -190,7 +195,9 @@ async fn classify_response(response: Response) -> FetchResult {
         200 => read_capped(response).await,
         300..=399 => FetchResult::Redirect,
         401 | 403 => FetchResult::Auth,
-        429 => FetchResult::RateLimited(parse_retry_after(response.headers())),
+        429 => FetchResult::RateLimited(
+            parse_retry_after(response.headers()).map(|wait| wait.min(MAX_USAGE_RETRY_AFTER)),
+        ),
         status => FetchResult::Http(status),
     }
 }
