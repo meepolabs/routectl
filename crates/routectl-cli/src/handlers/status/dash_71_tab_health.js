@@ -138,7 +138,11 @@
     wrap.appendChild(sectionHead(title, hint));
     var list = document.createElement('div');
     list.className = 'hlist';
-    groups.forEach(function (group) { list.appendChild(targetCard(group, negatives, nowMs)); });
+    groups.forEach(function (group) {
+      var card = targetCard(group, negatives, nowMs);
+      card.id = 'health-target-' + idKey(group.nickname);
+      list.appendChild(card);
+    });
     wrap.appendChild(list);
     return wrap;
   }

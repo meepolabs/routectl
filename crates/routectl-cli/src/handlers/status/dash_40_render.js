@@ -208,7 +208,50 @@
     if (!(node instanceof Node)) {
       throw new TypeError('morphPanel takes a DOM node, never markup');
     }
-    Idiomorph.morph(parent, node, { morphStyle: 'innerHTML' });
+    var held = heldSelection(parent);
+    Idiomorph.morph(parent, node, {
+      morphStyle: 'innerHTML',
+      callbacks: { beforeNodeMorphed: keepOpenState }
+    });
+    restoreSelection(parent, held);
+  }
+
+  // A text selection inside `parent`, as its two end points, or null. The
+  // morph keeps the selected nodes, but moving one into its new place
+  // (removed, then reinserted) collapses the browser's selection.
+  function heldSelection(parent) {
+    var sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !parent.contains(sel.anchorNode) ||
+        !parent.contains(sel.focusNode)) {
+      return null;
+    }
+    return { anchor: sel.anchorNode, anchorAt: sel.anchorOffset,
+      focus: sel.focusNode, focusAt: sel.focusOffset };
+  }
+
+  // Put a held selection back when the morph kept both of its end points in
+  // `parent`. An end point the morph dropped means the selected record left
+  // the page, and the selection goes with it.
+  function restoreSelection(parent, held) {
+    if (!held || !parent.contains(held.anchor) || !parent.contains(held.focus)) { return; }
+    var sel = window.getSelection();
+    if (!sel.isCollapsed) { return; }
+    var clamp = function (n, at) {
+      var len = n.nodeType === 3 ? n.nodeValue.length : n.childNodes.length;
+      return Math.min(at, len);
+    };
+    sel.setBaseAndExtent(held.anchor, clamp(held.anchor, held.anchorAt),
+      held.focus, clamp(held.focus, held.focusAt));
+  }
+
+  // A rebuilt <details> is always closed, and the morph removes every
+  // attribute the fresh node lacks, so without this a disclosure the operator
+  // opened would shut on the next refresh. The kept node's live state wins.
+  function keepOpenState(oldNode, freshNode) {
+    if (oldNode instanceof HTMLDetailsElement && freshNode instanceof HTMLDetailsElement) {
+      freshNode.open = oldNode.open;
+    }
+    return true;
   }
 
   // The modal host shows the overlay the pass just built, or nothing: an

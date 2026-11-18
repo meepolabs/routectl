@@ -434,3 +434,31 @@ fn row_ids_derive_only_from_table_id_and_row_key() {
     );
     assert_eq!(row_id.trim(), "return tableId + '-' + idKey(rowKey);");
 }
+
+/// Items of a list that reorders carry an id from their own identity, so the
+/// morph matches a card to the same record rather than to whatever now sits
+/// at its position: Doctor checks (section, name), Usage groups (label) and
+/// Health targets (nickname).
+///
+/// Mutation check: drop `cardEl.id = id;` from doctorFinding -> red.
+#[test]
+fn reordering_list_items_carry_an_identity_id() {
+    let finding = function_body("doctorFinding");
+    let pass = function_body("doctorPass");
+    let item_id = compact(&function_body("doctorItemId"));
+    let findings = function_body("doctorFindings");
+    let passes = function_body("doctorPasses");
+    let usage = function_body("buildUsageLive");
+    let health = function_body("targetGroupList");
+
+    assert!(finding.contains("cardEl.id = id;"));
+    assert!(pass.contains("row.id = id;"));
+    assert_eq!(
+        item_id,
+        "returnuniqueitemid(prefix+'-'+idkey(f.section)+'-'+idkey(f.name),seen);"
+    );
+    assert!(findings.contains("doctorFinding(f, doctorItemId('doctor-finding', f, seen))"));
+    assert!(passes.contains("doctorPass(p, doctorItemId('doctor-pass', p, seen))"));
+    assert!(usage.contains("card.id = uniqueItemId('usage-group-' + idKey(g.label), seen);"));
+    assert!(health.contains("card.id = 'health-target-' + idKey(group.nickname);"));
+}

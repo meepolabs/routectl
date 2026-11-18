@@ -23,7 +23,20 @@ const HTML_PARSING_SINKS: &[&str] = &[
     "DOMParser",
     "createContextualFragment",
     "document.write",
+    "setHTMLUnsafe",
+    "parseHTMLUnsafe",
+    "srcdoc",
 ];
+
+/// Names a page script may reach only through a plain, dotted spelling the
+/// scans above can see. As a string literal they are the key of a bracket
+/// access (`x['replaceChildren'](`) or of an alias assembled at runtime.
+const GUARDED_LITERALS: &[&str] = &["Idiomorph", "replaceChildren"];
+
+/// Members that, written as a bracket key, reach a guarded call:
+/// `document['write']`, `lib['morph']`. Only the bracket form is flagged,
+/// since `'write'` is ordinary label text elsewhere.
+const GUARDED_BRACKET_KEYS: &[&str] = &["write", "morph", "replaceChildren", "Idiomorph"];
 
 /// The positional updater `morphPanel` replaced. One updater only.
 const RETIRED_UPDATER: &[&str] = &[
@@ -90,10 +103,45 @@ fn call_end_of_block(chars: &[char], open: usize) -> usize {
     chars.len()
 }
 
-/// For every code (non-string, non-comment) reference to the `Idiomorph`
-/// identifier in `parts`, the part and the innermost named function enclosing
-/// it (`<top level>` when none does).
-fn morph_library_references(parts: &[(&str, &str)]) -> Vec<(String, String)> {
+/// The innermost named function in `spans` enclosing `at`.
+fn enclosing_function(spans: &[(String, usize, usize)], at: usize) -> String {
+    spans
+        .iter()
+        .filter(|(_, start, end)| *start < at && at < *end)
+        .min_by_key(|(_, start, end)| end - start)
+        .map_or("<top level>", |(f, _, _)| f.as_str())
+        .to_string()
+}
+
+/// One code reference to the morph library: its part, its enclosing named
+/// function, and whether it is the direct call `Idiomorph.morph(`. Anything
+/// else (`var m = Idiomorph.morph;`, `.bind(`, passing `Idiomorph` on) hands
+/// the library out of `morphPanel`, where its node-only check no longer runs.
+#[derive(Debug, PartialEq, Eq)]
+struct MorphReference {
+    part: String,
+    function: String,
+    is_direct_call: bool,
+}
+
+/// Whether `chars[at..]` reads `Idiomorph.morph(`, whitespace allowed around
+/// the dot and before the paren.
+fn is_direct_morph_call(chars: &[char], at: usize) -> bool {
+    let dot = skip_whitespace(chars, at + "Idiomorph".len());
+    if chars.get(dot) != Some(&'.') {
+        return false;
+    }
+    let member_at = skip_whitespace(chars, dot + 1);
+    if read_word(chars, member_at) != "morph" {
+        return false;
+    }
+    let paren = skip_whitespace(chars, member_at + "morph".len());
+    chars.get(paren) == Some(&'(')
+}
+
+/// Every code (non-string, non-comment) reference to the `Idiomorph`
+/// identifier in `parts`.
+fn morph_library_references(parts: &[(&str, &str)]) -> Vec<MorphReference> {
     let mut found = Vec::new();
     for (name, src) in parts {
         let chars: Vec<char> = strip_js_comments(src).chars().collect();
@@ -106,12 +154,11 @@ fn morph_library_references(parts: &[(&str, &str)]) -> Vec<(String, String)> {
             }
             let at_word = i == 0 || !is_ident_char(chars[i - 1]);
             if at_word && read_word(&chars, i) == "Idiomorph" {
-                let enclosing = spans
-                    .iter()
-                    .filter(|(_, start, end)| *start < i && i < *end)
-                    .min_by_key(|(_, start, end)| end - start)
-                    .map_or("<top level>", |(f, _, _)| f.as_str());
-                found.push(((*name).to_string(), enclosing.to_string()));
+                found.push(MorphReference {
+                    part: (*name).to_string(),
+                    function: enclosing_function(&spans, i),
+                    is_direct_call: is_direct_morph_call(&chars, i),
+                });
             }
             i += 1;
         }
@@ -149,15 +196,68 @@ fn replace_children_callers(parts: &[(&str, &str)]) -> Vec<String> {
         let code: String = chars.iter().collect();
         for (at, _) in code.match_indices(".replaceChildren(") {
             let at = code[..at].chars().count();
-            let enclosing = spans
-                .iter()
-                .filter(|(_, start, end)| *start < at && at < *end)
-                .min_by_key(|(_, start, end)| end - start)
-                .map_or("<top level>", |(f, _, _)| f.as_str());
-            callers.push(enclosing.to_string());
+            callers.push(enclosing_function(&spans, at));
         }
     }
     callers
+}
+
+/// The content of every plain string literal in `chars` (comments already
+/// stripped), with the index of its opening quote. A template literal with a
+/// `${` substitution has no single content and is skipped.
+fn string_literals(chars: &[char]) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if matches!(chars[i], '\'' | '"' | '`') {
+            let end = skip_string_literal(chars, i);
+            let content: String = chars[i + 1..end.saturating_sub(1).max(i + 1)]
+                .iter()
+                .collect();
+            if !(chars[i] == '`' && content.contains("${")) {
+                found.push((i, content));
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Whether the `[` before the literal at `quote` opens a member access
+/// (`x[`, `f()[`, `a[0][`) rather than an array literal (`= [`, `, [`).
+fn is_bracket_key(chars: &[char], quote: usize) -> bool {
+    let mut i = quote;
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || chars[i - 1] != '[' {
+        return false;
+    }
+    let mut j = i - 1;
+    while j > 0 && chars[j - 1].is_whitespace() {
+        j -= 1;
+    }
+    j > 0 && (is_ident_char(chars[j - 1]) || matches!(chars[j - 1], ')' | ']'))
+}
+
+/// Every (part, literal) pair whose string literal spells a guarded name, or
+/// keys a bracket access with a guarded member.
+fn guarded_literal_hits(parts: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut hits = Vec::new();
+    for (name, src) in parts {
+        let chars: Vec<char> = strip_js_comments(src).chars().collect();
+        for (quote, content) in string_literals(&chars) {
+            let guarded = GUARDED_LITERALS.contains(&content.as_str())
+                || (GUARDED_BRACKET_KEYS.contains(&content.as_str())
+                    && is_bracket_key(&chars, quote));
+            if guarded {
+                hits.push(((*name).to_string(), content));
+            }
+        }
+    }
+    hits
 }
 
 #[test]
@@ -195,7 +295,11 @@ fn page_code_reaches_the_morph_library_only_inside_morph_panel() {
 
     assert_eq!(
         refs,
-        vec![("dash_40_render.js".to_string(), "morphPanel".to_string())]
+        vec![MorphReference {
+            part: "dash_40_render.js".to_string(),
+            function: "morphPanel".to_string(),
+            is_direct_call: true,
+        }]
     );
 }
 
@@ -213,7 +317,7 @@ fn the_morph_reference_scan_attributes_each_call_and_ignores_comments() {
 
     let named: Vec<(&str, &str)> = refs
         .iter()
-        .map(|(part, f)| (part.as_str(), f.as_str()))
+        .map(|r| (r.part.as_str(), r.function.as_str()))
         .collect();
     assert_eq!(
         named,
@@ -223,6 +327,126 @@ fn the_morph_reference_scan_attributes_each_call_and_ignores_comments() {
             ("dash_62_synthetic.js", "<top level>"),
         ]
     );
+}
+
+/// An alias taken inside `morphPanel` and invoked elsewhere escapes the
+/// node-only check while every call site still reads as `morphPanel`'s, so
+/// any reference there other than the direct call is reported as one.
+#[test]
+fn the_morph_reference_scan_tells_a_direct_call_from_an_alias() {
+    let cases = [
+        ("direct call", "Idiomorph.morph(p, n, {});", true),
+        ("spaced call", "Idiomorph . morph (p, n, {});", true),
+        (
+            "aliased member",
+            "morphAlias = Idiomorph.morph; morphAlias(p, n);",
+            false,
+        ),
+        (
+            "bound member",
+            "var m = Idiomorph.morph.bind(null); m(p, n);",
+            false,
+        ),
+        ("library handed on", "keep(Idiomorph);", false),
+        (
+            "other member",
+            "Idiomorph.defaults.morphStyle = 'outerHTML';",
+            false,
+        ),
+    ];
+    for (label, body, direct) in cases {
+        let src = format!("function morphPanel(p, n) {{ {body} }}");
+        let parts = [("dash_62_synthetic.js", src.as_str())];
+
+        let refs = morph_library_references(&parts);
+
+        assert_eq!(refs.len(), 1, "{label}: one reference");
+        assert_eq!(refs[0].function, "morphPanel", "{label}");
+        assert_eq!(refs[0].is_direct_call, direct, "{label}");
+    }
+}
+
+/// Page code never spells a guarded name as a string: no bracket access to
+/// the library or `replaceChildren`, and no runtime-assembled alias.
+///
+/// Mutation check: write `body['replaceChildren']()` in renderActiveTab ->
+/// red.
+#[test]
+fn page_code_spells_no_guarded_name_as_a_string() {
+    assert_eq!(
+        guarded_literal_hits(&page_parts()),
+        Vec::<(String, String)>::new()
+    );
+}
+
+#[test]
+fn the_guarded_literal_scan_flags_bracket_and_alias_spellings() {
+    let flagged = [
+        (
+            "bracket replaceChildren",
+            "function p(b) { b['replaceChildren'](x); }",
+            "replaceChildren",
+        ),
+        (
+            "double-quoted key",
+            "function p(b) { b[\"replaceChildren\"](); }",
+            "replaceChildren",
+        ),
+        (
+            "window library",
+            "function p() { return window['Idiomorph']; }",
+            "Idiomorph",
+        ),
+        (
+            "alias by name",
+            "var k = 'Idiomorph'; function p() { return self[k]; }",
+            "Idiomorph",
+        ),
+        (
+            "template key",
+            "function p(b) { b[`replaceChildren`](); }",
+            "replaceChildren",
+        ),
+        (
+            "document write",
+            "function p(s) { document['write'](s); }",
+            "write",
+        ),
+        (
+            "library member",
+            "function p(l, a, b) { l['morph'](a, b); }",
+            "morph",
+        ),
+        (
+            "chained key",
+            "function p(b) { b.children[0]['replaceChildren'](); }",
+            "replaceChildren",
+        ),
+    ];
+    for (label, src, literal) in flagged {
+        let parts = [("dash_62_synthetic.js", src)];
+
+        assert_eq!(
+            guarded_literal_hits(&parts),
+            vec![("dash_62_synthetic.js".to_string(), literal.to_string())],
+            "{label} must be flagged"
+        );
+    }
+    let accepted = [
+        ("label array", "var rows = [['read', 1], ['write', 2]];"),
+        ("label text", "function p() { return 'write'; }"),
+        ("prose word", "var t = 'replace children of Idiomorph';"),
+        (
+            "comment",
+            "// b['replaceChildren']() in prose only\nvar a = 1;",
+        ),
+        ("substituted template", "var t = `${'x'}Idiomorph`;"),
+    ];
+    for (label, src) in accepted {
+        let parts = [("dash_62_synthetic.js", src)];
+
+        assert!(guarded_literal_hits(&parts).is_empty(), "{label} must pass");
+    }
 }
 
 /// `morphPanel` refuses anything but a DOM node before it calls the library:
@@ -237,13 +461,14 @@ fn morph_panel_refuses_a_non_node_before_morphing() {
         .expect("morphPanel checks `node instanceof Node`");
     let throw = body[guard..].find("throw ").map(|at| guard + at);
     let call = body
-        .find("Idiomorph.morph(parent, node, { morphStyle: 'innerHTML' });")
+        .find("Idiomorph.morph(parent, node, {")
         .expect("morphPanel morphs the parent's children to the node");
 
     assert!(
         throw.is_some_and(|at| at < call),
         "the non-node check must throw before the morph call"
     );
+    assert!(body[call..].contains(MORPH_STYLE_OPTION));
     let code: String = page_parts()
         .iter()
         .map(|(_, src)| strip_js_comments(src))
@@ -362,4 +587,78 @@ fn the_html_sink_scan_skips_only_the_morph_option() {
     assert!(html_sink_hits(&option).is_empty());
     assert_eq!(html_sink_hits(&option_beside_sink).len(), 1);
     assert_eq!(html_sink_hits(&other_option).len(), 1);
+}
+
+/// A disclosure the operator opened stays open through a refresh: the fresh
+/// node is always built closed, and the morph would otherwise drop `open`.
+///
+/// Mutation check: drop the `callbacks` entry from morphPanel -> red.
+#[test]
+fn morph_panel_keeps_a_kept_disclosure_open() {
+    let body = compact(&function_body("morphPanel"));
+    let keep = compact(&function_body("keepOpenState"));
+
+    assert!(
+        body.contains("callbacks:{beforenodemorphed:keepopenstate}"),
+        "morphPanel must hand the open-state callback to the morph"
+    );
+    assert!(
+        keep.contains(
+            "if(oldnodeinstanceofhtmldetailselement&&freshnodeinstanceofhtmldetailselement)\
+             {freshnode.open=oldnode.open;}"
+        ),
+        "the callback copies the kept disclosure's live state onto the fresh one"
+    );
+    assert!(
+        keep.ends_with("returntrue;"),
+        "the callback must never veto the morph"
+    );
+}
+
+#[test]
+fn the_html_sink_scan_flags_the_newer_parsing_apis() {
+    let cases = [
+        ("setHTMLUnsafe", "function b(n, s) { n.setHTMLUnsafe(s); }"),
+        (
+            "parseHTMLUnsafe",
+            "function b(s) { return Document.parseHTMLUnsafe(s); }",
+        ),
+        ("srcdoc", "function b(f, s) { f.srcdoc = s; }"),
+    ];
+    for (sink, src) in cases {
+        let parts = [("dash_62_synthetic.js", src)];
+
+        assert_eq!(
+            html_sink_hits(&parts),
+            vec![("dash_62_synthetic.js".to_string(), sink.to_string())],
+            "`{sink}` must be flagged"
+        );
+    }
+}
+
+/// A text selection inside the panel survives a morph that moves the selected
+/// node: idiomorph keeps the node but its remove-and-reinsert collapses the
+/// browser's selection, so `morphPanel` puts it back when both end points are
+/// still in the panel.
+///
+/// Mutation check: drop `restoreSelection(parent, held);` -> red.
+#[test]
+fn morph_panel_restores_a_selection_the_move_collapsed() {
+    let body = compact(&function_body("morphPanel"));
+    let restore = compact(&function_body("restoreSelection"));
+
+    let held = body.find("varheld=heldselection(parent);");
+    let morph = body.find("idiomorph.morph(");
+    let put_back = body.find("restoreselection(parent,held);");
+    assert!(held.is_some() && morph.is_some() && put_back.is_some());
+    assert!(
+        held < morph && morph < put_back,
+        "held before the morph, restored after"
+    );
+    assert!(
+        restore.starts_with(
+            "if(!held||!parent.contains(held.anchor)||!parent.contains(held.focus)){return;}"
+        ),
+        "a selection whose record left the panel is not restored"
+    );
 }

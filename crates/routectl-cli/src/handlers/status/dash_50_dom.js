@@ -23,6 +23,7 @@
   //   <row id>-toggle / -detail       that row's disclosure button / detail row
   //   <table>-wrap                    the table's scroll container
   //   <view>-<name>-<idKey(key)>      a control keyed by data (a provider card)
+  //   <view>-<name>-<idKey(key)>...   a repeated list item (see uniqueItemId)
   //
   // Table ids are literal strings, unique across the script (page.rs checks
   // it). idKey encodes a data key into 'k' + [A-Za-z0-9_]* and is injective,
@@ -42,6 +43,17 @@
 
   function rowDomId(tableId, rowKey) {
     return tableId + '-' + idKey(rowKey);
+  }
+
+  // The id of one item in a repeated list (a card, a check), whose `base` is
+  // built from the item's own keys through idKey. A list whose key can repeat
+  // (two checks sharing a name) tells the repeats apart by their order among
+  // themselves; `seen` is one fresh object per list. The ordinal suffix adds a
+  // segment no idKey-built base has, so it cannot equal another item's base.
+  function uniqueItemId(base, seen) {
+    var n = seen[base] || 0;
+    seen[base] = n + 1;
+    return n ? base + '-' + n : base;
   }
 
   // Mark `node` as the trigger of one ACTIONS entry (dash_90_chrome.js). No

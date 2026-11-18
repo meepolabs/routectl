@@ -47,7 +47,12 @@
     var list = document.createElement('div');
     list.className = 'ugroups';
     var totalReq = num0(view.totals.requests);
-    ranked.forEach(function (g) { list.appendChild(usageCard(g, totalReq)); });
+    var seen = Object.create(null);
+    ranked.forEach(function (g) {
+      var card = usageCard(g, totalReq);
+      card.id = uniqueItemId('usage-group-' + idKey(g.label), seen);
+      list.appendChild(card);
+    });
     wrap.appendChild(list);
     return wrap;
   }

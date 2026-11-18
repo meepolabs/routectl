@@ -167,16 +167,27 @@
       countText(findings.length, ' check needs attention', ' checks need attention')));
     var list = document.createElement('div');
     list.className = 'doclist';
-    findings.forEach(function (f) { list.appendChild(doctorFinding(f)); });
+    var seen = Object.create(null);
+    findings.forEach(function (f) {
+      list.appendChild(doctorFinding(f, doctorItemId('doctor-finding', f, seen)));
+    });
     wrap.appendChild(list);
     return wrap;
+  }
+
+  // A check's id comes from its own identity (section, then name), never its
+  // position: the lists reorder as severities change, and a card matched by
+  // position would carry a selection inside it over to another check.
+  function doctorItemId(prefix, f, seen) {
+    return uniqueItemId(prefix + '-' + idKey(f.section) + '-' + idKey(f.name), seen);
   }
 
   // One card per finding: the severity, what was checked, what was found, and
   // the remediation when the check carries one. A finding with no remediation
   // renders no empty slot for it.
-  function doctorFinding(f) {
+  function doctorFinding(f, id) {
     var cardEl = document.createElement('div');
+    cardEl.id = id;
     cardEl.className = 'docfinding' + (f.status === 'Fail' ? ' docfinding--fail' : '');
     cardEl.appendChild(doctorFindingHead(f));
     cardEl.appendChild(docText('docfinding-detail', f.detail));
@@ -209,14 +220,18 @@
     wrap.className = 'card';
     var grid = document.createElement('div');
     grid.className = 'docpassgrid';
-    passes.forEach(function (p) { grid.appendChild(doctorPass(p)); });
+    var seen = Object.create(null);
+    passes.forEach(function (p) {
+      grid.appendChild(doctorPass(p, doctorItemId('doctor-pass', p, seen)));
+    });
     wrap.appendChild(buildExpander('doctor-passes',
       countText(passes.length, ' check passed', ' checks passed'), grid));
     return wrap;
   }
 
-  function doctorPass(p) {
+  function doctorPass(p, id) {
     var row = document.createElement('div');
+    row.id = id;
     row.className = 'docpass';
     var dot = document.createElement('span');
     dot.className = 'docpass-dot';
