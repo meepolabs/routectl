@@ -4,7 +4,12 @@ use std::path::Path;
 
 use ::toml_edit::{DocumentMut, Table};
 use routectl_core::Result;
-use routectl_router::{Config, EditOutcome, ProviderEntry, edit_config_toml};
+use routectl_router::{Config, EditOutcome, ProviderEntry};
+
+#[cfg(test)]
+use self::publish_count::edit_config_toml;
+#[cfg(not(test))]
+use routectl_router::edit_config_toml;
 
 use crate::commands::edit_pipeline::{
     RelockValidationError, gate, insert_provider_block, parse_document, render_write_error,
@@ -100,4 +105,39 @@ pub(super) fn commit(
     })
     .map_err(render_write_error)?;
     Ok(result.outcome)
+}
+
+/// Counts the config publishes made through this module on the current
+/// thread, so a test can tell one commit of entry and pool from two.
+#[cfg(test)]
+pub(super) mod publish_count {
+    use std::cell::Cell;
+    use std::path::Path;
+
+    use routectl_router::{ConfigWriteError, EditOutcome, EditResult};
+
+    thread_local! {
+        static PUBLISHES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Publishes counted on this thread so far.
+    pub fn publishes() -> usize {
+        PUBLISHES.with(Cell::get)
+    }
+
+    pub(super) fn edit_config_toml<E, F>(
+        path: &Path,
+        base_bytes_snapshot: &[u8],
+        edit_fn: F,
+    ) -> Result<EditResult, ConfigWriteError<E>>
+    where
+        E: std::error::Error,
+        F: FnOnce(&mut ::toml_edit::DocumentMut) -> Result<EditOutcome, E>,
+    {
+        let result = routectl_router::edit_config_toml(path, base_bytes_snapshot, edit_fn);
+        if matches!(&result, Ok(r) if r.outcome == EditOutcome::Modified) {
+            PUBLISHES.with(|n| n.set(n.get() + 1));
+        }
+        result
+    }
 }

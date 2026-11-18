@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use routectl_router::CURRENT_CONFIG_VERSION;
 use routectl_testkit::ScopedEnv;
 
-use super::toml_edit::{Candidate, commit};
+use super::toml_edit::{Candidate, commit, publish_count};
 use super::*;
 
 /// A stub [`AddIo`] whose login records the seat and runs `hook` (standing
@@ -115,14 +115,21 @@ async fn a_join_writes_the_entry_and_its_membership_in_one_commit() {
     let body = pooled(&seat("first", "oauth://anthropic#first", ""));
     let path = write_config(dir.path(), &body);
     let io = LoginIo::default();
+    let publishes_before = publish_count::publishes();
 
     // Act
     let result = run_with_io(&path, pool_args("work", "work", "team"), &io)
         .await
         .expect("the join writes");
 
-    // Assert
+    // Assert: one publish carried both halves, so no reader of the file
+    // ever sees the entry without its membership.
     assert_eq!(result, AddResult::Written);
+    assert_eq!(
+        publish_count::publishes() - publishes_before,
+        1,
+        "the entry and the pool are one publish"
+    );
     assert_eq!(io.login_count(), 1);
     let text = std::fs::read_to_string(&path).unwrap();
     let config = parse_config(&text).expect("reparses");
@@ -168,38 +175,63 @@ async fn a_pool_the_add_creates_lists_the_entry_and_accepts_new_logins() {
     assert!(gate(&text).is_ok(), "{text}");
 }
 
-/// Each row's first member differs from the joining anthropic seat on the
-/// named pool-key field; the gate refuses the one candidate before the
-/// login runs and the file keeps every byte. `oauth://acme` is a vendor
-/// routectl does not manage, so containment leaves the member alone.
+/// Each row's pool differs on the named pool-key field: the first four
+/// rows' first member differs from the joining anthropic seat, and the
+/// cloak row's two members already differ on explicit cloak settings (the
+/// joining seat copies the first member's cloak keys, so only a pool that
+/// already disagrees can mismatch there). The gate refuses the one
+/// candidate before the login runs and the file keeps every byte.
+/// `oauth://acme` is a vendor routectl does not manage, so containment
+/// leaves the member alone.
 #[tokio::test]
 async fn a_mismatched_pool_refuses_before_the_login_and_writes_nothing() {
+    let cloak_split = format!(
+        "{}{}{}\n[pools.team]\nmembers = [\"first\", \"second\"]\n",
+        base(),
+        seat(
+            "first",
+            "oauth://anthropic#first",
+            "cloak_mode = \"never\"\n"
+        ),
+        seat("second", "oauth://anthropic#second", ""),
+    );
     let rows = [
         (
             "format",
-            seat("first", "oauth://acme", "").replace("anthropic-messages", "openai-chat"),
+            pooled(&seat("first", "oauth://acme", "").replace("anthropic-messages", "openai-chat")),
             "`format`",
+            true,
         ),
         (
             "destination",
-            seat("first", "oauth://anthropic#first", "")
-                .replace("api.anthropic.com\"", "api.anthropic.com/v1\""),
+            pooled(
+                &seat("first", "oauth://anthropic#first", "")
+                    .replace("api.anthropic.com\"", "api.anthropic.com/v1\""),
+            ),
             "destination",
+            true,
         ),
         (
             "auth",
-            seat("first", "oauth://acme", "").replace("\"bearer\"", "\"x-api-key\""),
+            pooled(&seat("first", "oauth://acme", "").replace("\"bearer\"", "\"x-api-key\"")),
             "`auth`",
+            true,
         ),
-        ("vendor", seat("first", "oauth://acme", ""), "OAuth vendor"),
+        (
+            "vendor",
+            pooled(&seat("first", "oauth://acme", "")),
+            "OAuth vendor",
+            true,
+        ),
+        ("cloak", cloak_split, "`cloak_mode`", false),
     ];
-    for (row, member, field) in rows {
+    for (row, body, field, snapshot_gates) in rows {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
-        let body = pooled(&member);
-        assert!(
+        assert_eq!(
             gate(&body).is_ok(),
-            "row `{row}`: the fixture itself is valid"
+            snapshot_gates,
+            "row `{row}`: the fixture's own validity"
         );
         let path = write_config(dir.path(), &body);
         let io = LoginIo::default();

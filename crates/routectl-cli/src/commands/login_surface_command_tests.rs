@@ -82,36 +82,56 @@ fn write_default_config(root: &Path, body: &str) -> (PathBuf, [ScopedEnv; 2]) {
 
 #[test]
 fn an_accepted_write_lands_the_entry_and_the_pool_and_passes_the_gate() {
-    // Arrange
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_config(dir.path(), &base());
+    for family in ["anthropic", "codex"] {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), &base());
+        let entry_name = format!("{family}-default");
+        let credential = format!("oauth://{family}");
 
-    // Act
-    let outcome = surface(&path, "anthropic", None, true).expect("a fresh write succeeds");
+        // Act
+        let outcome = surface(&path, family, None, true)
+            .unwrap_or_else(|e| panic!("row `{family}`: a fresh write fails: {e}"));
 
-    // Assert: the outcome names the entry, and the FILE parses and
-    // validates through the same gate the reload path runs.
-    assert_eq!(
-        outcome,
-        SurfaceOutcome::Written {
-            entry_name: "anthropic-default".to_string()
-        }
-    );
-    let text = String::from_utf8(read(&path)).expect("utf8");
-    let config = parse_config(&text).expect("the written config parses");
-    assert!(super::gate(&text).is_ok(), "the written config must gate");
+        // Assert: the outcome names the entry, and the FILE parses,
+        // validates through the same gate the reload path runs, and holds
+        // the typed managed-login entry inside a growth pool.
+        assert_eq!(
+            outcome,
+            SurfaceOutcome::Written {
+                entry_name: entry_name.clone()
+            },
+            "row `{family}`"
+        );
+        let text = String::from_utf8(read(&path)).expect("utf8");
+        let config = parse_config(&text)
+            .unwrap_or_else(|e| panic!("row `{family}`: the written config parses: {e}"));
+        assert!(
+            super::gate(&text).is_ok(),
+            "row `{family}`: the written config must gate:\n{text}"
+        );
 
-    let entry = config
-        .providers
-        .get("anthropic-default")
-        .expect("the entry landed");
-    assert_eq!(entry.api_key_ref(), Some("oauth://anthropic"));
-    let pool = config.pools.get("anthropic").expect("the pool landed");
-    assert_eq!(pool.members, ["anthropic-default"]);
-    assert!(
-        pool.accepts_new_logins,
-        "a pool login creates is one login may grow"
-    );
+        let entry = config
+            .providers
+            .get(&entry_name)
+            .unwrap_or_else(|| panic!("row `{family}`: the entry landed:\n{text}"));
+        let expected = routectl_router::ProviderEntry::for_managed_login(family, credential)
+            .expect("the family has a managed entry");
+        assert_eq!(
+            serde_json::to_value(entry).expect("entry json"),
+            serde_json::to_value(&expected).expect("expected json"),
+            "row `{family}`:\n{text}"
+        );
+        let pool = config
+            .pools
+            .get(family)
+            .unwrap_or_else(|| panic!("row `{family}`: the pool landed:\n{text}"));
+        assert_eq!(pool.members, [entry_name.as_str()], "row `{family}`");
+        assert!(
+            pool.accepts_new_logins,
+            "row `{family}`: a pool login creates is one login may grow"
+        );
+    }
 }
 
 #[test]
