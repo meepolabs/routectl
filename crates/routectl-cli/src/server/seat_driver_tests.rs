@@ -253,6 +253,151 @@ fn the_seat_list_is_the_configured_anthropic_and_codex_logins_once_each() {
     );
 }
 
+/// A config whose models `models` (name, provider) route over the given
+/// `[providers]` entries (name, credential) and the pool `team` of
+/// `pool_members`.
+fn entry_config(
+    entries: &[(&str, &str)],
+    pool_members: &[&str],
+    models: &[(&str, &str)],
+) -> Config {
+    let mut text = format!("version = {CURRENT_CONFIG_VERSION}\n");
+    for (name, credential) in entries {
+        text.push_str(&format!(
+            "[providers.{name}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"{credential}\"\nauth = \"bearer\"\n\n"
+        ));
+    }
+    if !pool_members.is_empty() {
+        let members: Vec<String> = pool_members.iter().map(|m| format!("\"{m}\"")).collect();
+        text.push_str(&format!(
+            "[pools.team]\nmembers = [{}]\n\n",
+            members.join(", ")
+        ));
+    }
+    for (name, provider) in models {
+        text.push_str(&format!(
+            "[models.{name}]\nprovider = \"{provider}\"\nupstream = \"u\"\n"
+        ));
+    }
+    routectl_router::parse_config(&text).expect("fixture parses")
+}
+
+fn seat_entries(config: &Config) -> Vec<(String, String)> {
+    managed_seats(config)
+        .into_iter()
+        .map(|seat| (seat.account, seat.entry))
+        .collect()
+}
+
+#[test]
+fn each_seat_carries_the_provider_entry_it_is_reached_through_directly_or_pooled() {
+    // Arrange: seat a reached directly, seats b and c through a pool.
+    let config = entry_config(
+        &[
+            ("direct_a", "oauth://anthropic#a"),
+            ("pooled_b", "oauth://anthropic#b"),
+            ("pooled_c", "oauth://anthropic#c"),
+        ],
+        &["pooled_b", "pooled_c"],
+        &[("m_direct", "direct_a"), ("m_pool", "team")],
+    );
+
+    // Act
+    let seats = seat_entries(&config);
+
+    // Assert
+    assert_eq!(
+        seats,
+        [
+            ("anthropic#a".to_string(), "direct_a".to_string()),
+            ("anthropic#b".to_string(), "pooled_b".to_string()),
+            ("anthropic#c".to_string(), "pooled_c".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn one_login_under_two_entries_is_one_seat_under_the_smallest_entry_name() {
+    // The model names sort so that the first model met reaches the larger
+    // entry in one row and the smaller entry in the other.
+    type Row<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
+    let rows: [Row; 4] = [
+        (
+            "direct, larger entry met first",
+            &[("a_model", "zeta"), ("b_model", "alpha")],
+            &[],
+        ),
+        (
+            "direct, smaller entry met first",
+            &[("a_model", "alpha"), ("b_model", "zeta")],
+            &[],
+        ),
+        (
+            "pool lists the larger entry first",
+            &[("a_model", "team")],
+            &["zeta", "alpha"],
+        ),
+        (
+            "pooled larger entry met before the direct smaller one",
+            &[("a_model", "team"), ("b_model", "alpha")],
+            &["zeta"],
+        ),
+    ];
+    for (name, models, pool_members) in rows {
+        // Arrange
+        let config = entry_config(
+            &[
+                ("zeta", "oauth://anthropic#shared"),
+                ("alpha", "oauth://anthropic#shared"),
+            ],
+            pool_members,
+            models,
+        );
+
+        // Act
+        let seats = seat_entries(&config);
+
+        // Assert
+        assert_eq!(
+            seats,
+            [("anthropic#shared".to_string(), "alpha".to_string())],
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_refresh_driver_stop_error_names_the_refresh_job() {
+    // Arrange
+    let rig = Rig::new(&[], ScriptedRefresh::Mint("unused".into())).await;
+    let health = Arc::new(SeatDriverHealth::default());
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+
+    // Act: the shutdown channel closes without a signal.
+    let ((), events) = with_capture(async {
+        drop(shutdown_tx);
+        run_seat_driver(rig.job(), rig.swap.clone(), shutdown_rx, health).await;
+    })
+    .await;
+
+    // Assert
+    let stops: Vec<(&str, Option<&str>)> = events
+        .iter()
+        .filter(|event| {
+            event.level == tracing::Level::ERROR && event.target.ends_with("seat_driver")
+        })
+        .map(|event| (event.message.as_str(), event.field("job")))
+        .collect();
+    assert_eq!(
+        stops,
+        [(
+            "refresh seat driver stopped before shutdown; the job no longer runs in the background",
+            Some("refresh"),
+        )]
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn one_sweep_refreshes_each_due_managed_seat_once_and_no_other_login() {
@@ -429,6 +574,8 @@ struct ResetDuringRun {
 }
 
 impl SeatJob for ResetDuringRun {
+    const KIND: &'static str = RefreshJob::KIND;
+
     type Outcome = RefreshOutcome;
 
     fn due(&self, router: &Router) -> Vec<ManagedSeat> {
@@ -497,6 +644,8 @@ struct CountingJob {
 }
 
 impl SeatJob for CountingJob {
+    const KIND: &'static str = "counting";
+
     type Outcome = ();
 
     fn due(&self, _router: &Router) -> Vec<ManagedSeat> {
@@ -575,10 +724,13 @@ struct HangingJob {
 }
 
 impl SeatJob for HangingJob {
+    const KIND: &'static str = "hanging";
+
     type Outcome = ();
 
     fn due(&self, _router: &Router) -> Vec<ManagedSeat> {
         vec![ManagedSeat {
+            entry: "seat_a".into(),
             provider: "anthropic".into(),
             label: Some("a".into()),
             account: SEAT_A.into(),

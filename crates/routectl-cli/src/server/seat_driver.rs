@@ -4,7 +4,7 @@
 //! Sibling of `metrics_driver.rs` and `probe_driver.rs`, riding the same
 //! reload pipeline and shutdown signal. The driver owns cadence, shutdown and
 //! its own health; a `SeatJob` owns which seats are due, what running one
-//! does, and how its outcome lands on the router. Refresh is the one job.
+//! does, and how its outcome lands on the router.
 //!
 //! Every seat runs under a credential generation acquired BEFORE the job
 //! runs, and its outcome applies only under that generation, so a re-login or
@@ -40,10 +40,14 @@ const NEVER: i64 = 0;
 /// One configured managed-login seat and the credential account the router
 /// keys its marks on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ManagedSeat {
-    pub(super) provider: String,
-    pub(super) label: Option<String>,
-    pub(super) account: String,
+pub(crate) struct ManagedSeat {
+    /// The `[providers]` entry the seat is reported under. A login named by
+    /// several entries is one seat, reported under the lexicographically
+    /// smallest of them so every surface agrees whatever the model order.
+    pub(crate) entry: String,
+    pub(crate) provider: String,
+    pub(crate) label: Option<String>,
+    pub(crate) account: String,
 }
 
 /// How one seat's outcome counts toward the driver's health.
@@ -59,6 +63,9 @@ pub(super) enum SeatVerdict {
 
 /// One kind of per-seat background work.
 pub(super) trait SeatJob: Send + Sync {
+    /// The job's name in the driver's log lines.
+    const KIND: &'static str;
+
     /// What running the job for one seat produced.
     type Outcome: Send;
 
@@ -92,6 +99,8 @@ impl RefreshJob {
 }
 
 impl SeatJob for RefreshJob {
+    const KIND: &'static str = "refresh";
+
     type Outcome = RefreshOutcome;
 
     /// Every configured managed seat except those already marked with a
@@ -171,16 +180,26 @@ fn settle_refreshed(router: &Router, seat: &ManagedSeat, generation: u64) {
 /// through, in account order. A seat is reached through a model's own
 /// provider entry or through a member of the pool it names; a stored
 /// credential no entry names is never listed.
-pub(super) fn managed_seats(config: &Config) -> Vec<ManagedSeat> {
+pub(crate) fn managed_seats(config: &Config) -> Vec<ManagedSeat> {
     let mut seats: BTreeMap<String, ManagedSeat> = BTreeMap::new();
     for model in config.models.values() {
         for entry_name in egress_entries(config, &model.provider) {
             if let Some(seat) = managed_seat_of(config, entry_name) {
-                seats.entry(seat.account.clone()).or_insert(seat);
+                keep_smallest_entry(&mut seats, seat);
             }
         }
     }
     seats.into_values().collect()
+}
+
+fn keep_smallest_entry(seats: &mut BTreeMap<String, ManagedSeat>, seat: ManagedSeat) {
+    match seats.get_mut(&seat.account) {
+        Some(kept) if seat.entry < kept.entry => *kept = seat,
+        Some(_) => {}
+        None => {
+            seats.insert(seat.account.clone(), seat);
+        }
+    }
 }
 
 fn egress_entries<'a>(config: &'a Config, provider: &'a str) -> Vec<&'a str> {
@@ -203,6 +222,7 @@ fn managed_seat_of(config: &Config, entry_name: &str) -> Option<ManagedSeat> {
     }
     let account = routectl_auth::oauth::seat_key(&provider, label.as_deref());
     Some(ManagedSeat {
+        entry: entry_name.to_string(),
         provider,
         label,
         account,
@@ -317,8 +337,8 @@ enum DriverExit {
 }
 
 /// Drive `job` until `shutdown` fires, keeping `health` current. Logs one
-/// ERROR when the loop stops for any other reason: the daemon keeps serving,
-/// but its managed logins are no longer refreshed in the background.
+/// ERROR naming the job when the loop stops for any other reason: the daemon
+/// keeps serving, but that job no longer runs in the background.
 pub(super) async fn run_seat_driver<J: SeatJob>(
     job: J,
     router_swap: Arc<ArcSwap<Router>>,
@@ -330,8 +350,10 @@ pub(super) async fn run_seat_driver<J: SeatJob>(
     health.set_running(false);
     if exit != DriverExit::Shutdown {
         tracing::error!(
+            job = J::KIND,
             exit = ?exit,
-            "seat driver stopped before shutdown; managed logins are no longer refreshed in the background",
+            "{} seat driver stopped before shutdown; the job no longer runs in the background",
+            J::KIND,
         );
     }
 }
