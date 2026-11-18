@@ -8,21 +8,23 @@
 //! copied into [`super::StatusState`] at construction: a panel built after a
 //! hot-reload must report the NEW load instant, not the boot one. Beside that
 //! stamp sits the last REJECTED reload (its redacted class and instant), which
-//! the doctor panel reads while no later load has superseded it, and the
-//! background seat driver's health, which the health panel reads.
+//! the doctor panel reads while no later load has superseded it, the health
+//! of each background seat driver (the refresh and the usage poll), which the
+//! health panel reads, and the usage poll's read-only state.
 //!
 //! Same enforcement shape as [`super::router_view`]: the `Arc<DaemonMeta>`
 //! is PRIVATE to [`DaemonMetaHandle`], so a panel module holding a handle can
 //! call only its read methods -- it can never name the inner field and so can
 //! never reach the stamp writer or the driver's health writer.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
 use crate::server::reload_failure::{ReloadFailure, ReloadFailureSnapshot};
 use crate::server::seat_driver::{SeatDriverHealth, SeatDriverHealthSnapshot};
+use crate::server::usage_poll::UsagePollState;
 
 /// Epoch-ms sentinel for "no config load has been stamped yet". Never
 /// reaches the wire: [`DaemonMetaHandle::snapshot`] maps it to `None` rather
@@ -36,8 +38,13 @@ pub struct DaemonMeta {
     config_loaded_at_ms: AtomicI64,
     /// The last rejected reload's class and epoch-ms instant.
     last_reload_failure: Mutex<Option<(ReloadFailure, i64)>>,
-    /// The background seat driver's health, written by the driver task.
+    /// The background refresh driver's health, written by the driver task.
     seat_driver: Arc<SeatDriverHealth>,
+    /// The background usage poll driver's health, written by its task.
+    usage_poll_driver: Arc<SeatDriverHealth>,
+    /// The usage poll's state, installed when the poll is spawned; unset on
+    /// a daemon that runs no poll.
+    usage_poll_state: OnceLock<UsagePollState>,
 }
 
 impl DaemonMeta {
@@ -49,12 +56,25 @@ impl DaemonMeta {
             config_loaded_at_ms: AtomicI64::new(UNSTAMPED),
             last_reload_failure: Mutex::new(None),
             seat_driver: Arc::default(),
+            usage_poll_driver: Arc::default(),
+            usage_poll_state: OnceLock::new(),
         }
     }
 
-    /// The background seat driver's health, shared with the driver task.
+    /// The background refresh driver's health, shared with the driver task.
     pub fn seat_driver_health(&self) -> Arc<SeatDriverHealth> {
         Arc::clone(&self.seat_driver)
+    }
+
+    /// The background usage poll driver's health, shared with its task.
+    pub fn usage_poll_driver_health(&self) -> Arc<SeatDriverHealth> {
+        Arc::clone(&self.usage_poll_driver)
+    }
+
+    /// Publish the usage poll's state. The first install wins: the daemon
+    /// spawns one poll for its lifetime.
+    pub(crate) fn install_usage_poll_state(&self, state: UsagePollState) {
+        let _ = self.usage_poll_state.set(state);
     }
 
     /// Record that the live config was loaded (or reloaded) now. Called at
@@ -104,9 +124,21 @@ impl DaemonMetaHandle {
         }
     }
 
-    /// One read of the background seat driver's health.
+    /// One read of the background refresh driver's health.
     pub fn seat_driver(&self) -> SeatDriverHealthSnapshot {
         self.inner.seat_driver.snapshot()
+    }
+
+    /// One read of the background usage poll driver's health.
+    pub fn usage_poll_driver(&self) -> SeatDriverHealthSnapshot {
+        self.inner.usage_poll_driver.snapshot()
+    }
+
+    /// The usage poll's read-only state, or `None` on a daemon that runs no
+    /// poll.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn usage_poll_state(&self) -> Option<&UsagePollState> {
+        self.inner.usage_poll_state.get()
     }
 
     /// The last rejected reload, when no config load has been stamped since

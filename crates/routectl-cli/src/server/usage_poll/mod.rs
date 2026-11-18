@@ -28,9 +28,16 @@ use routectl_router::{
 };
 use routectl_usage::UsageHandle;
 
+use arc_swap::ArcSwap;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
 use self::client::{FetchResult, SeatCredential, UsagePollClient};
 use self::schedule::{PollOutcome, PollSchedule, RandomJitter, SeatCandidate};
-use crate::server::seat_driver::{ManagedSeat, SeatJob, SeatVerdict, managed_seats};
+use crate::handlers::status::DaemonMeta;
+use crate::server::seat_driver::{
+    ManagedSeat, SeatJob, SeatVerdict, managed_seats, run_seat_driver,
+};
 
 /// The wall clock the schedule runs on, in epoch ms. Injected so tests can
 /// move it without sleeping.
@@ -178,7 +185,6 @@ impl UsagePollJob {
     /// The production job. Building it resolves no vendor client identity:
     /// the Codex identity headers are read per request, so they reflect
     /// whatever the provider factory installed before the first poll.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(store: Arc<OAuthStore>, usage: UsageHandle) -> reqwest::Result<Self> {
         Ok(Self::with_parts(
             store,
@@ -203,7 +209,6 @@ impl UsagePollJob {
     }
 
     /// The read-only handle to the poll state.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> UsagePollState {
         self.state.clone()
     }
@@ -321,6 +326,41 @@ impl SeatJob for UsagePollJob {
     }
 }
 
+/// Spawn the background usage poll over `store`'s managed logins, its
+/// health and poll state published on `daemon_meta`. Returns `None`, after
+/// one ERROR, when the poll's HTTP client cannot be built: the daemon then
+/// serves without the poll, and its health reads as not running.
+///
+/// The caller spawns this only after the provider factory has run: the
+/// first Codex identity read installs the pinned default for the whole
+/// process if no configured one was installed before it.
+pub(super) fn spawn_usage_poll_driver(
+    store: &Arc<OAuthStore>,
+    usage: &UsageHandle,
+    router_swap: &Arc<ArcSwap<Router>>,
+    shutdown: &watch::Receiver<()>,
+    daemon_meta: &DaemonMeta,
+) -> Option<JoinHandle<()>> {
+    let job = match UsagePollJob::new(Arc::clone(store), usage.clone()) {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::error!(
+                job = UsagePollJob::KIND,
+                error = %error,
+                "usage poll client could not be built; the background usage poll does not run",
+            );
+            return None;
+        }
+    };
+    daemon_meta.install_usage_poll_state(job.state());
+    Some(tokio::spawn(run_seat_driver(
+        job,
+        Arc::clone(router_swap),
+        shutdown.clone(),
+        daemon_meta.usage_poll_driver_health(),
+    )))
+}
+
 async fn fetch_usage(
     store: &OAuthStore,
     client: &UsagePollClient,
@@ -404,3 +444,11 @@ mod job_tests;
 #[cfg(test)]
 #[path = "containment_tests.rs"]
 mod containment_tests;
+
+#[cfg(test)]
+#[path = "config_reload_tests.rs"]
+mod config_reload_tests;
+
+#[cfg(test)]
+#[path = "daemon_tests.rs"]
+mod daemon_tests;

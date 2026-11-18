@@ -79,7 +79,7 @@ fn panel_of(status: &StatusState) -> HealthPanel {
     build_from_view(
         &status.router.view(),
         false,
-        crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
+        DriverHealth::idle(),
         FidelityEmission::always(),
         &FidelityGate::default(),
     )
@@ -124,6 +124,7 @@ struct PanelWithoutWireCheck<'a> {
     targets: &'a Vec<TargetHealth>,
     pools: &'a Vec<PoolHealth>,
     seat_driver: &'a SeatDriverRow,
+    usage_poll_driver: &'a SeatDriverRow,
     learned_negatives: &'a Vec<LearnedNegative>,
 }
 
@@ -148,6 +149,7 @@ fn existing_fields_keep_their_order_with_the_wire_check_section_last() {
         targets: &panel.targets,
         pools: &panel.pools,
         seat_driver: &panel.seat_driver,
+        usage_poll_driver: &panel.usage_poll_driver,
         learned_negatives: &panel.learned_negatives,
     })
     .expect("legacy shape serializes");

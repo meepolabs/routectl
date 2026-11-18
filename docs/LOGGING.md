@@ -29,6 +29,7 @@ The first half is for operators (filtering, triage, redaction); the
   [stream first-activity](#stream-first-activity-mark),
   [dispatch walk DEBUG lines](#dispatch-walk-debug-lines),
   [circuit-breaker transitions](#circuit-breaker-transition-info-lines),
+  [background usage poll](#background-usage-poll-lines),
   [capability intelligence](#capability-intelligence-events)
 - [WARN and ERROR catalog](#warn-and-error-catalog)
 - [Visibility moved to DEBUG](#visibility-moved-to-debug)
@@ -1871,6 +1872,23 @@ expansions that found at least one seat not dispatchable, and
 `rc_pool_unavailable_total` the subset that found none (plus any expansion
 of a pooled model with no seats at all, which no current build produces).
 
+## Background usage poll lines
+
+The background usage poll (see [CONFIGURATION.md](CONFIGURATION.md#background-usage-poll))
+logs one DEBUG line per seat it polls, target `routectl_cli::server::usage_poll`,
+`event=usage_poll`, message `usage poll finished`, with fields `account` (the
+seat key), `outcome` and `status`. `outcome` is one of `accepted`, `no_windows`
+(the account reported no usage windows), `token_not_ready` (no token outside the
+refresh lead; nothing was sent), `paused` (a 429 paused the vendor), `redirect`,
+`auth` (401 or 403, or a Codex login with no account id), `http` (any other
+non-200 status, carried in `status`), `timeout`, `transport`, `too_large`,
+`malformed` (the body did not reduce, or the meter refused it) and `superseded`
+(the seat was re-logged in or removed while the poll was in flight). `status`
+is set only for `http`. The line never carries the token, the response body or
+headers, or a vendor account id. A rejected reading also counts in the
+`quota_observation_rejected` WARN totals. The driver stopping before shutdown
+is an ERROR with `job=usage_poll` (see the catalog).
+
 ## Capability intelligence events
 
 routectl's learned-capability subsystem (see CONFIGURATION.md,
@@ -2590,7 +2608,8 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | ERROR | `routectl_cli::server::{purge_settlement,serve}` | `capability purge settlements did not finish before the shutdown deadline`, `a capability purge settlement did not complete ...`, `a capability purge settlement could not be accounted for` | The registry and ledger may disagree for a purged key; the daemon stops on purpose in the terminal cases. Check usage DB health, restart, and re-check the purged keys. |
 | WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `activation inventory: alias-referenced provider entries have no usable credential`, `credentials reload failed`, `credentials reload needed a router rebuild, but it failed` (`seat_set_changed`), `config reload failed: ...` (the loader one carries `is_panic` / `is_cancelled`), `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader (`is_panic=true`; a cancelled loader is the runtime shutting down). |
 | WARN | `routectl_cli::server::reload_shutdown` | `reload task join failed during shutdown` (`event=reload_task_join_failed`), `reload task did not stop within deadline` (`event=reload_task_deadline_exceeded`, field `deadline_secs`) | A reload task panicked or hung at shutdown: file a bug with the preceding lines; check the usage DB if it recurs. Match on the `event` field, not the message. |
-| ERROR | `routectl_cli::server::seat_driver` | `{job} seat driver stopped before shutdown; the job no longer runs in the background`; fields `job`, `exit` | A background seat job's loop ended while the daemon kept serving; `job` names it (`refresh`: managed logins are no longer refreshed in the background, though seats still refresh on demand when a request uses them). Restart the daemon to restore the job, and file a bug with the preceding lines. Match on the `job` field, not the message. |
+| ERROR | `routectl_cli::server::seat_driver` | `{job} seat driver stopped before shutdown; the job no longer runs in the background`; fields `job`, `exit` | A background seat job's loop ended while the daemon kept serving; `job` names it (`refresh`: managed logins are no longer refreshed in the background, though seats still refresh on demand when a request uses them; `usage_poll`: idle seats are no longer polled for usage, so they get a reading only from response headers, and `/status/health` shows `usage_poll_driver.running` false). Restart the daemon to restore the job, and file a bug with the preceding lines. Match on the `job` field, not the message. |
+| ERROR | `routectl_cli::server::usage_poll` | `usage poll client could not be built; the background usage poll does not run`; fields `job` (`usage_poll`), `error` | At startup no TLS client could be built for the usage endpoints. The daemon serves without the poll, and `usage_poll_driver.running` stays false. Restart; file a bug if it recurs. |
 | WARN | `routectl_cli::server::router_build` | `codex identity warning`, `cloud-code host warning`, `cloud-code model warning`, `auth-reserved header warning` (once per finding at serve startup and at each accepted config reload; a credentials seat-change rebuild repeats none) | A config advisory: adjust or remove the named knob, or accept it. `auth-reserved header warning`: a `[models.X] header_extras` key (`authorization`, `x-api-key`, `anthropic-version`) is dropped from every request; remove it and put credentials in the provider's `credential` / `auth`. |
 | WARN | `routectl_cli::server::secrets` | `OAuth credentials store unavailable ...`, `OAuth credentials store could not be constructed` | `oauth://` references will fail: set HOME/XDG, or fix the credentials directory per `error`. |
 | ERROR / WARN | `routectl_cli::server::serve` | `MITM proxy failed to start`, `usage writer drain task failed`, `usage writer panicked while draining` (ERROR); `graceful drain deadline elapsed`, `failed to install SIGTERM handler`, `usage writer stopped at its drain deadline` (WARN) | MITM down: fix its port or cert per `error`, restart. Drain task failed or writer panicked: queued usage rows may be lost; file a bug. Writer drain deadline: see the `routectl_usage::writer` deadline line just before it. Drain deadline: in-flight requests were cut, recurring means stuck requests. No SIGTERM handler: graceful stop is unavailable. |

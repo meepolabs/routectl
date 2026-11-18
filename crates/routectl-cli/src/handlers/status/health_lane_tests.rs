@@ -134,7 +134,7 @@ async fn each_target_learned_lane_is_the_state_key_of_the_row_learned_on_it() {
     let panel = build_from_view(
         &state.router.view(),
         false,
-        crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
+        DriverHealth::idle(),
         FidelityEmission::always(),
         &FidelityGate::default(),
     );
@@ -358,7 +358,7 @@ mod doctor_agreement {
         let status = serde_json::to_value(build_from_view(
             &view,
             false,
-            crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
+            DriverHealth::idle(),
             FidelityEmission::always(),
             &FidelityGate::default(),
         ))

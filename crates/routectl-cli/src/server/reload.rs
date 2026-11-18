@@ -24,6 +24,7 @@ use super::probe_driver::run_probe_driver;
 use super::reload_failure::ReloadFailure;
 use super::router_publish::publish_router;
 use super::seat_driver::{RefreshJob, run_seat_driver};
+use super::usage_poll::spawn_usage_poll_driver;
 use super::{build_router_from_config, log_advisory_warnings};
 
 #[cfg(test)]
@@ -83,8 +84,15 @@ pub(super) fn spawn_reload_pipeline(
         shutdown_rx.clone(),
     )));
 
-    // Background seat driver. Only with a credential store: without one no
-    // managed login can be read, so there is nothing to keep refreshed.
+    // Background seat drivers: the refresh and the usage poll. Only with a
+    // credential store: without one no managed login can be read, so there is
+    // nothing to refresh or poll. The poll's handle joins this set, so the
+    // usage-handle clone it holds is released before the writer drains.
+    //
+    // The router passed in was built by the provider factory, which installs
+    // the configured Codex client identity; the poll reads that identity per
+    // request, and a read before the install would fix the pinned default for
+    // the whole process.
     if let Some(store) = oauth_store.as_ref() {
         handles.push(tokio::spawn(run_seat_driver(
             RefreshJob::new(store.clone()),
@@ -92,6 +100,13 @@ pub(super) fn spawn_reload_pipeline(
             shutdown_rx.clone(),
             daemon_meta.seat_driver_health(),
         )));
+        handles.extend(spawn_usage_poll_driver(
+            store,
+            &usage,
+            &router_swap,
+            &shutdown_rx,
+            &daemon_meta,
+        ));
     }
 
     match file_watch::spawn_watcher(targets, reload_tx.clone(), shutdown_rx.clone()) {

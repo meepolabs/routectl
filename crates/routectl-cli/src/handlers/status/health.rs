@@ -1,6 +1,7 @@
 //! `/status/health` panel: read-only per-dispatch-target circuit / RPM /
-//! probe health and eligibility, per-pool seat counts, the background seat
-//! driver's health, plus the learned-capability negatives.
+//! probe health and eligibility, per-pool seat counts, the health of the two
+//! background seat drivers (refresh and usage poll), plus the
+//! learned-capability negatives.
 //!
 //! The panel snapshots the live router through the read-only facade ONCE
 //! per request (`state.router.view()`), reads per-target gate health and
@@ -48,6 +49,7 @@ pub(super) struct HealthPanel {
     targets: Vec<TargetHealth>,
     pools: Vec<PoolHealth>,
     seat_driver: SeatDriverRow,
+    usage_poll_driver: SeatDriverRow,
     learned_negatives: Vec<LearnedNegative>,
     wire_check: WireCheckRows,
 }
@@ -91,9 +93,9 @@ struct ReasonCount {
     seats: usize,
 }
 
-/// The background seat driver's health. Memory-only: a restart starts it
+/// One background seat driver's health. Memory-only: a restart starts it
 /// from zero. `running` is false on a daemon with no credential store, which
-/// runs no driver.
+/// runs neither driver.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct SeatDriverRow {
     running: bool,
@@ -328,6 +330,25 @@ fn map_pool(pool: PoolEligibility) -> PoolHealth {
     }
 }
 
+/// One read of each background seat driver's health.
+#[derive(Debug, Clone, Copy)]
+struct DriverHealth {
+    refresh: SeatDriverHealthSnapshot,
+    usage_poll: SeatDriverHealthSnapshot,
+}
+
+#[cfg(test)]
+impl DriverHealth {
+    /// Neither driver has started.
+    fn idle() -> Self {
+        let idle = crate::server::seat_driver::SeatDriverHealth::default().snapshot();
+        Self {
+            refresh: idle,
+            usage_poll: idle,
+        }
+    }
+}
+
 const fn map_seat_driver(health: SeatDriverHealthSnapshot) -> SeatDriverRow {
     SeatDriverRow {
         running: health.running,
@@ -374,13 +395,13 @@ fn map_learned(resolved: ResolvedEntry, now: Instant, now_ms: i64) -> LearnedNeg
 /// reads, so the target health and the learned negatives are internally
 /// consistent (no interleaved hot-swap).
 ///
-/// `writer_degraded` and `seat_driver` are read by the caller, which holds
-/// the counters and daemon-meta facades -- keeping this function a
-/// projection over the pinned snapshot.
+/// `writer_degraded` and the two drivers' health are read by the caller,
+/// which holds the counters and daemon-meta facades -- keeping this function
+/// a projection over the pinned snapshot.
 fn build_from_view(
     view: &StatusRouterView,
     writer_degraded: bool,
-    seat_driver: SeatDriverHealthSnapshot,
+    drivers: DriverHealth,
     emission: FidelityEmission,
     gate: &FidelityGate,
 ) -> HealthPanel {
@@ -415,7 +436,8 @@ fn build_from_view(
     HealthPanel {
         targets,
         pools,
-        seat_driver: map_seat_driver(seat_driver),
+        seat_driver: map_seat_driver(drivers.refresh),
+        usage_poll_driver: map_seat_driver(drivers.usage_poll),
         learned_negatives,
         wire_check,
     }
@@ -440,7 +462,10 @@ pub(super) async fn build_with_emission(
     // A counter read, not I/O, so it stays out here beside the router snapshot --
     // one read time for the whole build.
     let writer_degraded = state.usage_health.writer_degraded();
-    let seat_driver = state.daemon_meta.seat_driver();
+    let drivers = DriverHealth {
+        refresh: state.daemon_meta.seat_driver(),
+        usage_poll: state.daemon_meta.usage_poll_driver(),
+    };
     let gate = Arc::clone(&state.fidelity_gate);
     // The snapshot is pinned at `view()`, so request time IS the read time.
     let as_of = now_utc_rfc3339();
@@ -463,7 +488,7 @@ pub(super) async fn build_with_emission(
         move || {
             #[cfg(test)]
             assert!(!fail, "injected health-builder failure");
-            let dto = build_from_view(&view, writer_degraded, seat_driver, emission, &gate);
+            let dto = build_from_view(&view, writer_degraded, drivers, emission, &gate);
             Panel::available(SCHEMA_VERSION, as_of, dto)
         },
     )

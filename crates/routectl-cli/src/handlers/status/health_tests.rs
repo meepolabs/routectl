@@ -688,7 +688,7 @@ fn build_from_view_emits_the_field_verdict_snapshot_log() {
         build_from_view(
             &view,
             false,
-            crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
+            DriverHealth::idle(),
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -711,7 +711,7 @@ fn build_from_view_uses_a_single_snapshot() {
     let panel = build_from_view(
         &view,
         false,
-        crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
+        DriverHealth::idle(),
         FidelityEmission::always(),
         &FidelityGate::default(),
     );
@@ -809,9 +809,8 @@ fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
     let panel = HealthPanel {
         targets: vec![map_target(sample_target(CircuitPhase::Open), 1_000, None)],
         pools: Vec::new(),
-        seat_driver: map_seat_driver(
-            crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
-        ),
+        seat_driver: map_seat_driver(DriverHealth::idle().refresh),
+        usage_poll_driver: map_seat_driver(DriverHealth::idle().usage_poll),
         learned_negatives: vec![map_learned(
             resolved(LearnedRegistryEntry {
                 state_key: "anthropic#claude-opus-wire".into(),

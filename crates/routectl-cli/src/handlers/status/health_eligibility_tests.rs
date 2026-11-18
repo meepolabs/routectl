@@ -422,24 +422,49 @@ async fn pool_counts_seat_rows_and_driver_health_match_the_fixture() {
 }
 
 /// A daemon with no driver reports a stopped driver that never swept, every
-/// key present.
+/// key present, for both background drivers.
 #[tokio::test]
 async fn a_daemon_with_no_driver_reports_it_stopped_and_never_swept() {
     let swap = Arc::new(ArcSwap::from_pointee(Router::new(Arc::default())));
     let json = read_health(&status_state(swap, DaemonMeta::for_test())).await;
 
-    assert_eq!(
-        json["data"]["seat_driver"],
-        serde_json::json!({
-            "running": false,
-            "last_sweep_ms": null,
-            "last_good_sweep_ms": null,
-            "sweeps": 0,
-            "transient": 0,
-            "definitive": 0,
-        })
-    );
+    for driver in ["seat_driver", "usage_poll_driver"] {
+        assert_eq!(
+            json["data"][driver],
+            serde_json::json!({
+                "running": false,
+                "last_sweep_ms": null,
+                "last_good_sweep_ms": null,
+                "sweeps": 0,
+                "transient": 0,
+                "definitive": 0,
+            }),
+            "{driver}"
+        );
+    }
     assert_eq!(json["data"]["pools"], serde_json::json!([]));
+}
+
+/// The panel reads each driver from its own health: sweeps recorded by the
+/// usage poll driver show under `usage_poll_driver` and leave `seat_driver`
+/// at zero, under the unchanged schema version.
+#[tokio::test]
+async fn the_usage_poll_driver_reports_its_own_health() {
+    let swap = Arc::new(ArcSwap::from_pointee(Router::new(Arc::default())));
+    let meta = DaemonMeta::for_test();
+    meta.usage_poll_driver_health()
+        .record_two_sweeps_for_tests(4, 0);
+
+    let json = read_health(&status_state(swap, meta)).await;
+
+    assert_eq!(json["schema_version"], 9);
+    let poll = &json["data"]["usage_poll_driver"];
+    assert_eq!(poll["running"], true);
+    assert_eq!(poll["sweeps"], 2);
+    assert_eq!(poll["transient"], 4);
+    assert_eq!(poll["definitive"], 0);
+    assert_eq!(json["data"]["seat_driver"]["running"], false);
+    assert_eq!(json["data"]["seat_driver"]["sweeps"], 0);
 }
 
 fn request(model: &str) -> ChatRequest {

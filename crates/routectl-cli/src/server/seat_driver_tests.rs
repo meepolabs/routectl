@@ -844,9 +844,13 @@ async fn the_driver_logs_one_error_only_when_it_stops_without_a_shutdown_signal(
     }
 }
 
+/// Both background drivers (the refresh and the usage poll) run only with a
+/// credential store, each reporting into its own health, and the poll's
+/// state is published only when it runs. The seat has no stored login, so
+/// the poll has no token to send whatever it finds due.
 #[tokio::test]
 #[serial_test::serial]
-async fn the_reload_pipeline_runs_the_driver_only_with_a_credential_store_and_joins_it() {
+async fn the_reload_pipeline_runs_both_drivers_only_with_a_credential_store_and_joins_them() {
     let rows: [(&str, bool); 2] = [("with a credential store", true), ("without one", false)];
     for (name, with_store) in rows {
         // Arrange
@@ -870,15 +874,47 @@ async fn the_reload_pipeline_runs_the_driver_only_with_a_credential_store_and_jo
             meta.clone(),
         );
         settle().await;
-        let running_while_served = meta.seat_driver_health().snapshot().running;
+        let refresh_running = meta.seat_driver_health().snapshot().running;
+        let poll_running = meta.usage_poll_driver_health().snapshot().running;
+        let status = crate::handlers::status::StatusState::from_app(
+            &crate::server::AppState::for_test(rig.swap.clone()),
+            None,
+            meta.clone(),
+        );
+        let poll_state_published = status.daemon_meta.usage_poll_state().is_some();
         shutdown_tx.send(()).unwrap();
         await_reload_tasks(handles).await;
 
         // Assert
-        assert_eq!(running_while_served, with_store, "{name}");
+        assert_eq!(refresh_running, with_store, "{name}: refresh driver");
+        assert_eq!(poll_running, with_store, "{name}: usage poll driver");
+        assert_eq!(poll_state_published, with_store, "{name}: poll state");
         assert!(
             !meta.seat_driver_health().snapshot().running,
-            "{name}: stopped once the pipeline is joined"
+            "{name}: refresh driver stopped once the pipeline is joined"
+        );
+        assert!(
+            !meta.usage_poll_driver_health().snapshot().running,
+            "{name}: usage poll driver stopped once the pipeline is joined"
         );
     }
+}
+
+/// Each driver writes only its own health: a sweep recorded by the refresh
+/// driver leaves the poll driver's health untouched, and the reverse.
+#[test]
+fn each_driver_health_is_its_own() {
+    let meta = crate::handlers::status::DaemonMeta::new("127.0.0.1:0".into());
+
+    meta.seat_driver_health().record_two_sweeps_for_tests(1, 0);
+
+    assert_eq!(meta.seat_driver_health().snapshot().sweeps, 2);
+    assert_eq!(
+        meta.usage_poll_driver_health().snapshot(),
+        SeatDriverHealth::default().snapshot()
+    );
+    meta.usage_poll_driver_health()
+        .record_two_sweeps_for_tests(3, 0);
+    assert_eq!(meta.usage_poll_driver_health().snapshot().transient, 3);
+    assert_eq!(meta.seat_driver_health().snapshot().transient, 1);
 }

@@ -2407,7 +2407,9 @@ came back calibrated.
 On a multi-seat OAuth pool running `sticky-least-loaded`, a NEW
 conversation's birth seat is ordered by each credential account's
 remaining short-window subscription budget, read from the quota headers
-upstreams already return on every response. This is what makes a pool of
+upstreams already return on every response and, for a seat that carries no
+traffic, from the vendor's usage endpoint (see
+[Background usage poll](#background-usage-poll)). This is what makes a pool of
 two subscription accounts actually spread new conversations instead of
 tying on available RPM (which is unlimited on a subscription seat) and
 falling through to the anti-herd rotation.
@@ -2431,7 +2433,7 @@ budget it did not report. When the evidence is too thin to act on,
 placement falls back to the pre-quota capacity ranking and an unobserved
 seat can still be picked there, which is what makes these cases resolve
 exactly as they did before quota placement existed: a fresh process
-before any response has been observed, a seat whose reading has lapsed
+before any response or poll has been observed, a seat whose reading has lapsed
 past its own window, a provider routectl curates no short recovering
 window for (the Codex subscription egress is one -- it reports a
 seven-day window and no short one), and a pool where some seats are
@@ -2454,9 +2456,11 @@ herding onto the emptiest seat.
 Placement always applies; no config key turns it off.
 
 **Always on is safe because thin evidence places nothing.** A seat
-produces no reading until a real upstream response carries one, so a
-fresh process places exactly as it did before quota placement existed,
-and every case above that falls back (no fresh reading, a lapsed one, an
+produces no reading until a real upstream response carries one or the
+background usage poll reads one, and a restart starts every seat with no
+reading (the stored reading history is never loaded back), so a fresh
+process places exactly as it did before quota placement existed until
+those readings arrive, and every case above that falls back (no fresh reading, a lapsed one, an
 uncurated provider, a partially observed pool) resolves through the
 unchanged capacity ranking. Conversation pins and the one-time migration
 off an unhealthy seat are never affected. A pool that should not place
@@ -5084,8 +5088,10 @@ Two structured panels render after the sections:
   section above. Every key is
   always present. `pools` lists each pool's `configured` and `eligible` seat
   counts and `by_reason` (`reason`, `seats`) for the others, highest
-  priority first; `seat_driver` is the background seat driver's health (see
-  [Background refresh of managed logins](#background-refresh-of-managed-logins)).
+  priority first; `seat_driver` is the background refresh driver's health (see
+  [Background refresh of managed logins](#background-refresh-of-managed-logins))
+  and `usage_poll_driver` the background usage poll's, with the same keys
+  (see [Background usage poll](#background-usage-poll)).
   Reading the panel spends no rate-limit token and claims no half-open
   probe slot.
 - **`panels.would_trim`** -- the steady-state would-trim opportunity,
@@ -5452,6 +5458,11 @@ There is no override.
 
 ### Background refresh of managed logins
 
+`routectl serve` runs two background jobs over the managed logins: this
+refresh, and the [usage poll](#background-usage-poll) that reads each idle
+seat's subscription usage. Both run only when the daemon has a credential
+store.
+
 While `routectl serve` runs, a background seat driver checks once a minute
 every Anthropic and Codex managed login (`oauth://anthropic[#label]`,
 `oauth://codex[#label]`) that a `[models]` entry reaches, directly or through
@@ -5477,6 +5488,35 @@ refresh uses. Otherwise the check sends nothing.
 
 Each background refresh rewrites `credentials.json`, so the credentials watcher
 reloads once per seat per token lifetime.
+
+### Background usage poll
+
+While `routectl serve` runs, a second background job reads the subscription
+usage of the same managed logins the refresh covers, for the seats that carry
+no traffic. Anthropic seats are read from `https://api.anthropic.com/api/oauth/usage`
+and Codex seats from `https://chatgpt.com/backend-api/wham/usage`, each with the
+seat's own access token (and, for Codex, its ChatGPT account id). No other host
+is contacted and redirects are never followed.
+
+- A seat is polled only after 5 minutes (plus a per-seat random jitter of up to
+  a minute) without a fresh reading from either a response or an earlier poll,
+  so a seat taking traffic is not polled. A fresh daemon spreads its first polls
+  over the first 5 minutes, and each sweep polls at most one seat per vendor.
+- A seat whose access token is about to expire is skipped: the poll never
+  refreshes a token, it waits for the refresh job.
+- A failed poll backs that seat off for 5, then 10, then 15 minutes (the cap)
+  before it is tried again. A 429 pauses the whole vendor for the
+  `Retry-After` it names, capped at 1 hour, or 15 minutes when it names none.
+- A poll changes only the seat's reading and the poll's own state. It never
+  marks a seat unusable, opens a breaker or touches a credential, whatever the
+  endpoint answers.
+- An accepted reading feeds [quota-aware placement](#quota-aware-seat-placement)
+  exactly as a response header reading does, and is written to the usage
+  database's `account_readings` history. The poll's state and the meter are
+  memory-only: after a restart every seat starts with no reading.
+- `/status/health` shows the poll driver's health as `usage_poll_driver`, with
+  the same keys as `seat_driver`; a poll failure counts as `transient` and never
+  as `definitive`.
 
 ### Credential pools (multiple accounts per provider)
 
