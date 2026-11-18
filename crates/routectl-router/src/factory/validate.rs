@@ -6,7 +6,7 @@ use crate::config::entry_shape::{parse_base_url, shape_refusals};
 use crate::config::provider_descriptor::{Format, vendor_containment, vendor_row};
 use crate::config::{Config, PoolEntry, PoolKey, PoolKeyField, ProviderEntry};
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
-use routectl_core::{Result, render_operator_name, render_operator_text};
+use routectl_core::{Result, render_operator_name};
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use std::collections::BTreeMap;
@@ -222,7 +222,7 @@ fn validate_openai_responses_account_ids(config: &Config) -> Result<()> {
 /// Call once per process startup BEFORE building any providers.
 #[cfg(feature = "bedrock")]
 pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> Result<()> {
-    use routectl_core::Error;
+    use routectl_core::{Error, render_operator_text};
     use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 
     let mut errors: Vec<String> = Vec::new();
