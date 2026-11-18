@@ -4,7 +4,7 @@ use crate::oauth::file_io;
 use crate::oauth::types::{TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
-use super::{LocalProbe, OAuthStore};
+use super::{LocalProbe, OAuthStore, PeekedAccessToken, REFRESH_LEAD_SECS};
 
 impl OAuthStore {
     /// Read the stable account id recorded for `provider`, if any.
@@ -22,6 +22,23 @@ impl OAuthStore {
             .await
             .get(provider)
             .and_then(|rec| rec.account.account_id.clone())
+    }
+
+    /// Read the stored access token for `seat` (a seat key) without ever
+    /// refreshing or writing: no token-endpoint call, no file write, no
+    /// cooldown change. `Ready` only when the token is outside
+    /// `REFRESH_LEAD_SECS` of expiry, so a caller never sends a token the
+    /// refresh path is about to rotate; `NotReady` inside that window;
+    /// `Missing` when the seat has no record.
+    pub async fn peek_access_token(&self, seat: &str) -> PeekedAccessToken {
+        let guard = self.inner.file.read().await;
+        match guard.get(seat) {
+            None => PeekedAccessToken::Missing,
+            Some(rec) if rec.near_expiry(REFRESH_LEAD_SECS, unix_now()) => {
+                PeekedAccessToken::NotReady
+            }
+            Some(rec) => PeekedAccessToken::Ready(rec.access_token.clone()),
+        }
     }
 
     /// Read the per-credential `session_id` recorded for `provider`

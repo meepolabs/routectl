@@ -37,7 +37,9 @@ pub mod types;
 pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
-pub use store::{DefinitiveCause, LocalProbe, OAuthStore, OpenOutcome, RefreshOutcome};
+pub use store::{
+    DefinitiveCause, LocalProbe, OAuthStore, OpenOutcome, PeekedAccessToken, RefreshOutcome,
+};
 
 /// Where the credentials store lives by default
 /// (`$XDG_CONFIG_HOME/routectl/credentials.json`, falling back to

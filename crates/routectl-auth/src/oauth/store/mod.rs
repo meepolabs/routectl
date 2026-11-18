@@ -40,7 +40,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::oauth::file_io;
-use crate::oauth::types::{CredentialsFile, TokenRecord};
+use crate::oauth::types::{CredentialsFile, SecretToken, TokenRecord};
 use crate::oauth::{OAuthError, OAuthResult};
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -83,6 +83,21 @@ pub enum LocalProbe {
     /// caller when the composite store has no oauth arm, never by
     /// `probe_local` itself.
     StoreUnavailable,
+}
+
+/// Outcome of [`OAuthStore::peek_access_token`]: the stored access token
+/// for one seat, read from the in-memory cache without refreshing or
+/// writing. `Debug` never shows the token (`SecretToken` redacts it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeekedAccessToken {
+    /// The stored token is outside the refresh lead window.
+    Ready(SecretToken),
+    /// A record exists but its token is within `REFRESH_LEAD_SECS` of
+    /// expiry or already expired; only the refresh path may renew it.
+    NotReady,
+    /// No record for the seat (not logged in, or a degraded store whose
+    /// cache is empty).
+    Missing,
 }
 
 /// Outcome of [`OAuthStore::open_default_degradable`]. A resolvable
@@ -413,6 +428,10 @@ pub mod scripted;
 mod seat;
 
 pub use refresh::{DefinitiveCause, RefreshOutcome};
+
+#[cfg(test)]
+#[path = "peek_token_tests.rs"]
+mod peek_token_tests;
 
 #[cfg(test)]
 #[path = "test_support.rs"]

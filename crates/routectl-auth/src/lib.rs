@@ -33,5 +33,5 @@ pub use store::{CredentialProbeFailure, SecretStore};
 #[cfg(feature = "oauth")]
 pub use oauth::{
     DefinitiveCause, LocalProbe, LoginOptions, OAuthError, OAuthStore, OAuthStoreProjectCache,
-    OpenOutcome, RefreshOutcome,
+    OpenOutcome, PeekedAccessToken, RefreshOutcome,
 };
