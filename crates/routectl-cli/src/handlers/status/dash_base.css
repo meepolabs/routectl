@@ -44,6 +44,9 @@
 
   --dur: 160ms;
   --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+  /* How long a value that changed on refresh keeps its highlight. Long
+     enough to be seen at a glance, inside the 500ms motion ceiling. */
+  --dur-change: 400ms;
 
   --strip-h: 46px;
 
@@ -78,6 +81,20 @@
   --accent-soft: rgba(96, 152, 240, 0.12);
   --accent-2: oklch(0.74 0.13 305);
   --accent-2-soft: rgba(170, 120, 240, 0.16);
+  /* The accent when it is the TEXT color over --accent-soft; the light
+     theme darkens it to keep 4.5:1 there. */
+  --accent-ink: var(--accent);
+
+  /* Up to six series shown at once (accounts, models). Series 1-6 in this
+     order; a seventh and beyond fold into "other". Hues stay at least 40
+     degrees from the state hues (ok 155, warn 70-80, neg 25), and each
+     keeps 3:1 against --surface. */
+  --series-1: oklch(0.74 0.08 240);
+  --series-2: oklch(0.72 0.20 315);
+  --series-3: oklch(0.66 0.10 195);
+  --series-4: oklch(0.82 0.08 275);
+  --series-5: oklch(0.58 0.08 340);
+  --series-6: oklch(0.64 0.20 295);
 
   /* Semantic states ONLY: good / degraded / broken. */
   --ok: oklch(0.78 0.15 155);
@@ -89,6 +106,13 @@
 
   --hover: rgba(255, 255, 255, 0.04);
   --skel: rgba(255, 255, 255, 0.07);
+  --backdrop: rgba(0, 0, 0, 0.45);
+
+  /* A usage meter reads calm until it matters: accent, then amber when a
+     window is nearly used, red at or over its limit. */
+  --meter: var(--accent);
+  --meter-warn: var(--warn);
+  --meter-full: var(--neg);
 
   /* Value-domain pill palette, derived from the state tokens above so a
      pill can never drift out of contrast with its own theme. The palette
@@ -121,6 +145,14 @@
     --accent-soft: rgba(40, 100, 200, 0.07);
     --accent-2: oklch(0.52 0.15 305);
     --accent-2-soft: rgba(120, 70, 200, 0.10);
+    --accent-ink: oklch(0.50 0.14 248);
+
+    --series-1: oklch(0.62 0.12 240);
+    --series-2: oklch(0.52 0.10 315);
+    --series-3: oklch(0.56 0.08 195);
+    --series-4: oklch(0.44 0.12 275);
+    --series-5: oklch(0.42 0.08 340);
+    --series-6: oklch(0.50 0.20 295);
 
     --ok: oklch(0.50 0.13 155);
     --ok-soft: rgba(40, 150, 95, 0.12);
@@ -131,6 +163,7 @@
 
     --hover: rgba(0, 0, 0, 0.028);
     --skel: rgba(0, 0, 0, 0.06);
+    --backdrop: rgba(0, 0, 0, 0.45);
   }
 }
 
@@ -365,6 +398,14 @@ main { display: block; }
 @keyframes panein {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }
+}
+
+/* A value that differs from the previous refresh flashes a background that
+   fades back to the element's own; the value itself stays readable at rest.
+   No `to` frame, so the fade ends on whatever background the rule sets. */
+.changed { animation: changefade var(--dur-change) var(--ease); }
+@keyframes changefade {
+  from { background-color: var(--accent-soft); }
 }
 
 /* Card border = "a separate object"; the hairline grid inside a card =

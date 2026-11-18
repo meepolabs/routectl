@@ -1854,4 +1854,9 @@ mod tests {
         use super::*;
         include!("page_view_contract_tests.rs");
     }
+
+    mod style {
+        use super::*;
+        include!("page_style_tests.rs");
+    }
 }

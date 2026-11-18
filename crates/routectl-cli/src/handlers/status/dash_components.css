@@ -461,7 +461,7 @@ td.num .unit, th.num .unit {
   align-items: center;
   justify-content: center;
   padding: var(--sp-5);
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--backdrop);
   animation: panein 180ms var(--ease) both;
 }
 .modal {
@@ -651,7 +651,7 @@ td.num .unit, th.num .unit {
 .gbbtn:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
 .gbbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .gbbtn:disabled { cursor: default; opacity: 0.5; }
-.gbbtn--on { background: var(--accent-soft); color: var(--accent); }
+.gbbtn--on { background: var(--accent-soft); color: var(--accent-ink); }
 
 .ugroups {
   display: flex;

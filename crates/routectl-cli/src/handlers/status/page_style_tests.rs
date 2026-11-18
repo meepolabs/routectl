@@ -1,0 +1,489 @@
+// The style contract: every color token has a light value, no rule paints a
+// raw color, and the motion and series tokens hold the limits the page's
+// direction sets. `include!`d into a child module of `page::tests`, so the
+// helpers there (`style`, `strip_css_comments`, `compact`) are in scope; do
+// not add `use` lines here.
+
+use std::collections::BTreeMap;
+
+/// One CSS declaration and the block preludes enclosing it, outermost first
+/// (`["@media (prefers-color-scheme: light)", ":root"]`).
+#[derive(Debug)]
+struct Decl {
+    context: Vec<String>,
+    prop: String,
+    value: String,
+}
+
+/// Every declaration in `css` (comments stripped). A segment ending in `{` is
+/// a block prelude; one ending in `;` or `}` inside a block is a declaration.
+/// Quoted strings are skipped so `content: ";"` stays one value.
+fn css_decls(css: &str) -> Vec<Decl> {
+    let src = strip_css_comments(css);
+    let mut decls = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut seg = String::new();
+    let mut chars = src.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                seg.push(c);
+                for q in chars.by_ref() {
+                    seg.push(q);
+                    if q == c {
+                        break;
+                    }
+                }
+            }
+            '{' => {
+                stack.push(seg.trim().to_string());
+                seg.clear();
+            }
+            ';' | '}' => {
+                if let Some((prop, value)) = seg.split_once(':')
+                    && !stack.is_empty()
+                {
+                    decls.push(Decl {
+                        context: stack.clone(),
+                        prop: prop.trim().to_string(),
+                        value: value.trim().to_string(),
+                    });
+                }
+                seg.clear();
+                if c == '}' {
+                    stack.pop();
+                }
+            }
+            _ => seg.push(c),
+        }
+    }
+    decls
+}
+
+const COLOR_FUNCTIONS: &[&str] = &[
+    "rgb",
+    "rgba",
+    "hsl",
+    "hsla",
+    "hwb",
+    "lab",
+    "lch",
+    "oklab",
+    "oklch",
+    "color",
+    "color-mix",
+];
+
+/// The first raw color literal in a declaration value: a hex color or a CSS
+/// color function. `var(...)`, `transparent` and `currentColor` are not raw.
+fn raw_color_literal(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    for (i, _) in lower.match_indices('#') {
+        let digits = bytes[i + 1..]
+            .iter()
+            .take_while(|b| b.is_ascii_hexdigit())
+            .count();
+        let ends_word = bytes
+            .get(i + 1 + digits)
+            .is_none_or(|b| !(b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_'));
+        if matches!(digits, 3 | 4 | 6 | 8) && ends_word {
+            return Some(lower[i..i + 1 + digits].to_string());
+        }
+    }
+    for (i, _) in lower.match_indices('(') {
+        let name_start = lower[..i]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map_or(0, |p| p + 1);
+        let name = &lower[name_start..i];
+        if COLOR_FUNCTIONS.contains(&name) {
+            return Some(format!("{name}("));
+        }
+    }
+    None
+}
+
+fn is_dark_root(d: &Decl) -> bool {
+    d.context.len() == 1 && d.context[0] == ":root"
+}
+
+fn is_light_root(d: &Decl) -> bool {
+    d.context.len() == 2
+        && d.context[0].starts_with("@media")
+        && compact(&d.context[0]).contains("prefers-color-scheme:light")
+        && d.context[1] == ":root"
+}
+
+/// Custom properties the top-level `:root` gives a raw color literal that
+/// the light `:root` never re-declares. A `var()` alias carries no literal,
+/// so it follows its target into the light theme and is never reported.
+fn color_tokens_without_light_value(css: &str) -> Vec<String> {
+    let decls = css_decls(css);
+    let light: Vec<&str> = decls
+        .iter()
+        .filter(|d| is_light_root(d))
+        .map(|d| d.prop.as_str())
+        .collect();
+    decls
+        .iter()
+        .filter(|d| is_dark_root(d) && d.prop.starts_with("--"))
+        .filter(|d| raw_color_literal(&d.value).is_some())
+        .filter(|d| !light.contains(&d.prop.as_str()))
+        .map(|d| d.prop.clone())
+        .collect()
+}
+
+/// `<prop>: <value>` for every declaration that is not a custom property and
+/// still carries a raw color literal.
+fn raw_colors_outside_tokens(css: &str) -> Vec<String> {
+    css_decls(css)
+        .into_iter()
+        .filter(|d| !d.prop.starts_with("--"))
+        .filter(|d| raw_color_literal(&d.value).is_some())
+        .map(|d| format!("{}: {}", d.prop, d.value))
+        .collect()
+}
+
+/// The custom properties as one theme resolves them: the top-level `:root`,
+/// overlaid with the light `:root` when `light`.
+fn theme_tokens(css: &str, light: bool) -> BTreeMap<String, String> {
+    let mut tokens = BTreeMap::new();
+    for d in css_decls(css) {
+        if d.prop.starts_with("--") && (is_dark_root(&d) || (light && is_light_root(&d))) {
+            tokens.insert(d.prop, d.value);
+        }
+    }
+    tokens
+}
+
+/// A token's value with `var(--x)` aliases followed to the literal.
+fn resolve<'a>(tokens: &'a BTreeMap<String, String>, name: &str) -> &'a str {
+    let mut value = tokens
+        .get(name)
+        .unwrap_or_else(|| panic!("token {name} is not declared"));
+    for _ in 0..8 {
+        let Some(target) = value.strip_prefix("var(").and_then(|v| v.strip_suffix(')')) else {
+            return value;
+        };
+        value = tokens
+            .get(target.trim())
+            .unwrap_or_else(|| panic!("{name} aliases undeclared {target}"));
+    }
+    panic!("{name} aliases too deep")
+}
+
+/// The numbers inside `<fn>(...)`, separators and `/` ignored.
+fn fn_args(value: &str, func: &str) -> Vec<f64> {
+    let inner = value
+        .strip_prefix(&format!("{func}("))
+        .and_then(|v| v.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("`{value}` is not a {func}() color"));
+    inner
+        .split(|c: char| c == ',' || c == '/' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<f64>()
+                .unwrap_or_else(|_| panic!("`{s}` in `{value}`"))
+        })
+        .collect()
+}
+
+/// Gamma-encoded sRGB in 0..=1 (clamped) plus alpha, for the forms the
+/// tokens use: 6-digit hex, `rgba(r, g, b, a)` and `oklch(L C h)`.
+fn srgba(value: &str) -> [f64; 4] {
+    if let Some(hex) = value.strip_prefix('#') {
+        let channel = |i: usize| f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap()) / 255.0;
+        return [channel(0), channel(2), channel(4), 1.0];
+    }
+    if value.starts_with("rgba(") {
+        let a = fn_args(value, "rgba");
+        return [a[0] / 255.0, a[1] / 255.0, a[2] / 255.0, a[3]];
+    }
+    let [l, c, h] = fn_args(value, "oklch")[..] else {
+        panic!("`{value}` is not oklch(L C h)");
+    };
+    let lab = [l, c * h.to_radians().cos(), c * h.to_radians().sin()];
+    let lms = [
+        [1.0, 0.396_337_777_4, 0.215_803_757_3],
+        [1.0, -0.105_561_345_8, -0.063_854_172_8],
+        [1.0, -0.089_484_177_5, -1.291_485_548_0],
+    ]
+    .map(|row| dot(row, lab).powi(3));
+    let linear = [
+        [4.076_741_662_1, -3.307_711_591_3, 0.230_969_929_2],
+        [-1.268_438_004_6, 2.609_757_401_1, -0.341_319_396_5],
+        [-0.004_196_086_3, -0.703_418_614_7, 1.707_614_701_0],
+    ]
+    .map(|row| dot(row, lms));
+    let encode = |x: f64| {
+        let x = x.clamp(0.0, 1.0);
+        if x <= 0.003_130_8 {
+            12.92 * x
+        } else {
+            x.powf(1.0 / 2.4).mul_add(1.055, -0.055)
+        }
+    };
+    [encode(linear[0]), encode(linear[1]), encode(linear[2]), 1.0]
+}
+
+/// `fg` alpha-composited over an opaque `bg`.
+fn over(fg: [f64; 4], bg: [f64; 4]) -> [f64; 4] {
+    let mix = |i: usize| fg[3].mul_add(fg[i], (1.0 - fg[3]) * bg[i]);
+    [mix(0), mix(1), mix(2), 1.0]
+}
+
+/// WCAG 2.x relative luminance of an opaque sRGB color.
+fn relative_luminance(rgb: [f64; 4]) -> f64 {
+    let lin = |c: f64| {
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    dot(
+        [0.2126, 0.7152, 0.0722],
+        [lin(rgb[0]), lin(rgb[1]), lin(rgb[2])],
+    )
+}
+
+fn dot(row: [f64; 3], v: [f64; 3]) -> f64 {
+    row[0].mul_add(v[0], row[1].mul_add(v[1], row[2] * v[2]))
+}
+
+fn contrast(a: [f64; 4], b: [f64; 4]) -> f64 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+fn hue_of(tokens: &BTreeMap<String, String>, name: &str) -> f64 {
+    fn_args(resolve(tokens, name), "oklch")[2]
+}
+
+fn hue_distance(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
+}
+
+fn series_names() -> Vec<String> {
+    (1..=6).map(|n| format!("--series-{n}")).collect()
+}
+
+/// The `(prop, value)` declarations of the first block whose innermost
+/// prelude is `selector` inside `outer` (empty for top level).
+fn block<'a>(decls: &'a [Decl], outer: &str, selector: &str) -> Vec<(&'a str, &'a str)> {
+    decls
+        .iter()
+        .filter(|d| {
+            d.context.last().is_some_and(|s| s == selector)
+                && d.context[..d.context.len() - 1].join(" ") == outer
+        })
+        .map(|d| (d.prop.as_str(), d.value.as_str()))
+        .collect()
+}
+
+fn ms(value: &str) -> f64 {
+    value
+        .strip_suffix("ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("`{value}` is not a millisecond duration"))
+}
+
+#[test]
+fn every_color_token_has_a_light_value() {
+    let css = style();
+    let light_declared: Vec<String> = css_decls(&css)
+        .into_iter()
+        .filter(is_light_root)
+        .map(|d| d.prop)
+        .collect();
+    for name in ["--bg", "--series-1", "--backdrop"] {
+        assert!(
+            light_declared.iter().any(|p| p == name),
+            "positive control: the scan finds {name} in the light block"
+        );
+    }
+
+    assert_eq!(color_tokens_without_light_value(&css), Vec::<String>::new());
+}
+
+#[test]
+fn a_color_token_defined_only_for_dark_is_reported() {
+    let css = ":root { --a: #101010; --b: oklch(0.7 0.1 250); --c: var(--a); --d: 4px; }\n\
+               @media (prefers-color-scheme: light) { :root { --a: #fefefe; } }";
+
+    assert_eq!(
+        color_tokens_without_light_value(css),
+        vec!["--b".to_string()]
+    );
+}
+
+#[test]
+fn no_rule_paints_a_raw_color() {
+    let css = style();
+    assert!(
+        css_decls(&css)
+            .iter()
+            .any(|d| d.prop == "background" && d.value == "var(--backdrop)"),
+        "positive control: the scan reads rule declarations"
+    );
+
+    assert_eq!(raw_colors_outside_tokens(&css), Vec::<String>::new());
+}
+
+#[test]
+fn a_raw_color_in_a_rule_is_reported() {
+    let cases = [
+        ("hex", ".a { color: #fff; }", "color: #fff"),
+        (
+            "rgba inside a shorthand",
+            ".a { box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.2); }",
+            "box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.2)",
+        ),
+        (
+            "keyframe frame",
+            "@keyframes k { from { background-color: oklch(0.5 0.1 20); } }",
+            "background-color: oklch(0.5 0.1 20)",
+        ),
+        (
+            "hsl",
+            "@media (x) { .a { fill: hsl(0 0% 0%) } }",
+            "fill: hsl(0 0% 0%)",
+        ),
+    ];
+    for (label, rule, expected) in cases {
+        let css = format!(
+            ":root {{ --t: #000; }} #modal-host {{ color: var(--t); background: transparent; }} {rule}"
+        );
+
+        assert_eq!(
+            raw_colors_outside_tokens(&css),
+            vec![expected.to_string()],
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn the_change_highlight_is_short_and_fades_only_its_background() {
+    let css = style();
+    let decls = css_decls(&css);
+    for light in [false, true] {
+        let dur = ms(resolve(&theme_tokens(&css, light), "--dur-change"));
+        assert!((150.0..=500.0).contains(&dur), "--dur-change {dur}ms");
+    }
+    let changed = block(&decls, "", ".changed");
+    assert_eq!(
+        changed,
+        vec![("animation", "changefade var(--dur-change) var(--ease)")]
+    );
+    let frames: Vec<&str> = decls
+        .iter()
+        .filter(|d| {
+            d.context
+                .first()
+                .is_some_and(|c| c == "@keyframes changefade")
+        })
+        .map(|d| d.prop.as_str())
+        .collect();
+    assert!(!frames.is_empty(), "the changefade keyframes exist");
+    for prop in frames {
+        assert!(
+            prop == "background-color" || prop == "opacity",
+            "changefade animates `{prop}`"
+        );
+    }
+}
+
+#[test]
+fn reduced_motion_turns_the_change_highlight_off() {
+    let decls = css_decls(&style());
+    let reduced = "@media (prefers-reduced-motion: reduce)";
+    let selectors: Vec<&str> = decls
+        .iter()
+        .filter(|d| d.context.len() == 2 && d.context[0] == reduced && d.prop == "animation")
+        .filter(|d| d.value == "none")
+        .map(|d| d.context[1].as_str())
+        .collect();
+
+    assert!(
+        selectors
+            .iter()
+            .any(|s| s.split(',').any(|sel| sel.trim() == ".changed")),
+        "the reduced-motion block sets `.changed` to `animation: none`; it covers {selectors:?}"
+    );
+}
+
+#[test]
+fn series_colors_are_distinct_and_keep_clear_of_the_state_hues() {
+    let css = style();
+    for light in [false, true] {
+        let tokens = theme_tokens(&css, light);
+        let states: Vec<f64> = ["--ok", "--warn", "--neg"]
+            .iter()
+            .map(|s| hue_of(&tokens, s))
+            .collect();
+        let values: Vec<&str> = series_names().iter().map(|n| resolve(&tokens, n)).collect();
+        for (i, name) in series_names().iter().enumerate() {
+            let hue = hue_of(&tokens, name);
+            for state in &states {
+                assert!(
+                    hue_distance(hue, *state) >= 40.0,
+                    "{name} hue {hue} within 40 degrees of a state hue {state} (light: {light})"
+                );
+            }
+            assert!(
+                !values[..i].contains(&values[i]),
+                "{name} repeats an earlier series (light: {light})"
+            );
+        }
+    }
+}
+
+#[test]
+fn series_colors_keep_three_to_one_against_the_surface() {
+    let css = style();
+    for light in [false, true] {
+        let tokens = theme_tokens(&css, light);
+        let surface = srgba(resolve(&tokens, "--surface"));
+        for name in series_names() {
+            let ratio = contrast(srgba(resolve(&tokens, &name)), surface);
+            assert!(
+                ratio >= 3.0,
+                "{name} on --surface is {ratio:.2}:1 (light: {light})"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_active_group_by_button_text_keeps_four_and_a_half_to_one() {
+    let css = style();
+    let decls = css_decls(&css);
+    assert_eq!(
+        block(&decls, "", ".gbbtn--on"),
+        vec![
+            ("background", "var(--accent-soft)"),
+            ("color", "var(--accent-ink)")
+        ]
+    );
+    for light in [false, true] {
+        let tokens = theme_tokens(&css, light);
+        for page in ["--surface", "--bg"] {
+            let base = srgba(resolve(&tokens, page));
+            let fill = over(srgba(resolve(&tokens, "--accent-soft")), base);
+            let ratio = contrast(srgba(resolve(&tokens, "--accent-ink")), fill);
+            assert!(ratio >= 4.5, "on {page}: {ratio:.2}:1 (light: {light})");
+        }
+    }
+}
+
+#[test]
+fn the_contrast_formula_matches_the_wcag_reference_points() {
+    let black = srgba("#000000");
+    let white = srgba("#ffffff");
+
+    assert!((contrast(black, white) - 21.0).abs() < 1e-9);
+    assert!((contrast(srgba("#767676"), white) - 4.54).abs() < 0.01);
+    assert!((relative_luminance(srgba("oklch(1 0 0)")) - 1.0).abs() < 1e-3);
+}

@@ -740,7 +740,8 @@
   .skeleton span,
   .poll-dot { animation: none; }
   .pane,
-  .modal-backdrop { animation: none; }
+  .modal-backdrop,
+  .changed { animation: none; }
 }
 
 
