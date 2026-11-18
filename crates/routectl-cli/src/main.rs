@@ -446,6 +446,10 @@ enum ProviderCmd {
         /// seat.
         #[arg(long, requires = "login", conflicts_with = "format")]
         label: Option<String>,
+        /// Pool for `--login`: the new entry joins this pool (creating it
+        /// with `accepts_new_logins = true` when absent) in the same write.
+        #[arg(long, requires = "login", conflicts_with_all = ["format", "region"])]
+        pool: Option<String>,
         /// Replaced by `--format` / `--login`; refused when given.
         #[arg(long, hide = true)]
         kind: Option<String>,
@@ -749,6 +753,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 auth,
                 login,
                 label,
+                pool,
                 kind,
                 name,
                 base_url,
@@ -769,6 +774,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     format,
                     login,
                     label,
+                    pool,
                     auth,
                     name,
                     base_url,
@@ -1234,8 +1240,8 @@ mod tests {
     }
 
     /// `--format`, `--auth` and `--login` take only the values `provider add`
-    /// builds; `--format` with `--login`, and `--label` without `--login`,
-    /// are clap-layer rejections.
+    /// builds; `--format` with `--login`, and `--label` or `--pool` without
+    /// `--login`, are clap-layer rejections.
     #[test]
     fn provider_add_target_flags_parse_only_supported_values() {
         let base = ["routectl", "provider", "add", "--name", "x"];
@@ -1248,6 +1254,22 @@ mod tests {
             (&["--format", "gemini", "--auth", "x-goog-api-key"], true),
             (&["--login", "codex"], true),
             (&["--login", "codex", "--label", "work"], true),
+            (&["--login", "codex", "--pool", "codex"], true),
+            (&["--pool", "codex"], false),
+            (&["--format", "gemini", "--pool", "codex"], false),
+            (&["--pool", "codex", "--format", "gemini"], false),
+            (
+                &[
+                    "--login",
+                    "codex",
+                    "--pool",
+                    "codex",
+                    "--region",
+                    "us-east-1",
+                ],
+                false,
+            ),
+            (&["--pool", "codex", "--region", "us-east-1"], false),
             (&["--format", "gemini", "--label", "work"], false),
             (&["--label", "work"], false),
             (

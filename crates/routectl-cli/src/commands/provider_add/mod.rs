@@ -30,6 +30,9 @@
 //!      of the same name already exists, a byte-identical (normalized) block
 //!      is an idempotent NO-OP; a different block is refused unless
 //!      `--overwrite` is given.
+//!      With `--pool`, the pool edit joins the block in ONE candidate
+//!      (`toml_edit::Candidate`): the entry first takes the pool's explicit
+//!      cloak keys, and every later step treats block and pool as one.
 //!   4. Gate the candidate through the SAME shared gate the reload path runs
 //!      (`super::edit_pipeline::gate`); any failure renders and writes
 //!      nothing.
@@ -53,13 +56,11 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use routectl_core::{Error, Result};
-use routectl_router::{EditOutcome, parse_config};
+use routectl_router::{Config, EditOutcome, ProviderEntry, parse_config};
 
 use super::edit_pipeline::{
-    confirm_high_consequence, gate, insert_provider_block, parse_document, preflight,
-    render_gate_errors,
+    confirm_high_consequence, gate, inherit_pool_cloak, preflight, render_gate_errors,
 };
-use super::provider_entry::render_provider_block;
 use super::rerun::{RerunCommand, chosen_config_path, instruction};
 use crate::config_classify::collect_high_consequence_changes;
 
@@ -79,9 +80,13 @@ mod format_tests;
 #[path = "carrier_tests.rs"]
 mod carrier_tests;
 
+#[cfg(test)]
+#[path = "pool_tests.rs"]
+mod pool_tests;
+
 use self::build::build_entry;
 use self::capture::execute_pending;
-use self::toml_edit::{commit, provider_table};
+use self::toml_edit::{Candidate, commit, plan_pool, provider_table};
 
 /// The `--format` values `provider add` builds.
 pub const FORMAT_VALUES: [&str; 6] = [
@@ -112,6 +117,9 @@ pub struct ProviderAddArgs {
     pub login: Option<String>,
     /// The seat a `login` writes; only valid with `login`.
     pub label: Option<String>,
+    /// The pool the `login` entry joins (or creates) in the same write; only
+    /// valid with `login`.
+    pub pool: Option<String>,
     /// How the credential is sent; `None` writes the format's default.
     pub auth: Option<String>,
     pub name: String,
@@ -261,11 +269,32 @@ fn login_rerun_command(config_path: Option<&Path>, args: &ProviderAddArgs) -> Op
         .word("--login")
         .value(args.login.as_deref()?)
         .option("--label", args.label.as_deref())
+        .option("--pool", args.pool.as_deref())
         .word("--name")
         .value(&args.name)
         .switch("--overwrite", args.overwrite)
         .switch("--yes", args.yes)
         .render()
+}
+
+/// The candidate for `entry` named `name` over the config `prev`: with a
+/// `pool`, the entry first takes the pool's explicit cloak keys (members
+/// must share them), so the printed and the written block both carry them.
+fn build_candidate<'a>(
+    prev: &Config,
+    name: &'a str,
+    pool: Option<&str>,
+    entry: &mut ProviderEntry,
+) -> Result<Candidate<'a>> {
+    if let Some(pool) = pool {
+        inherit_pool_cloak(prev, pool, entry);
+    }
+    Ok(Candidate {
+        name,
+        block: provider_table(entry)?,
+        writes_block: true,
+        pool: pool.and_then(|pool| plan_pool(prev, pool, name)),
+    })
 }
 
 /// Run the `provider add` pipeline against `config_path` with the
@@ -305,20 +334,19 @@ pub async fn run_with_io(
         return Err(Error::Config("provider name must not be empty".into()));
     }
 
-    let (entry, cred_class, pending) = build_entry(&args, io)?;
+    let (mut entry, cred_class, pending) = build_entry(&args, io)?;
     let name = args.name.as_str();
-    // The family token of the built entry, so a `--login` add audits what
-    // actually lands on disk.
-    let kind = entry.kind_str();
-
-    let block = provider_table(&entry)?;
-    let new_block_norm = block.to_string();
-
     let prev = parse_config(&snapshot_text).map_err(|e| {
         Error::Config(format!(
             "current config does not parse; fix it before editing: {e}"
         ))
     })?;
+
+    let mut candidate = build_candidate(&prev, name, args.pool.as_deref(), &mut entry)?;
+    // The family token of the built entry, so a `--login` add audits what
+    // actually lands on disk.
+    let kind = entry.kind_str();
+    let new_block_norm = candidate.block.to_string();
 
     if let Some(existing) = prev.providers.get(name) {
         let existing_norm = provider_table(existing)?.to_string();
@@ -327,11 +355,14 @@ pub async fn run_with_io(
         // serialized block is byte-identical, so it must NOT take the
         // identical-block no-op (that silently discards the new key). Every
         // other pending kind keeps the idempotent re-init no-op.
-        if identical && !pending.rewrites_secret() {
+        let keeps_block = identical && !pending.rewrites_secret();
+        if keeps_block && candidate.pool.is_none() {
             println!("provider `{name}` is already configured identically; nothing written.");
             return Ok(AddResult::NoChange);
         }
-        if !args.overwrite {
+        // Only the pool half is owed: the operator's block keeps its bytes.
+        candidate.writes_block = !keeps_block;
+        if !args.overwrite && !keeps_block {
             let hint = if identical {
                 // A file capture over an identical block: the config would
                 // not change, but the credential rotates -- still an explicit
@@ -349,11 +380,7 @@ pub async fn run_with_io(
         }
     }
 
-    let candidate_text = {
-        let mut doc = parse_document(&snapshot_text)?;
-        insert_provider_block(&mut doc, name, block.clone())?;
-        doc.to_string()
-    };
+    let candidate_text = candidate.text(&snapshot_text)?;
     let next = gate(&candidate_text).map_err(|errors| {
         render_gate_errors(&errors);
         Error::Config(format!("{} config error(s)", errors.len()))
@@ -367,7 +394,7 @@ pub async fn run_with_io(
         high.push("providers.base_url");
     }
     if !args.yes {
-        print!("{}", render_provider_block(name, &block));
+        print!("{}", candidate.render());
     }
     if !confirm_high_consequence(&high, args.yes) {
         println!("aborted; nothing written.");
@@ -379,7 +406,7 @@ pub async fn run_with_io(
     let did_side_effect = pending.is_side_effect();
     execute_pending(pending, io).await?;
 
-    let outcome = match commit(config_path, &snapshot, &snapshot_text, name, block) {
+    let outcome = match commit(config_path, &snapshot, &snapshot_text, &candidate) {
         Ok(outcome) => outcome,
         Err(e) if did_side_effect => {
             return Err(post_side_effect_error(config_path, &args, &e));
@@ -410,12 +437,14 @@ pub async fn run_with_io(
         return Ok(AddResult::NoChange);
     }
 
+    let pool = candidate.pool.as_ref().map(|action| action.pool());
     tracing::info!(
         surface = "cli",
         verb = "provider-add",
         name,
         kind,
         credential_source = cred_class,
+        pool = %routectl_core::sanitize_for_log(pool.unwrap_or("<none>")),
         "provider add committed",
     );
 
@@ -424,5 +453,8 @@ pub async fn run_with_io(
         entry.format().as_str(),
         entry.auth.as_str()
     );
+    if let Some(pool) = pool {
+        println!("pool `{pool}` now lists `{name}`.");
+    }
     Ok(AddResult::Written)
 }

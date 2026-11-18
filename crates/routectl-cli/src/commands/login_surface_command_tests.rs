@@ -1603,3 +1603,50 @@ format = \"anthropic-messages\"
         "{text}"
     );
 }
+
+/// An empty inline `pools = {}` or `providers = {}` parent is a valid
+/// config; a login creating its first child there writes a file that
+/// reparses and gates, holding both the entry and the pool.
+#[test]
+fn a_login_under_an_empty_inline_parent_writes_a_valid_config() {
+    let rows = [
+        (
+            "pools = {}",
+            base().replace("[server]", "pools = {}\n[server]"),
+        ),
+        (
+            "providers = {}",
+            base().replace("[server]", "providers = {}\n[server]"),
+        ),
+    ];
+    for (row, body) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), &body);
+
+        // Act
+        let outcome =
+            surface(&path, "anthropic", None, true).unwrap_or_else(|e| panic!("row `{row}`: {e}"));
+
+        // Assert
+        assert_eq!(
+            outcome,
+            SurfaceOutcome::Written {
+                entry_name: "anthropic-default".to_string()
+            },
+            "row `{row}`"
+        );
+        let text = String::from_utf8(read(&path)).expect("utf8");
+        let config = parse_config(&text).unwrap_or_else(|e| panic!("row `{row}`: {e}"));
+        assert!(super::gate(&text).is_ok(), "row `{row}`: {text}");
+        assert!(
+            config.providers.contains_key("anthropic-default"),
+            "row `{row}`"
+        );
+        assert_eq!(
+            config.pools.get("anthropic").expect("pool").members,
+            ["anthropic-default"],
+            "row `{row}`"
+        );
+    }
+}

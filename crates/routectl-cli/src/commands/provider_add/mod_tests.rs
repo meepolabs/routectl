@@ -47,6 +47,7 @@ fn args(format: &str, name: &str) -> ProviderAddArgs {
         format: Some(format.to_string()),
         login: None,
         label: None,
+        pool: None,
         auth: None,
         name: name.to_string(),
         base_url: None,
@@ -670,8 +671,15 @@ fn stale_snapshot_conflict_leaves_file_unchanged() {
     let entry = ProviderEntry::openai_compat("https://api.x.example/v1", "file:///abs/key");
     let block = provider_table(&entry).unwrap();
 
-    let err = commit(&path, &stale, &stale_text, "grok", block)
-        .expect_err("a stale snapshot must conflict");
+    let candidate = super::toml_edit::Candidate {
+        name: "grok",
+        block,
+        writes_block: true,
+        pool: None,
+    };
+
+    let err =
+        commit(&path, &stale, &stale_text, &candidate).expect_err("a stale snapshot must conflict");
     assert!(err.to_string().contains("changed on disk"), "err: {err}");
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),

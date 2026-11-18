@@ -148,6 +148,11 @@ pub(super) fn build_entry(
             "`--label` names a login seat; it is only valid with `--login <VENDOR>`".into(),
         ));
     }
+    if args.pool.is_some() && args.login.is_none() {
+        return Err(Error::Config(
+            "`--pool` adds a login seat to a pool; it is only valid with `--login <VENDOR>`".into(),
+        ));
+    }
     let forwarded = wants_forwarded(args)?;
     let format = match target(args)? {
         Target::Login(vendor) => return build_login(args, vendor),

@@ -440,6 +440,64 @@ mod tests {
         assert!(doc.to_string().contains(r#""a", "b""#), "{doc}");
     }
 
+    /// A child created under an inline parent stays inline and leaves the
+    /// file reparsing; a standard parent gets a standard child (control).
+    #[test]
+    fn a_child_created_under_an_inline_parent_is_inline_and_reparses() {
+        let block = || {
+            let mut block = Table::new();
+            block.insert("format", toml_edit::value("anthropic-messages"));
+            block
+        };
+        type Edit = fn(&mut DocumentMut, Table) -> Result<()>;
+        let rows: [(&str, &str, Edit, &str); 4] = [
+            (
+                "pools = {}",
+                "version = 4\npools = {}\n",
+                |doc, _| {
+                    upsert_pool_members(doc, "p", &["a"])?;
+                    set_accepts_new_logins(doc, "p")
+                },
+                "version = 4\npools = { p = { members = [\"a\"], accepts_new_logins = true } }\n",
+            ),
+            (
+                "providers = {}",
+                "version = 4\nproviders = {}\n",
+                |doc, block| insert_provider_block(doc, "a", block),
+                "version = 4\nproviders = { a = { format = \"anthropic-messages\" } }\n",
+            ),
+            (
+                "standard pools control",
+                "version = 4\n[pools]\n",
+                |doc, _| {
+                    upsert_pool_members(doc, "p", &["a"])?;
+                    set_accepts_new_logins(doc, "p")
+                },
+                "version = 4\n[pools]\n\n[pools.p]\nmembers = [\"a\"]\naccepts_new_logins = true\n",
+            ),
+            (
+                "standard providers control",
+                "version = 4\n[providers]\n",
+                |doc, block| insert_provider_block(doc, "a", block),
+                "version = 4\n[providers]\n\n[providers.a]\nformat = \"anthropic-messages\"\n",
+            ),
+        ];
+
+        for (row, text, edit, expected) in rows {
+            // Arrange
+            let mut doc = doc_of(text);
+
+            // Act
+            edit(&mut doc, block()).unwrap_or_else(|e| panic!("row `{row}`: {e}"));
+
+            // Assert
+            let out = doc.to_string();
+            assert_eq!(out, expected, "row `{row}`");
+            out.parse::<DocumentMut>()
+                .unwrap_or_else(|e| panic!("row `{row}` must reparse: {e}"));
+        }
+    }
+
     /// A pool target whose shape cannot hold the edit is an error, never a
     /// silent no-op that would confirm a write which did not happen. The
     /// well-formed control shows the same call succeeding.

@@ -243,6 +243,7 @@ fn oauth_add_args(name: &str) -> ProviderAddArgs {
         format: None,
         login: Some("anthropic".to_string()),
         label: None,
+        pool: None,
         auth: None,
         name: name.to_string(),
         base_url: None,

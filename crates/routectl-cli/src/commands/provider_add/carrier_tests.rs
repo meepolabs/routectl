@@ -42,6 +42,7 @@ fn cloud_args(format: &str, credential: &str) -> ProviderAddArgs {
         format: Some(format.to_string()),
         login: None,
         label: None,
+        pool: None,
         auth: None,
         name: "added".to_string(),
         base_url: None,

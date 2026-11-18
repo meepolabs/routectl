@@ -163,6 +163,7 @@ fn base_args(format: &str, name: &str) -> ProviderAddArgs {
         format: Some(format.to_string()),
         login: None,
         label: None,
+        pool: None,
         auth: None,
         name: name.to_string(),
         base_url: None,
@@ -529,6 +530,61 @@ fn the_cloud_carrier_flags_are_refused_or_written_by_the_binary() {
             && text.contains("auth = \"aws-sigv4\""),
         "positive control writes the inline cloud and sigv4:\n{text}"
     );
+}
+
+/// `--pool` is refused by the binary unless it rides `--login`, and never
+/// with `--format` or `--region`, before any credential capture: the
+/// config keeps every byte and no credential store is created.
+#[test]
+fn the_pool_flag_is_refused_without_a_login_before_any_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &current_base());
+    let before = std::fs::read(&path).unwrap();
+    let rows: &[(&str, &[&str])] = &[
+        ("no --login", &["--pool", "team", "--secret-ref", "env://K"]),
+        (
+            "with --format",
+            &[
+                "--format",
+                "anthropic-messages",
+                "--pool",
+                "team",
+                "--secret-ref",
+                "env://K",
+            ],
+        ),
+        (
+            "with --region",
+            &[
+                "--login",
+                "anthropic",
+                "--pool",
+                "team",
+                "--region",
+                "us-west-2",
+            ],
+        ),
+    ];
+    for (row, extra) in rows {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+            .args(["--config", path.to_str().unwrap(), "provider", "add"])
+            .args(["--name", "seat", "--yes"])
+            .args(*extra)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run routectl");
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "row `{row}` must exit non-zero");
+        assert!(stderr.contains("--pool"), "row `{row}`: {stderr}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "row `{row}`");
+        assert!(
+            !xdg.path().join("routectl").exists(),
+            "row `{row}`: nothing captured"
+        );
+    }
 }
 
 #[test]

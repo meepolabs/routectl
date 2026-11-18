@@ -417,7 +417,7 @@ fn plan_existing_entry(config: &Config, family: &str, entry_name: &str) -> Surfa
 
 /// Join `member` to the existing `pool`, rendering the post-join member
 /// list. A member the pool already lists is not repeated.
-fn join_action(config: &Config, pool: &str, member: &str) -> PoolAction {
+pub(crate) fn join_action(config: &Config, pool: &str, member: &str) -> PoolAction {
     let mut members: Vec<String> = config
         .pools
         .get(pool)
@@ -509,7 +509,7 @@ pub fn render_delta(plan: &SurfacePlan) -> String {
 /// Render one `[pools.<name>]` block. `accepts_new_logins = true` is
 /// written ONLY for a pool the plan creates -- a joined pool already
 /// carries whatever marker its operator wrote.
-fn render_pool_block(action: &PoolAction) -> String {
+pub(crate) fn render_pool_block(action: &PoolAction) -> String {
     let members: Vec<String> = match action {
         PoolAction::Join { members, .. } | PoolAction::Create { members, .. } => {
             members.iter().map(|m| toml_string(m)).collect()
@@ -938,9 +938,15 @@ fn apply_delta(doc: &mut DocumentMut, write: &SurfaceWrite) -> Result<()> {
     if let Some(entry) = &write.new_entry {
         insert_provider_block(doc, &write.entry_name, entry.entry_table())?;
     }
-    let Some(action) = &write.pool else {
-        return Ok(());
-    };
+    match &write.pool {
+        Some(action) => apply_pool_action(doc, action),
+        None => Ok(()),
+    }
+}
+
+/// Apply the pool half of a delta: grow the member list, and mark the pool
+/// as one future logins may grow ONLY when this edit creates it.
+pub(crate) fn apply_pool_action(doc: &mut DocumentMut, action: &PoolAction) -> Result<()> {
     let members: Vec<&str> = match action {
         PoolAction::Join { members, .. } | PoolAction::Create { members, .. } => {
             members.iter().map(String::as_str).collect()

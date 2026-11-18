@@ -3568,6 +3568,8 @@ routectl provider add --format anthropic-messages --name claude-fwd \
   --credential-source forwarded
 routectl provider add --login codex --name codex
 routectl provider add --login anthropic --label work --name anthropic-work
+routectl provider add --login anthropic --label team-b --name anthropic-team-b \
+  --pool anthropic
 routectl provider add --format bedrock-converse --name bedrock \
   --region us-west-2 --secret-ref aws://profile/work
 routectl provider add --format anthropic-messages --name mantle \
@@ -3606,6 +3608,21 @@ routectl provider add --format anthropic-messages --name mantle \
   `ROUTECTL_CONFIG`. When a value holds a control character, no command is
   printed: the error says to re-run the same `routectl provider add`
   command instead.
+- **`--pool <name>`** (only with `--login`) puts the new entry in a
+  pool in the same write: the provider block and the pool edit are one
+  candidate, validated, confirmed and committed together, so either both
+  land or neither does. An existing pool grows by the entry (an explicit
+  edit, so its `accepts_new_logins` marker is not required and not
+  changed); a missing pool is created with `members = ["<name>"]` and
+  `accepts_new_logins = true`. Joining a pool whose first member sets
+  `cloak_mode` or `cloak_strict_mode` copies those keys onto the new
+  entry, and the confirmation shows them. A pool the entry cannot join
+  (a different format, destination, auth or vendor) or a `pools` value
+  that is not a table is refused before the login runs, with nothing
+  written. If the write fails after the login, the rerun command the
+  error names includes `--pool <name>`, under the same quoting rule as
+  `--label`. `--pool` is refused without `--login`, and with `--format`
+  or `--region`.
 - The credential comes from `--api-key-env`, `--secret-ref`,
   `--api-key-stdin` (captured to the managed `file://` store) or, on a
   terminal, the matching conventional environment variable (not offered
