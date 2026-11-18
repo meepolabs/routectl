@@ -81,7 +81,7 @@
   // the section boundary so a source that is down still says which reading is
   // missing instead of showing a bare error box.
   function routingSection(title, hint) {
-    var wrap = document.createElement('div');
+    var wrap = markRefreshUnit(document.createElement('div'), title);
     wrap.className = 'ovsection';
     wrap.appendChild(sectionHead(title, hint));
     return wrap;

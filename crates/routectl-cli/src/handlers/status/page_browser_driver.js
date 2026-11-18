@@ -8,7 +8,8 @@
 // Virtual time does not advance while a real fetch is pending, so a scenario
 // that needs an answer held or reordered registers a hold rule: the real
 // answer is read at once and handed to the page only after the rule's delay
-// on the page's timers.
+// on the page's timers. A scenario that needs an answer shaped differently
+// from the fixtures registers a rewrite rule over the answer's text.
 (function () {
   'use strict';
 
@@ -22,6 +23,7 @@
   var requests = [];
   var delivered = {};
   var holdRules = [];
+  var rewriteRules = [];
   var realFetch = window.fetch.bind(window);
 
   function abortError() {
@@ -43,6 +45,13 @@
     });
   }
 
+  // An answer's body as the page receives it: each rewrite rule maps the
+  // text, given the URL and how many answers for that path came before.
+  function rewritten(url, text) {
+    var n = delivered[url.pathname] || 0;
+    return rewriteRules.reduce(function (body, rule) { return rule(url, body, n); }, text);
+  }
+
   function holdFor(url, init) {
     var ms = 0;
     holdRules.forEach(function (rule) { ms = Math.max(ms, Number(rule(url, init)) || 0); });
@@ -61,8 +70,9 @@
     return realFetch(input, init).then(function (resp) {
       return resp.text().then(function (text) {
         return heldFor(holdMs, signal).then(function () {
+          var body = rewritten(url, text);
           delivered[url.pathname] = (delivered[url.pathname] || 0) + 1;
-          return new Response(text, {
+          return new Response(body, {
             status: resp.status,
             statusText: resp.statusText,
             headers: resp.headers
@@ -138,6 +148,7 @@
   var api = {
     scenario: function (name, fn) { scenarios[name] = fn; },
     hold: function (rule) { holdRules.push(rule); },
+    rewrite: function (rule) { rewriteRules.push(rule); },
     run: run,
     sleep: sleep,
     waitUntil: waitUntil,

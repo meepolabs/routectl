@@ -1915,4 +1915,9 @@ mod tests {
         use super::*;
         include!("page_browser_epoch_tests.rs");
     }
+
+    mod browser_locks {
+        use super::*;
+        include!("page_browser_locks_tests.rs");
+    }
 }

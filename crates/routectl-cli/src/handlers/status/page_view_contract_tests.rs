@@ -438,8 +438,8 @@ fn row_ids_derive_only_from_table_id_and_row_key() {
 
 /// Items of a list that reorders carry an id from their own identity, so the
 /// morph matches a card to the same record rather than to whatever now sits
-/// at its position: Doctor checks (section, name), Usage groups (label) and
-/// Health targets (nickname).
+/// at its position: Doctor checks (section, name, detail, remediation), Usage
+/// groups (label) and Health targets (nickname).
 ///
 /// Mutation check: drop `cardEl.id = id;` from doctorFinding -> red.
 #[test]
@@ -456,7 +456,9 @@ fn reordering_list_items_carry_an_identity_id() {
     assert!(pass.contains("row.id = id;"));
     assert_eq!(
         item_id,
-        "returnuniqueitemid(prefix+'-'+idkey(f.section)+'-'+idkey(f.name),seen);"
+        "varbase=prefix+'-'+idkey(f.section)+'-'+idkey(f.name)+'-'+idkey(f.detail);\
+         if(f.remediation){base+='-'+idkey(f.remediation);}\
+         returnuniqueitemid(base,seen);"
     );
     assert!(findings.contains("doctorFinding(f, doctorItemId('doctor-finding', f, seen))"));
     assert!(passes.contains("doctorPass(p, doctorItemId('doctor-pass', p, seen))"));

@@ -591,16 +591,25 @@ fn the_html_sink_scan_skips_only_the_morph_option() {
 
 /// A disclosure the operator opened stays open through a refresh: the fresh
 /// node is always built closed, and the morph would otherwise drop `open`.
+/// The morph's one callback carries the open state before it decides whether
+/// to hold a selected unit, so a held unit's disclosures keep their state too.
 ///
-/// Mutation check: drop the `callbacks` entry from morphPanel -> red.
+/// Mutation check: drop `keepOpenState(oldNode, freshNode);` from morphGate -> red.
 #[test]
 fn morph_panel_keeps_a_kept_disclosure_open() {
     let body = compact(&function_body("morphPanel"));
+    let gate = compact(&function_body("morphGate"));
     let keep = compact(&function_body("keepOpenState"));
 
     assert!(
-        body.contains("callbacks:{beforenodemorphed:keepopenstate}"),
-        "morphPanel must hand the open-state callback to the morph"
+        body.contains("callbacks:{beforenodemorphed:morphgate(held)}"),
+        "morphPanel must hand its composite callback to the morph"
+    );
+    assert!(
+        gate.starts_with(
+            "returnfunction(oldnode,freshnode){keepopenstate(oldnode,freshnode);return"
+        ),
+        "the callback carries the open state first, then decides"
     );
     assert!(
         keep.contains(
@@ -608,10 +617,6 @@ fn morph_panel_keeps_a_kept_disclosure_open() {
              {freshnode.open=oldnode.open;}"
         ),
         "the callback copies the kept disclosure's live state onto the fresh one"
-    );
-    assert!(
-        keep.ends_with("returntrue;"),
-        "the callback must never veto the morph"
     );
 }
 
@@ -634,31 +639,4 @@ fn the_html_sink_scan_flags_the_newer_parsing_apis() {
             "`{sink}` must be flagged"
         );
     }
-}
-
-/// A text selection inside the panel survives a morph that moves the selected
-/// node: idiomorph keeps the node but its remove-and-reinsert collapses the
-/// browser's selection, so `morphPanel` puts it back when both end points are
-/// still in the panel.
-///
-/// Mutation check: drop `restoreSelection(parent, held);` -> red.
-#[test]
-fn morph_panel_restores_a_selection_the_move_collapsed() {
-    let body = compact(&function_body("morphPanel"));
-    let restore = compact(&function_body("restoreSelection"));
-
-    let held = body.find("varheld=heldselection(parent);");
-    let morph = body.find("idiomorph.morph(");
-    let put_back = body.find("restoreselection(parent,held);");
-    assert!(held.is_some() && morph.is_some() && put_back.is_some());
-    assert!(
-        held < morph && morph < put_back,
-        "held before the morph, restored after"
-    );
-    assert!(
-        restore.starts_with(
-            "if(!held||!parent.contains(held.anchor)||!parent.contains(held.focus)){return;}"
-        ),
-        "a selection whose record left the panel is not restored"
-    );
 }

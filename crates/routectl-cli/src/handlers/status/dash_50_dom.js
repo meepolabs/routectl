@@ -46,9 +46,9 @@
   }
 
   // The id of one item in a repeated list (a card, a check), whose `base` is
-  // built from the item's own keys through idKey. A list whose key can repeat
-  // (two checks sharing a name) tells the repeats apart by their order among
-  // themselves; `seen` is one fresh object per list. The ordinal suffix adds a
+  // built from the item's own keys through idKey. A list whose items can be
+  // identical (two byte-identical checks) tells the repeats apart by their
+  // order among themselves; `seen` is one fresh object per list. The ordinal suffix adds a
   // segment no idKey-built base has, so it cannot equal another item's base.
   function uniqueItemId(base, seen) {
     var n = seen[base] || 0;
@@ -471,11 +471,24 @@
     return head;
   }
 
+  // A refresh unit is a section the in-place update holds back, whole, while
+  // the operator has text selected inside it (morphPanel), so a selection is
+  // never cut by a refresh. Card and section wrappers mark themselves with a
+  // key naming the section, unique within its view: a unit is held only
+  // against its own rebuild, never against another section the morph happens
+  // to pair it with.
+  var REFRESH_UNIT_ATTR = 'data-unit';
+
+  function markRefreshUnit(node, key) {
+    node.setAttribute(REFRESH_UNIT_ATTR, key);
+    return node;
+  }
+
   // A card shell with a title, an optional hint, and a body. The single
   // container every tab section builds into, so card chrome lives in one
   // place rather than once per tab.
   function card(title, hint, bodyNode) {
-    var c = document.createElement('div');
+    var c = markRefreshUnit(document.createElement('div'), title);
     c.className = 'card';
     c.appendChild(sectionHead(title, hint));
     if (bodyNode) { c.appendChild(bodyNode); }

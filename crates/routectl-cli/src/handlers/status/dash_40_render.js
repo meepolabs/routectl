@@ -201,48 +201,82 @@
 
   // The one way a pane body or the modal host is updated: `parent`'s children
   // are brought in line with `node` in place, so an element the rebuild keeps
-  // (matched by id, else by tag) is the same node afterward and focus or a
-  // text selection on it survives. A node only, never markup: the morph
-  // library parses a string argument as HTML, and every text on this page is
-  // wire data.
+  // (matched by id, else by tag) is the same node afterward and focus on it
+  // survives. A node only, never markup: the morph library parses a string
+  // argument as HTML, and every text on this page is wire data.
+  //
+  // A refresh unit holding a non-collapsed text selection is left exactly as
+  // it is (morphGate); it catches up on the first refresh after the selection
+  // collapses. Page and table scroll positions are put back after the morph.
   function morphPanel(parent, node) {
     if (!(node instanceof Node)) {
       throw new TypeError('morphPanel takes a DOM node, never markup');
     }
-    var held = heldSelection(parent);
+    var held = selectedUnits(parent);
+    var scroll = heldScroll(parent);
     Idiomorph.morph(parent, node, {
       morphStyle: 'innerHTML',
-      callbacks: { beforeNodeMorphed: keepOpenState }
+      callbacks: { beforeNodeMorphed: morphGate(held) }
     });
-    restoreSelection(parent, held);
+    restoreScroll(parent, scroll);
   }
 
-  // A text selection inside `parent`, as its two end points, or null. The
-  // morph keeps the selected nodes, but moving one into its new place
-  // (removed, then reinserted) collapses the browser's selection.
-  function heldSelection(parent) {
-    var sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !parent.contains(sel.anchorNode) ||
-        !parent.contains(sel.focusNode)) {
-      return null;
-    }
-    return { anchor: sel.anchorNode, anchorAt: sel.anchorOffset,
-      focus: sel.focusNode, focusAt: sel.focusOffset };
-  }
-
-  // Put a held selection back when the morph kept both of its end points in
-  // `parent`. An end point the morph dropped means the selected record left
-  // the page, and the selection goes with it.
-  function restoreSelection(parent, held) {
-    if (!held || !parent.contains(held.anchor) || !parent.contains(held.focus)) { return; }
-    var sel = window.getSelection();
-    if (!sel.isCollapsed) { return; }
-    var clamp = function (n, at) {
-      var len = n.nodeType === 3 ? n.nodeValue.length : n.childNodes.length;
-      return Math.min(at, len);
+  // The morph's per-node veto: carry a kept disclosure's open state first,
+  // then refuse to touch a held unit paired with its own rebuild, so neither
+  // its text nor its place changes under the selection. A held unit paired
+  // with a different section (or with none) is morphed: its section left.
+  function morphGate(held) {
+    return function (oldNode, freshNode) {
+      keepOpenState(oldNode, freshNode);
+      return !(held.indexOf(oldNode) >= 0 && sameRefreshUnit(oldNode, freshNode));
     };
-    sel.setBaseAndExtent(held.anchor, clamp(held.anchor, held.anchorAt),
-      held.focus, clamp(held.focus, held.focusAt));
+  }
+
+  function sameRefreshUnit(oldNode, freshNode) {
+    return freshNode.nodeType === 1 &&
+      freshNode.getAttribute(REFRESH_UNIT_ATTR) === oldNode.getAttribute(REFRESH_UNIT_ATTR);
+  }
+
+  // The refresh units in `parent` that hold an end of a non-collapsed text
+  // selection: the nearest marked ancestor of each end point. A selection
+  // inside one unit holds that unit alone.
+  function selectedUnits(parent) {
+    var sel = window.getSelection();
+    if (!sel || sel.isCollapsed) { return []; }
+    var units = [];
+    [sel.anchorNode, sel.focusNode].forEach(function (end) {
+      var unit = refreshUnitOf(end);
+      if (unit && parent.contains(unit) && units.indexOf(unit) < 0) { units.push(unit); }
+    });
+    return units;
+  }
+
+  function refreshUnitOf(node) {
+    var elem = node && (node.nodeType === 1 ? node : node.parentElement);
+    return elem ? elem.closest('[' + REFRESH_UNIT_ATTR + ']') : null;
+  }
+
+  // The page scroll and the scroll of every keyed table scroller in `parent`.
+  // A morph that shortens the page for a moment, or rebuilds a scroller,
+  // would otherwise move the operator's reading position.
+  function heldScroll(parent) {
+    var tables = [];
+    Array.prototype.forEach.call(parent.querySelectorAll('.tablewrap[id]'), function (wrap) {
+      tables.push({ id: wrap.id, left: wrap.scrollLeft, top: wrap.scrollTop });
+    });
+    return { x: window.scrollX, y: window.scrollY, tables: tables };
+  }
+
+  function restoreScroll(parent, held) {
+    held.tables.forEach(function (t) {
+      var wrap = document.getElementById(t.id);
+      if (!wrap || !parent.contains(wrap)) { return; }
+      if (wrap.scrollLeft !== t.left) { wrap.scrollLeft = t.left; }
+      if (wrap.scrollTop !== t.top) { wrap.scrollTop = t.top; }
+    });
+    if (window.scrollX !== held.x || window.scrollY !== held.y) {
+      window.scrollTo(held.x, held.y);
+    }
   }
 
   // A rebuilt <details> is always closed, and the morph removes every
@@ -252,7 +286,6 @@
     if (oldNode instanceof HTMLDetailsElement && freshNode instanceof HTMLDetailsElement) {
       freshNode.open = oldNode.open;
     }
-    return true;
   }
 
   // The modal host shows the overlay the pass just built, or nothing: an

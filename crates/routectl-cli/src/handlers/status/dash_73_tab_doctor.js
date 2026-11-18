@@ -79,7 +79,7 @@
   // ---- doctor: the verdict card ----------------------------------------
 
   function doctorVerdict(counts, reachability) {
-    var wrap = document.createElement('div');
+    var wrap = markRefreshUnit(document.createElement('div'), 'verdict');
     wrap.className = 'card docverdict';
     wrap.appendChild(doctorVerdictLead(counts, reachability));
     wrap.appendChild(doctorCounts(counts));
@@ -161,7 +161,7 @@
   // ---- doctor: findings + passes ---------------------------------------
 
   function doctorFindings(findings) {
-    var wrap = document.createElement('div');
+    var wrap = markRefreshUnit(document.createElement('div'), 'findings');
     wrap.className = 'ovsection';
     wrap.appendChild(sectionHead('Findings',
       countText(findings.length, ' check needs attention', ' checks need attention')));
@@ -175,11 +175,17 @@
     return wrap;
   }
 
-  // A check's id comes from its own identity (section, then name), never its
-  // position: the lists reorder as severities change, and a card matched by
-  // position would carry a selection inside it over to another check.
+  // A check's id comes from its own record, never its position: the lists
+  // reorder as severities change, and a card matched by position would carry
+  // a selection inside it over to another check. Section and name alone do
+  // not identify a check (every config validation error shares them), so
+  // the detail and the remediation join them; severity stays out, so a check
+  // that turns from warning to failure keeps its card. Only byte-identical
+  // records fall back to their order among themselves.
   function doctorItemId(prefix, f, seen) {
-    return uniqueItemId(prefix + '-' + idKey(f.section) + '-' + idKey(f.name), seen);
+    var base = prefix + '-' + idKey(f.section) + '-' + idKey(f.name) + '-' + idKey(f.detail);
+    if (f.remediation) { base += '-' + idKey(f.remediation); }
+    return uniqueItemId(base, seen);
   }
 
   // One card per finding: the severity, what was checked, what was found, and
@@ -216,7 +222,7 @@
   // disclosure: they are the report's bulk and none of them is something to
   // act on, so they must not push the findings off the screen.
   function doctorPasses(passes) {
-    var wrap = document.createElement('div');
+    var wrap = markRefreshUnit(document.createElement('div'), 'passes');
     wrap.className = 'card';
     var grid = document.createElement('div');
     grid.className = 'docpassgrid';
@@ -292,7 +298,7 @@
   // verdict and its layer; the routing action, the learned timestamps and the
   // age sit in its tooltip so the grid stays readable.
   function doctorMatrix(panel, nowMs) {
-    var wrap = document.createElement('div');
+    var wrap = markRefreshUnit(document.createElement('div'), 'matrix');
     wrap.className = 'ovsection';
     var lanes = Array.isArray(panel.lanes) ? panel.lanes : [];
     var columns = Array.isArray(panel.columns) ? panel.columns : [];
