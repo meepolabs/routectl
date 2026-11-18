@@ -508,7 +508,7 @@
     return kpiTile('Time to first token (avg)',
       figure(avg.v, avg.u, null),
       subNote(observed
-        ? 'max ' + msText(t.ttft_max_ms) + ' - avg over ' + humanCount(t.requests) + ' req'
+        ? 'max ' + msText(t.ttft_max_ms) + ' - avg over streamed successes'
         : 'no streamed response in this window', false),
       sparkArea(bucketSamples(series, function (m) { return m.ttft_avg_ms; }), gap));
   }

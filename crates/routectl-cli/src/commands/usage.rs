@@ -23,6 +23,7 @@ use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime, Ti
 
 use crate::local_time::{self, CivilInstant, LocalZone, unix_ms};
 
+use routectl_core::render_operator_text;
 use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_router::{Config, PriceDimension};
 use routectl_usage::{
@@ -1137,7 +1138,7 @@ const fn display_input(metrics: &QueryMetrics) -> i64 {
 fn normal_cells(row: &DisplayRow) -> Vec<String> {
     let m = &row.metrics;
     vec![
-        row.label.clone(),
+        render_operator_text(&row.label).into_owned(),
         m.requests.to_string(),
         m.errors.to_string(),
         human_count(display_input(m)),
@@ -1332,7 +1333,7 @@ fn render_reduction(report: &WindowReport) -> String {
     let histogram = r
         .decisions
         .iter()
-        .map(|(token, count)| format!("{token}={count}"))
+        .map(|(token, count)| format!("{}={count}", render_operator_text(token)))
         .collect::<Vec<_>>()
         .join(" ");
     let mut out = format!(
@@ -1437,8 +1438,8 @@ fn render_suppressed_sessions(report: &WindowReport, zone: &LocalZone) -> String
         out.push_str(&format!(
             "  session={:016x} kind={} model={} reqs={} first={} last={}\n",
             row.session_ref,
-            row.provider_kind,
-            row.model,
+            render_operator_text(&row.provider_kind),
+            render_operator_text(&row.model),
             row.suppressed_requests,
             format_suppression_ts(zone, row.first_suppressed_ms),
             format_suppression_ts(zone, row.last_suppressed_ms),
@@ -1460,12 +1461,18 @@ fn render_suppressed_sessions(report: &WindowReport, zone: &LocalZone) -> String
 /// (pre-seat history, forwarded client credentials), `utilization`,
 /// `overage`, `reset` -- render as `-`.
 fn render_quota(q: &QuotaSnapshot, zone: &LocalZone) -> String {
-    let seat = q.seat.as_deref().unwrap_or("-");
-    let status = q.status.as_deref().unwrap_or("unknown");
+    let seat = q.seat.as_deref().map_or("-".into(), render_operator_text);
+    let status = q
+        .status
+        .as_deref()
+        .map_or("unknown".into(), render_operator_text);
     let util = q
         .utilization
         .map_or_else(|| "-".to_string(), |u| format!("{:.0}%", u * 100.0));
-    let overage = q.overage_status.as_deref().unwrap_or("-");
+    let overage = q
+        .overage_status
+        .as_deref()
+        .map_or("-".into(), render_operator_text);
     let reset = q
         .reset
         .map_or_else(|| "-".to_string(), |epoch_s| format_reset(zone, epoch_s));

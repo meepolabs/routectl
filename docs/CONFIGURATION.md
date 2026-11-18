@@ -4891,8 +4891,12 @@ latency after the first token), so a long slow stream weighs as much as its
 tokens. `ctx_avg` and `ctx_peak` are the mean and the largest per-request
 prompt: fresh input plus cache read plus cache write, over requests that
 reported any of the three. `cache_hit_pct` is the share of prompt tokens
-served from cache, weighted by tokens over the requests whose provider
-reports cache reads, the same rule as the `routectl usage` hit rate. Each set
+served from cache, weighted by tokens, the same rule as the `routectl usage`
+hit rate. It is decided per group of requests that share a model, provider,
+upstream, alias, provider kind and seat: when at least one request in such a
+group reported cache reads, every prompt token of the whole group counts,
+including requests that reported none; a group with no cache-reporting
+request is left out. Each set
 also counts `cache_read_present` and `server_tool_present` (requests that
 reported a cache read or a server-tool map, a reported zero included) and
 `client_disconnect_pre_dispatch` (client hangups before a model was served).

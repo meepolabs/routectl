@@ -64,6 +64,12 @@ fn well_inside_the_budget() -> Duration {
     Duration::from_millis(QUERY_BUDGET_MS / 4)
 }
 
+/// Scheduler tolerance for an answer that must not wait at all: it covers a
+/// loaded test runner's task scheduling, not any waiting the gate might do.
+/// Far below the budget, so a gate that queued or waited for the held read
+/// would overrun it.
+const NO_WAIT_TOLERANCE: Duration = Duration::from_millis(250);
+
 fn already_expired() -> ReadLimit {
     ReadLimit::from(
         Instant::now()
@@ -85,9 +91,9 @@ async fn a_held_gate_answers_db_busy_at_once_and_health_stays_available() {
     let state = stalling_state(dir.path().join("usage.db"));
     let held = hold_gate_with_a_stalled_read(&state).await;
 
-    // Act: a second query, bounded well inside the first read's budget.
+    // Act: a second query, given only scheduler tolerance to answer.
     let second = tokio::time::timeout(
-        well_inside_the_budget(),
+        NO_WAIT_TOLERANCE,
         send(Arc::clone(&state), QUERY_METHOD, VALID_BODY),
     )
     .await;
