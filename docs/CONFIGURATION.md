@@ -5582,6 +5582,14 @@ always present; times are epoch ms and durations ms.
 Every count resets on restart. The panel carries no token, credential
 reference, response body or header, and no vendor account id.
 
+The `quota` list on `/status/usage` (one latest ledger snapshot per seat) and
+the quota lines under the `routectl usage` table follow the same configured
+rule: a seat appears only while the config names it, and a row with no seat
+recorded is not shown. A retired seat's ledger rows stay and still count in
+the traffic and cost figures. Each `/status/usage` `quota` row carries `seat`
+(the `account` key), `provider_entry` and `login_label`, with the values this
+panel gives that account.
+
 ### Credential pools (multiple accounts per provider)
 
 A single OAuth provider can hold more than one credential ("seat") in

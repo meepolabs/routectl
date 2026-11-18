@@ -240,6 +240,15 @@ banner, no retry signal -- silently mislabeled data.
 - At 800 px wide, the eligibility cell spans the whole card row and each fix
   command sits on one line; a command wider than the card scrolls inside its
   own box instead of wrapping at a hyphen.
+- Provider-card seat dots follow the current config. Serve a config whose
+  provider entry name differs from its login's vendor (for example entry
+  `work` with `credential = "oauth://anthropic#a"`) against a ledger copy
+  holding quota rows for that seat and for a seat the config no longer names.
+  On Overview the `work` card shows one seat dot (`1 seat`) and its modal
+  lists that seat alone; no card, dot or Health quota tile shows the retired
+  seat. Drop the entry from the config and reload: within one poll the dot,
+  the modal and the Health tile for it are gone, and the Usage figures are
+  unchanged.
 - Zero counts render faint: `0` in `eligible 0 of 2` and the seat driver's
   zero failure counts, never full brightness and never red.
 - In the light theme, faint text (hints, labels, zeros) stays readable on

@@ -157,9 +157,22 @@ pub(super) struct AccountSources {
 }
 
 /// One configured account's display identity.
-struct Identity {
-    provider_entry: String,
-    login_label: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Identity {
+    pub(super) provider_entry: String,
+    pub(super) login_label: Option<String>,
+}
+
+/// Every configured credential account, keyed by account, with its display
+/// identity.
+pub(super) type ConfiguredAccounts = BTreeMap<String, Identity>;
+
+/// The configured accounts of one router snapshot.
+pub(super) fn configured_accounts_of(view: &StatusRouterView) -> ConfiguredAccounts {
+    configured_accounts(
+        &view.route_targets(Instant::now()),
+        &view.managed_seat_entries(),
+    )
 }
 
 /// The credential accounts the route targets name. The provider entry of a
@@ -168,8 +181,8 @@ struct Identity {
 fn configured_accounts(
     targets: &[RouteTargetStatus],
     managed_entries: &BTreeMap<String, String>,
-) -> BTreeMap<String, Identity> {
-    let mut accounts: BTreeMap<String, Identity> = BTreeMap::new();
+) -> ConfiguredAccounts {
+    let mut accounts = ConfiguredAccounts::new();
     for target in targets {
         let Some(account) = target.account.as_ref() else {
             continue;
@@ -414,4 +427,4 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 
 #[cfg(test)]
 #[path = "accounts_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -417,6 +417,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
         "today",
         bounds,
         LedgerHealth::default(),
+        &ConfiguredAccounts::new(),
         Instant::now() + Duration::from_mins(10),
     )
     .expect("panel fold");

@@ -59,13 +59,13 @@ impl Provider for Unused {
 }
 
 /// `(model nickname, provider entry, provider block body, credential ref)`.
-type Seat = (&'static str, &'static str, &'static str, String);
+pub(in crate::handlers::status) type Seat = (&'static str, &'static str, &'static str, String);
 
-fn anthropic_block() -> &'static str {
+pub(in crate::handlers::status) fn anthropic_block() -> &'static str {
     "format = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\nauth = \"bearer\"\n"
 }
 
-fn codex_block() -> &'static str {
+pub(in crate::handlers::status) fn codex_block() -> &'static str {
     "format = \"openai-responses\"\nbase_url = \"https://chatgpt.com/backend-api/codex\"\n\
      auth = \"bearer\"\n"
 }
@@ -142,7 +142,7 @@ fn config_of(seats: &[Seat]) -> Config {
 }
 
 /// One non-pooled model per seat.
-fn router_of(seats: &[Seat]) -> Router {
+pub(in crate::handlers::status) fn router_of(seats: &[Seat]) -> Router {
     let mut router = Router::new(Arc::new(config_of(seats)));
     let provider: Arc<dyn Provider> = Arc::new(Unused);
     let models: BTreeMap<String, Arc<ResolvedModel>> = seats

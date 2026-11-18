@@ -943,6 +943,32 @@ fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
 
 // --- quota line ---
 
+/// [`cost_config`] plus one model per `(entry, credential)`, so each
+/// credential is a login the config dispatches through.
+fn config_with_logins(logins: &[(&str, String)]) -> Config {
+    let mut config = cost_config();
+    for (entry, credential) in logins {
+        let provider = if credential.starts_with("oauth://codex") {
+            ProviderEntry::openai_responses(credential.clone())
+        } else {
+            ProviderEntry::anthropic_api(credential.clone())
+        };
+        config.providers.insert((*entry).to_string(), provider);
+        config
+            .models
+            .insert(format!("model-{entry}"), ModelEntry::new(*entry, "u"));
+    }
+    config
+}
+
+/// A config naming the `anthropic#a` and `codex` logins.
+fn anthropic_a_and_codex() -> Config {
+    config_with_logins(&[
+        ("seat-a", "oauth://anthropic#a".to_string()),
+        ("codex-one", "oauth://codex".to_string()),
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_quota_row(
     db: &UsageDb,
@@ -957,7 +983,7 @@ fn insert_quota_row(
         db,
         request_id,
         ts_start,
-        None,
+        Some("anthropic#a"),
         Some(quota_status),
         Some(quota_utilization),
         Some(quota_overage_status),
@@ -1008,12 +1034,12 @@ fn build_report_surfaces_latest_quota_snapshot_per_seat() {
     insert_quota_row(&db, "q1", 1000, "allowed", 0.22, "none", 1_800_000_000);
 
     // Act
-    let report = report_all(&mut db, &cost_config(), None, false);
+    let report = report_all(&mut db, &anthropic_a_and_codex(), None, false);
 
     // Assert
     assert_eq!(report.quota.len(), 1);
     let quota = &report.quota[0];
-    assert_eq!(quota.seat, None, "the seeded row carries no seat");
+    assert_eq!(quota.seat.as_deref(), Some("anthropic#a"));
     assert_eq!(quota.status.as_deref(), Some("allowed"));
     assert_eq!(quota.utilization, Some(0.22));
     assert_eq!(quota.overage_status.as_deref(), Some("none"));
@@ -1025,7 +1051,7 @@ fn render_report_includes_quota_line() {
     // Arrange
     let (_dir, _path, mut db) = temp_db();
     insert_quota_row(&db, "q2", 1000, "allowed", 0.22, "none", 1_800_000_000);
-    let report = report_all(&mut db, &cost_config(), None, false);
+    let report = report_all(&mut db, &anthropic_a_and_codex(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1034,8 +1060,11 @@ fn render_report_includes_quota_line() {
         .find(|l| l.starts_with("quota["))
         .expect("quota line present");
 
-    // Assert: a seatless row labels as "-"; 0.22 renders as 22%.
-    assert!(quota_line.starts_with("quota[-]:"), "{quota_line}");
+    // Assert: 0.22 renders as 22%.
+    assert!(
+        quota_line.starts_with("quota[anthropic#a]:"),
+        "{quota_line}"
+    );
     assert!(quota_line.contains("status=allowed"));
     assert!(quota_line.contains("utilization=22%"));
     assert!(quota_line.contains("overage=none"));
@@ -1078,7 +1107,7 @@ fn render_report_includes_one_quota_line_per_seat() {
         None,
         Some(1_786_210_114),
     );
-    let report = report_all(&mut db, &cost_config(), None, false);
+    let report = report_all(&mut db, &anthropic_a_and_codex(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1099,6 +1128,36 @@ fn render_report_includes_one_quota_line_per_seat() {
     assert!(codex.contains("status=unknown"), "{codex}");
     assert!(codex.contains("utilization=16%"), "{codex}");
     assert!(codex.contains("overage=-"), "{codex}");
+}
+
+/// A seat logged out of and removed from the config, and a row with no
+/// seat, keep their ledger rows for the traffic figures but print no quota
+/// line; only the seat the config names does.
+#[test]
+fn render_report_prints_quota_lines_only_for_configured_seats() {
+    // Arrange
+    let (_dir, _path, mut db) = temp_db();
+    for (id, seat) in [
+        ("configured", Some("anthropic#a")),
+        ("retired", Some("anthropic#gone")),
+        ("seatless", None),
+    ] {
+        insert_seat_quota_row(&db, id, 1000, seat, Some("allowed"), Some(0.4), None, None);
+    }
+    let config = config_with_logins(&[("seat-a", "oauth://anthropic#a".to_string())]);
+    let report = report_all(&mut db, &config, None, false);
+
+    // Act
+    let out = render_report(&report, &zone());
+
+    // Assert
+    let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("quota[")).collect();
+    assert_eq!(lines.len(), 1, "{out}");
+    assert!(lines[0].starts_with("quota[anthropic#a]:"), "{out}");
+    assert_eq!(
+        report.total.metrics.requests, 3,
+        "every row still counts: {out}"
+    );
 }
 
 #[test]

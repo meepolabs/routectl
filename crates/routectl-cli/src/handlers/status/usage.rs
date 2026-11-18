@@ -9,6 +9,10 @@
 //! rows, ids, bodies, or prompts -- only rollups, windowed totals, the
 //! per-seat quota snapshots, and the window's observation totals with its
 //! completeness verdict.
+//!
+//! The quota list carries only the accounts the served config names: a
+//! seat that was logged out of or removed from the config keeps its ledger
+//! rows for traffic history, but its last snapshot is no longer reported.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,6 +33,7 @@ use routectl_usage::{
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 use crate::server::status_gate::USAGE_BUDGET_MS;
 
+use super::accounts::{ConfiguredAccounts, Identity, configured_accounts_of};
 use super::usage_health::{LedgerHealth, WindowObservation, window_observation};
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
@@ -53,8 +58,8 @@ pub(super) struct WindowQuery {
 }
 
 /// Aggregates-only usage payload. Carries per-`(alias, provider, model,
-/// upstream)` rollups, windowed totals, one latest quota snapshot per seat,
-/// and the window's observation totals. It never carries request rows, ids,
+/// upstream)` rollups, windowed totals, one latest quota snapshot per
+/// configured seat, and the window's observation totals. It never carries request rows, ids,
 /// bodies, or prompts.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct UsagePanel {
@@ -179,15 +184,22 @@ impl UsageGroup {
     }
 }
 
-/// One seat's latest quota-bearing snapshot. The `quota_*` ledger columns are
-/// shared across vendors, so `provider_kind` is the discriminator a client
-/// MUST read to interpret `utilization` (a fraction of a per-provider window)
-/// and to know which of the remaining fields that vendor populates at all.
+/// One configured seat's latest quota-bearing snapshot. The `quota_*` ledger
+/// columns are shared across vendors, so `provider_kind` is the discriminator
+/// a client MUST read to interpret `utilization` (a fraction of a
+/// per-provider window) and to know which of the remaining fields that vendor
+/// populates at all.
 #[derive(Debug, Clone, Serialize)]
 struct UsageQuota {
-    /// Credential identity this snapshot belongs to. `null` for pre-seat
-    /// history and forwarded client credentials.
-    seat: Option<String>,
+    /// The credential account this snapshot belongs to, the key
+    /// `/status/accounts` lists it under.
+    seat: String,
+    /// The `[providers]` entry the account is reported under, by the same
+    /// rule as `/status/accounts`.
+    provider_entry: String,
+    /// The `<label>` of an `oauth://<provider>#<label>` login; null for an
+    /// unlabeled login.
+    login_label: Option<String>,
     /// Provider kind of the row this snapshot came from -- the cross-vendor
     /// discriminator for every other field here.
     provider_kind: Option<String>,
@@ -235,13 +247,16 @@ async fn build_window(
     // Stamp `as_of` at request time (before the blocking read), so a lock
     // wait or slow disk cannot skew the freshness marker.
     let as_of = now_utc_rfc3339();
+    // Read beside `as_of` too, so a reload during the ledger read cannot pair
+    // the snapshots with a config they were not filtered against.
+    let configured = configured_accounts_of(&state.router.view());
     let panel = guard_panel(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
         move || {
             let bounds = window_bounds(&LocalZone::load(), flag, now);
-            build_panel(&db_path, token, bounds, health, as_of)
+            build_panel(&db_path, token, bounds, health, &configured, as_of)
         },
     )
     .await;
@@ -271,6 +286,7 @@ fn build_panel(
     token: &'static str,
     bounds: WindowBounds,
     health: LedgerHealth,
+    configured: &ConfiguredAccounts,
     as_of: String,
 ) -> Panel<UsagePanel> {
     let deadline = Instant::now() + Duration::from_millis(USAGE_BUDGET_MS);
@@ -278,7 +294,7 @@ fn build_panel(
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
-    match collect(&mut db, token, bounds, health, deadline) {
+    match collect(&mut db, token, bounds, health, configured, deadline) {
         Ok(dto) => Panel::available(SCHEMA_VERSION, as_of, dto),
         Err(code) => Panel::unavailable(SCHEMA_VERSION, code),
     }
@@ -298,6 +314,7 @@ fn collect(
     token: &'static str,
     bounds: WindowBounds,
     health: LedgerHealth,
+    configured: &ConfiguredAccounts,
     deadline: Instant,
 ) -> Result<UsagePanel, &'static str> {
     let guard = DeadlineGuard::install(db, deadline).map_err(|e| query_error_code(&e))?;
@@ -308,7 +325,24 @@ fn collect(
     let quota = latest_quota_by_seat(db).map_err(|e| query_error_code(&e))?;
     let observation = window_observation(db, bounds.from_ms, bounds.to_ms, health)
         .map_err(|e| query_error_code(&e))?;
+    let quota = configured_quota(quota, configured);
     Ok(assemble(token, bounds, rows, breakdown, quota, observation))
+}
+
+/// The snapshots of the configured accounts, each with its display identity.
+/// A snapshot with no seat (pre-seat history, a forwarded client credential)
+/// names no configured account and is dropped with the retired ones.
+fn configured_quota(
+    snapshots: Vec<QuotaSnapshot>,
+    configured: &ConfiguredAccounts,
+) -> Vec<UsageQuota> {
+    snapshots
+        .into_iter()
+        .filter_map(|snapshot| {
+            let (account, identity) = configured.get_key_value(snapshot.seat.as_deref()?)?;
+            Some(map_quota(account.clone(), identity.clone(), snapshot))
+        })
+        .collect()
 }
 
 /// Fold the query results into the wire DTO. Totals are summed over the
@@ -328,7 +362,7 @@ fn assemble(
     bounds: WindowBounds,
     rows: Vec<AggRow>,
     breakdown: Vec<(GroupKey, String, i64)>,
-    quota: Vec<QuotaSnapshot>,
+    quota: Vec<UsageQuota>,
     observation: WindowObservation,
 ) -> UsagePanel {
     let mut per_group: std::collections::HashMap<GroupKey, BTreeMap<String, i64>> =
@@ -372,7 +406,7 @@ fn assemble(
         to_ms: bounds.to_ms,
         totals,
         groups,
-        quota: quota.into_iter().map(map_quota).collect(),
+        quota,
         observation,
     }
 }
@@ -412,9 +446,11 @@ fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup 
     }
 }
 
-fn map_quota(snapshot: QuotaSnapshot) -> UsageQuota {
+fn map_quota(account: String, identity: Identity, snapshot: QuotaSnapshot) -> UsageQuota {
     UsageQuota {
-        seat: snapshot.seat,
+        seat: account,
+        provider_entry: identity.provider_entry,
+        login_label: identity.login_label,
         provider_kind: snapshot.provider_kind,
         ts_start_ms: snapshot.ts_start,
         claim: snapshot.claim,
@@ -493,6 +529,7 @@ mod read_budget_bench_tests;
 mod tests {
     use super::*;
     use crate::handlers::status::DaemonMeta;
+    use crate::handlers::status::accounts::tests::{anthropic_block, codex_block, router_of};
     use crate::server::AppState;
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
@@ -509,11 +546,48 @@ mod tests {
 
     /// Build a `StatusState` whose usage-ledger path is `db_path`.
     fn state_with_ledger(db_path: PathBuf) -> Arc<StatusState> {
-        let router = Router::new(Arc::new(Config::default()));
-        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        state_over_router(db_path, Router::new(Arc::new(Config::default())))
+    }
+
+    /// Build a `StatusState` serving `router` over the ledger at `db_path`.
+    fn state_over_router(db_path: PathBuf, router: Router) -> Arc<StatusState> {
+        state_over_swap(db_path, Arc::new(ArcSwap::from_pointee(router)))
+    }
+
+    fn state_over_swap(db_path: PathBuf, swap: Arc<ArcSwap<Router>>) -> Arc<StatusState> {
+        let app = AppState::for_test(swap);
         let mut status = StatusState::from_app(&app, None, DaemonMeta::for_test());
         status.usage_db_path = db_path;
         Arc::new(status)
+    }
+
+    /// A router whose config names `oauth://anthropic#a` and `oauth://codex`.
+    fn anthropic_a_and_codex() -> Router {
+        router_of(&[
+            (
+                "m-a",
+                "seat-a",
+                anthropic_block(),
+                "oauth://anthropic#a".into(),
+            ),
+            (
+                "m-codex",
+                "codex-one",
+                codex_block(),
+                "oauth://codex".into(),
+            ),
+        ])
+    }
+
+    fn quota_rows(json: &Value) -> &Vec<Value> {
+        json["data"]["quota"].as_array().expect("quota array")
+    }
+
+    fn seats_of(json: &Value) -> Vec<&str> {
+        quota_rows(json)
+            .iter()
+            .map(|q| q["seat"].as_str().expect("a listed seat is a string"))
+            .collect()
     }
 
     /// Seed a WAL ledger with one `ok` row per timestamp, all sharing the
@@ -693,12 +767,12 @@ mod tests {
         );
 
         // Act
-        let (status, json) =
-            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        let state = state_over_router(path.clone(), anthropic_a_and_codex());
+        let (status, json) = get_usage(state, "/status/usage?window=all").await;
 
         // Assert
         assert_eq!(status, StatusCode::OK);
-        let quota = json["data"]["quota"].as_array().expect("quota array");
+        let quota = quota_rows(&json);
         assert_eq!(quota.len(), 2, "one entry per seat: {json}");
         let anthropic = quota
             .iter()
@@ -720,24 +794,114 @@ mod tests {
         assert_eq!(codex["reset_ms"], 1_786_210_114_000_i64);
     }
 
+    /// The quota list carries only the accounts the served config names, each
+    /// with the identity `/status/accounts` gives it. A seat that left the
+    /// config (logged out of and its entry removed) and a seatless row
+    /// (pre-seat history, a forwarded credential) keep their ledger rows for
+    /// the traffic totals but report no snapshot.
     #[tokio::test]
-    async fn quota_gives_a_pre_seat_row_a_null_seat_entry() {
-        // Pre-seat history must stay visible under its own null-seat bucket
-        // rather than being filtered or given a synthetic seat token.
+    async fn quota_lists_only_configured_seats_with_their_identity() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_seat_quota_ledger(
             &path,
-            &[("legacy", None, None, Some("allowed"), Some(0.2), None)],
+            &[
+                (
+                    "configured",
+                    Some("anthropic#a"),
+                    Some("anthropic-api"),
+                    Some("allowed"),
+                    Some(0.3),
+                    Some(9_000),
+                ),
+                (
+                    "retired",
+                    Some("anthropic#gone"),
+                    Some("anthropic-api"),
+                    Some("allowed"),
+                    Some(0.7),
+                    Some(9_000),
+                ),
+                ("seatless", None, None, Some("allowed"), Some(0.2), None),
+                (
+                    "unlabeled",
+                    Some("codex"),
+                    Some("codex"),
+                    None,
+                    Some(0.1),
+                    None,
+                ),
+            ],
         );
+        let state = state_over_router(path.clone(), anthropic_a_and_codex());
 
-        let (status, json) =
-            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        // Act
+        let (status, json) = get_usage(state, "/status/usage?window=all").await;
+
+        // Assert
         assert_eq!(status, StatusCode::OK);
-        let quota = json["data"]["quota"].as_array().expect("quota array");
-        assert_eq!(quota.len(), 1);
-        assert!(quota[0]["seat"].is_null(), "{json}");
-        assert!(quota[0]["reset_ms"].is_null());
+        assert_eq!(json["schema_version"], 7, "an additive change: {json}");
+        assert_eq!(
+            json["data"]["totals"]["requests"], 4,
+            "every row still counts toward the traffic totals: {json}"
+        );
+        let mut seats = seats_of(&json);
+        seats.sort_unstable();
+        assert_eq!(seats, ["anthropic#a", "codex"], "{json}");
+        let labeled = &quota_rows(&json)[seats_of(&json)
+            .iter()
+            .position(|seat| *seat == "anthropic#a")
+            .expect("configured seat listed")];
+        assert_eq!(labeled["provider_entry"], "seat-a", "{labeled}");
+        assert_eq!(labeled["login_label"], "a", "{labeled}");
+        assert_eq!(labeled["utilization"], 0.3, "{labeled}");
+        let unlabeled = &quota_rows(&json)[seats_of(&json)
+            .iter()
+            .position(|seat| *seat == "codex")
+            .expect("unlabeled login listed")];
+        assert_eq!(unlabeled["provider_entry"], "codex-one", "{unlabeled}");
+        assert!(unlabeled["login_label"].is_null(), "{unlabeled}");
+    }
+
+    /// The filter reads the config being served at request time: a reload
+    /// that drops a login drops its snapshot on the next read, with the
+    /// ledger unchanged.
+    #[tokio::test]
+    async fn a_reload_that_drops_a_login_drops_its_quota_row() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_seat_quota_ledger(
+            &path,
+            &[
+                (
+                    "a",
+                    Some("anthropic#a"),
+                    Some("anthropic-api"),
+                    Some("allowed"),
+                    Some(0.3),
+                    None,
+                ),
+                ("c", Some("codex"), Some("codex"), None, Some(0.1), None),
+            ],
+        );
+        let swap = Arc::new(ArcSwap::from_pointee(anthropic_a_and_codex()));
+        let state = state_over_swap(path.clone(), Arc::clone(&swap));
+        let (_, before) = get_usage(Arc::clone(&state), "/status/usage?window=all").await;
+        assert_eq!(seats_of(&before).len(), 2, "premise: both listed: {before}");
+
+        // Act
+        swap.store(Arc::new(router_of(&[(
+            "m-codex",
+            "codex-one",
+            codex_block(),
+            "oauth://codex".into(),
+        )])));
+        let (_, after) = get_usage(state, "/status/usage?window=all").await;
+
+        // Assert
+        assert_eq!(seats_of(&after), ["codex"], "{after}");
     }
 
     #[tokio::test]
@@ -811,6 +975,13 @@ mod tests {
         assert_eq!(json["unavailable"], "db_unavailable");
     }
 
+    fn identity() -> Identity {
+        Identity {
+            provider_entry: "seat-a".into(),
+            login_label: Some("a".into()),
+        }
+    }
+
     #[test]
     fn quota_reset_seconds_scaled_to_milliseconds() {
         // The ledger stamps quota resets in epoch SECONDS; the panel field is
@@ -828,7 +999,7 @@ mod tests {
             overage_utilization: None,
             reset: Some(9_000),
         };
-        let mapped = map_quota(snapshot);
+        let mapped = map_quota("anthropic#a".into(), identity(), snapshot);
         assert_eq!(
             mapped.reset_ms,
             Some(9_000_000),
@@ -838,7 +1009,7 @@ mod tests {
             mapped.ts_start_ms, 1_700_000_000_000,
             "ts_start passes through as ms"
         );
-        assert_eq!(mapped.seat.as_deref(), Some("anthropic#a"));
+        assert_eq!(mapped.seat, "anthropic#a");
         assert_eq!(mapped.provider_kind.as_deref(), Some("anthropic-api"));
 
         let no_reset = QuotaSnapshot {
@@ -852,9 +1023,8 @@ mod tests {
             overage_utilization: None,
             reset: None,
         };
-        let mapped = map_quota(no_reset);
+        let mapped = map_quota("anthropic#a".into(), identity(), no_reset);
         assert_eq!(mapped.reset_ms, None, "absent reset stays absent");
-        assert_eq!(mapped.seat, None, "a pre-seat row renders a null seat");
     }
 
     #[test]
@@ -870,7 +1040,7 @@ mod tests {
             overage_utilization: None,
             reset: Some(i64::MAX / 1000 + 1),
         };
-        let mapped = map_quota(snapshot);
+        let mapped = map_quota("anthropic#a".into(), identity(), snapshot);
         assert_eq!(
             mapped.reset_ms, None,
             "a reset that overflows the ms scale drops the field instead of panicking"
@@ -1795,12 +1965,20 @@ mod tests {
             .expect("instant predates the process start");
 
         // Act
-        let shed = collect(&mut db, "all", ALL_TIME, LedgerHealth::default(), expired);
+        let shed = collect(
+            &mut db,
+            "all",
+            ALL_TIME,
+            LedgerHealth::default(),
+            &ConfiguredAccounts::new(),
+            expired,
+        );
         let after = collect(
             &mut db,
             "all",
             ALL_TIME,
             LedgerHealth::default(),
+            &ConfiguredAccounts::new(),
             Instant::now() + Duration::from_mins(10),
         );
 
@@ -1868,6 +2046,7 @@ mod tests {
             "all",
             ALL_TIME,
             LedgerHealth::default(),
+            &ConfiguredAccounts::new(),
             started + Duration::from_millis(USAGE_BUDGET_MS),
         );
         let elapsed = started.elapsed();

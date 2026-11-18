@@ -288,11 +288,10 @@
     }
   }
 
-  // A seat key is `provider` or `provider#label`, so the provider a quota row
-  // belongs to is the segment before the label separator. A row whose seat is
-  // absent (legacy history, a forwarded client credential) belongs to no
-  // provider card and is left to the Health tab's full list -- attaching it to
-  // a card by guessing would claim a credential identity nobody recorded.
+  // Each quota row names the provider entry its seat is reported under, the
+  // same entry a provider card is labeled with. The seat key is never split
+  // to find it: an entry name and a login's vendor need not agree. A row that
+  // names no entry belongs to no card and is left to the Health tab's list.
   function groupQuotaByProvider(rec) {
     if (!rec.data || !Array.isArray(rec.data.quota)) {
       throw new Error('usage payload carries no quota list');
@@ -300,19 +299,13 @@
     var nowMs = panelNowMs(rec);
     var byProvider = Object.create(null);
     rec.data.quota.forEach(function (q) {
-      if (!q || !q.seat) { return; }
-      var provider = String(q.seat).split(SEAT_LABEL_SEP)[0];
-      if (!provider) { return; }
+      if (!q || !q.provider_entry) { return; }
+      var provider = String(q.provider_entry);
       if (!byProvider[provider]) { byProvider[provider] = []; }
       byProvider[provider].push(q);
     });
     return { byProvider: byProvider, nowMs: nowMs };
   }
-
-  // The seat-key label separator (`provider#label`), built from its char code
-  // for the same reason HASH_SEP is: this script carries no literal that the
-  // mutation-channel scan in page.rs would have to reason about.
-  var SEAT_LABEL_SEP = String.fromCharCode(35);
 
   // The card's seat affordance: one dot per seat plus the seat count, opening a
   // modal that lists every seat in full. Dots, never a pooled bar -- a pooled

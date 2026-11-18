@@ -42,6 +42,15 @@ fn stray_controls(out: &str) -> Vec<char> {
         .collect()
 }
 
+/// A config naming `anthropic#a` and a login labeled with
+/// [`HOSTILE_LEDGER_TEXT`], so a quota row for either seat is printed.
+fn hostile_seat_config() -> Config {
+    config_with_logins(&[
+        ("seat-a", "oauth://anthropic#a".to_string()),
+        ("seat-h", format!("oauth://anthropic#{HOSTILE_LEDGER_TEXT}")),
+    ])
+}
+
 struct HostileCase {
     name: &'static str,
     seed: fn(&UsageDb),
@@ -77,7 +86,7 @@ fn ledger_text_reaches_the_terminal_without_control_sequences() {
                     db,
                     "q1",
                     1000,
-                    Some(HOSTILE_LEDGER_TEXT),
+                    Some(&format!("anthropic#{HOSTILE_LEDGER_TEXT}")),
                     Some("ok"),
                     None,
                     None,
@@ -94,7 +103,7 @@ fn ledger_text_reaches_the_terminal_without_control_sequences() {
                     db,
                     "q1",
                     1000,
-                    None,
+                    Some("anthropic#a"),
                     Some(HOSTILE_LEDGER_TEXT),
                     None,
                     None,
@@ -111,7 +120,7 @@ fn ledger_text_reaches_the_terminal_without_control_sequences() {
                     db,
                     "q1",
                     1000,
-                    None,
+                    Some("anthropic#a"),
                     Some("ok"),
                     None,
                     Some(HOSTILE_LEDGER_TEXT),
@@ -168,7 +177,7 @@ fn ledger_text_reaches_the_terminal_without_control_sequences() {
         (case.seed)(&db);
 
         // Act
-        let report = report_all(&mut db, &cost_config(), case.by, case.detail);
+        let report = report_all(&mut db, &hostile_seat_config(), case.by, case.detail);
         let out = render_report(&report, &zone());
 
         // Assert: the text was printed, and printed without its controls.

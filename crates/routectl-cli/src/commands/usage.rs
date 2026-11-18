@@ -42,6 +42,7 @@ use crate::commands::pricing::{
 };
 use crate::commands::text_table::render_table;
 use crate::commands::usage_cache_ignore::{CACHE_IGNORE_READ_BUDGET, cache_ignore_block};
+use crate::server::seat_driver::managed_seats;
 
 /// Parsed `routectl usage` arguments, already validated by clap.
 #[derive(Debug, Clone)]
@@ -515,8 +516,9 @@ pub struct WindowReport {
     /// The window total, labelled `total`. Kept apart from `groups` so an
     /// alias or seat literally named "total" is never mistaken for it.
     pub total: DisplayRow,
-    /// One latest quota snapshot per credential seat. Not windowed (a quota
-    /// snapshot is a seat's latest known state); empty when nothing reported.
+    /// One latest quota snapshot per credential seat the config names. Not
+    /// windowed (a quota snapshot is a seat's latest known state); empty when
+    /// nothing reported.
     pub quota: Vec<QuotaSnapshot>,
     /// Steady-state would-trim opportunity over the window (advisory; only
     /// populated and surfaced under `--detail`).
@@ -959,7 +961,7 @@ pub fn build_window_report(
         detail,
         groups,
         total,
-        quota: latest_quota_by_seat(db)?,
+        quota: configured_quota(config, latest_quota_by_seat(db)?),
         would_trim: diagnostics.would_trim,
         shadow_misfire: diagnostics.shadow_misfire,
         near_lossless_attribution: diagnostics.near_lossless_attribution,
@@ -968,6 +970,24 @@ pub fn build_window_report(
         suppressed_sessions: diagnostics.suppressed_sessions,
         observation: observation_totals(db, bounds.from_ms, bounds.to_ms)?,
     })
+}
+
+/// The snapshots of the managed logins `config` dispatches through. A seat
+/// logged out of and removed from the config, and a row with no seat, keep
+/// their ledger rows for the traffic figures but print no quota line.
+fn configured_quota(config: &Config, snapshots: Vec<QuotaSnapshot>) -> Vec<QuotaSnapshot> {
+    let configured: BTreeSet<String> = managed_seats(config)
+        .into_iter()
+        .map(|seat| seat.account)
+        .collect();
+    snapshots
+        .into_iter()
+        .filter(|q| {
+            q.seat
+                .as_ref()
+                .is_some_and(|seat| configured.contains(seat))
+        })
+        .collect()
 }
 
 /// The `--detail`-only window summaries; every one stays at its default
