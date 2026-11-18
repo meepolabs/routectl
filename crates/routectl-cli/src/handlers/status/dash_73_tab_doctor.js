@@ -210,7 +210,7 @@
     var grid = document.createElement('div');
     grid.className = 'docpassgrid';
     passes.forEach(function (p) { grid.appendChild(doctorPass(p)); });
-    wrap.appendChild(buildExpander(
+    wrap.appendChild(buildExpander('doctor-passes',
       countText(passes.length, ' check passed', ' checks passed'), grid));
     return wrap;
   }
@@ -293,7 +293,7 @@
     var cols = [R('lane'), C('kind'), C('nicknames')].concat(columns.map(function (c) {
       return C(c);
     }));
-    var tbl = mkTable('Capability matrix', cols, false);
+    var tbl = mkTable('doctor-matrix', 'Capability matrix', cols);
     lanes.forEach(function (lane) {
       var cells = Array.isArray(lane.cells) ? lane.cells : [];
       trow(tbl, [
@@ -302,7 +302,7 @@
         (lane.nicknames || []).join(', ') || '-'
       ].concat(cells.map(function (cell) { return matrixCell(cell, nowMs); })));
     });
-    wrap.appendChild(buildExpander(
+    wrap.appendChild(buildExpander('doctor-matrix-lanes',
       countText(lanes.length, ' lane', ' lanes') + ' by ' +
         countText(columns.length, ' capability', ' capabilities'),
       tableScroll(tbl)));

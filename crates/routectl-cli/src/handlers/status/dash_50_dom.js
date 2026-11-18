@@ -12,11 +12,55 @@
   function R(label) { return { label: label, row: true }; }
   function W(label) { return { label: label, wrap: true }; }
 
+  // ---- stable element ids and delegated actions ------------------------
+
+  // Element ids are a contract, not decoration: a node that can hold focus,
+  // be opened or be scrolled must come out of every rebuild with the same id,
+  // so a later in-place update can match it. The scheme:
+  //
+  //   <view>-<name>                   a fixed control or table (`config-models`)
+  //   <table>-<idKey(row key)>        a table row
+  //   <row id>-toggle / -detail       that row's disclosure button / detail row
+  //   <table>-wrap                    the table's scroll container
+  //   <view>-<name>-<idKey(key)>      a control keyed by data (a provider card)
+  //
+  // Table ids are literal strings, unique across the script (page.rs checks
+  // it). idKey encodes a data key into 'k' + [A-Za-z0-9_]* and is injective,
+  // so two keys never share an id. An encoded key never contains '-', so the
+  // last '-' of a row id splits it back into (table id, encoded key), and its
+  // leading 'k' keeps it from ever equaling a fixed suffix such as `wrap`.
+  // Nothing else (no counter, no render order) may enter an id.
+  function idKey(raw) {
+    var s = String(raw);
+    var out = 'k';
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      out += /[A-Za-z0-9]/.test(ch) ? ch : '_' + s.charCodeAt(i).toString(16) + '_';
+    }
+    return out;
+  }
+
+  function rowDomId(tableId, rowKey) {
+    return tableId + '-' + idKey(rowKey);
+  }
+
+  // Mark `node` as the trigger of one ACTIONS entry (dash_90_chrome.js). No
+  // builder attaches a listener: the delegated listener on the pane root or
+  // the modal host dispatches by these attributes, so a rebuilt or reused
+  // node always acts on what it currently says.
+  function setAction(node, action, arg) {
+    node.setAttribute('data-action', action);
+    if (arg !== null && arg !== undefined) { node.setAttribute('data-arg', String(arg)); }
+  }
+
   // Build a table with a visually-hidden caption, `scope="col"` headers,
-  // and per-column alignment metadata. `expandable` prepends a leading
-  // control column whose cells carry a disclosure button.
-  function mkTable(caption, cols, expandable) {
+  // and per-column alignment metadata. `id` is the table's stable id (see the
+  // scheme above). `opts.expandable` prepends a leading control column whose
+  // cells carry a disclosure button.
+  function mkTable(id, caption, cols, opts) {
+    var expandable = !!(opts && opts.expandable);
     var t = document.createElement('table');
+    t.id = id;
     var cap = document.createElement('caption');
     cap.className = 'sr-only';
     cap.textContent = caption;
@@ -44,14 +88,15 @@
     t.appendChild(thead);
     var tb = document.createElement('tbody');
     t.appendChild(tb);
-    return { t: t, tb: tb, cols: cols, key: caption, expandable: !!expandable };
+    return { t: t, tb: tb, cols: cols, id: id, expandable: expandable };
   }
 
   // A table wrapped so it scrolls INSIDE its card: the page itself never
-  // scrolls sideways, down to 380px.
+  // scrolls sideways, down to 720 px.
   function tableScroll(tbl) {
     var wrap = document.createElement('div');
     wrap.className = 'tablewrap';
+    wrap.id = tbl.id + '-wrap';
     wrap.appendChild(tbl.t);
     return wrap;
   }
@@ -80,57 +125,67 @@
   // Append an expandable row: the primary cells plus a hidden detail row
   // (a definition grid of the secondary fields) toggled by a keyboard-
   // accessible disclosure button. The WHOLE primary row is clickable (the
-  // button stays the visible affordance); a single toggle closure drives
-  // both, with the button stopping propagation so a button click does not
-  // also fire the row handler and double-toggle. Expansion persists across
-  // poll rebuilds via the `expanded` map keyed by (table caption, rowKey).
-  // An optional `rowClass` de-emphasizes the primary row (zero-traffic).
+  // button stays the visible affordance): both carry the `row-toggle` action,
+  // and the delegated dispatch acts on the NEAREST marked ancestor of a
+  // click, so a button click toggles once, never twice. Expansion persists
+  // across poll rebuilds via the `expanded` map keyed by (table id, encoded
+  // row key). An optional `rowClass` de-emphasizes the primary row
+  // (zero-traffic).
   function xrow(tbl, rowKey, cells, detailPairs, rowClass) {
+    var rid = rowDomId(tbl.id, rowKey);
+    var open = getExpanded(tbl.id, idKey(rowKey));
     var tr = document.createElement('tr');
+    tr.id = rid;
     tr.className = 'exp-row' + (rowClass ? ' ' + rowClass : '');
+    setAction(tr, 'row-toggle', rid);
 
     var detailRow = document.createElement('tr');
     detailRow.className = 'detail-row';
-    var did = 'detail-' + (uid++);
-    detailRow.id = did;
+    detailRow.id = rid + '-detail';
     var dcell = document.createElement('td');
     dcell.colSpan = tbl.cols.length + 1;
     dcell.appendChild(buildDefList(detailPairs));
     detailRow.appendChild(dcell);
-    var open = getExpanded(tbl.key, rowKey);
     detailRow.hidden = !open;
 
     var extd = document.createElement('td');
     extd.className = 'exp-cell';
     var btn = document.createElement('button');
     btn.type = 'button';
+    btn.id = rid + '-toggle';
     btn.className = 'exp-btn';
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    btn.setAttribute('aria-controls', did);
+    btn.setAttribute('aria-controls', detailRow.id);
     btn.setAttribute('aria-label', 'Toggle row details');
-    btn.textContent = open ? 'v' : '>';
-
-    function toggle() {
-      var nowOpen = !getExpanded(tbl.key, rowKey);
-      setExpanded(tbl.key, rowKey, nowOpen);
-      btn.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
-      btn.textContent = nowOpen ? 'v' : '>';
-      detailRow.hidden = !nowOpen;
-    }
-
-    btn.addEventListener('click', function (e) {
-      // The row-level handler also toggles; stop here so a button click is
-      // not counted twice.
-      e.stopPropagation();
-      toggle();
-    });
-    tr.addEventListener('click', toggle);
+    setAction(btn, 'row-toggle', rid);
+    paintRowToggle(btn, open);
     extd.appendChild(btn);
     tr.appendChild(extd);
 
     tbl.cols.forEach(function (col, i) { tr.appendChild(cellNode(col, cells[i])); });
     tbl.tb.appendChild(tr);
     tbl.tb.appendChild(detailRow);
+  }
+
+  function paintRowToggle(btn, open) {
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.textContent = open ? 'v' : '>';
+  }
+
+  // The `row-toggle` action. `rid` is the row id; its last '-' separates the
+  // table id from the encoded row key (see idKey). The open state is read
+  // from `expanded` now, at click time, and the row's current nodes are
+  // looked up by id, so the toggle never acts on a node a rebuild replaced.
+  function onRowToggle(rid) {
+    var cut = rid.lastIndexOf('-');
+    if (cut <= 0) { return; }
+    var tableId = rid.slice(0, cut);
+    var key = rid.slice(cut + 1);
+    var nowOpen = !getExpanded(tableId, key);
+    setExpanded(tableId, key, nowOpen);
+    var btn = el(rid + '-toggle');
+    var detailRow = el(rid + '-detail');
+    if (btn) { paintRowToggle(btn, nowOpen); }
+    if (detailRow) { detailRow.hidden = !nowOpen; }
   }
 
   // A definition grid of label:value pairs. Values may be humanized
@@ -194,8 +249,9 @@
   // A native default-collapsed disclosure: a summary line plus arbitrary
   // content. No JS state and no mutation affordance -- used for list-shaped
   // detail that must stay reachable (data floor) without dominating a tab.
-  function buildExpander(summaryText, contentNode) {
+  function buildExpander(id, summaryText, contentNode) {
     var det = document.createElement('details');
+    det.id = id;
     var sum = document.createElement('summary');
     sum.textContent = summaryText;
     det.appendChild(sum);

@@ -104,21 +104,22 @@
   // The reset affordance of last resort: shown only when the scoped query is
   // unrenderable, so the cards that normally carry the reset are not on screen.
   function scopeRecovery() {
-    return scopeStrip('this provider scope has no renderable data');
+    return scopeStrip('overview', 'this provider scope has no renderable data');
   }
 
   // A scoped-to-one-provider header carrying the affordance that lifts the
   // scope. Overview normally resets through its aggregate provider card, so this
   // serves Usage (which has no provider cards) and Overview's recovery case.
-  function scopeStrip(hint) {
+  function scopeStrip(view, hint) {
     var wrap = document.createElement('div');
     wrap.className = 'ovsection';
     var head = sectionHead('Scoped to ' + selectedProvider, hint);
     var reset = document.createElement('button');
     reset.type = 'button';
+    reset.id = view + '-scope-reset';
     reset.className = 'scope-reset';
     reset.textContent = 'all providers';
-    reset.addEventListener('click', function () { onProviderScope(null); });
+    setAction(reset, 'provider-scope', null);
     head.appendChild(reset);
     wrap.appendChild(head);
     return wrap;
@@ -197,6 +198,7 @@
 
     var btn = document.createElement('button');
     btn.type = 'button';
+    btn.id = label === null ? 'overview-provider-all' : 'overview-provider-' + idKey(label);
     btn.className = 'provcard-scope';
     btn.setAttribute('aria-pressed', scoped ? 'true' : 'false');
 
@@ -216,7 +218,7 @@
     btn.appendChild(facts);
 
     btn.appendChild(shareBar(share));
-    btn.addEventListener('click', function () { onProviderScope(label); });
+    setAction(btn, 'provider-scope', label);
     cardEl.appendChild(btn);
 
     if (label !== null) {
@@ -236,6 +238,7 @@
     cardEl.className = 'provcard provcard--more';
     var btn = document.createElement('button');
     btn.type = 'button';
+    btn.id = 'overview-provider-more';
     btn.className = 'provcard-scope';
     btn.setAttribute('aria-expanded', providerOverflowOpen ? 'true' : 'false');
 
@@ -251,7 +254,7 @@
     btn.appendChild(facts);
 
     btn.appendChild(shareBar(share));
-    btn.addEventListener('click', onProviderOverflow);
+    setAction(btn, 'provider-overflow', null);
     cardEl.appendChild(btn);
     return cardEl;
   }
@@ -322,6 +325,7 @@
     if (!rows || !rows.length) { return null; }
     var btn = document.createElement('button');
     btn.type = 'button';
+    btn.id = 'overview-seats-' + idKey(provider);
     btn.className = 'provseats';
     btn.title = 'show every seat';
     btn.appendChild(seatDots(rows));
@@ -329,7 +333,7 @@
     note.className = 'provseats-count';
     note.textContent = seatSummary(rows);
     btn.appendChild(note);
-    btn.addEventListener('click', function () { openSeatModal(provider); });
+    setAction(btn, 'seat-open', provider);
     return btn;
   }
 
@@ -402,17 +406,17 @@
       host.replaceChildren();
       return;
     }
+    // The backdrop's action closes the modal only for a click on the backdrop
+    // ITSELF (see ACTIONS), so a click inside the dialog never dismisses it.
     var backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
-    backdrop.addEventListener('click', closeSeatModal);
+    setAction(backdrop, 'seat-backdrop', null);
     var dialog = document.createElement('div');
+    dialog.id = 'overview-seats-dialog-' + idKey(seatModalProvider);
     dialog.className = 'modal';
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
     dialog.setAttribute('aria-label', seatModalProvider + ' seats');
-    // A click on the dialog must not reach the backdrop's close handler, or
-    // every click inside the modal would dismiss it.
-    dialog.addEventListener('click', function (e) { e.stopPropagation(); });
     dialog.appendChild(seatModalHead(seatModalProvider, rows));
     var body = document.createElement('div');
     body.className = 'modal-body qlist qlist--card';
@@ -435,10 +439,11 @@
     head.appendChild(sub);
     var close = document.createElement('button');
     close.type = 'button';
+    close.id = 'overview-seats-close-' + idKey(provider);
     close.className = 'modal-close';
     close.setAttribute('aria-label', 'Close');
     close.textContent = 'esc x';
-    close.addEventListener('click', closeSeatModal);
+    setAction(close, 'seat-close', null);
     head.appendChild(close);
     return head;
   }

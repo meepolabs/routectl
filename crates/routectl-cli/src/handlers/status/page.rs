@@ -1849,4 +1849,9 @@ mod tests {
 
         assert_eq!(declared_int(src, "TIMEOUT_MS"), 3500);
     }
+
+    mod view_contract {
+        use super::*;
+        include!("page_view_contract_tests.rs");
+    }
 }

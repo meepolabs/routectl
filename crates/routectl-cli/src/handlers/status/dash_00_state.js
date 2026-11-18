@@ -141,11 +141,10 @@
   var nextDueAtMs = 0;             // wall-clock instant the next round is due
   var ageTimer = null;             // 1s interval advancing the as_of age label
 
-  // Expansion state keyed by table caption -> { rowKey: true }. Survives the
+  // Expansion state keyed by table id -> { encoded row key: true }. Survives the
   // per-poll DOM rebuild so an operator's expanded row stays open across
   // refreshes.
   var expanded = {};
-  var uid = 0;
 
   var el = function (id) { return document.getElementById(id); };
 

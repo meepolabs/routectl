@@ -21,7 +21,7 @@
   function buildUsage(rec) {
     var stack = tabStack();
     if (selectedProvider) {
-      stack.appendChild(scopeStrip('every figure below is this provider only'));
+      stack.appendChild(scopeStrip('usage', 'every figure below is this provider only'));
     }
     stack.appendChild(groupByStrip());
     stack.appendChild(safeSection(rec, buildUsageLive));
@@ -98,11 +98,12 @@
     var on = selectedGroupBy === dim;
     var btn = document.createElement('button');
     btn.type = 'button';
+    btn.id = 'usage-groupby-' + idKey(dim);
     btn.className = 'gbbtn' + (on ? ' gbbtn--on' : '');
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.textContent = label;
     btn.disabled = terminal;
-    btn.addEventListener('click', function () { onGroupBy(dim); });
+    setAction(btn, 'group-by', dim);
     return btn;
   }
 

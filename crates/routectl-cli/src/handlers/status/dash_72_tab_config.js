@@ -111,8 +111,8 @@
   // NO per-alias timeout or retry-policy column: neither exists in the config
   // model, and a column of invented values would read as configuration.
   function aliasSection(aliases) {
-    var tbl = mkTable('Configured aliases',
-      [R('alias'), W('resolved chain'), N('steps')], false);
+    var tbl = mkTable('config-aliases', 'Configured aliases',
+      [R('alias'), W('resolved chain'), N('steps')]);
     aliases.forEach(function (entry) {
       var steps = Array.isArray(entry.chain) ? entry.chain : [];
       trow(tbl, [entry.alias, steps.length ? steps.join(' then ') : null, steps.length]);
@@ -126,8 +126,8 @@
   // carrying two unqualified "providers" reads as one number contradicting the
   // other.
   function activationSection(activation) {
-    var tbl = mkTable('Provider activation',
-      [R('provider'), C('kind'), C('status'), C('reason'), C('used by aliases')], false);
+    var tbl = mkTable('config-activation', 'Provider activation',
+      [R('provider'), C('kind'), C('status'), C('reason'), C('used by aliases')]);
     activation.forEach(function (p) {
       trow(tbl, [
         p.provider_id,
@@ -163,8 +163,8 @@
   // prices, each with its source) sit in the detail row: they are reference figures an operator opens, not a reading to
   // scan.
   function modelSection(models) {
-    var tbl = mkTable('Configured models',
-      [R('model'), C('provider'), C('upstream')], true);
+    var tbl = mkTable('config-models', 'Configured models',
+      [R('model'), C('provider'), C('upstream')], { expandable: true });
     models.forEach(function (m) { modelRow(tbl, m); });
     return card('Models', 'what each name dispatches to, and where its facts come from',
       tableScroll(tbl));
@@ -228,10 +228,9 @@
   // and the credential ref's SCHEME only, so there is nothing here to widen
   // back into a fuller URL or a ref body.
   function providerSection(providers) {
-    var tbl = mkTable('Configured routing providers',
+    var tbl = mkTable('config-providers', 'Configured routing providers',
       [R('provider'), C('format'), C('kind'), C('endpoint'), C('auth'), C('credential ref'),
-        N('rate limit')],
-      false);
+        N('rate limit')]);
     providers.forEach(function (p) {
       trow(tbl, [
         p.provider_id,
@@ -317,8 +316,8 @@
     wrap.className = 'ovsection';
     wrap.appendChild(sectionHead('Capability overrides',
       countText(caps.length, ' cell', ' cells') + ' resolved from config'));
-    var tbl = mkTable('Capability overrides',
-      [R('target'), C('capability'), C('verdict'), C('source')], false);
+    var tbl = mkTable('config-capabilities', 'Capability overrides',
+      [R('target'), C('capability'), C('verdict'), C('source')]);
     caps.forEach(function (c) {
       trow(tbl, [
         c.target_spec,
@@ -327,7 +326,8 @@
         tokLabeled('prov', 'prov', c.provenance)
       ]);
     });
-    wrap.appendChild(buildExpander('Show the resolved cells', tableScroll(tbl)));
+    wrap.appendChild(buildExpander('config-capabilities-cells', 'Show the resolved cells',
+      tableScroll(tbl)));
     return wrap;
   }
 
@@ -338,8 +338,8 @@
   // server derives from the router's transient-health set: this page must never
   // restate that set, and it invents no per-class knob beside it.
   function classSection(classes) {
-    var tbl = mkTable('Retry class policy',
-      [R('class'), N('retry cap'), C('fallback'), C('breaker debit'), C('source')], false);
+    var tbl = mkTable('config-classes', 'Retry class policy',
+      [R('class'), N('retry cap'), C('fallback'), C('breaker debit'), C('source')]);
     classes.forEach(function (c) {
       trow(tbl, [
         labelCell('class', c.class),

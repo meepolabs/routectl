@@ -191,6 +191,53 @@
     updateWindowSel();
   }
 
+  // ---- chrome: delegated actions ---------------------------------------
+
+  // Every control a view builder draws names its handler here through
+  // `data-action` (and its argument through `data-arg`; see setAction in
+  // dash_50_dom.js) instead of carrying a listener of its own. Each handler
+  // receives the argument string (null when absent), the marked node and the
+  // event, and reads page state at dispatch time, never a value captured
+  // when the node was built. page.rs checks that every action a builder
+  // names has an entry here and that every entry is named by a builder.
+  var ACTIONS = {
+    'row-toggle': function (arg) { if (arg) { onRowToggle(arg); } },
+    'provider-scope': function (arg) { onProviderScope(arg); },
+    'provider-overflow': function () { onProviderOverflow(); },
+    'group-by': function (arg) { if (arg) { onGroupBy(arg); } },
+    'seat-open': function (arg) { if (arg) { openSeatModal(arg); } },
+    'seat-close': function () { closeSeatModal(); },
+    // Only a click on the backdrop itself closes; a click that bubbled up
+    // from inside the dialog does not.
+    'seat-backdrop': function (arg, node, e) {
+      if (e.target === node) { closeSeatModal(); }
+    }
+  };
+
+  // Dispatch a click to the action of the NEAREST marked ancestor of its
+  // target inside `root`. Nearest-only is what lets a disclosure button sit
+  // inside a clickable row without the click toggling twice.
+  function dispatchAction(root, e) {
+    var target = e.target;
+    if (!target || typeof target.closest !== 'function') { return; }
+    var node = target.closest('[data-action]');
+    if (!node || !root.contains(node)) { return; }
+    var name = node.getAttribute('data-action');
+    if (!Object.prototype.hasOwnProperty.call(ACTIONS, name)) { return; }
+    ACTIONS[name](node.getAttribute('data-arg'), node, e);
+  }
+
+  // One click listener per pane root and one on the modal host, installed
+  // once: the nodes beneath them are rebuilt every render, the roots are not.
+  function initActions() {
+    var roots = TABS.map(function (n) { return el('pane-' + n); });
+    roots.push(el('modal-host'));
+    roots.forEach(function (root) {
+      if (!root) { return; }
+      root.addEventListener('click', function (e) { dispatchAction(root, e); });
+    });
+  }
+
   // ---- chrome: tabs ----------------------------------------------------
 
   // Selecting a tab switches the visible pane, follows the window picker's
@@ -245,6 +292,7 @@
     // render lands on the requested tab/window.
     applyHash();
     initWindowSel();
+    initActions();
     initTabs();
     initRefresh();
     renderVerdict();
