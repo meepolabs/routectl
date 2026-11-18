@@ -107,6 +107,10 @@ struct RejectionCounters {
     expired_reset: AtomicU64,
     implausible_reset: AtomicU64,
     overflow: AtomicU64,
+    contradictory: AtomicU64,
+    unknown_length: AtomicU64,
+    invalid_started: AtomicU64,
+    malformed_body: AtomicU64,
     last_warn_epoch_secs: AtomicU64,
 }
 
@@ -118,6 +122,10 @@ impl RejectionCounters {
             RejectionReason::ExpiredReset => &self.expired_reset,
             RejectionReason::ImplausibleReset => &self.implausible_reset,
             RejectionReason::Overflow => &self.overflow,
+            RejectionReason::Contradictory => &self.contradictory,
+            RejectionReason::UnknownLength => &self.unknown_length,
+            RejectionReason::InvalidStarted => &self.invalid_started,
+            RejectionReason::MalformedBody => &self.malformed_body,
         };
         counter.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -129,6 +137,10 @@ impl RejectionCounters {
             expired_reset: self.expired_reset.load(Ordering::Relaxed),
             implausible_reset: self.implausible_reset.load(Ordering::Relaxed),
             overflow: self.overflow.load(Ordering::Relaxed),
+            contradictory: self.contradictory.load(Ordering::Relaxed),
+            unknown_length: self.unknown_length.load(Ordering::Relaxed),
+            invalid_started: self.invalid_started.load(Ordering::Relaxed),
+            malformed_body: self.malformed_body.load(Ordering::Relaxed),
         }
     }
 
@@ -158,6 +170,14 @@ pub struct RejectionTotals {
     pub implausible_reset: u64,
     /// Windows refused because a bound could not be computed.
     pub overflow: u64,
+    /// Readings refused for contradicting the stored reading of their window.
+    pub contradictory: u64,
+    /// Windows refused for a length that cannot be classified.
+    pub unknown_length: u64,
+    /// Windows refused for a started state contradicting usage or reset.
+    pub invalid_started: u64,
+    /// Observations refused for a body or window set of the wrong shape.
+    pub malformed_body: u64,
 }
 
 /// Seconds since the Unix epoch, `0` on a pre-epoch clock (which then
@@ -472,6 +492,10 @@ impl QuotaStore {
             expired_reset_total = totals.expired_reset,
             implausible_reset_total = totals.implausible_reset,
             overflow_total = totals.overflow,
+            contradictory_total = totals.contradictory,
+            unknown_length_total = totals.unknown_length,
+            invalid_started_total = totals.invalid_started,
+            malformed_body_total = totals.malformed_body,
             "upstream subscription-quota window refused; seat reads as \
              no-evidence for that window",
         );

@@ -50,6 +50,8 @@ pub mod feed;
 pub mod freshness;
 pub mod key;
 pub mod placement;
+#[allow(dead_code)]
+pub mod reading;
 pub mod reduce;
 pub mod store;
 pub mod window;

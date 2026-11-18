@@ -74,11 +74,26 @@ pub enum RejectionReason {
     /// The reported reset could not be represented, or a bound over it could
     /// not be computed.
     Overflow,
+    /// A reading disagreed with the stored one for the same window: the same
+    /// reset with a used fraction lower than rounding can explain.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Contradictory,
+    /// The reported window length was zero or too long to be a quota window.
+    #[cfg_attr(not(test), allow(dead_code))]
+    UnknownLength,
+    /// The window's started state contradicted its usage or its reset.
+    #[cfg_attr(not(test), allow(dead_code))]
+    InvalidStarted,
+    /// A usage body or window set did not have the one shape it must: missing
+    /// or mistyped members, a non-canonical scope, a duplicate window, or too
+    /// many windows.
+    #[cfg_attr(not(test), allow(dead_code))]
+    MalformedBody,
 }
 
 impl RejectionReason {
     /// The reason a refused reset maps to.
-    const fn from_reset(rejection: &ResetRejection) -> Self {
+    pub(super) const fn from_reset(rejection: &ResetRejection) -> Self {
         match rejection {
             ResetRejection::Expired => Self::ExpiredReset,
             ResetRejection::Implausible => Self::ImplausibleReset,

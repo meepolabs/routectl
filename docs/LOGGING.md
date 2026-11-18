@@ -2682,7 +2682,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::factory::installation_id` | `installation-id file unreadable ...`, `installation-id could not be written ...` | Egress omits the installation header: fix permissions or disk space in the config directory. |
 | WARN | `routectl_router::factory::warnings` | `context_management = true on this anthropic-api provider but history_reasoning is not 'preserve'` | Set `history_reasoning = "preserve"` on that model. |
 | WARN | `routectl_router::probe_scheduler::schedule` | `probe_tombstone_capacity_saturated` (once per saturation episode) | Probe activations are refused until the next reload republishes the scheduler; the counter carries the volume. |
-| WARN | `routectl_router::quota::store` | `quota_observation_rejected` (throttled, 1 per 300s) | Upstream quota headers were untrusted. A steady rise in the rejection totals suggests a header-format change: file a bug. |
+| WARN | `routectl_router::quota::store` | `quota_observation_rejected` (throttled, 1 per 300s; `reason` plus a running total per reason: `invalid_utilization`, `expired_reset`, `implausible_reset`, `overflow`, `contradictory`, `unknown_length`, `invalid_started`, `malformed_body`) | An upstream quota reading was untrusted and that window reads as no evidence. A steady rise in one total suggests a format change in the quota headers or the usage body (`malformed_body`, `unknown_length`, `invalid_started`) or disagreeing sources (`contradictory`): file a bug. |
 
 ### routectl-usage, routectl-auth, routectl-core
 

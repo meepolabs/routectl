@@ -490,12 +490,69 @@ fn rejections_are_counted_by_reason() {
     store.record_rejection(&seat(None), RejectionReason::ImplausibleReset);
     store.record_rejection(&seat(None), RejectionReason::ImplausibleReset);
     store.record_rejection(&seat(None), RejectionReason::Overflow);
+    store.record_rejection(&seat(None), RejectionReason::Contradictory);
+    for _ in 0..3 {
+        store.record_rejection(&seat(None), RejectionReason::UnknownLength);
+    }
+    for _ in 0..4 {
+        store.record_rejection(&seat(None), RejectionReason::InvalidStarted);
+    }
+    for _ in 0..5 {
+        store.record_rejection(&seat(None), RejectionReason::MalformedBody);
+    }
 
     let totals = store.rejection_totals();
-    assert_eq!(totals.invalid_utilization, 1);
-    assert_eq!(totals.expired_reset, 1);
-    assert_eq!(totals.implausible_reset, 2);
-    assert_eq!(totals.overflow, 1);
+    assert_eq!(
+        totals,
+        RejectionTotals {
+            invalid_utilization: 1,
+            expired_reset: 1,
+            implausible_reset: 2,
+            overflow: 1,
+            contradictory: 1,
+            unknown_length: 3,
+            invalid_started: 4,
+            malformed_body: 5,
+        }
+    );
+}
+
+/// The throttled WARN carries every reason's running total, so a reason the
+/// store counts can never be missing from the one line an operator sees.
+#[test]
+fn the_rejection_warn_reports_every_reason_total() {
+    let store = store();
+    let reasons = [
+        (
+            RejectionReason::InvalidUtilization,
+            "invalid_utilization_total",
+        ),
+        (RejectionReason::ExpiredReset, "expired_reset_total"),
+        (RejectionReason::ImplausibleReset, "implausible_reset_total"),
+        (RejectionReason::Overflow, "overflow_total"),
+        (RejectionReason::Contradictory, "contradictory_total"),
+        (RejectionReason::UnknownLength, "unknown_length_total"),
+        (RejectionReason::InvalidStarted, "invalid_started_total"),
+        (RejectionReason::MalformedBody, "malformed_body_total"),
+    ];
+    // Counted below the WARN, so the throttle is still unclaimed when the
+    // captured rejection arrives.
+    for (reason, _) in &reasons[1..] {
+        store.rejections.incr(*reason);
+    }
+
+    let events = routectl_testkit::capture_events(|| {
+        store.record_rejection(&seat(None), reasons[0].0);
+    });
+
+    let warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.field("event") == Some("quota_observation_rejected"))
+        .collect();
+    assert_eq!(warns.len(), 1, "the first rejection claims the WARN");
+    for (_, field) in reasons {
+        assert_eq!(warns[0].field(field), Some("1"), "{field} on the WARN");
+    }
 }
 
 /// The counters are EXACT while the WARN is throttled -- a seat producing

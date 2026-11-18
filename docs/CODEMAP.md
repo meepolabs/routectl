@@ -2330,6 +2330,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   row runs dormant. Self-tests hold the whole-table invariants (no duplicate
   role or source window per provider, thresholds inside the utilization scale,
   no zero duration, `RESET_TOLERANCE` narrower than every window it guards)
+- `src/quota/reading.rs` -- the account meter's reading model. `WindowKey`
+  (reported length + optional canonical `Scope`, `[a-z0-9_]`, bounded) classed
+  `LengthClass::Short` up to 24 h and `Long` up to 31 d by length alone;
+  `WindowReading` validates used (saturating), `Started` against used and reset,
+  and the reset through `accept_reset` against the window's own length;
+  `WindowSet` refuses empty, duplicate-key and over-count sets;
+  `AccountObservation` is source-tagged and stamped, `Partial | Complete |
+  NoWindows`. Every refusal is a `RejectionReason`
 - `src/quota/reduce.rs` -- the two provider reducers onto `QuotaSnapshot`
   (`observed` + per-role windows + billing). Reads the curated row for each
   role, so a role is never inferred from a window's name, and routes every reset
