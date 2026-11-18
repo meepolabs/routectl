@@ -61,6 +61,14 @@
   // this interval is not fetched again the instant its round lands.
   var queryLastAttemptKey = null;
   var queryLastAttemptAtMs = 0;
+  // Set when the page aborts its own in-flight QUERY, cleared once a later
+  // QUERY gets an answer it renders. The server holds its one read permit until
+  // the aborted read notices the cancel, so the QUERY that superseded it can
+  // meet `db_busy` from the page's own abandoned read: that answer is retried
+  // on the short schedule below, never rendered as an outage.
+  var queryOwnAbortPending = false;
+  var queryBusyRetryIndex = -1;    // -1 = no short busy retry armed
+  var SUPERSEDED_BUSY_RETRY_MS = [150, 300, 600];
 
   // The transport-level unavailable codes a 200 QUERY can carry. These are
   // the SAME failure families the HTTP-level arms cover (a busy or
@@ -129,7 +137,7 @@
   // rendered). Never reuses a consumed Request; the body is stringified per
   // logical key.
   function queryStatus(body) {
-    if (queryCtrl) { queryCtrl.abort(); }
+    if (queryCtrl) { queryCtrl.abort(); queryOwnAbortPending = true; }
     queryGeneration += 1;
     var generation = queryGeneration;
     var ctrl = new AbortController();
@@ -167,6 +175,9 @@
     queryLastAttemptAtMs = Date.now();
     return queryStatus(body).then(function (out) {
       if (!out || out.stale) { return; }
+      if (retrySupersededBusy(out)) { return; }
+      queryOwnAbortPending = false;
+      queryBusyRetryIndex = -1;
       scheduleNextQuery(applyQueryOutcome(source, out, key));
     }).catch(function () {
       // A render throw must not wedge the QUERY loop; treat it as a failed
@@ -175,8 +186,25 @@
     });
   }
 
+  // A short busy retry counts as in flight: it is the same selection's round,
+  // still waiting for the permit its aborted predecessor holds.
   function queryInFlight() {
-    return queryCtrl !== null;
+    return queryCtrl !== null || queryBusyRetryIndex >= 0;
+  }
+
+  // A `db_busy` answer to a QUERY sent after the page aborted its own previous
+  // read. The panel stays in its loading state and the same round is retried
+  // on SUPERSEDED_BUSY_RETRY_MS, outside the backoff ladder. Returns false,
+  // leaving the answer to the normal path, for any other outcome, for a busy
+  // gate the page did not cause, and once the short schedule is spent.
+  function retrySupersededBusy(out) {
+    if (!queryOwnAbortPending || out.kind !== 'ok' || !out.json) { return false; }
+    if (out.json.unavailable !== 'db_busy') { return false; }
+    if (queryBusyRetryIndex + 1 >= SUPERSEDED_BUSY_RETRY_MS.length) { return false; }
+    queryBusyRetryIndex += 1;
+    clearTimeout(queryTimer);
+    queryTimer = setTimeout(queryRound, SUPERSEDED_BUSY_RETRY_MS[queryBusyRetryIndex]);
+    return true;
   }
 
   // Whether the 5s aggregate round should nudge the QUERY at all. The nudge is
@@ -250,7 +278,13 @@
     var body = queryBodyFor(activeTab);
     if (!body) {
       clearTimeout(queryTimer);
-      if (queryCtrl) { queryCtrl.abort(); queryCtrl = null; queryGeneration += 1; }
+      if (queryCtrl) {
+        queryCtrl.abort();
+        queryCtrl = null;
+        queryGeneration += 1;
+        queryOwnAbortPending = true;
+      }
+      queryBusyRetryIndex = -1;
       return;
     }
     // Each source's refusal marker is checked against ITS OWN shape, not the
@@ -273,6 +307,7 @@
     });
     clearTimeout(queryTimer);
     queryBackoffIndex = -1;
+    queryBusyRetryIndex = -1;
     queryRound();
   }
 

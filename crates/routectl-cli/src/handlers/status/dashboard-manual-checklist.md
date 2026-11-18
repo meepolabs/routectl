@@ -73,6 +73,13 @@ banner, no retry signal -- silently mislabeled data.
   Today under a Week label, or an unscoped total under a provider scope, is
   the bug.
 - Repeat on Usage with its group-by picker.
+- Supersede a SLOW read: on a ledger large enough that the All window takes
+  most of a second, select All, then pick another window (or, on Usage, another
+  group-by) while that read is still running. The server answers the new QUERY
+  `db_busy` until the aborted read lets go of its permit. The panel must stay
+  in Loading and fill with the new selection within about a second: no red
+  "unavailable: db_busy" card, no "n/a" tab badge, no "query unavailable" in
+  the verdict, and no 10 s wait for a backoff retry.
 
 ## 3. Hidden-tab and failure recovery
 
@@ -130,8 +137,9 @@ banner, no retry signal -- silently mislabeled data.
 - Expanded Config model rows stay readable at 1440, 1024, 390 and 390 at 200%
   text: no label runs into another pair's value, nothing is cut off at the
   row edge, and a pair too wide for its column drops the value under its
-  label. The Overview EST. COST note wraps instead of truncating, and
-  hovering it shows the full sentence.
+  label. The Overview EST. COST, TIME TO FIRST TOKEN and CACHE HIT notes
+  wrap instead of truncating (check 720 and 1024 px, and 1440 at 200% text),
+  and hovering each shows the full sentence.
 
 ## 5. Doctor tab capability surface
 

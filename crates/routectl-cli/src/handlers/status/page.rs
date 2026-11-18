@@ -1713,6 +1713,84 @@ mod tests {
         }
     }
 
+    /// A `db_busy` answer to a QUERY that superseded the page's own aborted
+    /// read is the server still releasing the permit that read held, not an
+    /// outage: the round must take the short retry schedule and never reach
+    /// the outcome renderer or the backoff ladder. Read from the wiring: the
+    /// round must hand its answer to `retrySupersededBusy` and return before
+    /// `applyQueryOutcome`, and that function must re-arm `queryRound` from
+    /// its own short schedule, gated on the page's own abort and the server's
+    /// own busy code. That the panel stays in Loading is on the manual
+    /// checklist.
+    #[test]
+    fn a_busy_answer_after_the_pages_own_abort_retries_briefly_outside_the_backoff_ladder() {
+        use crate::handlers::status::types::vocabulary::codes;
+
+        let compact_code =
+            |body: String| -> String { body.chars().filter(|c| !c.is_whitespace()).collect() };
+        let round = compact_code(function_body("queryRound"));
+        let diverted = round
+            .find("if(retrySupersededBusy(out)){return;}")
+            .expect("queryRound must return early when retrySupersededBusy takes the answer");
+        let rendered = round
+            .find("applyQueryOutcome(")
+            .expect("queryRound renders through applyQueryOutcome");
+        assert!(
+            diverted < rendered,
+            "queryRound must divert a superseded busy answer BEFORE applyQueryOutcome, or it \
+             renders the red unavailable panel and enters the backoff ladder"
+        );
+
+        let retry = compact_code(function_body("retrySupersededBusy"));
+        assert!(
+            retry.contains("setTimeout(queryRound,SUPERSEDED_BUSY_RETRY_MS["),
+            "retrySupersededBusy must re-arm queryRound on SUPERSEDED_BUSY_RETRY_MS: {retry}"
+        );
+        for backoff in ["scheduleNextQuery", "BACKOFF_STEPS_MS", "queryBackoffIndex"] {
+            assert!(
+                !retry.contains(backoff),
+                "retrySupersededBusy names `{backoff}`; a superseded busy answer must not \
+                 enter the backoff ladder"
+            );
+        }
+        assert!(
+            retry.contains("queryOwnAbortPending")
+                && retry.contains(&format!("'{}'", codes::DB_BUSY)),
+            "retrySupersededBusy must be gated on the page's own abort AND the server's \
+             `{}` code; any other failure keeps the error and backoff path",
+            codes::DB_BUSY
+        );
+        let status = compact_code(function_body("queryStatus"));
+        assert!(
+            status.contains("queryCtrl.abort();queryOwnAbortPending=true;"),
+            "queryStatus must record that it aborted its own in-flight read"
+        );
+
+        let schedule: Vec<u64> = literal_body("SUPERSEDED_BUSY_RETRY_MS", '[', ']')
+            .split(',')
+            .map(str::trim)
+            .filter(|step| !step.is_empty())
+            .map(|step| {
+                step.parse()
+                    .expect("SUPERSEDED_BUSY_RETRY_MS entry is a u64 ms delay")
+            })
+            .collect();
+        let first_backoff = literal_body("BACKOFF_STEPS_MS", '[', ']')
+            .split(',')
+            .next()
+            .and_then(|step| step.trim().parse::<u64>().ok())
+            .expect("BACKOFF_STEPS_MS has a first step");
+        assert!(
+            (1..=4).contains(&schedule.len()),
+            "SUPERSEDED_BUSY_RETRY_MS must be a short bounded schedule: {schedule:?}"
+        );
+        assert!(
+            schedule.iter().sum::<u64>() < first_backoff,
+            "the whole short busy schedule {schedule:?} must finish before the first \
+             backoff step ({first_backoff}ms), or it is no faster than backing off"
+        );
+    }
+
     #[test]
     fn a_query_round_call_condition_is_read_from_its_enclosing_if() {
         let cases = [

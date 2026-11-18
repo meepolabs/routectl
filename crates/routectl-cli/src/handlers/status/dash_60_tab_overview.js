@@ -507,9 +507,9 @@
     var observed = num0(t.ttft_avg_ms) > 0;
     return kpiTile('Time to first token (avg)',
       figure(avg.v, avg.u, null),
-      subNote(observed
+      wrappedNote(observed
         ? 'max ' + msText(t.ttft_max_ms) + ' - avg over streamed successes'
-        : 'no streamed response in this window', false),
+        : 'no streamed response in this window'),
       sparkArea(bucketSamples(series, function (m) { return m.ttft_avg_ms; }), gap));
   }
 
@@ -609,22 +609,25 @@
     var hit = num0(t.cache_hit_pct);
     return kpiTile('Cache hit',
       figure(hit > 0 ? hit.toFixed(1) : '0', '%', null),
-      subNote(hit > 0
+      wrappedNote(hit > 0
         ? 'weighted by prompt tokens'
-        : 'nothing served warm yet', false),
+        : 'nothing served warm yet'),
       sparkArea(bucketSamples(series, function (m) { return m.cache_hit_pct; }), gap));
   }
 
-  // The cost note says why a figure is partial or absent, so it wraps rather
-  // than truncating, and carries its full text as a title as well.
-  function costTile(t, series, gap) {
-    var text = costNote(t);
+  // A note that qualifies what its figure means: it wraps rather than
+  // truncating, and carries its full text as a title as well.
+  function wrappedNote(text) {
     var note = subNote(text, false);
     note.classList.add('kpi-sub-wrap');
     note.title = text;
+    return note;
+  }
+
+  function costTile(t, series, gap) {
     return kpiTile('Est. cost',
       costFigure(t),
-      note,
+      wrappedNote(costNote(t)),
       sparkArea(bucketSamples(series, function (m) { return m.cost_usd; }), gap));
   }
 
