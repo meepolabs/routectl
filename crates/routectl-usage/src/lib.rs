@@ -55,9 +55,9 @@ pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
 pub use query::{
     AggRow, BucketSpec, CacheDecisionSummary, CacheWriteLifetimes, CalibrationSampleRow,
-    CapabilityEventRow, CostStatus, DeadlineGuard, GroupDim, GroupKey, KCalibration,
+    CancelFlag, CapabilityEventRow, CostStatus, DeadlineGuard, GroupDim, GroupKey, KCalibration,
     NearLosslessAttributionSummary, QueryError, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
-    QuerySpec, QueryTotals, QuotaSnapshot, ReductionSummary, ReuseSampleRow, RowCost,
+    QuerySpec, QueryTotals, QuotaSnapshot, ReadLimit, ReductionSummary, ReuseSampleRow, RowCost,
     SUPPRESSED_SESSION_CAP, SeriesBucket, ShadowMisfireSummary, StreamExtraRow,
     SuppressedSessionRow, SuppressedSessions, TombstoneRow, WouldTrimSummary, aggregate,
     aggregate_with_cache_lifetimes, cache_decision_summary, earliest_ts_start, errors_by_class,

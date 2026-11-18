@@ -6,6 +6,7 @@ use rusqlite::{Connection, Row, Transaction};
 
 use crate::db::UsageDb;
 
+use super::deadline::CancelFlag;
 use super::{AggRow, GroupKey, QueryError};
 
 /// The most recent quota-bearing snapshot for one seat. Mirrors the `quota_*`
@@ -513,9 +514,11 @@ pub(super) fn read_error_classes(
     tx: &Transaction<'_>,
     window: &SideReadWindow<'_>,
     bucket_width_ms: Option<i64>,
+    cancel: &CancelFlag,
 ) -> Result<ClassesByRow, QueryError> {
     let mut out = ClassesByRow::new();
-    let mut fold = |row: &Row<'_>| -> rusqlite::Result<()> {
+    let mut fold = |row: &Row<'_>| -> Result<(), QueryError> {
+        cancel.check()?;
         let key = read_group_key(row)?;
         let bucket: i64 = row.get(GROUP_KEY_COLUMNS)?;
         let class: String = row.get(GROUP_KEY_COLUMNS + 1)?;

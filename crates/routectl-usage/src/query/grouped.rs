@@ -16,7 +16,6 @@
 //! [`RowCost`] verdict, which keeps `routectl-usage` a leaf.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +26,7 @@ use super::aggregate::{
     map_fine_row_bucketed, read_error_classes,
 };
 use super::cache_lifetimes::{attach, read_lifetimes};
-use super::deadline::DeadlineGuard;
+use super::deadline::{CancelFlag, DeadlineGuard, ReadLimit};
 use super::{AggRow, GroupKey, QueryError};
 
 /// The most buckets a series may carry. The caller resolves the bucket width so
@@ -330,11 +329,15 @@ pub struct QueryResult {
 /// Run one windowed, filtered, priced, grouped aggregate.
 ///
 /// The whole read happens inside a single deferred transaction, so every figure
-/// comes from one snapshot. A progress handler checks `deadline` every few
-/// thousand VM instructions and interrupts the statement once it has passed,
-/// surfacing as [`QueryError::Interrupted`]; a [`DeadlineGuard`] removes the
-/// handler on every exit path -- return, error, and unwind alike -- so the
-/// connection is left as it was found.
+/// comes from one snapshot. `limit` is a [`ReadLimit`] or a bare deadline
+/// [`Instant`](std::time::Instant). A progress handler checks it every few
+/// thousand VM instructions and interrupts the statement once the deadline has
+/// passed or the cancel flag is set, surfacing as [`QueryError::Interrupted`];
+/// a [`DeadlineGuard`] removes the handler on every exit path -- return, error,
+/// and unwind alike -- so the connection is left as it was found. The Rust
+/// loops over each statement's rows also check the cancel flag once per row,
+/// since rows already computed (a grouped result, the `price` closure's own
+/// work) run no VM instructions for the handler to count.
 ///
 /// `price` is called once per FINE row -- while `upstream` is still known --
 /// and its verdict is folded into the coarse group the row belongs to. Every
@@ -345,14 +348,17 @@ pub fn query(
     db: &mut UsageDb,
     spec: &QuerySpec,
     price: impl Fn(&AggRow) -> RowCost,
-    deadline: Instant,
+    limit: impl Into<ReadLimit>,
 ) -> Result<QueryResult, QueryError> {
+    let limit = limit.into();
+    let cancel = limit.cancel.clone();
+    cancel.check()?;
     // Held across the read + fold so the handler is detached even when the
     // `price` closure panics: the connection outlives this call, and a stale
     // expired deadline left on it would spuriously interrupt the next statement
     // run on it.
-    let guard = DeadlineGuard::install(db, deadline)?;
-    read_and_fold(&guard, spec, price)
+    let guard = DeadlineGuard::install(db, limit)?;
+    read_and_fold(&guard, spec, price, &cancel)
 }
 
 /// The read + fold, split out so [`query`] can scope its progress guard around
@@ -367,6 +373,7 @@ fn read_and_fold(
     db: &UsageDb,
     spec: &QuerySpec,
     price: impl Fn(&AggRow) -> RowCost,
+    cancel: &CancelFlag,
 ) -> Result<QueryResult, QueryError> {
     if let Some(bucket) = spec.bucket {
         check_bucket(bucket, spec.from_ms)?;
@@ -376,9 +383,9 @@ fn read_and_fold(
 
     let tx = db.conn().unchecked_transaction()?;
     match spec.bucket {
-        None => fold_groups(&tx, spec, &price, &mut groups)?,
+        None => fold_groups(&tx, spec, &price, cancel, &mut groups)?,
         Some(bucket) => {
-            fold_groups_and_buckets(&tx, spec, bucket, &price, &mut groups, &mut buckets)?
+            fold_groups_and_buckets(&tx, spec, bucket, &price, cancel, &mut groups, &mut buckets)?
         }
     }
     // A read-only transaction has nothing to commit; rolling back releases the
@@ -432,11 +439,12 @@ fn fold_groups(
     tx: &rusqlite::Transaction<'_>,
     spec: &QuerySpec,
     price: &impl Fn(&AggRow) -> RowCost,
+    cancel: &CancelFlag,
     groups: &mut BTreeMap<String, GroupAcc>,
 ) -> Result<(), QueryError> {
     let window = side_read_window(spec);
-    let mut lifetimes = read_lifetimes(tx, &window, None)?;
-    let mut classes = read_error_classes(tx, &window, None)?;
+    let mut lifetimes = read_lifetimes(tx, &window, None, cancel)?;
+    let mut classes = read_error_classes(tx, &window, None, cancel)?;
     let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
     let rows = stmt.query_map(
         rusqlite::params![
@@ -448,6 +456,7 @@ fn fold_groups(
         map_fine_row,
     )?;
     for row in rows {
+        cancel.check()?;
         let mut fine = row?;
         attach(&mut fine.agg, 0, &mut lifetimes);
         let row_classes = take_classes(&fine.agg.key, 0, &mut classes);
@@ -476,12 +485,13 @@ fn fold_groups_and_buckets(
     spec: &QuerySpec,
     bucket: BucketSpec,
     price: &impl Fn(&AggRow) -> RowCost,
+    cancel: &CancelFlag,
     groups: &mut BTreeMap<String, GroupAcc>,
     buckets: &mut BTreeMap<i64, GroupAcc>,
 ) -> Result<(), QueryError> {
     let window = side_read_window(spec);
-    let mut lifetimes = read_lifetimes(tx, &window, Some(bucket.width_ms))?;
-    let mut classes = read_error_classes(tx, &window, Some(bucket.width_ms))?;
+    let mut lifetimes = read_lifetimes(tx, &window, Some(bucket.width_ms), cancel)?;
+    let mut classes = read_error_classes(tx, &window, Some(bucket.width_ms), cancel)?;
     let mut stmt = tx.prepare(SERIES_AGG_SQL)?;
     let rows = stmt.query_map(
         rusqlite::params![
@@ -494,6 +504,7 @@ fn fold_groups_and_buckets(
         map_fine_row_bucketed,
     )?;
     for row in rows {
+        cancel.check()?;
         let (mut fine, bucket_ix) = row?;
         if bucket_ix < 0 || bucket_ix >= bucket.count as i64 {
             return Err(QueryError::InvalidBucket);

@@ -25,6 +25,7 @@ use crate::cache_writes::{LEGACY_1H_SECONDS, LEGACY_5M_SECONDS};
 use crate::db::UsageDb;
 
 use super::aggregate::{GROUP_KEY_COLUMNS, SideReadWindow, read_group_key};
+use super::deadline::CancelFlag;
 use super::{AggRow, GroupKey, QueryError};
 
 /// The cache writes of one fine aggregate row, split by how long the written
@@ -106,6 +107,7 @@ pub(super) fn read_lifetimes(
     tx: &Transaction<'_>,
     window: &SideReadWindow<'_>,
     bucket_width_ms: Option<i64>,
+    cancel: &CancelFlag,
 ) -> Result<LifetimesByRow, QueryError> {
     let mut out = LifetimesByRow::new();
     match bucket_width_ms {
@@ -118,6 +120,7 @@ pub(super) fn read_lifetimes(
                 window.provider_filter,
             ])?;
             while let Some(row) = rows.next()? {
+                cancel.check()?;
                 fold_row(row, &mut out)?;
             }
         }
@@ -131,6 +134,7 @@ pub(super) fn read_lifetimes(
                 width_ms,
             ])?;
             while let Some(row) = rows.next()? {
+                cancel.check()?;
                 fold_row(row, &mut out)?;
             }
         }
@@ -335,7 +339,7 @@ pub fn aggregate_with_cache_lifetimes(
         alias_filter: None,
         provider_filter: None,
     };
-    let mut lifetimes = read_lifetimes(&tx, &window, None)?;
+    let mut lifetimes = read_lifetimes(&tx, &window, None, &CancelFlag::default())?;
     // A read-only transaction has nothing to commit; finishing releases the
     // snapshot.
     tx.finish()?;

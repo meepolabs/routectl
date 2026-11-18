@@ -263,13 +263,14 @@ fn an_expired_deadline_interrupts_the_error_class_read() {
     // Act
     let guard = DeadlineGuard::install(&mut db, expired).expect("install deadline");
     let tx = guard.conn().unchecked_transaction().expect("begin read");
-    let interrupted = read_error_classes(&tx, &window, None);
+    let interrupted = read_error_classes(&tx, &window, None, &CancelFlag::default());
     drop(tx);
     drop(guard);
     let after = read_error_classes(
         &db.conn().unchecked_transaction().expect("begin read"),
         &window,
         None,
+        &CancelFlag::default(),
     );
 
     // Assert: the class read sheds as an interrupt, and runs to completion

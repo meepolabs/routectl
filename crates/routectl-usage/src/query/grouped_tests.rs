@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::db::open;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// A far-future deadline: the query under test is expected to complete.
@@ -698,3 +698,4 @@ include!("grouped_series_grid_tests.rs");
 include!("grouped_robustness_tests.rs");
 include!("grouped_seat_tests.rs");
 include!("grouped_error_class_tests.rs");
+include!("grouped_cancel_tests.rs");

@@ -84,7 +84,7 @@ pub use calibration::{CalibrationSampleRow, read_calibration_samples_since};
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,
 };
-pub use deadline::DeadlineGuard;
+pub use deadline::{CancelFlag, DeadlineGuard, ReadLimit};
 pub use grouped::{
     BucketSpec, CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
     QuerySpec, QueryTotals, RowCost, SeriesBucket, query,
@@ -105,9 +105,9 @@ pub enum QueryError {
     #[error("usage query failed: {0}")]
     Sqlite(#[source] rusqlite::Error),
 
-    /// The query exceeded its deadline and was interrupted mid-statement. A
-    /// distinct variant so the caller can shed it under its own code rather
-    /// than reporting the DB as unavailable.
+    /// The query exceeded its deadline, or its cancel flag was set, and was
+    /// interrupted mid-read. A distinct variant so the caller can shed it under
+    /// its own code rather than reporting the DB as unavailable.
     #[error("usage query exceeded its deadline")]
     Interrupted,
 
