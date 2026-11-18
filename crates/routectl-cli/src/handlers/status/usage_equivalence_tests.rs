@@ -65,6 +65,7 @@ const TO_MS: i64 = FROM_MS + 86_400_000;
 // cache_write_tokens      = both eras; every row here is an older-era row,
 //                           so (3 + 2) + (10 + 20)                        = 35
 // cache_write_present     = rows reporting a write: B + I                 = 2
+// cache_read_present      = rows reporting a cache read: B + H + I        = 3
 // stream_count            = SUM(stream) = B + E + F + H + I               = 5
 // errors_by_class         = F records no class                            = {unclassified: 1}
 
@@ -82,12 +83,13 @@ const EXPECTED_CACHE_WRITE_5M: i64 = 13;
 const EXPECTED_CACHE_WRITE_1H: i64 = 22;
 const EXPECTED_CACHE_WRITE_TOKENS: i64 = 35;
 const EXPECTED_CACHE_WRITE_PRESENT: i64 = 2;
+const EXPECTED_CACHE_READ_PRESENT: i64 = 3;
 const EXPECTED_STREAM_COUNT: i64 = 5;
 
 /// The metric vocabulary BOTH surfaces carry -- the projection this guard
 /// asserts equal. Every token is a contracts sec-15 wire name with the same
 /// type on both sides.
-const SHARED: [&str; 16] = [
+const SHARED: [&str; 17] = [
     "requests",
     "ok",
     "errors",
@@ -102,6 +104,7 @@ const SHARED: [&str; 16] = [
     "cache_write_1h",
     "cache_write_tokens",
     "cache_write_present",
+    "cache_read_present",
     "stream_count",
     "errors_by_class",
 ];
@@ -109,12 +112,14 @@ const SHARED: [&str; 16] = [
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 12] = [
+const QUERY_ONLY: [&str; 14] = [
     "fallback_served",
-    "ttft_p50_ms",
-    "ttft_p95_ms",
-    "latency_p50_ms",
-    "latency_p95_ms",
+    "server_tool_present",
+    "client_disconnect_pre_dispatch",
+    "ttft_avg_ms",
+    "ttft_max_ms",
+    "latency_avg_ms",
+    "latency_max_ms",
     "throughput_tok_s",
     "ctx_avg",
     "ctx_peak",
@@ -126,14 +131,7 @@ const QUERY_ONLY: [&str; 12] = [
 
 /// Panel metric-surface fields with NO `/status/query` counterpart: the group
 /// key the panel reports at its own fine grain, plus the panel-only figures.
-const PANEL_ONLY: [&str; 6] = [
-    "alias",
-    "provider",
-    "model",
-    "upstream",
-    "cache_read_peak",
-    "cache_read_present",
-];
+const PANEL_ONLY: [&str; 5] = ["alias", "provider", "model", "upstream", "cache_read_peak"];
 
 /// One ledger row's tunable columns. Defaults describe a minimal
 /// non-streaming success reporting no token counters, so each seeded row sets
@@ -465,7 +463,7 @@ fn shared_projection_agrees_between_query_and_usage_panel() {
     let p = &panel.totals;
     let q = &result.totals;
 
-    // Assert: the twelve tokens both surfaces carry at window totals.
+    // Assert: the tokens both surfaces carry at window totals.
     assert_eq!(p.requests, q.requests, "requests");
     assert_eq!(p.ok, q.ok, "ok");
     assert_eq!(p.errors, q.errors, "errors");
@@ -493,6 +491,10 @@ fn shared_projection_agrees_between_query_and_usage_panel() {
     assert_eq!(
         p.cache_write_present, q.cache_write_present,
         "cache_write_present"
+    );
+    assert_eq!(
+        p.cache_read_present, q.cache_read_present,
+        "cache_read_present"
     );
 
     // And the three the panel reports per group only.
@@ -653,13 +655,21 @@ fn both_paths_match_the_hand_computed_window_oracle() {
             "{label}: cache_write_present"
         );
     }
+    assert_eq!(
+        panel.totals.cache_read_present, EXPECTED_CACHE_READ_PRESENT,
+        "usage panel: cache_read_present"
+    );
+    assert_eq!(
+        result.totals.cache_read_present, EXPECTED_CACHE_READ_PRESENT,
+        "status query: cache_read_present"
+    );
 }
 
 #[test]
 fn every_metric_token_is_shared_or_declared_one_sided() {
     // The durable half of the guard: adding a metric to EITHER surface fails
     // here until it is declared shared (and therefore asserted equal above) or
-    // explicitly one-sided. The day a derived metric such as `ttft_p50_ms`
+    // explicitly one-sided. The day a derived metric such as `ttft_avg_ms`
     // gains a panel counterpart, this is what forces the population-filter
     // question to be answered -- at the moment it is answerable.
     let (_dir, panel, result) = both_folds();

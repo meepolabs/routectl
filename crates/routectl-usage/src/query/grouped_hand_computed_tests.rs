@@ -99,21 +99,22 @@ fn hand_computed_fixture_matches_every_derived_metric() {
     assert_eq!(m.stream_count, 3);
 
     // ttft: r1 and r2 are the only streaming successes with a TTFB, so both
-    // figures share that population -- p50 = (100 + 300) / 2, p95 = MAX.
-    assert_eq!(m.ttft_p50_ms, Some(200));
-    assert_eq!(m.ttft_p95_ms, Some(300));
-    // latency p50 = (1100 + 800 + 600 + 200) / 4 requests = 2700 / 4.
-    assert_eq!(m.latency_p50_ms, Some(675));
-    assert_eq!(m.latency_p95_ms, Some(1100));
-    // throughput: r1 = 200 tok / 1000 ms = 200 tok/s, r2 = 250 / 500 ms = 500
-    // tok/s; r3 is non-streaming and r4 has no TTFB, so the request-weighted
-    // mean is over 2 eligible rows.
-    assert_close(m.throughput_tok_s, 350.0);
-    // ctx: 6000 input tokens over the 3 rows that reported one; peak = 3000.
-    assert_eq!(m.ctx_avg, Some(2000));
+    // figures share that population -- avg = (100 + 300) / 2, max = MAX.
+    assert_eq!(m.ttft_avg_ms, Some(200));
+    assert_eq!(m.ttft_max_ms, Some(300));
+    // latency avg = (1100 + 800 + 600 + 200) / 4 requests = 2700 / 4.
+    assert_eq!(m.latency_avg_ms, Some(675));
+    assert_eq!(m.latency_max_ms, Some(1100));
+    // throughput: r1 generated 200 tokens over 1000 ms and r2 250 over 500 ms;
+    // r3 is non-streaming and r4 has no TTFB. (200 + 250) * 1000 / 1500 = 300.
+    assert_close(m.throughput_tok_s, 300.0);
+    // ctx: r1 1000, r2 3000, r3 2000 + 500 read + 100 write = 2600; r4
+    // reported nothing. (1000 + 3000 + 2600) / 3 = 2200; peak = 3000.
+    assert_eq!(m.ctx_avg, Some(2200));
     assert_eq!(m.ctx_peak, Some(3000));
-    // cache-hit: only r3 reports a cache read. Prompt total = 2000 input + 500
-    // read + 100 write = 2600, so the single eligible row's share is 500/2600.
+    // cache-hit: only u2's fine row (r3, r4) reports a cache read. Its prompt
+    // total = 2000 input + 500 read + 100 write = 2600, so the share is
+    // 500/2600; u1's fine row reports none and stays out of both sides.
     assert_close(m.cache_hit_pct, 500.0 / 2600.0 * 100.0);
     // cost: u1's fine row summed 4000 input tokens -> $4.00; u2 is unpriced, so
     // the group is partial and reports the priced subtotal only.
@@ -154,8 +155,8 @@ fn coarse_grouping_maxes_across_fine_rows_without_averaging_averages() {
     assert_eq!(by_model.groups.len(), 2);
     assert_eq!(by_alias.groups.len(), 1);
     let alias_metrics = &by_alias.groups[0].metrics;
-    assert_eq!(alias_metrics.latency_p95_ms, Some(5000));
-    assert_eq!(alias_metrics.ttft_p95_ms, Some(4000));
+    assert_eq!(alias_metrics.latency_max_ms, Some(5000));
+    assert_eq!(alias_metrics.ttft_max_ms, Some(4000));
     assert_eq!(alias_metrics.ctx_peak, Some(9000));
     // Both groupings cover the same rows, so the totals must agree.
     assert_eq!(by_model.totals, by_alias.totals);
@@ -270,4 +271,157 @@ fn cancelled_rows_are_excluded_from_errors_and_reconcile_per_group_and_totals() 
             metrics.ok + metrics.errors + metrics.client_disconnect_total + metrics.cancelled_total
         );
     }
+}
+
+#[test]
+fn throughput_is_summed_output_over_summed_generation_time() {
+    // Arrange: a short fast stream (100 tokens over 100 ms = 1000 tok/s) and a
+    // long slow one (1000 tokens over 10_000 ms = 100 tok/s), on two upstreams
+    // so the fold adds across fine rows as well as inside one.
+    let (_dir, mut db) = open_db();
+    for (request_id, upstream, latency_ms, output) in
+        [("fast", "u1", 200, 100), ("slow", "u2", 10_100, 1000)]
+    {
+        insert(
+            &db,
+            &Fixture {
+                request_id,
+                upstream: Some(upstream),
+                stream: 1,
+                latency_ms,
+                ttfb_ms: Some(100),
+                output_tokens: Some(output),
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+
+    // Assert: (100 + 1000) * 1000 / (100 + 10_000) ms, not (1000 + 100) / 2.
+    let ratio_of_sums = 1100.0 * 1000.0 / 10_100.0;
+    let mean_of_rates = f64::midpoint(1000.0, 100.0);
+    let m = &group(&result, "m1").metrics;
+    assert_close(m.throughput_tok_s, ratio_of_sums);
+    assert!(
+        (m.throughput_tok_s.expect("throughput present") - mean_of_rates).abs() > 1.0,
+        "throughput must not be the mean of per-request rates"
+    );
+    assert_close(result.totals.throughput_tok_s, ratio_of_sums);
+}
+
+#[test]
+fn cache_heavy_row_counts_its_cached_prompt_toward_context() {
+    // Arrange: a fresh-input-only row of 1000, and a cache-heavy row with 100
+    // fresh input, 5000 read from cache and 900 written: a 6000-token prompt.
+    let (_dir, mut db) = open_db();
+    insert(
+        &db,
+        &Fixture {
+            request_id: "fresh",
+            upstream: Some("u1"),
+            input_tokens: Some(1000),
+            ..Fixture::default()
+        },
+    );
+    insert(
+        &db,
+        &Fixture {
+            request_id: "cached",
+            upstream: Some("u2"),
+            input_tokens: Some(100),
+            cache_read: Some(5000),
+            cache_write_1h: Some(900),
+            ..Fixture::default()
+        },
+    );
+
+    // Act
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+
+    // Assert: (1000 + 6000) / 2 and the cache-heavy row's 6000 as the peak.
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.ctx_avg, Some(3500));
+    assert_eq!(m.ctx_peak, Some(6000));
+}
+
+#[test]
+fn context_counts_a_row_that_reports_only_cache_reads() {
+    // Arrange: a row with no input-token count but a cache read, beside a row
+    // reporting no prompt dimension at all.
+    let (_dir, mut db) = open_db();
+    insert(
+        &db,
+        &Fixture {
+            request_id: "cache-only",
+            cache_read: Some(4000),
+            ..Fixture::default()
+        },
+    );
+    insert(
+        &db,
+        &Fixture {
+            request_id: "silent",
+            ..Fixture::default()
+        },
+    );
+
+    // Act
+    let result = query(&mut db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+
+    // Assert: the silent row is not a measured zero, so the mean is 4000.
+    let m = &group(&result, "m1").metrics;
+    assert_eq!(m.ctx_avg, Some(4000));
+    assert_eq!(m.ctx_peak, Some(4000));
+}
+
+#[test]
+fn presence_and_pre_dispatch_counts_match_hand_computed_values() {
+    // Arrange: per row, (cache read, server-tool map, outcome, served model).
+    //   p1: read 0,  tools {web:1}, ok,                served
+    //   p2: read 40, -,             client_disconnect, served
+    //   p3: -,       tools {},      client_disconnect, never dispatched
+    //   p4: -,       -,             client_disconnect, never dispatched
+    // cache_read_present = p1 + p2 = 2 (a reported zero counts);
+    // server_tool_present = p1 + p3 = 2 (an empty map is still a report);
+    // client_disconnect_total = 3, of which pre-dispatch (NULL model) = 2.
+    let (_dir, mut db) = open_db();
+    let rows = [
+        ("p1", Some(0), Some(r#"{"web":1}"#), "ok", Some("m1")),
+        ("p2", Some(40), None, "client_disconnect", Some("m1")),
+        ("p3", None, Some("{}"), "client_disconnect", None),
+        ("p4", None, None, "client_disconnect", None),
+    ];
+    for (request_id, cache_read, server_tool_use, outcome, model) in rows {
+        insert(
+            &db,
+            &Fixture {
+                request_id,
+                model,
+                outcome,
+                cache_read,
+                server_tool_use,
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act: by provider, so the served and never-dispatched rows share a group.
+    let result = query(&mut db, &spec(GroupDim::Provider), unpriced, no_deadline()).expect("query");
+
+    // Assert
+    let m = &group(&result, "pa").metrics;
+    assert_eq!(m.cache_read_present, 2);
+    assert_eq!(m.server_tool_present, 2);
+    assert_eq!(m.client_disconnect_total, 3);
+    assert_eq!(m.client_disconnect_pre_dispatch, 2);
+    assert_eq!(
+        (
+            result.totals.cache_read_present,
+            result.totals.server_tool_present,
+            result.totals.client_disconnect_pre_dispatch
+        ),
+        (2, 2, 2)
+    );
 }

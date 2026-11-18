@@ -331,10 +331,10 @@ fn a_bucket_with_no_rows_reports_zero_requests_and_no_derived_metrics() {
     for empty in &s.buckets[1..] {
         let m = &empty.metrics;
         assert_eq!(m.requests, 0);
-        assert_eq!(m.ttft_p50_ms, None);
-        assert_eq!(m.ttft_p95_ms, None);
-        assert_eq!(m.latency_p50_ms, None);
-        assert_eq!(m.latency_p95_ms, None);
+        assert_eq!(m.ttft_avg_ms, None);
+        assert_eq!(m.ttft_max_ms, None);
+        assert_eq!(m.latency_avg_ms, None);
+        assert_eq!(m.latency_max_ms, None);
         assert_eq!(m.throughput_tok_s, None);
         assert_eq!(m.ctx_avg, None);
         assert_eq!(m.ctx_peak, None);
@@ -419,16 +419,16 @@ fn per_bucket_maxima_and_cost_status_describe_that_bucket_only() {
     let s = series(&result);
     let first = &s.buckets[0].metrics;
     let second = &s.buckets[1].metrics;
-    assert_eq!(first.latency_p95_ms, Some(4000));
-    assert_eq!(first.ttft_p95_ms, Some(900));
+    assert_eq!(first.latency_max_ms, Some(4000));
+    assert_eq!(first.ttft_max_ms, Some(900));
     assert_eq!(first.ctx_peak, Some(8000));
     assert_eq!(first.cost_status, CostStatus::Priced);
     assert_close(first.cost_usd, 3.0);
-    assert_eq!(second.latency_p95_ms, Some(300));
-    assert_eq!(second.ttft_p95_ms, Some(50));
+    assert_eq!(second.latency_max_ms, Some(300));
+    assert_eq!(second.ttft_max_ms, Some(50));
     assert_eq!(second.ctx_peak, Some(100));
     assert_eq!(second.cost_status, CostStatus::Unpriced);
     assert_eq!(second.cost_usd, None);
     assert_eq!(result.totals.cost_status, CostStatus::Partial);
-    assert_eq!(result.totals.latency_p95_ms, Some(4000));
+    assert_eq!(result.totals.latency_max_ms, Some(4000));
 }

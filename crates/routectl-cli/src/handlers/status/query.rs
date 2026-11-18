@@ -56,7 +56,20 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 /// `cache_write_tokens` and `cache_write_present`, the cache writes of both
 /// ledger eras, and `cache_write_5m` / `cache_write_1h` narrowed to rows written
 /// before the ledger recorded a write total.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// At 4 three figures changed meaning and four fields were renamed:
+/// `throughput_tok_s` is summed generation output over summed generation time
+/// (was a mean of per-request rates); `ctx_avg` / `ctx_peak` count fresh
+/// input plus cache read plus cache write (were fresh input only);
+/// `cache_hit_pct` is token-weighted over the rows reporting cache reads (was a
+/// mean of per-request shares); `ttft_p50_ms` / `ttft_p95_ms` /
+/// `latency_p50_ms` / `latency_p95_ms`, a mean and a maximum, are now
+/// `ttft_avg_ms` / `ttft_max_ms` / `latency_avg_ms` / `latency_max_ms`.
+/// Added alongside, without a bump of their own: the `seat` grouping, the
+/// `last24h` / `last7d` windows, and per metric set `errors_by_class`,
+/// `cache_read_present`, `server_tool_present` and
+/// `client_disconnect_pre_dispatch`.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The one method this route answers. Not expressible as an axum
 /// `MethodFilter`, hence the manual guard.

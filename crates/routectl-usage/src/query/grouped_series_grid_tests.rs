@@ -110,23 +110,23 @@ fn hand_computed_series_matches_the_edge_buckets_metrics_and_costs() {
     // successes over `u-priced`.
     let first = &s.buckets[0].metrics;
     assert_eq!(first.requests, 2);
-    // Request-weighted ttft: (200 + 400) / 2 eligible rows = 300; the p95 is
+    // Request-weighted ttft: (200 + 400) / 2 eligible rows = 300; the max is
     // the MAX of the same population.
-    assert_eq!(first.ttft_p50_ms, Some(300));
-    assert_eq!(first.ttft_p95_ms, Some(400));
-    // Only b1 reports a cache read. Its cache-inclusive prompt total is
-    // 1000 input + 500 read + 100 write_5m = 1600, so the single eligible
-    // row's share is 500 / 1600 = 0.3125 -> 31.25 %.
-    assert_close(first.cache_hit_pct, 31.25);
+    assert_eq!(first.ttft_avg_ms, Some(300));
+    assert_eq!(first.ttft_max_ms, Some(400));
+    // b1 and b2 share one fine row, and b1 reports a cache read, so the whole
+    // fine row counts: 500 read over 1000 + 3000 input + 500 read + 100
+    // write_5m = 4600.
+    assert_close(first.cache_hit_pct, 500.0 / 4600.0 * 100.0);
     // Cost: b1 and b2 share the
     // (model, provider, upstream, alias, provider_kind, bucket) grain, so they
     // price as ONE fine row of 1000 + 3000 = 4000 input tokens
     // -> $4.00, and every row in the bucket is priced.
     assert_eq!(first.cost_status, CostStatus::Priced);
     assert_close(first.cost_usd, 4.0);
-    // Latency p50 is request-weighted over the bucket's 2 requests:
+    // Latency avg is request-weighted over the bucket's 2 requests:
     // (1000 + 600) / 2 = 800.
-    assert_eq!(first.latency_p50_ms, Some(800));
+    assert_eq!(first.latency_avg_ms, Some(800));
 
     // LAST bucket -- b3 (priced, streaming ok) beside b4 (unpriced, failed,
     // fallback-served), two DISTINCT fine rows in one bucket.
@@ -136,8 +136,8 @@ fn hand_computed_series_matches_the_edge_buckets_metrics_and_costs() {
     assert_eq!(last.errors, 1);
     assert_eq!(last.fallback_served, 1);
     // b4 stamped no ttfb, so only b3 is ttft-eligible: 100 / 1 = 100.
-    assert_eq!(last.ttft_p50_ms, Some(100));
-    assert_eq!(last.ttft_p95_ms, Some(100));
+    assert_eq!(last.ttft_avg_ms, Some(100));
+    assert_eq!(last.ttft_max_ms, Some(100));
     // b3's prompt total is 2000 input + 300 read + 200 write_1h = 2500, so its
     // share is 300 / 2500 = 0.12 -> 12 %. b4 reports no cache read at all.
     assert_close(last.cache_hit_pct, 12.0);
@@ -145,27 +145,27 @@ fn hand_computed_series_matches_the_edge_buckets_metrics_and_costs() {
     // the bucket is partial and reports the priced subtotal only.
     assert_eq!(last.cost_status, CostStatus::Partial);
     assert_close(last.cost_usd, 2.0);
-    // Latency p50 over the bucket's 2 requests: (500 + 300) / 2 = 400.
-    assert_eq!(last.latency_p50_ms, Some(400));
+    // Latency avg over the bucket's 2 requests: (500 + 300) / 2 = 400.
+    assert_eq!(last.latency_avg_ms, Some(400));
 
     // The three interior buckets saw nothing, and say so honestly.
     for empty in &s.buckets[1..4] {
         assert_eq!(empty.metrics.requests, 0);
-        assert_eq!(empty.metrics.ttft_p50_ms, None);
+        assert_eq!(empty.metrics.ttft_avg_ms, None);
         assert_eq!(empty.metrics.cache_hit_pct, None);
         assert_eq!(empty.metrics.cost_usd, None);
         assert_eq!(empty.metrics.cost_status, CostStatus::Unpriced);
     }
 
     // The window totals fold the same three fine rows: 4 requests, ttft
-    // (200 + 400 + 100) / 3 = 233 (integer), cache-hit (0.3125 + 0.12) / 2
-    // = 0.21625 -> 21.625 %, and $4.00 + $2.00 = $6.00 priced beside one
+    // (200 + 400 + 100) / 3 = 233 (integer), cache-hit (500 + 300) read over
+    // 4600 + 2500 prompt, and $4.00 + $2.00 = $6.00 priced beside one
     // unpriced row.
     let t = &result.totals;
     assert_eq!(t.requests, 4);
-    assert_eq!(t.ttft_p50_ms, Some(233));
-    assert_eq!(t.ttft_p95_ms, Some(400));
-    assert_close(t.cache_hit_pct, 21.625);
+    assert_eq!(t.ttft_avg_ms, Some(233));
+    assert_eq!(t.ttft_max_ms, Some(400));
+    assert_close(t.cache_hit_pct, 800.0 / 7100.0 * 100.0);
     assert_eq!(t.cost_status, CostStatus::Partial);
     assert_close(t.cost_usd, 6.0);
 }

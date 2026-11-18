@@ -138,7 +138,7 @@ async fn empty_ledger_is_available_with_zeros_never_400() {
     assert_eq!(json["data"]["totals"]["requests"], 0);
     assert_eq!(json["data"]["groups"].as_array().unwrap().len(), 0);
     // An absent derived metric is an explicit null, never a misleading 0.
-    assert!(json["data"]["totals"]["ttft_p50_ms"].is_null());
+    assert!(json["data"]["totals"]["ttft_avg_ms"].is_null());
     assert!(json["data"]["totals"]["cost_usd"].is_null());
     assert_eq!(json["data"]["totals"]["cost_status"], "unpriced");
 }

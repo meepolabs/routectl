@@ -151,22 +151,22 @@
 
   // The ONE column set this tab ships (the Essentials/Everything toggle is not
   // built): token volumes in and out, the weighted cache-hit share, the billed
-  // cache read and write volumes, time to first token at p50 and its observed
-  // peak, generation throughput, context size at its peak and mean, and how
-  // many of the group's requests were streamed. Every figure is a metric the
+  // cache read and write volumes, time to first token as a mean and its
+  // observed maximum, generation throughput, context size at its peak and
+  // mean, and how many of the group's requests were streamed. Every figure is a metric the
   // ledger measured for THIS group -- nothing is derived from another column
   // and nothing is filler.
   function usageStatLine(m) {
     var line = document.createElement('div');
     line.className = 'ucard-stats';
-    var ttft = msParts(m.ttft_p50_ms), peak = msParts(m.ttft_p95_ms);
+    var ttft = msParts(m.ttft_avg_ms), max = msParts(m.ttft_max_ms);
     [
       ustat('tokens in / out', pairValue(magSpan(m.input_tokens), magSpan(m.output_tokens))),
       ustat('cache hit', pctFigure(m.cache_hit_pct)),
       ustat('cache read / write',
         pairValue(magSpan(m.cache_read_billed), magSpan(cacheWritten(m)))),
-      ustat('ttft p50 / peak',
-        pairValue(figure(ttft.v, ttft.u, null), figure(peak.v, peak.u, null))),
+      ustat('ttft avg / max',
+        pairValue(figure(ttft.v, ttft.u, null), figure(max.v, max.u, null))),
       ustat('throughput', throughputFigure(m.throughput_tok_s)),
       ustat('ctx peak / avg', pairValue(magSpan(m.ctx_peak), magSpan(m.ctx_avg))),
       ustat('streamed', magSpan(m.stream_count))

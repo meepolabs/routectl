@@ -207,8 +207,8 @@ impl CostStatus {
 /// The additive fields are cross-row sums or counts. The derived fields are
 /// `Option` and are `None` -- never `0` -- when the group holds no row eligible
 /// to contribute to them, so "no data" is always distinguishable from "measured
-/// zero". `ttft_p50_ms` and `latency_p50_ms` are request-weighted MEANS, an
-/// approximation of the median; `*_p95_ms` are the observed maxima.
+/// zero". The `*_avg_ms` figures are request-weighted means and the
+/// `*_max_ms` figures observed maxima; no field is a percentile.
 ///
 /// Every field name here IS the wire vocabulary: an absent `Option` serializes
 /// as an explicit `null` (never skipped) so a reader can tell "no eligible rows"
@@ -240,12 +240,20 @@ pub struct QueryMetrics {
     /// Count of requests reporting a cache-write value, a reported zero
     /// included.
     pub cache_write_present: i64,
+    /// Count of requests reporting a cache-read value, a reported zero
+    /// included.
+    pub cache_read_present: i64,
     /// Total server-tool invocations.
     pub server_tool_calls: i64,
+    /// Count of requests reporting a server-tool usage map.
+    pub server_tool_present: i64,
     /// Count of streaming requests.
     pub stream_count: i64,
     /// Count of rows whose terminal outcome was `client_disconnect`.
     pub client_disconnect_total: i64,
+    /// The part of `client_disconnect_total` that hung up before a served
+    /// model was recorded.
+    pub client_disconnect_pre_dispatch: i64,
     /// Count of rows whose terminal outcome was `cancelled`.
     pub cancelled_total: i64,
     /// Count of requests served only after a fallback (`fallback_count > 0`).
@@ -255,22 +263,28 @@ pub struct QueryMetrics {
     /// `unclassified`; a token this build does not know stays its own key.
     /// Empty (`{}`) when there are no errors.
     pub errors_by_class: BTreeMap<String, i64>,
-    /// Approximate p50 time-to-first-token (request-weighted mean) over
-    /// streaming successes, ms. Same population as `ttft_p95_ms`.
-    pub ttft_p50_ms: Option<i64>,
+    /// Mean time-to-first-token over streaming successes, ms. Same
+    /// population as `ttft_max_ms`.
+    pub ttft_avg_ms: Option<i64>,
     /// Observed maximum time-to-first-token over streaming successes, ms.
-    pub ttft_p95_ms: Option<i64>,
-    /// Approximate p50 end-to-end latency (request-weighted mean), ms.
-    pub latency_p50_ms: Option<i64>,
+    pub ttft_max_ms: Option<i64>,
+    /// Mean end-to-end latency over every request, ms.
+    pub latency_avg_ms: Option<i64>,
     /// Observed maximum end-to-end latency, ms.
-    pub latency_p95_ms: Option<i64>,
-    /// Request-weighted mean generation throughput, output tokens/second.
+    pub latency_max_ms: Option<i64>,
+    /// Generation throughput, output tokens/second: the output tokens of
+    /// streaming successes over their summed generation time (latency after
+    /// the first token). Absent when no generation time was measured.
     pub throughput_tok_s: Option<f64>,
-    /// Mean reported input-context size, tokens.
+    /// Mean per-request context, tokens: fresh input plus cache read plus
+    /// cache write, over requests reporting any of the three.
     pub ctx_avg: Option<i64>,
-    /// Peak reported input-context size, tokens.
+    /// Largest per-request context, tokens, under the same rule as `ctx_avg`.
     pub ctx_peak: Option<i64>,
-    /// Request-weighted mean share of prompt tokens served from cache, percent.
+    /// Share of prompt tokens served from cache, percent, token-weighted:
+    /// summed cache reads over summed input + cache read + cache write, both
+    /// taken over the fine rows that report cache reads. Absent when that
+    /// prompt total is zero.
     pub cache_hit_pct: Option<f64>,
     /// Dollar cost, per [`CostStatus`]. Absent whenever no priced row
     /// contributed.
@@ -578,9 +592,12 @@ struct GroupAcc {
     cache_write_1h: i64,
     cache_write_tokens: i64,
     cache_write_present: i64,
+    cache_read_present: i64,
     server_tool_calls: i64,
+    server_tool_present: i64,
     stream_count: i64,
     client_disconnect_total: i64,
+    client_disconnect_pre_dispatch: i64,
     cancelled_total: i64,
     fallback_served: i64,
     errors_by_class: BTreeMap<String, i64>,
@@ -589,12 +606,13 @@ struct GroupAcc {
     ttfb_max: Option<i64>,
     latency_sum: i64,
     latency_max: Option<i64>,
-    input_tokens_max: Option<i64>,
-    input_tokens_present: i64,
-    tok_s_sum: f64,
-    tok_s_count: i64,
-    cache_hit_sum: f64,
-    cache_hit_count: i64,
+    ctx_max: Option<i64>,
+    ctx_sum: i64,
+    ctx_count: i64,
+    gen_output_tokens: i64,
+    gen_window_ms: i64,
+    cache_hit_num: i64,
+    cache_hit_den: i64,
     priced_usd: f64,
     any_priced: bool,
     /// Summed API-equivalent value of the subscription rows that resolved one.
@@ -626,9 +644,12 @@ impl GroupAcc {
         self.cache_write_1h += agg.cache_write_1h;
         self.cache_write_tokens += agg.cache_write_tokens;
         self.cache_write_present += agg.cache_write_present;
+        self.cache_read_present += agg.cache_read_present;
         self.server_tool_calls += agg.server_tool_calls;
+        self.server_tool_present += agg.server_tool_present;
         self.stream_count += agg.stream_count;
         self.client_disconnect_total += agg.client_disconnect_total;
+        self.client_disconnect_pre_dispatch += agg.client_disconnect_pre_dispatch;
         self.cancelled_total += agg.cancelled_total;
         self.fallback_served += fine.fallback_served;
         add_classes(&mut self.errors_by_class, classes);
@@ -637,12 +658,17 @@ impl GroupAcc {
         self.ttfb_max = max_opt(self.ttfb_max, fine.ttfb_max);
         self.latency_sum += fine.latency_sum;
         self.latency_max = max_opt(self.latency_max, fine.latency_max);
-        self.input_tokens_max = max_opt(self.input_tokens_max, fine.input_tokens_max);
-        self.input_tokens_present += fine.input_tokens_present;
-        self.tok_s_sum += fine.tok_s_sum;
-        self.tok_s_count += fine.tok_s_count;
-        self.cache_hit_sum += fine.cache_hit_sum;
-        self.cache_hit_count += fine.cache_hit_count;
+        self.ctx_max = max_opt(self.ctx_max, fine.ctx_max);
+        self.ctx_sum += fine.ctx_sum;
+        self.ctx_count += fine.ctx_count;
+        self.gen_output_tokens += agg.gen_output_tokens;
+        self.gen_window_ms += agg.gen_window_ms;
+        // The CLI footer's rule: a fine row counts toward the hit share only
+        // when it reports cache reads, and then with its whole prompt.
+        if agg.cache_read_present > 0 {
+            self.cache_hit_num += agg.cache_read_billed;
+            self.cache_hit_den += agg.input_tokens + agg.cache_read_billed + agg.cache_write_tokens;
+        }
         match cost {
             RowCost::Subscription(equivalent) => {
                 self.any_subscription = true;
@@ -682,9 +708,12 @@ impl GroupAcc {
         self.cache_write_1h += other.cache_write_1h;
         self.cache_write_tokens += other.cache_write_tokens;
         self.cache_write_present += other.cache_write_present;
+        self.cache_read_present += other.cache_read_present;
         self.server_tool_calls += other.server_tool_calls;
+        self.server_tool_present += other.server_tool_present;
         self.stream_count += other.stream_count;
         self.client_disconnect_total += other.client_disconnect_total;
+        self.client_disconnect_pre_dispatch += other.client_disconnect_pre_dispatch;
         self.cancelled_total += other.cancelled_total;
         self.fallback_served += other.fallback_served;
         add_classes(&mut self.errors_by_class, &other.errors_by_class);
@@ -693,12 +722,13 @@ impl GroupAcc {
         self.ttfb_max = max_opt(self.ttfb_max, other.ttfb_max);
         self.latency_sum += other.latency_sum;
         self.latency_max = max_opt(self.latency_max, other.latency_max);
-        self.input_tokens_max = max_opt(self.input_tokens_max, other.input_tokens_max);
-        self.input_tokens_present += other.input_tokens_present;
-        self.tok_s_sum += other.tok_s_sum;
-        self.tok_s_count += other.tok_s_count;
-        self.cache_hit_sum += other.cache_hit_sum;
-        self.cache_hit_count += other.cache_hit_count;
+        self.ctx_max = max_opt(self.ctx_max, other.ctx_max);
+        self.ctx_sum += other.ctx_sum;
+        self.ctx_count += other.ctx_count;
+        self.gen_output_tokens += other.gen_output_tokens;
+        self.gen_window_ms += other.gen_window_ms;
+        self.cache_hit_num += other.cache_hit_num;
+        self.cache_hit_den += other.cache_hit_den;
         self.priced_usd += other.priced_usd;
         self.any_priced |= other.any_priced;
         self.equivalent_usd += other.equivalent_usd;
@@ -725,20 +755,23 @@ impl GroupAcc {
             cache_write_1h: self.cache_write_1h,
             cache_write_tokens: self.cache_write_tokens,
             cache_write_present: self.cache_write_present,
+            cache_read_present: self.cache_read_present,
             server_tool_calls: self.server_tool_calls,
+            server_tool_present: self.server_tool_present,
             stream_count: self.stream_count,
             client_disconnect_total: self.client_disconnect_total,
+            client_disconnect_pre_dispatch: self.client_disconnect_pre_dispatch,
             cancelled_total: self.cancelled_total,
             fallback_served: self.fallback_served,
             errors_by_class: self.errors_by_class,
-            ttft_p50_ms: mean_i64(self.ttft_sum, self.ttft_count),
-            ttft_p95_ms: self.ttfb_max,
-            latency_p50_ms: mean_i64(self.latency_sum, self.requests),
-            latency_p95_ms: self.latency_max,
-            throughput_tok_s: mean_f64(self.tok_s_sum, self.tok_s_count),
-            ctx_avg: mean_i64(self.input_tokens, self.input_tokens_present),
-            ctx_peak: self.input_tokens_max,
-            cache_hit_pct: mean_f64(self.cache_hit_sum, self.cache_hit_count).map(|r| r * 100.0),
+            ttft_avg_ms: mean_i64(self.ttft_sum, self.ttft_count),
+            ttft_max_ms: self.ttfb_max,
+            latency_avg_ms: mean_i64(self.latency_sum, self.requests),
+            latency_max_ms: self.latency_max,
+            throughput_tok_s: ratio(self.gen_output_tokens as f64 * 1000.0, self.gen_window_ms),
+            ctx_avg: mean_i64(self.ctx_sum, self.ctx_count),
+            ctx_peak: self.ctx_max,
+            cache_hit_pct: ratio(self.cache_hit_num as f64 * 100.0, self.cache_hit_den),
             cost_usd,
             equivalent_cost_usd,
             cost_status,
@@ -809,10 +842,10 @@ const fn mean_i64(sum: i64, count: i64) -> Option<i64> {
     if count > 0 { Some(sum / count) } else { None }
 }
 
-/// `sum / count` as a float mean, or `None` when nothing was eligible.
-fn mean_f64(sum: f64, count: i64) -> Option<f64> {
-    if count > 0 {
-        Some(sum / count as f64)
+/// `num / den` as a float, or `None` when the denominator is not positive.
+fn ratio(num: f64, den: i64) -> Option<f64> {
+    if den > 0 {
+        Some(num / den as f64)
     } else {
         None
     }

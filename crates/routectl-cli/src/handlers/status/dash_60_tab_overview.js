@@ -499,18 +499,18 @@
       sparkline(reqSpark, gap));
   }
 
-  // Time to first token. The headline is the request-weighted p50; the peak
-  // beside it is an observed MAXIMUM, so it is labeled "peak" and never as a
-  // percentile.
+  // Time to first token. The headline is the mean over streamed successes;
+  // the figure beside it is the observed maximum. Neither is a percentile, so
+  // the tile says avg and max.
   function ttftTile(t, series, gap) {
-    var p50 = msParts(t.ttft_p50_ms);
-    var observed = num0(t.ttft_p50_ms) > 0;
-    return kpiTile('Time to first token',
-      figure(p50.v, p50.u, null),
+    var avg = msParts(t.ttft_avg_ms);
+    var observed = num0(t.ttft_avg_ms) > 0;
+    return kpiTile('Time to first token (avg)',
+      figure(avg.v, avg.u, null),
       subNote(observed
-        ? 'peak ' + msText(t.ttft_p95_ms) + ' - weighted over ' + humanCount(t.requests) + ' req'
+        ? 'max ' + msText(t.ttft_max_ms) + ' - avg over ' + humanCount(t.requests) + ' req'
         : 'no streamed response in this window', false),
-      sparkArea(bucketSamples(series, function (m) { return m.ttft_p50_ms; }), gap));
+      sparkArea(bucketSamples(series, function (m) { return m.ttft_avg_ms; }), gap));
   }
 
   function fallbackTile(t, series, gap) {
@@ -610,7 +610,7 @@
     return kpiTile('Cache hit',
       figure(hit > 0 ? hit.toFixed(1) : '0', '%', null),
       subNote(hit > 0
-        ? 'weighted over ' + humanCount(t.requests) + ' req'
+        ? 'weighted by prompt tokens'
         : 'nothing served warm yet', false),
       sparkArea(bucketSamples(series, function (m) { return m.cache_hit_pct; }), gap));
   }

@@ -158,10 +158,10 @@ fn empty_ledger_yields_no_groups_and_zeroed_totals() {
     assert!(result.groups.is_empty());
     assert_eq!(result.totals, QueryTotals::default());
     assert_eq!(result.totals.requests, 0);
-    assert_eq!(result.totals.ttft_p50_ms, None);
-    assert_eq!(result.totals.ttft_p95_ms, None);
-    assert_eq!(result.totals.latency_p50_ms, None);
-    assert_eq!(result.totals.latency_p95_ms, None);
+    assert_eq!(result.totals.ttft_avg_ms, None);
+    assert_eq!(result.totals.ttft_max_ms, None);
+    assert_eq!(result.totals.latency_avg_ms, None);
+    assert_eq!(result.totals.latency_max_ms, None);
     assert_eq!(result.totals.throughput_tok_s, None);
     assert_eq!(result.totals.ctx_avg, None);
     assert_eq!(result.totals.ctx_peak, None);
@@ -198,10 +198,10 @@ fn rows_reporting_no_metrics_yield_absent_derived_metrics() {
     // row count is zero is None rather than 0.
     let m = &group(&result, "m1").metrics;
     assert_eq!(m.requests, 2);
-    assert_eq!(m.latency_p50_ms, Some(50));
-    assert_eq!(m.latency_p95_ms, Some(60));
-    assert_eq!(m.ttft_p50_ms, None);
-    assert_eq!(m.ttft_p95_ms, None);
+    assert_eq!(m.latency_avg_ms, Some(50));
+    assert_eq!(m.latency_max_ms, Some(60));
+    assert_eq!(m.ttft_avg_ms, None);
+    assert_eq!(m.ttft_max_ms, None);
     assert_eq!(m.throughput_tok_s, None);
     assert_eq!(m.ctx_avg, None);
     assert_eq!(m.ctx_peak, None);
@@ -234,8 +234,8 @@ fn zero_generation_window_is_excluded_from_throughput() {
     // Assert: no eligible row for throughput; the TTFB metrics still resolve.
     let m = &group(&result, "m1").metrics;
     assert_eq!(m.throughput_tok_s, None);
-    assert_eq!(m.ttft_p50_ms, Some(500));
-    assert_eq!(m.ttft_p95_ms, Some(500));
+    assert_eq!(m.ttft_avg_ms, Some(500));
+    assert_eq!(m.ttft_max_ms, Some(500));
 }
 
 #[test]
@@ -649,9 +649,9 @@ fn failed_streaming_row_with_a_stamped_ttfb_is_excluded_from_both_ttft_figures()
     // the unfiltered mean would have read 500 against a p95 of 100.
     let m = &group(&result, "m1").metrics;
     assert_eq!(m.requests, 2);
-    assert_eq!(m.ttft_p50_ms, Some(100));
-    assert_eq!(m.ttft_p95_ms, Some(100));
-    assert!(m.ttft_p50_ms <= m.ttft_p95_ms);
+    assert_eq!(m.ttft_avg_ms, Some(100));
+    assert_eq!(m.ttft_max_ms, Some(100));
+    assert!(m.ttft_avg_ms <= m.ttft_max_ms);
 }
 
 #[test]
@@ -686,10 +686,10 @@ fn group_with_no_ttft_eligible_row_reports_neither_ttft_figure() {
     // Assert: absent, never a mean over an ineligible population.
     let m = &group(&result, "m1").metrics;
     assert_eq!(m.requests, 2);
-    assert_eq!(m.ttft_p50_ms, None);
-    assert_eq!(m.ttft_p95_ms, None);
-    assert_eq!(result.totals.ttft_p50_ms, None);
-    assert_eq!(result.totals.ttft_p95_ms, None);
+    assert_eq!(m.ttft_avg_ms, None);
+    assert_eq!(m.ttft_max_ms, None);
+    assert_eq!(result.totals.ttft_avg_ms, None);
+    assert_eq!(result.totals.ttft_max_ms, None);
 }
 
 include!("grouped_hand_computed_tests.rs");

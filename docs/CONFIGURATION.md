@@ -4806,7 +4806,7 @@ loaded.
 
 The running server's `/status/query` endpoint answers a grouped, windowed
 aggregate over the local usage ledger. Like `--json` above, its payload
-carries a `schema_version` (currently `3`) and its shape is UNSTABLE before
+carries a `schema_version` (currently `4`) and its shape is UNSTABLE before
 1.0 -- metric names may be added and the envelope may be restructured. The
 `schema_version` bumps on any semantic change or removal; purely additive
 changes (a new metric, a new grouping or window token) do not bump it.
@@ -4857,6 +4857,22 @@ each series bucket. An error request with no recorded class counts under
 key. A set with no errors carries `{}`. The class is a measure, never a
 `group_by` token. The `/status/usage` panel's `errors_by_class` uses the
 same class vocabulary.
+
+The timing, throughput, context and cache-hit figures of every metric set
+mean what their names say. `ttft_avg_ms` and `ttft_max_ms` are the mean and
+the largest time to first token over streamed successes; `latency_avg_ms` and
+`latency_max_ms` the mean and the largest end-to-end latency over every
+request. None of them is a percentile. `throughput_tok_s` is the output
+tokens of streamed successes divided by their summed generation time (the
+latency after the first token), so a long slow stream weighs as much as its
+tokens. `ctx_avg` and `ctx_peak` are the mean and the largest per-request
+prompt: fresh input plus cache read plus cache write, over requests that
+reported any of the three. `cache_hit_pct` is the share of prompt tokens
+served from cache, weighted by tokens over the requests whose provider
+reports cache reads, the same rule as the `routectl usage` hit rate. Each set
+also counts `cache_read_present` and `server_tool_present` (requests that
+reported a cache read or a server-tool map, a reported zero included) and
+`client_disconnect_pre_dispatch` (client hangups before a model was served).
 
 ### `provider probe [<name>]` -- reachability, free-only
 

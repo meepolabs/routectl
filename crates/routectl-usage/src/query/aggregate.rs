@@ -144,42 +144,46 @@ WHERE ts_start >= ?1 AND ts_start < ?2
 );
 
 /// Row-eligibility predicate for every time-to-first-token figure: a streaming
-/// success that recorded a first-byte time. Shared by the p50 numerator /
-/// denominator AND the p95 MAX so the two can never describe different
+/// success that recorded a first-byte time. Shared by the mean's numerator /
+/// denominator AND the MAX so the two can never describe different
 /// populations -- a mid-stream failure stamps a `ttfb_ms` too, and counting it
-/// in one but not the other lets p50 exceed p95.
+/// in one but not the other lets the mean exceed the max.
 macro_rules! ttft_eligible {
     () => {
         "stream = 1 AND outcome = 'ok' AND ttfb_ms IS NOT NULL"
     };
 }
 
-/// Row-eligibility predicate for the request-weighted throughput estimate:
-/// a streaming success with a usable TTFB, a STRICTLY positive generation
-/// window, and a reported output-token count. The `>` is strict on purpose --
-/// a zero-length window would divide by zero.
-macro_rules! tok_s_eligible {
-    () => {
-        "stream = 1 AND outcome = 'ok' AND ttfb_ms IS NOT NULL
-            AND latency_ms > ttfb_ms AND output_tokens IS NOT NULL"
-    };
-}
-
-/// The cache-INCLUSIVE prompt total for one row: the disjoint prompt
-/// dimensions summed, NULL counters contributing 0. Denominator of the
-/// per-row cache-hit fraction.
-macro_rules! cache_prompt_total {
+/// One row's context size: fresh input plus cache read plus the cache-write
+/// total (both ledger eras), NULL counters contributing 0. The three are
+/// disjoint prompt dimensions, so their sum is the whole prompt the model saw.
+macro_rules! ctx_total {
     () => {
         concat!(
-            "(COALESCE(input_tokens, 0) + cache_read + COALESCE(",
+            "(COALESCE(input_tokens, 0) + COALESCE(cache_read, 0) + COALESCE(",
             cache_write_total_expr!(),
             ", 0))"
         )
     };
 }
 
+/// Row-eligibility predicate for the context figures: the row reported at
+/// least one of the dimensions [`ctx_total`] sums, so a row that reported
+/// none is absent rather than a measured zero.
+macro_rules! ctx_reported {
+    () => {
+        concat!(
+            "(input_tokens IS NOT NULL OR cache_read IS NOT NULL OR ",
+            cache_write_total_expr!(),
+            " IS NOT NULL)"
+        )
+    };
+}
+
 /// The `/status/query` SELECT clause: [`AGG_SQL`]'s base columns at the SAME
-/// fine grain, plus the twelve expressions the derived display metrics need.
+/// fine grain, plus the nine expressions the derived display metrics need.
+/// Throughput and the cache-hit share need no extra column: both are ratios of
+/// base-column sums the fold already holds.
 ///
 /// A macro rather than a `const` for the same reason [`agg_base_columns`] is:
 /// both [`QUERY_AGG_SQL`] and [`SERIES_AGG_SQL`] assemble it with `concat!` at
@@ -207,29 +211,19 @@ macro_rules! query_agg_select {
             " THEN 1 ELSE 0 END), 0)                            AS ttft_count,
     COALESCE(SUM(latency_ms), 0)                        AS latency_sum,
     MAX(latency_ms)                                     AS latency_max,
-    MAX(input_tokens)                                   AS input_tokens_max,
-    COUNT(input_tokens)                                 AS input_tokens_present,
+    MAX(CASE WHEN ",
+            ctx_reported!(),
+            " THEN ",
+            ctx_total!(),
+            " END)                                              AS ctx_max,
     COALESCE(SUM(CASE WHEN ",
-            tok_s_eligible!(),
-            "
-        THEN CAST(output_tokens AS REAL) * 1000.0
-             / CAST(latency_ms - ttfb_ms AS REAL)
-        ELSE 0.0 END), 0.0)                             AS tok_s_sum,
+            ctx_reported!(),
+            " THEN ",
+            ctx_total!(),
+            " ELSE 0 END), 0)                                   AS ctx_sum,
     COALESCE(SUM(CASE WHEN ",
-            tok_s_eligible!(),
-            "
-        THEN 1 ELSE 0 END), 0)                          AS tok_s_count,
-    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
-            cache_prompt_total!(),
-            " > 0
-        THEN CAST(cache_read AS REAL) / CAST(",
-            cache_prompt_total!(),
-            " AS REAL)
-        ELSE 0.0 END), 0.0)                             AS cache_hit_sum,
-    COALESCE(SUM(CASE WHEN cache_read IS NOT NULL AND ",
-            cache_prompt_total!(),
-            " > 0
-        THEN 1 ELSE 0 END), 0)                          AS cache_hit_count,
+            ctx_reported!(),
+            " THEN 1 ELSE 0 END), 0)                            AS ctx_count,
     COALESCE(SUM(CASE WHEN fallback_count > 0
         THEN 1 ELSE 0 END), 0)                          AS fallback_served"
         )
@@ -296,7 +290,7 @@ pub(super) struct FineRow {
     /// `MAX(ttfb_ms)` over streaming successes with a TTFB; `None` when the
     /// group has no such row.
     pub ttfb_max: Option<i64>,
-    /// Summed `ttfb_ms` over TTFT-eligible rows -- the p50 numerator. Filtered
+    /// Summed `ttfb_ms` over TTFT-eligible rows -- the mean's numerator. Filtered
     /// to the SAME population as `ttfb_max`, unlike `AggRow::sum_ttfb_ms`.
     pub ttft_sum: i64,
     /// Count of TTFT-eligible rows (the `ttft_sum` divisor).
@@ -307,21 +301,14 @@ pub(super) struct FineRow {
     /// `None` only for a group with no rows -- which cannot occur in a grouped
     /// result -- but it is still read as `Option` rather than assumed.
     pub latency_max: Option<i64>,
-    /// `MAX(input_tokens)` -- the group's context high-water mark. `None` when
-    /// no row reported an input-token count.
-    pub input_tokens_max: Option<i64>,
-    /// Rows that REPORTED an input-token count (`COUNT` ignores NULL). The
-    /// mean-context denominator.
-    pub input_tokens_present: i64,
-    /// Summed per-request tokens/second over throughput-eligible rows.
-    pub tok_s_sum: f64,
-    /// Count of throughput-eligible rows (the `tok_s_sum` divisor).
-    pub tok_s_count: i64,
-    /// Summed per-request cache-hit FRACTION over cache-reporting rows.
-    pub cache_hit_sum: f64,
-    /// Count of cache-reporting rows with a positive prompt total (the
-    /// `cache_hit_sum` divisor).
-    pub cache_hit_count: i64,
+    /// Largest per-row context (fresh input + cache read + cache write) over
+    /// rows that reported any of the three; `None` when none did.
+    pub ctx_max: Option<i64>,
+    /// Summed per-row context over the same rows as `ctx_max`.
+    pub ctx_sum: i64,
+    /// Count of rows that reported any context dimension (the `ctx_sum`
+    /// divisor).
+    pub ctx_count: i64,
     /// Rows served only after a fallback (`fallback_count > 0`). Additive, not
     /// a ratio: `fallback_count` is NOT NULL in the schema, so this is a plain
     /// count of rows where the router had to try more than its first choice.
@@ -354,7 +341,7 @@ pub(super) fn aggregate_in(
 }
 
 /// Build a [`FineRow`] from a [`QUERY_AGG_SQL`] result row: the base columns
-/// through the shared mapper, then the twelve extra columns by ordinal.
+/// through the shared mapper, then the nine extra columns by ordinal.
 pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
     Ok(FineRow {
         agg: map_agg_row(row)?,
@@ -363,13 +350,10 @@ pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
         ttft_count: row.get(35)?,
         latency_sum: row.get(36)?,
         latency_max: row.get(37)?,
-        input_tokens_max: row.get(38)?,
-        input_tokens_present: row.get(39)?,
-        tok_s_sum: row.get(40)?,
-        tok_s_count: row.get(41)?,
-        cache_hit_sum: row.get(42)?,
-        cache_hit_count: row.get(43)?,
-        fallback_served: row.get(44)?,
+        ctx_max: row.get(38)?,
+        ctx_sum: row.get(39)?,
+        ctx_count: row.get(40)?,
+        fallback_served: row.get(41)?,
     })
 }
 
@@ -379,7 +363,7 @@ pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
 /// index is read here.
 pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64)> {
     let fine = map_fine_row(row)?;
-    let bucket = row.get(45)?;
+    let bucket = row.get(42)?;
     Ok((fine, bucket))
 }
 
