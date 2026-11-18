@@ -441,13 +441,22 @@ fn series_bucket_lifetime_sums_reconcile_to_the_group_sums() {
         }),
     );
 
-    // Assert: the bucketed path prices each row per bucket, and those
-    // per-bucket lifetimes sum to the unbucketed group sums.
+    // Assert: the bucketed path prices each row once per bucket and once over
+    // the whole window, so what it priced is the window's lifetimes twice: the
+    // per-bucket rows sum to them, and the window rows are them.
     assert!(
-        bucketed.len() > unbucketed.len(),
+        bucketed.len() > 2 * unbucketed.len(),
         "the fixture must split a group across buckets"
     );
-    assert_eq!(per_provider(&bucketed), per_provider(&unbucketed));
+    let doubled: BTreeMap<String, CacheWriteLifetimes> = per_provider(&unbucketed)
+        .into_iter()
+        .map(|(provider, mut lifetimes)| {
+            let once = lifetimes.clone();
+            merge_lifetimes(&mut lifetimes, once);
+            (provider, lifetimes)
+        })
+        .collect();
+    assert_eq!(per_provider(&bucketed), doubled);
 }
 
 #[test]
@@ -505,6 +514,25 @@ fn each_seat_of_one_provider_gets_its_own_lifetimes_on_every_priced_read() {
 /// lifetime sums.
 type LegacyOnlyCase = (&'static str, Vec<Writes>, Vec<(u32, i64)>);
 
+/// One row per fine group of `rows`, in first-seen order. Every row of a group
+/// must carry the same lifetimes: on a one-bucket grid the bucket and the
+/// window hold the same ledger rows, so the two prices of a group see the same
+/// writes.
+fn one_per_group(rows: Vec<AggRow>) -> Vec<AggRow> {
+    let mut out: Vec<AggRow> = Vec::new();
+    for row in rows {
+        match out.iter().find(|seen| seen.key == row.key) {
+            Some(seen) => assert_eq!(
+                lifetimes_of(seen),
+                lifetimes_of(&row),
+                "one group's bucket and window rows disagree"
+            ),
+            None => out.push(row),
+        }
+    }
+    out
+}
+
 /// One ledger read through every priced path: the
 /// unbucketed and bucketed query, and the priced aggregate.
 fn priced_reads(db: &mut UsageDb) -> [(&'static str, Vec<AggRow>); 3] {
@@ -514,7 +542,7 @@ fn priced_reads(db: &mut UsageDb) -> [(&'static str, Vec<AggRow>); 3] {
     };
     [
         ("query", priced_rows(db, None)),
-        ("series", priced_rows(db, Some(one_bucket))),
+        ("series", one_per_group(priced_rows(db, Some(one_bucket)))),
         (
             "aggregate",
             aggregate_with_cache_lifetimes(db, 0, 10_000).expect("aggregate"),

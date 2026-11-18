@@ -699,6 +699,7 @@ fn group_with_no_ttft_eligible_row_reports_neither_ttft_figure() {
 include!("grouped_hand_computed_tests.rs");
 include!("grouped_series_tests.rs");
 include!("grouped_series_grid_tests.rs");
+include!("grouped_series_pricing_tests.rs");
 include!("grouped_robustness_tests.rs");
 include!("grouped_seat_tests.rs");
 include!("grouped_error_class_tests.rs");

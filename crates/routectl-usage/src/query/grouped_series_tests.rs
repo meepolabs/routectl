@@ -241,7 +241,7 @@ fn every_additive_bucket_metric_sums_to_the_window_totals() {
 }
 
 #[test]
-fn both_cost_channels_reconcile_bucket_wise_with_the_window_totals() {
+fn both_cost_channels_stay_apart_in_every_bucket_and_in_the_totals() {
     // Arrange: four rows on a four-bucket grid, alternating a priced upstream
     // with a subscription one, so each channel has contributions in two
     // separate buckets and neither can be reconstructed from the other.
@@ -264,36 +264,42 @@ fn both_cost_channels_reconcile_bucket_wise_with_the_window_totals() {
         );
     }
 
-    // Act
+    // Act: a price per token, so a figure depends on the rows priced and not
+    // on how many fine rows they were cut into.
     let result = query(
         &mut db,
         &bucketed(GroupDim::Model, 1000, 4),
-        |row| match row.key.upstream.as_deref() {
-            Some("u-priced") => RowCost::Priced(1.25),
-            _ => RowCost::Subscription(Some(2.5), Vec::new()),
+        |row| {
+            let usd = row.input_tokens as f64 / 800.0;
+            match row.key.upstream.as_deref() {
+                Some("u-priced") => RowCost::Priced(usd),
+                _ => RowCost::Subscription(Some(2.0 * usd), Vec::new()),
+            }
         },
         no_deadline(),
     )
     .expect("query");
 
-    // Assert: the hand-computed totals first -- real spend counts only the two
-    // priced rows, notional value only the two subscription ones.
+    // Assert: real spend counts only the two priced rows, notional value only
+    // the two subscription ones. Each bucket is priced over its own rows, so
+    // it carries its own row's channel and nothing of the other. The buckets
+    // are not summed against the totals: a cost is priced over the span it
+    // covers, and only the additive counts are guaranteed to sum.
     assert_close(result.totals.cost_usd, 2.5);
     assert_close(result.totals.equivalent_cost_usd, 5.0);
-
-    // Both cost channels are strictly additive, so the buckets sum to the
-    // totals they were folded beside -- separately, and never into each other.
-    let s = series(&result);
-    let summed_cost: f64 = s.buckets.iter().filter_map(|b| b.metrics.cost_usd).sum();
-    let summed_equivalent: f64 = s
+    let channels: Vec<(Option<f64>, Option<f64>)> = series(&result)
         .buckets
         .iter()
-        .filter_map(|b| b.metrics.equivalent_cost_usd)
-        .sum();
-    assert_close(Some(summed_cost), result.totals.cost_usd.unwrap());
-    assert_close(
-        Some(summed_equivalent),
-        result.totals.equivalent_cost_usd.unwrap(),
+        .map(|b| (b.metrics.cost_usd, b.metrics.equivalent_cost_usd))
+        .collect();
+    assert_eq!(
+        channels,
+        [
+            (Some(1.25), None),
+            (None, Some(2.5)),
+            (Some(1.25), None),
+            (None, Some(2.5)),
+        ]
     );
 }
 

@@ -25,7 +25,7 @@ use crate::db::UsageDb;
 use super::aggregate::ClassesByRow;
 use super::cache_lifetimes::attach;
 use super::deadline::{DeadlineGuard, ReadLimit};
-use super::slices::{MergedRead, ReadPlan, read_merged};
+use super::slices::{MergedRead, ReadPlan, WindowRows, read_merged};
 use super::{AggRow, GroupKey, QueryError};
 
 /// The most buckets a series may carry. The caller resolves the bucket width so
@@ -329,7 +329,15 @@ pub struct QueryResult {
     pub totals: QueryTotals,
     /// The time series over the same rows, present exactly when
     /// [`QuerySpec::bucket`] asked for one. Serialized as an explicit `null`
-    /// otherwise, never skipped.
+    /// otherwise, never skipped. The groups and totals are the same with or
+    /// without it.
+    ///
+    /// A bucket's figures are priced and derived over that bucket's rows
+    /// alone. The additive counts of the buckets sum to the totals, but the
+    /// costs and the cache-hit share need not: a fine row unpriced over the
+    /// window (a cache write of unknown lifetime) can be priced in the buckets
+    /// that hold none of it, and a row counts toward the hit share in a bucket
+    /// only when it reported cache reads there.
     pub series: Option<QuerySeries>,
 }
 
@@ -359,12 +367,13 @@ pub struct QueryResult {
 /// has ended before this returns, the first failure that is not an interrupt
 /// is the error, and no partial result is ever returned.
 ///
-/// `price` is called once per FINE row -- while `upstream` is still known --
-/// on the calling thread, after the slices are merged, and its verdict is
-/// folded into the coarse group the row belongs to. Every row it sees carries
-/// its per-lifetime cache writes ([`AggRow::cache_write_lifetimes`] is
-/// `Some`); on the series path those are the writes of that row's bucket
-/// alone.
+/// `price` is called once per FINE row over the whole window -- while
+/// `upstream` is still known -- on the calling thread, after the slices are
+/// merged, and its verdict is folded into the coarse group the row belongs to.
+/// On the series path it is also called once per fine row and bucket, over
+/// that bucket's rows alone, for the bucket's figures. Every row it sees
+/// carries its per-lifetime cache writes ([`AggRow::cache_write_lifetimes`]
+/// is `Some`) for the span it is priced over.
 pub fn query(
     db: &mut UsageDb,
     spec: &QuerySpec,
@@ -401,9 +410,9 @@ pub(super) fn query_with(
 /// The read + fold, split out so [`query_with`] can scope its progress guard
 /// around the whole of it.
 ///
-/// Each fine row is priced exactly once and folded into the coarse groups and,
-/// on the series path, into its bucket in the same pass, so groups, totals
-/// and series reconcile by construction.
+/// The groups and totals are priced over the whole window and each series
+/// bucket over itself, so the additive counts reconcile by construction and
+/// the priced and ratio figures need not (see [`QueryResult::series`]).
 fn read_and_fold(
     db: &UsageDb,
     spec: &QuerySpec,
@@ -441,8 +450,14 @@ fn read_and_fold(
 /// The coarse groups by label and, on the series path, the buckets by index.
 type Folded = (BTreeMap<String, GroupAcc>, BTreeMap<i64, GroupAcc>);
 
-/// Price each merged fine row once and fold it into its coarse group and, on
-/// the series path, its bucket.
+/// Fold the merged fine rows into the coarse groups and, on the series path,
+/// the buckets.
+///
+/// A bucket is priced from its own fine rows. The groups are priced from the
+/// same fine rows merged across their buckets first, so a group's figures are
+/// the whole window's whether or not a series was requested: a row's price and
+/// its cache-hit eligibility depend on what it holds over the span it is
+/// priced over, not on the sum of its slices.
 ///
 /// A row whose bucket index falls outside the grid is refused before it
 /// reaches EITHER accumulator: [`densify`] emits only `0..count`, so counting
@@ -461,7 +476,7 @@ fn fold(
         mut lifetimes,
         mut classes,
     } = read;
-    let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
+    let mut window = WindowRows::default();
     let mut buckets: BTreeMap<i64, GroupAcc> = BTreeMap::new();
     for (mut fine, bucket_ix) in rows {
         limit.check()?;
@@ -472,20 +487,25 @@ fn fold(
         }
         attach(&mut fine.agg, bucket_ix, &mut lifetimes);
         let row_classes = take_classes(&fine.agg.key, bucket_ix, &mut classes);
-        let cost = price(&fine.agg);
-        let label = spec.group_by.label(&fine.agg.key);
-        groups
-            .entry(label)
-            .or_default()
-            .add(&fine, &cost, &row_classes);
         if spec.bucket.is_some() {
+            let cost = price(&fine.agg);
             buckets
                 .entry(bucket_ix)
                 .or_default()
                 .add(&fine, &cost, &row_classes);
         }
+        window.add(fine, row_classes);
     }
     debug_assert_classes_attached(&classes);
+    let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
+    for (fine, row_classes) in window.into_rows() {
+        limit.check()?;
+        let cost = price(&fine.agg);
+        groups
+            .entry(spec.group_by.label(&fine.agg.key))
+            .or_default()
+            .add(&fine, &cost, &row_classes);
+    }
     Ok((groups, buckets))
 }
 

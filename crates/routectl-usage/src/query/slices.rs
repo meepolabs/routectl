@@ -27,8 +27,8 @@
 //!   slices of a window that reaches back past the retention horizon.
 //!
 //! Slices return raw, unpriced fine rows; the merge sums them per
-//! `(fine group, bucket)` and the caller prices and folds the merged rows once,
-//! so a figure never depends on how the window was cut.
+//! `(fine group, bucket)` and the caller prices and folds the merged rows, so a
+//! figure never depends on how the window was cut.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -41,7 +41,7 @@ use super::aggregate::{earliest_ts_start_below, read_fine_rows};
 use super::cache_lifetimes::{LifetimesByRow, merge_lifetimes, read_lifetimes};
 use super::deadline::{CancelFlag, DeadlineGuard, ReadLimit};
 use super::grouped::QuerySpec;
-use super::{AggRow, QueryError};
+use super::{AggRow, GroupKey, QueryError};
 
 /// How many slices a long window is read in. Four keeps the 5M-row all-time
 /// read well inside the query budget on one core each; more buys speed the
@@ -449,6 +449,45 @@ pub(super) fn merge(slices: Vec<SliceRows>, limit: &ReadLimit) -> Result<MergedR
         lifetimes,
         classes,
     })
+}
+
+/// The fine rows of a read merged across their buckets: one row per fine
+/// group over the whole window, in the order each group first appears, with
+/// its lifetimes and error classes summed alongside. The groups and totals are
+/// priced from these, so they never depend on whether a series was requested.
+#[derive(Default)]
+pub(super) struct WindowRows {
+    rows: Vec<(FineRow, BTreeMap<String, i64>)>,
+    index: HashMap<GroupKey, usize>,
+}
+
+impl WindowRows {
+    /// Add one bucket's fine row, its lifetimes already attached, and its
+    /// error classes.
+    pub(super) fn add(&mut self, mut row: FineRow, classes: BTreeMap<String, i64>) {
+        match self.index.entry(row.agg.key.clone()) {
+            Entry::Occupied(at) => {
+                let (into, into_classes) = &mut self.rows[*at.get()];
+                let lifetimes = row.agg.cache_write_lifetimes.take().unwrap_or_default();
+                merge_fine(into, row);
+                merge_lifetimes(
+                    into.agg.cache_write_lifetimes.get_or_insert_default(),
+                    lifetimes,
+                );
+                merge_classes(into_classes, classes);
+                derive_cache_read_avg(&mut into.agg);
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(self.rows.len());
+                self.rows.push((row, classes));
+            }
+        }
+    }
+
+    /// The merged rows, each beside its error classes.
+    pub(super) fn into_rows(self) -> Vec<(FineRow, BTreeMap<String, i64>)> {
+        self.rows
+    }
 }
 
 /// Add the class counts of `from` into `into`.
