@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::quota::freshness::accept_reset;
 use crate::quota::key::seat_key_for_secret_ref;
-use crate::quota::window::{Billing, Utilization};
+use crate::quota::window::{Billing, QuotaWindow, Utilization};
 
 const SEAT_PROVIDER: &str = "anthropic";
 const WINDOW: Duration = Duration::from_hours(5);

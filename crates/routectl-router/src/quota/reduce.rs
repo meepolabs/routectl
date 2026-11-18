@@ -76,19 +76,15 @@ pub enum RejectionReason {
     Overflow,
     /// A reading disagreed with the stored one for the same window: the same
     /// reset with a used fraction lower than rounding can explain.
-    #[cfg_attr(not(test), allow(dead_code))]
     Contradictory,
     /// The reported window length was zero or too long to be a quota window.
-    #[cfg_attr(not(test), allow(dead_code))]
     UnknownLength,
     /// The window's started state contradicted its usage or its reset.
-    #[cfg_attr(not(test), allow(dead_code))]
     InvalidStarted,
     /// A usage body or window set did not have the one shape it must: missing
     /// or mistyped members, a non-canonical scope, a duplicate window, too
     /// many windows, or a window validated against another observation's
     /// stamp.
-    #[cfg_attr(not(test), allow(dead_code))]
     MalformedBody,
 }
 

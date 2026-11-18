@@ -2,7 +2,7 @@
 //!
 //! # Why a plain map, and why it is bounded
 //!
-//! One [`QuotaSnapshot`] per seat, behind one mutex. The keyspace is the OAuth
+//! One [`AccountMeter`] per seat, behind one mutex. The keyspace is the OAuth
 //! seat set the credential store declares and the loaded config admits -- it
 //! is operator-declared, not client-driven, so a plain map cannot grow past
 //! the seats EVER declared in this process. That is the same bound the
@@ -35,25 +35,18 @@
 //! client-supplied session; nothing here is client-supplied, so there is no
 //! eviction policy to get wrong.
 //!
-//! # The merge rule, and why it is per-window
+//! # The merge rule
 //!
-//! An observation carries both windows, but an upstream can report one and
-//! omit the other, so the windows are merged INDEPENDENTLY. Per window:
+//! Each account holds one window per reported length and scope; the merge
+//! rule lives in [`super::meter`]. Two entry points feed it:
+//! [`QuotaStore::observe_account`] takes a validated, source-tagged
+//! observation, and [`QuotaStore::observe`] adapts one response-header
+//! snapshot onto a partial observation of the curated windows. Both are
+//! refused whole when a reading contradicts the stored one for its window,
+//! and the refusal is counted.
 //!
-//! - A newer valid `Known` replaces an older `Known` or `Unknown`, INCLUDING
-//!   when utilization DECREASES. A window resets; a drop is a real reading,
-//!   not an anomaly to smooth away.
-//! - An incoming `Unknown` PRESERVES a still-fresh stored `Known`. One
-//!   response that failed to carry a header is not evidence the budget
-//!   changed.
-//! - An incoming `Unknown` leaves `Unknown` when the stored reading is absent
-//!   or no longer fresh -- so a preserved reading can never outlive its own
-//!   window.
-//! - An OLDER observation never overwrites a newer one. Responses complete out
-//!   of order, and a late arrival describes an earlier moment.
-//! - Omitting one window never erases the other.
-//! - Expired state is never revived: freshness is judged at merge time and
-//!   again at read time, against the window's own reset.
+//! [`QuotaStore::reading_for`] projects an account back onto the two-role
+//! snapshot placement reads, applying read-time expiry.
 //!
 //! # Log hygiene
 //!
@@ -71,10 +64,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 
-use super::freshness::{ObservationStamp, is_fresh};
+use super::freshness::ObservationStamp;
 use super::key::SeatKey;
+use super::meter::{AccountMeter, ReportState};
+use super::reading::AccountObservation;
 use super::reduce::{QuotaSnapshot, RejectionReason};
-use super::window::QuotaWindow;
 
 /// How long a stored reading stays authoritative on the MONOTONIC clock,
 /// independent of its own reset.
@@ -159,6 +153,15 @@ impl RejectionCounters {
     }
 }
 
+/// Why an observation was not merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserveRefusal {
+    /// The account is not in the configured seat set.
+    NotAdmitted,
+    /// The merge refused the observation for this reason.
+    Rejected(RejectionReason),
+}
+
 /// Running rejection totals, partitioned by the fixed reason set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RejectionTotals {
@@ -188,204 +191,11 @@ fn now_epoch_secs() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// One seat's stored reading: each window paired with the stamp of the
-/// observation THAT window came from.
-///
-/// Every field stays private, so the merge rule below is the only way to
-/// build or change one. A caller reads a seat's state through
-/// [`QuotaStore::reading_for`], which applies read-time expiry -- it cannot
-/// reach an unexpired-checked window by holding this type.
-///
-/// The per-window stamp is load-bearing rather than bookkeeping. A window
-/// preserved across an unknown-bearing response must keep aging on its ORIGINAL
-/// observation, or the monotonic ceiling never bites: a seat under steady
-/// traffic whose responses stop carrying the header would re-stamp the same
-/// stale reading forever, and a far-future reset would make it immortal --
-/// exactly the failure the second freshness bound exists to prevent. Storing one
-/// stamp for the whole snapshot cannot express that, because the two windows are
-/// merged independently and so can come from different responses.
-#[derive(Debug, Clone)]
-struct StoredReading {
-    /// Stamp of the most recent observation merged into this seat, whatever it
-    /// carried. Orders arrivals; never ages a window.
-    latest: ObservationStamp,
-    fast: StoredWindow,
-    slow: StoredWindow,
-    /// Billing state and the stamp of the observation it came from.
-    billing: super::window::Billing,
-    billing_observed: ObservationStamp,
-}
-
-/// One window and the observation instant it was read at.
-#[derive(Debug, Clone)]
-struct StoredWindow {
-    window: QuotaWindow,
-    observed: ObservationStamp,
-}
-
-impl StoredWindow {
-    /// The window as it reads at `now`: itself while both freshness bounds
-    /// hold, `Unknown` once either lapses.
-    fn effective(&self, now: &ObservationStamp) -> QuotaWindow {
-        match &self.window {
-            QuotaWindow::Unknown => QuotaWindow::Unknown,
-            QuotaWindow::Known { reset_at, .. } => {
-                if is_fresh(reset_at.at(), &self.observed, now, MAX_OBSERVATION_AGE) {
-                    self.window.clone()
-                } else {
-                    QuotaWindow::Unknown
-                }
-            }
-        }
-    }
-
-    /// This window merged with an incoming one observed at `observed`.
-    ///
-    /// Ordering is judged PER WINDOW, on the monotonic component: an incoming
-    /// reading older than the one already stored for THIS window is discarded
-    /// even when it arrived later, because responses complete out of order and a
-    /// late arrival describes an earlier moment. Judging that per snapshot
-    /// instead would let one window's newer reading be thrown away because a
-    /// DIFFERENT window had been updated in between -- the two windows are
-    /// merged independently and so can legitimately come from different
-    /// responses.
-    ///
-    /// A `Known` incoming reading otherwise wins outright and brings its own
-    /// stamp -- including when its utilization DECREASED, which is a window
-    /// resetting and not an anomaly to smooth. An `Unknown` incoming reading
-    /// carries this window forward UNCHANGED, keeping its original stamp, and
-    /// only while it is still effective; once it lapses the seat reads `Unknown`
-    /// for that window rather than at its last value.
-    fn merged(&self, incoming: &QuotaWindow, observed: &ObservationStamp) -> Self {
-        if observed.monotonic() < self.observed.monotonic() {
-            return self.clone();
-        }
-        match incoming {
-            QuotaWindow::Known { .. } => Self {
-                window: incoming.clone(),
-                observed: *observed,
-            },
-            QuotaWindow::Unknown => match self.effective(observed) {
-                QuotaWindow::Unknown => Self {
-                    window: QuotaWindow::Unknown,
-                    observed: *observed,
-                },
-                _ => self.clone(),
-            },
-        }
-    }
-}
-
-impl StoredReading {
-    /// A first reading for a seat, every part stamped at its observation.
-    const fn first(snapshot: QuotaSnapshot) -> Self {
-        Self {
-            latest: snapshot.observed,
-            fast: StoredWindow {
-                window: snapshot.fast,
-                observed: snapshot.observed,
-            },
-            slow: StoredWindow {
-                window: snapshot.slow,
-                observed: snapshot.observed,
-            },
-            billing: snapshot.billing,
-            billing_observed: snapshot.observed,
-        }
-    }
-
-    /// This reading merged with `observed`.
-    ///
-    /// There is deliberately NO whole-snapshot reject. Ordering is enforced by
-    /// each part against its OWN stamp -- see [`StoredWindow::merged`] and
-    /// [`StoredReading::merged_billing`] -- because a snapshot-level gate throws
-    /// away a genuinely newer reading for one window whenever a different window
-    /// happened to be updated in between. Concretely: FAST known at t1, then a
-    /// response at t3 carrying only SLOW (which preserves FAST), then the FAST
-    /// reading stamped t2 arrives late; rejecting the whole t2 snapshot against a
-    /// snapshot-level t3 would keep the t1 FAST value even though t2 is the newest
-    /// FAST observation there is.
-    ///
-    /// `latest` therefore records the most recent arrival for diagnostics only.
-    /// It never ages a window and never gates one.
-    fn merged(&self, observed: &QuotaSnapshot) -> Self {
-        Self {
-            latest: if observed.observed.monotonic() < self.latest.monotonic() {
-                self.latest
-            } else {
-                observed.observed
-            },
-            fast: self.fast.merged(&observed.fast, &observed.observed),
-            slow: self.slow.merged(&observed.slow, &observed.observed),
-            billing: self.merged_billing(observed),
-            billing_observed: if observed.billing == super::window::Billing::Unknown
-                || observed.observed.monotonic() < self.billing_observed.monotonic()
-            {
-                self.billing_observed
-            } else {
-                observed.observed
-            },
-        }
-    }
-
-    /// The billing state to keep. A known incoming state wins unless it is older
-    /// than the stored one; an `Unknown` incoming state preserves a known stored
-    /// one only while the observation it came from is itself within the age
-    /// ceiling, and otherwise falls back to `Unknown`.
-    ///
-    /// Aged rather than expired, because billing is reported alongside the
-    /// windows and has no reset of its own. An unknown incoming state is a
-    /// missing header, never evidence a seat became cheaper.
-    fn merged_billing(&self, observed: &QuotaSnapshot) -> super::window::Billing {
-        if observed.billing != super::window::Billing::Unknown {
-            if observed.observed.monotonic() < self.billing_observed.monotonic() {
-                return self.billing.clone();
-            }
-            return observed.billing.clone();
-        }
-        if Self::within_ceiling(&self.billing_observed, &observed.observed) {
-            self.billing.clone()
-        } else {
-            super::window::Billing::Unknown
-        }
-    }
-
-    /// Whether `now` is within the monotonic age ceiling of `observed`. False
-    /// when the two cannot be ordered, so an unorderable pair ages out rather
-    /// than reading as fresh.
-    fn within_ceiling(observed: &ObservationStamp, now: &ObservationStamp) -> bool {
-        now.monotonic()
-            .checked_duration_since(observed.monotonic())
-            .is_some_and(|age| age <= MAX_OBSERVATION_AGE)
-    }
-
-    /// This reading as a snapshot read at `now`, every window past its bounds
-    /// reported `Unknown` rather than at its last value.
-    fn as_of(&self, now: &ObservationStamp) -> QuotaSnapshot {
-        QuotaSnapshot {
-            observed: self.latest,
-            fast: self.fast.effective(now),
-            slow: self.slow.effective(now),
-            // Billing ages on the SAME ceiling as a window. It has no reset of
-            // its own, so without this a seat that reported overage and then
-            // went quiet would keep reporting overage forever while its windows
-            // correctly read Unknown -- a stale cost signal outliving the
-            // capacity signal it arrived beside, which is the direction that
-            // demotes a seat on evidence no longer in evidence.
-            billing: if Self::within_ceiling(&self.billing_observed, now) {
-                self.billing.clone()
-            } else {
-                super::window::Billing::Unknown
-            },
-        }
-    }
-}
-
 /// Per-seat latest-quota readings. Interior-locked, so the post-response feed
 /// and the placement read both work through a shared reference.
 #[derive(Debug, Default)]
 pub struct QuotaStore {
-    seats: Mutex<HashMap<SeatKey, StoredReading>>,
+    seats: Mutex<HashMap<SeatKey, AccountMeter>>,
     /// The seat keys insertion admits. Empty until
     /// [`QuotaStore::admit_seats`] declares the configured set, and an empty
     /// set admits NOTHING -- a store nobody declared seats for holds no
@@ -430,15 +240,43 @@ impl QuotaStore {
         self.admitted.lock().contains(key)
     }
 
-    /// Merge one observed snapshot into `key`'s stored reading.
+    /// Merge one response-header snapshot into `key`'s meter.
     ///
-    /// Refused outright -- no entry created, no window merged -- when `key` is
-    /// outside the configured seat set, or when the incoming observation is
-    /// OLDER than the stored one. Otherwise each window merges independently
-    /// per this module's rule.
+    /// The snapshot's known windows become a partial observation of the
+    /// curated windows (see [`AccountMeter`]); an unknown window is omitted
+    /// and never erases. Refused outright -- no entry created, nothing merged
+    /// -- when `key` is outside the configured seat set, and refused whole and
+    /// counted when a window contradicts the stored one.
     ///
-    /// Returns whether anything was stored, which the feed's tests read; the
-    /// production call site ignores it.
+    /// Returns whether the snapshot was merged, which the feed's tests read;
+    /// the production call site ignores it.
+    pub fn observe(&self, key: &SeatKey, observed: QuotaSnapshot) -> bool {
+        self.merge(key, observed.observed, |meter| {
+            meter.merged_header(&observed)
+        })
+        .is_ok()
+    }
+
+    /// Merge one validated observation into `key`'s meter.
+    ///
+    /// Refused as [`ObserveRefusal::NotAdmitted`] (counted in
+    /// [`QuotaStore::refused_by_admission_total`], no entry created) when
+    /// `key` is outside the configured seat set, and as
+    /// [`ObserveRefusal::Rejected`] (counted by reason, stored state
+    /// unchanged) when the merge refuses it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn observe_account(
+        &self,
+        key: &SeatKey,
+        observation: &AccountObservation,
+    ) -> Result<(), ObserveRefusal> {
+        self.merge(key, *observation.observed(), |meter| {
+            meter.merged(observation)
+        })
+    }
+
+    /// Apply `merge` to `key`'s meter (a fresh one stamped `observed` when it
+    /// has none) and store the result.
     ///
     /// Holds `seats` across BOTH the admission check and the insert (nesting
     /// `admitted` inside it via a brief, immediately-released acquisition)
@@ -448,29 +286,64 @@ impl QuotaStore {
     /// takes them strictly sequentially, never together. That one-directional
     /// discipline is what closes the TOCTOU: there is no interleaving where a
     /// retired seat's write survives a concurrent prune.
-    pub fn observe(&self, key: &SeatKey, observed: QuotaSnapshot) -> bool {
+    fn merge(
+        &self,
+        key: &SeatKey,
+        observed: ObservationStamp,
+        merge: impl FnOnce(&AccountMeter) -> Result<AccountMeter, RejectionReason>,
+    ) -> Result<(), ObserveRefusal> {
         let mut guard = self.seats.lock();
         if !self.admits(key) {
             self.refused_by_admission.fetch_add(1, Ordering::Relaxed);
-            return false;
+            return Err(ObserveRefusal::NotAdmitted);
         }
         let merged = match guard.get(key) {
-            Some(stored) => stored.merged(&observed),
-            None => StoredReading::first(observed),
+            Some(stored) => merge(stored),
+            None => merge(&AccountMeter::new(observed)),
         };
-        guard.insert(key.clone(), merged);
-        true
+        match merged {
+            Ok(meter) => {
+                guard.insert(key.clone(), meter);
+                Ok(())
+            }
+            Err(reason) => {
+                drop(guard);
+                self.record_rejection(key, reason);
+                Err(ObserveRefusal::Rejected(reason))
+            }
+        }
     }
 
-    /// `key`'s reading as of `now`, with every window past its own bounds
-    /// reported `Unknown` rather than at its last value.
+    /// `key`'s reading projected onto today's two-role snapshot as of `now`,
+    /// with every window past its own bounds reported `Unknown` rather than
+    /// at its last value.
     ///
-    /// `None` for a seat with no reading at all. A seat WITH a reading whose
-    /// every window has expired answers `Some` with both windows `Unknown`,
-    /// which a caller treats exactly as no evidence -- the distinction exists
-    /// so a diagnostic can tell "never observed" from "observed and expired".
+    /// FAST is the account-wide window of the curated five-hour length; SLOW
+    /// the account-wide window of the curated long length. `None` for a seat
+    /// with no entry at all. A seat WITH an entry whose every window has
+    /// expired answers `Some` with both windows `Unknown`, which a caller
+    /// treats exactly as no evidence -- the distinction exists so a
+    /// diagnostic can tell "never observed" from "observed and expired".
     pub fn reading_for(&self, key: &SeatKey, now: &ObservationStamp) -> Option<QuotaSnapshot> {
-        self.seats.lock().get(key).map(|stored| stored.as_of(now))
+        self.seats
+            .lock()
+            .get(key)
+            .map(|meter| meter.projection(now))
+    }
+
+    /// A copy of `key`'s meter, or `None` when it has no entry.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn account(&self, key: &SeatKey) -> Option<AccountMeter> {
+        self.seats.lock().get(key).cloned()
+    }
+
+    /// What `key` has reported: `NoReading` when it has no entry.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn report_for(&self, key: &SeatKey) -> ReportState {
+        self.seats
+            .lock()
+            .get(key)
+            .map_or(ReportState::NoReading, AccountMeter::report)
     }
 
     /// Count one rejected window by reason, emitting at most one throttled

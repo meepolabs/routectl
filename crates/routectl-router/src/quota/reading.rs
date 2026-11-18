@@ -34,6 +34,7 @@ pub const MAX_WINDOWS_PER_OBSERVATION: usize = 16;
 
 /// Longest scope tag accepted, in bytes. The scope is persisted and served, so
 /// it is held to one short canonical layout.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_SCOPE_BYTES: usize = 32;
 
 /// Which horizon a window describes, read from its reported length alone.
@@ -64,6 +65,7 @@ impl LengthClass {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Scope(String);
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl Scope {
     /// Accept a scope tag in its one canonical layout, or refuse it as
     /// `MalformedBody`. Never normalizes: an uppercase or padded tag is a
@@ -104,6 +106,7 @@ impl WindowKey {
     }
 
     /// The reported window length, in seconds.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn length_secs(&self) -> u64 {
         self.length_secs
     }
@@ -114,12 +117,14 @@ impl WindowKey {
     }
 
     /// The scope, or `None` for an account-wide window.
+    #[allow(dead_code)]
     pub const fn scope(&self) -> Option<&Scope> {
         self.scope.as_ref()
     }
 
     /// The window's class. Total, because construction refused every length
     /// that has none.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn class(&self) -> LengthClass {
         if self.length_secs <= SHORT_WINDOW_MAX_SECS {
             LengthClass::Short
@@ -136,6 +141,7 @@ impl WindowKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Started {
     /// The window is running and resets at its reported reset.
+    #[cfg_attr(not(test), allow(dead_code))]
     Yes,
     /// The window has not started: nothing used. A reset, when the source
     /// reports one, is where the window would end if it began at the
@@ -151,6 +157,7 @@ pub enum ReadingSource {
     /// Quota headers on a proxied response.
     Response,
     /// The background usage poll.
+    #[cfg_attr(not(test), allow(dead_code))]
     Poll,
 }
 
@@ -208,6 +215,7 @@ impl WindowReading {
     }
 
     /// The window's class.
+    #[allow(dead_code)]
     pub const fn class(&self) -> LengthClass {
         self.key.class()
     }
@@ -268,8 +276,10 @@ pub enum ObservationReport {
     /// Some windows; a window this set omits is unchanged, never erased.
     Partial(WindowSet),
     /// Every window the account has; one this set omits no longer applies.
+    #[cfg_attr(not(test), allow(dead_code))]
     Complete(WindowSet),
     /// A complete, schema-valid report that the account has no windows.
+    #[cfg_attr(not(test), allow(dead_code))]
     NoWindows,
 }
 

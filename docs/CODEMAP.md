@@ -2410,6 +2410,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   as no-evidence with no error and no warning. Feeds the seat that ACTUALLY
   served; `served_seat`'s absent cases (pre-dispatch failure, non-OAuth ref,
   forwarded credential) are all correct skips
+- `src/quota/meter.rs` -- one account's meter: a window per reported
+  `WindowKey` with its own stamp and source, last accepted reading, report
+  state (`NoReading | Windows | NoWindows`) and billing. `merged` is
+  newest-wins per key on the monotonic clock; a partial never erases; a
+  complete report drops older omitted windows and sets a floor late windows
+  cannot cross; a same-reset reading lower by at most `CONTRADICTION_SLACK`
+  is kept at the higher value, further is refused `Contradictory` with
+  nothing advanced. `merged_header` adapts a header snapshot onto a partial of
+  the curated keys; `projection` gives placement's two-role snapshot (FAST =
+  account-wide window of the curated five-hour length)
 - `src/quota/placement.rs` -- the birth-placement PARTITION, the store's one
   production reader. `seat_tiers` classifies each seat's FAST window against its
   curated threshold into `SeatQuota::{Unknown, BelowCap, AtCap}` (empty vec for
