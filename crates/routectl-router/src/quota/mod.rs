@@ -38,12 +38,15 @@
 //!   property forbids. No `Display`, so no diagnostic can render a quota
 //!   value without deciding for itself how to word unknown.
 //!
-//! The whole tree is crate-private. The shape is expected to be wrong on the
-//! first cut, and a `pub` item in a baselined crate is a one-way door: every
-//! reshape here is an in-crate refactor instead of a workspace-wide public-API
-//! break. There is deliberately no facade re-export here either -- a consumer
-//! names the submodule it depends on, so the module a type lives in stays
-//! visible at every call site while the shape is still moving.
+//! The tree is crate-private. The shape is expected to be wrong on the first
+//! cut, and a `pub` item in a baselined crate is a one-way door, so the crate
+//! root re-exports only the account-reading read surface (`view`, the token
+//! enums it carries, and the poll vendor and body error) that
+//! `Router::observe_polled_usage` and `Router::account_readings` hand out.
+//! Every other reshape here stays an in-crate refactor. There is deliberately
+//! no facade re-export in this module -- an in-crate consumer names the
+//! submodule it depends on, so the module a type lives in stays visible at
+//! every call site while the shape is still moving.
 
 pub mod curation;
 pub mod feed;
@@ -55,4 +58,5 @@ pub mod reading;
 pub mod reduce;
 pub mod store;
 pub mod usage_body;
+pub mod view;
 pub mod window;

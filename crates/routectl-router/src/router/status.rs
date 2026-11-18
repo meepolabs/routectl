@@ -6,6 +6,12 @@ use routectl_auth::SecretRef;
 use routectl_core::EligibilityReason;
 
 use super::Router;
+use crate::quota::freshness::ObservationStamp;
+use crate::quota::key::seat_key_for_served_identity;
+use crate::quota::reduce::RejectionReason;
+use crate::quota::store::ObserveRefusal;
+use crate::quota::usage_body::{BodyError, UsageVendor};
+use crate::quota::view::{AcceptedReading, AccountReadings};
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::{CircuitPhase, ProviderGateStatus};
 use crate::seat_pool::SeatTarget;
@@ -170,6 +176,53 @@ impl Router {
         out
     }
 
+    /// Land one polled usage body for `account` (a credential account key,
+    /// `provider#label` or the bare provider), fetched under the credential
+    /// `generation` acquired before its token was read.
+    ///
+    /// Refused, in order: [`PolledUsageRejection::NotAdmitted`] when the
+    /// account is not configured; [`PolledUsageRejection::Superseded`] when
+    /// `generation` is no longer the account's current one;
+    /// [`PolledUsageRejection::Body`] when `vendor`'s reducer refuses the
+    /// body; [`PolledUsageRejection::Rejected`] when the meter refuses the
+    /// observation. Only the meter and its counters change: eligibility, the
+    /// breaker and every credential record are untouched.
+    pub fn observe_polled_usage(
+        &self,
+        account: &str,
+        vendor: UsageVendor,
+        body: &[u8],
+        generation: u64,
+    ) -> Result<AcceptedReading, PolledUsageRejection> {
+        let key = seat_key_for_served_identity(account);
+        if self.quota_store.check_admission(&key).is_err() {
+            return Err(PolledUsageRejection::NotAdmitted);
+        }
+        let reduced = vendor.reduce(body, ObservationStamp::now());
+        // The merge runs under the generation check's lock, so a re-login
+        // cannot land between the check and the merge.
+        let outcome = self
+            .under_current_generation(account, generation, || match &reduced {
+                Ok(observation) => self
+                    .quota_store
+                    .observe_account(&key, observation)
+                    .map(|()| AcceptedReading::of(observation))
+                    .map_err(PolledUsageRejection::from),
+                Err(error) => Err(PolledUsageRejection::Body(*error)),
+            })
+            .ok_or(PolledUsageRejection::Superseded)?;
+        if let Err(PolledUsageRejection::Body(error)) = outcome {
+            self.quota_store.record_rejection(&key, error.reason());
+        }
+        outcome
+    }
+
+    /// Every configured account's meter readings as of `now`, with the stale
+    /// rule applied per window, plus the meter's refusal totals. Read-only.
+    pub fn account_readings(&self, now: &ObservationStamp) -> AccountReadings {
+        self.quota_store.readings(now)
+    }
+
     /// Live seat counts for every pool a model routes at, in
     /// pool-name order, read from the same side-effect-free capacity
     /// snapshot sticky placement reads: no RPM token is charged and no
@@ -258,6 +311,30 @@ fn oauth_login_label(secret_ref: Option<&SecretRef>) -> Option<String> {
     }
 }
 
+/// Why a polled usage body did not reach the account meter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolledUsageRejection {
+    /// The account is not one the loaded config serves; nothing was read or
+    /// stored.
+    NotAdmitted,
+    /// The account's credential changed after the poll began, so the body
+    /// describes a login that is no longer current; nothing was stored.
+    Superseded,
+    /// The body did not reduce to an observation; counted, nothing stored.
+    Body(BodyError),
+    /// The meter refused the observation; counted, nothing stored.
+    Rejected(RejectionReason),
+}
+
+impl From<ObserveRefusal> for PolledUsageRejection {
+    fn from(refusal: ObserveRefusal) -> Self {
+        match refusal {
+            ObserveRefusal::NotAdmitted => Self::NotAdmitted,
+            ObserveRefusal::Rejected(reason) => Self::Rejected(reason),
+        }
+    }
+}
+
 /// One pool's live seat counts: how many seats it has, how many a request
 /// could dispatch to right now, and why each of the others cannot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,3 +403,7 @@ impl PoolSeatTotals {
 #[cfg(test)]
 #[path = "status_login_label_tests.rs"]
 mod login_label_tests;
+
+#[cfg(test)]
+#[path = "account_readings_tests.rs"]
+mod account_readings_tests;

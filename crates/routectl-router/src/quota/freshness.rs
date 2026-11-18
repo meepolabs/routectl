@@ -59,7 +59,7 @@ impl ObservationStamp {
     /// This is the ONLY production constructor, and the fields are private,
     /// because the two clocks are only meaningful as a matched pair. A
     /// hand-assembled stamp mixing a wall time from one instant with a
-    /// monotonic reading from another satisfies both of [`is_fresh`]'s
+    /// monotonic reading from another satisfies both of `is_fresh`'s
     /// comparisons independently while representing no real instant, which
     /// turns a fail-closed predicate into a permissive one.
     pub fn now() -> Self {
@@ -69,15 +69,13 @@ impl ObservationStamp {
         }
     }
 
-    /// Wall clock at observation.
+    /// Wall clock at observation, for reporting when a reading was taken.
     ///
-    /// Test-only: the wall reading's one production consumer is [`is_fresh`]
-    /// in this module, which reads the field directly. Exposing an accessor to
-    /// production would invite a caller to compare a stored wall time against
-    /// an upstream instant WITHOUT the monotonic half, which is the pairing
-    /// that makes the freshness verdict fail closed.
-    #[cfg(test)]
-    pub const fn wall(&self) -> SystemTime {
+    /// Never a freshness input on its own: comparing a stored wall time
+    /// against an upstream instant WITHOUT the monotonic half drops the
+    /// pairing that makes a freshness verdict fail closed, so every such
+    /// decision goes through this module's functions instead.
+    pub(crate) const fn wall(&self) -> SystemTime {
         self.wall
     }
 
@@ -184,6 +182,36 @@ pub fn is_fresh(
         return false;
     };
     age <= max_age && now.wall < reset_at
+}
+
+/// How long before `now` the observation stamped `observed` was taken: the
+/// larger of its wall and monotonic ages, so a wall clock that advanced while
+/// the monotonic one did not (a suspended host) still ages the reading.
+///
+/// `None` when either clock places `now` before `observed`: an unorderable
+/// pair has no age, and a caller reads that as no evidence.
+pub fn age(observed: &ObservationStamp, now: &ObservationStamp) -> Option<Duration> {
+    let monotonic = now.monotonic.checked_duration_since(observed.monotonic)?;
+    let wall = now.wall.duration_since(observed.wall).ok()?;
+    Some(monotonic.max(wall))
+}
+
+/// Whether the wall-clock instant `at` has been reached at `now`.
+pub fn has_passed(at: SystemTime, now: &ObservationStamp) -> bool {
+    now.wall >= at
+}
+
+/// The instant `span` after `observed` on the wall clock, accepted as a reset
+/// of a window of `window_duration`: the expiry of a claim that holds only for
+/// `span`. `None` when `span` is zero, longer than the window, or
+/// unrepresentable.
+pub fn reset_after(
+    observed: &ObservationStamp,
+    span: Duration,
+    window_duration: Duration,
+) -> Option<ValidatedReset> {
+    let at = observed.wall.checked_add(span)?;
+    accept_reset(at, observed, window_duration, Duration::ZERO).ok()
 }
 
 #[cfg(test)]

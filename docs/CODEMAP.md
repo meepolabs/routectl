@@ -2427,6 +2427,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   nothing advanced. `merged_header` adapts a header snapshot onto a partial of
   the curated keys; `projection` gives placement's two-role snapshot (FAST =
   account-wide window of the curated five-hour length)
+- `src/quota/view.rs` -- the placement-safe read view of the meter and
+  `STALE_AFTER` (7 min). A window is stale past `STALE_AFTER` on either clock,
+  past a running window's reset, or on an unorderable stamp; a stale window
+  gives no `remaining`. Plain owned, non-`Serialize` values
+  (`AccountReadings`, `AccountReading`, `AccountWindow`, `ReadingWindow`,
+  `LastReading`, `AcceptedReading`) behind `Router::account_readings` and
+  `Router::observe_polled_usage`; today's placement projection does not read it
 - `src/quota/placement.rs` -- the birth-placement PARTITION, the store's one
   production reader. `seat_tiers` classifies each seat's FAST window against its
   curated threshold into `SeatQuota::{Unknown, BelowCap, AtCap}` (empty vec for

@@ -256,6 +256,25 @@ impl Router {
             .generation()
     }
 
+    /// Run `f` while `account`'s credential generation is still `generation`,
+    /// or return `None` without running it. Reads the record and creates none:
+    /// an account with no record never handed out a generation, so nothing
+    /// observed for it is current. The account map stays locked while `f`
+    /// runs, so a reset cannot land between the check and `f`'s effect; `f`
+    /// must not take the account map or a model slot.
+    pub(super) fn under_current_generation<R>(
+        &self,
+        account: &str,
+        generation: u64,
+        f: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let records = self.credential_accounts.lock();
+        let is_current = records
+            .get(account)
+            .is_some_and(|record| record.generation() == generation);
+        is_current.then(f)
+    }
+
     /// Mark `account`'s credential unusable for `cause`. With
     /// `Some(generation)` (from [`Self::acquire_credential_generation`]) the
     /// mark applies only while that credential generation is current, so

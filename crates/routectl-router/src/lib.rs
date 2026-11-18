@@ -173,15 +173,25 @@ pub use override_registry::{
 };
 pub use pool_build::{PoolPlaceholder, PoolReport};
 pub use probe_scheduler::ProbeSchedulerSnapshot;
+pub use quota::freshness::ObservationStamp;
+pub use quota::meter::ReportState;
+pub use quota::reading::{LengthClass, ReadingSource, Started};
+pub use quota::reduce::RejectionReason;
+pub use quota::store::RejectionTotals;
+pub use quota::usage_body::{BodyError, UsageVendor};
+pub use quota::view::{
+    AcceptedReading, AccountReading, AccountReadings, AccountWindow, LastReading, ReadingWindow,
+    STALE_AFTER,
+};
 pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, ActingFieldVerdict, CanaryPosture, CapabilityPersistenceHealth,
     DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot, FieldPreflight,
     FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
     LaneBudgetExhaustions, LaneLossyRepairs, LearnedFills, LearnedLaneProjection, LiveSampleSink,
-    OpeningLane, PoolEligibility, PreflightBlockedReason, ProbeClearAcknowledgement,
-    ResolvedLearnedLane, ResponseCheck, Router, RouterOptions, StreamEvidence,
-    acting_field_verdicts, class_debits,
+    OpeningLane, PolledUsageRejection, PoolEligibility, PreflightBlockedReason,
+    ProbeClearAcknowledgement, ResolvedLearnedLane, ResponseCheck, Router, RouterOptions,
+    StreamEvidence, acting_field_verdicts, class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

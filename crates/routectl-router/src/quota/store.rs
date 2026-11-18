@@ -66,9 +66,12 @@ use parking_lot::Mutex;
 
 use super::freshness::ObservationStamp;
 use super::key::SeatKey;
-use super::meter::{AccountMeter, ReportState};
+use super::meter::AccountMeter;
+#[cfg(test)]
+use super::meter::ReportState;
 use super::reading::AccountObservation;
 use super::reduce::{QuotaSnapshot, RejectionReason};
+use super::view::{AccountReading, AccountReadings};
 
 /// How long a stored reading stays authoritative on the MONOTONIC clock,
 /// independent of its own reset.
@@ -240,6 +243,18 @@ impl QuotaStore {
         self.admitted.lock().contains(key)
     }
 
+    /// Refuse `key` as [`ObserveRefusal::NotAdmitted`], counted like a refused
+    /// write, when it is outside the configured seat set. A gate for a caller
+    /// that must refuse before doing any other work for the account; the
+    /// merge re-checks under its own lock.
+    pub fn check_admission(&self, key: &SeatKey) -> Result<(), ObserveRefusal> {
+        if self.admits(key) {
+            return Ok(());
+        }
+        self.refused_by_admission.fetch_add(1, Ordering::Relaxed);
+        Err(ObserveRefusal::NotAdmitted)
+    }
+
     /// Merge one response-header snapshot into `key`'s meter.
     ///
     /// The snapshot's known windows become a partial observation of the
@@ -264,7 +279,6 @@ impl QuotaStore {
     /// `key` is outside the configured seat set, and as
     /// [`ObserveRefusal::Rejected`] (counted by reason, stored state
     /// unchanged) when the merge refuses it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn observe_account(
         &self,
         key: &SeatKey,
@@ -332,13 +346,33 @@ impl QuotaStore {
     }
 
     /// A copy of `key`'s meter, or `None` when it has no entry.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn account(&self, key: &SeatKey) -> Option<AccountMeter> {
         self.seats.lock().get(key).cloned()
     }
 
+    /// Every configured account's readings at `now`, in account order, with
+    /// the running refusal totals. One lock acquisition each for the admitted
+    /// set and the meters, never held together.
+    pub fn readings(&self, now: &ObservationStamp) -> AccountReadings {
+        let mut admitted: Vec<SeatKey> = self.admitted.lock().iter().cloned().collect();
+        admitted.sort();
+        let accounts = {
+            let seats = self.seats.lock();
+            admitted
+                .iter()
+                .map(|key| AccountReading::of(key.as_str(), seats.get(key), now))
+                .collect()
+        };
+        AccountReadings {
+            accounts,
+            rejections: self.rejections.totals(),
+            refused_by_admission: self.refused_by_admission_total(),
+        }
+    }
+
     /// What `key` has reported: `NoReading` when it has no entry.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn report_for(&self, key: &SeatKey) -> ReportState {
         self.seats
             .lock()
@@ -374,11 +408,6 @@ impl QuotaStore {
     }
 
     /// Running rejection totals, partitioned by reason.
-    ///
-    /// Test-only read surface: the production reporter is the throttled WARN in
-    /// [`QuotaStore::record_rejection`], which reads the counters inline. A
-    /// `/status` field would be a persisted-vocabulary addition this
-    /// derived-only reading deliberately does not make.
     #[cfg(test)]
     pub fn rejection_totals(&self) -> RejectionTotals {
         self.rejections.totals()

@@ -52,7 +52,6 @@ const ANTHROPIC_SCOPED_WEEKLY_PREFIX: &str = "seven_day_";
 const CODEX_WINDOW_MEMBERS: [&str; 2] = ["primary_window", "secondary_window"];
 
 /// Why a usage body did not reduce to an observation.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyError {
     /// The body was empty or whitespace only.
@@ -86,6 +85,39 @@ impl From<RejectionReason> for BodyError {
     }
 }
 
+/// Which vendor's usage-endpoint body a poll fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageVendor {
+    /// The Anthropic OAuth usage endpoint.
+    Anthropic,
+    /// The Codex usage endpoint.
+    Codex,
+}
+
+impl UsageVendor {
+    /// Reduce `body`, read at `observed`, with this vendor's reducer.
+    pub fn reduce(
+        self,
+        body: &[u8],
+        observed: ObservationStamp,
+    ) -> Result<AccountObservation, BodyError> {
+        match self {
+            Self::Anthropic => reduce_anthropic_body(body, observed),
+            Self::Codex => reduce_codex_body(body, observed),
+        }
+    }
+}
+
+impl BodyError {
+    /// The rejection reason this error is counted under.
+    pub const fn reason(self) -> RejectionReason {
+        match self {
+            Self::Window(reason) => reason,
+            _ => RejectionReason::MalformedBody,
+        }
+    }
+}
+
 /// Reduce an Anthropic usage body read at `observed`.
 ///
 /// Windows come only from `five_hour`, `seven_day` and the `seven_day_<scope>`
@@ -93,7 +125,6 @@ impl From<RejectionReason> for BodyError {
 /// `null` (no such window) or `{utilization, resets_at}` with a 0-100 percent
 /// and an RFC 3339 reset, where a `null` reset marks a window that has not
 /// started.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn reduce_anthropic_body(
     body: &[u8],
     observed: ObservationStamp,
@@ -121,7 +152,6 @@ pub fn reduce_anthropic_body(
 /// `rate_limit.secondary_window`, each `null` or `{used_percent,
 /// limit_window_seconds, reset_after_seconds, reset_at}`. A window whose
 /// `reset_after_seconds` is at least its length has not started.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn reduce_codex_body(
     body: &[u8],
     observed: ObservationStamp,

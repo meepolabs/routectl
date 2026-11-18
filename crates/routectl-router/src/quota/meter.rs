@@ -46,13 +46,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::curation::{ANTHROPIC_PROVIDER_KIND, RESET_TOLERANCE, row_for};
-use super::freshness::{ObservationStamp, is_fresh};
+use super::freshness::{ObservationStamp, is_fresh, reset_after};
 use super::reading::{
     AccountObservation, ObservationReport, ReadingSource, Started, WindowKey, WindowReading,
     WindowSet,
 };
 use super::reduce::{QuotaSnapshot, RejectionReason};
 use super::store::MAX_OBSERVATION_AGE;
+use super::view::{STALE_AFTER, within_stale_after};
 use super::window::{Billing, QuotaWindow, WindowRole};
 
 /// How far, as a fraction of the window, a same-reset reading may fall below
@@ -94,19 +95,16 @@ pub struct StoredWindow {
 
 impl StoredWindow {
     /// The validated reading.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn reading(&self) -> &WindowReading {
         &self.reading
     }
 
     /// The stamp of the observation this window came from.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn observed(&self) -> &ObservationStamp {
         &self.observed
     }
 
     /// Where this window came from.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn source(&self) -> ReadingSource {
         self.source
     }
@@ -122,8 +120,19 @@ impl StoredWindow {
                 .is_some_and(|reset| is_fresh(reset.at(), &self.observed, now, MAX_OBSERVATION_AGE))
     }
 
-    /// This window as today's placement value at `now`.
-    fn projected(&self, now: &ObservationStamp) -> QuotaWindow {
+    /// This window as today's placement value at `now`, in `role`.
+    ///
+    /// A running window holds until its reset. An unstarted FAST window says
+    /// the account has used nothing of it, but only as of its observation: it
+    /// reads as known zero while no older than [`STALE_AFTER`], with that
+    /// bound as its reset, and as unknown after.
+    fn projected(&self, role: &WindowRole, now: &ObservationStamp) -> QuotaWindow {
+        if self.reading.started() == Started::No {
+            return match role {
+                WindowRole::Fast => self.projected_unstarted(now),
+                WindowRole::Slow => QuotaWindow::Unknown,
+            };
+        }
         match self.reading.reset() {
             Some(reset_at) if self.is_effective(now) => QuotaWindow::Known {
                 utilization: self.reading.used().clone(),
@@ -131,6 +140,19 @@ impl StoredWindow {
             },
             _ => QuotaWindow::Unknown,
         }
+    }
+
+    fn projected_unstarted(&self, now: &ObservationStamp) -> QuotaWindow {
+        if !within_stale_after(&self.observed, now) {
+            return QuotaWindow::Unknown;
+        }
+        reset_after(&self.observed, STALE_AFTER, self.reading.key().length()).map_or(
+            QuotaWindow::Unknown,
+            |reset_at| QuotaWindow::Known {
+                utilization: self.reading.used().clone(),
+                reset_at,
+            },
+        )
     }
 }
 
@@ -180,19 +202,17 @@ impl AccountMeter {
     }
 
     /// The latest accepted reading's time and source, if any.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn last_accepted(&self) -> Option<LastAccepted> {
         self.last_accepted
     }
 
     /// Every stored window, in no particular order.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn windows(&self) -> impl Iterator<Item = &StoredWindow> {
         self.windows.values()
     }
 
     /// The stored window for `key`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn window(&self, key: &WindowKey) -> Option<&StoredWindow> {
         self.windows.get(key)
     }
@@ -356,7 +376,8 @@ impl AccountMeter {
     /// Today's placement value at `now`: FAST is the account-wide window of
     /// the curated five-hour length, SLOW the account-wide window of the
     /// curated long length, each `Unknown` once past its reset or the age
-    /// ceiling, or when it has not started.
+    /// ceiling. An unstarted window is `Unknown`, except a FAST one no older
+    /// than [`STALE_AFTER`], which is known zero.
     pub(super) fn projection(&self, now: &ObservationStamp) -> QuotaSnapshot {
         QuotaSnapshot {
             observed: self.latest,
@@ -376,7 +397,7 @@ impl AccountMeter {
     fn projected_role(&self, role: &WindowRole, now: &ObservationStamp) -> QuotaWindow {
         role_key(role)
             .and_then(|key| self.windows.get(&key))
-            .map_or(QuotaWindow::Unknown, |stored| stored.projected(now))
+            .map_or(QuotaWindow::Unknown, |stored| stored.projected(role, now))
     }
 }
 

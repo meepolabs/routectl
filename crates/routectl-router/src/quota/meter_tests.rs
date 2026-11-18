@@ -631,9 +631,13 @@ fn an_unstarted_reading_never_counts_as_a_contradiction() {
         .expect("accepted");
 
     assert_eq!(used_of(&store, &five), Some(0.0));
+    let fast = store.reading_for(&seat("a"), &t1).expect("an entry").fast;
+    let QuotaWindow::Known { reset_at, .. } = fast else {
+        panic!("a fresh unstarted FAST window is known: {fast:?}");
+    };
     assert_eq!(
-        store.reading_for(&seat("a"), &t1).expect("an entry").fast,
-        QuotaWindow::Unknown,
+        reset_at.at(),
+        base_wall() + mins(1) + crate::quota::view::STALE_AFTER,
         "a provisional reset is not a running window's expiry"
     );
 }
