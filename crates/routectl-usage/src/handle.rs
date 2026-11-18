@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::mpsc::Sender;
 
+use crate::account_reading::AccountReadingRow;
 use crate::capability_event::CapabilityEvent;
 use crate::record::UsageRecord;
 use crate::writer::WriterMessage;
@@ -66,6 +67,15 @@ pub struct UsageCounters {
     /// to it.
     capability_writer_unavailable: AtomicU64,
     capability_events_persisted: AtomicU64,
+    /// Account-reading history counters, one unit per observation (one
+    /// message, however many rows it carries). Kept apart from the request
+    /// and capability counters: history is best effort, and its loss must
+    /// neither read as ledger loss nor suspend capability pre-flight.
+    account_readings_enqueued: AtomicU64,
+    account_readings_dropped_full: AtomicU64,
+    account_readings_dropped_closed: AtomicU64,
+    account_readings_persisted: AtomicU64,
+    account_readings_write_errors: AtomicU64,
 }
 
 impl UsageCounters {
@@ -127,6 +137,57 @@ impl UsageCounters {
     /// field's own note for why this is not the full counter.
     pub fn capability_writer_unavailable(&self) -> u64 {
         self.capability_writer_unavailable.load(Ordering::Relaxed)
+    }
+
+    /// Account-reading observations accepted into the channel.
+    pub fn account_readings_enqueued(&self) -> u64 {
+        self.account_readings_enqueued.load(Ordering::Relaxed)
+    }
+
+    /// Account-reading observations dropped because the channel was full.
+    pub fn account_readings_dropped_full(&self) -> u64 {
+        self.account_readings_dropped_full.load(Ordering::Relaxed)
+    }
+
+    /// Account-reading observations dropped because the channel was closed.
+    pub fn account_readings_dropped_closed(&self) -> u64 {
+        self.account_readings_dropped_closed.load(Ordering::Relaxed)
+    }
+
+    /// Account-reading observations whose rows all committed.
+    pub fn account_readings_persisted(&self) -> u64 {
+        self.account_readings_persisted.load(Ordering::Relaxed)
+    }
+
+    /// Account-reading observations the writer dropped: no connection, or a
+    /// failed insert that rolled back every row of the observation.
+    pub fn account_readings_write_errors(&self) -> u64 {
+        self.account_readings_write_errors.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn incr_account_readings_enqueued(&self) {
+        self.account_readings_enqueued
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn incr_account_readings_dropped_full(&self) -> u64 {
+        self.account_readings_dropped_full
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn incr_account_readings_dropped_closed(&self) -> u64 {
+        self.account_readings_dropped_closed
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn incr_account_readings_persisted(&self) {
+        self.account_readings_persisted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn incr_account_readings_write_errors(&self) -> u64 {
+        self.account_readings_write_errors
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     pub(crate) fn incr_enqueued(&self) {
@@ -271,6 +332,27 @@ impl UsageHandle {
         }
     }
 
+    /// Hand one account-meter observation's history rows to the writer
+    /// without ever blocking, awaiting, or panicking.
+    ///
+    /// Best effort: a full or closed channel drops the observation with its
+    /// own counter and rate-limited WARN, and the caller's in-memory reading
+    /// stands either way. The writer commits the rows in one transaction, so
+    /// history never holds part of an observation.
+    pub fn try_send_account_readings(&self, rows: Vec<AccountReadingRow>) {
+        match self.sender.try_send(WriterMessage::account_readings(rows)) {
+            Ok(()) => self.counters.incr_account_readings_enqueued(),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                let prior = self.counters.incr_account_readings_dropped_full();
+                warn_account_readings_drop(prior, "full");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                let prior = self.counters.incr_account_readings_dropped_closed();
+                warn_account_readings_drop(prior, "closed");
+            }
+        }
+    }
+
     /// The producer end of the writer channel. Crate-internal so the
     /// acknowledged capability batch can send its own message variant
     /// without duplicating the handle's construction.
@@ -361,5 +443,18 @@ impl UsageHandle {
                 "usage channel full -- dropping capability event (capture lags writer)"
             );
         }
+    }
+}
+
+/// Rate-limited WARN for a dropped account-reading observation; `prior` is the
+/// cause's counter before this drop.
+fn warn_account_readings_drop(prior: u64, channel_state: &'static str) {
+    if prior == 0 || (prior + 1).is_multiple_of(DROP_WARN_INTERVAL) {
+        tracing::warn!(
+            target: "routectl_usage::handle",
+            channel_state,
+            dropped_total = prior + 1,
+            "usage channel refused account reading history -- dropping observation"
+        );
     }
 }

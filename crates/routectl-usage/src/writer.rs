@@ -97,6 +97,9 @@ enum WriterCommand {
     /// it, so a partial application would evict live routing state. See the
     /// `capability_batch` module for the acknowledged-commit contract.
     CapabilityBatch(crate::capability_batch::CapabilityBatch),
+    /// One account-meter observation's history rows, committed together or
+    /// not at all. Best effort: the outcome is counted, never reported back.
+    AccountReadings(Vec<crate::account_reading::AccountReadingRow>),
 }
 
 impl WriterMessage {
@@ -120,6 +123,13 @@ impl WriterMessage {
     /// An acknowledged atomic capability-event batch.
     pub(crate) const fn capability_batch(batch: crate::capability_batch::CapabilityBatch) -> Self {
         Self::new(WriterCommand::CapabilityBatch(batch))
+    }
+
+    /// One account-meter observation's history rows.
+    pub(crate) const fn account_readings(
+        rows: Vec<crate::account_reading::AccountReadingRow>,
+    ) -> Self {
+        Self::new(WriterCommand::AccountReadings(rows))
     }
 }
 
@@ -480,6 +490,13 @@ fn run_writer(
             WriterCommand::CapabilityBatch(batch) => {
                 state.commit_capability_batch(batch, &counters)
             }
+            WriterCommand::AccountReadings(rows) => {
+                crate::account_reading::persist_account_readings(
+                    state.conn.as_ref(),
+                    &rows,
+                    &counters,
+                );
+            }
         }
         state.persist_ledger_gaps(&counters);
     }
@@ -698,7 +715,8 @@ impl WriterState {
     /// Run the one-shot startup retention prune. Best-effort: failures log
     /// a WARN and bump a counter but never abort the writer. Prunes the
     /// `requests` table, the `capability_events` ledger (the latter exempts
-    /// the tombstone boundary and everything after it), and `ledger_gaps`.
+    /// the tombstone boundary and everything after it), `ledger_gaps`, and
+    /// `account_readings`.
     fn prune_once(&self, retention_days: u32, counters: &Arc<UsageCounters>) {
         let Some(conn) = self.conn.as_ref() else {
             return;
@@ -719,6 +737,12 @@ impl WriterState {
         report_prune(
             "ledger gap",
             retention::prune_ledger_gaps(conn, retention_days, now),
+            retention_days,
+            counters,
+        );
+        report_prune(
+            "account reading",
+            retention::prune_account_readings(conn, retention_days, now),
             retention_days,
             counters,
         );

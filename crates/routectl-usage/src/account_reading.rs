@@ -5,6 +5,14 @@
 //! `schema::CREATE_ACCOUNT_READINGS_TABLE`: its `as_str` values are exactly the
 //! tokens that column accepts. Add a variant only alongside a schema step that
 //! widens the CHECK.
+//!
+//! History is best effort: the writer commits one observation's rows in one
+//! transaction or none of them, counts the outcome, and never reports back to
+//! the producer. Nothing reads this table to rebuild in-memory state.
+
+use rusqlite::Connection;
+
+use crate::handle::UsageCounters;
 
 /// Where a reading came from. Column `source`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +152,82 @@ impl AccountReadingRow {
     }
 }
 
+const INSERT_SQL: &str = "INSERT INTO account_readings \
+     (ts_ms, account, source, report, window_secs, scope, length_class, used, reset_ms, started) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+
+/// Log a history write failure at most this often (every Nth failure); the
+/// first one always logs.
+const WRITE_ERROR_LOG_INTERVAL: u64 = 1024;
+
+/// Insert one observation's rows in a single transaction: either every row
+/// lands or none does. Returns the number of rows inserted.
+pub fn insert_account_readings(
+    conn: &Connection,
+    rows: &[AccountReadingRow],
+) -> Result<usize, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let mut inserted = 0;
+    {
+        let mut stmt = tx.prepare_cached(INSERT_SQL)?;
+        for row in rows {
+            let window = row.window.as_ref();
+            inserted += stmt.execute(rusqlite::params![
+                row.ts_ms,
+                row.account,
+                row.source.as_str(),
+                row.report().as_str(),
+                window.map(|w| w.window_secs),
+                window.and_then(|w| w.scope.as_deref()),
+                window.map(|w| w.length_class.as_str()),
+                window.map(|w| w.used),
+                window.and_then(|w| w.reset_ms),
+                window.map(|w| w.started.as_str()),
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(inserted)
+}
+
+/// The writer's handling of one observation: commit its rows and count the
+/// outcome. A missing connection (the writer is running degraded) or a failed
+/// insert drops the observation and counts one history write error.
+///
+/// Kept off the writer's shared `write_errors` on purpose: that counter gates
+/// capability pre-flight and the ledger health reading, and a lost history row
+/// says nothing about either.
+pub fn persist_account_readings(
+    conn: Option<&Connection>,
+    rows: &[AccountReadingRow],
+    counters: &UsageCounters,
+) {
+    let outcome = conn.map_or(Err(None), |conn| {
+        insert_account_readings(conn, rows).map_err(Some)
+    });
+    match outcome {
+        Ok(_) => counters.incr_account_readings_persisted(),
+        Err(err) => note_write_error(err.as_ref(), rows.len(), counters),
+    }
+}
+
+fn note_write_error(err: Option<&rusqlite::Error>, rows: usize, counters: &UsageCounters) {
+    let prior = counters.incr_account_readings_write_errors();
+    if prior == 0 || (prior + 1).is_multiple_of(WRITE_ERROR_LOG_INTERVAL) {
+        tracing::warn!(
+            target: "routectl_usage::account_reading",
+            error = err.map(ToString::to_string).unwrap_or_default(),
+            rows,
+            write_errors = prior + 1,
+            "account reading history write failed -- observation dropped"
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "account_reading_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "account_reading_writer_tests.rs"]
+mod writer_tests;

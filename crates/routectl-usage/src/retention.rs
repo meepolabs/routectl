@@ -88,6 +88,24 @@ pub fn prune_ledger_gaps(
     Ok(PruneOutcome::Pruned { deleted })
 }
 
+/// Delete `account_readings` rows read before the retention cutoff.
+///
+/// Uses the same window as [`prune`], so history never outlives the request
+/// ledger it sits beside. `retention_days == 0` is an explicit "keep
+/// everything" and returns `Skipped`.
+pub fn prune_account_readings(
+    conn: &Connection,
+    retention_days: u32,
+    now_ms: i64,
+) -> Result<PruneOutcome, rusqlite::Error> {
+    if retention_days == 0 {
+        return Ok(PruneOutcome::Skipped);
+    }
+    let cutoff = now_ms.saturating_sub(i64::from(retention_days).saturating_mul(MS_PER_DAY));
+    let deleted = conn.execute("DELETE FROM account_readings WHERE ts_ms < ?1", [cutoff])?;
+    Ok(PruneOutcome::Pruned { deleted })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +335,58 @@ mod tests {
         // Assert
         assert_eq!(outcome, PruneOutcome::Skipped);
         assert_eq!(gap_dropped_values(db.conn()), vec![1, 2]);
+    }
+
+    fn insert_reading(conn: &Connection, ts_ms: i64, account: &str) {
+        conn.execute(
+            "INSERT INTO account_readings (ts_ms, account, source, report) \
+             VALUES (?1, ?2, 'poll', 'no_windows')",
+            rusqlite::params![ts_ms, account],
+        )
+        .expect("insert reading");
+    }
+
+    fn reading_accounts(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT account FROM account_readings ORDER BY ts_ms")
+            .expect("prepare");
+        stmt.query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect")
+    }
+
+    #[test]
+    fn reading_prune_deletes_rows_before_the_cutoff_and_keeps_the_boundary() {
+        // Arrange: 7-day retention puts the cutoff at day 3.
+        let (_dir, db) = open_db();
+        let now = 10 * MS_PER_DAY;
+        let cutoff = now - 7 * MS_PER_DAY;
+        insert_reading(db.conn(), 0, "ancient");
+        insert_reading(db.conn(), cutoff - 1, "just-before");
+        insert_reading(db.conn(), cutoff, "at-cutoff");
+        insert_reading(db.conn(), now - 1, "fresh");
+
+        // Act
+        let outcome = prune_account_readings(db.conn(), 7, now).expect("prune");
+
+        // Assert
+        assert_eq!(outcome, PruneOutcome::Pruned { deleted: 2 });
+        assert_eq!(reading_accounts(db.conn()), vec!["at-cutoff", "fresh"]);
+    }
+
+    #[test]
+    fn reading_prune_zero_retention_keeps_everything() {
+        // Arrange
+        let (_dir, db) = open_db();
+        insert_reading(db.conn(), 0, "ancient");
+        insert_reading(db.conn(), 10 * MS_PER_DAY, "recent");
+
+        // Act
+        let outcome = prune_account_readings(db.conn(), 0, 100 * MS_PER_DAY).expect("prune");
+
+        // Assert
+        assert_eq!(outcome, PruneOutcome::Skipped);
+        assert_eq!(reading_accounts(db.conn()), vec!["ancient", "recent"]);
     }
 }
