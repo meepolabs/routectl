@@ -54,4 +54,5 @@ pub mod placement;
 pub mod reading;
 pub mod reduce;
 pub mod store;
+pub mod usage_body;
 pub mod window;

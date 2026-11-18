@@ -50,7 +50,7 @@ use super::window::{Billing, QuotaWindow, Utilization, WindowRole};
 
 /// Scale of the Codex `primary-used-percent` value, which is a 0-100 percent
 /// rather than the 0-1 fraction the normalized shape carries.
-const PERCENT_SCALE: f64 = 100.0;
+pub(super) const PERCENT_SCALE: f64 = 100.0;
 
 /// Why one REPORTED window was refused, in a fixed closed set so the counters
 /// that partition on it never interpolate an upstream string.

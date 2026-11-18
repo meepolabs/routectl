@@ -2352,6 +2352,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Returns a `Reduction` (the snapshot plus every REPORTED window refused,
   partitioned by `RejectionReason`: invalid utilization, expired / implausible
   reset, overflow) -- an absent window is dormant, not a rejection
+- `src/quota/usage_body.rs` -- pure reducers from the Anthropic and Codex
+  usage-endpoint bodies onto one `Complete` or `NoWindows` poll
+  `AccountObservation`, or a typed `BodyError`. Anthropic windows come only
+  from `five_hour`, `seven_day` and `seven_day_<scope>`; Codex from
+  `rate_limit.primary_window` / `secondary_window`. Duplicate JSON keys at any
+  depth, missing or mistyped members and a percent outside 0-100 are errors,
+  never `NoWindows`
 - `src/quota/key.rs` -- `SeatKey`, the store key, and the ONE derivation both
   sides share. Keyed on `seat_pool::seat_identity`'s OAuth `provider#label`
   ACCOUNT identity, NEVER on `seat_state_key`'s model-scoped
