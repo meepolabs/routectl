@@ -468,9 +468,8 @@ fn the_fresh_schema_ends_with_the_two_cache_write_columns() {
     let db = open(&path).expect("open fresh");
 
     // Assert
-    assert_eq!(SCHEMA_VERSION, 21);
-    assert_eq!(user_version(&path), 21);
-    assert_eq!(meta_version(db.conn()), "21");
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     let columns = requests_columns(db.conn());
     let tail: Vec<&str> = V21_REQUESTS_COLUMNS.iter().map(|(name, _)| *name).collect();
     assert_eq!(&columns[columns.len() - tail.len()..], tail.as_slice());
@@ -500,12 +499,12 @@ fn a_seeded_v20_ledger_migrates_to_v21_with_null_cache_write_columns_on_old_rows
     wait_persisted(&writer, 1);
     drop(handle);
     writer.shutdown();
-    let db = open(&path).expect("reopen at v21");
+    let db = open(&path).expect("reopen at the current version");
 
-    // Assert: both stamps read 21, the fresh column list, the old rows keep
-    // their legacy write and read NULL in both new columns.
-    assert_eq!(user_version(&path), 21);
-    assert_eq!(meta_version(db.conn()), "21");
+    // Assert: both stamps read current, the fresh column list, the old rows
+    // keep their legacy write and read NULL in both new columns.
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(requests_columns(db.conn()), fresh_columns);
     assert_eq!(
         cache_write_row(db.conn(), "v20-row-a"),
@@ -522,9 +521,12 @@ fn a_seeded_v20_ledger_migrates_to_v21_with_null_cache_write_columns_on_old_rows
     drop(db);
 
     // Assert: reopening a v21 file changes neither shape nor rows.
-    let again = open(&path).expect("reopen at v21");
-    assert_eq!(migrate_to_current(again.conn(), 0).expect("re-run"), 21);
-    assert_eq!(user_version(&path), 21);
+    let again = open(&path).expect("reopen at the current version");
+    assert_eq!(
+        migrate_to_current(again.conn(), 0).expect("re-run"),
+        SCHEMA_VERSION
+    );
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
     assert_eq!(requests_columns(again.conn()), fresh_columns);
     assert_eq!(
         cache_write_row(again.conn(), "v20-row-a"),
@@ -563,7 +565,7 @@ fn the_v21_step_creates_the_write_total_index_on_a_migrated_file_as_on_a_fresh_o
     let fresh = write_total_index(open(&fresh_path).expect("fresh").conn());
 
     // Act
-    let migrated = open(&path).expect("migrate to v21");
+    let migrated = open(&path).expect("migrate to the current version");
 
     // Assert: the migrated file carries the same partial index as a fresh
     // one, and reopening leaves it in place.
@@ -572,8 +574,11 @@ fn the_v21_step_creates_the_write_total_index_on_a_migrated_file_as_on_a_fresh_o
     assert_eq!(index, fresh);
     assert!(index.expect("present").1, "the index is partial");
     drop(migrated);
-    let again = open(&path).expect("reopen at v21");
-    assert_eq!(migrate_to_current(again.conn(), 0).expect("re-run"), 21);
+    let again = open(&path).expect("reopen at the current version");
+    assert_eq!(
+        migrate_to_current(again.conn(), 0).expect("re-run"),
+        SCHEMA_VERSION
+    );
     assert_eq!(write_total_index(again.conn()), fresh);
 }
 
@@ -627,7 +632,7 @@ fn an_injected_failure_after_the_first_v21_alter_rolls_back_the_columns_and_both
     // Assert: once the fault is gone the same file migrates normally.
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .expect("clear authorizer");
-    assert_eq!(migrate_to_current(&conn, 0).expect("retry"), 21);
+    assert_eq!(migrate_to_current(&conn, 0).expect("retry"), SCHEMA_VERSION);
     let columns = requests_columns(&conn);
     assert_eq!(
         &columns[columns.len() - 2..],

@@ -133,7 +133,7 @@ macro_rules! agg_group_by {
     };
 }
 
-pub(super) const AGG_SQL: &str = concat!(
+pub const AGG_SQL: &str = concat!(
     "SELECT\n",
     agg_base_columns!(),
     "\nFROM requests AS r
@@ -257,7 +257,7 @@ WHERE ts_start >= ?1 AND ts_start < ?2
 /// existing caller's call shape for no benefit. The base column list and the
 /// GROUP BY are shared verbatim through macros, so the fine grain and the
 /// `map_agg_row` ordinals stay identical by construction.
-pub(super) const QUERY_AGG_SQL: &str = concat!(
+pub const QUERY_AGG_SQL: &str = concat!(
     query_agg_select!(),
     query_agg_from_where!(),
     agg_group_by!()
@@ -273,7 +273,7 @@ pub(super) const QUERY_AGG_SQL: &str = concat!(
 /// make every bucket index a silent SQL NULL rather than an error, which is why
 /// the caller's `width_ms > 0` invariant is re-checked before this statement
 /// runs.
-pub(super) const SERIES_AGG_SQL: &str = concat!(
+pub const SERIES_AGG_SQL: &str = concat!(
     query_agg_select!(),
     ",\n    (ts_start - ?1) / ?5                                AS bucket",
     query_agg_from_where!(),
@@ -487,11 +487,11 @@ GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
 }
 
 /// [`errors_by_class_sql`] over the whole window: every row in bucket 0.
-pub(super) const ERRORS_BY_CLASS_SQL: &str = errors_by_class_sql!("0", "");
+pub const ERRORS_BY_CLASS_SQL: &str = errors_by_class_sql!("0", "");
 
 /// [`ERRORS_BY_CLASS_SQL`] split further by the bucket index the series
 /// aggregate groups on (`?5` is the bucket width, `?1` its anchor).
-pub(super) const ERRORS_BY_CLASS_BUCKETED_SQL: &str =
+pub const ERRORS_BY_CLASS_BUCKETED_SQL: &str =
     errors_by_class_sql!("(ts_start - ?1) / ?5", ", bucket");
 
 /// The window and filters a side read (error classes, cache-write lifetimes)
@@ -590,7 +590,7 @@ pub fn errors_by_class(
     Ok(rows)
 }
 
-const LATEST_QUOTA_BY_SEAT_SQL: &str = "\
+pub const LATEST_QUOTA_BY_SEAT_SQL: &str = "\
 SELECT seat, provider_kind, ts_start, quota_claim, quota_status,
        quota_overage_status, quota_utilization, quota_overage_utilization,
        quota_reset

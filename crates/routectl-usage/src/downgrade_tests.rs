@@ -481,11 +481,12 @@ fn refuses_a_file_whose_version_the_target_does_not_accept() {
     // the newest step's input. The fixture is a valid v17 file re-stamped, so
     // only the version check can refuse these rows.
     let cases: &[(i64, &[i64])] = &[
-        (16, &[0, 15, 16, 22]),
-        (17, &[0, 15, 16, 17, 22]),
-        (18, &[0, 15, 16, 17, 18, 22]),
-        (19, &[0, 15, 16, 17, 18, 19, 22]),
-        (20, &[0, 15, 16, 17, 18, 19, 20, 22]),
+        (16, &[0, 15, 16, 23]),
+        (17, &[0, 15, 16, 17, 23]),
+        (18, &[0, 15, 16, 17, 18, 23]),
+        (19, &[0, 15, 16, 17, 18, 19, 23]),
+        (20, &[0, 15, 16, 17, 18, 19, 20, 23]),
+        (21, &[0, 15, 16, 17, 18, 19, 20, 21, 23]),
     ];
     for &(target, versions) in cases {
         for &version in versions {
@@ -518,7 +519,7 @@ fn refuses_a_file_whose_version_the_target_does_not_accept() {
 
 #[test]
 fn refuses_a_target_outside_the_step_list_before_touching_the_file() {
-    for target in [15, 21] {
+    for target in [15, 22] {
         // Arrange
         let (_dir, path) = temp_db_path();
         drop(open(&path).expect("open fresh"));

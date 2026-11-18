@@ -16,7 +16,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -391,6 +391,40 @@ pub const CREATE_CACHE_WRITE_TS_START_INDEX: &str = concat!(
     "WHERE cache_write_tokens > 0"
 );
 
+/// Covering index for the windowed aggregate reads (v22): `ts_start` first for
+/// the window range, then every `requests` column the aggregate statements
+/// read, so a window is answered from the index alone without visiting the
+/// wide table rows. A statement that reads one more column silently falls
+/// back to a table lookup per row, so the column set is welded to the
+/// statements by a test.
+pub const CREATE_AGG_COVERING_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_requests_agg ON requests (
+    ts_start, operation,
+    model, requested_model, provider, upstream, alias, provider_kind, seat,
+    outcome, stream, fallback_count, latency_ms, ttfb_ms,
+    input_tokens, output_tokens, reasoning_tokens, cache_read,
+    cache_write_5m, cache_write_1h, cache_write_tokens, server_tool_use
+)";
+
+/// Partial covering index over the error rows (v22) for the error-class read.
+/// SQLite uses a partial index only when the query's WHERE implies the
+/// index's, so the predicate is the class statement's error predicate
+/// verbatim.
+pub const CREATE_ERROR_ROWS_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_requests_errors ON requests (
+    ts_start, operation,
+    model, requested_model, provider, upstream, alias, provider_kind, seat,
+    resolved_class, outcome
+) WHERE outcome NOT IN ('ok', 'client_disconnect', 'cancelled')";
+
+/// Partial `(seat, ts_start)` index over the quota-bearing rows (v22), so the
+/// latest snapshot of each seat is a seek rather than a scan of the ledger.
+/// The predicate is the latest-quota read's eligibility predicate verbatim.
+pub const CREATE_QUOTA_SEAT_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS idx_requests_quota_seat ON requests (seat, ts_start) ",
+    "WHERE quota_status IS NOT NULL OR quota_utilization IS NOT NULL"
+);
+
 /// DDL for the `capability_learn_events` table (v9).
 ///
 /// RETAINED, unused: superseded by the unified `capability_events` ledger
@@ -512,3 +546,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY NOT NULL,
     value TEXT NOT NULL
 )";
+
+#[cfg(test)]
+#[path = "schema_index_tests.rs"]
+mod index_tests;

@@ -1,4 +1,4 @@
-//! Offline schema downgrade: v21 -> v20 -> v19 -> v18 -> v17 -> v16.
+//! Offline schema downgrade: v22 -> v21 -> v20 -> v19 -> v18 -> v17 -> v16.
 //!
 //! A binary refuses a file stamped with a newer schema version than it
 //! understands (`VersionTooNew`), so rolling a host back to an earlier binary
@@ -6,6 +6,10 @@
 //! strictly additive forward step, so every downgrade is a re-stamp, never a
 //! rewrite:
 //!
+//! - 22 -> 21: v22 only created three read indexes on `requests`, which a
+//!   v21 binary never names and SQLite maintains on its inserts. The indexes
+//!   stay; the shape check is the v21 one, so `requests` must be exactly the
+//!   v21 columns.
 //! - 21 -> 20: v21 appended the nullable `cache_write_tokens` and
 //!   `cache_write_lifetimes` columns to `requests`, which a v20 binary never
 //!   names. Their values stay, so a later reopen by a v21 binary reads them
@@ -78,6 +82,10 @@ struct Step {
 /// Every downgrade step, newest first. A downgrade runs a contiguous run of
 /// them, starting at the file's version, until it reaches the target.
 const STEPS: &[Step] = &[
+    Step {
+        from: 22,
+        verify_shape: verify_additive_v21,
+    },
     Step {
         from: 21,
         verify_shape: verify_additive_v21,
@@ -344,8 +352,8 @@ pub enum DowngradeError {
 /// Stamp the usage DB at `path` down to schema version `target`, so a binary
 /// built for that version opens it.
 ///
-/// Runs every step from the file's version down to `target` -- 21 -> 20,
-/// then 20 -> 19,
+/// Runs every step from the file's version down to `target` -- 22 -> 21,
+/// then 21 -> 20, then 20 -> 19,
 /// then 19 -> 18, then 18 -> 17, then 17 -> 16, stopping at `target` -- in
 /// one transaction. Each step checks
 /// its tables are exactly the earlier shape plus the additive set the forward
@@ -494,8 +502,8 @@ fn appended(
         .map(|&(name, declared_type)| (name, declared_type, false, 0))
 }
 
-/// The 21 -> 20 shape check: `requests` is exactly the v20 shape followed by
-/// the two v21 columns.
+/// The 22 -> 21 and 21 -> 20 shape check: `requests` is exactly the v20 shape
+/// followed by the two v21 columns (v22 added no column).
 fn verify_additive_v21(conn: &Connection) -> Result<(), DowngradeError> {
     verify_table(conn, "requests", &[&requests_through_v21()])
 }
@@ -662,3 +670,7 @@ mod v20_tests;
 #[cfg(test)]
 #[path = "downgrade_v21_tests.rs"]
 mod v21_tests;
+
+#[cfg(test)]
+#[path = "downgrade_v22_tests.rs"]
+mod v22_tests;

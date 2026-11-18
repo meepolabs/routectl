@@ -317,10 +317,10 @@ fn errors_by_class_empty_window_returns_no_rows() {
 }
 
 #[test]
-fn errors_by_class_uses_ts_start_index() {
-    // The breakdown must ride idx_requests_ts_start for its window range,
-    // not degrade to a full table scan. If this ever fails, add a covering
-    // index rather than accepting the scan.
+fn errors_by_class_searches_the_error_rows_index() {
+    // The breakdown must search its window through the partial covering
+    // index over error rows alone, not degrade to a full table scan or a
+    // per-row table lookup.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
     for i in 0..64 {
@@ -362,8 +362,9 @@ fn errors_by_class_uses_ts_start_index() {
             .expect("collect explain");
 
         assert!(
-            plan.iter().any(|d| d.contains("idx_requests_ts_start")),
-            "{name} breakdown query must use idx_requests_ts_start; plan was {plan:?}"
+            plan.iter()
+                .any(|d| d.contains("SEARCH requests USING COVERING INDEX idx_requests_errors ")),
+            "{name} breakdown query must search idx_requests_errors alone; plan was {plan:?}"
         );
     }
 }

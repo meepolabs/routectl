@@ -154,7 +154,7 @@ pub(super) fn requests_column_names(conn: &Connection) -> Vec<String> {
 
 /// Insert one request row through the frozen v17 column list, binding a
 /// value to every `NOT NULL` column and NULL to the rest.
-fn insert_as_v17_writer(conn: &Connection, request_id: &str) {
+pub(super) fn insert_as_v17_writer(conn: &Connection, request_id: &str) {
     insert_through(conn, V17_INSERT_COLUMNS, request_id);
 }
 

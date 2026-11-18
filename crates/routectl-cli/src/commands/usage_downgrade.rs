@@ -1,5 +1,5 @@
-//! `routectl usage downgrade --to 20|19|18|17|16`: hand the usage DB back to an earlier
-//! binary.
+//! `routectl usage downgrade --to 21|20|19|18|17|16`: hand the usage DB back to
+//! an earlier binary.
 //!
 //! Offline only. The usage crate's `downgrade_to` refuses while any other
 //! connection -- the daemon's writer included -- has the file open, runs every

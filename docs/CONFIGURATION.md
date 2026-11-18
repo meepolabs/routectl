@@ -4671,17 +4671,22 @@ source, reason and `terminal_source` counts.
 A binary refuses a usage database stamped with a newer schema version than
 it understands, so rolling a host back to an earlier release needs the
 database re-stamped first. Each schema step it undoes only appended
-nullable columns or a table that the earlier binary never names, so the
-rollback is a re-stamp, not a rewrite:
+nullable columns or created a table or index that the earlier binary never
+names, so the rollback is a re-stamp, not a rewrite:
 
-- `--to 20` undoes v21: the two cache-write columns on `requests`
-  (`cache_write_tokens`, `cache_write_lifetimes`) and their values stay in
-  place. A v20 binary names every `requests` column it writes, so its rows
-  leave them NULL, and it reports only the older `cache_write_5m` /
-  `cache_write_1h` columns, so cache writes recorded at v21 do not show in
-  its reports. Starting the v21 binary again reads them back.
-- `--to 19` undoes v21 (when the file is at v21) and then v20: the five
-  walk-count columns on `requests` (`request_caused_failures`,
+- `--to 21` undoes v22: the three read indexes on `requests`
+  (`idx_requests_agg`, `idx_requests_errors`, `idx_requests_quota_seat`)
+  stay in place. A v21 binary never names them, and SQLite keeps them up
+  to date on its inserts, so starting the v22 binary again needs no rebuild.
+- `--to 20` undoes v22 (when the file is at v22) and then v21: the two
+  cache-write columns on `requests` (`cache_write_tokens`,
+  `cache_write_lifetimes`) and their values stay in place. A v20 binary
+  names every `requests` column it writes, so its rows leave them NULL, and
+  it reports only the older `cache_write_5m` / `cache_write_1h` columns, so
+  cache writes recorded at v21 do not show in its reports. Starting a v21 or
+  later binary again reads them back.
+- `--to 19` undoes every step above the file's version down to v20, then
+  v20: the five walk-count columns on `requests` (`request_caused_failures`,
   `excluded_endpoint`, `excluded_model`, `excluded_target`,
   `excluded_probe_run`) stay in place. A v19 binary names every `requests`
   column it writes. A file already stamped 20 that still carries the
@@ -4701,7 +4706,7 @@ rollback is a re-stamp, not a rewrite:
 
 ```bash
 systemctl --user stop routectl        # or however the daemon runs
-./routectl usage downgrade --to 20    # [--db /path/to/usage.db]; --to 19, 18, 17 or 16 for an older binary
+./routectl usage downgrade --to 21    # [--db /path/to/usage.db]; --to 20, 19, 18, 17 or 16 for an older binary
 # install and start the previous binary
 ```
 

@@ -1406,13 +1406,17 @@ mod tests {
 
         // Build a full current-schema ledger with rows, then roll it back to
         // the exact shape the prior binary wrote: drop the v12 column and stamp
-        // the old user_version. This is a genuine pre-ALTER v11 file.
+        // the old user_version, after dropping the later read indexes a v11
+        // file never had. This is a genuine pre-ALTER v11 file.
         seed_class_ledger(&path, &[("ok", None), ("upstream_error", Some("http-5xx"))]);
         {
             let db = open(&path).expect("reopen ledger");
             db.conn()
                 .execute_batch(
-                    "ALTER TABLE requests DROP COLUMN resolved_class; \
+                    "DROP INDEX idx_requests_agg; \
+                     DROP INDEX idx_requests_errors; \
+                     DROP INDEX idx_requests_quota_seat; \
+                     ALTER TABLE requests DROP COLUMN resolved_class; \
                      PRAGMA user_version = 11;",
                 )
                 .expect("roll back to v11 shape");

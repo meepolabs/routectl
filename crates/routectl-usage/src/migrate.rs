@@ -10,11 +10,11 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::capability_event::TOMBSTONE_VERDICT;
 use crate::schema::{
-    CREATE_CACHE_WRITE_TS_START_INDEX, CREATE_CAPABILITY_EVENTS_TABLE,
+    CREATE_AGG_COVERING_INDEX, CREATE_CACHE_WRITE_TS_START_INDEX, CREATE_CAPABILITY_EVENTS_TABLE,
     CREATE_CAPABILITY_EVENTS_TS_INDEX, CREATE_CAPABILITY_LEARN_EVENTS_TABLE,
-    CREATE_LEDGER_GAPS_TABLE, CREATE_LEDGER_GAPS_TS_INDEX, CREATE_META_TABLE,
-    CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS, META_LEGACY_CAPABILITY_PURGE,
-    META_SCHEMA_VERSION, SCHEMA_VERSION,
+    CREATE_ERROR_ROWS_INDEX, CREATE_LEDGER_GAPS_TABLE, CREATE_LEDGER_GAPS_TS_INDEX,
+    CREATE_META_TABLE, CREATE_QUOTA_SEAT_INDEX, CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX,
+    META_CREATED_AT_MS, META_LEGACY_CAPABILITY_PURGE, META_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 
 /// Errors raised while migrating the usage DB. The caller can degrade
@@ -724,6 +724,43 @@ fn migrate_v20_to_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// The indexes v22 creates: the covering index for the windowed aggregates,
+/// the partial index over error rows and the partial `(seat, ts_start)` index
+/// over quota-bearing rows.
+pub const V22_INDEXES: &[&str] = &[
+    CREATE_AGG_COVERING_INDEX,
+    CREATE_ERROR_ROWS_INDEX,
+    CREATE_QUOTA_SEAT_INDEX,
+];
+
+/// Apply the v21 -> v22 step atomically: create the three read indexes, bump
+/// `PRAGMA user_version` to 22, and update the human-readable
+/// `meta.schema_version` row, all in one transaction. No column or row
+/// changes.
+///
+/// Building the indexes reads the whole `requests` table once, so on a large
+/// ledger this step is the slow part of the first open after an upgrade; a
+/// failure or crash rolls back every index with the stamps.
+///
+/// A v21 binary can be handed the file back after the version stamps are
+/// lowered: it never names an index, and SQLite maintains all three on its
+/// inserts. A FRESH DB reaches this arm too, and so does a
+/// downgraded-then-reopened file, which still has the indexes, so each is
+/// `IF NOT EXISTS`.
+fn migrate_v21_to_v22(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    for ddl in V22_INDEXES {
+        tx.execute_batch(ddl)?;
+    }
+    tx.execute_batch("PRAGMA user_version = 22")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "22"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -789,6 +826,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             18 => migrate_v18_to_v19(conn)?,
             19 => migrate_v19_to_v20(conn)?,
             20 => migrate_v20_to_v21(conn)?,
+            21 => migrate_v21_to_v22(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
@@ -858,3 +896,7 @@ fn purge_marker_present(conn: &Connection) -> Result<bool, rusqlite::Error> {
 #[cfg(test)]
 #[path = "migrate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "migrate_v22_tests.rs"]
+mod v22_tests;

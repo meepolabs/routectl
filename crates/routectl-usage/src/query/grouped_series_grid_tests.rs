@@ -213,13 +213,13 @@ fn a_widened_grid_still_covers_the_window_and_reprices_it_whole() {
     assert_eq!(widened.groups, narrow.groups);
 }
 
-/// The bucketed statement must ride `idx_requests_ts_start` for its window
-/// range rather than degrading to a full table scan -- the series grain widens
-/// the GROUP BY, and a scan under that would put the shell's large-series
-/// day-over-100k-row cost check past its query budget. If this ever fails, add
-/// a covering index rather than accepting the scan.
+/// The bucketed statement must search its window through the covering
+/// aggregate index alone rather than degrading to a full table scan or a
+/// per-row table lookup -- the series grain widens the GROUP BY, and a scan
+/// under that would put the shell's large-series day-over-100k-row cost check
+/// past its query budget.
 #[test]
-fn the_series_statement_uses_the_ts_start_index() {
+fn the_series_statement_searches_the_covering_aggregate_index() {
     // Arrange
     let (_dir, db) = open_db();
     seed_bulk(&db, 64);
@@ -239,8 +239,9 @@ fn the_series_statement_uses_the_ts_start_index() {
 
     // Assert
     assert!(
-        plan.iter().any(|d| d.contains("idx_requests_ts_start")),
-        "the series query must use idx_requests_ts_start; plan was {plan:?}"
+        plan.iter()
+            .any(|d| d.contains("SEARCH r USING COVERING INDEX idx_requests_agg ")),
+        "the series query must search idx_requests_agg alone; plan was {plan:?}"
     );
 }
 
