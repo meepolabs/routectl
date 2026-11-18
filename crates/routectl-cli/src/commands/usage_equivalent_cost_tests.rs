@@ -140,7 +140,8 @@ fn equiv_agg_row(db: &UsageDb) -> AggRow {
         WindowFlag::All,
         fixed_now(),
     );
-    let rows = aggregate_with_cache_lifetimes(db, bounds.from_ms, bounds.to_ms).expect("aggregate");
+    let rows = routectl_usage::aggregate_with_cache_lifetimes(db, bounds.from_ms, bounds.to_ms)
+        .expect("aggregate");
     assert_eq!(rows.len(), 1, "the fixture folds to one fine row");
     rows.into_iter().next().unwrap()
 }
@@ -361,7 +362,7 @@ fn a_kindless_subscription_row_on_a_removed_provider_resolves_no_equivalent() {
     );
 
     // Act
-    let verdicts: Vec<RowCost> = aggregate_with_cache_lifetimes(&db, 0, i64::MAX)
+    let verdicts: Vec<RowCost> = routectl_usage::aggregate_with_cache_lifetimes(&db, 0, i64::MAX)
         .expect("aggregate")
         .iter()
         .map(|row| cost_for_row(&config, &both_tables(), row))
@@ -380,7 +381,7 @@ fn a_kindless_subscription_row_on_a_removed_provider_resolves_no_equivalent() {
 fn a_mixed_group_never_folds_notional_value_into_real_spend() {
     // Arrange: one alias group spanning a priced API-key row, a resolvable
     // subscription row, and a subscription row whose rates leave it absent.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     let mut config = equiv_config_api_key(complete_rates());
     config.providers.insert(
         "sub-ok".to_string(),
@@ -414,7 +415,7 @@ fn a_mixed_group_never_folds_notional_value_into_real_spend() {
 
     // Act
     let report = build_window_report(
-        &db,
+        &mut db,
         &config,
         &no_prices(),
         "t".into(),
@@ -432,8 +433,11 @@ fn a_mixed_group_never_folds_notional_value_into_real_spend() {
     // Assert: real spend is the priced row alone and the equivalent counts only
     // the row that resolved -- two DISTINCT figures, never each other's value
     // and never their $27.00 sum.
-    assert_eq!(row.priced_total_usd, Some(EQUIV_BASE_ONLY_USD));
-    assert_eq!(row.equivalent_total_usd, Some(EQUIV_BASE_ONLY_USD / 2.0));
+    assert_eq!(row.metrics.cost_usd, Some(EQUIV_BASE_ONLY_USD));
+    assert_eq!(
+        row.metrics.equivalent_cost_usd,
+        Some(EQUIV_BASE_ONLY_USD / 2.0)
+    );
     assert!(row.any_subscription);
     assert_eq!(
         cost_cell(row),
@@ -444,22 +448,28 @@ fn a_mixed_group_never_folds_notional_value_into_real_spend() {
     );
 }
 
+/// A display row carrying only the cost figures `cost_cell` reads.
+fn cost_row(priced: Option<f64>, any_subscription: bool, equivalent: Option<f64>) -> DisplayRow {
+    DisplayRow {
+        label: "g".to_string(),
+        metrics: QueryMetrics {
+            cost_usd: priced,
+            equivalent_cost_usd: equivalent,
+            ..QueryMetrics::default()
+        },
+        any_subscription,
+        ttft_p50_ms: None,
+        ttft_p95_ms: None,
+    }
+}
+
 #[test]
 fn the_cost_cell_labels_the_equivalent_and_leaves_the_old_strings_untouched() {
-    // A display row assembled straight from an accumulator, so each cost cell
-    // shape is exercised without a ledger standing between the state and the
-    // string it renders.
-    fn cell(priced: Option<f64>, any_subscription: bool, equivalent: Option<f64>) -> String {
-        let acc = Acc {
-            any_priced: priced.is_some(),
-            priced_usd: priced.unwrap_or_default(),
-            any_subscription,
-            any_equivalent: equivalent.is_some(),
-            equivalent_usd: equivalent.unwrap_or_default(),
-            ..Acc::default()
-        };
-        cost_cell(&finalize_row("g".to_string(), acc, &TtftMap::new()))
-    }
+    // Each cost cell shape is exercised straight from a display row, without
+    // a ledger standing between the state and the string it renders.
+    let cell = |priced, any_subscription, equivalent| {
+        cost_cell(&cost_row(priced, any_subscription, equivalent))
+    };
 
     // Resolvable subscription value: labelled as the approximation it is,
     // beside rather than inside the real figure.
@@ -503,28 +513,36 @@ fn a_per_row_equivalent_that_overflows_reads_absent() {
 
 #[test]
 fn a_non_finite_equivalent_total_degrades_to_absent() {
-    // The aggregate-level defense, asserted on the accumulator directly: no
-    // configurable rate can drive the CLI's summed equivalent past the finite
-    // range (each per-row figure is divided by a million), so the state is
-    // reachable only from a future pricing bug -- which is exactly what this
-    // filter must absorb rather than render as "inf".
-    fn subscription_acc(equivalent_usd: f64) -> Acc {
-        Acc {
-            any_subscription: true,
-            any_equivalent: true,
-            equivalent_usd,
-            ..Acc::default()
-        }
-    }
+    // The aggregate-level defense, asserted through the report: no
+    // configurable rate can drive the summed equivalent past the finite range
+    // (each per-row figure is divided by a million), so the state is reachable
+    // only from a future pricing bug -- which the shared fold must absorb
+    // rather than hand the cost cell an "inf".
+    let (_dir, _path, mut db) = temp_db();
+    seed_equiv_ledger(&db);
+    let spec = routectl_usage::QuerySpec {
+        from_ms: 0,
+        to_ms: i64::MAX,
+        group_by: GroupDim::Model,
+        alias_filter: None,
+        provider_filter: None,
+        bucket: None,
+    };
+    let fold = |db: &mut UsageDb, usd: f64| {
+        let deadline = Instant::now() + std::time::Duration::from_mins(10);
+        routectl_usage::query(db, &spec, |_| RowCost::Subscription(Some(usd)), deadline)
+            .expect("query")
+            .totals
+    };
 
-    let row = finalize_row(
-        "g".to_string(),
-        subscription_acc(f64::INFINITY),
-        &TtftMap::new(),
-    );
-    let control = finalize_row("g".to_string(), subscription_acc(12.34), &TtftMap::new());
+    let overflowed = fold(&mut db, f64::INFINITY);
+    let control = fold(&mut db, 12.34);
 
-    assert_eq!(row.equivalent_total_usd, None);
+    assert_eq!(overflowed.equivalent_cost_usd, None);
+    let row = DisplayRow {
+        metrics: overflowed,
+        ..cost_row(None, true, None)
+    };
     assert_eq!(cost_cell(&row), "n/a (subscription)");
-    assert_eq!(control.equivalent_total_usd, Some(12.34));
+    assert!(control.equivalent_cost_usd.is_some());
 }

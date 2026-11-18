@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use routectl_cli::{commands, server};
 
-use clap::builder::PossibleValuesParser;
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, Subcommand};
+use routectl_usage::GroupDim;
 
 /// Build a clap value-parser that accepts exactly the OAuth provider ids
 /// the auth registry knows about. Driven by
@@ -31,6 +32,14 @@ use clap::{Parser, Subcommand};
 /// rejected by clap with the valid set listed in the error.
 fn provider_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(routectl_auth::oauth::known_provider_ids())
+}
+
+/// A clap value-parser for `routectl usage --by` that accepts exactly the
+/// tokens of the shared grouping list, so a grouping added there is offered
+/// here with zero edits.
+fn group_by_value_parser() -> impl TypedValueParser<Value = GroupDim> {
+    PossibleValuesParser::new(GroupDim::ALL.map(GroupDim::as_str))
+        .try_map(|token| GroupDim::parse(&token).ok_or("not a usage grouping"))
 }
 
 #[derive(Debug, Parser)]
@@ -234,24 +243,8 @@ enum Cmd {
     Usage {
         #[command(subcommand)]
         action: Option<UsageCmd>,
-        /// Usage since local midnight today.
-        #[arg(long, group = "window")]
-        today: bool,
-        /// Usage since Monday 00:00 local of the current week.
-        #[arg(long = "this-week", group = "window")]
-        this_week: bool,
-        /// Usage since the 1st of the current month, 00:00 local.
-        #[arg(long = "this-month", group = "window")]
-        this_month: bool,
-        /// Usage over the 24 hours ending now.
-        #[arg(long = "last-24h", group = "window")]
-        last_24h: bool,
-        /// Usage over the 7 days (168 hours) ending now.
-        #[arg(long = "last-7d", group = "window")]
-        last_7d: bool,
-        /// All recorded usage.
-        #[arg(long, group = "window")]
-        all: bool,
+        #[command(flatten)]
+        window: commands::usage::UsageWindowArgs,
         /// Ad-hoc range start (YYYY-MM-DD, local). Conflicts with the
         /// window flags.
         #[arg(long, conflicts_with = "window")]
@@ -260,10 +253,10 @@ enum Cmd {
         /// Only valid with `--since`.
         #[arg(long, requires = "since")]
         until: Option<String>,
-        /// Break the report down by this dimension instead of a single
-        /// total row.
-        #[arg(long, value_parser = ["model", "provider", "alias"])]
-        by: Option<String>,
+        /// Break the report down by this dimension. Absent groups by model;
+        /// every report ends with a total row.
+        #[arg(long, value_parser = group_by_value_parser())]
+        by: Option<GroupDim>,
         /// Show extra columns (cache-write total of every lifetime, ttft
         /// p50/p95, tok/s, server-tool counts) plus a per-window latency
         /// summary line.
@@ -886,7 +879,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     window,
                     since,
                     until,
-                    by: by.as_deref().and_then(commands::usage::GroupDim::parse),
+                    by,
                     detail,
                     db,
                     k_calibration,
@@ -1009,19 +1002,9 @@ fn apply_mitm_port_override(
 /// flag was given (or `cmd` is another command). clap's `window` group
 /// guarantees at most one flag is set.
 const fn usage_window(cmd: &Cmd) -> commands::usage::WindowFlag {
-    use commands::usage::WindowFlag;
     match cmd {
-        Cmd::Usage { today: true, .. } => WindowFlag::Today,
-        Cmd::Usage {
-            this_week: true, ..
-        } => WindowFlag::ThisWeek,
-        Cmd::Usage {
-            this_month: true, ..
-        } => WindowFlag::ThisMonth,
-        Cmd::Usage { last_24h: true, .. } => WindowFlag::Last24h,
-        Cmd::Usage { last_7d: true, .. } => WindowFlag::Last7d,
-        Cmd::Usage { all: true, .. } => WindowFlag::All,
-        _ => WindowFlag::None,
+        Cmd::Usage { window, .. } => window.selected(),
+        _ => commands::usage::WindowFlag::None,
     }
 }
 
@@ -1799,6 +1782,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `--by` accepts exactly the shared grouping tokens, each parsing to its
+    /// own grouping, and nothing else; an absent `--by` leaves the grouping
+    /// unset (the report then groups by model).
+    #[test]
+    fn usage_by_accepts_exactly_the_shared_grouping_tokens() {
+        let by = |argv: &[&str]| match Cli::try_parse_from(argv).map(|cli| cli.cmd) {
+            Ok(Cmd::Usage { by, .. }) => Ok(by),
+            Ok(other) => panic!("parsed as another command: {other:?}"),
+            Err(err) => Err(err.kind()),
+        };
+        for dim in GroupDim::ALL {
+            let token = dim.as_str();
+            assert_eq!(
+                by(&["routectl", "usage", "--by", token]),
+                Ok(Some(dim)),
+                "{token}"
+            );
+        }
+        assert_eq!(by(&["routectl", "usage"]), Ok(None));
+        for token in ["upstream", "Model", "", "seats"] {
+            assert_eq!(
+                by(&["routectl", "usage", "--by", token]),
+                Err(clap::error::ErrorKind::InvalidValue),
+                "{token:?}"
+            );
+        }
+        let help = <Cli as clap::CommandFactory>::command()
+            .find_subcommand("usage")
+            .expect("usage subcommand")
+            .get_arguments()
+            .find(|arg| arg.get_id() == "by")
+            .expect("--by argument")
+            .get_possible_values()
+            .iter()
+            .map(|value| value.get_name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(help, GroupDim::ALL.map(|dim| dim.as_str().to_string()));
     }
 
     /// `--opening-accuracy` is opt-in and exclusive with the other report

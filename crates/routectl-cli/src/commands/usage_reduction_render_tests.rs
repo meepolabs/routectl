@@ -42,11 +42,11 @@ fn reduction_row(
 #[test]
 fn render_detail_shows_reduction_block_with_histogram_and_derived_tokens() {
     // Arrange: two applied rows and one skip, 40_000 bytes saved in total.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     reduction_row(&db, "rd1", Some("applied"), 4, 2, 0, 24_000);
     reduction_row(&db, "rd2", Some("applied"), 1, 1, 0, 16_000);
     reduction_row(&db, "rd3", Some("skipped:nothing-to-strip"), 0, 9, 0, 0);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -75,9 +75,9 @@ fn render_detail_shows_reduction_block_with_histogram_and_derived_tokens() {
 #[test]
 fn render_detail_reduction_block_carries_the_drop_counter_validity_caveat() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     reduction_row(&db, "rd1", Some("applied"), 1, 0, 0, 800);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -98,10 +98,10 @@ fn render_detail_reduction_block_carries_the_drop_counter_validity_caveat() {
 #[test]
 fn render_detail_reduction_block_omits_a_percentage_or_cost_figure() {
     // Arrange: a window whose counters would invite a share or dollar claim.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     reduction_row(&db, "rd1", Some("applied"), 10, 5, 0, 4_000);
     reduction_row(&db, "rd2", Some("skipped:no-tail"), 0, 0, 0, 0);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -122,9 +122,9 @@ fn render_detail_reduction_block_flags_a_nonzero_rejected_count_as_a_defect() {
     // Arrange: `rejected` is structurally unreachable with the current
     // minifier, so a nonzero count is a guard-caught rewrite -- a defect
     // signal, not headroom.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     reduction_row(&db, "rd1", Some("applied"), 2, 0, 3, 100);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -140,9 +140,9 @@ fn render_detail_reduction_block_flags_a_nonzero_rejected_count_as_a_defect() {
 #[test]
 fn render_detail_reduction_block_omits_the_rejected_line_when_zero() {
     // Arrange: the ordinary case -- nothing rejected.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     reduction_row(&db, "rd1", Some("applied"), 2, 1, 0, 100);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert
     let out = render_report(&report, &zone());
@@ -155,9 +155,9 @@ fn render_detail_reduction_block_omits_the_rejected_line_when_zero() {
 #[test]
 fn render_non_detail_omits_reduction_block() {
     // Arrange: outcomes exist, but the default table must not surface them.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     reduction_row(&db, "rd1", Some("applied"), 1, 0, 0, 500);
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act + Assert
     let out = render_report(&report, &zone());
@@ -170,10 +170,10 @@ fn render_non_detail_omits_reduction_block() {
 #[test]
 fn render_detail_omits_reduction_block_when_no_row_carries_an_outcome() {
     // Arrange: a NULL-outcome row (pre-column history) plus a plain row.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     reduction_row(&db, "old", None, 0, 0, 0, 0);
     paid_row(&db, "plain", Some(10), Some(20));
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert: a window with no decided request stays uncluttered.
     let out = render_report(&report, &zone());

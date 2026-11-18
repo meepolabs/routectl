@@ -144,12 +144,12 @@ fn a_decision_outside_the_suppression_token_is_not_a_finder_row() {
 fn render_detail_shows_one_finder_line_per_suppressed_triple() {
     // Arrange: one session suppressed on two models plus a second session,
     // three triples in total.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     k_suppressed_row(&db, "k1", 1_000, "sess-a", "haiku");
     k_suppressed_row(&db, "k2", 1_100, "sess-a", "haiku");
     k_suppressed_row(&db, "k3", 1_200, "sess-a", "sonnet");
     k_suppressed_row(&db, "k4", 1_300, "sess-b", "haiku");
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -177,11 +177,11 @@ fn render_detail_shows_one_finder_line_per_suppressed_triple() {
 #[test]
 fn render_detail_finder_orders_triples_newest_suppression_first() {
     // Arrange: three triples with strictly ordered last-suppression instants.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     k_suppressed_row(&db, "old", 1_000, "sess-old", "m-old");
     k_suppressed_row(&db, "mid", 2_000, "sess-mid", "m-mid");
     k_suppressed_row(&db, "new", 3_000, "sess-new", "m-new");
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -208,7 +208,7 @@ fn render_detail_finder_orders_triples_newest_suppression_first() {
 fn render_detail_finder_counts_a_both_marker_suppression_once() {
     // Arrange: suppression withholds BOTH markers under one shared verdict, so
     // the row carries the token twice and is ONE suppressed request.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     decision_triple_row(
         &db,
         "both",
@@ -219,7 +219,7 @@ fn render_detail_finder_counts_a_both_marker_suppression_once() {
         Some(K_SUPPRESSION_TOKEN),
         Some(K_SUPPRESSION_TOKEN),
     );
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -235,7 +235,7 @@ fn render_detail_finder_counts_a_both_marker_suppression_once() {
 #[test]
 fn render_detail_finder_caps_the_list_and_says_so() {
     // Arrange: one more triple than the cap, each with a distinct recency.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     for i in 0..=SUPPRESSED_SESSION_CAP {
         let idx = i64::try_from(i).expect("small index");
         k_suppressed_row(
@@ -246,7 +246,7 @@ fn render_detail_finder_caps_the_list_and_says_so() {
             "haiku",
         );
     }
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -270,9 +270,9 @@ fn render_detail_finder_caps_the_list_and_says_so() {
 #[test]
 fn render_detail_finder_omits_the_truncation_line_when_nothing_was_dropped() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     k_suppressed_row(&db, "k1", 1_000, "sess-a", "haiku");
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert
     let block = suppressed_block(&render_report(&report, &zone()));
@@ -287,10 +287,10 @@ fn render_detail_finder_carries_the_drop_counter_validity_caveat() {
     // Arrange: a window whose counts an operator might otherwise price. The
     // usage channel can drop records, so the block must refuse a rate or cost
     // reading and name the three counters that prove the window lossless.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     k_suppressed_row(&db, "k1", 1_000, "sess-a", "haiku");
     k_suppressed_row(&db, "k2", 1_100, "sess-a", "haiku");
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -316,10 +316,10 @@ fn render_detail_finder_carries_the_drop_counter_validity_caveat() {
 fn render_detail_finder_never_prints_the_raw_session_key() {
     // Arrange: a session key that would be a durable personal identifier if it
     // reached an operator-facing surface.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     let raw = "user@example.test";
     k_suppressed_row(&db, "k1", 1_000, raw, "haiku");
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -345,7 +345,7 @@ fn render_detail_finder_never_prints_the_raw_session_key() {
 #[test]
 fn render_detail_omits_the_finder_when_nothing_was_suppressed() {
     // Arrange: an emitted decision and a differently-skipped one.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     decision_triple_row(
         &db,
         "emitted",
@@ -366,7 +366,7 @@ fn render_detail_omits_the_finder_when_nothing_was_suppressed() {
         Some("auto_skipped:breakpoint_cap"),
         None,
     );
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert: an ordinary window stays uncluttered.
     let out = render_report(&report, &zone());
@@ -379,9 +379,9 @@ fn render_detail_omits_the_finder_when_nothing_was_suppressed() {
 #[test]
 fn render_non_detail_omits_the_finder() {
     // Arrange: suppression exists, but the default table must not surface it.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     k_suppressed_row(&db, "k1", 1_000, "sess-a", "haiku");
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act + Assert
     let out = render_report(&report, &zone());

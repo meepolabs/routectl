@@ -115,7 +115,7 @@ fn insert_table_row(
 
 /// The verdict for the single aggregate row of `db`.
 fn table_verdict(db: &UsageDb, config: &Config, prices: &PriceSnapshot) -> RowCost {
-    let rows = aggregate_with_cache_lifetimes(db, 0, i64::MAX).expect("aggregate");
+    let rows = routectl_usage::aggregate_with_cache_lifetimes(db, 0, i64::MAX).expect("aggregate");
     assert_eq!(rows.len(), 1, "the fixture folds to one fine row");
     cost_for_row(config, prices, &rows[0])
 }
@@ -403,7 +403,7 @@ fn a_mixed_window_reports_the_priced_subtotal_only() {
     // Three rows in ONE display group: table-priced, subscription, and an
     // unpriced upstream. The group surfaces all three markers and a subtotal
     // covering the priced row alone.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     let mut config = table_config("env://ANTH_KEY");
     config.providers.insert(
         "sub".to_string(),
@@ -435,7 +435,7 @@ fn a_mixed_window_reports_the_priced_subtotal_only() {
     );
 
     let report = build_window_report(
-        &db,
+        &mut db,
         &config,
         &both_tables(),
         "t".into(),
@@ -450,8 +450,8 @@ fn a_mixed_window_reports_the_priced_subtotal_only() {
     .expect("window report");
     let total = find(&report, "total");
 
-    assert_eq!(total.priced_total_usd, Some(REFRESHED_USD));
-    assert_eq!(total.equivalent_total_usd, Some(REFRESHED_USD));
+    assert_eq!(total.metrics.cost_usd, Some(REFRESHED_USD));
+    assert_eq!(total.metrics.equivalent_cost_usd, Some(REFRESHED_USD));
     assert!(total.any_subscription);
-    assert!(total.any_unpriced);
+    assert_eq!(total.metrics.cost_status, CostStatus::Partial);
 }

@@ -17,7 +17,12 @@ fn paid_row(db: &UsageDb, request_id: &str, input: Option<i64>, output: Option<i
     );
 }
 
-fn report_all(db: &UsageDb, config: &Config, by: Option<GroupDim>, detail: bool) -> WindowReport {
+fn report_all(
+    db: &mut UsageDb,
+    config: &Config,
+    by: Option<GroupDim>,
+    detail: bool,
+) -> WindowReport {
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
     build_window_report(db, config, &no_prices(), "t".into(), bounds, by, detail).unwrap()
 }
@@ -42,9 +47,9 @@ fn paid_model_row(db: &UsageDb, id: &str, model: &str, outcome: &str, input: i64
 #[test]
 fn render_non_detail_header_has_expected_columns() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_row(&db, "h1", Some(10), Some(20));
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -96,10 +101,10 @@ fn would_trim_row(db: &UsageDb, request_id: &str, would_trim_tokens: i64) {
 #[test]
 fn render_detail_shows_would_trim_opportunity_line() {
     // Arrange: two rows with would-cut candidates.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     would_trim_row(&db, "wt1", 40_000);
     would_trim_row(&db, "wt2", 20_000);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -118,9 +123,9 @@ fn render_detail_shows_would_trim_opportunity_line() {
 fn render_non_detail_omits_would_trim_line() {
     // Arrange: a would-cut candidate exists, but the default table must not
     // surface it (only --detail does).
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     would_trim_row(&db, "wt1", 40_000);
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act + Assert
     let out = render_report(&report, &zone());
@@ -133,9 +138,9 @@ fn render_non_detail_omits_would_trim_line() {
 #[test]
 fn render_detail_omits_would_trim_line_when_no_candidates() {
     // Arrange: a plain row, no would-cut candidate.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_row(&db, "plain", Some(10), Some(20));
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert: a window with no candidates stays uncluttered.
     let out = render_report(&report, &zone());
@@ -148,9 +153,9 @@ fn render_detail_omits_would_trim_line_when_no_candidates() {
 #[test]
 fn render_by_provider_uses_provider_key_header() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_row(&db, "h2", Some(10), Some(20));
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Provider), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Provider), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -165,9 +170,9 @@ fn render_by_provider_uses_provider_key_header() {
 fn render_data_row_shows_rolled_up_values_and_priced_cost() {
     // Arrange: 1_000_000 in @ $3 + 1_000_000 out @ $15 = $18.00. Cost renders
     // only under --detail, so request the detail view.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_row(&db, "r1", Some(1_000_000), Some(1_000_000));
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Provider), true);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Provider), true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -184,11 +189,11 @@ fn render_data_row_shows_rolled_up_values_and_priced_cost() {
 #[test]
 fn render_detail_adds_extra_columns_non_detail_omits_them() {
     // Arrange: a streaming row so the detail columns have data.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(&db, "d1", 1000, "m", 120, 620, Some(50), Some(5), Some(7));
     let config = cost_config();
-    let detail = report_all(&db, &config, None, true);
-    let plain = report_all(&db, &config, None, false);
+    let detail = report_all(&mut db, &config, None, true);
+    let plain = report_all(&mut db, &config, None, false);
 
     // Act
     let detail_out = render_report(&detail, &zone());
@@ -235,7 +240,7 @@ fn render_humanizes_large_cache_read_and_honors_not_reported() {
     // Arrange: the cache_read column across all three presence/value cases --
     // a large reported volume (4_637_884 -> "4.6M"), a NULL (not reported), and a
     // reported-but-zero (present, sum 0) that must render "0", not "-".
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(
         &db,
         "c1",
@@ -249,7 +254,7 @@ fn render_humanizes_large_cache_read_and_honors_not_reported() {
     );
     insert_stream_row(&db, "c2", 1100, "nulls", 100, 600, Some(10), None, None);
     insert_stream_row(&db, "c3", 1200, "zero", 100, 600, Some(10), None, Some(0));
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -292,7 +297,7 @@ fn render_detail_latency_summary_uses_window_total_not_alias_named_total() {
     // alias (ttfb 100, 300) plus one under another alias (ttfb 500). The window
     // total p95 (nearest-rank over all three: 100,300,500 -> rank 3 -> 500) must
     // differ from the "total" alias group's own p95 (100,300 -> rank 2 -> 300).
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     let insert_stream_alias = |id: &str, alias: &str, ttfb: i64| {
         db.conn()
             .execute(
@@ -310,7 +315,7 @@ fn render_detail_latency_summary_uses_window_total_not_alias_named_total() {
     insert_stream_alias("tb", "total", 300);
     insert_stream_alias("oc", "other", 500);
 
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Alias), true);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Alias), true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -357,17 +362,17 @@ fn cost_prices_summed_cache_read_not_peak() {
     // basis is the SUM (268000), not the peak (91000). The rows use no other
     // dimension and only cache_read is priced, at a known rate, so the dollar
     // figure is attributable to it alone.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(&db, "cr1", 1000, "m", 100, 600, None, None, Some(88_000));
     insert_stream_row(&db, "cr2", 1100, "m", 100, 600, None, None, Some(89_000));
     insert_stream_row(&db, "cr3", 1200, "m", 100, 600, None, None, Some(91_000));
     let rate = 6.0; // USD per million tokens
     let config = cache_read_priced_config(rate);
-    let report = report_all(&db, &config, Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &config, Some(GroupDim::Model), false);
 
     // Act
     let total = find(&report, "total");
-    let cost = total.priced_total_usd.expect("priced cost present");
+    let cost = total.metrics.cost_usd.expect("priced cost present");
 
     // Assert: cost is the SUM-based figure (268000 * rate / 1e6), strictly
     // greater than the peak-based figure (91000 * rate / 1e6). This MUST fail
@@ -384,53 +389,114 @@ fn cost_prices_summed_cache_read_not_peak() {
     );
 }
 
+/// The `--detail` cell under `column` on the row labelled `label`, located
+/// through the header so a column reorder cannot move the assertion.
+fn detail_cell(out: &str, label: &str, column: &str) -> String {
+    let mut lines = out.lines().skip(1);
+    let header: Vec<&str> = lines.next().expect("header").split_whitespace().collect();
+    let index = header
+        .iter()
+        .position(|h| *h == column)
+        .unwrap_or_else(|| panic!("header carries {column}: {out}"));
+    let row = lines
+        .find(|l| l.split_whitespace().next() == Some(label))
+        .unwrap_or_else(|| panic!("row `{label}` present: {out}"));
+    row.split_whitespace()
+        .nth(index)
+        .unwrap_or_else(|| panic!("row `{label}` has a {column} cell: {row}"))
+        .to_string()
+}
+
 #[test]
-fn render_total_ctx_peak_is_max_not_sum_and_flows_stay_summed() {
-    // Arrange: two streaming rows in the same model group with a climbing
-    // cache_read snapshot (88000, 91000). The display total must report the
-    // PEAK context (91000 -> "91K"), never the sum (179000 -> "179K"), while
-    // input/output remain real summed flows.
-    let (_dir, _path, db) = temp_db();
-    insert_stream_row(
-        &db,
-        "ft1",
-        1000,
-        "m",
-        100,
-        600,
-        Some(10),
-        None,
-        Some(88_000),
-    );
-    insert_stream_row(
-        &db,
-        "ft2",
-        1100,
-        "m",
-        100,
-        600,
-        Some(20),
-        None,
-        Some(91_000),
-    );
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+fn detail_ctx_columns_show_the_whole_per_request_prompt() {
+    // Arrange: two requests in one model group. Per request, the prompt is
+    // fresh input + cache read + cache write:
+    //   p1: 1_000 + 88_000 +     0 = 89_000
+    //   p2: 2_000 + 91_000 + 4_000 = 97_000
+    // ctx_peak = 97_000 -> "97K"; ctx_avg = 186_000 / 2 = 93_000 -> "93K".
+    // The cached-read size alone would read 91K and 89.5K.
+    let (_dir, _path, mut db) = temp_db();
+    insert_prompt_row(&db, "p1", "up-paid", 1_000, Some(88_000), None);
+    insert_prompt_row(&db, "p2", "up-paid", 2_000, Some(91_000), Some(4_000));
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), true);
 
     // Act
-    let total = find(&report, "total");
+    let out = render_report(&report, &zone());
 
-    // Assert: ctx_peak is the MAX snapshot; the sum never appears as a field.
-    assert_eq!(total.cache_read_peak, 91_000);
-    assert_ne!(total.cache_read_peak, 179_000);
-    // Output is a real summed flow (10 + 20).
-    assert_eq!(total.output_tokens, 30);
+    // Assert
+    for label in ["m", "total"] {
+        assert_eq!(detail_cell(&out, label, "ctx_peak"), "97K", "{label}");
+        assert_eq!(detail_cell(&out, label, "ctx_avg"), "93K", "{label}");
+    }
+    // Input and output remain summed flows; the context is never summed.
+    assert_eq!(report.total.metrics.ctx_peak, Some(97_000));
+    assert_eq!(report.total.metrics.input_tokens, 3_000);
+}
+
+#[test]
+fn detail_ctx_columns_read_dash_when_no_request_reported_a_prompt() {
+    // A request that reported none of input, cache read or cache write has no
+    // context to show: `-`, never `0`.
+    let (_dir, _path, mut db) = temp_db();
+    insert_row(
+        &db, "z", 1000, "m", "paid", "up-paid", "al", "ok", None, None, 5,
+    );
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), true);
+
+    let out = render_report(&report, &zone());
+
+    assert_eq!(detail_cell(&out, "m", "ctx_peak"), "-");
+    assert_eq!(detail_cell(&out, "m", "ctx_avg"), "-");
+}
+
+#[test]
+fn by_seat_groups_by_the_recorded_seat_under_a_seat_header() {
+    // Arrange: one model and provider, three seat values (one NULL), so only a
+    // seat grouping splits the rows.
+    let (_dir, _path, mut db) = temp_db();
+    for (id, seat) in [
+        ("s1", Some("work")),
+        ("s2", Some("work")),
+        ("s3", Some("home")),
+        ("s4", None),
+    ] {
+        paid_row(&db, id, Some(10), Some(20));
+        db.conn()
+            .execute(
+                "UPDATE requests SET seat = ?1 WHERE request_id = ?2",
+                rusqlite::params![seat, id],
+            )
+            .expect("set seat");
+    }
+
+    // Act
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Seat), false);
+    let out = render_report(&report, &zone());
+
+    // Assert
+    let labels: Vec<(&str, i64)> = report
+        .rows()
+        .map(|row| (row.label.as_str(), row.metrics.requests))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("(unattributed)", 1),
+            ("home", 1),
+            ("work", 2),
+            ("total", 4)
+        ]
+    );
+    let header = out.lines().nth(1).expect("header line present");
+    assert_eq!(header.split_whitespace().next(), Some("seat"));
 }
 
 #[test]
 fn render_includes_total_row() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_model_row(&db, "t1", "m", "ok", 10, 20);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -445,10 +511,10 @@ fn render_footer_shows_cache_hit_rate() {
     // fresh-input stream row (cache_read=0, input via reasoning unused). With the
     // token-weighted formula, a row reporting cache_read=100 and no fresh input /
     // cache-write has hit rate 100/100 = 100.0%.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(&db, "r1", 1000, "m", 100, 600, Some(10), None, Some(100));
     paid_model_row(&db, "r2", "m", "upstream_error", 0, 0);
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -461,9 +527,9 @@ fn render_footer_shows_cache_hit_rate() {
 #[test]
 fn render_footer_na_rate_when_no_tokens() {
     // Arrange: NULL input, no cache => denominator 0 => rate None => "n/a".
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_row(&db, "r3", None, None);
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -483,7 +549,7 @@ fn render_footer_cache_hit_rate_is_token_weighted_over_reporting_rows() {
     // cache-write). Group A: cache_read 900, input 100. Group B: cache_read 0,
     // input 100. num = 900 + 0 = 900; den = (100+900) + (100+0) = 1100;
     // 900/1100 = 0.81818 -> "81.8%".
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // Group A "ga": a stream row carries the cache_read billed volume (900); a
     // paid row carries the fresh input (100). Both share (model, provider,
     // upstream, alias) so they roll into one aggregate group.
@@ -492,7 +558,7 @@ fn render_footer_cache_hit_rate_is_token_weighted_over_reporting_rows() {
     // Group B "gb": cache_read reported as 0 (present), input 100.
     insert_stream_row(&db, "gb_s", 1100, "gb", 100, 600, Some(5), None, Some(0));
     paid_model_row(&db, "gb_i", "gb", "ok", 100, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -513,7 +579,7 @@ fn render_footer_excludes_non_cache_reporting_rows() {
     // "norep": input 1000, NULL cache_read. Footer over reporting rows only =
     // 600/600 = 100.0%; if the non-reporting input leaked in it would be
     // 600/1600 = 37.5%.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(
         &db,
         "rep_s",
@@ -526,7 +592,7 @@ fn render_footer_excludes_non_cache_reporting_rows() {
         Some(600),
     );
     paid_model_row(&db, "norep_i", "norep", "ok", 1000, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -556,7 +622,7 @@ fn per_group_cache_hit_matches_footer_in_mixed_provider_group() {
     // -- exactly the footer's rate. The pre-fix per-group rule summed input over
     // ALL rows in the group: 900/(600+900) = 60.0%, showing a diluted per-group
     // rate beside the footer's correct one in the same report.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // Reporting aggregate (model "rep"): a stream row carries the billed
     // cache-read volume (900); a paid row carries the fresh input (100). Both
     // share (provider "paid", upstream "up-paid", alias "al").
@@ -574,15 +640,15 @@ fn per_group_cache_hit_matches_footer_in_mixed_provider_group() {
     paid_model_row(&db, "rep_i", "rep", "ok", 100, 0);
     // Non-reporting aggregate (model "norep"): input 500, NULL cache_read.
     paid_model_row(&db, "norep_i", "norep", "ok", 500, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Alias), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Alias), false);
 
     // Act
-    let group = find(&report, "al").cache_hit_rate;
-    let total = find(&report, "total").cache_hit_rate;
-    let footer = report.cache_hit_rate;
+    let group = find(&report, "al").metrics.cache_hit_pct;
+    let total = find(&report, "total").metrics.cache_hit_pct;
+    let footer = report.total.metrics.cache_hit_pct;
 
     // Assert: per-group agrees with the footer (90.0%), never the diluted 60.0%.
-    assert_eq!(footer, Some(0.9), "footer rate over reporting rows only");
+    assert_eq!(footer, Some(90.0), "footer rate over reporting rows only");
     assert_eq!(
         group, footer,
         "per-group rate must equal the footer, not the input-diluted rate"
@@ -596,9 +662,9 @@ fn non_reporting_only_group_renders_no_data_marker() {
     // Arrange: a group whose only rows never report cache reads (present==0).
     // The shared denominator stays 0, so the rate is None and the hit% cell is
     // the "-" no-data marker -- never "0.0%".
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_model_row(&db, "nr1", "norep", "ok", 500, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let group = find(&report, "norep");
@@ -609,7 +675,7 @@ fn non_reporting_only_group_renders_no_data_marker() {
         .expect("norep row present");
 
     // Assert: no rate on the struct; the row renders the "-" marker, not 0.0%.
-    assert_eq!(group.cache_hit_rate, None);
+    assert_eq!(group.metrics.cache_hit_pct, None);
     assert!(
         row_line.contains(" - "),
         "hit% cell should be '-' for a non-reporting-only group: {row_line:?}"
@@ -628,11 +694,11 @@ fn render_footer_not_equal_to_old_peak_based_value() {
     // the PEAK (900): 900/(900+100) = 0.90 -> "90.0%". The NEW token-weighted
     // value sums the billed cache-read flow (100+900=1000): 1000/(100+1000) =
     // 0.90909 -> "90.9%". These differ, proving the footer no longer uses peak.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(&db, "pk1", 1000, "pk", 100, 600, Some(5), None, Some(100));
     insert_stream_row(&db, "pk2", 1100, "pk", 100, 600, Some(5), None, Some(900));
     paid_model_row(&db, "pk_i", "pk", "ok", 100, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -669,10 +735,10 @@ fn render_footer_shows_client_disconnect_line() {
     // Arrange: one pre-dispatch disconnect (raw model NULL, never reached a
     // provider) and one post-dispatch disconnect (model stamped, so dispatch
     // had already resolved a provider before the client hung up).
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     client_disconnect_row(&db, "cd_pre", None);
     client_disconnect_row(&db, "cd_post", Some("m"));
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -702,7 +768,7 @@ fn outcome_row(db: &UsageDb, request_id: &str, outcome: &str) {
 fn report_counts_cancelled_apart_from_errors_and_disconnects() {
     // Arrange: one row per outcome class, plus a second cancelled row so the
     // cancelled count is distinguishable from every other count.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     for (request_id, outcome) in [
         ("ok1", "ok"),
         ("err1", "upstream_error"),
@@ -712,7 +778,7 @@ fn report_counts_cancelled_apart_from_errors_and_disconnects() {
     ] {
         outcome_row(&db, request_id, outcome);
     }
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -720,9 +786,9 @@ fn report_counts_cancelled_apart_from_errors_and_disconnects() {
     // Assert: the footer reports the cancelled count on its own line, and the
     // model row's err cell counts only the upstream_error (header order is
     // key|reqs|err|...).
-    assert_eq!(report.total_errors, 1);
-    assert_eq!(report.client_disconnects, 1);
-    assert_eq!(report.cancellations, 2);
+    assert_eq!(report.total.metrics.errors, 1);
+    assert_eq!(report.total.metrics.client_disconnect_total, 1);
+    assert_eq!(report.total.metrics.cancelled_total, 2);
     assert!(
         out.contains("client disconnects: 1 (0 pre-dispatch)\ncancelled: 2\n"),
         "footer must report the cancelled count: {out:?}"
@@ -740,10 +806,10 @@ fn report_counts_cancelled_apart_from_errors_and_disconnects() {
 fn render_footer_client_disconnect_excluded_from_error_column() {
     // Arrange: a client_disconnect row alongside an ok row in the same group.
     // The disconnect must not inflate the `err` column (see AggRow::errors).
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_model_row(&db, "ok1", "m", "ok", 10, 20);
     client_disconnect_row(&db, "cd1", Some("m"));
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -769,11 +835,11 @@ fn render_hit_pct_column_is_token_weighted_over_billed_not_peak() {
     // If it ever used the PEAK (900) the cell would read "90.0%"
     // (900 / (100 + 900)). The group's own per-row cell must show the billed
     // figure, proving SUM not peak.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(&db, "hp1", 1000, "hp", 100, 600, Some(5), None, Some(100));
     insert_stream_row(&db, "hp2", 1100, "hp", 100, 600, Some(5), None, Some(900));
     paid_model_row(&db, "hp_i", "hp", "ok", 100, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -798,9 +864,9 @@ fn render_hit_pct_column_dash_when_provider_does_not_report_cache() {
     // Arrange: a paid row with input but NULL cache_read => cache_read_present
     // == 0. The hit% cell must render "-" (not "0.0%"): the provider does not
     // report cache reads, so the rate is "not reported", not "zero hits".
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_model_row(&db, "nc1", "nocache", "ok", 500, 200);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -832,7 +898,7 @@ fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
     // The OLD total recomputed from its OWN summed fields, which fold in the
     // non-reporting input: 900 / (100 + 900 + 1000) = 900/2000 = 45.0%. The
     // total must read 90.0%, never 45.0%.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_stream_row(
         &db,
         "rep_s",
@@ -846,7 +912,7 @@ fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
     );
     paid_model_row(&db, "rep_i", "rep", "ok", 100, 0);
     paid_model_row(&db, "norep_i", "norep", "ok", 1000, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -938,11 +1004,11 @@ fn insert_seat_quota_row(
 #[test]
 fn build_report_surfaces_latest_quota_snapshot_per_seat() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_quota_row(&db, "q1", 1000, "allowed", 0.22, "none", 1_800_000_000);
 
     // Act
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Assert
     assert_eq!(report.quota.len(), 1);
@@ -957,9 +1023,9 @@ fn build_report_surfaces_latest_quota_snapshot_per_seat() {
 #[test]
 fn render_report_includes_quota_line() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_quota_row(&db, "q2", 1000, "allowed", 0.22, "none", 1_800_000_000);
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -981,7 +1047,7 @@ fn render_report_includes_one_quota_line_per_seat() {
     // Arrange: two seats, the second reporting utilization with no status
     // token or overage state (the codex shape), plus a superseded older row
     // for the first seat.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_seat_quota_row(
         &db,
         "a-old",
@@ -1012,7 +1078,7 @@ fn render_report_includes_one_quota_line_per_seat() {
         None,
         Some(1_786_210_114),
     );
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1038,8 +1104,8 @@ fn render_report_includes_one_quota_line_per_seat() {
 #[test]
 fn render_report_omits_the_quota_line_when_nothing_reported() {
     // Arrange: a window with request rows but no quota-bearing row.
-    let (_dir, _path, db) = temp_db();
-    let report = report_all(&db, &cost_config(), None, false);
+    let (_dir, _path, mut db) = temp_db();
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1126,19 +1192,19 @@ fn since_without_until_builds_single_open_ended_block() {
 #[test]
 fn by_model_groups_rows_sharing_a_model() {
     // Arrange: two rows with the same model "claude-x".
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_model_row(&db, "m1", "claude-x", "ok", 10, 20);
     paid_model_row(&db, "m2", "claude-x", "ok", 5, 7);
 
     // Act
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Assert: one model group plus the always-appended total row.
-    assert_eq!(report.rows.len(), 2);
+    assert_eq!(report.rows().count(), 2);
     let row = find(&report, "claude-x");
-    assert_eq!(row.requests, 2);
-    assert_eq!(row.input_tokens, 15);
-    assert_eq!(row.output_tokens, 27);
+    assert_eq!(row.metrics.requests, 2);
+    assert_eq!(row.metrics.input_tokens, 15);
+    assert_eq!(row.metrics.output_tokens, 27);
 }
 
 #[test]
@@ -1146,7 +1212,7 @@ fn by_model_null_model_attributes_to_requested_model() {
     // Arrange: a pre-dispatch abort has model=NULL but always carries a
     // requested_model. The aggregate must attribute it to requested_model so
     // it groups under the route the caller asked for, not a NULL bucket.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     db.conn()
         .execute(
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
@@ -1160,16 +1226,16 @@ fn by_model_null_model_attributes_to_requested_model() {
         .expect("insert null-model row");
 
     // Act
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Assert: attributed to requested_model, never an "(unattributed)" bucket.
     assert!(
-        report.rows.iter().all(|r| r.label != "(unattributed)"),
+        report.rows().all(|r| r.label != "(unattributed)"),
         "pre-dispatch abort must not land in the unattributed bucket"
     );
     let row = find(&report, "gpt-asked");
-    assert_eq!(row.requests, 1);
-    assert_eq!(row.input_tokens, 8);
+    assert_eq!(row.metrics.requests, 1);
+    assert_eq!(row.metrics.input_tokens, 8);
 }
 
 /// Insert a successful row carrying explicit fresh input plus cache-write
@@ -1201,9 +1267,9 @@ fn displayed_input_folds_in_cache_write_buckets() {
     // Arrange: a row with fresh input 100 and a 5m cache-write of 40 (1h zero).
     // The displayed input column means "prompt tokens not served from cache",
     // so it must render the sum 100 + 40 + 0 = 140, not the fresh-only 100.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_cache_write_row(&db, "cw1", 100, 40, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1228,9 +1294,9 @@ fn displayed_input_unchanged_for_write_less_provider() {
     // Arrange: an OpenAI-style row reports zero cache-write and no cache_read.
     // With both write buckets zero the displayed input must equal the fresh
     // input (100) -- no regression for write-less providers.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_cache_write_row(&db, "ow1", 100, 0, 0);
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1254,7 +1320,7 @@ fn current_era_write_total_feeds_displayed_input_and_hit_rate() {
     // input 100, cache_read 300, writes 100. Displayed input = 100 + 100 = 200;
     // hit% = 300 / (100 + 300 + 100) = 60.0%. A reader of only the older-era
     // columns would show input 100 and 75.0%.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     db.conn()
         .execute(
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
@@ -1266,7 +1332,7 @@ fn current_era_write_total_feeds_displayed_input_and_hit_rate() {
             [],
         )
         .expect("insert current-era row");
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+    let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1311,12 +1377,12 @@ fn would_trim_verdict_counts_one_of_each_shape() {
     //   cold     : break_even=Some(2.0), k_floor=None
     //   met      : break_even=Some(2.0), k_floor=Some(3.0)  (3 >= 2)
     //   unmet    : break_even=Some(5.0), k_floor=Some(2.0)  (2 < 5)
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     would_trim_verdict_row(&db, "v-unpriced", 10_000, None, None);
     would_trim_verdict_row(&db, "v-cold", 10_000, Some(2.0), None);
     would_trim_verdict_row(&db, "v-met", 10_000, Some(2.0), Some(3.0));
     would_trim_verdict_row(&db, "v-unmet", 10_000, Some(5.0), Some(2.0));
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let wt = &report.would_trim;
@@ -1332,10 +1398,10 @@ fn would_trim_verdict_counts_one_of_each_shape() {
 #[test]
 fn would_trim_render_verdict_line_present_when_candidates() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     would_trim_verdict_row(&db, "vm1", 20_000, Some(2.0), Some(3.0));
     would_trim_verdict_row(&db, "vm2", 20_000, Some(5.0), Some(2.0));
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1354,9 +1420,9 @@ fn would_trim_render_verdict_line_present_when_candidates() {
 #[test]
 fn would_trim_render_no_verdict_line_when_zero_candidates() {
     // Arrange: no candidates at all.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     paid_row(&db, "plain", Some(10), Some(20));
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert: verdict line must not appear.
     let out = render_report(&report, &zone());
@@ -1404,10 +1470,10 @@ fn near_lossless_attribution_row(
 #[test]
 fn render_detail_shows_near_lossless_attribution_line() {
     // Arrange: two recorder-marked rows.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     near_lossless_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
     near_lossless_attribution_row(&db, "m2", Some(1), 20_000, 20_000, 2, 2);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1435,9 +1501,9 @@ fn render_detail_shows_near_lossless_attribution_line() {
 fn render_non_detail_omits_near_lossless_attribution_line() {
     // Arrange: a near-lossless recording exists, but the default table must not
     // surface it (only --detail does).
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     near_lossless_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act + Assert
     let out = render_report(&report, &zone());
@@ -1452,9 +1518,9 @@ fn render_detail_omits_near_lossless_attribution_line_when_no_recorder_rows() {
     // Arrange: only a baseline (pre-recorder) row -- would_trim_recorder_version
     // is NULL, so it must not surface a near-lossless attribution block even
     // under --detail.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     near_lossless_attribution_row(&db, "baseline", None, 0, 0, 0, 0);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert: no recorder rows -> no attribution block.
     let out = render_report(&report, &zone());
@@ -1492,7 +1558,7 @@ fn cache_decision_row(
 fn render_detail_shows_cache_breakpoint_and_prefix_epoch_lines() {
     // Arrange: one row emitted at both regions, one declined at the terminal
     // region, and distinct epoch events so the breakdown is unambiguous.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     cache_decision_row(
         &db,
         "c1",
@@ -1507,7 +1573,7 @@ fn render_detail_shows_cache_breakpoint_and_prefix_epoch_lines() {
         Some("auto_skipped:breakpoint_cap"),
         Some(1),
     );
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act
     let out = render_report(&report, &zone());
@@ -1526,7 +1592,7 @@ fn render_detail_shows_cache_breakpoint_and_prefix_epoch_lines() {
 #[test]
 fn render_non_detail_omits_cache_breakpoint_line() {
     // Arrange: decisions exist, but the default table must not surface them.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     cache_decision_row(
         &db,
         "c1",
@@ -1534,7 +1600,7 @@ fn render_non_detail_omits_cache_breakpoint_line() {
         Some("auto_emitted"),
         Some(0),
     );
-    let report = report_all(&db, &cost_config(), None, false);
+    let report = report_all(&mut db, &cost_config(), None, false);
 
     // Act + Assert
     let out = render_report(&report, &zone());
@@ -1548,9 +1614,9 @@ fn render_non_detail_omits_cache_breakpoint_line() {
 fn render_detail_omits_cache_breakpoint_line_when_every_row_predates_the_columns() {
     // Arrange: a row shaped like pre-v16 history -- all three columns NULL. It
     // must not be counted as a decline, so no block renders at all.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     cache_decision_row(&db, "old", None, None, None);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert
     let out = render_report(&report, &zone());
@@ -1563,9 +1629,9 @@ fn render_detail_omits_cache_breakpoint_line_when_every_row_predates_the_columns
 #[test]
 fn render_detail_omits_the_prefix_epoch_line_when_no_epoch_was_classified() {
     // Arrange: a decided row with no comparable prior prefix, so no epoch event.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     cache_decision_row(&db, "c1", Some("auto_emitted"), Some("auto_emitted"), None);
-    let report = report_all(&db, &cost_config(), None, true);
+    let report = report_all(&mut db, &cost_config(), None, true);
 
     // Act + Assert: the region line renders, the epoch line does not.
     let out = render_report(&report, &zone());
@@ -1828,7 +1894,7 @@ const WALK_WINDOW: WindowBounds = WindowBounds {
     to_ms: 5_000,
 };
 
-fn walk_report(db: &UsageDb) -> WindowReport {
+fn walk_report(db: &mut UsageDb) -> WindowReport {
     build_window_report(
         db,
         &cost_config(),
@@ -1852,13 +1918,13 @@ fn the_usage_report_prints_the_window_walk_counts_exactly() {
     // Arrange: two in-window rows whose per-field sums are distinct primes,
     // so a swapped or dropped field cannot still match, plus one row past
     // the window end that must not be counted.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     walk_row(&db, "w1", 1_000, [1, 1, 2, 3, 5]);
     walk_row(&db, "w2", 4_999, [1, 2, 3, 4, 6]);
     walk_row(&db, "late", 5_000, [100, 100, 100, 100, 100]);
 
     // Act
-    let out = render_report(&walk_report(&db), &zone());
+    let out = render_report(&walk_report(&mut db), &zone());
 
     // Assert
     assert_eq!(
@@ -1895,14 +1961,14 @@ fn the_walk_line_says_lower_bound_only_when_the_window_has_a_gap() {
     ];
     for case in cases {
         // Arrange
-        let (_dir, _path, db) = temp_db();
+        let (_dir, _path, mut db) = temp_db();
         walk_row(&db, "w1", 2_000, [1, 2, 3, 4, 5]);
         for &(ts_ms, dropped) in case.gaps {
             ledger_gap(&db, ts_ms, dropped);
         }
 
         // Act
-        let out = render_report(&walk_report(&db), &zone());
+        let out = render_report(&walk_report(&mut db), &zone());
         let line = walk_line(&out);
 
         // Assert

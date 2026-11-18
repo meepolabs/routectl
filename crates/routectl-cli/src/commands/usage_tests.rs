@@ -6,7 +6,7 @@
 use super::*;
 use routectl_router::prices::PriceTable;
 use routectl_router::{Config, ModelEntry, PricingConfig, ProviderEntry};
-use routectl_usage::{UsageDb, open};
+use routectl_usage::{CostStatus, UsageDb, open};
 use tempfile::TempDir;
 
 /// No refreshed and no shipped price table, so a figure a test asserts can
@@ -917,15 +917,14 @@ fn cost_config() -> Config {
 
 fn find<'a>(report: &'a WindowReport, label: &str) -> &'a DisplayRow {
     report
-        .rows
-        .iter()
+        .rows()
         .find(|r| r.label == label)
         .expect("display row present")
 }
 
 #[test]
 fn subscription_group_renders_na_subscription() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_row(
         &db,
         "s1",
@@ -942,7 +941,7 @@ fn subscription_group_renders_na_subscription() {
     let config = cost_config();
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
     let report = build_window_report(
-        &db,
+        &mut db,
         &config,
         &no_prices(),
         "t".into(),
@@ -953,13 +952,13 @@ fn subscription_group_renders_na_subscription() {
     .unwrap();
     let row = find(&report, "sub");
     assert!(row.any_subscription);
-    assert_eq!(row.priced_total_usd, None);
+    assert_eq!(row.metrics.cost_usd, None);
     assert_eq!(cost_cell(row), "n/a (subscription)");
 }
 
 #[test]
 fn api_key_priced_group_shows_dollars() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // 1_000_000 input @ $3/Mtok = $3.00; 1_000_000 output @ $15 = $15.00.
     insert_row(
         &db,
@@ -977,7 +976,7 @@ fn api_key_priced_group_shows_dollars() {
     let config = cost_config();
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
     let report = build_window_report(
-        &db,
+        &mut db,
         &config,
         &no_prices(),
         "t".into(),
@@ -987,7 +986,7 @@ fn api_key_priced_group_shows_dollars() {
     )
     .unwrap();
     let row = find(&report, "paid");
-    assert_eq!(row.priced_total_usd, Some(18.0));
+    assert_eq!(row.metrics.cost_usd, Some(18.0));
     assert!(!row.any_subscription);
     assert_eq!(cost_cell(row), "$18.00");
 }
@@ -998,7 +997,7 @@ fn mixed_priced_and_subscription_group_shows_dollars_plus_sub() {
     // a subscription (oauth://) provider. The cost cell must surface both: the
     // priced dollar total AND a `+sub` marker so the subscription portion is
     // not silently hidden behind the dollar figure.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // Priced fine-row: 1_000_000 in @ $3 + 1_000_000 out @ $15 = $18.00.
     insert_row(
         &db,
@@ -1030,7 +1029,7 @@ fn mixed_priced_and_subscription_group_shows_dollars_plus_sub() {
     let config = cost_config();
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
     let report = build_window_report(
-        &db,
+        &mut db,
         &config,
         &no_prices(),
         "t".into(),
@@ -1040,14 +1039,14 @@ fn mixed_priced_and_subscription_group_shows_dollars_plus_sub() {
     )
     .unwrap();
     let row = find(&report, "shared");
-    assert_eq!(row.priced_total_usd, Some(18.0));
+    assert_eq!(row.metrics.cost_usd, Some(18.0));
     assert!(row.any_subscription);
     assert_eq!(cost_cell(row), "$18.00+sub");
 }
 
 #[test]
 fn api_key_without_pricing_shows_na() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // Provider "paid" but an upstream no model entry prices.
     insert_row(
         &db,
@@ -1065,7 +1064,7 @@ fn api_key_without_pricing_shows_na() {
     let config = cost_config();
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
     let report = build_window_report(
-        &db,
+        &mut db,
         &config,
         &no_prices(),
         "t".into(),
@@ -1075,14 +1074,14 @@ fn api_key_without_pricing_shows_na() {
     )
     .unwrap();
     let row = find(&report, "paid");
-    assert_eq!(row.priced_total_usd, None);
+    assert_eq!(row.metrics.cost_usd, None);
     assert!(!row.any_subscription);
     assert_eq!(cost_cell(row), "n/a");
 }
 
 #[test]
 fn by_provider_rolls_up_and_totals_match() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_row(
         &db,
         "a",
@@ -1127,7 +1126,7 @@ fn by_provider_rolls_up_and_totals_match() {
 
     // By provider: two groups plus the always-appended total row.
     let by_prov = build_window_report(
-        &db,
+        &mut db,
         &config,
         &no_prices(),
         "t".into(),
@@ -1136,25 +1135,33 @@ fn by_provider_rolls_up_and_totals_match() {
         false,
     )
     .unwrap();
-    assert_eq!(by_prov.rows.len(), 3);
+    assert_eq!(by_prov.rows().count(), 3);
     let paid = find(&by_prov, "paid");
-    assert_eq!(paid.requests, 2);
-    assert_eq!(paid.input_tokens, 15);
-    assert_eq!(paid.output_tokens, 27);
+    assert_eq!(paid.metrics.requests, 2);
+    assert_eq!(paid.metrics.input_tokens, 15);
+    assert_eq!(paid.metrics.output_tokens, 27);
 
     // Default view (by=None => per-model rows): one model "m" row + total.
-    let total =
-        build_window_report(&db, &config, &no_prices(), "t".into(), bounds, None, false).unwrap();
-    assert_eq!(total.rows.len(), 2);
+    let total = build_window_report(
+        &mut db,
+        &config,
+        &no_prices(),
+        "t".into(),
+        bounds,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(total.rows().count(), 2);
     let t = find(&total, "total");
-    assert_eq!(t.requests, 3);
-    assert_eq!(t.input_tokens, 18);
-    assert_eq!(t.output_tokens, 31);
+    assert_eq!(t.metrics.requests, 3);
+    assert_eq!(t.metrics.input_tokens, 18);
+    assert_eq!(t.metrics.output_tokens, 31);
 }
 
 #[test]
 fn footer_cache_hit_rate_and_errors() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // input=300, one error row, neither reporting cache_read (NULL). The footer
     // rate is presence-gated: with cache_read_present == 0 on every row, no row
     // qualifies, so the rate is None ("not reported"), NOT 0.0. The error count
@@ -1187,24 +1194,40 @@ fn footer_cache_hit_rate_and_errors() {
     );
     let config = cost_config();
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
-    let report =
-        build_window_report(&db, &config, &no_prices(), "t".into(), bounds, None, false).unwrap();
-    assert_eq!(report.total_errors, 1);
-    assert_eq!(report.cache_hit_rate, None);
+    let report = build_window_report(
+        &mut db,
+        &config,
+        &no_prices(),
+        "t".into(),
+        bounds,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.total.metrics.errors, 1);
+    assert_eq!(report.total.metrics.cache_hit_pct, None);
 }
 
 #[test]
 fn footer_cache_hit_rate_none_when_no_tokens() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // A row with NULL input and no cache_read => denominator 0 => None.
     insert_row(
         &db, "z", 1000, "m", "paid", "up-paid", "al", "ok", None, None, 5,
     );
     let config = cost_config();
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
-    let report =
-        build_window_report(&db, &config, &no_prices(), "t".into(), bounds, None, false).unwrap();
-    assert_eq!(report.cache_hit_rate, None);
+    let report = build_window_report(
+        &mut db,
+        &config,
+        &no_prices(),
+        "t".into(),
+        bounds,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.total.metrics.cache_hit_pct, None);
 }
 
 #[test]
@@ -1255,7 +1278,7 @@ fn multi_window_summary_emits_four_blocks() {
 
 #[test]
 fn detail_computes_ttft_percentiles_per_group() {
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     // 20 streaming ttfb values 1..=20 in one model group. Nearest-rank p95 is
     // value at ceil(0.95*20)=19th => 19; p50 at ceil(0.50*20)=10th => 10.
     for i in 1..=20 {
@@ -1273,8 +1296,16 @@ fn detail_computes_ttft_percentiles_per_group() {
     }
     let config = cost_config();
     let bounds = window_bounds(&zone(), WindowFlag::All, fixed_now());
-    let report =
-        build_window_report(&db, &config, &no_prices(), "t".into(), bounds, None, true).unwrap();
+    let report = build_window_report(
+        &mut db,
+        &config,
+        &no_prices(),
+        "t".into(),
+        bounds,
+        None,
+        true,
+    )
+    .unwrap();
     let m = find(&report, "m");
     assert_eq!(m.ttft_p50_ms, Some(10));
     assert_eq!(m.ttft_p95_ms, Some(19));
@@ -1313,11 +1344,13 @@ fn human_ms_renders_scaled_durations() {
 }
 
 #[test]
-fn tok_per_s_aggregates_and_handles_zero_window() {
-    // Arrange + Act + Assert: 40 tokens over 400ms => 100 tok/s.
-    assert_eq!(tok_per_s(40, 400), Some(100));
-    // Zero generation window => no rate.
-    assert_eq!(tok_per_s(10, 0), None);
+fn tok_per_s_cell_rounds_the_query_rate_and_marks_an_absent_one() {
+    let rate = |throughput_tok_s| QueryMetrics {
+        throughput_tok_s,
+        ..QueryMetrics::default()
+    };
+    assert_eq!(tok_per_s_cell(&rate(Some(99.6))), "100");
+    assert_eq!(tok_per_s_cell(&rate(None)), "-");
 }
 
 #[test]

@@ -1,22 +1,22 @@
 //! `routectl usage` -- the read surface over the usage-accounting DB.
 //!
-//! Reads the local SQLite usage DB (never writes it), rolls the
-//! finest-grained aggregate rows up to a display dimension, derives cost
-//! at query time from the effective per-field prices (`[models.X.pricing]`,
-//! then the refreshed and shipped price tables), and prints an
-//! ASCII report. Subscription providers (managed-OAuth,
+//! Reads the local SQLite usage DB (never writes it) through the same grouped
+//! query `/status/query` serves, pricing each fine row at read time from the
+//! effective per-field prices (`[models.X.pricing]`, then the refreshed and
+//! shipped price tables), and prints an ASCII report. Subscription providers (managed-OAuth,
 //! `credential` starting `oauth://`) carry no per-token dollar cost; their
 //! dollar column reads `n/a (subscription)` and the quota line is the real
 //! spend signal.
 //!
-//! The clap parsing, the window math, the rollup + cost core, and the
-//! stdout formatting are deliberately separate so the correctness-critical
-//! pieces (window bounds, rollup, cost bifurcation) are unit-testable
-//! against a temp DB with a fixed reference instant.
+//! The clap parsing, the window math, the pricer, and the stdout formatting
+//! are deliberately separate so the correctness-critical pieces (window
+//! bounds, cost bifurcation) are unit-testable against a temp DB with a fixed
+//! reference instant.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use time::macros::format_description;
 use time::{Date, Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime, Time};
@@ -26,12 +26,12 @@ use crate::local_time::{self, CivilInstant, LocalZone, unix_ms};
 use routectl_router::Config;
 use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_usage::{
-    AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
-    NearLosslessAttributionSummary, ObservationTotals, OpenError, QueryError, QuotaSnapshot, Rates,
-    ReductionSummary, RowCost, SUPPRESSED_SESSION_CAP, ShadowMisfireSummary, SuppressedSessions,
-    UsageDb, WouldTrimSummary, aggregate_with_cache_lifetimes, cache_decision_summary,
+    AggRow, BucketSpec, CacheDecisionSummary, GroupDim, KCalibration,
+    NearLosslessAttributionSummary, ObservationTotals, OpenError, QueryError, QueryMetrics,
+    QuerySpec, QuotaSnapshot, Rates, ReductionSummary, RowCost, SUPPRESSED_SESSION_CAP,
+    ShadowMisfireSummary, SuppressedSessions, UsageDb, WouldTrimSummary, cache_decision_summary,
     estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
-    near_lossless_attribution_summary, observation_totals, open_readonly, reduction_summary,
+    near_lossless_attribution_summary, observation_totals, open_readonly, query, reduction_summary,
     shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
 
@@ -47,11 +47,58 @@ pub struct UsageArgs {
     pub window: WindowFlag,
     pub since: Option<String>,
     pub until: Option<String>,
+    /// The `--by` grouping; absent groups by model.
     pub by: Option<GroupDim>,
     pub detail: bool,
     pub db: Option<PathBuf>,
     /// When true, emit only the k-calibration diagnostic and return.
     pub k_calibration: bool,
+}
+
+/// The `routectl usage` window flags. clap's `window` group admits at most
+/// one; [`UsageWindowArgs::selected`] is the one place a flag becomes a
+/// [`WindowFlag`].
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct UsageWindowArgs {
+    /// Usage since local midnight today.
+    #[arg(long, group = "window")]
+    pub today: bool,
+    /// Usage since Monday 00:00 local of the current week.
+    #[arg(long = "this-week", group = "window")]
+    pub this_week: bool,
+    /// Usage since the 1st of the current month, 00:00 local.
+    #[arg(long = "this-month", group = "window")]
+    pub this_month: bool,
+    /// Usage over the 24 hours ending now.
+    #[arg(long = "last-24h", group = "window")]
+    pub last_24h: bool,
+    /// Usage over the 7 days (168 hours) ending now.
+    #[arg(long = "last-7d", group = "window")]
+    pub last_7d: bool,
+    /// All recorded usage.
+    #[arg(long, group = "window")]
+    pub all: bool,
+}
+
+impl UsageWindowArgs {
+    /// The window the flags select; [`WindowFlag::None`] when none is set.
+    pub const fn selected(&self) -> WindowFlag {
+        if self.today {
+            WindowFlag::Today
+        } else if self.this_week {
+            WindowFlag::ThisWeek
+        } else if self.this_month {
+            WindowFlag::ThisMonth
+        } else if self.last_24h {
+            WindowFlag::Last24h
+        } else if self.last_7d {
+            WindowFlag::Last7d
+        } else if self.all {
+            WindowFlag::All
+        } else {
+            WindowFlag::None
+        }
+    }
 }
 
 /// The mutually-exclusive window selector: a local calendar window, a
@@ -66,36 +113,6 @@ pub enum WindowFlag {
     Last7d,
     All,
     None,
-}
-
-/// The breakdown dimension for `--by`. Absent means a single total row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupDim {
-    Model,
-    Provider,
-    Alias,
-}
-
-impl GroupDim {
-    /// Parse the `--by` value. Returns `None` on an unknown token (clap's
-    /// value-parser rejects those before this is reached; this keeps the
-    /// mapping in one place for tests).
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "model" => Some(Self::Model),
-            "provider" => Some(Self::Provider),
-            "alias" => Some(Self::Alias),
-            _ => None,
-        }
-    }
-
-    const fn header(self) -> &'static str {
-        match self {
-            Self::Model => "model",
-            Self::Provider => "provider",
-            Self::Alias => "alias",
-        }
-    }
 }
 
 /// Errors surfaced by the usage command's core. `NoData` is NOT an error
@@ -463,86 +480,42 @@ fn parse_local_date_end(zone: &LocalZone, s: &str) -> Result<i64, UsageError> {
 
 // --- rollup + cost ------------------------------------------------------
 
-/// One display row: the rolled-up counters plus the cost decision the
-/// formatter renders. Cost is intentionally tri-state: `priced_total_usd`
-/// is the summed dollar cost of API-key rows that had a price;
-/// `any_subscription` flags that managed-OAuth rows contributed (no $);
-/// `any_unpriced` flags API-key rows that no price source (`[models.X.pricing]`
-/// or a price table) prices. `equivalent_total_usd` is a FOURTH, separate
-/// channel: what the subscription rows would have cost at API rates.
+/// One display row: a group's figures exactly as the shared grouped query
+/// folded them, plus the two things that query does not carry -- whether any
+/// of the group's rows were subscription usage (the `+sub` cost marker) and
+/// the `--detail` time-to-first-token percentiles.
 #[derive(Debug, Clone)]
 pub struct DisplayRow {
     pub label: String,
-    pub requests: i64,
-    pub ok: i64,
-    pub errors: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub reasoning_tokens: i64,
-    /// Peak cached-context SIZE in the group (MAX of the fine rows' per-turn
-    /// snapshots). NOT a flow -- never folded into a token total.
-    pub cache_read_peak: i64,
-    /// Mean cached-context size in the group: presence-weighted mean of the
-    /// fine rows' per-turn snapshots (`sum(avg_i * present_i) / total_present`).
-    /// Display-only.
-    pub cache_read_avg: i64,
-    /// Summed billed cache-read VOLUME for the group (a flow). The rendered
-    /// `cache_read` column shows this directly; it is also the numerator of the
-    /// token-weighted `hit%`. Distinct from `cache_read_peak`/`cache_read_avg`,
-    /// which are per-turn context SIZE snapshots (never summed).
-    pub cache_read_billed: i64,
-    /// Token-weighted cache-hit rate for this row, precomputed at finalize so
-    /// the rendered cell never recomputes from summed fields. `None` when the
-    /// provider does not report cache reads or the denominator is degenerate.
-    /// The `total` row's value is overridden after the footer is computed so it
-    /// mirrors the authoritative footer rate (see `build_window_report`).
-    pub cache_hit_rate: Option<f64>,
-    /// Summed cache-write tokens across both ledger eras.
-    pub cache_write_tokens: i64,
-    pub server_tool_calls: i64,
-    pub priced_total_usd: Option<f64>,
-    /// Summed API-equivalent value of this row's subscription usage, absent
-    /// when no subscription row resolved a complete rate set. Notional
-    /// replacement value -- rendered beside `priced_total_usd`, never added to
-    /// it.
-    pub equivalent_total_usd: Option<f64>,
+    /// The group's metrics as `/status/query` reports them.
+    pub metrics: QueryMetrics,
+    /// True when at least one of the group's rows was priced as subscription
+    /// usage. The query's `cost_status` cannot say this for a `partial` group,
+    /// whose mix may be priced plus unpriced rather than priced plus
+    /// subscription.
     pub any_subscription: bool,
-    pub any_unpriced: bool,
+    /// Nearest-rank TTFT percentiles over the group's streaming successes;
+    /// populated only under `--detail`.
     pub ttft_p50_ms: Option<i64>,
     pub ttft_p95_ms: Option<i64>,
-    pub gen_window_ms: i64,
-    pub gen_output_tokens: i64,
-    pub stream_count: i64,
-    pub reasoning_present: i64,
-    pub cache_read_present: i64,
-    /// Fine rows reporting a cache-write value in either era; an observed
-    /// zero counts.
-    pub cache_write_present: i64,
-    pub server_tool_present: i64,
 }
 
-/// The full report for one window: the display rows, the latest quota
-/// snapshot per seat (subscription spend signal), and the window-wide footer.
+/// The full report for one window: the display rows, the window total, the
+/// latest quota snapshot per seat (subscription spend signal), and the
+/// `--detail` diagnostics.
 #[derive(Debug, Clone)]
 pub struct WindowReport {
     pub title: String,
     pub by_header: &'static str,
     pub detail: bool,
-    pub rows: Vec<DisplayRow>,
+    /// One row per group, in label order.
+    pub groups: Vec<DisplayRow>,
+    /// The window total, labelled `total`. Kept apart from `groups` so an
+    /// alias or seat literally named "total" is never mistaken for it.
+    pub total: DisplayRow,
     /// One latest quota snapshot per credential seat. Not windowed (a quota
     /// snapshot is a seat's latest known state); empty when nothing reported.
     pub quota: Vec<QuotaSnapshot>,
-    pub cache_hit_rate: Option<f64>,
-    pub total_errors: i64,
-    /// Window-wide `client_disconnect` outcome count (excluded from
-    /// `total_errors`; see `AggRow::client_disconnect_total`).
-    pub client_disconnects: i64,
-    /// Subset of `client_disconnects` that never reached dispatch (raw
-    /// `model IS NULL`, i.e. disconnected before the first content chunk).
-    pub client_disconnects_pre_dispatch: i64,
-    /// Window-wide `cancelled` outcome count (excluded from `total_errors`;
-    /// see `AggRow::cancelled_total`).
-    pub cancellations: i64,
     /// Steady-state would-trim opportunity over the window (advisory; only
     /// populated and surfaced under `--detail`).
     pub would_trim: WouldTrimSummary,
@@ -569,6 +542,13 @@ pub struct WindowReport {
     /// The window's ledger observation totals: the dispatch walk counts that
     /// the walk line prints, and the gap fields that make them a lower bound.
     pub observation: ObservationTotals,
+}
+
+impl WindowReport {
+    /// Every display row in render order: the groups, then the total.
+    pub fn rows(&self) -> impl Iterator<Item = &DisplayRow> {
+        self.groups.iter().chain(std::iter::once(&self.total))
+    }
 }
 
 /// The provider kind whose reasoning tokens are DISJOINT from its output count
@@ -835,115 +815,36 @@ fn rates_cover_used_dimensions(resolved: &RowRates, row: &AggRow) -> bool {
     .all(|(tokens, rate)| tokens == 0 || rate_covers(rate))
 }
 
-/// Per-group time-to-first-token percentiles: label -> (p50, p95) in ms,
-/// each `None` when the group has no streaming samples.
-type TtftMap = BTreeMap<String, (Option<i64>, Option<i64>)>;
+/// A nearest-rank TTFT p50 and p95 in ms, each `None` without samples.
+type TtftPair = (Option<i64>, Option<i64>);
 
-/// The display label for a fine row under a given breakdown dimension.
-/// A null model/provider column falls back to `(unattributed)`.
-fn group_label(key: &GroupKey, by: GroupDim) -> String {
-    match by {
-        GroupDim::Model => key
-            .model
-            .clone()
-            .unwrap_or_else(|| "(unattributed)".to_string()),
-        GroupDim::Provider => key
-            .provider
-            .clone()
-            .unwrap_or_else(|| "(unattributed)".to_string()),
-        GroupDim::Alias => key.alias.clone(),
+/// The `--detail` TTFT percentiles: per group label, and over the whole
+/// window. The window figure is kept apart from the labelled ones so a group
+/// labelled "total" cannot share its samples.
+#[derive(Debug, Default)]
+struct TtftPercentiles {
+    by_label: BTreeMap<String, TtftPair>,
+    total: TtftPair,
+}
+
+impl TtftPercentiles {
+    fn for_label(&self, label: &str) -> TtftPair {
+        self.by_label.get(label).copied().unwrap_or((None, None))
     }
 }
 
-/// Accumulator mirroring `DisplayRow`'s summable fields while the cost
-/// tri-state is folded in.
-#[derive(Default)]
-struct Acc {
-    requests: i64,
-    ok: i64,
-    errors: i64,
-    input_tokens: i64,
-    output_tokens: i64,
-    reasoning_tokens: i64,
-    /// Running MAX of the fine rows' per-turn cache-read peaks.
-    cache_read_peak: i64,
-    /// Presence-weighted accumulator for the group's mean cache-read size:
-    /// `sum(avg_i * present_i)`; divided by `cache_read_present` at finalize.
-    cache_read_avg_weighted: i64,
-    /// Running SUM of the fine rows' billed cache-read volume (a flow).
-    cache_read_billed: i64,
-    /// Cache-inclusive prompt-token denominator for the hit%, summed over the
-    /// fine rows that report cache reads (`cache_read_present > 0`) via the one
-    /// shared `cache_prompt_den` rule. Numerator is `cache_read_billed`
-    /// (non-reporting rows contribute 0 there), so this pairs with it to give a
-    /// per-group rate that matches the footer by construction.
-    cache_hit_den: i64,
-    cache_write_tokens: i64,
-    server_tool_calls: i64,
-    gen_window_ms: i64,
-    gen_output_tokens: i64,
-    stream_count: i64,
-    reasoning_present: i64,
-    cache_read_present: i64,
-    cache_write_present: i64,
-    server_tool_present: i64,
-    priced_usd: f64,
-    any_priced: bool,
-    /// Summed API-equivalent value of the subscription rows that resolved one.
-    /// Never folded into `priced_usd`: notional value and real spend stay in
-    /// separate channels all the way to the rendered cell.
-    equivalent_usd: f64,
-    any_equivalent: bool,
-    any_subscription: bool,
-    any_unpriced: bool,
-}
+/// How far ahead the report's read deadline sits. The command is attended and
+/// has no latency budget (the operator's interrupt is its limit), but the
+/// shared query always runs under a deadline, so the CLI hands it one no real
+/// read reaches.
+const REPORT_READ_HORIZON: Duration = Duration::from_hours(24);
 
-impl Acc {
-    fn add(&mut self, row: &AggRow, cost: RowCost) {
-        self.requests += row.requests;
-        self.ok += row.ok;
-        self.errors += row.errors;
-        self.input_tokens += row.input_tokens;
-        self.output_tokens += row.output_tokens;
-        self.reasoning_tokens += row.reasoning_tokens;
-        self.cache_read_peak = self.cache_read_peak.max(row.cache_read_peak);
-        // safe in i64: ~200k-token ceiling * realistic per-window turn counts << i64::MAX
-        self.cache_read_avg_weighted += row.cache_read_avg * row.cache_read_present;
-        self.cache_read_billed += row.cache_read_billed;
-        if row.cache_read_present > 0 {
-            self.cache_hit_den += cache_prompt_den(row);
-        }
-        self.cache_write_tokens += row.cache_write_tokens;
-        self.server_tool_calls += row.server_tool_calls;
-        self.gen_window_ms += row.gen_window_ms;
-        self.gen_output_tokens += row.gen_output_tokens;
-        self.stream_count += row.stream_count;
-        self.reasoning_present += row.reasoning_present;
-        self.cache_read_present += row.cache_read_present;
-        self.cache_write_present += row.cache_write_present;
-        self.server_tool_present += row.server_tool_present;
-        match cost {
-            RowCost::Subscription(equivalent) => {
-                self.any_subscription = true;
-                if let Some(usd) = equivalent {
-                    self.equivalent_usd += usd;
-                    self.any_equivalent = true;
-                }
-            }
-            RowCost::Priced(usd) => {
-                self.priced_usd += usd;
-                self.any_priced = true;
-            }
-            RowCost::Unpriced => self.any_unpriced = true,
-        }
-    }
-}
-
-/// Build the full window report: aggregate -> rollup to `by` (defaulting to
-/// model) -> cost per fine row folded into the display group -> a window-wide
-/// `total` row -> quota + footer. Pure over the DB read; no clap, no stdout.
+/// Build the full window report: the shared grouped query over the window,
+/// grouped by `by` (model when absent) and priced row by row through
+/// `cost_for_row` -- the same query and pricer `/status/query` runs -- plus
+/// the quota lines and, under `--detail`, the diagnostics. No clap, no stdout.
 pub fn build_window_report(
-    db: &UsageDb,
+    db: &mut UsageDb,
     config: &Config,
     prices: &PriceSnapshot,
     title: String,
@@ -952,224 +853,100 @@ pub fn build_window_report(
     detail: bool,
 ) -> Result<WindowReport, UsageError> {
     let dim = by.unwrap_or(GroupDim::Model);
-    let rows = aggregate_with_cache_lifetimes(db, bounds.from_ms, bounds.to_ms)?;
-
-    let mut groups: BTreeMap<String, Acc> = BTreeMap::new();
-    let mut total = Acc::default();
-    for row in &rows {
-        let label = group_label(&row.key, dim);
+    let spec = QuerySpec {
+        from_ms: bounds.from_ms,
+        to_ms: bounds.to_ms,
+        group_by: dim,
+        alias_filter: None,
+        provider_filter: None,
+        bucket: None,
+    };
+    let subscription_labels = RefCell::new(BTreeSet::new());
+    let price = |row: &AggRow| {
         let cost = cost_for_row(config, prices, row);
-        groups.entry(label).or_default().add(row, cost);
-        total.add(row, cost);
-    }
+        if matches!(cost, RowCost::Subscription(_)) {
+            subscription_labels.borrow_mut().insert(dim.label(&row.key));
+        }
+        cost
+    };
+    let result = query(db, &spec, price, Instant::now() + REPORT_READ_HORIZON)?;
+    let subscription_labels = subscription_labels.into_inner();
 
     let ttft = if detail {
         compute_ttft(db, bounds, dim)?
     } else {
-        BTreeMap::new()
+        TtftPercentiles::default()
     };
 
-    // Steady-state would-trim opportunity: only queried (and surfaced) under
-    // --detail. The default table stays unchanged.
-    let would_trim = if detail {
-        would_trim_summary(db, bounds.from_ms, bounds.to_ms)?
-    } else {
-        WouldTrimSummary::default()
-    };
-
-    // Shadow misfire monitor: only queried (and surfaced) under --detail.
-    let shadow_misfire = if detail {
-        shadow_misfire_summary(db, bounds.from_ms, bounds.to_ms)?
-    } else {
-        ShadowMisfireSummary::default()
-    };
-
-    // Near-lossless attribution: only queried (and surfaced) under
-    // --detail. Restricted at the query layer to recorder-version rows.
-    let near_lossless_attribution = if detail {
-        near_lossless_attribution_summary(db, bounds.from_ms, bounds.to_ms)?
-    } else {
-        NearLosslessAttributionSummary::default()
-    };
-
-    // Lossless-minifier outcome summary: only queried (and surfaced) under
-    // --detail.
-    let reduction = if detail {
-        reduction_summary(db, bounds.from_ms, bounds.to_ms)?
-    } else {
-        ReductionSummary::default()
-    };
-
-    // Cache-breakpoint decisions: only queried (and surfaced) under --detail.
-    let cache_decision = if detail {
-        cache_decision_summary(db, bounds.from_ms, bounds.to_ms)?
-    } else {
-        CacheDecisionSummary::default()
-    };
-
-    // K-suppressed sessions: only queried (and surfaced) under --detail.
-    let suppressed = if detail {
-        suppressed_sessions(db, bounds.from_ms, bounds.to_ms)?
-    } else {
-        SuppressedSessions::default()
-    };
-
-    let observation = observation_totals(db, bounds.from_ms, bounds.to_ms)?;
-
-    let mut display_rows: Vec<DisplayRow> = groups
+    let groups = result
+        .groups
         .into_iter()
-        .map(|(label, acc)| finalize_row(label, acc, &ttft))
+        .map(|group| {
+            let (ttft_p50_ms, ttft_p95_ms) = ttft.for_label(&group.label);
+            DisplayRow {
+                any_subscription: subscription_labels.contains(&group.label),
+                label: group.label,
+                metrics: group.metrics,
+                ttft_p50_ms,
+                ttft_p95_ms,
+            }
+        })
         .collect();
-    display_rows.push(finalize_row("total".to_string(), total, &ttft));
+    let total = DisplayRow {
+        label: "total".to_string(),
+        metrics: result.totals,
+        any_subscription: !subscription_labels.is_empty(),
+        ttft_p50_ms: ttft.total.0,
+        ttft_p95_ms: ttft.total.1,
+    };
 
-    let FooterTotals {
-        cache_hit_rate,
-        total_errors,
-        client_disconnects,
-        client_disconnects_pre_dispatch,
-        cancellations,
-    } = footer(&rows);
-    // The total row mirrors the authoritative footer (token-weighted over
-    // cache-reporting rows) so the two never disagree in mixed-provider windows.
-    if let Some(t) = display_rows.last_mut() {
-        t.cache_hit_rate = cache_hit_rate;
-    }
+    let diagnostics = if detail {
+        detail_diagnostics(db, bounds)?
+    } else {
+        DetailDiagnostics::default()
+    };
 
     Ok(WindowReport {
         title,
-        by_header: dim.header(),
+        by_header: dim.as_str(),
         detail,
-        rows: display_rows,
+        groups,
+        total,
         quota: latest_quota_by_seat(db)?,
-        cache_hit_rate,
-        total_errors,
-        client_disconnects,
-        client_disconnects_pre_dispatch,
-        cancellations,
-        would_trim,
-        shadow_misfire,
-        near_lossless_attribution,
-        reduction,
-        cache_decision,
-        suppressed_sessions: suppressed,
-        observation,
+        would_trim: diagnostics.would_trim,
+        shadow_misfire: diagnostics.shadow_misfire,
+        near_lossless_attribution: diagnostics.near_lossless_attribution,
+        reduction: diagnostics.reduction,
+        cache_decision: diagnostics.cache_decision,
+        suppressed_sessions: diagnostics.suppressed_sessions,
+        observation: observation_totals(db, bounds.from_ms, bounds.to_ms)?,
     })
 }
 
-/// Turn one accumulator into a display row, resolving the cost tri-state and
-/// attaching the group's pre-computed TTFT percentiles (if any).
-fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
-    let (ttft_p50_ms, ttft_p95_ms) = ttft.get(&label).copied().unwrap_or((None, None));
-    let cache_read_avg = if acc.cache_read_present > 0 {
-        acc.cache_read_avg_weighted / acc.cache_read_present
-    } else {
-        0
-    };
-    let cache_hit_rate = cache_hit_ratio(acc.cache_read_billed, acc.cache_hit_den);
-    DisplayRow {
-        ttft_p50_ms,
-        ttft_p95_ms,
-        priced_total_usd: if acc.any_priced {
-            Some(acc.priced_usd)
-        } else {
-            None
-        },
-        equivalent_total_usd: if acc.any_equivalent {
-            Some(acc.equivalent_usd).filter(|usd| usd.is_finite())
-        } else {
-            None
-        },
-        any_subscription: acc.any_subscription,
-        any_unpriced: acc.any_unpriced,
-        label,
-        requests: acc.requests,
-        ok: acc.ok,
-        errors: acc.errors,
-        input_tokens: acc.input_tokens,
-        output_tokens: acc.output_tokens,
-        reasoning_tokens: acc.reasoning_tokens,
-        cache_read_peak: acc.cache_read_peak,
-        cache_read_avg,
-        cache_read_billed: acc.cache_read_billed,
-        cache_hit_rate,
-        cache_write_tokens: acc.cache_write_tokens,
-        server_tool_calls: acc.server_tool_calls,
-        gen_window_ms: acc.gen_window_ms,
-        gen_output_tokens: acc.gen_output_tokens,
-        stream_count: acc.stream_count,
-        reasoning_present: acc.reasoning_present,
-        cache_read_present: acc.cache_read_present,
-        cache_write_present: acc.cache_write_present,
-        server_tool_present: acc.server_tool_present,
-    }
+/// The `--detail`-only window summaries; every one stays at its default
+/// (and unrendered) without `--detail`.
+#[derive(Default)]
+struct DetailDiagnostics {
+    would_trim: WouldTrimSummary,
+    shadow_misfire: ShadowMisfireSummary,
+    near_lossless_attribution: NearLosslessAttributionSummary,
+    reduction: ReductionSummary,
+    cache_decision: CacheDecisionSummary,
+    suppressed_sessions: SuppressedSessions,
 }
 
-/// Cache-inclusive prompt-token denominator for one aggregate row:
-/// `input + cache_read_billed + cache_write_tokens`, the write total spanning
-/// both ledger eras. The DB stores
-/// input / cache_read / cache_write as DISJOINT prompt dimensions, so their sum
-/// is the cache-INCLUSIVE prompt total against which billed cache reads are
-/// weighed. This is the ONE denominator rule -- consumed by both the per-group
-/// accumulator (`Acc::add`) and the footer, so a mixed-provider window can never
-/// show two contradictory hit%. A row with `cache_read_present > 0` but
-/// `input_tokens == 0` still contributes its reads/writes here.
-const fn cache_prompt_den(row: &AggRow) -> i64 {
-    row.input_tokens + row.cache_read_billed + row.cache_write_tokens
-}
-
-/// The token-weighted cache-hit ratio `num / den`, or `None` when the
-/// denominator is degenerate (`<= 0`) -- the caller renders `-`, never `0%`.
-/// `cache_read_billed` is a summed FLOW, so both the per-group and footer paths
-/// legitimately accumulate their own `(num, den)` pair (weighted aggregation is
-/// not mean-of-means) and feed it through this one ratio rule; they differ only
-/// in HOW they accumulate, never in the ratio.
-fn cache_hit_ratio(num: i64, den: i64) -> Option<f64> {
-    if den <= 0 {
-        return None;
-    }
-    Some(num as f64 / den as f64)
-}
-
-/// Window-wide footer: cache-hit-rate, the total error count, and the
-/// client-disconnect breakdown.
-///
-/// The rate is the token-weighted fraction of prompt tokens served from cache,
-/// computed over the rows that report cache reads (`cache_read_present > 0`):
-/// `sum(cache_read_billed) / sum(input + cache_read_billed +
-/// cache_write_tokens)`. cache_read here is a billed FLOW, so summing it across rows
-/// is correct (the per-turn snapshot used for the display SIZE column is NOT --
-/// that one must never be summed). Rows whose provider does not report cache are
-/// excluded from both numerator and denominator. `None` when no qualifying row
-/// has a positive denominator. Errors ARE a flow, so the error count stays a
-/// cross-row sum. `client_disconnect_total` / `client_disconnect_pre_dispatch`
-/// and `cancelled_total` are likewise cross-row sums straight off `AggRow` --
-/// see that struct's docs for why they are excluded from `errors`.
-fn footer(rows: &[AggRow]) -> FooterTotals {
-    let mut num = 0i64;
-    let mut den = 0i64;
-    let mut totals = FooterTotals::default();
-    for r in rows {
-        totals.total_errors += r.errors;
-        totals.client_disconnects += r.client_disconnect_total;
-        totals.client_disconnects_pre_dispatch += r.client_disconnect_pre_dispatch;
-        totals.cancellations += r.cancelled_total;
-        if r.cache_read_present > 0 {
-            num += r.cache_read_billed;
-            den += cache_prompt_den(r);
-        }
-    }
-    totals.cache_hit_rate = cache_hit_ratio(num, den);
-    totals
-}
-
-/// The window-wide footer figures [`footer`] folds out of the aggregate rows.
-#[derive(Debug, Default)]
-struct FooterTotals {
-    cache_hit_rate: Option<f64>,
-    total_errors: i64,
-    client_disconnects: i64,
-    client_disconnects_pre_dispatch: i64,
-    cancellations: i64,
+/// Read the `--detail` window summaries.
+fn detail_diagnostics(db: &UsageDb, bounds: WindowBounds) -> Result<DetailDiagnostics, UsageError> {
+    let (from_ms, to_ms) = (bounds.from_ms, bounds.to_ms);
+    Ok(DetailDiagnostics {
+        would_trim: would_trim_summary(db, from_ms, to_ms)?,
+        shadow_misfire: shadow_misfire_summary(db, from_ms, to_ms)?,
+        // Restricted at the query layer to recorder-version rows.
+        near_lossless_attribution: near_lossless_attribution_summary(db, from_ms, to_ms)?,
+        reduction: reduction_summary(db, from_ms, to_ms)?,
+        cache_decision: cache_decision_summary(db, from_ms, to_ms)?,
+        suppressed_sessions: suppressed_sessions(db, from_ms, to_ms)?,
+    })
 }
 
 /// Nearest-rank percentile of a sorted, non-empty slice. `q` is in `[0,1]`;
@@ -1180,32 +957,43 @@ fn nearest_rank(sorted: &[i64], q: f64) -> i64 {
     sorted[rank - 1]
 }
 
-/// Per-display-group TTFT p50/p95 via nearest-rank over the in-window
-/// streaming time-to-first-byte samples. A window-wide `total` bucket is
-/// accumulated alongside the per-group buckets. Only computed for `--detail`.
-fn compute_ttft(db: &UsageDb, bounds: WindowBounds, by: GroupDim) -> Result<TtftMap, UsageError> {
+/// The nearest-rank p50 and p95 of `values`, or `(None, None)` when empty.
+fn ttft_pair(mut values: Vec<i64>) -> TtftPair {
+    if values.is_empty() {
+        return (None, None);
+    }
+    values.sort_unstable();
+    (
+        Some(nearest_rank(&values, 0.50)),
+        Some(nearest_rank(&values, 0.95)),
+    )
+}
+
+/// Per-group and window-wide TTFT p50/p95 via nearest-rank over the in-window
+/// streaming time-to-first-byte samples, each sample labelled the way the
+/// shared query labels its row. Only computed for `--detail`.
+fn compute_ttft(
+    db: &UsageDb,
+    bounds: WindowBounds,
+    by: GroupDim,
+) -> Result<TtftPercentiles, UsageError> {
     let raw = ttfbs(db, bounds.from_ms, bounds.to_ms)?;
     let mut buckets: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    let mut total = Vec::with_capacity(raw.len());
     for (key, ms) in raw {
-        buckets.entry(group_label(&key, by)).or_default().push(ms);
-        buckets.entry("total".to_string()).or_default().push(ms);
+        buckets.entry(by.label(&key)).or_default().push(ms);
+        total.push(ms);
     }
-    let mut out = BTreeMap::new();
-    for (label, mut values) in buckets {
-        if values.is_empty() {
-            continue;
-        }
-        values.sort_unstable();
-        let p50 = nearest_rank(&values, 0.50);
-        let p95 = nearest_rank(&values, 0.95);
-        out.insert(label, (Some(p50), Some(p95)));
-    }
-    Ok(out)
+    Ok(TtftPercentiles {
+        by_label: buckets
+            .into_iter()
+            .map(|(label, values)| (label, ttft_pair(values)))
+            .collect(),
+        total: ttft_pair(total),
+    })
 }
 
 // --- formatting ---------------------------------------------------------
-
-const MS_PER_SECOND_F: f64 = 1_000.0;
 
 /// Render a metric sum under the not-reported rule: `-` when no fine row in
 /// the group reported the metric (`present == 0`), else the humanized sum.
@@ -1216,14 +1004,17 @@ fn metric_cell(present: i64, sum: i64) -> String {
     human_count(sum)
 }
 
-/// Robust generation throughput as an integer tokens/second, or `None` when
-/// there is no generation window to divide by. Aggregates totals rather than
-/// averaging per-request ratios.
-fn tok_per_s(gen_output_tokens: i64, gen_window_ms: i64) -> Option<i64> {
-    if gen_window_ms == 0 {
-        return None;
-    }
-    Some((gen_output_tokens as f64 * MS_PER_SECOND_F / gen_window_ms as f64).round() as i64)
+/// Render an optional figure: `-` when absent, else the humanized count.
+fn optional_count_cell(value: Option<i64>) -> String {
+    value.map_or_else(|| "-".to_string(), human_count)
+}
+
+/// The shared query's generation throughput as a whole tokens/second cell, or
+/// `-` when no generation time was measured.
+fn tok_per_s_cell(metrics: &QueryMetrics) -> String {
+    metrics
+        .throughput_tok_s
+        .map_or_else(|| "-".to_string(), |v| (v.round() as i64).to_string())
 }
 
 /// Render the cost cell for a display row given its tri-state. A display
@@ -1236,13 +1027,14 @@ fn tok_per_s(gen_output_tokens: i64, gen_window_ms: i64) -> Option<i64> {
 /// subscription portion renders exactly as it did before the equivalent
 /// existed.
 fn cost_cell(row: &DisplayRow) -> String {
-    match (row.priced_total_usd, row.any_subscription) {
-        (Some(usd), true) => match row.equivalent_total_usd {
+    let equivalent = row.metrics.equivalent_cost_usd;
+    match (row.metrics.cost_usd, row.any_subscription) {
+        (Some(usd), true) => match equivalent {
             Some(sub) => format!("${usd:.2} (+sub ~${sub:.2})"),
             None => format!("${usd:.2}+sub"),
         },
         (Some(usd), false) => format!("${usd:.2}"),
-        (None, true) => match row.equivalent_total_usd {
+        (None, true) => match equivalent {
             Some(sub) => format!("n/a (sub ~${sub:.2})"),
             None => "n/a (subscription)".to_string(),
         },
@@ -1278,13 +1070,12 @@ const DETAIL_HEADERS: [&str; 8] = [
     "srv_tools",
 ];
 
-/// Render the token-weighted cache-hit-rate cell for a display row under the
-/// not-reported rule: `-` when the provider reports no cache reads or the
-/// denominator is degenerate, else the one-decimal percentage (e.g. `45.0%`),
-/// matching the footer's formatting so column and footer read identically.
-fn hit_pct_cell(row: &DisplayRow) -> String {
-    row.cache_hit_rate
-        .map_or_else(|| "-".to_string(), |r| format!("{:.1}%", r * 100.0))
+/// Render a token-weighted cache-hit percentage under the not-reported rule:
+/// `-` when the provider reports no cache reads or the denominator is
+/// degenerate, else the one-decimal percentage (e.g. `45.0%`), matching the
+/// footer's formatting so column and footer read identically.
+fn hit_pct_cell(cache_hit_pct: Option<f64>) -> String {
+    cache_hit_pct.map_or_else(|| "-".to_string(), |pct| format!("{pct:.1}%"))
 }
 
 /// Displayed `input`: all prompt tokens NOT served from cache, i.e. fresh
@@ -1292,35 +1083,36 @@ fn hit_pct_cell(row: &DisplayRow) -> String {
 /// every provider (a row reporting no write adds 0). With
 /// `cache_read_billed`, this reconciles with the `cache_hit_pct` denominator.
 /// NOT the cost basis -- cost prices the disjoint stored buckets separately.
-const fn display_input(row: &DisplayRow) -> i64 {
-    row.input_tokens + row.cache_write_tokens
+const fn display_input(metrics: &QueryMetrics) -> i64 {
+    metrics.input_tokens + metrics.cache_write_tokens
 }
 
 /// The normal data cells for one row, in header order.
 fn normal_cells(row: &DisplayRow) -> Vec<String> {
+    let m = &row.metrics;
     vec![
         row.label.clone(),
-        row.requests.to_string(),
-        row.errors.to_string(),
-        human_count(display_input(row)),
-        human_count(row.output_tokens),
-        metric_cell(row.cache_read_present, row.cache_read_billed),
-        hit_pct_cell(row),
+        m.requests.to_string(),
+        m.errors.to_string(),
+        human_count(display_input(m)),
+        human_count(m.output_tokens),
+        metric_cell(m.cache_read_present, m.cache_read_billed),
+        hit_pct_cell(m.cache_hit_pct),
     ]
 }
 
 /// The extra `--detail` data cells for one row, in header order.
 fn detail_cells(row: &DisplayRow) -> Vec<String> {
+    let m = &row.metrics;
     vec![
         cost_cell(row),
-        metric_cell(row.cache_read_present, row.cache_read_peak),
-        metric_cell(row.cache_read_present, row.cache_read_avg),
-        metric_cell(row.cache_write_present, row.cache_write_tokens),
+        optional_count_cell(m.ctx_peak),
+        optional_count_cell(m.ctx_avg),
+        metric_cell(m.cache_write_present, m.cache_write_tokens),
         ttft_cell(row.ttft_p50_ms),
         ttft_cell(row.ttft_p95_ms),
-        tok_per_s(row.gen_output_tokens, row.gen_window_ms)
-            .map_or_else(|| "-".to_string(), |v| v.to_string()),
-        metric_cell(row.server_tool_present, row.server_tool_calls),
+        tok_per_s_cell(m),
+        metric_cell(m.server_tool_present, m.server_tool_calls),
     ]
 }
 
@@ -1340,7 +1132,7 @@ pub fn render_report(report: &WindowReport, zone: &LocalZone) -> String {
     }
 
     let mut table: Vec<Vec<String>> = vec![headers];
-    for row in &report.rows {
+    for row in report.rows() {
         let mut cells = normal_cells(row);
         if report.detail {
             cells.extend(detail_cells(row));
@@ -1365,26 +1157,16 @@ pub fn render_report(report: &WindowReport, zone: &LocalZone) -> String {
     out
 }
 
-/// The window total row, used for the detail latency-summary line. It is
-/// always the LAST row appended by `build_window_report` (after the sorted
-/// per-group rows), so it is selected by position rather than by label -- an
-/// alias named "total" under `--by alias` must not be mistaken for it.
-fn total_row(report: &WindowReport) -> Option<&DisplayRow> {
-    report.rows.last()
-}
-
 /// One-line latency / throughput / streaming-share summary, derived from the
-/// window total row. Emitted only under `--detail`.
+/// window total. Emitted only under `--detail`.
 fn render_latency_summary(report: &WindowReport) -> String {
-    let Some(total) = total_row(report) else {
-        return String::new();
-    };
+    let total = &report.total;
     let p50 = ttft_cell(total.ttft_p50_ms);
     let p95 = ttft_cell(total.ttft_p95_ms);
-    let toks = tok_per_s(total.gen_output_tokens, total.gen_window_ms)
-        .map_or_else(|| "-".to_string(), |v| v.to_string());
-    let pct = if total.requests > 0 {
-        (100.0 * total.stream_count as f64 / total.requests as f64).round() as i64
+    let toks = tok_per_s_cell(&total.metrics);
+    let m = &total.metrics;
+    let pct = if m.requests > 0 {
+        (100.0 * m.stream_count as f64 / m.requests as f64).round() as i64
     } else {
         0
     };
@@ -1652,15 +1434,16 @@ fn format_reset(zone: &LocalZone, epoch_s: i64) -> String {
 }
 
 fn render_footer(report: &WindowReport) -> String {
-    let hit = report.cache_hit_rate.map_or_else(
-        || "cache hit n/a".to_string(),
-        |r| format!("cache hit {:.1}%", r * 100.0),
-    );
+    let totals = &report.total.metrics;
+    let hit = match totals.cache_hit_pct {
+        Some(pct) => format!("cache hit {pct:.1}%"),
+        None => "cache hit n/a".to_string(),
+    };
     format!(
         "{hit}\nclient disconnects: {} ({} pre-dispatch)\ncancelled: {}\n{}",
-        report.client_disconnects,
-        report.client_disconnects_pre_dispatch,
-        report.cancellations,
+        totals.client_disconnect_total,
+        totals.client_disconnect_pre_dispatch,
+        totals.cancelled_total,
         render_walk_line(&report.observation),
     )
 }
@@ -1700,8 +1483,11 @@ const LEGEND: &str = concat!(
     "  \"n/a (sub)\" = managed subscription (see quota)\n",
     "  \"~$\"        = notional API-equivalent value of subscription usage; never added to the dollar figure,\n",
     "                and absent when the subscription rows' rates are incomplete\n",
-    "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
-    "                cache_wr (cache writes of every lifetime, already in input), ttft, tok/s, server-tools,\n",
+    "  --detail    = adds cost, ctx_peak/ctx_avg (largest and mean per-request prompt:\n",
+    "                fresh input + cache read + cache write, not a flow),\n",
+    "                cache_wr (cache writes of every lifetime, already in input),\n",
+    "                ttft_p50/ttft_p95 (nearest-rank time to first token over streamed successes),\n",
+    "                tok/s, server-tools,\n",
     "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied),\n",
     "                a reduction line (lossless-minifier outcomes actually applied; counts, not rates),\n",
     "                and a cache-breakpoint line (per-region injection decisions + prefix-epoch events),\n",
@@ -1838,52 +1624,65 @@ pub fn build_blocks(
 
 /// The per-window rendered blocks before the legend is appended.
 fn build_window_blocks(
-    db: &UsageDb,
+    db: &mut UsageDb,
     config: &Config,
     prices: &PriceSnapshot,
     args: &UsageArgs,
     zone: &LocalZone,
     now: OffsetDateTime,
 ) -> Result<Vec<String>, UsageError> {
-    if let Some(since) = &args.since {
-        let bounds = since_bounds(zone, since, args.until.as_deref(), now)?;
+    let reports = build_window_reports(db, config, prices, args, zone, now)?;
+    Ok(reports
+        .iter()
+        .map(|report| render_report(report, zone))
+        .collect())
+}
+
+/// One report per window the request names: the `--since` range, the
+/// selected window, or (neither given) the multi-window summary's four.
+pub(crate) fn build_window_reports(
+    db: &mut UsageDb,
+    config: &Config,
+    prices: &PriceSnapshot,
+    args: &UsageArgs,
+    zone: &LocalZone,
+    now: OffsetDateTime,
+) -> Result<Vec<WindowReport>, UsageError> {
+    let windows = if let Some(since) = &args.since {
         let title = match &args.until {
             Some(until) => format!("== {since} .. {until} =="),
             None => format!("== since {since} =="),
         };
-        let report = build_window_report(db, config, prices, title, bounds, args.by, args.detail)?;
-        return Ok(vec![render_report(&report, zone)]);
-    }
-
-    if args.window == WindowFlag::None {
-        let windows = [
-            (WindowFlag::Today, "== today =="),
-            (WindowFlag::ThisWeek, "== this week =="),
-            (WindowFlag::ThisMonth, "== this month =="),
-            (WindowFlag::All, "== all time =="),
-        ];
-        let mut blocks = Vec::with_capacity(windows.len());
-        for (flag, title) in windows {
-            let bounds = window_bounds(zone, flag, now);
-            let report = build_window_report(
-                db,
-                config,
-                prices,
-                title.to_string(),
-                bounds,
-                args.by,
-                args.detail,
-            )?;
-            blocks.push(render_report(&report, zone));
-        }
-        return Ok(blocks);
-    }
-
-    let title = window_title(args.window);
-    let bounds = window_bounds(zone, args.window, now);
-    let report = build_window_report(db, config, prices, title, bounds, args.by, args.detail)?;
-    Ok(vec![render_report(&report, zone)])
+        vec![(
+            title,
+            since_bounds(zone, since, args.until.as_deref(), now)?,
+        )]
+    } else if args.window == WindowFlag::None {
+        SUMMARY_WINDOWS
+            .iter()
+            .map(|&flag| (window_title(flag), window_bounds(zone, flag, now)))
+            .collect()
+    } else {
+        vec![(
+            window_title(args.window),
+            window_bounds(zone, args.window, now),
+        )]
+    };
+    windows
+        .into_iter()
+        .map(|(title, bounds)| {
+            build_window_report(db, config, prices, title, bounds, args.by, args.detail)
+        })
+        .collect()
 }
+
+/// The windows the multi-window summary prints, in order.
+const SUMMARY_WINDOWS: [WindowFlag; 4] = [
+    WindowFlag::Today,
+    WindowFlag::ThisWeek,
+    WindowFlag::ThisMonth,
+    WindowFlag::All,
+];
 
 fn window_title(flag: WindowFlag) -> String {
     match flag {

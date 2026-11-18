@@ -4442,10 +4442,18 @@ the command prints a multi-window summary (today / this week / this
 month / all time) as separate blocks. The only trailing windows are
 `--last-24h` and `--last-7d`.
 
-**Breakdown.** `--by model|provider|alias` rolls the rows up to that
-dimension; omit `--by` for a single total row. `--detail` adds extra
-columns: `cache_wr` (cache-write tokens of every lifetime), p95
-(nearest-rank) and max latency, total wall-time (summed `latency_ms`),
+**Breakdown.** `--by model|alias|provider|seat` rolls the rows up to
+that dimension; omit `--by` to group by model. Every report ends with a
+`total` row. `seat` is the credential seat recorded with each request;
+requests with no recorded seat group as `(unattributed)`. The report reads
+the same grouped query as `/status/query`, so for the same window and
+grouping its groups and figures match the dashboard's. `--detail` adds
+extra columns: cost, `ctx_peak` and `ctx_avg` (the largest and the mean
+per-request prompt: fresh input plus cache read plus cache write, over
+requests that reported any of the three; `-` when none did), `cache_wr`
+(cache-write tokens of every lifetime), `ttft_p50` and `ttft_p95`
+(nearest-rank time to first token over streamed successes), `tok/s`
+(output tokens of streamed successes over their summed generation time)
 and server-tool counts.
 
 **Cache writes.** The `input` column, the `cache_wr` column and the

@@ -109,7 +109,7 @@ fn insert_lifetime_row(db: &UsageDb, writes: &WriteCase) {
 fn lifetime_verdict(writes: &WriteCase, config: &Config) -> RowCost {
     let (_dir, _path, db) = temp_db();
     insert_lifetime_row(&db, writes);
-    let rows = aggregate_with_cache_lifetimes(&db, 0, i64::MAX).expect("aggregate");
+    let rows = routectl_usage::aggregate_with_cache_lifetimes(&db, 0, i64::MAX).expect("aggregate");
     assert_eq!(rows.len(), 1, "the fixture folds to one fine row");
     cost_for_row(config, &no_prices(), &rows[0])
 }

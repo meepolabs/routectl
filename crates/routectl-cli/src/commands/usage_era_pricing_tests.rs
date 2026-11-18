@@ -149,7 +149,7 @@ fn config_shift_now_subsumed() -> Config {
     ))
 }
 
-fn era_report(db: &UsageDb, config: &Config) -> WindowReport {
+fn era_report(db: &mut UsageDb, config: &Config) -> WindowReport {
     build_window_report(
         db,
         config,
@@ -173,7 +173,7 @@ fn aggregate_partitions_one_provider_name_by_persisted_kind() {
     seed_two_eras(&db);
 
     // Act
-    let rows = aggregate_with_cache_lifetimes(&db, 0, i64::MAX).expect("aggregate");
+    let rows = routectl_usage::aggregate_with_cache_lifetimes(&db, 0, i64::MAX).expect("aggregate");
 
     // Assert: the read grain separates the eras, which is what lets each be
     // priced by what it was. Without the split there is no era to price.
@@ -189,27 +189,27 @@ fn aggregate_partitions_one_provider_name_by_persisted_kind() {
 #[test]
 fn mixed_era_total_matches_the_hand_computed_oracle() {
     // Arrange
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     seed_two_eras(&db);
 
     // Act
-    let report = era_report(&db, &config_shift_now_gemini());
+    let report = era_report(&mut db, &config_shift_now_gemini());
     let row = find(&report, SHIFT_PROVIDER);
 
     // Assert: the era-correct sum, and explicitly NEITHER single-kind figure a
     // current-config lookup would produce.
     assert_eq!(
-        row.priced_total_usd,
+        row.metrics.cost_usd,
         Some(EXPECTED_ERA_CORRECT_USD),
         "each era must price by its own persisted kind"
     );
     assert_ne!(
-        row.priced_total_usd,
+        row.metrics.cost_usd,
         Some(BOTH_ERAS_AS_GEMINI_USD),
         "pricing the subsumed era as gemini double-charges its reasoning"
     );
     assert_ne!(
-        row.priced_total_usd,
+        row.metrics.cost_usd,
         Some(BOTH_ERAS_AS_SUBSUMED_USD),
         "pricing the gemini era as subsumed drops its disjoint reasoning"
     );
@@ -219,22 +219,22 @@ fn mixed_era_total_matches_the_hand_computed_oracle() {
 fn historical_totals_do_not_move_when_the_provider_kind_is_reconfigured() {
     // Arrange: ONE ledger, read under two configs that differ ONLY in the
     // kind `shift` carries now -- the operator edit that produced the defect.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     seed_two_eras(&db);
 
     // Act
-    let as_gemini = era_report(&db, &config_shift_now_gemini());
-    let as_subsumed = era_report(&db, &config_shift_now_subsumed());
+    let as_gemini = era_report(&mut db, &config_shift_now_gemini());
+    let as_subsumed = era_report(&mut db, &config_shift_now_subsumed());
 
     // Assert: both agree with the oracle, so re-kinding a provider cannot
     // retroactively reprice history.
     assert_eq!(
-        find(&as_gemini, SHIFT_PROVIDER).priced_total_usd,
+        find(&as_gemini, SHIFT_PROVIDER).metrics.cost_usd,
         Some(EXPECTED_ERA_CORRECT_USD),
         "config kind gemini"
     );
     assert_eq!(
-        find(&as_subsumed, SHIFT_PROVIDER).priced_total_usd,
+        find(&as_subsumed, SHIFT_PROVIDER).metrics.cost_usd,
         Some(EXPECTED_ERA_CORRECT_USD),
         "config kind openai-compat"
     );
@@ -244,20 +244,19 @@ fn historical_totals_do_not_move_when_the_provider_kind_is_reconfigured() {
 fn one_display_group_is_reported_for_a_two_era_provider() {
     // The finer read grain must not leak into the report as two same-label
     // rows: the eras are priced apart and reported together.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     seed_two_eras(&db);
 
-    let report = era_report(&db, &config_shift_now_gemini());
+    let report = era_report(&mut db, &config_shift_now_gemini());
 
     let labelled: Vec<&DisplayRow> = report
-        .rows
-        .iter()
+        .rows()
         .filter(|r| r.label == SHIFT_PROVIDER)
         .collect();
     assert_eq!(labelled.len(), 1, "one group per provider label");
     // The single group carries BOTH eras' tokens.
-    assert_eq!(labelled[0].requests, 2);
-    assert_eq!(labelled[0].reasoning_tokens, 4_000_000);
+    assert_eq!(labelled[0].metrics.requests, 2);
+    assert_eq!(labelled[0].metrics.reasoning_tokens, 4_000_000);
 }
 
 #[test]
@@ -265,7 +264,7 @@ fn unknown_persisted_kind_with_reasoning_tokens_is_unpriced_not_guessed() {
     // Arrange: a row with a NULL persisted kind that DID report reasoning
     // tokens. Neither structure can be justified for it, so it must fail
     // closed rather than borrow an answer from current config.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_era_row(
         &db,
         "kindless-with-reasoning",
@@ -277,16 +276,17 @@ fn unknown_persisted_kind_with_reasoning_tokens_is_unpriced_not_guessed() {
     );
 
     // Act
-    let report = era_report(&db, &config_shift_now_gemini());
+    let report = era_report(&mut db, &config_shift_now_gemini());
     let row = find(&report, SHIFT_PROVIDER);
 
     // Assert: no dollar figure at all, and the group says so.
-    assert!(
-        row.any_unpriced,
+    assert_eq!(
+        row.metrics.cost_status,
+        CostStatus::Unpriced,
         "an unknown-kind reasoning row must report as unpriced"
     );
     assert_eq!(
-        row.priced_total_usd, None,
+        row.metrics.cost_usd, None,
         "no cost may be asserted for a row whose reasoning structure is unknown"
     );
 }
@@ -296,7 +296,7 @@ fn unknown_persisted_kind_without_reasoning_tokens_still_prices() {
     // A kindless row that reported NO reasoning tokens is fully determined:
     // the kind cannot change what its input and output dimensions cost, so
     // failing it closed would throw away a correct figure.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_era_row(
         &db,
         "kindless-no-reasoning",
@@ -307,19 +307,19 @@ fn unknown_persisted_kind_without_reasoning_tokens_still_prices() {
         None,
     );
 
-    let report = era_report(&db, &config_shift_now_gemini());
+    let report = era_report(&mut db, &config_shift_now_gemini());
     let row = find(&report, SHIFT_PROVIDER);
 
     // input $3.00 + output $15.00, reasoning absent.
-    assert_eq!(row.priced_total_usd, Some(18.00));
-    assert!(!row.any_unpriced);
+    assert_eq!(row.metrics.cost_usd, Some(18.00));
+    assert_eq!(row.metrics.cost_status, CostStatus::Priced);
 }
 
 #[test]
 fn a_reported_zero_reasoning_count_on_an_unknown_kind_still_prices() {
     // `reasoning_tokens = 0` reported explicitly is as determined as an absent
     // count: there are no reasoning tokens to attribute either way.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_era_row(
         &db,
         "kindless-zero-reasoning",
@@ -330,18 +330,18 @@ fn a_reported_zero_reasoning_count_on_an_unknown_kind_still_prices() {
         Some(0),
     );
 
-    let report = era_report(&db, &config_shift_now_gemini());
+    let report = era_report(&mut db, &config_shift_now_gemini());
     let row = find(&report, SHIFT_PROVIDER);
 
-    assert_eq!(row.priced_total_usd, Some(18.00));
-    assert!(!row.any_unpriced);
+    assert_eq!(row.metrics.cost_usd, Some(18.00));
+    assert_eq!(row.metrics.cost_status, CostStatus::Priced);
 }
 
 #[test]
 fn ttft_samples_from_both_eras_land_in_one_display_group() {
     // TTFB rows carry the same widened key as the aggregate, so a partitioned
     // read must still attach every era's samples to the one reported group.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     for (id, kind, ttfb) in [
         ("g-fast", "gemini", 10),
         ("g-slow", "gemini", 20),
@@ -369,7 +369,7 @@ fn ttft_samples_from_both_eras_land_in_one_display_group() {
     }
 
     let report = build_window_report(
-        &db,
+        &mut db,
         &config_shift_now_gemini(),
         &no_prices(),
         "t".into(),
@@ -397,7 +397,7 @@ fn an_unrecognized_non_null_kind_with_reasoning_tokens_is_unpriced_not_subsumed(
     // SUBSUMED, which silently dropped reasoning tokens from the bill -- an
     // undercharge with no signal. A kind we have never heard of may report
     // reasoning disjointly, so it must fail closed exactly like a NULL kind.
-    let (_dir, _path, db) = temp_db();
+    let (_dir, _path, mut db) = temp_db();
     insert_era_row(
         &db,
         "future-disjoint-provider",
@@ -409,17 +409,18 @@ fn an_unrecognized_non_null_kind_with_reasoning_tokens_is_unpriced_not_subsumed(
     );
 
     // Act
-    let report = era_report(&db, &config_shift_now_gemini());
+    let report = era_report(&mut db, &config_shift_now_gemini());
     let row = find(&report, SHIFT_PROVIDER);
 
     // Assert: unpriced, and specifically NOT the $18.00 a subsumed reading
     // would have produced (3 + 15 + 0), nor the $48.00 a disjoint one would.
-    assert!(
-        row.any_unpriced,
+    assert_eq!(
+        row.metrics.cost_status,
+        CostStatus::Unpriced,
         "an unrecognized kind carrying reasoning tokens must report as unpriced"
     );
     assert_eq!(
-        row.priced_total_usd, None,
+        row.metrics.cost_usd, None,
         "no cost may be asserted for an unrecognized reasoning structure"
     );
 }

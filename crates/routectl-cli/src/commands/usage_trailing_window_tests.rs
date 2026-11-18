@@ -101,7 +101,7 @@ fn trailing_windows_select_rows_and_print_their_own_title() {
             build_blocks(&mut db, &config, &no_prices(), &args, &zone(), fixed_now()).unwrap();
         let bounds = window_bounds(&zone(), flag, fixed_now());
         let report = build_window_report(
-            &db,
+            &mut db,
             &config,
             &no_prices(),
             title.into(),
@@ -119,7 +119,7 @@ fn trailing_windows_select_rows_and_print_their_own_title() {
             blocks[0]
         );
         assert_eq!(
-            find(&report, "total").requests,
+            find(&report, "total").metrics.requests,
             requests,
             "{flag:?} selects its rows"
         );

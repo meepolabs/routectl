@@ -43,7 +43,7 @@ fn query_cache_hit_share_equals_the_report_footer_rule() {
 
     // Act
     let report = build_window_report(
-        &db,
+        &mut db,
         &cost_config(),
         &no_prices(),
         "t".into(),
@@ -64,11 +64,15 @@ fn query_cache_hit_share_equals_the_report_footer_rule() {
     let result = routectl_usage::query(&mut db, &spec, |_| RowCost::Unpriced, deadline).unwrap();
 
     // Assert
-    let footer_pct = report.cache_hit_rate.expect("footer share present") * 100.0;
+    let footer_pct = report
+        .total
+        .metrics
+        .cache_hit_pct
+        .expect("footer share present");
     let query_pct = result.totals.cache_hit_pct.expect("query share present");
     assert!((footer_pct - 60.0).abs() < 1e-9, "footer {footer_pct}");
     assert!((query_pct - footer_pct).abs() < 1e-9, "query {query_pct}");
-    let row_pct = find(&report, "m").cache_hit_rate.expect("row share") * 100.0;
+    let row_pct = find(&report, "m").metrics.cache_hit_pct.expect("row share");
     let group_pct = result.groups[0].metrics.cache_hit_pct.expect("group share");
     assert!((group_pct - row_pct).abs() < 1e-9, "group {group_pct}");
 }

@@ -152,7 +152,7 @@ fn without_detail_the_output_is_the_window_blocks_and_legend_alone() {
         .map(|(flag, title)| {
             let bounds = window_bounds(&LocalZone::utc(), *flag, fixed_now());
             let report = build_window_report(
-                &db,
+                &mut db,
                 &config,
                 &PriceSnapshot::default(),
                 (*title).to_owned(),

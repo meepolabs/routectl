@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::commands::pricing::PriceSnapshot;
-use crate::commands::usage::{GroupDim as ReportDim, UsageArgs, build_output};
+use crate::commands::usage::{UsageArgs, build_output};
 
 const FROM_MS: i64 = 0;
 const TO_MS: i64 = 1_000_000;
@@ -59,7 +59,7 @@ fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
         window: WindowFlag::All,
         since: None,
         until: None,
-        by: Some(ReportDim::Model),
+        by: Some(GroupDim::Model),
         detail: true,
         db: None,
         k_calibration: false,

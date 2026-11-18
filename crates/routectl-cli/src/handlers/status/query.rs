@@ -430,3 +430,7 @@ fn build_panel(
 #[cfg(test)]
 #[path = "query_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "query_cli_parity_tests.rs"]
+mod cli_parity_tests;
