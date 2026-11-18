@@ -674,12 +674,20 @@ fn lifetime_statements_read_through_the_write_total_index() {
         (
             "unbucketed",
             CACHE_LIFETIMES_SQL,
-            vec![&0_i64, &10_000_i64, &none, &none],
+            vec![&0_i64, &10_000_i64, &none, &none, &i64::MAX],
         ),
         (
             "bucketed",
             CACHE_LIFETIMES_BUCKETED_SQL,
-            vec![&0_i64, &10_000_i64, &none, &none, &1_000_i64],
+            vec![
+                &0_i64,
+                &10_000_i64,
+                &none,
+                &none,
+                &i64::MAX,
+                &1_000_i64,
+                &0_i64,
+            ],
         ),
     ];
     for (name, sql, params) in cases {

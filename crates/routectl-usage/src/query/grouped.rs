@@ -1,11 +1,12 @@
 //! Grouped, priced, deadline-bounded aggregate query over the usage ledger.
 //!
-//! One SQL statement reads the ledger at the finest cost-relevant grain
-//! (`model, provider, upstream, alias, provider_kind, seat` -- the kind is part
-//! of the grain because reasoning pricing depends on the structure the row was
-//! written under, not on current config, and the seat so a seat grouping reads
-//! the persisted column); the fold in this module prices each
-//! fine row through a caller-supplied closure BEFORE the upstream dimension is
+//! The read (see the `slices` module) returns the window's rows at the finest
+//! cost-relevant grain (`model, provider, upstream, alias, provider_kind,
+//! seat` -- the kind is part of the grain because reasoning pricing depends on
+//! the structure the row was written under, not on current config, and the
+//! seat so a seat grouping reads the persisted column), with each fine row's
+//! cache-write lifetimes and error classes beside it; the fold in this module
+//! prices each fine row through a caller-supplied closure BEFORE the upstream dimension is
 //! discarded, rolls the priced fine rows up to the requested coarse dimension,
 //! and derives the display metrics. Totals are folded from the SAME per-group
 //! accumulators rather than from a second SQL pass: a grouped SELECT over an
@@ -21,12 +22,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::UsageDb;
 
-use super::aggregate::{
-    ClassesByRow, QUERY_AGG_SQL, SERIES_AGG_SQL, SideReadWindow, map_fine_row,
-    map_fine_row_bucketed, read_error_classes,
-};
-use super::cache_lifetimes::{attach, read_lifetimes};
+use super::aggregate::ClassesByRow;
+use super::cache_lifetimes::attach;
 use super::deadline::{CancelFlag, DeadlineGuard, ReadLimit};
+use super::slices::{MergedRead, ReadPlan, read_merged};
 use super::{AggRow, GroupKey, QueryError};
 
 /// The most buckets a series may carry. The caller resolves the bucket width so
@@ -336,69 +335,85 @@ pub struct QueryResult {
 
 /// Run one windowed, filtered, priced, grouped aggregate.
 ///
-/// The whole read happens inside a single deferred transaction, so every figure
-/// comes from one snapshot. `limit` is a [`ReadLimit`] or a bare deadline
-/// [`Instant`](std::time::Instant). A progress handler checks it every few
-/// thousand VM instructions and interrupts the statement once the deadline has
-/// passed or the cancel flag is set, surfacing as [`QueryError::Interrupted`];
-/// a [`DeadlineGuard`] removes the handler on every exit path -- return, error,
-/// and unwind alike -- so the connection is left as it was found. The Rust
-/// loops over each statement's rows also check the cancel flag once per row,
-/// since rows already computed (a grouped result, the `price` closure's own
-/// work) run no VM instructions for the handler to count.
+/// Every figure describes one fixed set of rows: the read first takes the
+/// ledger's highest rowid as a watermark and every statement counts only rows
+/// at or below it. A window whose span from its earliest row is a week or more
+/// is read in parallel `ts_start` slices, each on its own read-only connection
+/// and in its own transaction; since the ledger only appends rows and deletes
+/// its oldest, the rows under the watermark are the same set in every slice's
+/// snapshot, and the slices partition them, so the answer equals a single read
+/// of that set. A shorter window is one slice on `db` alone.
+///
+/// `limit` is a [`ReadLimit`] or a bare deadline
+/// [`Instant`](std::time::Instant). A progress handler on every connection
+/// checks it every few thousand VM instructions and interrupts the statement
+/// once the deadline has passed or the cancel flag is set, surfacing as
+/// [`QueryError::Interrupted`]; a [`DeadlineGuard`] removes the handler from
+/// `db` on every exit path -- return, error, and unwind alike -- so the
+/// connection is left as it was found. The Rust loops over each statement's
+/// rows also check the cancel flag once per row, since rows already computed
+/// (a grouped result, the `price` closure's own work) run no VM instructions
+/// for the handler to count. A slice that fails stops the others; every slice
+/// has ended before this returns, the first failure that is not an interrupt
+/// is the error, and no partial result is ever returned.
 ///
 /// `price` is called once per FINE row -- while `upstream` is still known --
-/// and its verdict is folded into the coarse group the row belongs to. Every
-/// row it sees carries its per-lifetime cache writes
-/// ([`AggRow::cache_write_lifetimes`] is `Some`); on the series path those are
-/// the writes of that row's bucket alone.
+/// on the calling thread, after the slices are merged, and its verdict is
+/// folded into the coarse group the row belongs to. Every row it sees carries
+/// its per-lifetime cache writes ([`AggRow::cache_write_lifetimes`] is
+/// `Some`); on the series path those are the writes of that row's bucket
+/// alone.
 pub fn query(
     db: &mut UsageDb,
     spec: &QuerySpec,
     price: impl Fn(&AggRow) -> RowCost,
     limit: impl Into<ReadLimit>,
 ) -> Result<QueryResult, QueryError> {
-    let limit = limit.into();
-    let cancel = limit.cancel.clone();
-    cancel.check()?;
+    query_with(db, spec, price, limit.into(), &ReadPlan::AUTO)
+}
+
+/// [`query`] under an explicit [`ReadPlan`], so a test can force the slice
+/// count, the watermark or a slice's connection.
+pub(super) fn query_with(
+    db: &mut UsageDb,
+    spec: &QuerySpec,
+    price: impl Fn(&AggRow) -> RowCost,
+    limit: ReadLimit,
+    plan: &ReadPlan<'_>,
+) -> Result<QueryResult, QueryError> {
+    limit.cancel.check()?;
+    // The read stops its own slices through a child flag, leaving the
+    // caller's flag as the caller set it.
+    let limit = ReadLimit {
+        deadline: limit.deadline,
+        cancel: limit.cancel.child(),
+    };
     // Held across the read + fold so the handler is detached even when the
     // `price` closure panics: the connection outlives this call, and a stale
     // expired deadline left on it would spuriously interrupt the next statement
     // run on it.
-    let guard = DeadlineGuard::install(db, limit)?;
-    read_and_fold(&guard, spec, price, &cancel)
+    let guard = DeadlineGuard::install(db, limit.clone())?;
+    read_and_fold(&guard, spec, price, &limit, plan)
 }
 
-/// The read + fold, split out so [`query`] can scope its progress guard around
-/// the whole of it.
+/// The read + fold, split out so [`query_with`] can scope its progress guard
+/// around the whole of it.
 ///
-/// Both paths read ONE statement and fold it. On the series path that single
-/// scan feeds two accumulator maps at once: a second bucket-only statement would
-/// re-scan the ledger for a strict subset of rows already in hand, and each row
-/// is priced exactly once for both folds, so groups, totals and series reconcile
-/// by construction.
+/// Each fine row is priced exactly once and folded into the coarse groups and,
+/// on the series path, into its bucket in the same pass, so groups, totals
+/// and series reconcile by construction.
 fn read_and_fold(
     db: &UsageDb,
     spec: &QuerySpec,
     price: impl Fn(&AggRow) -> RowCost,
-    cancel: &CancelFlag,
+    limit: &ReadLimit,
+    plan: &ReadPlan<'_>,
 ) -> Result<QueryResult, QueryError> {
     if let Some(bucket) = spec.bucket {
         check_bucket(bucket, spec.from_ms)?;
     }
-    let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
-    let mut buckets: BTreeMap<i64, GroupAcc> = BTreeMap::new();
-
-    let tx = db.conn().unchecked_transaction()?;
-    match spec.bucket {
-        None => fold_groups(&tx, spec, &price, cancel, &mut groups)?,
-        Some(bucket) => {
-            fold_groups_and_buckets(&tx, spec, bucket, &price, cancel, &mut groups, &mut buckets)?
-        }
-    }
-    // A read-only transaction has nothing to commit; rolling back releases the
-    // snapshot without touching the DB.
-    tx.finish()?;
+    let read = read_merged(db, spec, limit, plan)?;
+    let (groups, buckets) = fold(spec, read, &price, &limit.cancel)?;
 
     let mut totals = GroupAcc::default();
     for acc in groups.values() {
@@ -419,6 +434,57 @@ fn read_and_fold(
         totals: totals.finish(),
         series,
     })
+}
+
+/// The coarse groups by label and, on the series path, the buckets by index.
+type Folded = (BTreeMap<String, GroupAcc>, BTreeMap<i64, GroupAcc>);
+
+/// Price each merged fine row once and fold it into its coarse group and, on
+/// the series path, its bucket.
+///
+/// A row whose bucket index falls outside the grid is refused before it
+/// reaches EITHER accumulator: [`densify`] emits only `0..count`, so counting
+/// such a row in the groups and totals while dropping it from the series would
+/// make the two folds disagree silently. Erroring keeps the guarantee absolute
+/// -- either every counted row is representable in the series, or the query
+/// fails.
+fn fold(
+    spec: &QuerySpec,
+    read: MergedRead,
+    price: &impl Fn(&AggRow) -> RowCost,
+    cancel: &CancelFlag,
+) -> Result<Folded, QueryError> {
+    let MergedRead {
+        rows,
+        mut lifetimes,
+        mut classes,
+    } = read;
+    let mut groups: BTreeMap<String, GroupAcc> = BTreeMap::new();
+    let mut buckets: BTreeMap<i64, GroupAcc> = BTreeMap::new();
+    for (mut fine, bucket_ix) in rows {
+        cancel.check()?;
+        if let Some(bucket) = spec.bucket
+            && (bucket_ix < 0 || bucket_ix >= bucket.count as i64)
+        {
+            return Err(QueryError::InvalidBucket);
+        }
+        attach(&mut fine.agg, bucket_ix, &mut lifetimes);
+        let row_classes = take_classes(&fine.agg.key, bucket_ix, &mut classes);
+        let cost = price(&fine.agg);
+        let label = spec.group_by.label(&fine.agg.key);
+        groups
+            .entry(label)
+            .or_default()
+            .add(&fine, &cost, &row_classes);
+        if spec.bucket.is_some() {
+            buckets
+                .entry(bucket_ix)
+                .or_default()
+                .add(&fine, &cost, &row_classes);
+        }
+    }
+    debug_assert_classes_attached(&classes);
+    Ok((groups, buckets))
 }
 
 /// Re-check the caller's bucket-grid invariants at the crate boundary.
@@ -442,122 +508,20 @@ const fn check_bucket(bucket: BucketSpec, anchor_ms: i64) -> Result<(), QueryErr
     Ok(())
 }
 
-/// Fold the windowed fine rows into the coarse groups.
-fn fold_groups(
-    tx: &rusqlite::Transaction<'_>,
-    spec: &QuerySpec,
-    price: &impl Fn(&AggRow) -> RowCost,
-    cancel: &CancelFlag,
-    groups: &mut BTreeMap<String, GroupAcc>,
-) -> Result<(), QueryError> {
-    let window = side_read_window(spec);
-    let mut lifetimes = read_lifetimes(tx, &window, None, cancel)?;
-    let mut classes = read_error_classes(tx, &window, None, cancel)?;
-    let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
-    let rows = stmt.query_map(
-        rusqlite::params![
-            spec.from_ms,
-            spec.to_ms,
-            spec.alias_filter.as_deref(),
-            spec.provider_filter.as_deref(),
-        ],
-        map_fine_row,
-    )?;
-    for row in rows {
-        cancel.check()?;
-        let mut fine = row?;
-        attach(&mut fine.agg, 0, &mut lifetimes);
-        let row_classes = take_classes(&fine.agg.key, 0, &mut classes);
-        let cost = price(&fine.agg);
-        let label = spec.group_by.label(&fine.agg.key);
-        groups
-            .entry(label)
-            .or_default()
-            .add(&fine, &cost, &row_classes);
-    }
-    debug_assert_classes_attached(&classes);
-    Ok(())
-}
-
-/// Fold the windowed fine-and-bucketed rows into the coarse groups AND the
-/// per-bucket accumulators, in one scan. Each map discards the dimension the
-/// other keeps.
-///
-/// A row whose bucket index falls outside the grid is refused before it reaches
-/// EITHER accumulator: [`densify`] emits only `0..count`, so counting such a row
-/// in the groups and totals while dropping it from the series would make the two
-/// folds disagree silently. Erroring keeps the guarantee absolute -- either every
-/// counted row is representable in the series, or the query fails.
-fn fold_groups_and_buckets(
-    tx: &rusqlite::Transaction<'_>,
-    spec: &QuerySpec,
-    bucket: BucketSpec,
-    price: &impl Fn(&AggRow) -> RowCost,
-    cancel: &CancelFlag,
-    groups: &mut BTreeMap<String, GroupAcc>,
-    buckets: &mut BTreeMap<i64, GroupAcc>,
-) -> Result<(), QueryError> {
-    let window = side_read_window(spec);
-    let mut lifetimes = read_lifetimes(tx, &window, Some(bucket.width_ms), cancel)?;
-    let mut classes = read_error_classes(tx, &window, Some(bucket.width_ms), cancel)?;
-    let mut stmt = tx.prepare(SERIES_AGG_SQL)?;
-    let rows = stmt.query_map(
-        rusqlite::params![
-            spec.from_ms,
-            spec.to_ms,
-            spec.alias_filter.as_deref(),
-            spec.provider_filter.as_deref(),
-            bucket.width_ms,
-        ],
-        map_fine_row_bucketed,
-    )?;
-    for row in rows {
-        cancel.check()?;
-        let (mut fine, bucket_ix) = row?;
-        if bucket_ix < 0 || bucket_ix >= bucket.count as i64 {
-            return Err(QueryError::InvalidBucket);
-        }
-        attach(&mut fine.agg, bucket_ix, &mut lifetimes);
-        let row_classes = take_classes(&fine.agg.key, bucket_ix, &mut classes);
-        let cost = price(&fine.agg);
-        let label = spec.group_by.label(&fine.agg.key);
-        groups
-            .entry(label)
-            .or_default()
-            .add(&fine, &cost, &row_classes);
-        buckets
-            .entry(bucket_ix)
-            .or_default()
-            .add(&fine, &cost, &row_classes);
-    }
-    debug_assert_classes_attached(&classes);
-    Ok(())
-}
-
 /// The error-class counts of one fine row in one bucket, taken out of
 /// `classes`; empty when the row has no error.
 fn take_classes(key: &GroupKey, bucket: i64, classes: &mut ClassesByRow) -> BTreeMap<String, i64> {
     classes.remove(&(key.clone(), bucket)).unwrap_or_default()
 }
 
-/// Every error row belongs to a fine row read under the same predicate in the
-/// same snapshot, so a class count left unattached means the two statements
+/// Every error row belongs to a fine row read under the same predicate, slice
+/// and watermark, so a class count left unattached means the two statements
 /// disagree on the window, a filter or the grain: a reader bug, caught in tests.
 fn debug_assert_classes_attached(classes: &ClassesByRow) {
     debug_assert!(
         classes.is_empty(),
         "error-class rows matched no fine row: {classes:?}"
     );
-}
-
-/// The window and filters of `spec`, as the side reads bind them.
-fn side_read_window(spec: &QuerySpec) -> SideReadWindow<'_> {
-    SideReadWindow {
-        from_ms: spec.from_ms,
-        to_ms: spec.to_ms,
-        alias_filter: spec.alias_filter.as_deref(),
-        provider_filter: spec.provider_filter.as_deref(),
-    }
 }
 
 /// Resolve the per-bucket accumulators into a dense series: one entry per

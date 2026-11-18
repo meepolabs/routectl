@@ -253,11 +253,13 @@ fn an_expired_deadline_interrupts_the_error_class_read() {
     let expired = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .expect("instant predates the process start");
-    let window = SideReadWindow {
+    let window = ReadWindow {
         from_ms: 0,
         to_ms: 10_000,
         alias_filter: None,
         provider_filter: None,
+        watermark: i64::MAX,
+        anchor_ms: 0,
     };
 
     // Act

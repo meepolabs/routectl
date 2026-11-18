@@ -230,7 +230,15 @@ fn the_series_statement_searches_the_covering_aggregate_index() {
         .prepare(&format!("EXPLAIN QUERY PLAN {SERIES_AGG_SQL}"))
         .expect("prepare explain")
         .query_map(
-            rusqlite::params![0_i64, 10_000_i64, None::<&str>, None::<&str>, 1000_i64],
+            rusqlite::params![
+                0_i64,
+                10_000_i64,
+                None::<&str>,
+                None::<&str>,
+                i64::MAX,
+                1000_i64,
+                0_i64
+            ],
             |row| row.get::<_, String>(3),
         )
         .expect("query explain")

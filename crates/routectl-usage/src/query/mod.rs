@@ -19,6 +19,18 @@ macro_rules! inference_rows {
     };
 }
 
+/// The rowid watermark predicate every statement of the grouped read carries:
+/// only rows that existed when the read took its watermark (`?5`) count, so
+/// slices read in separate transactions still describe one set of rows.
+///
+/// The unary `+` keeps the term out of index selection: a rowid range would
+/// let the planner walk the table instead of the `ts_start` index.
+macro_rules! below_watermark {
+    () => {
+        "+rowid <= ?5"
+    };
+}
+
 /// One row's cache-write total across both ledger eras: `cache_write_tokens`
 /// when the row has it; otherwise NULL when neither legacy per-tier column was
 /// reported; otherwise the legacy 5-minute plus 1-hour columns. The eras never
@@ -66,6 +78,7 @@ mod grouped;
 mod observation;
 mod reduction;
 mod session_ref;
+mod slices;
 mod stream_extra;
 mod would_trim;
 

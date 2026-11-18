@@ -349,9 +349,11 @@ fn errors_by_class_searches_the_error_rows_index() {
             Box::new(1000_i64),
             Box::new(None::<String>),
             Box::new(None::<String>),
+            Box::new(i64::MAX),
         ];
-        if stmt.parameter_count() == 5 {
+        if stmt.parameter_count() == 7 {
             binds.push(Box::new(100_i64));
+            binds.push(Box::new(0_i64));
         }
         let plan: Vec<String> = stmt
             .query_map(rusqlite::params_from_iter(binds.iter()), |row| {

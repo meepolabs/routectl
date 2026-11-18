@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use routectl_router::prices::PriceBook;
 use routectl_router::{Config, ProviderEntry, Router};
-use routectl_usage::{ReadLimit, open, open_readonly};
+use routectl_usage::{
+    CHANNEL_CAPACITY, ReadLimit, UsageCounters, UsageRecord, UsageWriter, open, open_readonly,
+};
 use tempfile::TempDir;
 use time::OffsetDateTime;
 
@@ -296,6 +298,130 @@ impl Bench<'_> {
     }
 }
 
+/// Rows the contention probe writes per second, well above a live daemon's
+/// rate.
+const PROBE_ROWS_PER_SEC: u64 = 20;
+
+/// Probe rows written before the read starts: the uncontended baseline.
+const PROBE_BASELINE_ROWS: usize = 100;
+
+/// How long one probe row may take to persist before the probe gives up on it.
+const PROBE_PERSIST_BOUND: Duration = Duration::from_secs(10);
+
+/// A probe row: a completed request whose start lies an hour back, so it
+/// lands inside every slice of an all-time read rather than at its newest
+/// edge.
+fn probe_record(seq: usize) -> UsageRecord {
+    let now_ms = unix_ms(OffsetDateTime::now_utc());
+    UsageRecord {
+        ts_start: now_ms - 3_600_000,
+        ts_end: now_ms,
+        request_id: format!("contention-probe-{seq}"),
+        ingress_dialect: "anthropic".to_string(),
+        requested_model: "probe".to_string(),
+        alias: "probe".to_string(),
+        latency_ms: 1,
+        ..UsageRecord::default()
+    }
+}
+
+/// Send one probe row through the writer and wait for it to persist: the
+/// time from the hand-off to the committed insert.
+fn probe_once(
+    handle: &routectl_usage::UsageHandle,
+    counters: &UsageCounters,
+    seq: usize,
+) -> Duration {
+    let persisted = counters.persisted();
+    let started = Instant::now();
+    handle.try_send(probe_record(seq));
+    while counters.persisted() == persisted {
+        assert!(
+            started.elapsed() < PROBE_PERSIST_BOUND,
+            "probe row {seq} did not persist within {PROBE_PERSIST_BOUND:?}"
+        );
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    started.elapsed()
+}
+
+/// `(p50, p99)` of `samples`.
+fn percentiles(samples: &mut [Duration]) -> (Duration, Duration) {
+    samples.sort_unstable();
+    let at = |q: usize| samples[(samples.len() - 1) * q / 100];
+    (at(50), at(99))
+}
+
+impl Bench<'_> {
+    /// One cold all-time read while the usage writer commits probe rows at a
+    /// steady rate: the read's time, and the writer's persist latency before
+    /// and during it. Returns the read's time.
+    fn writer_contention(&self) -> Duration {
+        let (handle, writer) = UsageWriter::start(self.ledger.to_path_buf(), CHANNEL_CAPACITY, 0);
+        let counters = Arc::clone(writer.counters());
+        let interval = Duration::from_millis(1_000 / PROBE_ROWS_PER_SEC);
+        let reading = std::sync::atomic::AtomicBool::new(false);
+        let read_done = std::sync::atomic::AtomicBool::new(false);
+        let body = r#"{"window":"all","group_by":"provider"}"#;
+        let (before, during, elapsed, requests) = std::thread::scope(|scope| {
+            let probe = scope.spawn(|| {
+                let (mut before, mut during) = (Vec::new(), Vec::new());
+                let mut seq = 0;
+                while !read_done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let tick = Instant::now();
+                    let in_read = reading.load(std::sync::atomic::Ordering::SeqCst);
+                    let latency = probe_once(&handle, &counters, seq);
+                    if in_read {
+                        during.push(latency);
+                    } else {
+                        before.push(latency);
+                    }
+                    seq += 1;
+                    std::thread::sleep(interval.saturating_sub(tick.elapsed()));
+                }
+                (before, during)
+            });
+            std::thread::sleep(interval * PROBE_BASELINE_ROWS as u32);
+            evict_from_page_cache(self.ledger);
+            reading.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (elapsed, requests) = self.query_once(body);
+            read_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (before, during) = probe.join().expect("probe thread");
+            (before, during, elapsed, requests)
+        });
+        writer.shutdown();
+        let (mut before, mut during) = (before, during);
+        let (before_p50, before_p99) = percentiles(&mut before);
+        let (during_p50, during_p99) = percentiles(&mut during);
+        println!(
+            "writer contention: query window=all series=none cold requests={requests} ms={} \
+             probe_rate_per_s={PROBE_ROWS_PER_SEC} before n={} p50_us={} p99_us={} \
+             during n={} p50_us={} p99_us={} dropped_full={} dropped_closed={} write_errors={}",
+            elapsed.as_millis(),
+            before.len(),
+            before_p50.as_micros(),
+            before_p99.as_micros(),
+            during.len(),
+            during_p50.as_micros(),
+            during_p99.as_micros(),
+            counters.dropped_full(),
+            counters.dropped_closed(),
+            counters.write_errors(),
+        );
+        assert_eq!(
+            counters.dropped_full(),
+            0,
+            "writer dropped rows under the read"
+        );
+        assert_eq!(
+            counters.write_errors(),
+            0,
+            "writer failed rows under the read"
+        );
+        elapsed
+    }
+}
+
 fn print_cell(label: &str, cell: &Cell, budget_ms: u64) {
     println!(
         "{label}: requests={} reps={} p50_ms={} max_ms={} budget_ms={budget_ms}",
@@ -329,7 +455,8 @@ fn print_environment(ledger: &Path) {
 }
 
 /// The 5M-row live-mix ledger answers every window, with and without a series,
-/// cold and warm, under `QUERY_BUDGET_MS`.
+/// cold and warm, under `QUERY_BUDGET_MS`, and a cold all-time read stays
+/// under it while the usage writer commits rows at a steady rate.
 ///
 /// `#[ignore]`d: seeding takes minutes and writes several GB. Run it in
 /// release with `TMPDIR` on real storage (a tmpfs `/tmp` would measure a
@@ -364,11 +491,16 @@ fn a_five_million_row_ledger_answers_every_window_inside_the_query_budget() {
     // Act
     let over = bench.query_matrix(QUERY_BUDGET_MS);
     bench.usage_matrix();
+    let contended = bench.writer_contention();
 
     // Assert
     assert!(
         over.is_empty(),
         "cells at or over {QUERY_BUDGET_MS} ms: {over:#?}"
+    );
+    assert!(
+        contended < Duration::from_millis(QUERY_BUDGET_MS),
+        "window=all cold under writer load took {contended:?}"
     );
 }
 

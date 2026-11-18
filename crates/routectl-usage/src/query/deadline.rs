@@ -24,20 +24,40 @@ use super::QueryError;
 ///
 /// [`cancel`]: CancelFlag::cancel
 #[derive(Debug, Clone, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag {
+    own: Arc<AtomicBool>,
+    /// The flag this one was derived from with [`CancelFlag::child`]; setting
+    /// it stops this one too.
+    parent: Option<Arc<Self>>,
+}
 
 impl CancelFlag {
     /// Ask every read holding this flag (or a clone of it) to stop. Idempotent.
     pub fn cancel(&self) {
         // Relaxed: the flag publishes no other data, it only has to be seen
         // eventually by the reader's next check.
-        self.0.store(true, Ordering::Relaxed);
+        self.own.store(true, Ordering::Relaxed);
     }
 
-    /// Whether [`CancelFlag::cancel`] has been called on this flag or a clone.
+    /// Whether [`CancelFlag::cancel`] has been called on this flag, a clone,
+    /// or the flag it was derived from.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.own.load(Ordering::Relaxed)
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_cancelled())
+    }
+
+    /// A flag that is set whenever this one is, and that can also be set on
+    /// its own without setting this one: a read stops its own parts through
+    /// it while its caller's flag stays as the caller left it.
+    pub(super) fn child(&self) -> Self {
+        Self {
+            own: Arc::default(),
+            parent: Some(Arc::new(self.clone())),
+        }
     }
 
     /// [`QueryError::Interrupted`] once the flag is set. Cheap enough to call

@@ -24,7 +24,7 @@ use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Vis
 use crate::cache_writes::{LEGACY_1H_SECONDS, LEGACY_5M_SECONDS};
 use crate::db::UsageDb;
 
-use super::aggregate::{GROUP_KEY_COLUMNS, SideReadWindow, read_group_key};
+use super::aggregate::{GROUP_KEY_COLUMNS, ReadWindow, read_group_key};
 use super::deadline::CancelFlag;
 use super::{AggRow, GroupKey, QueryError};
 
@@ -84,6 +84,9 @@ macro_rules! cache_lifetimes_sql {
       AND (?3 IS NULL OR alias = ?3)
       AND (?4 IS NULL OR provider = ?4)
       AND ",
+            below_watermark!(),
+            "
+      AND ",
             write_total_rows!()
         )
     };
@@ -92,8 +95,8 @@ macro_rules! cache_lifetimes_sql {
 const CACHE_LIFETIMES_SQL: &str = cache_lifetimes_sql!("0");
 
 /// [`CACHE_LIFETIMES_SQL`] split further by the same bucket index the series
-/// aggregate groups on (`?5` is the bucket width, `?1` its anchor).
-const CACHE_LIFETIMES_BUCKETED_SQL: &str = cache_lifetimes_sql!("(ts_start - ?1) / ?5");
+/// aggregate groups on (`?6` is the bucket width, `?7` its anchor).
+const CACHE_LIFETIMES_BUCKETED_SQL: &str = cache_lifetimes_sql!("(ts_start - ?7) / ?6");
 
 /// Per-lifetime cache writes of the rows carrying a write total, keyed by fine
 /// group and bucket index. The unbucketed read puts every row in bucket 0.
@@ -105,7 +108,7 @@ pub(super) type LifetimesByRow = HashMap<(GroupKey, i64), CacheWriteLifetimes>;
 /// [`attach`].
 pub(super) fn read_lifetimes(
     tx: &Transaction<'_>,
-    window: &SideReadWindow<'_>,
+    window: &ReadWindow<'_>,
     bucket_width_ms: Option<i64>,
     cancel: &CancelFlag,
 ) -> Result<LifetimesByRow, QueryError> {
@@ -118,6 +121,7 @@ pub(super) fn read_lifetimes(
                 window.to_ms,
                 window.alias_filter,
                 window.provider_filter,
+                window.watermark,
             ])?;
             while let Some(row) = rows.next()? {
                 cancel.check()?;
@@ -131,7 +135,9 @@ pub(super) fn read_lifetimes(
                 window.to_ms,
                 window.alias_filter,
                 window.provider_filter,
+                window.watermark,
                 width_ms,
+                window.anchor_ms,
             ])?;
             while let Some(row) = rows.next()? {
                 cancel.check()?;
@@ -306,6 +312,21 @@ impl<'de> Visitor<'de> for TokensVisitor {
     }
 }
 
+/// Add `from` into `into`: the per-lifetime writes of the same fine group
+/// and bucket, read from two parts of the window.
+pub(super) fn merge_lifetimes(into: &mut CacheWriteLifetimes, from: CacheWriteLifetimes) {
+    let CacheWriteLifetimes {
+        tokens_by_lifetime,
+        unknown_tokens,
+        invalid_split,
+    } = from;
+    for (seconds, tokens) in tokens_by_lifetime {
+        into.add_lifetime(seconds, tokens);
+    }
+    into.unknown_tokens = into.unknown_tokens.saturating_add(unknown_tokens);
+    into.invalid_split |= invalid_split;
+}
+
 /// Attach each row's per-lifetime writes, taking them out of `lifetimes` and
 /// merging the row's own legacy column sums in as the 300 s and 3600 s
 /// lifetimes. A legacy column adds its lifetime only when some ledger row in
@@ -333,11 +354,13 @@ pub fn aggregate_with_cache_lifetimes(
 ) -> Result<Vec<AggRow>, QueryError> {
     let tx = db.conn().unchecked_transaction()?;
     let mut rows = super::aggregate::aggregate_in(&tx, from_ms, to_ms)?;
-    let window = SideReadWindow {
+    let window = ReadWindow {
         from_ms,
         to_ms,
         alias_filter: None,
         provider_filter: None,
+        watermark: i64::MAX,
+        anchor_ms: from_ms,
     };
     let mut lifetimes = read_lifetimes(&tx, &window, None, &CancelFlag::default())?;
     // A read-only transaction has nothing to commit; finishing releases the

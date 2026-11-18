@@ -21,12 +21,14 @@ fn cancelled() -> CancelFlag {
 }
 
 /// The whole window, unfiltered, as the side reads bind it.
-fn whole_window() -> SideReadWindow<'static> {
-    SideReadWindow {
+fn whole_window() -> ReadWindow<'static> {
+    ReadWindow {
         from_ms: 0,
         to_ms: 10_000,
         alias_filter: None,
         provider_filter: None,
+        watermark: i64::MAX,
+        anchor_ms: 0,
     }
 }
 

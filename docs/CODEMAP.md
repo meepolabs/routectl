@@ -5774,6 +5774,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   vocabulary, absent `Option`s serialize as explicit `null` (never skipped,
   `series` included), and `CostStatus` renames to the same lowercase tokens
   `as_str` returns
+- `src/query/slices.rs` -- the grouped query's read: takes a `MAX(rowid)`
+  watermark bound into every statement, reads a window whose span from its
+  earliest row is a week or more in four parallel `ts_start` slices (each on its
+  own read-only connection, thread and progress guard; the first slice on the
+  caller's connection), cancels and joins every slice on the first failure, and
+  merges the raw fine rows and side maps by `(fine group, bucket)` (`FineRow` /
+  `AggRow` destructured in full) for `grouped.rs` to price and fold once
 - `src/query/cache_lifetimes.rs` -- per-lifetime cache-write sums for pricing:
   `aggregate_with_cache_lifetimes` (the aggregate plus each fine row's
   `CacheWriteLifetimes`: tokens per lifetime seconds, unknown remainder, invalid

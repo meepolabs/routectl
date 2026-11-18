@@ -33,6 +33,7 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "query/observation.rs",
     "query/reduction.rs",
     "query/session_ref.rs",
+    "query/slices.rs",
     "query/stream_extra.rs",
     "query/would_trim.rs",
     "record.rs",

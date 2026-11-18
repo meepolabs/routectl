@@ -245,6 +245,11 @@ const EXEMPT_SITES: &[(&str, &str, &str)] = &[
         "seat quota state, not an inference population: the freshest snapshot wins whatever the request kind",
     ),
     (
+        "slices.rs",
+        "WATERMARK_SQL",
+        "the grouped read's rowid watermark bounds which rows exist; each statement it is bound into applies the predicate itself",
+    ),
+    (
         "observation.rs",
         "OBSERVATION_TOTALS_SQL",
         "observation totals reconcile with process-wide counters that include count_tokens traffic",

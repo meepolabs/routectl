@@ -2,6 +2,9 @@
 
 use super::*;
 use crate::db::open;
+use crate::query::aggregate::{ReadWindow, SERIES_AGG_SQL, read_error_classes};
+use crate::query::cache_lifetimes::read_lifetimes;
+use crate::query::slices::ReadPlan;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -699,3 +702,4 @@ include!("grouped_robustness_tests.rs");
 include!("grouped_seat_tests.rs");
 include!("grouped_error_class_tests.rs");
 include!("grouped_cancel_tests.rs");
+include!("grouped_slice_tests.rs");

@@ -234,6 +234,9 @@ macro_rules! query_agg_select {
 /// The window predicate and the two optional filters, as BIND PARAMS (never
 /// interpolated identifiers). Shared by both query statements so a filter can
 /// never apply to one and not the other.
+///
+/// `?5` is the read's rowid watermark (see `below_watermark!` in the parent
+/// module).
 macro_rules! query_agg_from_where {
     () => {
         concat!(
@@ -244,7 +247,10 @@ WHERE ts_start >= ?1 AND ts_start < ?2
             inference_rows!(),
             "
   AND (?3 IS NULL OR alias = ?3)
-  AND (?4 IS NULL OR provider = ?4)\n"
+  AND (?4 IS NULL OR provider = ?4)
+  AND ",
+            below_watermark!(),
+            "\n"
         )
     };
 }
@@ -267,15 +273,16 @@ pub const QUERY_AGG_SQL: &str = concat!(
 /// one further GROUP BY dimension, so one scan feeds both the coarse groups and
 /// the time series.
 ///
-/// `?5` is the bucket WIDTH in milliseconds and `?1` doubles as the bucket
-/// ANCHOR. The numerator `ts_start - ?1` is never negative, because the same
-/// `?1` is the window's inclusive lower bound in the WHERE. A zero `?5` would
-/// make every bucket index a silent SQL NULL rather than an error, which is why
-/// the caller's `width_ms > 0` invariant is re-checked before this statement
-/// runs.
+/// `?6` is the bucket WIDTH in milliseconds and `?7` the bucket ANCHOR, bound
+/// apart from the `?1` lower bound so a read over part of the window still
+/// numbers its buckets on the whole window's grid. The numerator
+/// `ts_start - ?7` is never negative, because the anchor is at or below every
+/// lower bound a read binds. A zero `?6` would make every bucket index a silent
+/// SQL NULL rather than an error, which is why the caller's `width_ms > 0`
+/// invariant is re-checked before this statement runs.
 pub const SERIES_AGG_SQL: &str = concat!(
     query_agg_select!(),
-    ",\n    (ts_start - ?1) / ?5                                AS bucket",
+    ",\n    (ts_start - ?7) / ?6                                AS bucket",
     query_agg_from_where!(),
     agg_group_by!(),
     ", bucket"
@@ -478,6 +485,9 @@ WHERE ts_start >= ?1 AND ts_start < ?2
             "
   AND (?3 IS NULL OR alias = ?3)
   AND (?4 IS NULL OR provider = ?4)
+  AND ",
+            below_watermark!(),
+            "
 GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
          provider_kind, seat",
             $group_bucket,
@@ -490,18 +500,71 @@ GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
 pub const ERRORS_BY_CLASS_SQL: &str = errors_by_class_sql!("0", "");
 
 /// [`ERRORS_BY_CLASS_SQL`] split further by the bucket index the series
-/// aggregate groups on (`?5` is the bucket width, `?1` its anchor).
+/// aggregate groups on (`?6` is the bucket width, `?7` its anchor).
 pub const ERRORS_BY_CLASS_BUCKETED_SQL: &str =
-    errors_by_class_sql!("(ts_start - ?1) / ?5", ", bucket");
+    errors_by_class_sql!("(ts_start - ?7) / ?6", ", bucket");
 
-/// The window and filters a side read (error classes, cache-write lifetimes)
-/// applies beside the aggregate it is merged into; the same bind values that
-/// aggregate used.
-pub(super) struct SideReadWindow<'a> {
+/// The window, filters and watermark a statement of the grouped read binds:
+/// the aggregate and both side reads (error classes, cache-write lifetimes)
+/// bind the same values, so they always describe the same rows.
+pub(super) struct ReadWindow<'a> {
     pub from_ms: i64,
     pub to_ms: i64,
     pub alias_filter: Option<&'a str>,
     pub provider_filter: Option<&'a str>,
+    /// The highest rowid the read counts.
+    pub watermark: i64,
+    /// The bucket grid's anchor; read only by the bucketed statements.
+    pub anchor_ms: i64,
+}
+
+/// One fine row of the grouped aggregate and its bucket index (always 0 on
+/// the unbucketed read).
+pub(super) type BucketedFineRow = (FineRow, i64);
+
+/// Read the fine aggregate rows of `window`. With `bucket_width_ms`, each fine
+/// group is further split by bucket index; without it every row is in
+/// bucket 0.
+pub(super) fn read_fine_rows(
+    tx: &Transaction<'_>,
+    window: &ReadWindow<'_>,
+    bucket_width_ms: Option<i64>,
+    cancel: &CancelFlag,
+) -> Result<Vec<BucketedFineRow>, QueryError> {
+    let mut out = Vec::new();
+    let base = rusqlite::params![
+        window.from_ms,
+        window.to_ms,
+        window.alias_filter,
+        window.provider_filter,
+        window.watermark,
+    ];
+    match bucket_width_ms {
+        None => {
+            let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
+            for row in stmt.query_map(base, map_fine_row)? {
+                cancel.check()?;
+                out.push((row?, 0));
+            }
+        }
+        Some(width_ms) => {
+            let mut stmt = tx.prepare(SERIES_AGG_SQL)?;
+            let params = rusqlite::params![
+                window.from_ms,
+                window.to_ms,
+                window.alias_filter,
+                window.provider_filter,
+                window.watermark,
+                width_ms,
+                window.anchor_ms,
+            ];
+            for row in stmt.query_map(params, map_fine_row_bucketed)? {
+                cancel.check()?;
+                out.push(row?);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Error counts per class, keyed by fine group and bucket index. The
@@ -512,7 +575,7 @@ pub(super) type ClassesByRow = HashMap<(GroupKey, i64), BTreeMap<String, i64>>;
 /// `bucket_width_ms`, each group is further split by bucket index.
 pub(super) fn read_error_classes(
     tx: &Transaction<'_>,
-    window: &SideReadWindow<'_>,
+    window: &ReadWindow<'_>,
     bucket_width_ms: Option<i64>,
     cancel: &CancelFlag,
 ) -> Result<ClassesByRow, QueryError> {
@@ -534,6 +597,7 @@ pub(super) fn read_error_classes(
                 window.to_ms,
                 window.alias_filter,
                 window.provider_filter,
+                window.watermark,
             ])?;
             while let Some(row) = rows.next()? {
                 fold(row)?;
@@ -546,7 +610,9 @@ pub(super) fn read_error_classes(
                 window.to_ms,
                 window.alias_filter,
                 window.provider_filter,
+                window.watermark,
                 width_ms,
+                window.anchor_ms,
             ])?;
             while let Some(row) = rows.next()? {
                 fold(row)?;
@@ -577,7 +643,7 @@ pub fn errors_by_class(
     let mut stmt = db.conn().prepare(ERRORS_BY_CLASS_SQL)?;
     let rows = stmt
         .query_map(
-            rusqlite::params![from_ms, to_ms, None::<&str>, None::<&str>],
+            rusqlite::params![from_ms, to_ms, None::<&str>, None::<&str>, i64::MAX],
             |row| {
                 Ok((
                     read_group_key(row)?,
