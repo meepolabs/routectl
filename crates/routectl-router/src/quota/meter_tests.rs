@@ -777,6 +777,124 @@ fn an_unstarted_reading_is_refused_only_over_a_running_window_still_in_effect() 
     }
 }
 
+/// What follows a complete report that dropped a running five-hour window.
+enum AfterDrop {
+    Unstarted,
+    Running,
+}
+
+/// One drop case: name, whether the dropping report carries a weekly window,
+/// what arrives next, the minute it arrives, and whether it is taken.
+type DropRow = (&'static str, bool, AfterDrop, u64, bool);
+
+/// A complete report that omits a running window still in effect does not
+/// clear the way for an unstarted reading: the window's reset is remembered,
+/// and an unstarted reading before it is a contradiction. After that reset,
+/// or once a running reading for the key is taken, it is not.
+#[test]
+fn an_unstarted_reading_after_a_complete_report_dropped_a_running_window() {
+    let rows: [DropRow; 5] = [
+        (
+            "no windows, then idle",
+            false,
+            AfterDrop::Unstarted,
+            2,
+            false,
+        ),
+        (
+            "weekly only, then idle",
+            true,
+            AfterDrop::Unstarted,
+            2,
+            false,
+        ),
+        (
+            "no windows, then idle after the reset",
+            false,
+            AfterDrop::Unstarted,
+            181,
+            true,
+        ),
+        (
+            "weekly only, then idle after the reset",
+            true,
+            AfterDrop::Unstarted,
+            181,
+            true,
+        ),
+        (
+            "no windows, then running",
+            false,
+            AfterDrop::Running,
+            2,
+            true,
+        ),
+    ];
+    for (name, reports_weekly, next, minute, accepted) in rows {
+        // Arrange
+        let clock = Clock::new();
+        let store = store();
+        let five = key(FIVE_HOURS, None);
+        let (t0, t1, t2) = (clock.at(mins(0)), clock.at(mins(1)), clock.at(mins(minute)));
+        seed(&store, &Before::PollRunning, t0);
+        let dropping = if reports_weekly {
+            ObservationReport::Complete(
+                WindowSet::new(vec![running(key(SEVEN_DAYS, None), 0.20, mins(3_000), &t1)])
+                    .expect("a set"),
+            )
+        } else {
+            ObservationReport::NoWindows
+        };
+        store
+            .observe_account(&seat("a"), &observation(ReadingSource::Poll, t1, dropping))
+            .expect("the dropping report is accepted");
+        let held_before = store.account(&seat("a"));
+        let reading = match next {
+            AfterDrop::Unstarted => unstarted(five.clone(), None, &t2),
+            AfterDrop::Running => running(five.clone(), 0.97, mins(180), &t2),
+        };
+
+        // Act
+        let result = store.observe_account(
+            &seat("a"),
+            &observation(
+                ReadingSource::Poll,
+                t2,
+                ObservationReport::Complete(WindowSet::new(vec![reading]).expect("a set")),
+            ),
+        );
+
+        // Assert
+        let fast = store.reading_for(&seat("a"), &t2).expect("an entry").fast;
+        let meter = store.account(&seat("a")).expect("an entry");
+        if !accepted {
+            assert_eq!(
+                result,
+                Err(ObserveRefusal::Rejected(RejectionReason::Contradictory)),
+                "row: {name}"
+            );
+            assert_eq!(Some(meter), held_before, "row: {name}: nothing advances");
+            assert_eq!(fast, QuotaWindow::Unknown, "row: {name}: never room");
+            assert_eq!(store.rejection_totals().contradictory, 1, "row: {name}");
+            continue;
+        }
+        assert_eq!(result, Ok(()), "row: {name}");
+        assert!(
+            !meter.running_until.contains_key(&five),
+            "row: {name}: the entry clears"
+        );
+        assert_eq!(store.rejection_totals().contradictory, 0, "row: {name}");
+        let QuotaWindow::Known { utilization, .. } = fast else {
+            panic!("row: {name}: the taken reading is known: {fast:?}");
+        };
+        let expected = match next {
+            AfterDrop::Unstarted => 0.0,
+            AfterDrop::Running => 0.97,
+        };
+        assert_eq!(utilization.fraction(), expected, "row: {name}");
+    }
+}
+
 /// The contradiction rule also governs header-only traffic.
 #[test]
 fn a_header_snapshot_more_than_the_slack_lower_on_the_same_reset_is_refused() {

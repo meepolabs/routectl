@@ -132,33 +132,46 @@ fn an_accepted_body_lands_on_the_meter_and_reads_back_through_the_view() {
     assert_eq!(window.source, ReadingSource::Poll);
 }
 
+/// A superseded generation changes nothing and counts nothing, whether its
+/// body would have been taken or refused.
 #[test]
 fn a_generation_overtaken_by_a_reset_is_superseded_and_changes_nothing() {
-    // Arrange
-    let router = router();
-    let generation = router.acquire_credential_generation(ACCOUNT);
-    assert_eq!(router.lift_credential_parks([ACCOUNT]).len(), 1);
-    let before = containment(&router);
+    let rows: [(&str, Vec<u8>); 2] = [
+        ("idle body", anthropic_idle()),
+        ("malformed body", b"<html>".to_vec()),
+    ];
+    for (name, body) in rows {
+        // Arrange
+        let router = router();
+        let generation = router.acquire_credential_generation(ACCOUNT);
+        assert_eq!(
+            router.lift_credential_parks([ACCOUNT]).len(),
+            1,
+            "row: {name}"
+        );
+        let before = containment(&router);
 
-    // Act
-    let result = router.observe_polled_usage(
-        ACCOUNT,
-        UsageVendor::Anthropic,
-        &anthropic_idle(),
-        generation,
-    );
+        // Act
+        let result =
+            router.observe_polled_usage(ACCOUNT, UsageVendor::Anthropic, &body, generation);
 
-    // Assert
-    assert_eq!(result, Err(PolledUsageRejection::Superseded));
-    assert_eq!(containment(&router), before);
-    assert_eq!(reading(&router).report, ReportState::NoReading);
-    assert_eq!(
-        router
-            .account_readings(&ObservationStamp::now())
-            .rejections
-            .malformed_body,
-        0
-    );
+        // Assert
+        assert_eq!(result, Err(PolledUsageRejection::Superseded), "row: {name}");
+        assert_eq!(containment(&router), before, "row: {name}");
+        assert_eq!(
+            reading(&router).report,
+            ReportState::NoReading,
+            "row: {name}"
+        );
+        assert_eq!(
+            router
+                .account_readings(&ObservationStamp::now())
+                .rejections
+                .malformed_body,
+            0,
+            "row: {name}"
+        );
+    }
 }
 
 /// An account with no credential record never handed out a generation, so no

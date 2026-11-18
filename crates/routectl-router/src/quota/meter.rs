@@ -37,19 +37,24 @@
 //!   it never takes part in this comparison. An unstarted reading for a key
 //!   whose stored window is running and still in effect at its stamp is
 //!   refused as `Contradictory` too: a window cannot stop before its reset,
-//!   and taking it would turn the fullest window into an empty one.
+//!   and taking it would turn the fullest window into an empty one. A
+//!   complete report that drops such a window keeps its reset for the key,
+//!   and an unstarted reading is refused against that reset the same way
+//!   until a reading for the key is accepted or the reset passes; otherwise
+//!   a report omitting the window would clear the way for the unstarted one.
 //!
 //! # Why the window map is bounded
 //!
 //! Response headers produce at most the curated keys, and a poll is complete,
 //! so each poll replaces the window set it reported last time; a key no source
-//! still reports does not accumulate.
+//! still reports does not accumulate. A dropped running window's remembered
+//! reset is held only for a key that was stored, at most one per key.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use super::curation::{ANTHROPIC_PROVIDER_KIND, RESET_TOLERANCE, row_for};
-use super::freshness::{ObservationStamp, is_fresh, reset_after};
+use super::freshness::{ObservationStamp, ValidatedReset, has_passed, is_fresh, reset_after};
 use super::reading::{
     AccountObservation, ObservationReport, ReadingSource, Started, WindowKey, WindowReading,
     WindowSet,
@@ -174,6 +179,10 @@ pub struct AccountMeter {
     /// not in effect; readings observed before it are not taken. Holds at most
     /// the curated header keys.
     unknown_marks: HashMap<WindowKey, ObservationStamp>,
+    /// Per key, the reset of a running window a complete report dropped while
+    /// it was still in effect; an unstarted reading for the key before that
+    /// reset is a contradiction. At most one per key that was stored.
+    running_until: HashMap<WindowKey, ValidatedReset>,
     last_accepted: Option<LastAccepted>,
     billing: Billing,
     billing_observed: ObservationStamp,
@@ -187,6 +196,7 @@ impl AccountMeter {
             windows: HashMap::new(),
             complete_floor: None,
             unknown_marks: HashMap::new(),
+            running_until: HashMap::new(),
             last_accepted: None,
             billing: Billing::Unknown,
             billing_observed: observed,
@@ -227,6 +237,8 @@ impl AccountMeter {
         let source = observation.source();
         let mut next = self.clone();
         next.latest = newer(self.latest, observed);
+        next.running_until
+            .retain(|_, reset| !has_passed(reset.at(), &observed));
         let (incoming, is_complete) = match observation.report() {
             ObservationReport::Partial(set) => (set.as_slice(), false),
             ObservationReport::Complete(set) => {
@@ -241,6 +253,7 @@ impl AccountMeter {
         for reading in incoming {
             if let Some(stored) = self.merged_window(reading, &observed, source, is_complete)? {
                 next.unknown_marks.remove(reading.key());
+                next.running_until.remove(reading.key());
                 next.windows.insert(reading.key().clone(), stored);
             }
         }
@@ -254,7 +267,8 @@ impl AccountMeter {
     }
 
     /// Drop every window a complete report at `observed` omits and is not
-    /// older than, and raise the floor to `observed`.
+    /// older than, remember the reset of each dropped window still in effect
+    /// at `observed`, and raise the floor to `observed`.
     fn apply_complete(&mut self, observed: &ObservationStamp, reported: &[WindowReading]) {
         if self
             .complete_floor
@@ -262,10 +276,27 @@ impl AccountMeter {
         {
             return;
         }
-        self.windows.retain(|key, stored| {
-            reported.iter().any(|w| w.key() == key)
-                || stored.observed.monotonic() > observed.monotonic()
-        });
+        let dropped: Vec<WindowKey> = self
+            .windows
+            .iter()
+            .filter(|(key, stored)| {
+                !reported.iter().any(|w| w.key() == *key)
+                    && stored.observed.monotonic() <= observed.monotonic()
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in dropped {
+            let Some(stored) = self.windows.remove(&key) else {
+                continue;
+            };
+            if let Some(reset) = stored
+                .reading
+                .reset()
+                .filter(|_| stored.is_effective(observed))
+            {
+                self.running_until.insert(key, reset);
+            }
+        }
         self.complete_floor = Some(*observed);
     }
 
@@ -293,6 +324,13 @@ impl AccountMeter {
             || stored.is_some_and(|s| observed.monotonic() < s.observed.monotonic())
         {
             return Ok(None);
+        }
+        let still_running = self
+            .running_until
+            .get(reading.key())
+            .is_some_and(|reset| !has_passed(reset.at(), observed));
+        if reading.started() == Started::No && still_running {
+            return Err(RejectionReason::Contradictory);
         }
         let reading = match stored {
             Some(stored) => reconciled(stored, reading, observed)?,
