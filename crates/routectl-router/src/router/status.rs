@@ -179,12 +179,14 @@ impl Router {
         out
     }
 
-    /// Every credential account this router's dispatch targets name, with
-    /// the display identity each is reported under on every surface. Reads
-    /// the same targets as [`Self::status_targets`] without their gates. A
-    /// forwarded target names no account and is not listed.
+    /// Every credential account this router's built dispatch targets name,
+    /// with its display identity. A model whose provider failed to build has
+    /// no target, so this omits its account: surfaces list
+    /// [`AccountIdentities::from_config`] instead. Kept as the oracle that the
+    /// config walk resolves accounts the way the factory does.
+    #[cfg(test)]
     #[must_use]
-    pub fn account_identities(&self) -> AccountIdentities {
+    pub(crate) fn account_identities(&self) -> AccountIdentities {
         let mut identities = AccountIdentities::default();
         for model in self.resolved_models.values() {
             for target in self.projection_targets(model) {
@@ -373,9 +375,10 @@ pub struct AccountIdentities(BTreeMap<String, AccountIdentity>);
 impl AccountIdentities {
     /// The accounts `config`'s models dispatch on, walked the way the factory
     /// resolves them (a model's own entry, or each configured member of the
-    /// pool it names), for a caller that holds no built router. A model whose
-    /// provider would fail to build is still walked, so this can list an
-    /// account [`Router::account_identities`] omits, never the reverse.
+    /// pool it names). The configured set, whether or not each provider
+    /// built: every surface that lists or names accounts (the status panels,
+    /// the usage poll, the CLI report) reads it from here, so an account
+    /// whose login is missing is still listed everywhere it is polled.
     #[must_use]
     pub fn from_config(config: &Config) -> Self {
         let mut identities = Self::default();

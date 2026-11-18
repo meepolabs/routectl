@@ -8,10 +8,12 @@
 //! ledger, no vendor I/O. Every wire type is owned here and mapped from the
 //! internal read shapes, so a router-side rename never changes the wire.
 //!
-//! The account list is the route targets' credential accounts: an OAuth seat,
-//! or `#<entry>` for an API-key or cloud credential. A meter reading for an
-//! account no target names is never listed. A forwarded target carries the
-//! client's credential, so it names no account and is not listed either.
+//! The account list is the served config's credential accounts, the same set
+//! the usage poll and the CLI read: an OAuth seat, or `#<entry>` for an
+//! API-key or cloud credential, listed whether or not its provider built. A
+//! meter reading for an account the config does not name is never listed. A
+//! forwarded entry carries the client's credential, so it names no account
+//! and is not listed either.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -401,3 +403,7 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 #[cfg(test)]
 #[path = "accounts_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "accounts_unbuilt_tests.rs"]
+mod unbuilt_tests;

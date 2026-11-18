@@ -297,7 +297,7 @@ fn an_unmanaged_login_under_two_entries_reports_the_smaller_entry() {
         ),
     ];
     let router = router_of(&seats);
-    let identities = router.account_identities();
+    let identities = AccountIdentities::from_config(&router.config);
     let readings = router.account_readings(&routectl_router::ObservationStamp::now());
 
     // Act
@@ -415,7 +415,7 @@ async fn a_reload_that_drops_a_login_drops_its_row_and_keeps_the_others() {
 fn a_reading_for_an_unconfigured_account_is_not_listed() {
     // Arrange
     let router = router_of(&every_kind()[2..3]);
-    let identities = router.account_identities();
+    let identities = AccountIdentities::from_config(&router.config);
     let readings = AccountReadings {
         accounts: vec![AccountReading {
             account: "anthropic#gone".into(),
@@ -556,7 +556,7 @@ fn report_states_map_to_their_tokens() {
 fn poll_state_maps_per_account_and_vendor_pauses_are_listed() {
     // Arrange
     let router = router_of(&every_kind());
-    let identities = router.account_identities();
+    let identities = AccountIdentities::from_config(&router.config);
     let readings = router.account_readings(&routectl_router::ObservationStamp::now());
     let poll = PollStateSnapshot {
         seats: vec![SeatPollSnapshot {

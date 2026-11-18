@@ -521,7 +521,7 @@ fn non_seat_payloads_serialize_as_the_grouped_result() {
                 }],
             }),
         };
-        let identities = work_and_codex_router().account_identities();
+        let identities = AccountIdentities::from_config(&work_and_codex_router().config);
 
         // Act
         let payload = name_groups(result.clone(), group_by, &identities);

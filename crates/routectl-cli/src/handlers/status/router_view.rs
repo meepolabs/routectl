@@ -89,7 +89,7 @@ impl UnpinnedPricer {
     /// display identity, so a result's seat names and its prices read one
     /// config.
     pub fn account_identities(&self) -> AccountIdentities {
-        self.router.account_identities()
+        AccountIdentities::from_config(&self.router.config)
     }
 
     /// Read the book once (a stat, and a reparse when the file changed) and
@@ -144,10 +144,11 @@ impl StatusRouterView {
         self.router.account_readings(now)
     }
 
-    /// Every configured credential account with the display identity every
-    /// surface reports it under.
+    /// Every credential account the served config names, with the display
+    /// identity every surface reports it under, including an account whose
+    /// provider failed to build.
     pub fn account_identities(&self) -> AccountIdentities {
-        self.router.account_identities()
+        AccountIdentities::from_config(&self.router.config)
     }
 
     /// The usage poll's state for the served config's managed logins, with
