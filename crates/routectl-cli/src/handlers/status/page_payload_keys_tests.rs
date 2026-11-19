@@ -28,6 +28,7 @@ const QUERY_FIELD_LISTS: &[&str] = &["QUERY_METRICS", "QUERY_TOKENS"];
 const BUILT_IN_MEMBERS: &[&str] = &[
     // Array, String, RegExp, Promise, Function
     "concat",
+    "every",
     "filter",
     "join",
     "length",
@@ -253,6 +254,30 @@ fn fields_missing_from(
         .filter(|field| !keys.contains(*field))
         .cloned()
         .collect()
+}
+
+/// The query metrics the page accepts as null are exactly the ones the
+/// server's `QueryMetrics` serializes as an explicit null when nothing
+/// contributed: read off a default value, where every `Option` is `None` and
+/// every count is `0`. A count the page wrongly allowed as null could render
+/// a malformed payload; a nullable metric it wrongly required would refuse a
+/// real one.
+#[test]
+fn the_nullable_query_metrics_are_the_dto_options() {
+    let default = serde_json::to_value(routectl_usage::QueryMetrics::default())
+        .expect("QueryMetrics serializes");
+    let server_nullable: Vec<String> = string_array("QUERY_METRICS")
+        .into_iter()
+        .filter(|name| default[name.as_str()].is_null())
+        .collect();
+
+    let page_nullable = string_array("QUERY_NULLABLE_METRICS");
+
+    assert!(
+        !server_nullable.is_empty(),
+        "positive control: some listed metric is an Option"
+    );
+    assert_eq!(page_nullable, server_nullable);
 }
 
 #[test]

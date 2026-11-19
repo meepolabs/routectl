@@ -129,7 +129,14 @@
   // the optional provider scope is added on top (the server accepts it against
   // any shape).
   function queryBodyFor(tab) {
-    var shape = shapeFor(querySourceFor(tab));
+    return bodyFromShape(shapeFor(querySourceFor(tab)));
+  }
+
+  function queryBodyForSource(source) {
+    return bodyFromShape(shapeFor(source));
+  }
+
+  function bodyFromShape(shape) {
     if (!shape) { return null; }
     var body = {};
     Object.keys(shape).forEach(function (k) { body[k] = shape[k]; });
@@ -313,6 +320,34 @@
     queryTimer = setTimeout(queryRound, BACKOFF_STEPS_MS[queryBackoffIndex]);
   }
 
+  var QUERY_SOURCES = [QUERY_SOURCE, QUERY_SERIES_SOURCE];
+
+  // The request key each query source would be fetched for under the current
+  // selection, whichever view is active.
+  function queryKeysBySource() {
+    var keys = {};
+    QUERY_SOURCES.forEach(function (name) {
+      var body = queryBodyForSource(name);
+      keys[name] = body ? queryBodyKey(body) : null;
+    });
+    return keys;
+  }
+
+  // A selection change, made on any view: every query source whose request
+  // key moved since `prior` drops the payload it holds for the old key and is
+  // marked pending, whether or not the active view issues it. A view opened
+  // later then shows its loading state, never the old selection's figures
+  // under the new labels, and its own round settles the mark. A source whose
+  // key did not move keeps its payload and is not marked.
+  function resetMovedQuerySources(prior) {
+    var now = queryKeysBySource();
+    var moved = QUERY_SOURCES.filter(function (name) { return prior[name] !== now[name]; });
+    markPending(moved);
+    moved.forEach(function (name) {
+      setSource(name, { state: 'loading', code: null, data: null, liveAt: null });
+    });
+  }
+
   // Every input that changes what the QUERY asks for funnels through here:
   // it aborts the in-flight request (queryStatus supersedes it), clears any
   // stale deterministic-refusal marker, and
@@ -354,7 +389,7 @@
         delete queryRejectedKeyBySource[tabSource];
       }
     });
-    [QUERY_SOURCE, QUERY_SERIES_SOURCE].forEach(function (name) {
+    QUERY_SOURCES.forEach(function (name) {
       setSource(name, { state: 'loading', code: null, data: null });
     });
     clearTimeout(queryTimer);

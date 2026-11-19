@@ -220,11 +220,23 @@
 
   // ---- missing data reads as unavailable, never as a zero ---------------
 
+  // Every other pool is full and every target usable, so the absent pool
+  // count is the only thing standing between the verdict and "All routes
+  // healthy".
   function withoutData(json) {
+    var health = json.panels.health.data;
     delete json.panels.usage;
-    delete json.panels.health.data.seat_driver.sweeps;
-    delete json.panels.health.data.pools[0].eligible;
+    delete health.seat_driver.sweeps;
+    health.pools.forEach(function (p) { p.eligible = p.configured; });
+    delete health.pools[0].eligible;
+    health.targets.forEach(function (t) { t.eligibility.reason = null; });
     return json;
+  }
+
+  function faviconFill() {
+    var href = document.getElementById('favicon').getAttribute('href');
+    var m = /fill='%23([0-9a-f]{6})'/.exec(href);
+    return m ? m[1] : href;
   }
 
   function definition(root, term) {
@@ -244,7 +256,9 @@
       sweeps: definition(driver, 'sweeps'),
       first_pool_eligible: definition(pools, 'eligible'),
       quota_card: quota ? textOf('#body-accounts [data-source="usage"] .unavailable-msg') : null,
-      quota_zero_figures: quota ? quota.querySelectorAll('.mag-zero').length : null
+      quota_zero_figures: quota ? quota.querySelectorAll('.mag-zero').length : null,
+      verdict: textOf('#verdict-text'),
+      favicon: faviconFill()
     };
   }
 
@@ -336,5 +350,139 @@
       out.after_superseded = trafficObservation();
       out.month_pressed = windowButton('month').getAttribute('aria-pressed');
     });
+  });
+
+  // ---- a selection changed on another view resets the query sources -------
+
+  function isAliasQuery(entry) {
+    return entry.method === 'QUERY' && !!entry.body && entry.body.group_by === 'alias';
+  }
+
+  function trafficCards() {
+    var names = document.querySelectorAll('#body-traffic .ucard-name');
+    return Array.prototype.map.call(names, function (n) { return n.textContent; });
+  }
+
+  function paneBusy(view) {
+    return document.getElementById('pane-' + view).getAttribute('aria-busy');
+  }
+
+  function crossViewObservation() {
+    var obs = trafficObservation();
+    obs.labels = trafficCards();
+    obs.now_busy = paneBusy('now');
+    obs.accounts_busy = paneBusy('accounts');
+    return obs;
+  }
+
+  // Traffic grouped by model, then Accounts, then an address naming the alias
+  // grouping applied there, then Traffic again with the alias answer held.
+  d.scenario('states-group-changed-on-another-view', function () {
+    var out = {};
+    rules.push(function (entry) { return isAliasQuery(entry) ? { ms: 3000 } : null; });
+    return d.waitUntil('traffic cards', function () { return query(TRAFFIC_FIGURES); })
+      .then(function () {
+        out.before = crossViewObservation();
+        document.getElementById('tab-accounts').click();
+        return settledView('accounts');
+      })
+      .then(function () {
+        location.hash = '#accounts?group=alias';
+        return d.waitUntil('the alias address applied', function () {
+          return location.hash === '#accounts?group=alias';
+        });
+      })
+      .then(function () { return d.sleep(200); })
+      .then(function () {
+        out.on_accounts = crossViewObservation();
+        document.getElementById('tab-traffic').click();
+        return d.sleep(100);
+      })
+      .then(function () {
+        out.held = crossViewObservation();
+        return d.waitUntil('the pane to stop being busy', function () {
+          return !paneBusy('traffic');
+        }, 20000);
+      })
+      .then(function () { return d.sleep(300); })
+      .then(function () {
+        out.applied = crossViewObservation();
+        out.pressed_group = textOf('#body-traffic .gbbtn[aria-pressed="true"]');
+        return out;
+      });
+  });
+
+  // ---- a malformed query payload is an error card, never a zero ----------
+
+  var QUERY_FAULTS = {
+    'missing-totals-errors': function (data) { delete data.totals.errors; },
+    'group-missing-a-metric': function (data) { delete data.groups[0].metrics.input_tokens; },
+    'malformed-series-bucket': function (data) { data.series.buckets[0].metrics = null; }
+  };
+
+  function viewReading(view) {
+    var body = document.getElementById('body-' + view);
+    return {
+      error_card: textOf('#body-' + view + ' [data-source] .unavailable-msg'),
+      error_cards: errorCards(body),
+      figures: body.querySelectorAll('.ucard, .kpi').length
+    };
+  }
+
+  function queryFaultScenario(fault, view) {
+    d.scenario('states-query-' + fault, function () {
+      var broken = false;
+      rules.push(function (entry) {
+        if (!broken || entry.method !== 'QUERY') { return null; }
+        return {
+          rewrite: function (json) { QUERY_FAULTS[fault](json.data); return json; }
+        };
+      });
+      var out = {};
+      return settledView(view).then(function () {
+        out.present = viewReading(view);
+        broken = true;
+        return nextAnswer('/status/query', 15000);
+      }).then(function () {
+        return d.sleep(300);
+      }).then(function () {
+        out.broken = viewReading(view);
+        return out;
+      });
+    });
+  }
+
+  queryFaultScenario('missing-totals-errors', 'traffic');
+  queryFaultScenario('group-missing-a-metric', 'traffic');
+  queryFaultScenario('malformed-series-bucket', 'now');
+
+  // ---- a stale section reports its own source's last success -------------
+
+  d.scenario('states-query-stale-time', function () {
+    var failing = false;
+    rules.push(function (entry) {
+      return (failing && entry.method === 'QUERY') ? { fail: true } : null;
+    });
+    var out = {};
+    return d.waitUntil('traffic figures', function () { return query(TRAFFIC_FIGURES); })
+      .then(function () {
+        failing = true;
+        return d.waitUntil('a stale traffic status line', function () {
+          return (textOf('#status-traffic') || '').indexOf('stale: ') === 0;
+        }, 15000);
+      })
+      .then(function () {
+        out.first = textOf('#status-traffic');
+        out.rounds_at_first = answers('/status');
+        return nextAnswer('/status', 10000);
+      })
+      .then(function () { return nextAnswer('/status', 10000); })
+      .then(function () { return d.sleep(200); })
+      .then(function () {
+        out.later = textOf('#status-traffic');
+        out.rounds_later = answers('/status');
+        out.figures = textOf(TRAFFIC_FIGURES);
+        return out;
+      });
   });
 })(window.routectlDriver);

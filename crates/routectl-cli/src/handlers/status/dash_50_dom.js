@@ -419,6 +419,34 @@
     return span;
   }
 
+  // A welcoming empty / not-yet-populated state. Never a grid of zeros.
+  function emptyCard(title, bodyText, facts) {
+    var card = document.createElement('div');
+    card.className = 'card empty';
+    var inner = document.createElement('div');
+    inner.className = 'empty-inner';
+    var h = document.createElement('div');
+    h.className = 'empty-title';
+    h.textContent = title;
+    var p = document.createElement('div');
+    p.className = 'empty-body';
+    p.textContent = bodyText;
+    inner.appendChild(h);
+    inner.appendChild(p);
+    if (facts && facts.length) {
+      var row = document.createElement('div');
+      row.className = 'empty-facts';
+      facts.forEach(function (f) {
+        var s = document.createElement('span');
+        s.textContent = f;
+        row.appendChild(s);
+      });
+      inner.appendChild(row);
+    }
+    card.appendChild(inner);
+    return card;
+  }
+
   // ---- quantitative render helpers -------------------------------------
 
   // Magnitude number with a smaller, muted K/M/B suffix in its own span.
@@ -673,9 +701,9 @@
 
   // A millisecond span split into numeral + unit, promoted to seconds past a
   // full second so a tile never shows five digits of milliseconds. A
-  // non-positive input means the metric was never observed (the adapter
-  // coerces an absent figure to zero and no real latency is 0ms), so it reads
-  // as absent rather than as an instant response.
+  // null or non-positive input means the metric was never observed (the
+  // server sends null for it, and no real latency is 0ms), so it reads as
+  // absent rather than as an instant response.
   function msParts(ms) {
     var v = num0(ms);
     if (v <= 0) { return { v: '-', u: '' }; }

@@ -177,15 +177,16 @@
   }
 
   // A share that ARRIVED as a percentage, rounded by pctText and re-split so
-  // the sign rides the faint unit slot instead of the numeral.
+  // the sign rides the faint unit slot instead of the numeral. A null share
+  // (no prompt tokens to weigh) is absent, not zero.
   function pctFigure(v) {
+    if (v === null) { return figure('-', null, null); }
     var text = pctText(v);
     return figure(text.slice(0, text.length - 1), '%', null);
   }
 
-  // A non-positive throughput means no generation was measured for this group
-  // (the adapter coerces an absent figure to zero), so it reads as absent
-  // rather than as a stalled stream.
+  // A null or non-positive throughput means no generation was measured for
+  // this group, so it reads as absent rather than as a stalled stream.
   function throughputFigure(v) {
     var x = num0(v);
     return x > 0 ? figure(String(Math.round(x)), 'tok/s', null) : figure('-', null, null);

@@ -104,8 +104,10 @@
   // `state` is one of loading | live | empty | unavailable | incompatible |
   // invalid_payload | stale | dead. `name` is carried on the record so a
   // section handed only its record can still say WHICH source it renders.
+  // `liveAt` is the local wall time this source's own last valid payload
+  // landed: a stale or dead section reports it, never another source's.
   function freshRecord(name) {
-    return { name: name, state: 'loading', code: null, data: null, asOf: null, badge: null };
+    return { name: name, state: 'loading', code: null, data: null, asOf: null, liveAt: null, badge: null };
   }
 
   var SOURCES = {};
@@ -127,6 +129,7 @@
       code: prev.code,
       data: prev.data,
       asOf: prev.asOf,
+      liveAt: prev.liveAt,
       badge: prev.badge
     };
     Object.keys(next).forEach(function (k) { merged[k] = next[k]; });

@@ -210,9 +210,13 @@ fn page_browser_a_superseded_range_ends_pending_on_the_newer_answer() {
 }
 
 /// A panel absent from the answer shows its unavailable card, and a figure
-/// absent from a payload reads as a dash; neither becomes a zero.
+/// absent from a payload reads as a dash; neither becomes a zero. A pool
+/// count the verdict needs being absent leaves the verdict and the favicon
+/// neutral, never healthy.
 ///
-/// Mutation check: make seatCountText answer `0` for an absent count -> red.
+/// Mutation check: make seatCountText answer `0` for an absent count -> red;
+/// drop the poolCountsKnown check in verdictState -> red (the verdict reads
+/// healthy).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_missing_data_reads_as_unavailable_never_zero() {
@@ -231,4 +235,116 @@ fn page_browser_missing_data_reads_as_unavailable_never_zero() {
         "{missing:#}"
     );
     assert_eq!(missing["quota_zero_figures"], 0, "{missing:#}");
+    assert_eq!(missing["verdict"], "Checking routing state", "{missing:#}");
+    assert_eq!(missing["favicon"], ICON_STALE_UNKNOWN, "{missing:#}");
+    assert_ne!(
+        present["verdict"], missing["verdict"],
+        "positive control: the populated pools move the verdict: {present:#}"
+    );
+    assert_ne!(present["favicon"], ICON_STALE_UNKNOWN, "{present:#}");
+}
+
+/// The stale-or-unknown favicon fill, as the driver reads it from the href.
+const ICON_STALE_UNKNOWN: &str = "9aa5b5";
+
+/// A grouping changed by the address while Accounts is showing resets the
+/// Traffic query too: opening Traffic with the new answer held shows a busy
+/// pane and none of the old grouping's cards, then the new grouping's cards
+/// once the answer applies. No hidden pane is left busy meanwhile.
+///
+/// Mutation check: drop the resetMovedQuerySources call in applyViewState ->
+/// red (the model cards sit under the alias grouping); drop the active-view
+/// arm in paintPending -> red (the hidden Traffic pane is busy).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_selection_changed_on_another_view_resets_its_query() {
+    let result = states_scenario("states-group-changed-on-another-view", "traffic", 60_000);
+    let (before, on_accounts, held, applied) = (
+        &result["before"],
+        &result["on_accounts"],
+        &result["held"],
+        &result["applied"],
+    );
+    let labels = |at: &Value| at["labels"].as_array().expect("card labels").clone();
+
+    assert!(!labels(before).is_empty(), "{before:#}");
+    assert_eq!(
+        on_accounts["busy"],
+        Value::Null,
+        "the hidden Traffic pane is marked busy: {on_accounts:#}"
+    );
+    assert_eq!(on_accounts["accounts_busy"], Value::Null, "{on_accounts:#}");
+    assert_eq!(on_accounts["now_busy"], Value::Null, "{on_accounts:#}");
+    assert_eq!(held["busy"], "true", "{held:#}");
+    assert!(
+        labels(held).is_empty(),
+        "the old grouping's cards under the new one: {held:#}"
+    );
+    assert_eq!(held["figures"], Value::Null, "{held:#}");
+    assert_settled(applied, "after the alias answer");
+    assert!(
+        !labels(applied).is_empty(),
+        "positive control: the alias cards appear once released: {applied:#}"
+    );
+    assert_ne!(labels(applied), labels(before), "{result:#}");
+    assert_eq!(result["pressed_group"], "Alias", "{result:#}");
+}
+
+/// A query payload missing a required metric, or with a malformed series
+/// bucket, puts an error card in the section that reads it; the populated
+/// payload before it rendered figures and no error card.
+///
+/// Mutation check: make isMetricsShape return true for any object -> red
+/// (every row renders zeros instead of the card).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_malformed_query_payload_is_an_error_never_a_zero() {
+    let rows = [
+        ("states-query-missing-totals-errors", "traffic"),
+        ("states-query-group-missing-a-metric", "traffic"),
+        ("states-query-malformed-series-bucket", "now"),
+    ];
+    for (name, hash) in rows {
+        let result = states_scenario(name, hash, 40_000);
+        let (present, broken) = (&result["present"], &result["broken"]);
+
+        assert_eq!(present["error_cards"], 0, "`{name}` control: {present:#}");
+        assert!(
+            present["figures"].as_u64().unwrap_or(0) > 0,
+            "`{name}` control renders figures: {present:#}"
+        );
+        assert_eq!(
+            broken["error_card"],
+            "unavailable: invalid_payload (this section could not be rendered from the \
+             payload it received)",
+            "`{name}`: {broken:#}"
+        );
+        assert_eq!(broken["figures"], 0, "`{name}`: {broken:#}");
+    }
+}
+
+/// A QUERY that keeps failing while the aggregate rounds keep landing reports
+/// its own last success: the stale time on the status line does not advance
+/// with the aggregate.
+///
+/// Mutation check: read the aggregate's lastSuccess in renderSectionStatus
+/// -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_stale_query_reports_its_own_last_success() {
+    let result = states_scenario("states-query-stale-time", "traffic", 60_000);
+    let first = text(&result["first"], "the first stale line");
+
+    assert!(first.starts_with("stale: last success at "), "{result:#}");
+    let before = result["rounds_at_first"].as_u64().expect("rounds");
+    let later = result["rounds_later"].as_u64().expect("rounds");
+    assert!(
+        later >= before + 2,
+        "positive control: aggregate rounds landed: {result:#}"
+    );
+    assert_eq!(result["later"], result["first"], "{result:#}");
+    assert!(
+        result["figures"].is_string(),
+        "the kept figures stay: {result:#}"
+    );
 }

@@ -56,6 +56,7 @@
       code: null,
       data: data,
       asOf: env.as_of,
+      liveAt: new Date(),
       badge: sourceBadge(name, data)
     });
     renderSourceChanged(name);
@@ -178,11 +179,15 @@
     paintPending();
   }
 
+  // Only the active pane is marked: a source a hidden view reads stays
+  // pending until that view is opened and its own round answers, and the mark
+  // follows it there rather than sitting on a pane nobody can see.
   function paintPending() {
     VIEWS.forEach(function (view) {
       var pane = el('pane-' + view.id);
       if (!pane) { return; }
-      var busy = view.sources.some(function (name) { return !!PENDING_SOURCES[name]; });
+      var busy = view.id === activeTab &&
+        view.sources.some(function (name) { return !!PENDING_SOURCES[name]; });
       pane.classList.toggle('pane--pending', busy);
       if (busy) { pane.setAttribute('aria-busy', 'true'); }
       else { pane.removeAttribute('aria-busy'); }
@@ -462,8 +467,8 @@
       return;
     }
     if (state === 'stale' || state === 'dead') {
-      var note = lastSuccess
-        ? 'last success at ' + lastSuccess.toLocaleTimeString()
+      var note = rec.liveAt
+        ? 'last success at ' + rec.liveAt.toLocaleTimeString()
         : 'no successful poll yet';
       var lead = state === 'stale' ? 'stale: ' : 'no current data: ';
       status.appendChild(makeLiveDot());
@@ -540,34 +545,6 @@
     return div;
   }
 
-  // A welcoming empty / not-yet-populated state. Never a grid of zeros.
-  function emptyCard(title, bodyText, facts) {
-    var card = document.createElement('div');
-    card.className = 'card empty';
-    var inner = document.createElement('div');
-    inner.className = 'empty-inner';
-    var h = document.createElement('div');
-    h.className = 'empty-title';
-    h.textContent = title;
-    var p = document.createElement('div');
-    p.className = 'empty-body';
-    p.textContent = bodyText;
-    inner.appendChild(h);
-    inner.appendChild(p);
-    if (facts && facts.length) {
-      var row = document.createElement('div');
-      row.className = 'empty-facts';
-      facts.forEach(function (f) {
-        var s = document.createElement('span');
-        s.textContent = f;
-        row.appendChild(s);
-      });
-      inner.appendChild(row);
-    }
-    card.appendChild(inner);
-    return card;
-  }
-
   function enterTerminal() {
     terminal = true;
     clearTimeout(timer);
@@ -625,8 +602,21 @@
   // shows on the panels it costs. No other source moves the verdict.
   function verdictState() {
     if (terminal) { return { kind: 'bad', text: 'Polling stopped - open this page on the bound address' }; }
-    if (!healthIsCurrent()) { return { kind: 'idle', text: 'Checking routing state' }; }
-    return seatVerdict(SOURCES.health.data) || { kind: 'ok', text: 'All routes healthy' };
+    var checking = { kind: 'idle', text: 'Checking routing state' };
+    if (!healthIsCurrent()) { return checking; }
+    var data = SOURCES.health.data;
+    if (!poolCountsKnown(data)) { return checking; }
+    return seatVerdict(data) || { kind: 'ok', text: 'All routes healthy' };
+  }
+
+  // A pool count the verdict needs that is absent or not a number leaves the
+  // seat question unanswered, so the strip stays neutral rather than calling
+  // routing healthy on a comparison that could not be made.
+  function poolCountsKnown(data) {
+    if (!Array.isArray(data.pools)) { return false; }
+    return data.pools.every(function (p) {
+      return !!p && isFiniteNumber(p.eligible) && isFiniteNumber(p.configured);
+    });
   }
 
   function healthIsCurrent() {
@@ -640,12 +630,12 @@
   // arms come first and a pool's outage is named once, by the pool. Null when
   // every seat is usable.
   function seatVerdict(data) {
-    var pools = Array.isArray(data.pools) ? data.pools : [];
-    var empty = pools.filter(function (p) { return Number(p.eligible) <= 0 && Number(p.configured) > 0; });
+    var pools = data.pools;
+    var empty = pools.filter(function (p) { return p.eligible <= 0 && p.configured > 0; });
     if (empty.length) {
       return { kind: 'bad', text: 'No usable seat in ' + namedFew(empty.map(poolName)) + ' - see Accounts' };
     }
-    var short = pools.filter(function (p) { return Number(p.eligible) < Number(p.configured); });
+    var short = pools.filter(function (p) { return p.eligible < p.configured; });
     if (short.length) {
       return { kind: 'warn', text: 'Some seats unusable in ' + namedFew(short.map(poolName)) + ' - see Accounts' };
     }

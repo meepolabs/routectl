@@ -565,8 +565,8 @@ mod tests {
     ///
     /// `QUERY_METRICS` + `QUERY_TOKENS` are the only places a raw query field
     /// name lives in the dashboard, so a server-side rename would otherwise
-    /// silently turn a column into zeroes (the adapter coerces a missing
-    /// numeric field through `num0`) or a cost token into `undefined`. Both
+    /// fail every query payload's shape check (each listed field is required)
+    /// or carry a cost token as `undefined`. Both
     /// arrays are checked, so a field moved between them stays covered. The
     /// Rust side is DERIVED from serde -- a serialized `QueryMetrics` value --
     /// rather than a second hardcoded list, so this test cannot rot into

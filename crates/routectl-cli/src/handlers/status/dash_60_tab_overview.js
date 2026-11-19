@@ -600,8 +600,10 @@
 
   function cacheHitTile(t, series, gap) {
     var hit = num0(t.cache_hit_pct);
+    var shown = t.cache_hit_pct === null ? figure('-', null, null)
+      : figure(hit > 0 ? hit.toFixed(1) : '0', '%', null);
     return kpiTile('Cache hit',
-      figure(hit > 0 ? hit.toFixed(1) : '0', '%', null),
+      shown,
       wrappedNote(hit > 0
         ? 'weighted by prompt tokens'
         : 'nothing served warm yet'),
