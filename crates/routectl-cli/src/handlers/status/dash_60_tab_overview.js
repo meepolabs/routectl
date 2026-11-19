@@ -36,18 +36,12 @@
   var providerRowWindow = null;
 
   // The provider scope lives on the provider cards themselves (the aggregate
-  // card is the reset), so this tab carries no separate scope strip. But those
-  // cards are part of the query-backed content: when a provider-scoped query is
-  // unavailable or refused, the state card that replaces the content carries no
-  // affordance at all, so the scope would be irreversible. The lone reset line
-  // below renders ONLY in that case.
+  // card is the reset), so this tab carries no separate scope strip. Those
+  // cards are part of the query-backed content, so the view composes the
+  // reset line beside this section for the case they are not drawn
+  // (scopeRecovery).
   function buildOverview(rec) {
-    var section = safeSection(rec, buildOverviewLive);
-    if (!selectedProvider || !stateCard(rec)) { return section; }
-    var stack = tabStack();
-    stack.appendChild(scopeRecovery());
-    stack.appendChild(section);
-    return stack;
+    return safeSection(rec, buildOverviewLive);
   }
 
   // The live Overview: one query response feeds the provider cards, the eight
@@ -97,8 +91,10 @@
     renderActiveTab();
   }
 
-  // The reset affordance of last resort: shown only when the scoped query is
-  // unrenderable, so the cards that normally carry the reset are not on screen.
+  // The reset affordance of last resort: shown only when a provider-scoped
+  // query is unavailable or refused. The state card that replaces the content
+  // then carries no provider card, so without it the scope would be
+  // irreversible.
   function scopeRecovery() {
     return scopeStrip('overview', 'this provider scope has no renderable data');
   }

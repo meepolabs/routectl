@@ -751,10 +751,11 @@
   // =====================================================================
   // Per-tab section builders.
   //
-  // One contiguous marker-delimited block per tab, in VIEWS order, each
-  // registered as a view's `build` in dash_80_views.js. Every builder:
-  //   1. consults `stateCard(rec)` first and returns it when non-null, so
-  //      loading / unavailable / incompatible / dead states are uniform;
+  // One contiguous marker-delimited block per tab, composed into the views
+  // in dash_80_views.js through viewSection, which draws the loading /
+  // unavailable / incompatible / dead card for a section's source and calls
+  // the builder only for a renderable record. Every builder:
+  //   1. receives the record of the source it reads, as the host passed it;
   //   2. reads a query-backed tab's data through `queryView()` (adapter
   //      properties only, never raw JSON) and a GET-backed tab's through
   //      `rec.data` / `SOURCES[<name>].data` per the view's `sources`;

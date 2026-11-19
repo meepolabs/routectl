@@ -307,8 +307,21 @@ pub(super) fn run_scenario(scenario: &Scenario) -> DriverReport {
 /// [`run_scenario`] with extra Chrome switches, such as a forced media
 /// preference.
 pub(super) fn run_scenario_with(scenario: &Scenario, chrome_switches: &[&str]) -> DriverReport {
+    run_page(scenario, page_with_driver(scenario), chrome_switches)
+}
+
+/// [`run_scenario`] on the page as `patch` rewrites it, for a test that needs
+/// page code no fixture can reach (a view composed only for the test).
+pub(super) fn run_scenario_on_patched_page(
+    scenario: &Scenario,
+    patch: impl FnOnce(String) -> String,
+) -> DriverReport {
+    run_page(scenario, patch(page_with_driver(scenario)), &[])
+}
+
+fn run_page(scenario: &Scenario, page: String, chrome_switches: &[&str]) -> DriverReport {
     let harness = Arc::new(Harness {
-        page: page_with_driver(scenario),
+        page,
         payloads: Payloads::populated(),
         rounds: Rounds::default(),
     });
@@ -460,6 +473,21 @@ fn page_browser_seat_dialog_stays_open_with_focus_inside() {
     let obs = observations(&report.result);
 
     assert_flags(&obs, &["open", "same_dialog", "same_node", "focus_inside"]);
+    assert_figure_changed_every_round(&obs);
+}
+
+/// Models: a dispatch target card and the rate-limit figure inside it are the
+/// same nodes across two changed rounds, and the figure shows each round's
+/// value. Models has no control to focus or open, so the kept nodes are the
+/// card and the figure the rounds change.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_target_card_and_figure_are_kept_across_rounds() {
+    let report = run_scenario(&scenario("models-target-kept", "models"));
+
+    let obs = observations(&report.result);
+
+    assert_flags(&obs, &["same_card", "same_figure_node", "connected"]);
     assert_figure_changed_every_round(&obs);
 }
 

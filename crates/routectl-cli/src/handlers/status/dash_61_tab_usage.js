@@ -13,19 +13,23 @@
     provider: 'By provider'
   };
 
-  // The group-by picker and the provider-scope strip render OUTSIDE the section
-  // boundary: a selection whose query comes back unavailable or refused must
-  // stay reversible, and the state card that replaces the content carries no
-  // affordance. Usage carries no provider cards of its own, so the strip is the
-  // only place its inherited scope can be read or lifted.
-  function buildUsage(rec) {
-    var stack = tabStack();
+  // The group-by picker and the provider-scope strip, composed by the view
+  // OUTSIDE the section boundary: a selection whose query comes back
+  // unavailable or refused must stay reversible, and the state card that
+  // replaces the content carries no affordance. Usage carries no provider
+  // cards of its own, so the strip is the only place its inherited scope can
+  // be read or lifted.
+  function usageControls() {
+    var controls = document.createDocumentFragment();
     if (selectedProvider) {
-      stack.appendChild(scopeStrip('usage', 'every figure below is this provider only'));
+      controls.appendChild(scopeStrip('usage', 'every figure below is this provider only'));
     }
-    stack.appendChild(groupByStrip());
-    stack.appendChild(safeSection(rec, buildUsageLive));
-    return stack;
+    controls.appendChild(groupByStrip());
+    return controls;
+  }
+
+  function buildUsage(rec) {
+    return safeSection(rec, buildUsageLive);
   }
 
   // One card per group, never a table: a group is a separate object an operator

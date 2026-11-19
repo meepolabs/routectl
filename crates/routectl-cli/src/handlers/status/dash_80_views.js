@@ -19,7 +19,8 @@
   //            it rather than promising a filter that does not reach the
   //            figures, and the span is shown beside it.
   //   build    build(primaryRec) -> Node, per the contract in dash_50_dom.js;
-  //            every section it composes goes through viewSection.
+  //            every section it composes goes through viewSection, which
+  //            hands that section's builder its own source's record.
   var VIEWS = [
     {
       id: 'now',
@@ -76,12 +77,21 @@
 
   // Each view composes its sections through viewSection (dash_40_render.js),
   // naming the source each section reads: the host, not the section, owns
-  // that section's fault boundary and its stale and pending marks.
+  // that section's panel states, its fault boundary and its stale and
+  // pending marks. Controls over the page selection sit beside the sections,
+  // so a section showing a state card never takes them with it.
 
   // Where traffic is going: the windowed QUERY's provider cards and tiles,
   // with the seat quota on them read from the usage ledger and guarded inside.
-  function buildNow() {
-    return viewSection(QUERY_SERIES_SOURCE, buildOverview);
+  // The scope reset line stands in for the provider cards when a scoped
+  // query has nothing renderable.
+  function buildNow(rec) {
+    var section = viewSection(QUERY_SERIES_SOURCE, buildOverview);
+    if (!selectedProvider || !stateCard(rec)) { return section; }
+    var stack = tabStack();
+    stack.appendChild(scopeRecovery());
+    stack.appendChild(section);
+    return stack;
   }
 
   // Seats and quota: the pools a request can dispatch to, the driver keeping
@@ -89,9 +99,9 @@
   // section reads the usage ledger, so a dark ledger costs the tiles alone.
   function buildAccounts() {
     var stack = tabStack();
-    stack.appendChild(viewSection('health', healthPoolSection));
-    stack.appendChild(viewSection('health', healthDriverSection));
-    stack.appendChild(viewSection('usage', function () { return healthQuotaSection(); }));
+    stack.appendChild(viewSection('health', healthPoolSection, 'Pool seats'));
+    stack.appendChild(viewSection('health', healthDriverSection, 'Background seat driver'));
+    stack.appendChild(viewSection('usage', healthQuotaSection, 'Seat quota'));
     return stack;
   }
 
@@ -100,19 +110,22 @@
   // estimate from the all-history ledger.
   function buildTraffic() {
     var stack = tabStack();
+    stack.appendChild(usageControls());
     stack.appendChild(viewSection(QUERY_SOURCE, buildUsage));
-    stack.appendChild(viewSection('config', routingChainsSection));
+    stack.appendChild(viewSection('config', routingChainsSection, 'Fallback chains'));
     var chains = liveChains(SOURCES.config);
     if (!chains.length) { return stack; }
-    stack.appendChild(viewSection('health', function () { return targetStateSection(chains); }));
-    stack.appendChild(viewSection(USAGE_ALL_SOURCE, function () {
-      return attributionSection(chains);
-    }));
+    stack.appendChild(viewSection('health', function (rec) {
+      return targetStateSection(rec, chains);
+    }, 'Live target state'));
+    stack.appendChild(viewSection(USAGE_ALL_SOURCE, function (rec) {
+      return attributionSection(rec, chains);
+    }, 'Estimated step attribution'));
     return stack;
   }
 
   function buildModels() {
-    return viewSection('health', healthTargetSection);
+    return viewSection('health', healthTargetSection, 'Dispatch targets');
   }
 
   function buildConfigView() {

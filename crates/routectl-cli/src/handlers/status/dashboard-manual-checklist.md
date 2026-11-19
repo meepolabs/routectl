@@ -24,6 +24,9 @@ has not verified the failure that matters most.
   sections while polling continues, a failed refresh keeps the section marked
   stale, a pending selection ends on its answer) and
   `page_browser_verdict_tests.rs` (the verdict and favicon each fault drives).
+- **The host-owned section boundary** (`dash_40_render.js`):
+  `page_browser_host_tests.rs` (a section with no guard of its own gets the
+  loading, unavailable, error and recovered states from `viewSection`).
 - **Focus, selection and open state across a refresh** (`dash_40_render.js`,
   `dash_50_dom.js`): `page_browser_tests.rs`, `page_browser_locks_tests.rs`
   and `page_browser_sort_tests.rs` keep the focused node, a text selection,
@@ -156,12 +159,14 @@ banner, no retry signal -- silently mislabeled data.
   CACHE READ / WRITE reads a faint `-` on the write side for the first and
   `0` for the second; scoped to a provider with no reported write, the
   Now WRITE tile reads `-` and its note says no cache write was reported.
-- Expanded Config model rows stay readable at 1440, 1024, 390 and 390 at 200%
-  text: no label runs into another pair's value, nothing is cut off at the
-  row edge, and a pair too wide for its column drops the value under its
-  label. The Now EST. COST, TIME TO FIRST TOKEN and CACHE HIT notes
-  wrap instead of truncating (check 720 and 1024 px, and 1440 at 200% text),
-  and hovering each shows the full sentence.
+- Check the next item at 720, 1024 and 1440 px wide and at 1440 px with
+  200% text, in both the dark and the light theme, and once more with the
+  OS reduced-motion preference on (no value animates, nothing is lost).
+  Expanded Config model rows stay readable: no label runs into another
+  pair's value, nothing is cut off at the row edge, and a pair too wide for
+  its column drops the value under its label. The Now EST. COST, TIME TO
+  FIRST TOKEN and CACHE HIT notes wrap instead of truncating, and hovering
+  each shows the full sentence.
 
 ## 5. Doctor tab capability surface
 

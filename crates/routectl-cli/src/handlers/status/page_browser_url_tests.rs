@@ -256,6 +256,12 @@ fn scope_cases() -> Vec<ScopeCase> {
             None,
             "#now",
         ),
+        scope_case(
+            "blank braille pattern dropped",
+            "anthro%E2%A0%80pic",
+            None,
+            "#now",
+        ),
     ]
 }
 
@@ -263,7 +269,8 @@ fn scope_cases() -> Vec<ScopeCase> {
 /// trimmed, kept at up to 128 chars and dropped when blank or longer, longer
 /// than 512 before the trim, or carrying a character that draws nothing or
 /// draws as a plain space (control, format, default-ignorable, line or
-/// paragraph separator, inner whitespace other than U+0020), and the QUERY
+/// paragraph separator, inner whitespace other than U+0020, the blank
+/// Braille pattern U+2800), and the QUERY
 /// sent for it carries exactly the kept value or no provider at all.
 /// Non-ASCII text that is none of these (the euro sign, U+FFFD) is kept, as
 /// is an inner U+0020 (the plus row).
@@ -271,8 +278,8 @@ fn scope_cases() -> Vec<ScopeCase> {
 /// Mutation checks: drop the length bound in scopeParam -> red (129/200
 /// rows); drop the hidden-character test -> red (every dropped-character
 /// row); drop `\p{Default_Ignorable_Code_Point}` from it -> red (the joiner,
-/// variation selector and filler rows); drop the raw bound -> red
-/// (past-the-raw-bound row).
+/// variation selector and filler rows); drop `\u2800` from it -> red (the
+/// blank Braille row); drop the raw bound -> red (past-the-raw-bound row).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_scope_from_the_address_is_trimmed_bounded_and_sent_as_given() {

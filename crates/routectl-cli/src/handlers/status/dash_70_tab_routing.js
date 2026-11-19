@@ -182,8 +182,7 @@
   // keep rendering. The hint follows what `safeSection` will actually do with
   // the record, so it never promises a list that a state card replaced (nor
   // cries unavailable over retained last-known values).
-  function targetStateSection(chains) {
-    var rec = SOURCES.health;
+  function targetStateSection(rec, chains) {
     var wrap = routingSection('Live target state', stateCard(rec)
       ? 'health unavailable - live target state is not shown'
       : 'reported now - never part of the estimate below');
@@ -368,8 +367,7 @@
 
   // ---- routing: estimated step attribution (from the usage ledger) -----
 
-  function attributionSection(chains) {
-    var rec = SOURCES[USAGE_ALL_SOURCE];
+  function attributionSection(rec, chains) {
     var wrap = routingSection('Estimated step attribution', attributionHint(rec));
     wrap.appendChild(safeSection(rec, function (live) {
       return buildAttribution(live, chains);

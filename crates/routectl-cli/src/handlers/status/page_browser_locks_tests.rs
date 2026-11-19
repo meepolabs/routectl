@@ -102,7 +102,7 @@ fn page_browser_a_selected_finding_stays_until_released_after_the_server_drops_i
 
 /// A held section is held only against its own rebuild: when the findings
 /// section leaves the page, the section the morph pairs with its node is
-/// drawn, not the stale findings.
+/// drawn, not the stale findings, and the selected text node leaves with it.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_selected_section_gives_way_when_the_section_leaves() {
@@ -111,6 +111,10 @@ fn page_browser_a_selected_section_gives_way_when_the_section_leaves() {
     let result = &report.result;
     assert_eq!(result["findings_shown"], false, "{result:#}");
     assert_eq!(result["stale_text_shown"], false, "{result:#}");
+    assert_eq!(
+        result["selected_connected"], false,
+        "the selected text node outlived its section: {result:#}"
+    );
 }
 
 /// Two findings sharing section and name swap places every round. Each card
@@ -152,6 +156,10 @@ fn page_browser_same_named_findings_keep_their_own_ids_when_they_swap() {
     assert_eq!(id_of.len(), 2, "two distinct ids: {id_of:?}");
 }
 
+/// The table scroller and a row in it are the same nodes across two changed
+/// rounds, and both the table and the page keep their scroll. Scroll alone is
+/// not evidence of an in-place update: restoreScroll puts it back after a
+/// wholesale replace too, so the node identity is what pins the morph.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_table_and_page_scroll_survive_changed_rounds() {
@@ -168,6 +176,14 @@ fn page_browser_table_and_page_scroll_survive_changed_rounds() {
         "positive control: the page was scrolled: {base:#}"
     );
     for (i, o) in obs.iter().enumerate() {
+        assert_eq!(
+            o["same_wrap"], true,
+            "the table scroller was rebuilt at {i}: {o:#}"
+        );
+        assert_eq!(
+            o["same_row"], true,
+            "the table row was rebuilt at {i}: {o:#}"
+        );
         assert_eq!(o["table_left"], base["table_left"], "table scroll at {i}");
         assert_eq!(o["page_y"], base["page_y"], "page scroll at {i}");
     }

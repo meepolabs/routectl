@@ -125,9 +125,10 @@
   // Provider names are config identifiers. A character that draws nothing or
   // draws as a plain space (a control or format character, a default-ignorable
   // one such as a variation selector or a Hangul filler, a line or paragraph
-  // separator, any inner whitespace but U+0020) only makes a label read as a
-  // provider it is not.
-  var SCOPE_HIDDEN_CHAR = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]|[^\S ]/u;
+  // separator, any inner whitespace but U+0020, the blank Braille pattern)
+  // only makes a label read as a provider it is not.
+  var SCOPE_HIDDEN_CHAR =
+    /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\u2800]|[^\S ]/u;
   var SORT_DIRS = ['asc', 'desc'];
   // Sortable tables by id, each with the column ids it sorts by (the `sortBy`
   // ids its mkTable call declares; a page test keeps the two equal). A sort

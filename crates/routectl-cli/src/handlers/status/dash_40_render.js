@@ -430,27 +430,28 @@
   // source that section reads (see VIEWS). The binding is written on the
   // section, so the panel states are drawn per section rather than per pane:
   // a section whose source is serving retained values after a failed refresh
-  // is marked stale while its siblings stay current. A throw that escapes the
-  // section's own guards costs this section alone and is recorded against its
-  // source, like a safeSection fault.
+  // is marked stale while its siblings stay current. The section's content
+  // goes through safeSection, so the host, not the builder, draws the
+  // loading and failure cards, contains a throw and records the attempt that
+  // lets a recovered section clear its source's fault. `build` is called
+  // only for a renderable record, and receives it. A builder that guards
+  // itself as well is safe here: its own card is a successful build to the
+  // host, and the fault it records is not undone by the host's attempt mark.
+  // A control that must stay usable while the section shows a card (a
+  // scope reset, a grouping picker) is composed beside the section, not in it.
+  // A section that titles itself passes its `title`, so the card the host
+  // draws in its place still says which reading is missing.
   var SECTION_SOURCE_ATTR = 'data-source';
 
-  function viewSection(name, build) {
+  function viewSection(name, build, title) {
     var rec = SOURCES[name];
     var wrap = document.createElement('div');
     wrap.className = 'view-section';
     wrap.setAttribute(SECTION_SOURCE_ATTR, name);
     if (rec.state === 'stale') { wrap.classList.add('section--stale'); }
     if (PENDING_SOURCES[name]) { wrap.classList.add('section--pending'); }
-    var node;
-    try {
-      node = build(rec);
-    } catch (e) {
-      recordRenderFault(name);
-      node = errorCard('invalid_payload',
-        'this section could not be rendered from the payload it received');
-    }
-    wrap.appendChild(node);
+    if (title && stateCard(rec)) { wrap.appendChild(sectionHead(title, null)); }
+    wrap.appendChild(safeSection(rec, build));
     return wrap;
   }
 

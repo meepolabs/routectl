@@ -181,11 +181,14 @@
       '#body-config { padding-bottom: 3000px; }';
     document.head.appendChild(style);
     return d.waitForElement('config-models-wrap').then(function (wrap) {
+      var row = document.getElementById('config-models-kglm');
       wrap.scrollLeft = 60;
       window.scrollTo(0, 400);
       return d.acrossRounds('/status', 2, function () {
         var live = document.getElementById('config-models-wrap');
         return {
+          same_wrap: live === wrap,
+          same_row: !!row && row === document.getElementById('config-models-kglm'),
           table_left: live.scrollLeft,
           page_y: window.scrollY,
           figure: document.querySelector('#body-config .cfgstrip').textContent

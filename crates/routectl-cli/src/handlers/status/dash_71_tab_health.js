@@ -465,8 +465,7 @@
 
   // ---- health: per-seat quota (from the usage ledger) ------------------
 
-  function healthQuotaSection() {
-    var rec = SOURCES.usage;
+  function healthQuotaSection(rec) {
     var wrap = routingSection('Seat quota', stateCard(rec)
       ? 'usage unavailable - quota is not shown'
       : 'latest snapshot per credential seat - never summed across seats');
