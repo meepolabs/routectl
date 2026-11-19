@@ -1,9 +1,9 @@
   // ---- transport -------------------------------------------------------
 
   // The browser tests drive the late-answer cases of the response-currency
-  // guard below; the rest of this part is verified BY HAND -- see
-  // dashboard-manual-checklist.md beside this source, and run it before
-  // shipping a change here.
+  // guard below (page_browser_epoch_tests.rs); a real slow ledger is verified
+  // BY HAND -- see dashboard-manual-checklist.md beside this source, and run
+  // it before shipping a change here.
 
   // Issue one request under an abort budget and classify the outcome. The
   // ONLY place a fetch happens; both the GET poll and the QUERY aggregate

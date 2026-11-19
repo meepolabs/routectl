@@ -304,10 +304,14 @@ fn page_browser_a_scope_from_the_address_is_trimmed_bounded_and_sent_as_given() 
 /// Chrome). Positive control: the plain-scope row is kept, so the handler
 /// read the address the row wrote.
 ///
+/// The bound sits far above a dropped load under machine load (single-digit
+/// ms) and far below the trim running first (seconds at 300,000 spaces).
+///
 /// Mutation check: run the edge trim before the raw bound -> red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_an_overlong_scope_is_dropped_before_any_regex_runs() {
+    const OVERLONG_SCOPE_BOUND_MS: f64 = 500.0;
     let spaces = "+".repeat(300_000);
     let rows = [
         (
@@ -345,7 +349,10 @@ fn page_browser_an_overlong_scope_is_dropped_before_any_regex_runs() {
         assert_eq!(report["view"], "config", "`{name}`");
         assert_eq!(report["hash"], canonical, "`{name}`");
         let ms = report["handled_ms"].as_f64().expect("a duration");
-        assert!(ms < 50.0, "`{name}`: the load handler took {ms} ms");
+        assert!(
+            ms < OVERLONG_SCOPE_BOUND_MS,
+            "`{name}`: the load handler took {ms} ms"
+        );
     }
 }
 

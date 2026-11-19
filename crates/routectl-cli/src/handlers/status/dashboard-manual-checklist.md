@@ -1,37 +1,50 @@
 # Dashboard manual verification checklist
 
-The dashboard client (`dash_*.js`) has **no automated runtime harness**. The
-Rust guards in `page.rs` scan the concatenated script as TEXT -- they pin the
-wire vocabularies the client renders against, and they cannot observe a single
-line of its behavior. Everything below is therefore verified BY HAND, and
-running it is part of shipping any change to the transport, render, DOM, or
-chrome parts.
+The dashboard client (`dash_*.js`) is driven in a real headless Chrome by the
+browser tests beside it (`page_browser_tests.rs` and its
+`page_browser_<topic>_tests.rs` sidecars, run with
+`cargo test -p routectl-cli page_browser -- --ignored`). The Rust guards in
+`page.rs` scan the concatenated script as TEXT. What neither reaches is
+verified BY HAND below, and running it is part of shipping any change to the
+transport, render, DOM, or chrome parts.
 
 Serve the page from a local daemon (`routectl serve`, then open the status
 port) and work through the sections in order. A run that skips section 2
 has not verified the failure that matters most.
 
+## What the browser tests cover
+
+- **The single-flight generation guard** (`dash_30_transport.js`):
+  `page_browser_epoch_tests.rs` holds and reorders answers so a late QUERY
+  for an old range, an older answer for the same selection, a late answer
+  for a view left behind and a late aggregate after a terminal 403 never
+  repaint; a held query is neither aborted nor duplicated by the 5 s rounds.
+- **Per-pass fault reconciliation** (`dash_40_render.js`):
+  `page_browser_states_tests.rs` (an invalid payload errors only its own
+  sections while polling continues, a failed refresh keeps the section marked
+  stale, a pending selection ends on its answer) and
+  `page_browser_verdict_tests.rs` (the verdict and favicon each fault drives).
+- **Focus, selection and open state across a refresh** (`dash_40_render.js`,
+  `dash_50_dom.js`): `page_browser_tests.rs`, `page_browser_locks_tests.rs`
+  and `page_browser_sort_tests.rs` keep the focused node, a text selection,
+  an open row and disclosure, the seat dialog, and page and table scroll.
+- **The changed-value mark and reduced motion** (`dash_40_render.js`,
+  `dash_50_dom.js`, `dash_90_chrome.js`): `page_browser_motion_tests.rs`.
+- **The address and the views** (`dash_90_chrome.js`):
+  `page_browser_url_tests.rs` and `page_browser_views_tests.rs`.
+
 ## What is NOT covered by any test
 
-Three transport rules are manual-only, deliberately. A test asserting that
-their source text still contains a particular expression would pin a STRING,
-not the behavior -- it passes on a file where the rule below it is commented
-out -- and it would make this gap invisible in the coverage story. Naming the
-gap here is the honest alternative.
-
-1. **The single-flight generation guard** (`dash_30_transport.js`). Each QUERY
-   aborts the previous one, and every fetched source (the aggregate, the
-   all-history usage read and both QUERY shapes) applies an answer only while
-   its epoch and state key are still current. The headless browser tests
-   drive the late-answer orderings with held answers; nothing automated
-   drives a real slow ledger, which is what section 2 exercises.
-2. **Per-pass fault reconciliation** (`dash_40_render.js`, `dash_50_dom.js`).
-   Which sources are recorded as faulted on a pass, and the pane status line /
-   tab badge / page verdict / favicon that each fault drives, are pure DOM
-   bookkeeping across passes.
-3. **The DOM and animation surface** (`dash_50_dom.js`, `dash_90_chrome.js`).
-   Pane transitions, the age ticker, sparkline and segment drawing, and
-   reduced-motion behavior. Motion is CSS; the JS only decides what is drawn.
+1. **A real slow ledger** (`dash_30_transport.js`). The browser tests hold
+   answers on the page's clock; nothing automated supersedes a read that is
+   slow on the server, which is what section 2 exercises.
+2. **The drawn surface** (`dash_50_dom.js`, `dash_90_chrome.js`). The age
+   ticker, sparkline and segment drawing, layout at each width, and how the
+   fade and pane transitions look. The tests read classes and computed
+   styles, never pixels.
+3. **The fade reaching its end by itself.** Headless Chrome under virtual
+   time renders too few frames for a CSS animation to finish, so the browser
+   test dispatches the fade's end; section 4 watches a real one.
 
 One hazard of the multi-part split IS covered mechanically, and belongs here so
 nobody re-files it as manual work: two parts declaring the same top-level name.
@@ -108,8 +121,11 @@ banner, no retry signal -- silently mislabeled data.
 - A **sparse series draws gaps as BREAKS, never bridged**: produce traffic
   with an idle stretch in the middle of the window and confirm the sparkline
   and segment charts leave a hole instead of interpolating across it.
-- Enable the OS reduced-motion preference and reload. Pane transitions and
-  any other motion must be suppressed.
+- Watch two healthy rounds on Accounts: a quota figure that moved flashes
+  and fades back within half a second, a meter slides to its new width, and
+  a figure that held does not flash. Switching views flashes nothing.
+- Enable the OS reduced-motion preference and reload. Pane transitions, the
+  changed-value flash and the meter slide must be suppressed.
 - Config's routing-provider table must distinguish all three rate-limit
   states. Serve a config with one provider at `rpm_limit = 0`, one with no
   `rpm_limit`, and one with a positive cap; the rows must read **0 RPM**

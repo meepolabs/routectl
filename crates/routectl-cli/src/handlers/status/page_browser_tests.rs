@@ -213,9 +213,10 @@ fn chrome_binary() -> String {
     std::env::var("ROUTECTL_TEST_CHROME").unwrap_or_else(|_| "google-chrome".to_owned())
 }
 
-/// Load `url` in headless Chrome under a virtual-time budget and return the
-/// DOM it dumps. A missing binary, a failed exit or a hung browser fails.
-fn dump_dom(url: &str, budget_ms: u64, scratch: &Path) -> String {
+/// Load `url` in headless Chrome under a virtual-time budget, with `extra`
+/// switches after the fixed ones, and return the DOM it dumps. A missing
+/// binary, a failed exit or a hung browser fails.
+fn dump_dom(url: &str, budget_ms: u64, extra: &[&str], scratch: &Path) -> String {
     let binary = chrome_binary();
     let out_path = scratch.join("dom.html");
     let err_path = scratch.join("chrome.log");
@@ -232,6 +233,7 @@ fn dump_dom(url: &str, budget_ms: u64, scratch: &Path) -> String {
             "--disable-sync",
             "--mute-audio",
         ])
+        .args(extra)
         .arg(format!(
             "--user-data-dir={}",
             scratch.join("profile").display()
@@ -299,6 +301,12 @@ fn assert_harness_requests_only(requests: &[Value], origin: &str) {
 /// Serve the page with the driver, run `scenario` in headless Chrome and
 /// return what it reported. Panics when the scenario threw or never finished.
 pub(super) fn run_scenario(scenario: &Scenario) -> DriverReport {
+    run_scenario_with(scenario, &[])
+}
+
+/// [`run_scenario`] with extra Chrome switches, such as a forced media
+/// preference.
+pub(super) fn run_scenario_with(scenario: &Scenario, chrome_switches: &[&str]) -> DriverReport {
     let harness = Arc::new(Harness {
         page: page_with_driver(scenario),
         payloads: Payloads::populated(),
@@ -320,6 +328,7 @@ pub(super) fn run_scenario(scenario: &Scenario) -> DriverReport {
     let dom = dump_dom(
         &format!("{origin}/#{}", scenario.hash),
         scenario.budget_ms,
+        chrome_switches,
         scratch.path(),
     );
     runtime.shutdown_background();

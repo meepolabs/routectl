@@ -591,8 +591,9 @@ fn the_html_sink_scan_skips_only_the_morph_option() {
 
 /// A disclosure the operator opened stays open through a refresh: the fresh
 /// node is always built closed, and the morph would otherwise drop `open`.
-/// The morph's one callback carries the open state before it decides whether
-/// to hold a selected unit, so a held unit's disclosures keep their state too.
+/// The morph's one callback carries the open state (and, on a refresh, the
+/// change mark) before it decides whether to hold a selected unit, so a held
+/// unit's disclosures keep their state too.
 ///
 /// Mutation check: drop `keepOpenState(oldNode, freshNode);` from morphGate -> red.
 #[test]
@@ -602,14 +603,15 @@ fn morph_panel_keeps_a_kept_disclosure_open() {
     let keep = compact(&function_body("keepOpenState"));
 
     assert!(
-        body.contains("callbacks:{beforenodemorphed:morphgate(held)}"),
+        body.contains("callbacks:{beforenodemorphed:morphgate(held,markschanges)}"),
         "morphPanel must hand its composite callback to the morph"
     );
     assert!(
         gate.starts_with(
-            "returnfunction(oldnode,freshnode){keepopenstate(oldnode,freshnode);return"
+            "returnfunction(oldnode,freshnode){keepopenstate(oldnode,freshnode);\
+             if(markschanges){markchangedvalue(oldnode,freshnode);}return"
         ),
-        "the callback carries the open state first, then decides"
+        "the callback carries the open state and the change mark first, then decides"
     );
     assert!(
         keep.contains(

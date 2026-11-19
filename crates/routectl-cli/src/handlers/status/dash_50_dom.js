@@ -1,8 +1,10 @@
   // ---- DOM table helpers (textContent only, never innerHTML) -----------
 
-  // NO automated runtime harness covers this part. The drawing and DOM
-  // surface is verified BY HAND only -- see dashboard-manual-checklist.md
-  // beside this source, and run it before shipping a change here.
+  // The browser tests drive the tables, the refresh units and the value marks
+  // (page_browser_sort_tests.rs, page_browser_locks_tests.rs,
+  // page_browser_motion_tests.rs); the drawing is verified BY HAND -- see
+  // dashboard-manual-checklist.md beside this source, and run it before
+  // shipping a change here.
 
   // Column descriptors: C = text, N = numeric (right-aligned, mono,
   // tabular), R = row-header identifier column (<th scope="row">),
@@ -219,6 +221,7 @@
       node.appendChild(cell);
     } else {
       node.textContent = (cell === null || cell === undefined) ? '-' : String(cell);
+      if (col.num) { markValue(node, node.textContent); }
     }
     return node;
   }
@@ -425,11 +428,13 @@
   function magSpan(n) {
     var span = document.createElement('span');
     if (n === null || n === undefined || !isFinite(Number(n))) {
+      markValue(span, '-');
       span.className = 'mag-zero';
       span.textContent = '-';
       return span;
     }
     var x = Number(n), neg = x < 0, a = Math.abs(x);
+    markValue(span, x);
     if (x === 0) { span.className = 'mag-zero'; }
     if (a < 10000) {
       span.appendChild(document.createTextNode((neg ? '-' : '') + String(Math.trunc(a))));
@@ -581,6 +586,45 @@
     return node;
   }
 
+  // A figure, a numeric cell or a meter carries its raw value in VALUE_ATTR,
+  // so a refresh can tell a reading that moved from one that was only drawn
+  // again. A value that differs on a node the morph keeps is marked with
+  // CHANGED_CLASS (morphGate), whose fade (dash_base.css) clears the mark when
+  // it ends; reduced motion turns the fade off, and the mark then stays,
+  // invisible, until the value moves again.
+  var VALUE_ATTR = 'data-v';
+  var CHANGED_CLASS = 'changed';
+  var CHANGE_ANIMATION = 'changefade';
+
+  function markValue(node, raw) {
+    node.setAttribute(VALUE_ATTR, String(raw));
+    return node;
+  }
+
+  // The morph copies the fresh node's classes onto the kept one, so the mark
+  // is set on `freshNode`, and carried there while an unchanged value is
+  // still fading. A kept node still fading from an earlier change loses its
+  // mark and has its style flushed first: re-adding a class already present
+  // would not restart the fade.
+  function markChangedValue(oldNode, freshNode) {
+    if (oldNode.nodeType !== 1 || freshNode.nodeType !== 1) { return; }
+    var was = oldNode.getAttribute(VALUE_ATTR);
+    var now = freshNode.getAttribute(VALUE_ATTR);
+    if (was === null || now === null) { return; }
+    var fading = oldNode.classList.contains(CHANGED_CLASS);
+    if (was !== now && fading) {
+      oldNode.classList.remove(CHANGED_CLASS);
+      void oldNode.offsetWidth;
+    }
+    if (was !== now || fading) { freshNode.classList.add(CHANGED_CLASS); }
+  }
+
+  function clearChangedValue(e) {
+    if (e.animationName === CHANGE_ANIMATION && e.target.classList) {
+      e.target.classList.remove(CHANGED_CLASS);
+    }
+  }
+
   // A card shell with a title, an optional hint, and a body. The single
   // container every tab section builds into, so card chrome lives in one
   // place rather than once per tab.
@@ -604,7 +648,7 @@
   // (a leading one for a currency mark, a trailing one for a magnitude). A zero
   // or absent value de-emphasizes whole -- a zero is faint, never an error.
   function figure(text, unit, pre) {
-    var span = document.createElement('span');
+    var span = markValue(document.createElement('span'), (pre || '') + text + (unit || ''));
     if (text === '-' || text === '0' || text === '0.00') { span.classList.add('mag-zero'); }
     if (pre) { span.appendChild(unitSlot(pre)); }
     span.appendChild(document.createTextNode(text));
@@ -669,7 +713,9 @@
     track.className = 'sharebar';
     var fill = document.createElement('span');
     fill.className = 'sharebar-fill';
-    fill.style.setProperty('--pct', Math.max(0, Math.min(100, isFinite(pct) ? pct : 0)));
+    var clamped = Math.max(0, Math.min(100, isFinite(pct) ? pct : 0));
+    fill.style.setProperty('--pct', clamped);
+    markValue(fill, clamped);
     track.appendChild(fill);
     return track;
   }

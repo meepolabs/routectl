@@ -1,9 +1,10 @@
   // ---- render dispatch -------------------------------------------------
 
-  // NO automated runtime harness covers this part. Per-pass fault
-  // reconciliation and the state it drives are verified BY HAND only -- see
-  // dashboard-manual-checklist.md beside this source, and run it before
-  // shipping a change here.
+  // The browser tests drive per-pass fault reconciliation and the in-place
+  // update (page_browser_states_tests.rs, page_browser_verdict_tests.rs,
+  // page_browser_locks_tests.rs, page_browser_motion_tests.rs); what they do
+  // not reach is verified BY HAND -- see dashboard-manual-checklist.md beside
+  // this source, and run it before shipping a change here.
 
   // Render one source's envelope under its own error boundary. A throw from
   // ANY source -- a malformed same-version payload, a builder fault -- becomes
@@ -211,9 +212,11 @@
     var view = viewFor(tab);
     var primary = SOURCES[view.sources[0]];
     var pass = { faults: Object.create(null), touched: Object.create(null), overlay: null };
+    var marksChanges = paintedView === tab;
+    paintedView = tab;
     renderPass = pass;
     try {
-      morphPanel(body, view.build(primary));
+      morphPanel(body, view.build(primary), marksChanges);
     } catch (e) {
       pass.faults[primary.name] = true;
       pass.touched[primary.name] = true;
@@ -223,7 +226,7 @@
     } finally {
       renderPass = null;
     }
-    paintOverlay(pass.overlay);
+    paintOverlay(pass.overlay, marksChanges);
     // What this pass ACTUALLY drew decides the fault map: a source every one of
     // whose sections built cleanly here has recovered, whatever an earlier pass
     // recorded, and a source that threw here is faulted even on a payload that
@@ -249,7 +252,8 @@
   // A refresh unit holding a non-collapsed text selection is left exactly as
   // it is (morphGate); it catches up on the first refresh after the selection
   // collapses. Page and table scroll positions are put back after the morph.
-  function morphPanel(parent, node) {
+  // With `marksChanges`, a figure whose value moved on a kept node is marked.
+  function morphPanel(parent, node, marksChanges) {
     if (!(node instanceof Node)) {
       throw new TypeError('morphPanel takes a DOM node, never markup');
     }
@@ -257,18 +261,20 @@
     var scroll = heldScroll(parent);
     Idiomorph.morph(parent, node, {
       morphStyle: 'innerHTML',
-      callbacks: { beforeNodeMorphed: morphGate(held) }
+      callbacks: { beforeNodeMorphed: morphGate(held, marksChanges) }
     });
     restoreScroll(parent, scroll);
   }
 
-  // The morph's per-node veto: carry a kept disclosure's open state first,
-  // then refuse to touch a held unit paired with its own rebuild, so neither
-  // its text nor its place changes under the selection. A held unit paired
-  // with a different section (or with none) is morphed: its section left.
-  function morphGate(held) {
+  // The morph's per-node veto: carry a kept disclosure's open state and mark a
+  // changed value first, then refuse to touch a held unit paired with its own
+  // rebuild, so neither its text nor its place changes under the selection. A
+  // held unit paired with a different section (or with none) is morphed: its
+  // section left.
+  function morphGate(held, marksChanges) {
     return function (oldNode, freshNode) {
       keepOpenState(oldNode, freshNode);
+      if (marksChanges) { markChangedValue(oldNode, freshNode); }
       return !(held.indexOf(oldNode) >= 0 && sameRefreshUnit(oldNode, freshNode));
     };
   }
@@ -334,10 +340,10 @@
   // state card in its place, a tab that failed to render -- cannot outlive it.
   // Offered during the build (offerOverlay) and drawn after it, so an overlay
   // that stays open is morphed, not torn down and rebuilt.
-  function paintOverlay(node) {
+  function paintOverlay(node, marksChanges) {
     var host = el('modal-host');
     if (!host) { return; }
-    morphPanel(host, node || document.createDocumentFragment());
+    morphPanel(host, node || document.createDocumentFragment(), marksChanges);
   }
 
   function offerOverlay(node) {
@@ -347,6 +353,11 @@
   // The sections built during the current render pass: which sources they read
   // and which of them threw. Non-null only while a tab body is being built.
   var renderPass = null;
+
+  // The view the pane bodies were last painted for. Only a repaint of that
+  // same view is a refresh whose moved values are marked: a first paint or a
+  // view switch shows values the operator has not been watching change.
+  var paintedView = null;
 
   // Record a section fault against its source for the pass in progress. Set on
   // the pass rather than straight into RENDER_FAULTS so the map is reconciled

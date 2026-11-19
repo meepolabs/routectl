@@ -1,9 +1,12 @@
 
   // ---- chrome: age ticker ----------------------------------------------
 
-  // NO automated runtime harness covers this part. The chrome and animation
-  // surface is verified BY HAND only -- see dashboard-manual-checklist.md
-  // beside this source, and run it before shipping a change here.
+  // The browser tests drive the address, the verdict and favicon and the
+  // changed-value mark (page_browser_url_tests.rs,
+  // page_browser_verdict_tests.rs, page_browser_motion_tests.rs); the ticker
+  // and how motion looks are verified BY HAND -- see
+  // dashboard-manual-checklist.md beside this source, and run it before
+  // shipping a change here.
 
   // Repaint the poll indicator every second so the as_of age it reports
   // advances between rounds instead of looking frozen at the last one's value.
@@ -438,6 +441,7 @@
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') { closeSeatModal(); }
     });
+    document.addEventListener('animationend', clearChangedValue);
     tick();
     usageAllRound();
   });

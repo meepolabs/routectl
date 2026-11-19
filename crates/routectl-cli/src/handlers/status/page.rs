@@ -1400,26 +1400,93 @@ mod tests {
         );
     }
 
-    /// The client JS has no runtime harness, so the manual checklist beside
-    /// these sources IS the coverage for the transport, render, and DOM
-    /// surfaces. This pins the pointer to it: the checklist file must exist,
-    /// and the concatenated script must still name it. A part rewritten
-    /// without carrying the pointer forward, or a deleted checklist, fails the
-    /// build rather than quietly leaving the untested surfaces unannounced.
+    /// The checklist beside these sources records what the browser tests
+    /// cover and what is still verified by hand.
+    const MANUAL_CHECKLIST: &str = "dashboard-manual-checklist.md";
+
+    /// What is wrong with the pointer from the script to the manual checklist
+    /// and from the checklist to the browser tests; empty when both hold: the
+    /// script names the checklist, and the checklist names every browser test
+    /// module it points the reader at.
+    fn checklist_pointer_gaps(script: &str, checklist: &str, suites: &[&str]) -> Vec<String> {
+        let mut gaps = Vec::new();
+        if !script.contains(MANUAL_CHECKLIST) {
+            gaps.push(format!("the script does not point at `{MANUAL_CHECKLIST}`"));
+        }
+        for suite in suites {
+            if !checklist.contains(suite) {
+                gaps.push(format!("the checklist does not name `{suite}`"));
+            }
+        }
+        gaps
+    }
+
+    /// The browser test modules the checklist names as the automated
+    /// coverage, each one a real sidecar file.
+    const CHECKLIST_BROWSER_SUITES: &[(&str, &str)] = &[
+        (
+            "page_browser_tests.rs",
+            include_str!("page_browser_tests.rs"),
+        ),
+        (
+            "page_browser_epoch_tests.rs",
+            include_str!("page_browser_epoch_tests.rs"),
+        ),
+        (
+            "page_browser_states_tests.rs",
+            include_str!("page_browser_states_tests.rs"),
+        ),
+        (
+            "page_browser_verdict_tests.rs",
+            include_str!("page_browser_verdict_tests.rs"),
+        ),
+        (
+            "page_browser_locks_tests.rs",
+            include_str!("page_browser_locks_tests.rs"),
+        ),
+        (
+            "page_browser_motion_tests.rs",
+            include_str!("page_browser_motion_tests.rs"),
+        ),
+    ];
+
+    /// The script points at the manual checklist, and the checklist points
+    /// at the browser tests that now carry the generation guard, fault
+    /// reconciliation, focus and the changed-value mark. A part rewritten
+    /// without the pointer, or a checklist that drops a suite, fails here.
+    ///
+    /// Negative case: the same check over the script with every pointer
+    /// removed, and over a checklist without the motion suite, reports each.
     #[test]
     fn dashboard_script_points_at_the_manual_checklist() {
         const CHECKLIST: &str = include_str!("dashboard-manual-checklist.md");
-        const MARKER: &str = "dashboard-manual-checklist.md";
+        let suites: Vec<&str> = CHECKLIST_BROWSER_SUITES
+            .iter()
+            .map(|(name, src)| {
+                assert!(src.contains("page_browser"), "`{name}` is a browser suite");
+                *name
+            })
+            .collect();
+        let script = script();
 
-        assert!(
-            CHECKLIST.contains("generation guard"),
-            "the manual checklist must still name the untested single-flight generation \
-             guard; it is the coverage gap this file exists to record"
+        assert_eq!(
+            checklist_pointer_gaps(&script, CHECKLIST, &suites),
+            Vec::<String>::new()
         );
         assert!(
-            script().contains(MARKER),
-            "the dashboard script must point at `{MARKER}`: the client JS has no runtime \
-             harness, so that checklist is the only record of what is verified by hand"
+            CHECKLIST.contains("generation guard") && CHECKLIST.contains("BY HAND"),
+            "the checklist says what is automated and what is still verified by hand"
+        );
+
+        let unpointed = script.replace(MANUAL_CHECKLIST, "the checklist");
+        let no_motion = CHECKLIST.replace("page_browser_motion_tests.rs", "the motion tests");
+        assert_eq!(
+            checklist_pointer_gaps(&unpointed, CHECKLIST, &suites),
+            vec![format!("the script does not point at `{MANUAL_CHECKLIST}`")]
+        );
+        assert_eq!(
+            checklist_pointer_gaps(&script, &no_motion, &suites),
+            vec!["the checklist does not name `page_browser_motion_tests.rs`".to_owned()]
         );
     }
 
@@ -1934,5 +2001,10 @@ mod tests {
     mod browser_verdict {
         use super::*;
         include!("page_browser_verdict_tests.rs");
+    }
+
+    mod browser_motion {
+        use super::*;
+        include!("page_browser_motion_tests.rs");
     }
 }
