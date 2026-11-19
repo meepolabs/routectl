@@ -413,16 +413,21 @@
   // throw reaching it would blank content the primary source rendered
   // correctly while the status line still reported the primary live.
   function safeSection(rec, build) {
+    return guardedContent(rec, build).node;
+  }
+
+  // safeSection's node, and whether it is a card drawn in the builder's place.
+  function guardedContent(rec, build) {
     var pending = stateCard(rec);
-    if (pending) { return pending; }
+    if (pending) { return { node: pending, isCard: true }; }
     try {
       var node = build(rec);
       markRenderAttempt(rec.name);
-      return node;
+      return { node: node, isCard: false };
     } catch (e) {
       recordRenderFault(rec.name);
-      return errorCard('invalid_payload',
-        'this section could not be rendered from the payload it received');
+      var fault = errorCard('invalid_payload', 'this section could not be rendered from the payload it received');
+      return { node: fault, isCard: true };
     }
   }
 
@@ -439,8 +444,9 @@
   // host, and the fault it records is not undone by the host's attempt mark.
   // A control that must stay usable while the section shows a card (a
   // scope reset, a grouping picker) is composed beside the section, not in it.
-  // A section that titles itself passes its `title`, so the card the host
-  // draws in its place still says which reading is missing.
+  // A section that titles itself passes its `title`, so every card the host
+  // draws in its place (a state card or a builder fault) still says which
+  // reading is missing; a successful build draws its own head instead.
   var SECTION_SOURCE_ATTR = 'data-source';
 
   function viewSection(name, build, title) {
@@ -450,8 +456,9 @@
     wrap.setAttribute(SECTION_SOURCE_ATTR, name);
     if (rec.state === 'stale') { wrap.classList.add('section--stale'); }
     if (PENDING_SOURCES[name]) { wrap.classList.add('section--pending'); }
-    if (title && stateCard(rec)) { wrap.appendChild(sectionHead(title, null)); }
-    wrap.appendChild(safeSection(rec, build));
+    var content = guardedContent(rec, build);
+    if (title && content.isCard) { wrap.appendChild(sectionHead(title, null)); }
+    wrap.appendChild(content.node);
     return wrap;
   }
 
@@ -606,17 +613,22 @@
     var checking = { kind: 'idle', text: 'Checking routing state' };
     if (!healthIsCurrent()) { return checking; }
     var data = SOURCES.health.data;
-    if (!poolCountsKnown(data)) { return checking; }
+    if (!verdictInputsKnown(data)) { return checking; }
     return seatVerdict(data) || { kind: 'ok', text: 'All routes healthy' };
   }
 
-  // A pool count the verdict needs that is absent or not a number leaves the
-  // seat question unanswered, so the strip stays neutral rather than calling
-  // routing healthy on a comparison that could not be made.
-  function poolCountsKnown(data) {
-    if (!Array.isArray(data.pools)) { return false; }
-    return data.pools.every(function (p) {
-      return !!p && isFiniteNumber(p.eligible) && isFiniteNumber(p.configured);
+  // Every field seatVerdict reads, well typed: pools[] { pool, eligible,
+  // configured } and targets[] { nickname, eligibility.reason (string|null) }.
+  // Anything else leaves the strip neutral, never healthy on an unmade reading.
+  function verdictInputsKnown(data) {
+    if (!Array.isArray(data.pools) || !Array.isArray(data.targets)) { return false; }
+    var poolsKnown = data.pools.every(function (p) {
+      return isPlainObject(p) && typeof p.pool === 'string' &&
+        isFiniteNumber(p.eligible) && isFiniteNumber(p.configured);
+    });
+    return poolsKnown && data.targets.every(function (t) {
+      return isPlainObject(t) && typeof t.nickname === 'string' && isPlainObject(t.eligibility) &&
+        (t.eligibility.reason === null || typeof t.eligibility.reason === 'string');
     });
   }
 
@@ -641,8 +653,8 @@
       return { kind: 'warn', text: 'Some seats unusable in ' + namedFew(short.map(poolName)) + ' - see Accounts' };
     }
     var blocked = [];
-    (data.targets || []).forEach(function (t) {
-      if (!t || !t.eligibility || !t.eligibility.reason) { return; }
+    data.targets.forEach(function (t) {
+      if (!t.eligibility.reason) { return; }
       if (blocked.indexOf(t.nickname) < 0) { blocked.push(t.nickname); }
     });
     if (blocked.length) {

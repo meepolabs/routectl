@@ -211,12 +211,13 @@ fn page_browser_a_superseded_range_ends_pending_on_the_newer_answer() {
 
 /// A panel absent from the answer shows its unavailable card, and a figure
 /// absent from a payload reads as a dash; neither becomes a zero. A pool
-/// count the verdict needs being absent leaves the verdict and the favicon
-/// neutral, never healthy.
+/// count or the target list the verdict needs being absent leaves the
+/// verdict and the favicon neutral, never healthy.
 ///
 /// Mutation check: make seatCountText answer `0` for an absent count -> red;
-/// drop the poolCountsKnown check in verdictState -> red (the verdict reads
-/// healthy).
+/// drop the verdictInputsKnown check in verdictState -> red (the verdict
+/// reads healthy); drop its targets array check -> red (the missing-targets
+/// row reads healthy).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_missing_data_reads_as_unavailable_never_zero() {
@@ -242,6 +243,16 @@ fn page_browser_missing_data_reads_as_unavailable_never_zero() {
         "positive control: the populated pools move the verdict: {present:#}"
     );
     assert_ne!(present["favicon"], ICON_STALE_UNKNOWN, "{present:#}");
+
+    let result = states_scenario("states-missing-targets", "accounts", 30_000);
+    let (present, missing) = (&result["present"], &result["missing"]);
+    assert_eq!(
+        present["verdict"], "All routes healthy",
+        "positive control: full pools and usable targets read healthy: {present:#}"
+    );
+    assert_ne!(present["favicon"], ICON_STALE_UNKNOWN, "{present:#}");
+    assert_eq!(missing["verdict"], "Checking routing state", "{missing:#}");
+    assert_eq!(missing["favicon"], ICON_STALE_UNKNOWN, "{missing:#}");
 }
 
 /// The stale-or-unknown favicon fill, as the driver reads it from the href.
@@ -250,15 +261,18 @@ const ICON_STALE_UNKNOWN: &str = "9aa5b5";
 /// A grouping changed by the address while Accounts is showing resets the
 /// Traffic query too: opening Traffic with the new answer held shows a busy
 /// pane and none of the old grouping's cards, then the new grouping's cards
-/// once the answer applies. No hidden pane is left busy meanwhile.
+/// once the answer applies. No hidden pane is left busy meanwhile. Now's
+/// request does not carry the grouping, so returning to Now with its next
+/// answer held still shows the figure it last rendered, in the same node.
 ///
 /// Mutation check: drop the resetMovedQuerySources call in applyViewState ->
 /// red (the model cards sit under the alias grouping); drop the active-view
-/// arm in paintPending -> red (the hidden Traffic pane is busy).
+/// arm in paintPending -> red (the hidden Traffic pane is busy); reset every
+/// query source in queryInputChanged -> red (Now returns as a skeleton).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_selection_changed_on_another_view_resets_its_query() {
-    let result = states_scenario("states-group-changed-on-another-view", "traffic", 60_000);
+    let result = states_scenario("states-group-changed-on-another-view", "now", 60_000);
     let (before, on_accounts, held, applied) = (
         &result["before"],
         &result["on_accounts"],
@@ -288,6 +302,25 @@ fn page_browser_a_selection_changed_on_another_view_resets_its_query() {
     );
     assert_ne!(labels(applied), labels(before), "{result:#}");
     assert_eq!(result["pressed_group"], "Alias", "{result:#}");
+
+    let (now_before, now_returned) = (&result["now_before"], &result["now_returned"]);
+    assert!(
+        now_before["figure"].is_string(),
+        "positive control: Now rendered a figure: {now_before:#}"
+    );
+    assert_eq!(
+        result["series_answers_at_return"], result["series_answers_before_return"],
+        "Now's next answer was held: {result:#}"
+    );
+    assert_eq!(
+        now_returned["figure"], now_before["figure"],
+        "{now_returned:#}"
+    );
+    assert_eq!(now_returned["same_node"], true, "{now_returned:#}");
+    assert_eq!(now_returned["connected"], true, "{now_returned:#}");
+    assert_eq!(now_returned["skeleton"], false, "{now_returned:#}");
+    assert_eq!(now_returned["error_cards"], 0, "{now_returned:#}");
+    assert_eq!(now_returned["busy"], Value::Null, "{now_returned:#}");
 }
 
 /// A query payload missing a required metric, or with a malformed series

@@ -350,16 +350,11 @@
 
   // Every input that changes what the QUERY asks for funnels through here:
   // it aborts the in-flight request (queryStatus supersedes it), clears any
-  // stale deterministic-refusal marker, and
-  // refreshes immediately so an active tab never shows another selection's
-  // numbers.
-  //
-  // BOTH query sources are reset, not just the active tab's. Window, group-by,
-  // and provider scope are page-wide, so a change to any of them invalidates the
-  // payload each source holds; the inactive one is refetched when its tab is
-  // next selected (this same path runs on every tab switch). Leaving it holding
-  // the previous selection's numbers is what would put one window's figures
-  // under another window's picker.
+  // stale deterministic-refusal marker, and refreshes immediately. It leaves
+  // the query source records alone: resetMovedQuerySources has already
+  // dropped the payload of every source whose request key moved, and a
+  // source whose key did not move still holds the answer for this same
+  // request, so a failed refresh of it reads as stale, not as a first failure.
   function queryInputChanged() {
     var body = queryBodyFor(activeTab);
     if (!body) {
@@ -388,9 +383,6 @@
       if (queryRejectedKeyBySource[tabSource] !== queryBodyKey(tabBody)) {
         delete queryRejectedKeyBySource[tabSource];
       }
-    });
-    QUERY_SOURCES.forEach(function (name) {
-      setSource(name, { state: 'loading', code: null, data: null });
     });
     clearTimeout(queryTimer);
     queryBackoffIndex = -1;

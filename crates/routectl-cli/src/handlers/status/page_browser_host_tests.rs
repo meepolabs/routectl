@@ -14,8 +14,9 @@ const MODELS_VIEW: &str = "  function buildModels() {
   }";
 
 /// The Models view composing one probe section through the host helper. The
-/// builder throws, returns a self-guarded throw, or returns a node, as the
-/// driver's `mode` says, and never consults the record's state itself.
+/// builder throws, returns a self-guarded throw, or returns a node under its
+/// own title, as the driver's `mode` says, and never consults the record's
+/// state itself.
 const PROBE_VIEW: &str = "  function buildModels() {
     var probe = window.routectlHostProbe;
     return viewSection('health', function (rec) {
@@ -24,9 +25,11 @@ const PROBE_VIEW: &str = "  function buildModels() {
       if (probe.mode === 'inner-throw') {
         return safeSection(rec, function () { throw new Error('probe section fault'); });
       }
-      var node = document.createElement('p');
-      node.id = 'host-probe';
-      node.textContent = 'probe build ' + probe.calls.length;
+      var node = document.createElement('div');
+      node.appendChild(sectionHead('Probe', null));
+      var line = node.appendChild(document.createElement('p'));
+      line.id = 'host-probe';
+      line.textContent = 'probe build ' + probe.calls.length;
       return node;
     }, 'Probe');
   }";
@@ -58,7 +61,8 @@ fn text<'a>(value: &'a Value, what: &str) -> &'a str {
 /// A section builder with no guard of its own gets every panel state from the
 /// host: loading and unavailable records draw the host's card under the
 /// section title without calling the builder, a throw costs the section one
-/// error card and marks its source faulted, a clean build after the throw
+/// error card under that title and marks its source faulted, a successful
+/// build carries only its own title, a clean build after the throw
 /// clears the fault in the same pass, and a builder that guards itself as
 /// well still shows ONE card and still faults its source.
 ///
@@ -68,7 +72,9 @@ fn text<'a>(value: &'a Value, what: &str) -> &'a str {
 /// Mutation checks: viewSection calling `build(rec)` directly instead of
 /// safeSection -> red (no host card on the loading record); drop the
 /// markRenderAttempt call from safeSection -> red (the recovered build
-/// leaves the source faulted).
+/// leaves the source faulted); title only a state card, not a builder fault
+/// -> red (the throwing step has no head); title every section -> red (the
+/// successful build has two heads).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_the_host_draws_every_state_of_an_unguarded_section() {
@@ -94,11 +100,17 @@ fn page_browser_the_host_draws_every_state_of_an_unguarded_section() {
     assert_eq!(success["skeleton"], false, "{success:#}");
     assert!(text(&success["probe"], "the probe node").starts_with("probe build "));
     assert_eq!(success["status"], "", "{success:#}");
+    assert_eq!(
+        success["heads"], 1,
+        "a successful build is titled once, by itself: {success:#}"
+    );
 
     let throwing = at("throwing");
     assert_eq!(throwing["sections"], 1, "{throwing:#}");
     assert_eq!(throwing["cards"], 1, "{throwing:#}");
     assert_eq!(throwing["probe"], Value::Null, "{throwing:#}");
+    assert_eq!(throwing["head"], "Probe", "{throwing:#}");
+    assert_eq!(throwing["heads"], 1, "{throwing:#}");
     assert!(
         text(&throwing["card"], "the error card").starts_with("unavailable: invalid_payload"),
         "{throwing:#}"

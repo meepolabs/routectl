@@ -25,6 +25,7 @@
       cards: section ? section.querySelectorAll('.unavailable-msg, .incompatible-msg').length : null,
       card: textOf('#body-models .unavailable-msg'),
       head: textOf('#body-models [data-source="health"] .card-title'),
+      heads: section ? section.querySelectorAll('.card-title').length : null,
       probe: textOf('#host-probe'),
       calls: probe.calls.slice(),
       status: textOf('#status-models')

@@ -59,6 +59,7 @@
       return resp.text().then(function (text) {
         return waitMs(rule.ms || 0, signal).then(function () {
           countAnswer(entry.path);
+          if (isSeriesQuery(entry)) { countAnswer(SERIES_ANSWERS); }
           if (rule.fail) { throw new TypeError('Failed to fetch'); }
           var body = rule.rewrite ? JSON.stringify(rule.rewrite(JSON.parse(text))) : text;
           return new Response(rule.status ? '' : body, {
@@ -69,6 +70,9 @@
       });
     });
   };
+
+  // Answers to the bucketed QUERY Now reads, counted apart from Traffic's.
+  var SERIES_ANSWERS = 'series query';
 
   function answers(path) { return answered[path] || 0; }
 
@@ -262,6 +266,40 @@
     };
   }
 
+  // Every pool full and every target usable: the verdict's healthy reading.
+  function allUsable(json) {
+    var health = json.panels.health.data;
+    health.pools.forEach(function (p) { p.eligible = p.configured; });
+    health.targets.forEach(function (t) { t.eligibility.reason = null; });
+    return json;
+  }
+
+  function withoutTargets(json) {
+    delete allUsable(json).panels.health.data.targets;
+    return json;
+  }
+
+  d.scenario('states-missing-targets', function () {
+    var missing = false;
+    rules.push(function (entry) {
+      if (!isAggregate(entry)) { return null; }
+      return { rewrite: missing ? withoutTargets : allUsable };
+    });
+    var out = {};
+    return nextAnswer('/status').then(function () {
+      return settledView('accounts');
+    }).then(function () {
+      out.present = accountsReading();
+      missing = true;
+      return nextAnswer('/status');
+    }).then(function () {
+      return d.sleep(200);
+    }).then(function () {
+      out.missing = accountsReading();
+      return out;
+    });
+  });
+
   d.scenario('states-missing-data', function () {
     var missing = false;
     rules.push(function (entry) {
@@ -375,12 +413,51 @@
     return obs;
   }
 
-  // Traffic grouped by model, then Accounts, then an address naming the alias
-  // grouping applied there, then Traffic again with the alias answer held.
+  function isSeriesQuery(entry) {
+    return entry.method === 'QUERY' && !!entry.body && !!entry.body.bucket;
+  }
+
+  function nowRequestsTile() {
+    var tiles = document.querySelectorAll('#body-now .kpi');
+    for (var i = 0; i < tiles.length; i++) {
+      if (tiles[i].querySelector('.kpi-label').textContent === 'Requests') {
+        return tiles[i].querySelector('.kpi-value');
+      }
+    }
+    return null;
+  }
+
+  function nowObservation(tile) {
+    var current = nowRequestsTile();
+    return {
+      figure: current ? current.textContent : null,
+      same_node: !!tile && tile === current,
+      connected: !!tile && tile.isConnected,
+      skeleton: !!document.querySelector('#body-now .skeleton'),
+      error_cards: errorCards(document.getElementById('body-now')),
+      busy: paneBusy('now')
+    };
+  }
+
+  // Now populated first, then Traffic grouped by model, then Accounts, then an
+  // address naming the alias grouping applied there, then Traffic again with
+  // the alias answer held, then Now again with its next answer held: the
+  // grouping is not in Now's request, so its payload is still the answer.
   d.scenario('states-group-changed-on-another-view', function () {
     var out = {};
+    var holdSeries = false;
+    var nowTile = null;
     rules.push(function (entry) { return isAliasQuery(entry) ? { ms: 3000 } : null; });
-    return d.waitUntil('traffic cards', function () { return query(TRAFFIC_FIGURES); })
+    rules.push(function (entry) {
+      return (holdSeries && isSeriesQuery(entry)) ? { ms: 3000 } : null;
+    });
+    return d.waitUntil('the Now requests figure', nowRequestsTile)
+      .then(function () {
+        nowTile = nowRequestsTile();
+        out.now_before = nowObservation(nowTile);
+        document.getElementById('tab-traffic').click();
+        return d.waitUntil('traffic cards', function () { return query(TRAFFIC_FIGURES); });
+      })
       .then(function () {
         out.before = crossViewObservation();
         document.getElementById('tab-accounts').click();
@@ -408,6 +485,14 @@
       .then(function () {
         out.applied = crossViewObservation();
         out.pressed_group = textOf('#body-traffic .gbbtn[aria-pressed="true"]');
+        out.series_answers_before_return = answers(SERIES_ANSWERS);
+        holdSeries = true;
+        document.getElementById('tab-now').click();
+        return d.sleep(100);
+      })
+      .then(function () {
+        out.now_returned = nowObservation(nowTile);
+        out.series_answers_at_return = answers(SERIES_ANSWERS);
         return out;
       });
   });
