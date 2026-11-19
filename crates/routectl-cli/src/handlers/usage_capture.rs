@@ -1066,8 +1066,9 @@ impl UsageCapture {
     /// operator needs to see. The routing reducer is bounded instead -- a value
     /// it cannot interpret at all becomes cap-dormant, and a finite percent
     /// over 100 saturates to an exhausted window rather than being stored raw.
-    /// Two sites converting one percent can drift, so a test there pins both
-    /// against the same captured input and the same expected fraction.
+    /// Two sites converting one percent can drift, so
+    /// `the_ledger_and_the_routing_reducer_read_one_codex_percent_as_one_fraction`
+    /// runs both on the same captured input and requires the same fraction.
     fn observe_codex_quota(&mut self, q: &routectl_core::CodexQuota) {
         self.record.quota_claim = q.active_limit.clone();
         self.record.quota_utilization = q

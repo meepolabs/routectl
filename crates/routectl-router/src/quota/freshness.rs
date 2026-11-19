@@ -87,7 +87,7 @@ impl ObservationStamp {
     /// Build a stamp from explicit clock readings, for tests that need a
     /// controlled instant. Test-only so production can reach a stamp solely
     /// through [`ObservationStamp::now`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub const fn from_parts(wall: SystemTime, monotonic: Instant) -> Self {
         Self { wall, monotonic }
     }

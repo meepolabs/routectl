@@ -802,3 +802,58 @@ fn a_backward_clock_step_pulls_the_failure_start_back_to_now() {
         Some(stepped_back)
     );
 }
+
+/// One poll times out, then the seat is swept every minute for half an hour,
+/// polled whenever it comes due (each poll timing out again), with each row's
+/// last accepted reading. A reading newer than the run's start ends the run,
+/// whatever its source; with no such reading the run stands.
+#[test]
+fn an_accepted_reading_from_any_source_ends_the_failure_run() {
+    const FAILED_AT: i64 = START_MS + MIN;
+    type Reading = fn(i64) -> Option<i64>;
+    let rows: [(&str, Reading, Option<i64>, bool); 4] = [
+        ("a header reading every minute", Some, None, false),
+        ("no reading", |_| None, Some(FAILED_AT), true),
+        (
+            "only a reading older than the run",
+            |_| Some(START_MS),
+            Some(FAILED_AT),
+            true,
+        ),
+        (
+            "a reading stamped at the run's start",
+            |_| Some(FAILED_AT),
+            Some(FAILED_AT),
+            true,
+        ),
+    ];
+    for (name, reading_at, expected, polls_again) in rows {
+        // Arrange
+        let mut schedule = PollSchedule::new(FixedJitter(0));
+        schedule.sweep(START_MS, &[seat("codex", UsageVendor::Codex, None)]);
+        schedule.record("codex", UsageVendor::Codex, FAILED_AT, PollOutcome::Timeout);
+        let mut polled = 0;
+
+        // Act
+        for minute in 2..=30 {
+            let now = START_MS + minute * MIN;
+            let seats = [seat("codex", UsageVendor::Codex, reading_at(now))];
+            if !schedule.sweep(now, &seats).is_empty() {
+                schedule.record("codex", UsageVendor::Codex, now, PollOutcome::Timeout);
+                polled += 1;
+            }
+        }
+
+        // Assert
+        assert_eq!(
+            polled > 0,
+            polls_again,
+            "{name}: premise, polls after the failure"
+        );
+        assert_eq!(
+            schedule.seat("codex").unwrap().failure_since_ms(),
+            expected,
+            "{name}"
+        );
+    }
+}

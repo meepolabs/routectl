@@ -208,9 +208,11 @@ fn reset_of(
     }
 }
 
-/// The canonical scope of an extra limit's family.
+/// The scope of an extra limit's family, its name taken verbatim: a name
+/// outside the scope's one canonical layout is refused, never rewritten, as
+/// the poll refuses the same `metered_feature`.
 fn scope_of(family: &str) -> Result<Scope, RejectionReason> {
-    Scope::new(&format!("{SCOPE_PREFIX}{}", family.replace('-', "_")))
+    Scope::new(&format!("{SCOPE_PREFIX}{family}"))
 }
 
 /// Parse an epoch-SECONDS instant, the scale the family reports.
@@ -234,6 +236,35 @@ fn partial(
         ObservationReport::Partial(WindowSet::new(windows)?),
     )
     .map(Some)
+}
+
+/// `(length_secs, scope, used fraction)` of each window [`reduce_codex_headers`]
+/// reads from `quota` as observed at `observed_wall`. Test seam for comparing
+/// the routing conversion with the request ledger's, which lives in a crate
+/// above this one.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub fn codex_header_fractions_for_tests(
+    quota: &CodexQuota,
+    observed_wall: SystemTime,
+) -> Vec<(u64, Option<String>, f64)> {
+    let observed = ObservationStamp::from_parts(observed_wall, std::time::Instant::now());
+    let Some(observation) = reduce_codex_headers(quota, observed).observation else {
+        return Vec::new();
+    };
+    let ObservationReport::Partial(set) = observation.report() else {
+        return Vec::new();
+    };
+    set.as_slice()
+        .iter()
+        .map(|window| {
+            (
+                window.key().length_secs(),
+                window.key().scope().map(|scope| scope.as_str().to_owned()),
+                window.used().fraction(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

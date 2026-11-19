@@ -484,6 +484,16 @@ pub(super) async fn handle_credentials_reload(
         "credentials reloaded from disk",
     );
 
+    // The shared token cache already dials each changed seat with its new
+    // record, whatever the rebuild below does, so the readings taken under the
+    // record it replaced go now. A seat counts as changed on any change to its
+    // stored record, a refresh by another routectl process included; dropping
+    // a reading only costs one extra poll. The lift forgets again once it has
+    // started each seat's next credential generation.
+    router_swap
+        .load()
+        .forget_account_readings(changed_seats.iter().map(String::as_str));
+
     // Gate the Router rebuild on a real seat-set change or a changed
     // placeholder seat. A token-value-only refresh of built seats (same keys)
     // must not rebuild, or every routine auto-refresh would needlessly re-run
@@ -533,8 +543,8 @@ pub(super) async fn handle_credentials_reload(
 /// router published at that reload's commit point, sparing every seat that
 /// router holds as a placeholder: its unusable mark is the build's own
 /// evidence about the record just read. Every changed seat's meter readings
-/// are then forgotten, placeholder or not: they were read under the login the
-/// reload replaced.
+/// are then forgotten, placeholder or not: they were read under the stored
+/// record the reload replaced.
 fn lift_changed_seat_parks(
     router_swap: &Arc<ArcSwap<Router>>,
     changed_seats: &std::collections::BTreeSet<String>,

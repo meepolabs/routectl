@@ -24,8 +24,9 @@
 //! upstream reporting past its own limit is telling routectl the window is
 //! spent, and reading that as "no information" would hand the seat back its
 //! headroom. Two sites converting the same percent can drift, which is why the
-//! sibling carries the matching note and why a test pins that both derive the
-//! same fraction from the same captured input.
+//! sibling carries the matching note and why the CLI crate's
+//! `the_ledger_and_the_routing_reducer_read_one_codex_percent_as_one_fraction`
+//! pins that both derive the same fraction from the same captured input.
 //!
 //! # Why the bare Anthropic `reset` is never read
 //!

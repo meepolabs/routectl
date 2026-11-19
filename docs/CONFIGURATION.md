@@ -5529,10 +5529,14 @@ is contacted and redirects are never followed.
 - An accepted reading feeds [quota-aware placement](#quota-aware-seat-placement)
   exactly as a response header reading does, and is written to the usage
   database's `account_readings` history. The poll's state and the meter are
-  memory-only: after a restart every seat starts with no reading. A seat whose
-  stored login changes (a `routectl login` of another account, a hand edit)
-  also starts again with no reading when the credentials file reloads;
-  routectl's own token refreshes keep it.
+  memory-only: after a restart every seat starts with no reading. A seat also
+  starts again with no reading when the credentials file reloads with any
+  change to its stored login record: a `routectl login` of another account, a
+  hand edit, or a token refresh by another routectl process (a `routectl
+  refresh`, a second daemon). This happens even when the router rebuild that
+  reload needs fails. A refresh the running daemon made itself normally keeps
+  the reading, but one that lands while the file is being reloaded can drop it
+  too; a dropped reading costs only one extra poll.
 - `/status/health` shows the poll driver's health as `usage_poll_driver`, with
   the same keys as `seat_driver`; a poll failure counts as `transient` and never
   as `definitive`.
@@ -5590,8 +5594,9 @@ always present; times are epoch ms and durations ms.
     `redirect`, `auth`, `http`, `timeout`, `transport`, `too_large` or
     `malformed` result after an accepted poll (or since the daemon started),
     kept through further failures, cleared to null by an `accepted` or
-    `no_windows` result, and left as it was by `token_not_ready` and
-    `superseded`. It is the input for "a usage poll failing for 15 minutes":
+    `no_windows` result or by any accepted reading newer than it (a response
+    header reading included, which also holds the poll off), and left as it
+    was by `token_not_ready` and `superseded`. It is the input for "a usage poll failing for 15 minutes":
     `now - failure_since_ms`. A backward wall-clock step pulls it back to
     the new time, never into the future.
 - `vendor_pauses`: each vendor whose polling is paused after a 429, with

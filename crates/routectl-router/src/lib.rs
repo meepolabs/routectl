@@ -173,6 +173,8 @@ pub use override_registry::{
 };
 pub use pool_build::{PoolPlaceholder, PoolReport};
 pub use probe_scheduler::ProbeSchedulerSnapshot;
+#[cfg(any(test, feature = "test-utils"))]
+pub use quota::codex_headers::codex_header_fractions_for_tests;
 pub use quota::freshness::ObservationStamp;
 pub use quota::meter::ReportState;
 pub use quota::reading::{LengthClass, ReadingSource, Started};

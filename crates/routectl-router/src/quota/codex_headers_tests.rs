@@ -323,17 +323,30 @@ fn a_family_reporting_no_usable_window_yields_no_observation() {
     }
 }
 
+/// Each row renames the `bengalfox` extra limit. Its window alone is refused
+/// and counted; the account-wide primary survives.
 #[test]
 fn an_extra_limit_with_a_non_canonical_name_is_refused() {
-    let mut quota = captured();
-    for (key, _) in &mut quota.extras {
-        if let Some(rest) = key.strip_prefix("bengalfox-") {
-            *key = format!("{}-{rest}", "x".repeat(40));
+    let too_long = "x".repeat(40);
+    let rows: [(&str, &str); 2] = [
+        ("over the scope length", &too_long),
+        ("hyphenated", "bengal-fox"),
+    ];
+    for (name, limit) in rows {
+        let mut quota = captured();
+        for (key, _) in &mut quota.extras {
+            if let Some(rest) = key.strip_prefix("bengalfox-") {
+                *key = format!("{limit}-{rest}");
+            }
         }
+
+        let reduction = reduce_codex_headers(&quota, observed());
+
+        assert_eq!(
+            reduction.rejections,
+            vec![RejectionReason::MalformedBody],
+            "row: {name}"
+        );
+        assert_eq!(windows(&reduction).len(), 1, "row: {name}");
     }
-
-    let reduction = reduce_codex_headers(&quota, observed());
-
-    assert_eq!(reduction.rejections, vec![RejectionReason::MalformedBody]);
-    assert_eq!(windows(&reduction).len(), 1);
 }

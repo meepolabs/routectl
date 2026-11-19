@@ -169,7 +169,8 @@ pub struct SeatPollSnapshot {
     /// When the seat is next due (epoch ms) as of the last sweep.
     pub next_due_ms: Option<i64>,
     /// When the seat's current run of failed polls began (epoch ms); `None`
-    /// before any failure and once a poll is accepted again.
+    /// before any failure and once a poll, or a newer reading from any source,
+    /// is accepted.
     pub failure_since_ms: Option<i64>,
 }
 

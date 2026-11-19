@@ -126,7 +126,8 @@ struct PollRow {
     /// When the account is next due, as of the poll's last sweep.
     next_due_ms: Option<i64>,
     /// When the account's current run of failed polls began; null before a
-    /// failure and once a poll is accepted again.
+    /// failure and once a poll, or a newer reading from any source, is
+    /// accepted.
     failure_since_ms: Option<i64>,
 }
 

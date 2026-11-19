@@ -198,7 +198,8 @@ pub(super) struct SeatState {
     last_outcome: Option<PollOutcome>,
     error_streak: u32,
     /// When the current run of failed polls began; `None` while the last
-    /// poll that said anything about the endpoint succeeded.
+    /// poll that said anything about the endpoint succeeded, or once a newer
+    /// reading from any source was accepted.
     failure_since_ms: Option<i64>,
     /// The end of the last vendor pause this seat was held by.
     pause_end_ms: Option<i64>,
@@ -287,6 +288,15 @@ impl SeatState {
         self.failure_since_ms = self.failure_since_ms.map(|since| since.min(now_ms));
         let pause_bound = now_ms.saturating_add(draw_bound(MAX_VENDOR_PAUSE_MS));
         self.pause_end_ms = self.pause_end_ms.map(|end| end.min(pause_bound));
+    }
+
+    /// End the current failure run once an accepted reading from any source
+    /// is newer than its start: a response header reading suppresses the
+    /// poll, so no poll would ever end it.
+    fn end_failure_run_on(&mut self, reading: Option<i64>) {
+        if reading.is_some_and(|at| self.failure_since_ms.is_some_and(|since| at > since)) {
+            self.failure_since_ms = None;
+        }
     }
 
     /// The last-accepted reading time to count from: a reading stamped
@@ -429,6 +439,7 @@ impl<J: JitterSource> PollSchedule<J> {
         state.track_pause(now_ms, pause_until);
         state.rebase_after_clock_step(now_ms);
         let reading = state.reading_base(now_ms, seat.last_accepted_ms);
+        state.end_failure_run_on(reading);
         let cadence_due = state.cadence_due(reading);
         state.next_due_ms = state.due_at(cadence_due);
         DueRank {

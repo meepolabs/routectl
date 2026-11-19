@@ -1595,6 +1595,54 @@ fn observe_quota_normalizes_codex_percent_and_keeps_reset_in_seconds() {
     );
 }
 
+/// The captured account-wide Codex family, with the window length and reset
+/// offset the routing reducer needs, and the instant it was observed at.
+fn captured_codex_headers() -> (routectl_core::CodexQuota, std::time::SystemTime) {
+    const RESET_AT_SECS: u64 = 1_786_210_114;
+    const RESET_AFTER_SECS: u64 = 468_887;
+    let mut quota = routectl_core::CodexQuota::default();
+    quota.active_limit = Some("premium".into());
+    quota.primary_used_percent = Some("16".into());
+    quota.primary_reset_at = Some(RESET_AT_SECS.to_string());
+    quota.extras = vec![
+        ("primary-window-minutes".into(), "10080".into()),
+        (
+            "primary-reset-after-seconds".into(),
+            RESET_AFTER_SECS.to_string(),
+        ),
+        ("secondary-used-percent".into(), "0".into()),
+        ("secondary-window-minutes".into(), "0".into()),
+    ];
+    let observed =
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(RESET_AT_SECS - RESET_AFTER_SECS);
+    (quota, observed)
+}
+
+/// The routing reducer and this ledger mapping convert the same Codex percent
+/// at different bounds; for an in-range percent they must land on the same
+/// fraction, bit for bit.
+#[test]
+fn the_ledger_and_the_routing_reducer_read_one_codex_percent_as_one_fraction() {
+    // Arrange
+    let (quota, observed) = captured_codex_headers();
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_chunk(&chunk_with_codex_quota(quota.clone()));
+    let routed = routectl_router::codex_header_fractions_for_tests(&quota, observed);
+
+    // Assert
+    let ledger = cap
+        .record
+        .quota_utilization
+        .expect("the ledger records the percent");
+    assert_eq!(
+        routed,
+        vec![(7 * 86_400, None, ledger)],
+        "one account-wide weekly window at the ledger's fraction"
+    );
+}
+
 #[test]
 fn observe_quota_leaves_unparseable_codex_numerics_none_without_failing_the_row() {
     // Arrange: garbage percent + an empty reset (the wire sends "" for an
