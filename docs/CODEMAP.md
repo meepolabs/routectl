@@ -582,8 +582,10 @@ license.
   `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`,
   `model_profile`, `skipped_format`, `stream_completion`, `upstream_error`,
   `aws_error`; re-exports
-  `system_filter::is_billing_attribution_block` for the ingress system lift
-  and `aws_error::is_client_safe_token` for the cli error-envelope sinks
+  `system_filter::is_billing_attribution_block` for the ingress system lift,
+  `aws_error::is_client_safe_token` for the cli error-envelope sinks, and
+  `retry_after::parse_retry_after` for callers that read a vendor's rate-limit
+  reply themselves
 - `src/alloc_probe.rs` -- test-only thread-local allocation counter for
   OpenAI Responses request tests; absent from other feature combinations
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
@@ -1734,7 +1736,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   inputs `LearnKey` / `NegativeEvidence` with the lapse rule
   `negative_lapsed`, the provider-or-pool resolver `resolve_model_provider` /
   `ModelProviderTarget`, and the create-new config writer `write_config_new` /
-  `ConfigCreateError`
+  `ConfigCreateError`; plus the account-reading read surface (`ObservationStamp`,
+  the `quota::view` types and `STALE_AFTER`, `ReportState`, `LengthClass`,
+  `ReadingSource`, `Started`, `RejectionReason`, `RejectionTotals`,
+  `UsageVendor`, `BodyError`, `MAX_USAGE_BODY_BYTES`) and `AccountIdentities` /
+  `AccountIdentity` / `PolledUsageRejection`
 - `src/activation.rs` -- PURE auto-activation inventory (leaf module; imports
   ONLY `config` types, `config::is_config_provider_kind`, and
   `routectl_auth::LocalProbe` -- no `router`/`factory` dep, so activation
@@ -2288,9 +2294,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   for the triple and returns `FirstSeen` / `Stable` / `Misfire`, where a
   `Misfire` is the canary that a real cut would break the upstream cache
 - `src/quota/mod.rs` -- provider-agnostic normalized subscription-quota
-  vocabulary, `pub(crate)` (the shape is expected to reshape, and a `pub` item
-  in a baselined crate is a one-way door). No facade re-export: consumers name
-  the submodule
+  vocabulary, `pub(crate)`; the crate root re-exports only the account-reading
+  read surface (`view` types, reading token enums, `UsageVendor` /
+  `BodyError`). No facade re-export here: consumers name the submodule
 - `src/quota/window.rs` -- the per-window value. `QuotaWindow` is an algebraic
   `Unknown | Known { utilization, reset_at }`, so unknown is UNREPRESENTABLE as
   a number and a reported `0.0` stays structurally distinct from no reading.
@@ -2318,14 +2324,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`ResetRejection::Expired`/`Implausible`/`Overflow`, which rejects an
   epoch-millis-as-seconds value at the door); `is_fresh` requires BOTH a
   monotonic age ceiling and the window's own wall-clock reset, answering
-  not-fresh on any arithmetic it cannot perform
+  not-fresh on any arithmetic it cannot perform. Also `age` (larger of the two
+  clock ages, `None` when unorderable), `has_passed` and `reset_after`
 - `src/quota/curation.rs` -- the closed curated window table: ONE `const` slice
   of `CuratedWindow`, each row carrying provider kind, the upstream's own window
   id, role, expected DURATION (what bounds the reported reset, curated beside
   the role so the two cannot drift) and the cap/guard threshold. Anthropic `5h`
-  = Fast at half full, `7d` = Slow at 90%; Codex `primary` (a seven-day window
-  however it is named) = Slow, with NO Fast row -- the absence is the curated
-  fact, so the Codex fast cap is dormant by construction. `rows_for` / `row_for`
+  = Fast at half full, `7d` = Slow at 90%; Codex has NO row (its windows reach
+  the account meter keyed by reported length via `codex_headers`), so its caps
+  are dormant by construction. `rows_for` / `row_for`
   answer nothing for an uncurated provider kind, which is how a provider with no
   row runs dormant. Self-tests hold the whole-table invariants (no duplicate
   role or source window per provider, thresholds inside the utilization scale,
@@ -2338,20 +2345,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `WindowSet` refuses empty, duplicate-key and over-count sets;
   `AccountObservation` is source-tagged and stamped, `Partial | Complete |
   NoWindows`. Every refusal is a `RejectionReason`
-- `src/quota/reduce.rs` -- the two provider reducers onto `QuotaSnapshot`
-  (`observed` + per-role windows + billing). Reads the curated row for each
-  role, so a role is never inferred from a window's name, and routes every reset
-  through `accept_reset` with that row's duration. Anthropic's `7d` utilization
-  and BOTH per-window resets are reached by walking `AnthropicUnifiedQuota
-  ::extras` -- that struct is deliberately NOT widened, since it feeds the shared
-  ledger write path. The bare `anthropic-ratelimit-unified-reset` is never read:
-  it happens to equal `5h-reset` on every captured envelope, so pairing them
-  would pass unobserved, and a test pins the refusal. Codex converts its 0-100
-  percent to a fraction; strict where `UsageCapture::observe_codex_quota` is
-  loose (routing signal vs observability record), cross-referenced at both sites.
-  Returns a `Reduction` (the snapshot plus every REPORTED window refused,
-  partitioned by `RejectionReason`: invalid utilization, expired / implausible
-  reset, overflow) -- an absent window is dormant, not a rejection
+- `src/quota/reduce.rs` -- the Anthropic response-header reducer
+  (`reduce_anthropic`) onto the two-role `QuotaSnapshot` (`observed` + per-role
+  windows + billing), reading the curated row for each role and routing every
+  reset through `accept_reset`; returns a `Reduction` (the snapshot plus every
+  REPORTED window refused). Also owns the closed `RejectionReason` set every
+  quota reducer and the meter count by, and `PERCENT_SCALE`
 - `src/quota/codex_headers.rs` -- reducer from the Codex `x-codex-*`
   response-header family onto one partial response `AccountObservation`:
   every slot (`primary`, `secondary`, each extra limit's family scoped
@@ -2387,29 +2386,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   partition declines, and the caller then keeps the unchanged fill-first
   collapse (token `keyless_fill_first`; `keyless_quota` when quota ordered it).
   A keyless request mints NO pin either way -- there is no key to pin under
-- `src/quota/store.rs` -- `Mutex<HashMap<SeatKey, StoredReading>>`, ONE latest
-  reading per seat. Bounded by the credential-store-declared OAuth seat set
-  (`admit_seats`, enforced at INSERTION), the same operator-declared-keyspace
-  argument the calibration store rests on one dimension over -- deliberately
-  NOT calibration's bounded ring (no reduction over history: the freshest
-  reading IS the answer) and NOT the K tracker's LRU (nothing here is
-  client-supplied). Merge is PER-WINDOW and independent: a newer valid `Known`
-  wins including when utilization DECREASES, an incoming `Unknown` preserves a
-  still-fresh `Known` and leaves `Unknown` once it lapses, an older observation
-  never overwrites a newer (ordered on the MONOTONIC clock), omitting one window
-  never erases the other, expired state is never revived. Each window carries its
-  OWN observation stamp so a preserved window keeps aging on the instant it was
-  read -- one stamp per snapshot would let a re-stamp make a stale reading
-  immortal. `reading_for` re-applies expiry at READ time. Exact per-reason
-  rejection counters plus one rate-limited WARN carrying the running totals
-  (the window-gate skip pattern); only the routectl-internal account key and
-  counters reach a log line. `admit_seats` now also PRUNES `seats` for any key
-  outside the new admitted set (folded in so both `install_resolved_models`
-  and the hot-reload carry-over share one prune point); the hot-reload carry-over
-  (`Router::carry_over_quota_from`) SHARES the store `Arc` and re-declares
-  admission against it rather than exporting/importing entries. A write refused
-  for admission bumps `refused_by_admission_total`, which rides the
-  `RouterMetrics::log_snapshot` line as `rc_quota_refused_by_admission_total`
+- `src/quota/store.rs` -- `QuotaStore`: one `AccountMeter` per admitted seat
+  behind one mutex (the merge rule lives in `meter.rs`), bounded by
+  `admit_seats` (which also prunes) and shared across hot reload by `Arc`.
+  Writes: `observe` (Anthropic header snapshot), `observe_account` /
+  `observe_account_uncounted` (a validated observation), `forget`; reads:
+  `reading_for` (placement's two-role projection), `readings` (the `view`),
+  `account`, `report_for`; per-reason `record_rejection` / `RejectionTotals`,
+  `ObserveRefusal` and `refused_by_admission_total`; see its module doc
 - `src/quota/feed.rs` -- the post-response feed, wired on BOTH completion paths.
   `feed_response` reads `ChatResponse::upstream_meta` at the terminal
   non-streaming success arm; `FirstChunkFeed` is armed with the served seat's key
@@ -2421,7 +2405,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   only the non-streaming path would leave a streaming client's every seat reading
   as no-evidence with no error and no warning. Feeds the seat that ACTUALLY
   served; `served_seat`'s absent cases (pre-dispatch failure, non-OAuth ref,
-  forwarded credential) are all correct skips
+  forwarded credential) are all correct skips. The Anthropic family goes
+  through `reduce_anthropic` -> `QuotaStore::observe`; the Codex family
+  through `reduce_codex_headers` -> `QuotaStore::observe_account`
 - `src/quota/meter.rs` -- one account's meter: a window per reported
   `WindowKey` with its own stamp and source, last accepted reading, report
   state (`NoReading | Windows | NoWindows`) and billing. `merged` is
@@ -3401,7 +3387,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Router::pool_eligibility` -> `PoolEligibility` (live configured / eligible
   seat counts per pool and the non-eligible seats by `EligibilityReason`, read
   from the non-claiming capacity snapshot), and the private `gate_status_for`
-  gate read (state key + account park and unusable mark)
+  gate read (state key + account park and unusable mark). Also the account
+  meter's router surface: `observe_polled_usage` (lands one polled usage body
+  under a credential generation -> `AcceptedReading` or `PolledUsageRejection`),
+  `account_readings`, `forget_account_readings`, and the `AccountIdentities`
+  resolver (`from_config`: each configured credential account's
+  `AccountIdentity` provider entry + login label; targets carry `login_label`)
 - `src/router/count_tokens.rs` -- the token-counting dispatch path:
   `Router::count_tokens` (result-only, NON-SETTLING) and
   `count_tokens_with_meta` -> `CountedTokens` (SETTLING), both through
@@ -4230,7 +4221,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   an account when a terminal rejection (or a terminal auth refresh) carries a
   typed `UpstreamReason`, never for a probe or a forwarded credential (no
   account), and only in the credential generation the attempt was admitted
-  under; the unusable-credential mark: `acquire_credential_generation`,
+  under; `under_current_generation` runs a closure only while an account's
+  generation is unchanged; the unusable-credential mark: `acquire_credential_generation`,
   `mark_credential_unusable` (applies only in the acquired generation),
   `credential_refreshed_in_generation` (a successful refresh starts a new
   generation and clears an expired mark) and `mark_unusable_on_refused_refresh`;
@@ -5455,7 +5447,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `env_ref`); feature-gated re-exports of `LocalProbe`, `LoginOptions`,
   `OAuthError`, `OAuthStore`, `OAuthStoreProjectCache`, `OpenOutcome` under
   `oauth` (incl. the `RefreshOutcome` / `DefinitiveCause` refresh-check
-  vocabulary), and the unconditional `CredentialProbeFailure`. Carries
+  vocabulary and the `PeekedAccessToken` / `PeekedCredential` peek outcomes),
+  and the unconditional `CredentialProbeFailure`. Carries
   `#![warn(missing_docs)]`
 - `src/store.rs` -- `SecretStore` async trait (get/set/delete) for credential
   providers, plus `probe_credential` returning a text-free
@@ -5526,6 +5519,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   429)
 - `src/oauth/store/mod.rs` --
   `OAuthStore`/`Inner`/`SeatCooldown`/`LocalProbe`/`OpenOutcome` shared types
+  and the `PeekedAccessToken` (`Ready | NotReady | Missing`) /
+  `PeekedCredential` (redacted `Debug`) peek outcomes
   + open/lifecycle:
   `open`/`open_or_degraded`/`open_default`/`open_default_degradable`
   (start-and-degrade contract),
@@ -5534,6 +5529,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the test-gated `scripted` seam)
 - `src/oauth/store/crud.rs` -- token-record CRUD + cloud-project-id cache
   adapter: `peek_account_id`/`peek_session_id`/`peek_cloud_project_id`,
+  `peek_access_token` / `peek_credential` (never refresh or write; `Ready`
+  only outside the refresh lead) and `reload_generation`,
   `set_cloud_project_id`, `clear_cloud_project_id_if_matches`
   (compare-and-clear only when the stored id matches, disk-first under
   `update_under_lock`; missing/differing is a no-write `Ok(false)`),
@@ -5734,7 +5731,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `CapabilityEvent`), shared lock-free
   `UsageCounters` (enqueued / dropped_full / dropped_closed / persisted /
   write_errors / prune_errors plus the capability-event trio capability_events_enqueued /
-  capability_events_dropped_full / capability_events_persisted)
+  capability_events_dropped_full / capability_events_persisted, and the five
+  `account_readings_*` history counters); `try_send_account_readings` hands one
+  observation's history rows to the writer, best effort
 - `src/ledger_gap.rs` -- `GapTracker`: the writer thread's record of
   queue-full request drops, appended to `ledger_gaps` as they occur
   (`QUEUE_FULL_CAUSE` is the crate-internal cause token)
@@ -5972,13 +5971,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   tombstone-verdict literal mirroring `capability_event.rs`
 - `src/writer.rs` -- `UsageWriter`, the single writer thread: opens the DB at
   boot (no-op drain on failure), drains the opaque `WriterMessage` channel into
-  `requests` / `capability_events`, records `ledger_gaps`, and `shutdown` ->
-  `ShutdownOutcome`; see its module doc
+  `requests` / `capability_events` / `account_readings`, records `ledger_gaps`,
+  and `shutdown` -> `ShutdownOutcome`; see its module doc
 - `src/account_reading.rs` -- `AccountReadingRow` (one `account_readings`
   history row; `report()` derives `windows` / `no_windows` from whether it
   carries an `AccountReadingWindow`) and the token enums
   `AccountReadingSource`, `AccountReadingReport`, `WindowLengthClass`,
-  `WindowStarted`, whose `as_str` values are the table's CHECK tokens
+  `WindowStarted`, whose `as_str` values are the table's CHECK tokens; also
+  `insert_account_readings` / `persist_account_readings` -> `HistoryWrite`,
+  one observation's rows in one transaction
 - `src/cache_writes.rs` -- `cache_write_columns(total, lifetimes) ->
   CacheWriteColumns`, the one builder of the v21 `cache_write_tokens` /
   `cache_write_lifetimes` bound values (a split with no total takes its sum;
@@ -5987,8 +5988,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/db.rs` -- `UsageDb`, `open`, `open_readonly`, `open_readonly_fastfail`,
   `OpenError`: usage-DB connection open (writer and read-only)
 - `src/schema.rs` -- the ledger DDL (`requests`, `capability_learn_events`,
-  `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (22); each
-  version's columns are commented in the DDL itself. Also the v21
+  `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (23); each
+  version's columns are commented in the DDL itself. The v23
+  `CREATE_ACCOUNT_READINGS_TABLE` (reading history, CHECK tokens welded to
+  `account_reading.rs`) and `CREATE_ACCOUNT_READINGS_TS_INDEX`. Also the v21
   `CREATE_CACHE_WRITE_TS_START_INDEX` partial index (`WHERE cache_write_tokens
   > 0`) the per-lifetime write read filters on, and the three v22 read
   indexes: `CREATE_AGG_COVERING_INDEX` (`ts_start` then every column the
@@ -5999,14 +6002,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table (one `migrate_vN_to_vM` step per version, the appended-column
   lists `V18`/`V19`/`V20`/`V21_REQUESTS_COLUMNS`, and `V22_INDEXES`, the three
-  `IF NOT EXISTS` indexes the column-free v21 -> v22 step creates); also `purge_legacy_capability_observations(conn)`, a
+  `IF NOT EXISTS` indexes the column-free v21 -> v22 step creates; the
+  create-only v22 -> v23 step adds `account_readings` and its index); also `purge_legacy_capability_observations(conn)`, a
   one-shot data step (no version bump) that deletes NULL-vocabulary
   non-tombstone `capability_events` rows below the latest tombstone's rowid,
   guarded by the `META_LEGACY_CAPABILITY_PURGE` marker (value = deleted count,
   marker and delete in one transaction); called from the writer's open, not
   from `db::open`
 - `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path, target)`
-  runs the additive `STEPS` (22 down to 16; 22 -> 21 keeps the v22 indexes and
+  runs the additive `STEPS` (23 down to 16; 23 -> 22 keeps `account_readings`
+  and checks its v23 column shape; 22 -> 21 keeps the v22 indexes and
   checks the v21 `requests` shape) to a target in `SUPPORTED_TARGETS`;
   a refusal is a `DowngradeError` that leaves the file untouched
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
@@ -6014,8 +6019,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `prune_capability_events` (same shape for the `capability_events` ledger)
   which age-prunes only rows before the latest tombstone's rowid so the
   tombstone boundary and every row after it survive regardless of age (no
-  tombstone -> ordinary age prune), and `prune_ledger_gaps` (the `requests`
-  window applied to `ledger_gaps`); `PruneOutcome` counters
+  tombstone -> ordinary age prune), `prune_ledger_gaps` (the `requests`
+  window applied to `ledger_gaps`) and `prune_account_readings` (the same
+  window over `account_readings.ts_ms`); `PruneOutcome` counters
 - `src/production_inventory_tests.rs` -- the DECLARED inventory of this crate's
   production modules, reconciled against a filesystem walk of `src/` so a new
   undeclared module (or a stale declared one) goes RED; a planted-file fixture
@@ -6330,7 +6336,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `run_router_metrics_snapshot_driver` (in `metrics_driver.rs`),
   `run_probe_driver` (in `probe_driver.rs`), `run_cache_ignore_driver` (in
   `cache_ignore_driver.rs`) and, when a credential store exists,
-  `run_seat_driver` (in `seat_driver.rs`); the cache-ignore driver takes the
+  `run_seat_driver` (in `seat_driver.rs`) plus the usage poll
+  (`spawn_usage_poll_driver`, in `usage_poll/mod.rs`); a credentials reload
+  and its park lift both call `forget_account_readings` for every changed
+  seat; the cache-ignore driver takes the
   boot config's `usage.db_path` (restart-required, like the writer's) and
   reads only eligibility from the live config. All three
   publication sites go through `router_publish::publish_router`, never a direct
@@ -6368,16 +6377,23 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
 - `src/server/seat_driver.rs` -- the background seat driver: `run_seat_driver`
   sweeps every `SEAT_DRIVER_INTERVAL` over the configured managed Anthropic and
-  Codex seats (`managed_seats`) through one `SeatJob` (`RefreshJob`: due, run,
-  apply), acquiring each seat's credential generation before the refresh and
-  marking or clearing under it; keeps the memory-only `SeatDriverHealth` that
+  Codex seats (`managed_seats`, one per account via
+  `AccountIdentities::from_config`) through one `SeatJob` (`KIND` names it in
+  log lines; `RefreshJob` here, `UsagePollJob` in `usage_poll/`: due, run,
+  apply), acquiring each seat's credential generation before `run` and
+  applying under it; keeps the memory-only `SeatDriverHealth` that
   `DaemonMeta` holds. Spawned by `spawn_reload_pipeline` when a credential
   store exists; tests in `seat_driver_tests.rs`
-- `src/server/usage_poll/mod.rs` -- the background usage poll's module hub.
+- `src/server/usage_poll/mod.rs` -- the background usage poll: `UsagePollJob`
+  (a `SeatJob` that peeks each due seat's token, fetches its usage endpoint and
+  lands an accepted body through `Router::observe_polled_usage`, plus its
+  history rows), `UsagePollState` / `PollStateSnapshot` (the schedule and its
+  read-only view for `/status/accounts`) and `spawn_usage_poll_driver`
 - `src/server/usage_poll/client.rs` -- the usage poll's HTTP client: the two
   compile-time vendor usage URLs, a no-redirect https-only client with 5 s
   connect / 10 s total timeouts, the body cut at `MAX_USAGE_BODY_BYTES`, the
-  lane's first-party identity headers, and the closed `FetchResult`; tests in
+  lane's first-party identity headers, and the closed `FetchResult`; its
+  `network_fence` makes a test build resolve no host; tests in
   `client_tests.rs`
 - `src/server/usage_poll/history.rs` -- maps an accepted poll reading to
   `account_readings` history rows (one per window, or one `no_windows` row).
@@ -6963,7 +6979,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `status_query_series`) so a healthy aggregate poll cannot mask a consistently
   failing series poll.
   `status_router() -> Router<Arc<StatusState>>` registers GET-only panel routes
-  (`/status`, `/status/{usage,health,config,doctor}`; non-GET gets 405) plus the
+  (`/status`, `/status/{usage,health,config,doctor,accounts}`; non-GET gets 405) plus the
   ONE method carve-out `/status/query`, registered with `any()` because axum's
   `MethodFilter` cannot express `QUERY` -- the carve-out is route-scoped, so
   `QUERY` against any sibling path is still a 405.
@@ -6979,14 +6995,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the permit of its own one-permit `LedgerReadGate` (a `StatusState` field
   apart from `BuilderCapacity`), so a query read never holds a GET builder
   permit. The `/status` aggregate
-  composes the four REAL panel builders SEQUENTIALLY (four awaits, no
+  composes the five REAL panel builders SEQUENTIALLY (five awaits, no
   `tokio::join!`), so an admitted request holds at most ONE blocking builder at a
   time and `STATUS_MAX_INFLIGHT` names a single unit -- admitted requests AND
   concurrent blocking builders -- cancellation included: waiting on the builder
   permit cannot deadlock (no hold-and-wait edge), and a request arriving behind a
   detached builder is DELAYED, never shed. Latency is
-  the SUM of the four builders rather than the max, deliberately accepted.
-  Composed into `{panels:{usage,health,config,doctor}}` -- each an INDEPENDENT
+  the SUM of the five builders rather than the max, deliberately accepted.
+  Composed into `{panels:{usage,health,config,doctor,accounts}}` -- each an INDEPENDENT
   per-panel envelope with its OWN `schema_version` (each panel module's own
   `SCHEMA_VERSION` const -- `DOCTOR_SCHEMA_VERSION` for
   doctor)/`as_of`/availability, with NO outer envelope version
@@ -7088,7 +7104,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   failure arm would be a bare 500 outside the three regimes -- a render failure
   degrades to the unavailable panel instead), so the metric field names ARE the
   wire vocabulary (contracts sec 15), with absent `Option` metrics as explicit
-  `null`. A PRESENT `bucket` selects the series mode: the grid is resolved on the
+  `null`; a `seat` grouping's groups also carry `account` / `provider_entry` /
+  `login_label` from the pricer's `AccountIdentities` (`QueryPayload`). A PRESENT `bucket` selects the series mode: the grid is resolved on the
   blocking worker via `commands::usage::resolve_bucket` (reading
   `earliest_ts_start` first, and ONLY for `window: all`, whose epoch lower bound
   is re-anchored to the oldest in-window row's local midnight, clamped never to
@@ -7110,6 +7127,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `SeatFix` that readmits a seat, derived from the served config),
   `learned_capabilities(now)` (each resident entry with its cell resolved
   through `lane_cell::resolve_entries` -> `ResolvedEntry`),
+  `account_identities()` / `account_readings(now)` (the configured accounts
+  and their account-meter readings), `usage_poll_snapshot(state)`,
   `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
   see `field_verdict_log.rs`), `lossy_repairs_by_lane()` and the
@@ -7154,9 +7173,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `record_reload_failure(class)` keeps the last rejected reload beside the
   stamp; `stamp_config_loaded` clears it, so `DaemonMetaHandle::reload_failure`
   reports it only until a later load supersedes it. `DaemonMeta` also holds the
-  seat driver's `SeatDriverHealth` (`seat_driver_health()` hands the writer to
-  the driver); the handle reads it only as `seat_driver()` ->
-  `SeatDriverHealthSnapshot`
+  refresh and usage poll drivers' `SeatDriverHealth` (`seat_driver_health()` /
+  `usage_poll_driver_health()` hand the writer to each driver) and the
+  once-installed `UsagePollState`; the handle reads them only as
+  `seat_driver()` / `usage_poll_driver()` -> `SeatDriverHealthSnapshot` and
+  `usage_poll_state()`
 - `src/handlers/status/usage.rs` --
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
@@ -7165,8 +7186,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `window_bounds` window, and maps to the aggregates-only `UsagePanel` DTO
   (schema_version 7, which dropped the `would_trim` block: per-`(alias,provider,model,upstream)` rollups, each with
   the both-era `cache_write_tokens` / `cache_write_present`, + windowed
-  totals + one per-seat quota snapshot each (`seat` + `provider_kind`, per-row
-  `ts_start_ms` freshness) + the window's `observation`
+  totals + one quota snapshot per CONFIGURED seat (`seat` + `provider_entry` +
+  `login_label` from `AccountIdentities`, + `provider_kind`, per-row
+  `ts_start_ms` freshness; seatless and retired seats are dropped) + the
+  window's `observation`
   block with its walk counts; per-group and totals
   `errors_by_class` failure-class breakdown, `client_disconnect_total` +
   `cancelled_total` +
@@ -7193,8 +7216,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`account`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`/`park_reason`/`parked_until_ms`
   and an `eligibility` object `{reason, cause, since_ms, fix}` (fix from
   `seat_fix`, only for `credential_unusable`); `pools` rows
-  `{pool, configured, eligible, by_reason}`; a `seat_driver` row from the
-  daemon's `SeatDriverHealth`;
+  `{pool, configured, eligible, by_reason}`; `seat_driver` and
+  `usage_poll_driver` rows from the daemon's two `SeatDriverHealth`s;
+  per-target `login_label`;
   + learned rows keyed by lane, joined to targets on `learned_lane`
   `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`/`action`/`layer`/`overrode_layer`/`age_ms`/`expires_at_ms`/`value`,
   each resolved through `lane_cell::{ResolvedEntry, lapse_deadline_ms}`
@@ -7309,7 +7333,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `capability_writes()` -> `CapabilityWriteCounters` (the three
   capability-persistence failure counters, reported apart rather than summed)
   for the doctor panel, and `ledger_health()` -> `LedgerHealth` (the
-  request-row loss counters). Also `window_observation` -> `WindowObservation`,
+  request-row loss counters), and `account_reading_history()` ->
+  `AccountReadingHistory` (the five reading-history counters, for
+  `/status/accounts`). Also `window_observation` -> `WindowObservation`,
   a window's ledger observation totals judged complete or not against those
   counters (read by the usage and doctor panels). A facade rather than the writer's producer handle:
   `StatusState`'s contract is that it carries no handle that could enqueue rows,
@@ -7412,7 +7438,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   asserting the set of `method:` values the script sets is a subset of
   `{"query"}` (fails closed on a verb nobody deny-listed); (2) the
   `EXPECTED` schema-version map pinned to the panel `SCHEMA_VERSION` consts
-  (`pub` on usage/health/config, `DOCTOR_SCHEMA_VERSION` on doctor,
+  (`pub` on usage/health/config/accounts, `DOCTOR_SCHEMA_VERSION` on doctor,
   `query::SCHEMA_VERSION`) so client render-target and server wire versions
   cannot drift; (3) `QUERY_METRICS` + `QUERY_TOKENS` field names asserted to be
   fields of a serde-serialized `QueryMetrics` (derived, not a second hardcoded
@@ -7470,7 +7496,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   declaration order, so these rules land last and may lean on the component
   vocabulary above
 - `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 13: the
-  client's shared state. `EXPECTED` (per-source wire versions), the seven DATA
+  client's shared state. `EXPECTED` (per-source wire versions, `accounts`
+  pinned though no view reads it yet), the seven DATA
   SOURCES -- `usage`/`health`/`config`/`doctor` off the GET `/status`
   aggregate, plus `query`, `query_series`, and `usage_all` -- each with an
   independent state record
@@ -7583,7 +7610,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   stays reversible with no cards on screen). A card's seat affordance is
   per-seat DOTS plus the seat count, opening a page-level centered MODAL
   (backdrop click, close control, or Escape) of one quota tile per seat over
-  the usage `quota[]` rows whose seat key names that provider -- the same tiles
+  the usage `quota[]` rows whose `provider_entry` names that provider -- the same tiles
   Health renders, so a provider with no quota row gets no affordance, no
   synthesized tile, and no cross-seat rollup. Eight KPI tiles come from
   `totals`, each carrying a sparkline over `series.buckets[].metrics`; the seat
@@ -8494,7 +8521,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   column. Every operator- or ledger-sourced string printed to the terminal
   (group labels, seat / quota tokens, suppressed-session kind and model,
   reduction decision tokens) passes through `routectl_core::render_operator_text`,
-  which strips control characters and escape sequences.
+  which strips control characters and escape sequences. Quota lines print only
+  for seats `AccountIdentities::from_config` lists (`configured_quota`).
   `--detail` adds the `cost`, `ctx_peak`/`ctx_avg`, `cache_wr` (write total
   of every lifetime), `ttft_p50`/`ttft_p95`, `tok/s` and `srv_tools` columns and
   a one-line latency / throughput / streaming-share summary, plus the advisory would-trim / shadow /
@@ -8529,8 +8557,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `render_cache_ignore`, `CACHE_IGNORE_READ_BUDGET`: the `routectl usage
   --detail` cache-ignore block
 - `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to
-  21|20|19|18|17|16 [--db P]`: the offline rollback over
-  `routectl_usage::downgrade_to` (a v22 file taken to 16 runs every step);
+  22|21|20|19|18|17|16 [--db P]`: the offline rollback over
+  `routectl_usage::downgrade_to` (a v23 file taken to 16 runs every step);
   prints the re-stamped path, exits 1 on refusal
 - `src/commands/opening_accuracy/mod.rs` -- `routectl usage
   --opening-accuracy`, the read-only context meter release-gate report over an
@@ -8889,7 +8917,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (single source of truth for the canonical scenario builders) and the
   testkit `file_ref` secret helper, plus the cli-only `replay` harness and
   `readiness` submodules; the builders are enabled via the `test-utils`
-  dev-dependency feature on core
+  dev-dependency feature on core, and this crate's own `test-utils` feature
+  fences the usage poll client off the network for every booted daemon
 - `tests/common/bounded_child.rs` -- one-shot child runner
   (`run_to_exit`, deadline + poll-interval consts) for binaries that spawn
   the real CLI; included by `#[path]`, it fails the test when the child is
