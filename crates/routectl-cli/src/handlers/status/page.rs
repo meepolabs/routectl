@@ -2007,4 +2007,9 @@ mod tests {
         use super::*;
         include!("page_browser_motion_tests.rs");
     }
+
+    mod payload_keys {
+        use super::*;
+        include!("page_payload_keys_tests.rs");
+    }
 }

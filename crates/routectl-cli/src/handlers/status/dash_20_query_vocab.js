@@ -42,6 +42,60 @@
     'cost_status'
   ];
 
+  // The fields this page reads from each GET panel, at any depth, envelope
+  // included. Nothing reads these arrays at runtime: they are the page's half
+  // of a contract page.rs checks in both directions. Each name must be a key
+  // the server's own DTO serializes for THAT panel, and every lowercase member
+  // read anywhere in the script must be declared here, be a key of an object
+  // literal the script builds, or be a JS/DOM built-in. A field the page starts
+  // reading goes into its panel's list here.
+  var USAGE_FIELDS = [
+    'schema_version', 'unavailable', 'as_of', 'data',
+    'window', 'groups', 'totals', 'quota',
+    'alias', 'model', 'requests', 'errors',
+    'seat', 'provider_kind', 'claim', 'status', 'ts_start_ms', 'reset_ms',
+    'utilization', 'overage_utilization', 'overage_status'
+  ];
+
+  var HEALTH_FIELDS = [
+    'schema_version', 'unavailable', 'as_of', 'data',
+    'targets', 'pools', 'seat_driver', 'learned_negatives',
+    'nickname', 'provider_name', 'upstream', 'seat_label', 'state_key', 'learned_lane',
+    'circuit', 'open_since_ms', 'half_open_probe_in_flight', 'rpm_available',
+    'last_outcome', 'last_outcome_at_ms',
+    'eligibility', 'reason', 'cause', 'since_ms', 'fix',
+    'pool', 'configured', 'eligible', 'by_reason', 'seats',
+    'running', 'last_sweep_ms', 'last_good_sweep_ms', 'sweeps', 'transient', 'definitive',
+    'capability_key', 'verdict', 'source', 'value', 'last_seen_ms'
+  ];
+
+  var CONFIG_FIELDS = [
+    'schema_version', 'unavailable', 'as_of', 'data',
+    'source', 'aliases', 'models', 'providers', 'capabilities', 'activation', 'classes',
+    'config_path', 'loaded_age_ms', 'alias_count', 'provider_count', 'listen_addr', 'version',
+    'alias', 'chain',
+    'nickname', 'provider', 'upstream', 'provider_kind', 'context_window', 'fill', 'tokens',
+    'prices', 'field', 'per_mtok', 'table_date',
+    'provider_id', 'format', 'endpoint_origin', 'cloud', 'auth_token', 'credential_ref_scheme',
+    'rpm_limit', 'status', 'reason', 'referenced_by_aliases',
+    'target_spec', 'capability_key', 'verdict', 'provenance',
+    'class', 'retry_cap', 'fallback', 'debits_breaker'
+  ];
+
+  var DOCTOR_FIELDS = [
+    'schema_version', 'unavailable', 'as_of', 'data',
+    'report', 'reachability', 'capability_writes',
+    'findings', 'status', 'section', 'name', 'detail', 'remediation',
+    'capability_events_dropped_full', 'write_errors', 'capability_writer_unavailable',
+    'panels', 'capability_matrix', 'availability', 'state', 'code', 'source', 'columns', 'lanes',
+    'warm', 'outcome', 'class', 'summary', 'replay',
+    'loaded_rows', 'replayed', 'skipped_vocab', 'skipped_owner', 'skipped_revision',
+    'skipped_lane', 'skipped_unknown',
+    'lane', 'routed', 'provider_kind', 'nicknames', 'cells',
+    'action', 'verdict', 'layer', 'stale', 'nickname_actions', 'nickname',
+    'first_seen_ms', 'last_seen_ms', 'expires_at_ms', 'value'
+  ];
+
   // The COMPLETE set of request bodies this page can issue: every selectable
   // window crossed with every group-by the tabs use, in both the series read
   // path (Overview) and the non-series one (Usage), each carrying the bucket
