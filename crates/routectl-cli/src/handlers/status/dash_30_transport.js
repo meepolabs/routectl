@@ -322,6 +322,20 @@
 
   var QUERY_SOURCES = [QUERY_SOURCE, QUERY_SERIES_SOURCE];
 
+  // The aggregate failed on transport. A healthy QUERY is only re-requested
+  // by the aggregate round's nudge, so while the daemon is down nothing else
+  // would ever mark it: every query source takes the same transport state as
+  // the GET sources. A source no request will answer (no body for the
+  // selection, or a body the daemon refused) is left as it is, since no
+  // recovery would clear the mark. The first good round's nudge refetches.
+  function markQuerySourcesTransport() {
+    QUERY_SOURCES.forEach(function (name) {
+      var body = queryBodyForSource(name);
+      if (!body || queryRejectedKeyBySource[name] === queryBodyKey(body)) { return; }
+      markSourceTransport(name);
+    });
+  }
+
   // The request key each query source would be fetched for under the current
   // selection, whichever view is active.
   function queryKeysBySource() {
@@ -449,6 +463,7 @@
       if (agg.kind === 'forbidden') { enterTerminal(); return { terminal: true }; }
       if (agg.kind !== 'ok') {
         markTransport(agg.kind);
+        markQuerySourcesTransport();
         return { ok: false };
       }
       // Each panel renders under its OWN error boundary: one malformed

@@ -570,4 +570,62 @@
         return out;
       });
   });
+
+  // ---- an unreachable daemon marks the query sections stale too ----------
+
+  var TRAFFIC_SECTION = '#body-traffic [data-source="query"]';
+
+  function trafficOutageObservation(figures) {
+    var section = query(TRAFFIC_SECTION);
+    var body = document.getElementById('body-traffic');
+    return {
+      figure: textOf(TRAFFIC_FIGURES),
+      same_figure_node: !!figures && figures === query(TRAFFIC_FIGURES),
+      connected: !!figures && figures.isConnected,
+      section_stale: !!section && section.classList.contains('section--stale'),
+      status: textOf('#status-traffic'),
+      verdict: textOf('#verdict-text'),
+      zero_figures: body.querySelectorAll('.mag-zero').length,
+      error_cards: errorCards(body)
+    };
+  }
+
+  d.scenario('states-outage-marks-query-stale', function () {
+    var down = false;
+    rules.push(function (entry) {
+      return (down && (isAggregate(entry) || entry.method === 'QUERY')) ? { fail: true } : null;
+    });
+    var out = {};
+    var figures = null;
+    return d.waitUntil('the Now requests figure', nowRequestsTile)
+      .then(function () {
+        document.getElementById('tab-traffic').click();
+        return d.waitUntil('traffic figures', function () { return query(TRAFFIC_FIGURES); });
+      })
+      .then(function () { return nextAnswer('/status'); })
+      .then(function () { return d.sleep(200); })
+      .then(function () {
+        figures = query(TRAFFIC_FIGURES);
+        out.good = trafficOutageObservation(figures);
+        down = true;
+        return d.waitUntil('the aggregate to fail', function () {
+          return document.getElementById('banner').hidden === false;
+        }, 15000);
+      })
+      .then(function () { return d.sleep(500); })
+      .then(function () {
+        out.down = trafficOutageObservation(figures);
+        down = false;
+        return d.waitUntil('the query section to recover', function () {
+          var section = query(TRAFFIC_SECTION);
+          return !!section && !section.classList.contains('section--stale') &&
+            textOf(TRAFFIC_FIGURES) !== out.down.figure;
+        }, 45000);
+      })
+      .then(function () { return d.sleep(300); })
+      .then(function () {
+        out.recovered = trafficOutageObservation(figures);
+        return out;
+      });
+  });
 })(window.routectlDriver);

@@ -381,3 +381,41 @@ fn page_browser_a_stale_query_reports_its_own_last_success() {
         "the kept figures stay: {result:#}"
     );
 }
+
+/// After a good round with Now and Traffic populated, the daemon goes
+/// unreachable for both the aggregate and the QUERY: the Traffic section
+/// keeps its figure node, marked stale with its own status line, the
+/// verdict reads neutral and nothing reads 0; once the daemon answers again
+/// the query is refetched and the stale mark clears.
+///
+/// Mutation check: drop the markQuerySourcesTransport call in runRound ->
+/// red (the Traffic section is never marked stale).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_an_unreachable_daemon_marks_the_query_section_stale() {
+    let result = states_scenario("states-outage-marks-query-stale", "now", 90_000);
+    let (good, down, recovered) = (&result["good"], &result["down"], &result["recovered"]);
+
+    assert_eq!(good["section_stale"], false, "{good:#}");
+    assert!(good["figure"].is_string(), "{good:#}");
+    assert_ne!(good["verdict"], "Checking routing state", "{good:#}");
+
+    assert_eq!(down["section_stale"], true, "{down:#}");
+    assert_eq!(down["same_figure_node"], true, "{down:#}");
+    assert_eq!(down["connected"], true, "{down:#}");
+    assert_eq!(down["figure"], good["figure"], "the kept figure moved");
+    assert_eq!(down["error_cards"], 0, "{down:#}");
+    assert_eq!(down["zero_figures"], good["zero_figures"], "{down:#}");
+    assert_eq!(down["verdict"], "Checking routing state", "{down:#}");
+    assert!(
+        text(&down["status"], "the status line").starts_with("stale: last success at "),
+        "{down:#}"
+    );
+
+    assert_eq!(recovered["section_stale"], false, "{recovered:#}");
+    assert_eq!(recovered["error_cards"], 0, "{recovered:#}");
+    assert_ne!(
+        recovered["figure"], down["figure"],
+        "positive control: the recovered query brings fresh figures: {recovered:#}"
+    );
+}
