@@ -18,14 +18,15 @@
   //            span instead of a window: the picker dims and goes inert on
   //            it rather than promising a filter that does not reach the
   //            figures, and the span is shown beside it.
-  //   build    build(primaryRec) -> Node, per the contract in dash_50_dom.js.
+  //   build    build(primaryRec) -> Node, per the contract in dash_50_dom.js;
+  //            every section it composes goes through viewSection.
   var VIEWS = [
     {
       id: 'now',
       label: 'Now',
       sources: [QUERY_SERIES_SOURCE, 'usage'],
       span: null,
-      build: buildOverview
+      build: buildNow
     },
     {
       id: 'accounts',
@@ -53,14 +54,14 @@
       label: 'Config',
       sources: ['config'],
       span: 'current state',
-      build: buildConfig
+      build: buildConfigView
     },
     {
       id: 'doctor',
       label: 'Doctor',
       sources: ['doctor'],
       span: 'current state',
-      build: buildDoctor
+      build: buildDoctorView
     }
   ];
 
@@ -73,31 +74,53 @@
     health: 'accounts'
   };
 
+  // Each view composes its sections through viewSection (dash_40_render.js),
+  // naming the source each section reads: the host, not the section, owns
+  // that section's fault boundary and its stale and pending marks.
+
+  // Where traffic is going: the windowed QUERY's provider cards and tiles,
+  // with the seat quota on them read from the usage ledger and guarded inside.
+  function buildNow() {
+    return viewSection(QUERY_SERIES_SOURCE, buildOverview);
+  }
+
   // Seats and quota: the pools a request can dispatch to, the driver keeping
   // their logins fresh, and the latest quota snapshot per seat. The quota
-  // section reads the usage ledger and guards itself, so a dark ledger costs
-  // the tiles alone.
-  function buildAccounts(rec) {
+  // section reads the usage ledger, so a dark ledger costs the tiles alone.
+  function buildAccounts() {
     var stack = tabStack();
-    stack.appendChild(healthPoolSection(rec));
-    stack.appendChild(healthDriverSection(rec));
-    stack.appendChild(healthQuotaSection());
+    stack.appendChild(viewSection('health', healthPoolSection));
+    stack.appendChild(viewSection('health', healthDriverSection));
+    stack.appendChild(viewSection('usage', function () { return healthQuotaSection(); }));
     return stack;
   }
 
   // What was served in the window, then how the configured chains carried
-  // it. The routing sections read config, health and the all-history ledger,
-  // each behind its own safeSection; buildRouting takes config as the record
-  // it is built around.
-  function buildTraffic(rec) {
+  // it: the chains from config, their live state from health and the
+  // estimate from the all-history ledger.
+  function buildTraffic() {
     var stack = tabStack();
-    stack.appendChild(buildUsage(rec));
-    stack.appendChild(buildRouting(SOURCES.config));
+    stack.appendChild(viewSection(QUERY_SOURCE, buildUsage));
+    stack.appendChild(viewSection('config', routingChainsSection));
+    var chains = liveChains(SOURCES.config);
+    if (!chains.length) { return stack; }
+    stack.appendChild(viewSection('health', function () { return targetStateSection(chains); }));
+    stack.appendChild(viewSection(USAGE_ALL_SOURCE, function () {
+      return attributionSection(chains);
+    }));
     return stack;
   }
 
-  function buildModels(rec) {
-    return healthTargetSection(rec);
+  function buildModels() {
+    return viewSection('health', healthTargetSection);
+  }
+
+  function buildConfigView() {
+    return viewSection('config', buildConfig);
+  }
+
+  function buildDoctorView() {
+    return viewSection('doctor', buildDoctor);
   }
 
   // The registered view with this id, or null.

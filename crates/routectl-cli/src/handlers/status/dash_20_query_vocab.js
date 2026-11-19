@@ -126,10 +126,10 @@
   }
 
   // The adapted QUERY payload of ONE query source, or null when that source
-  // carries no usable payload. `stale` counts as usable: a 503 RETAINS the
-  // last-good data by design, and the degradation is the section status line's
-  // job to report -- discarding it here would turn a recoverable overload into
-  // an invalid-payload card and lose the stale-values reading.
+  // carries no usable payload. `stale` counts as usable: a failed refresh
+  // RETAINS the last-good data by design, and the degradation is the stale
+  // mark's job to report -- discarding it here would turn a recoverable
+  // failure into an invalid-payload card and lose the stale-values reading.
   //
   // A payload that does not match its declared shape returns null, so both
   // query-backed builders throw inside `safeSection` and the source records

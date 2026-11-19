@@ -217,7 +217,11 @@
     var source = querySourceFor(activeTab);
     if (terminal || !body || !source) { return Promise.resolve(); }
     var key = queryBodyKey(body);
-    if (queryRejectedKeyBySource[source] === key) { return Promise.resolve(); }
+    if (queryRejectedKeyBySource[source] === key) {
+      // Nothing will answer a refused selection, so nothing may wait on one.
+      settlePending(source);
+      return Promise.resolve();
+    }
     queryLastAttemptKey = key;
     queryLastAttemptAtMs = Date.now();
     return queryStatus(source, body).then(function (out) {
@@ -287,7 +291,7 @@
       return true;
     }
     if (out.kind !== 'ok') {
-      markSourceTransport(source, out.kind === 'overloaded' ? 'stale' : 'dead');
+      markSourceTransport(source);
       return false;
     }
     renderPanelGuarded(source, out.json);
@@ -480,7 +484,7 @@
   function applyUsageAllOutcome(out) {
     if (out.kind === 'forbidden') { enterTerminal(); return false; }
     if (out.kind !== 'ok') {
-      markSourceTransport(USAGE_ALL_SOURCE, out.kind === 'overloaded' ? 'stale' : 'dead');
+      markSourceTransport(USAGE_ALL_SOURCE);
       return false;
     }
     renderPanelGuarded(USAGE_ALL_SOURCE, out.json);

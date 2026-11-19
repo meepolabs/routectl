@@ -239,14 +239,17 @@
   // Make `next` the page selection and repaint it. With `refetch`, a move
   // re-issues the QUERY once through queryInputChanged, which supersedes any
   // in-flight read for the old selection and resets both query sources. A
-  // changed range, scope or group resets them BEFORE the repaint, so the view
-  // shows its loading state rather than another selection's figures under the
-  // new labels; a view switch alone first repaints the view's own last
-  // payload, which was fetched for this same selection.
+  // changed range, scope or group marks the panes reading those sources
+  // pending (aria-busy) and resets them BEFORE anything is relabeled, so the
+  // view shows a busy loading state rather than another selection's figures
+  // under the new labels, until the answer for the new selection applies. A
+  // view switch alone first repaints the view's own last payload, which was
+  // fetched for this same selection.
   function applyViewState(next, refetch) {
     var prior = currentViewState();
     var inputsMoved = queryInputKey(prior) !== queryInputKey(next);
     var viewMoved = prior.view !== next.view;
+    if (refetch && inputsMoved) { markPending([QUERY_SOURCE, QUERY_SERIES_SOURCE]); }
     activeTab = next.view;
     selectedWindow = next.range;
     selectedProvider = next.scope;

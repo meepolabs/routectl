@@ -519,8 +519,12 @@ main { display: block; }
   font-size: var(--fs-xs);
   opacity: 0.85;
 }
+/* Retained values after a failed refresh: still readable, visibly not current. */
 .section--stale { opacity: 0.45; }
-.section--dead { opacity: 0.55; }
+/* Waiting on the answer for a selection the operator just changed. */
+.pane--pending { cursor: progress; }
+.section--pending { opacity: 0.55; }
+.view-section { min-width: 0; }
 
 .meta {
   font-family: var(--font-mono);

@@ -12,29 +12,25 @@
     half_open_ready: 'tdot--warn'
   };
 
-  // The first multi-source tab: the configured chains come from config, the
-  // step attribution from the usage ledger, and the live target state from
-  // health. Each section is wrapped in its OWN `safeSection` against its OWN
-  // source record, so health going dark costs the state list alone and a
-  // ledger outage costs the estimate alone -- the chains keep rendering
-  // either way. `rec` is the config record (the tab's primary source): with
-  // no chains there is nothing for the other two sections to describe, so
-  // they are not built at all rather than rendered empty.
-  function buildRouting(rec) {
+  // The routing sections: the configured chains come from config, the step
+  // attribution from the usage ledger, and the live target state from health.
+  // Each section is wrapped in its OWN `safeSection` against its OWN source
+  // record, so health going dark costs the state list alone and a ledger
+  // outage costs the estimate alone -- the chains keep rendering either way.
+  // The view that shows them composes them (dash_80_views.js); with no chains
+  // there is nothing for the other two sections to describe, so it does not
+  // build them at all rather than render them empty.
+  function routingChainsSection(rec) {
     var stack = tabStack();
     stack.appendChild(routingHead());
     stack.appendChild(safeSection(rec, buildChainList));
-    var chains = liveChains(rec);
-    if (!chains.length) { return stack; }
-    stack.appendChild(targetStateSection(chains));
-    stack.appendChild(attributionSection(chains));
     return stack;
   }
 
   // The configured chains, or an empty list when config carries none to
   // describe. Keyed on the RETAINED payload rather than on `live`, so a source
-  // marked stale (503, last-known values kept) still gets its derived sections
-  // -- the whole pane is already dimmed in that state. The chain section
+  // marked stale (a failed refresh, last-known values kept) still gets its
+  // derived sections -- its own section is dimmed in that state. The chain section
   // itself reports the malformed case, so this only decides whether the
   // derived sections have anything to describe.
   function liveChains(rec) {

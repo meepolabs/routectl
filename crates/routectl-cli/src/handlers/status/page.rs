@@ -1925,4 +1925,9 @@ mod tests {
         use super::*;
         include!("page_browser_locks_tests.rs");
     }
+
+    mod browser_states {
+        use super::*;
+        include!("page_browser_states_tests.rs");
+    }
 }

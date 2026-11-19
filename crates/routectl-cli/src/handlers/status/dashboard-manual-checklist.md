@@ -92,9 +92,11 @@ banner, no retry signal -- silently mislabeled data.
   advances once per interval, not twice).
 - Force an unavailable ledger (stop the source of the usage database, or
   point the daemon at a path it cannot read) while the page polls. Expected:
-  the affected sources go stale and then dead, the pane status line names the
-  not-current source, the favicon reflects the degraded state, and the data
-  age stays visible rather than the last-good numbers reading as current.
+  a source that had rendered keeps its last values, dimmed and marked stale
+  (a source that never rendered shows its error card), the pane status line
+  names the not-current source, the favicon reflects the degraded state, and
+  the data age stays visible rather than the last-good numbers reading as
+  current.
 - Restore the ledger. Recovery returns to live cadence with no duplicate
   timers and no leftover error card.
 

@@ -101,25 +101,35 @@
     renderSourceChanged(name);
   }
 
-  // A failed refresh must NEVER leave last-good numbers rendered as
-  // current. 503 marks the source visibly stale (muted last-known values
-  // plus a "last success" note); a network/timeout failure clears the
-  // numbers to an explicit no-current-data state. Either way the DATA is
-  // retained or dropped per mode, and siblings are untouched.
-  function markSourceTransport(name, mode) {
-    var stale = mode === 'stale';
+  // A failed background refresh (503, timeout, network) never closes what the
+  // source last rendered: a source holding a payload keeps it and its DOM,
+  // marked stale (the section dims, the status line says since when). A
+  // source with nothing rendered yet has nothing to keep, so it shows the
+  // transport error state. Siblings are untouched either way.
+  function markSourceTransport(name) {
+    var kept = SOURCES[name].data !== null;
     setSource(name, {
-      state: stale ? 'stale' : 'dead',
+      state: kept ? 'stale' : 'dead',
       code: null,
-      data: stale ? SOURCES[name].data : null,
-      badge: stale ? { label: 'stale', kind: 'warn' } : { label: 'offline', kind: 'error' }
+      badge: kept ? { label: 'stale', kind: 'warn' } : { label: 'offline', kind: 'error' }
+    });
+    renderSourceChanged(name);
+  }
+
+  // Polling has stopped for good: nothing on screen is current any more, and
+  // nothing will refresh it.
+  function markSourceStopped(name) {
+    setSource(name, {
+      state: 'dead',
+      code: null,
+      data: null,
+      badge: { label: 'offline', kind: 'error' }
     });
     renderSourceChanged(name);
   }
 
   function markTransport(kind) {
-    var mode = (kind === 'overloaded') ? 'stale' : 'dead';
-    GET_SOURCES.forEach(function (n) { markSourceTransport(n, mode); });
+    GET_SOURCES.forEach(function (n) { markSourceTransport(n); });
     if (kind === 'overloaded') {
       setBanner('warn', 'status overloaded: showing last known values, backing off');
     } else if (kind === 'timeout') {
@@ -137,10 +147,45 @@
   // it reads that source, and refresh the chrome that summarizes every
   // source. A tab that does NOT read the source is left alone -- this is
   // what keeps a dead QUERY confined to Overview and Usage.
+  //
+  // Every answer that applies to a source lands here, so this is also where a
+  // pending source stops being pending: the answer (figures, a refusal or a
+  // failure) is what the view shows next.
   function renderSourceChanged(name) {
+    settlePending(name);
     if (viewFor(activeTab).sources.indexOf(name) >= 0) { renderActiveTab(); }
     renderVerdict();
     syncTabBadges();
+  }
+
+  // ---- pending view changes --------------------------------------------
+
+  // Sources reset by the operator's own range, scope or group change and not
+  // yet answered for the new selection. A pane reading one of them is marked
+  // busy until that answer applies, so nothing in it reads as the current
+  // answer for the selection its controls now show.
+  var PENDING_SOURCES = Object.create(null);
+
+  function markPending(names) {
+    names.forEach(function (name) { PENDING_SOURCES[name] = true; });
+    paintPending();
+  }
+
+  function settlePending(name) {
+    if (!PENDING_SOURCES[name]) { return; }
+    delete PENDING_SOURCES[name];
+    paintPending();
+  }
+
+  function paintPending() {
+    VIEWS.forEach(function (view) {
+      var pane = el('pane-' + view.id);
+      if (!pane) { return; }
+      var busy = view.sources.some(function (name) { return !!PENDING_SOURCES[name]; });
+      pane.classList.toggle('pane--pending', busy);
+      if (busy) { pane.setAttribute('aria-busy', 'true'); }
+      else { pane.removeAttribute('aria-busy'); }
+    });
   }
 
   // ---- tab rendering ---------------------------------------------------
@@ -185,10 +230,6 @@
     // rendered before. Reconciled BEFORE the status line is drawn, since that
     // line reads the effective state.
     var changed = reconcileRenderFaults(pass);
-    var state = effectiveState(primary);
-    pane.classList.remove('section--stale', 'section--dead');
-    if (state === 'stale') { pane.classList.add('section--stale'); }
-    if (state === 'dead') { pane.classList.add('section--dead'); }
     renderSectionStatus(status, primary);
     // A fault raised or cleared by THIS pass changes what the chrome should say
     // about its source. Neither of these re-enters the tab builder, so there is
@@ -369,6 +410,34 @@
     }
   }
 
+  // The host's boundary around ONE section a view composes, bound to the
+  // source that section reads (see VIEWS). The binding is written on the
+  // section, so the panel states are drawn per section rather than per pane:
+  // a section whose source is serving retained values after a failed refresh
+  // is marked stale while its siblings stay current. A throw that escapes the
+  // section's own guards costs this section alone and is recorded against its
+  // source, like a safeSection fault.
+  var SECTION_SOURCE_ATTR = 'data-source';
+
+  function viewSection(name, build) {
+    var rec = SOURCES[name];
+    var wrap = document.createElement('div');
+    wrap.className = 'view-section';
+    wrap.setAttribute(SECTION_SOURCE_ATTR, name);
+    if (rec.state === 'stale') { wrap.classList.add('section--stale'); }
+    if (PENDING_SOURCES[name]) { wrap.classList.add('section--pending'); }
+    var node;
+    try {
+      node = build(rec);
+    } catch (e) {
+      recordRenderFault(name);
+      node = errorCard('invalid_payload',
+        'this section could not be rendered from the payload it received');
+    }
+    wrap.appendChild(node);
+    return wrap;
+  }
+
   // The pane's status line reports a source that is NOT current, and nothing
   // else. A live source says nothing here: the verdict strip already carries the
   // as_of age of the visible tab's data, and repeating it per pane would show
@@ -498,7 +567,7 @@
     setBanner('terminal',
       'This dashboard must be opened via the loopback or bound address ' +
       '(for example http://127.0.0.1:8787). Polling has stopped.');
-    ALL_SOURCES.forEach(function (n) { markSourceTransport(n, 'dead'); });
+    ALL_SOURCES.forEach(markSourceStopped);
     updateWindowSel();
     syncRefreshBtn();
     renderVerdict();
