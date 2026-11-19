@@ -1930,4 +1930,9 @@ mod tests {
         use super::*;
         include!("page_browser_states_tests.rs");
     }
+
+    mod browser_verdict {
+        use super::*;
+        include!("page_browser_verdict_tests.rs");
+    }
 }

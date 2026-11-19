@@ -571,7 +571,6 @@
     updateWindowSel();
     syncRefreshBtn();
     renderVerdict();
-    updateFavicon();
   }
 
   function setBanner(kind, text) {
@@ -591,7 +590,8 @@
   // ---- verdict strip ---------------------------------------------------
 
   // The plain-language verdict: ONE sentence about whether routing is
-  // working, plus the window's req/span figures and the poll indicator.
+  // working, plus the window's req/span figures and the poll indicator. The
+  // favicon follows the verdict, so it is repainted here too.
   // Deliberately carries NO cost figure -- cost is a Usage/Overview reading,
   // and repeating it here would show the same fact twice.
   function renderVerdict() {
@@ -602,72 +602,34 @@
     el('verdict-text').textContent = verdict.text;
     el('verdict-stats').textContent = verdictStats();
     renderPollIndicator();
+    updateFavicon();
   }
 
-  // Precedence: a stopped page, then a dead aggregate, then the today
-  // aggregate's own overload. Past those, seats a request cannot use and
-  // sources a fresh round found unusable or left STALE are BOTH reported:
-  // with both, the seat sentence leads and the source phrases follow it, at the
-  // worse of the two kinds (a seat verdict is bad or warn, a source problem
-  // always warn, so the seat kind); a source problem alone keeps "Routing
-  // healthy - ..."; neither present is healthy. Every arm reads the EFFECTIVE state, so a
-  // source whose section threw during render counts as unusable here rather
-  // than letting the strip claim health beside an error card -- and a source
-  // serving RETAINED values after a 503 is reported as stale rather than
-  // passing as healthy beside the retained figures it is showing.
+  // The verdict reads routing state only: whether the targets and pool seats
+  // a request can dispatch to are usable, from the health payload. A stopped
+  // page says so. Health that is not current (no payload yet, a refusal, a
+  // payload that failed to render, or one RETAINED as stale after a failed
+  // refresh) says nothing about routing now, so the strip reads neutral rather
+  // than repeating an old reading or guessing at a cause; the failure itself
+  // shows on the panels it costs. No other source moves the verdict.
   function verdictState() {
     if (terminal) { return { kind: 'bad', text: 'Polling stopped - open this page on the bound address' }; }
-    var down = GET_SOURCES.filter(function (n) { return SOURCES[n].state === 'dead'; });
-    if (down.length === GET_SOURCES.length) {
-      return { kind: 'bad', text: 'Daemon unreachable - showing no current data' };
-    }
-    if (SOURCES.health.state === 'stale' || SOURCES.usage.state === 'stale') {
-      return { kind: 'warn', text: 'Status overloaded - showing last known values' };
-    }
-    var seats = seatVerdict();
-    var problems = sourceProblems();
-    if (seats && problems.length) {
-      return { kind: seats.kind, text: seats.text + '; ' + problems.join('; ') };
-    }
-    if (seats) { return seats; }
-    if (problems.length) {
-      return { kind: 'warn', text: 'Routing healthy - ' + problems.join('; ') };
-    }
-    if (ALL_SOURCES.every(function (n) { return SOURCES[n].state === 'loading'; })) {
-      return { kind: 'idle', text: 'Checking routes' };
-    }
-    return { kind: 'ok', text: 'All routes healthy' };
+    if (!healthIsCurrent()) { return { kind: 'idle', text: 'Checking routing state' }; }
+    return seatVerdict(SOURCES.health.data) || { kind: 'ok', text: 'All routes healthy' };
   }
 
-  // One phrase per kind of source problem: the sources a fresh round found
-  // unusable, then the sources serving retained values. Empty when every
-  // source is current. Every check reads the EFFECTIVE state.
-  function sourceProblems() {
-    var degraded = ALL_SOURCES.filter(function (n) {
-      var s = effectiveState(SOURCES[n]);
-      return s === 'unavailable' || s === 'incompatible' || s === 'dead' ||
-        s === 'invalid_payload';
-    });
-    var staleSources = ALL_SOURCES.filter(function (n) {
-      return effectiveState(SOURCES[n]) === 'stale';
-    });
-    var parts = [];
-    if (degraded.length) { parts.push(degraded.map(sourceLabel).join(', ') + ' unavailable'); }
-    if (staleSources.length) {
-      parts.push(staleSources.map(sourceLabel).join(', ') + ' data stale');
-    }
-    return parts;
+  function healthIsCurrent() {
+    var rec = SOURCES.health;
+    return effectiveState(rec) === 'live' && !!rec.data;
   }
 
-  // A live health payload reporting seats a request cannot use: a pool with no
+  // Seats a request cannot use, from a current health payload: a pool with no
   // eligible seat is bad; a pool missing some seats, or any target with an
   // eligibility reason, is a warning. Pool seats are also targets, so the pool
   // arms come first and a pool's outage is named once, by the pool. Null when
-  // every seat is usable or health has no live payload to read.
-  function seatVerdict() {
-    var rec = SOURCES.health;
-    if (effectiveState(rec) !== 'live' || !rec.data) { return null; }
-    var pools = Array.isArray(rec.data.pools) ? rec.data.pools : [];
+  // every seat is usable.
+  function seatVerdict(data) {
+    var pools = Array.isArray(data.pools) ? data.pools : [];
     var empty = pools.filter(function (p) { return Number(p.eligible) <= 0 && Number(p.configured) > 0; });
     if (empty.length) {
       return { kind: 'bad', text: 'No usable seat in ' + namedFew(empty.map(poolName)) + ' - see Accounts' };
@@ -677,7 +639,7 @@
       return { kind: 'warn', text: 'Some seats unusable in ' + namedFew(short.map(poolName)) + ' - see Accounts' };
     }
     var blocked = [];
-    (rec.data.targets || []).forEach(function (t) {
+    (data.targets || []).forEach(function (t) {
       if (!t || !t.eligibility || !t.eligibility.reason) { return; }
       if (blocked.indexOf(t.nickname) < 0) { blocked.push(t.nickname); }
     });
@@ -695,23 +657,17 @@
     return names[0] + ' and ' + (names.length - 1) + ' more';
   }
 
-  // req/span for the ACTIVE tab: a query-backed tab reads the adapter's
-  // totals; a GET-backed tab reads the usage totals of the ledger read THAT
-  // tab is looking at -- the all-history one on Routing, the today-scoped
-  // aggregate elsewhere -- so the count and the span beside it always describe
-  // the same read. One derivation each, never both.
+  // req/span for the ACTIVE tab. A count is shown only beside the span it
+  // covers: a query-backed view's count is its own QUERY's totals, read for
+  // the selection the picker shows. Until that answer applies, and on a view
+  // whose span is not a window, the span stands alone; no other read stands
+  // in for it, since none covers the same span and scope.
   function verdictStats() {
     var view = viewFor(activeTab);
     var span = view.span || WINDOW_SPAN[selectedWindow];
-    var primaryName = view.sources[0];
-    var view = primaryName === QUERY_SOURCE ? queryView()
-      : (primaryName === QUERY_SERIES_SOURCE ? querySeriesView() : null);
-    if (view) { return humanCount(view.totals.requests) + ' req ' + span; }
-    var usage = SOURCES[activeTab === 'routing' ? USAGE_ALL_SOURCE : 'usage'];
-    if (usage.state === 'live' && usage.data && usage.data.totals) {
-      return humanCount(num0(usage.data.totals.requests)) + ' req ' + span;
-    }
-    return span;
+    var source = viewQuerySource(view);
+    var answer = source ? queryViewOf(source) : null;
+    return answer ? humanCount(answer.totals.requests) + ' req ' + span : span;
   }
 
   // The poll indicator reports the AGE of the data on screen, not a countdown to

@@ -44,27 +44,20 @@
     return Date.now() > nextDueAtMs + TIMEOUT_MS + FRESH_SLACK_MS;
   }
 
-  // Warn-or-error, computed ONLY from the last fresh render of each source
-  // (never from transport-failure state, which surfaces via backoff /
-  // staleness at a higher precedence): any source a fresh round found
-  // unusable, or any badge of kind warn/error.
-  function isWarnError() {
-    for (var i = 0; i < ALL_SOURCES.length; i++) {
-      var rec = SOURCES[ALL_SOURCES[i]];
-      var state = effectiveState(rec);
-      if (state === 'unavailable' || state === 'incompatible' ||
-        state === 'invalid_payload') { return true; }
-      if (rec.badge && (rec.badge.kind === 'warn' || rec.badge.kind === 'error')) { return true; }
-    }
-    return false;
-  }
+  // The icon follows the verdict strip (ok, warn or bad, or idle while routing
+  // state is not current), behind the two arms the strip does not carry: a
+  // stopped page, and data the wall clock says has aged out.
+  var FAVICON_BY_VERDICT = {
+    ok: 'ok',
+    warn: 'warn_error',
+    bad: 'warn_error',
+    idle: 'stale_unknown'
+  };
 
-  // Precedence: terminal > stale_unknown > warn_error > ok.
   function faviconState() {
     if (terminal) { return 'terminal'; }
     if (isStaleUnknown()) { return 'stale_unknown'; }
-    if (isWarnError()) { return 'warn_error'; }
-    return 'ok';
+    return FAVICON_BY_VERDICT[verdictState().kind];
   }
 
   function updateFavicon() {
@@ -106,7 +99,7 @@
   // falls back to the default and the address is rewritten canonical with
   // replaceState. scope is the one open value. It reaches the QUERY body and
   // labels drawn with textContent, so it is only trimmed, bounded and
-  // refused when it carries a control or format character (see scopeParam).
+  // refused when it carries a hidden character (see scopeParam).
   //
   // A link from before the query keys, `#<view>[/<window>]`, still opens: an
   // old tab token goes through canonicalViewId, and the window segment is the
@@ -126,10 +119,12 @@
   // The server refuses a blank provider and counts U+0085 as blank, which
   // String.prototype.trim does not strip.
   var SCOPE_EDGE_SPACE = /^[\s\u0085]+|[\s\u0085]+$/g;
-  // Provider names are config identifiers. A control or format character
-  // (zero-width, bidi override) only makes a label read as a provider it is
-  // not.
-  var SCOPE_HIDDEN_CHAR = /[\p{Cc}\p{Cf}]/u;
+  // Provider names are config identifiers. A character that draws nothing or
+  // draws as a plain space (a control or format character, a default-ignorable
+  // one such as a variation selector or a Hangul filler, a line or paragraph
+  // separator, any inner whitespace but U+0020) only makes a label read as a
+  // provider it is not.
+  var SCOPE_HIDDEN_CHAR = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}]|[^\S ]/u;
   var SORT_DIRS = ['asc', 'desc'];
   // Sortable tables by id, each with the column ids it sorts by (the `sortBy`
   // ids its mkTable call declares; a page test keeps the two equal). A sort

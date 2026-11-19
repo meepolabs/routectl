@@ -43,19 +43,8 @@
   // the query wire version.
   var SOURCE_PANEL = { usage_all: 'usage', query_series: 'query' };
 
-  // What a degraded source is called in the verdict strip. A source name is
-  // an internal key; only the ones that do not read as English need a word.
-  var SOURCE_LABELS = {
-    usage_all: 'all-history usage',
-    query_series: 'bucketed usage'
-  };
-
   function expectedVersion(name) {
     return EXPECTED[SOURCE_PANEL[name] || name];
-  }
-
-  function sourceLabel(name) {
-    return SOURCE_LABELS[name] || name;
   }
 
   var WINDOWS = ['today', 'week', 'month', 'all'];

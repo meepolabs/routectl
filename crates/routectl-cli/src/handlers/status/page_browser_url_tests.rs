@@ -236,18 +236,43 @@ fn scope_cases() -> Vec<ScopeCase> {
         scope_case("C0 control dropped", "anthro%01pic", None, "#now"),
         scope_case("inner tab dropped", "anthro%09pic", None, "#now"),
         scope_case("inner next-line dropped", "anthro%C2%85pic", None, "#now"),
+        scope_case(
+            "combining grapheme joiner dropped",
+            "anthro%CD%8Fpic",
+            None,
+            "#now",
+        ),
+        scope_case(
+            "variation selector dropped",
+            "anthropic%EF%B8%8F",
+            None,
+            "#now",
+        ),
+        scope_case("hangul filler dropped", "%E3%85%A4", None, "#now"),
+        scope_case("line separator dropped", "anthro%E2%80%A8pic", None, "#now"),
+        scope_case(
+            "inner no-break space dropped",
+            "anthro%C2%A0pic",
+            None,
+            "#now",
+        ),
     ]
 }
 
 /// The scope value classes the URLSearchParams parser can produce: each is
 /// trimmed, kept at up to 128 chars and dropped when blank or longer, longer
-/// than 512 before the trim, or carrying a control or format character, and
-/// the QUERY sent for it carries exactly the kept value or no provider at all.
-/// Non-ASCII text that is neither (the euro sign, U+FFFD) is kept.
+/// than 512 before the trim, or carrying a character that draws nothing or
+/// draws as a plain space (control, format, default-ignorable, line or
+/// paragraph separator, inner whitespace other than U+0020), and the QUERY
+/// sent for it carries exactly the kept value or no provider at all.
+/// Non-ASCII text that is none of these (the euro sign, U+FFFD) is kept, as
+/// is an inner U+0020 (the plus row).
 ///
 /// Mutation checks: drop the length bound in scopeParam -> red (129/200
-/// rows); drop the control/format test -> red (the five dropped-character
-/// rows); drop the raw bound -> red (past-the-raw-bound row).
+/// rows); drop the hidden-character test -> red (every dropped-character
+/// row); drop `\p{Default_Ignorable_Code_Point}` from it -> red (the joiner,
+/// variation selector and filler rows); drop the raw bound -> red
+/// (past-the-raw-bound row).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_scope_from_the_address_is_trimmed_bounded_and_sent_as_given() {
@@ -419,7 +444,13 @@ fn page_browser_open_rows_dialogs_focus_and_scroll_stay_out_of_the_address() {
 
 /// The spellings the guard's sites pattern matches, plus the other ways a
 /// script reaches the address: the document's own URL, navigation by method,
-/// and a bracket access on location or history.
+/// and a bracket access on location, history or a global holder.
+///
+/// This is a text scan, so it covers spellings, not the class: a member name
+/// or event name computed at run time (`'hash' + 'change'`, a key held in a
+/// variable) is out of its reach. The bracket needles flag every computed
+/// access on an object that holds the address, so such a name can only reach
+/// the address through code the scan reports.
 const SITE_NEEDLES: &[&str] = &[
     "location.hash",
     "location.search",
@@ -431,19 +462,34 @@ const SITE_NEEDLES: &[&str] = &[
     "popstate",
     "decodeURI",
     "document.URL",
+    "documentURI",
+    "baseURI",
     "location.assign",
     "location.replace",
     "location[",
     "history[",
+    "window[",
+    "self[",
+    "globalThis[",
+    "document[",
 ];
 
 /// Globals that hold the address. Any code reference to one, not only the
 /// spellings above, is a site: `var h = history; h.back()` or `location = x`.
-const ADDRESS_GLOBALS: &[&str] = &["location", "history"];
+const ADDRESS_GLOBALS: &[&str] = &["location", "history", "navigation"];
 
 /// Objects through which a global is reached as a member: `window.location`
-/// is the same object as `location`.
-const GLOBAL_HOLDERS: &[&str] = &["window", "self", "globalThis", "document"];
+/// is the same object as `location`, and `top.location` is another frame's.
+const GLOBAL_HOLDERS: &[&str] = &[
+    "window",
+    "self",
+    "globalThis",
+    "document",
+    "top",
+    "parent",
+    "opener",
+    "frames",
+];
 
 /// Offsets in `code` (comments already stripped) of each identifier `name`
 /// that refers to the global: outside string literals, not part of a longer
@@ -651,6 +697,33 @@ fn the_url_site_scan_flags_a_read_outside_the_codec() {
             "document.location.hash = 'x';",
             &["location.hash", "location"],
         ),
+        ("top member", "top.location = '#x';", &["location"]),
+        ("parent member", "var l = parent.location;", &["location"]),
+        ("opener member", "opener.history.back();", &["history"]),
+        ("frames member", "var l = frames.location;", &["location"]),
+        ("navigation", "navigation.navigate('#x');", &["navigation"]),
+        (
+            "document URI",
+            "var u = document.documentURI;",
+            &["documentURI"],
+        ),
+        ("base URI", "var u = document.baseURI;", &["baseURI"]),
+        (
+            "window computed",
+            "var h = window['location'].hash;",
+            &["window["],
+        ),
+        ("self computed", "var h = self[key];", &["self["]),
+        (
+            "globalThis computed",
+            "var h = globalThis[key];",
+            &["globalThis["],
+        ),
+        (
+            "document computed",
+            "var u = document[key];",
+            &["document["],
+        ),
     ];
     for (name, extra, expected) in rows {
         let src = synthetic_codec_page(&format!("function other() {{ {extra} }}\n"));
@@ -675,7 +748,11 @@ fn the_url_site_scan_ignores_members_strings_comments_and_the_codec() {
         ("codec only", ""),
         (
             "member of another object",
-            "var n = rec.history.length; x.location = 1;",
+            "var n = rec.history.length; x.location = 1; rec.top.location = 1;",
+        ),
+        (
+            "holder names as plain words",
+            "var top = wrap.scrollTop; var parent = node.parentNode; frames.push(1);",
         ),
         (
             "longer identifier",

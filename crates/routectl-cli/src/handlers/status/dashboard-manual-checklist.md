@@ -94,7 +94,8 @@ banner, no retry signal -- silently mislabeled data.
   point the daemon at a path it cannot read) while the page polls. Expected:
   a source that had rendered keeps its last values, dimmed and marked stale
   (a source that never rendered shows its error card), the pane status line
-  names the not-current source, the favicon reflects the degraded state, and
+  names the not-current source, the verdict line and favicon keep reading
+  routing state (a ledger fault is not a routing fault), and
   the data age stays visible rather than the last-good numbers reading as
   current.
 - Restore the ledger. Recovery returns to live cadence with no duplicate
@@ -225,11 +226,11 @@ banner, no retry signal -- silently mislabeled data.
 - With a seat still unusable, block `/status/usage?window=all` in the
   browser devtools (request blocking; it is the one source fetched on its
   own, while config, health and doctor ride the `/status` aggregate) and wait
-  two polls. The status line reports BOTH: `No usable seat in <pool> - see
-  Accounts; all-history usage unavailable` (red with every seat out, amber with
-  some), never the seat sentence alone and never "Routing healthy - ...".
-  Log every seat in with the block still on: the line reads `Routing healthy
-  - all-history usage unavailable` in amber.
+  two polls. The status line still reads the seat sentence alone (red with
+  every seat out, amber with some): a source other than health never moves
+  it, and the blocked source shows its failure only on its own sections.
+  Log every seat in with the block still on: the line reads `All routes
+  healthy`.
 - The Accounts and Models tab badges each count every target with an
   eligibility reason or a non-closed breaker once: two logged-out seats badge `2`, and a seat that is
   both logged out and breaker-open still counts once. The favicon turns amber
