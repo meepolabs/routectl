@@ -205,9 +205,6 @@ pub enum PollApplicability {
 pub(super) enum PollAttempt {
     /// The seat's provider has no usage endpoint; nothing was read or sent.
     NotPolled,
-    /// A reload switched `[usage] poll` off after the sweep picked the seat;
-    /// the token was not read and nothing was sent.
-    SwitchedOff,
     Attempted {
         vendor: UsageVendor,
         attempted_ms: i64,
@@ -352,23 +349,23 @@ impl SeatJob for UsagePollJob {
             .collect()
     }
 
+    /// The sweep's router is the one loaded before the first seat's
+    /// request; a reload during an earlier seat's request shows only on the
+    /// published one.
+    fn is_switched_off(&self) -> bool {
+        !self.live_router.load().config.usage.poll
+    }
+
     fn run(&self, seat: &ManagedSeat) -> impl Future<Output = PollAttempt> + Send {
         let attempted_ms = self.state.clock.now_ms();
         let vendor = usage_vendor(&seat.provider);
         let store = Arc::clone(&self.store);
         let client = self.client.clone();
         let seat = seat.clone();
-        let live_router = Arc::clone(&self.live_router);
         async move {
             let Some(vendor) = vendor else {
                 return PollAttempt::NotPolled;
             };
-            // The sweep's router is the one loaded before the first seat's
-            // request; a reload during an earlier seat's request shows only
-            // on the published one.
-            if !live_router.load().config.usage.poll {
-                return PollAttempt::SwitchedOff;
-            }
             let user_agent = (vendor == UsageVendor::Anthropic).then(|| seat_user_agent(&seat));
             let credential = store.peek_credential(&seat.account).await;
             let reload_generation = credential.reload_generation;

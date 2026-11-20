@@ -410,6 +410,10 @@ async fn a_reload_switching_the_poll_off_mid_sweep_sends_nothing_for_the_seats_s
             .await;
         rig.pass_every_deadline();
         let router = rig.swap.load_full();
+        assert!(
+            !router.has_credential_record_for_tests(CODEX_SEAT),
+            "{row}: premise, the waiting seat has no credential record yet"
+        );
 
         // Act: reload while the first request is out, then let it answer.
         let reload_then_release = async {
@@ -428,6 +432,11 @@ async fn a_reload_switching_the_poll_off_mid_sweep_sends_nothing_for_the_seats_s
             rig.hits().await,
             1,
             "{row}: premise, the first request went out"
+        );
+        assert_eq!(
+            rig.swap.load().has_credential_record_for_tests(CODEX_SEAT),
+            landed,
+            "{row}: the waiting seat's credential record"
         );
         assert_eq!(
             rig.codex_hits().await,

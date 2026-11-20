@@ -430,6 +430,14 @@ impl Router {
             .map_or(0, |record| record.generation())
     }
 
+    /// Whether `account` holds a credential record, read without creating
+    /// one. Test seam.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn has_credential_record_for_tests(&self, account: &str) -> bool {
+        self.credential_accounts.lock().contains_key(account)
+    }
+
     /// Admit one client dispatch on `state_key` through the real gate and
     /// return the credential generation the admission captured, or `None`
     /// when the gate refused. Test seam for holding an admitted attempt

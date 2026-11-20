@@ -92,6 +92,13 @@ pub(super) trait SeatJob: Send + Sync {
     /// The seats due for this job on `router`, in sweep order.
     fn due(&self, router: &Router) -> Vec<ManagedSeat>;
 
+    /// Whether the job was switched off since the sweep picked its seats.
+    /// Checked before each seat's credential generation is acquired, so a
+    /// seat still waiting when the job goes off is left untouched.
+    fn is_switched_off(&self) -> bool {
+        false
+    }
+
     /// Run the job for `seat`.
     fn run(&self, seat: &ManagedSeat) -> impl Future<Output = Self::Outcome> + Send;
 
@@ -401,6 +408,9 @@ const fn exit_for(changed: Result<(), watch::error::RecvError>) -> DriverExit {
 pub(super) async fn sweep<J: SeatJob>(job: &J, router: &Router) -> SweepTally {
     let mut tally = SweepTally::default();
     for seat in job.due(router) {
+        if job.is_switched_off() {
+            break;
+        }
         let generation = router.acquire_credential_generation(&seat.account);
         let outcome = job.run(&seat).await;
         match job.apply(router, &seat, generation, outcome) {

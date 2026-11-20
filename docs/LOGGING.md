@@ -1903,8 +1903,10 @@ both place, the first pool's record is stored:
 `{"rule": "pace_v1", "event": "birth" | "move" | "keyless", "arm": "roomy" |
 "low_room" | "unread", "seat": "<account key>", "trigger": "<reason>"}`.
 `arm` is the tier of the seat the request was placed on (for a move, the seat
-it moved to); `seat` is that seat's account key, the same value as the
-`requests.seat` column uses; `trigger` is present on a move only and is
+it moved to); `seat` is that seat's account key, in the form the
+`requests.seat` column uses. `requests.seat` is the account that served the
+request, so after a fallback it can name another seat or be NULL while
+`placement.seat` still names the placed one; `trigger` is present on a move only and is
 `credential_unusable`, `account_parked` or `breaker_open`. The record holds
 nothing else: no credential, header, session key or request content. Treat
 an unknown token as unknown. A row with no placement has no `placement` key.
