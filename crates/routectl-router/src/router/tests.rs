@@ -799,18 +799,14 @@ fn observed_quota_reading(utilization: &str) -> crate::quota::reduce::QuotaSnaps
     .snapshot
 }
 
-/// The fraction of a seat's FAST window, or `None` when it reads as no
-/// evidence.
+/// The used fraction of a seat's fresh five-hour window, or `None` when it
+/// holds none.
 fn quota_fast_fraction(router: &Router, key: &crate::quota::key::SeatKey) -> Option<f64> {
-    let reading = router
-        .quota_store
-        .reading_for(key, &crate::quota::freshness::ObservationStamp::now())?;
-    match reading.fast {
-        crate::quota::window::QuotaWindow::Known { utilization, .. } => {
-            Some(utilization.fraction())
-        }
-        crate::quota::window::QuotaWindow::Unknown => None,
-    }
+    crate::quota::test_support::fresh_five_hour(
+        &router.quota_store,
+        key,
+        &crate::quota::freshness::ObservationStamp::now(),
+    )
 }
 
 #[test]
@@ -2225,10 +2221,6 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
         "rc_feature_naming_unmatched_total",
         "rc_verified_working_total",
         "rc_f3_suspect_total",
-        "rc_quota_placement_below_cap_total",
-        "rc_quota_placement_all_capped_total",
-        "rc_quota_placement_mixed_unknown_total",
-        "rc_quota_placement_all_unknown_total",
         // The pool counters, including the one whose only driver today is the
         // seam `note_pool_removed_pin_repick`: a counter absent from the
         // snapshot is unobservable, and a zero-valued one is the honest report

@@ -54,10 +54,13 @@ pub mod feed;
 pub mod freshness;
 pub mod key;
 pub mod meter;
+pub mod model_scope;
 pub mod placement;
 pub mod reading;
 pub mod reduce;
 pub mod store;
+#[cfg(test)]
+pub mod test_support;
 pub mod usage_body;
 pub mod view;
 pub mod window;

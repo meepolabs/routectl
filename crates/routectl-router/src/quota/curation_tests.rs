@@ -1,10 +1,9 @@
 //! Self-tests over the curated table.
 //!
 //! These check properties of the TABLE rather than of any one lookup, which is
-//! the reason the five facts share one row: a duplicate role, a threshold off
-//! its scale, a zero duration and a tolerance wider than the window it guards
-//! are each a mismatch BETWEEN columns, and none of them is visible from a
-//! single field. The Codex-has-no-row assertion is here for the same
+//! the reason the four facts share one row: a duplicate role, a zero duration
+//! and a tolerance wider than the window it guards are each a mismatch BETWEEN
+//! columns, and none of them is visible from a single field. The Codex-has-no-row assertion is here for the same
 //! reason -- it is the absence of a row, so only a test over the whole table
 //! can pin it.
 
@@ -60,19 +59,6 @@ fn no_provider_curates_two_rows_for_one_source_window() {
 }
 
 #[test]
-fn every_threshold_sits_inside_the_utilization_scale() {
-    for row in all_rows() {
-        assert!(
-            row.threshold.is_finite() && row.threshold > 0.0 && row.threshold <= 1.0,
-            "{} {} has threshold {}, which is not a usable fraction of a window",
-            row.provider_kind,
-            row.source_id,
-            row.threshold
-        );
-    }
-}
-
-#[test]
 fn no_window_has_a_zero_duration() {
     for row in all_rows() {
         assert!(
@@ -113,7 +99,7 @@ fn anthropic_curates_the_five_hour_window_fast_and_the_seven_day_window_slow() {
 }
 
 #[test]
-fn codex_curates_no_row_so_its_fast_cap_is_dormant_by_construction() {
+fn codex_curates_no_row() {
     assert_eq!(
         rows_for(CODEX_PROVIDER_KIND).count(),
         0,

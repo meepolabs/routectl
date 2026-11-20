@@ -49,14 +49,14 @@
 //!   fractions floor, the poll endpoint rounds) and is accepted at the stored
 //!   fraction. A multi-window observation is taken only when every lower
 //!   window in it has confirmed.
-//! - A complete report that drops the account-wide five-hour window (the one
-//!   placement reads) while it is running and in effect keeps that window
+//! - A complete report that drops the account-wide five-hour window while it
+//!   is running and in effect keeps that window
 //!   aside, and a later reading for the key is reconciled against it exactly
 //!   as against a stored window, until a reading for the key is accepted or
 //!   the kept window stops being in effect. Otherwise a report omitting the
 //!   window would clear the way for an unstarted or emptied one. Other keys
-//!   keep nothing once dropped: placement does not read them, and holding a
-//!   weekly window would refuse the account's polls for up to a week.
+//!   keep nothing once dropped: holding a weekly window would refuse the
+//!   account's polls for up to a week.
 //!
 //! # Why the window map is bounded
 //!
@@ -73,14 +73,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::curation::{ANTHROPIC_PROVIDER_KIND, RESET_TOLERANCE, row_for};
-use super::freshness::{ObservationStamp, is_fresh, reset_after};
+use super::freshness::{ObservationStamp, is_fresh};
 use super::reading::{
     AccountObservation, ObservationReport, ReadingSource, Started, WindowKey, WindowReading,
     WindowSet,
 };
 use super::reduce::{QuotaSnapshot, RejectionReason};
 use super::store::MAX_OBSERVATION_AGE;
-use super::view::{STALE_AFTER, within_stale_after};
 use super::window::{Billing, QuotaWindow, WindowRole};
 
 /// How far, as a fraction of the window, a same-reset reading may fall below
@@ -149,41 +148,6 @@ impl StoredWindow {
                 .reading
                 .reset()
                 .is_some_and(|reset| is_fresh(reset.at(), &self.observed, now, MAX_OBSERVATION_AGE))
-    }
-
-    /// This window as today's placement value at `now`, in `role`.
-    ///
-    /// A running window holds until its reset. An unstarted FAST window says
-    /// the account has used nothing of it, but only as of its observation: it
-    /// reads as known zero while no older than [`STALE_AFTER`], with that
-    /// bound as its reset, and as unknown after.
-    fn projected(&self, role: &WindowRole, now: &ObservationStamp) -> QuotaWindow {
-        if self.reading.started() == Started::No {
-            return match role {
-                WindowRole::Fast => self.projected_unstarted(now),
-                WindowRole::Slow => QuotaWindow::Unknown,
-            };
-        }
-        match self.reading.reset() {
-            Some(reset_at) if self.is_effective(now) => QuotaWindow::Known {
-                utilization: self.reading.used().clone(),
-                reset_at,
-            },
-            _ => QuotaWindow::Unknown,
-        }
-    }
-
-    fn projected_unstarted(&self, now: &ObservationStamp) -> QuotaWindow {
-        if !within_stale_after(&self.observed, now) {
-            return QuotaWindow::Unknown;
-        }
-        reset_after(&self.observed, STALE_AFTER, self.reading.key().length()).map_or(
-            QuotaWindow::Unknown,
-            |reset_at| QuotaWindow::Known {
-                utilization: self.reading.used().clone(),
-                reset_at,
-            },
-        )
     }
 }
 
@@ -615,33 +579,6 @@ impl AccountMeter {
         } else {
             Billing::Unknown
         }
-    }
-
-    /// Today's placement value at `now`: FAST is the account-wide window of
-    /// the curated five-hour length, SLOW the account-wide window of the
-    /// curated long length, each `Unknown` once past its reset or the age
-    /// ceiling. An unstarted window is `Unknown`, except a FAST one no older
-    /// than [`STALE_AFTER`], which is known zero.
-    pub(super) fn projection(&self, now: &ObservationStamp) -> QuotaSnapshot {
-        QuotaSnapshot {
-            observed: self.latest,
-            fast: self.projected_role(&WindowRole::Fast, now),
-            slow: self.projected_role(&WindowRole::Slow, now),
-            // Billing ages on the same ceiling as a window: it has no reset of
-            // its own, and an overage claim must not outlive the capacity
-            // signal it arrived beside.
-            billing: if within_ceiling(&self.billing_observed, now) {
-                self.billing.clone()
-            } else {
-                Billing::Unknown
-            },
-        }
-    }
-
-    fn projected_role(&self, role: &WindowRole, now: &ObservationStamp) -> QuotaWindow {
-        role_key(role)
-            .and_then(|key| self.windows.get(&key))
-            .map_or(QuotaWindow::Unknown, |stored| stored.projected(role, now))
     }
 }
 

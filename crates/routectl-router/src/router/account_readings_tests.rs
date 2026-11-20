@@ -331,15 +331,12 @@ fn a_polled_idle_seat_projects_a_known_empty_fast_window() {
 
     // Assert
     let key = crate::quota::key::seat_key_for_served_identity(ACCOUNT);
-    let fast = router
-        .quota_store
-        .reading_for(&key, &ObservationStamp::now())
-        .expect("an entry")
-        .fast;
-    assert!(
-        matches!(&fast, crate::quota::window::QuotaWindow::Known { utilization, .. } if utilization.fraction() == 0.0),
-        "{fast:?}"
+    let fast = crate::quota::test_support::fresh_five_hour(
+        &router.quota_store,
+        &key,
+        &ObservationStamp::now(),
     );
+    assert_eq!(fast, Some(0.0));
 }
 
 /// A seat polled as running near its cap, then polled as idle while that

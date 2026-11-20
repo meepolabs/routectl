@@ -11,10 +11,10 @@ use super::*;
 
 use std::time::Instant;
 
-use crate::quota::curation::ANTHROPIC_PROVIDER_KIND;
 use crate::quota::freshness::accept_reset;
 use crate::quota::key::seat_key_for_secret_ref;
-use crate::quota::placement::{SeatQuota, seat_tiers};
+use crate::quota::placement::{Tier, standing};
+use crate::quota::test_support::{fresh_five_hour, held_five_hour, held_seven_day, reading};
 use crate::quota::window::{Billing, QuotaWindow, Utilization};
 
 const SEAT_PROVIDER: &str = "anthropic";
@@ -72,24 +72,15 @@ fn store() -> QuotaStore {
     store
 }
 
-/// The fraction of a known window, or a panic naming what came back unknown.
-fn fraction_of(window: &QuotaWindow, role: &str) -> f64 {
-    match window {
-        QuotaWindow::Known { utilization, .. } => utilization.fraction(),
-        QuotaWindow::Unknown => panic!("the {role} window was expected to be known"),
-    }
-}
-
 #[test]
 fn a_fresh_store_holds_nothing() {
     let store = store();
 
     assert!(store.is_empty());
     assert_eq!(store.len(), 0);
-    assert!(
-        store
-            .reading_for(&seat(None), &stamp_at(Duration::ZERO))
-            .is_none()
+    assert_eq!(
+        held_five_hour(&store, &seat(None), &stamp_at(Duration::ZERO)),
+        None
     );
 }
 
@@ -108,11 +99,8 @@ fn a_first_observation_is_stored_for_an_admitted_seat() {
     );
 
     assert!(stored);
-    let reading = store
-        .reading_for(&seat(None), &observed)
-        .expect("the seat now holds a reading");
-    assert_eq!(fraction_of(&reading.fast, "fast"), 0.25);
-    assert_eq!(reading.slow, QuotaWindow::Unknown);
+    assert_eq!(held_five_hour(&store, &seat(None), &observed), Some(0.25));
+    assert_eq!(held_seven_day(&store, &seat(None), &observed), None);
 }
 
 /// Membership is enforced at INSERTION, not filtered at read: an identity
@@ -160,8 +148,7 @@ fn a_newer_known_replaces_an_older_known() {
         ),
     );
 
-    let reading = store.reading_for(&seat(None), &second).expect("a reading");
-    assert_eq!(fraction_of(&reading.fast, "fast"), 0.40);
+    assert_eq!(held_five_hour(&store, &seat(None), &second), Some(0.40));
 }
 
 /// A window RESETTING is the case a smoothing merge would get wrong: once the
@@ -190,10 +177,9 @@ fn a_newer_known_replaces_an_older_one_even_when_utilization_decreases() {
         ),
     );
 
-    let reading = store.reading_for(&seat(None), &second).expect("a reading");
     assert_eq!(
-        fraction_of(&reading.fast, "fast"),
-        0.05,
+        held_five_hour(&store, &seat(None), &second),
+        Some(0.05),
         "a window that reset must report its new value, not its high-water mark"
     );
 }
@@ -217,8 +203,7 @@ fn a_newer_known_replaces_a_stored_unknown() {
         ),
     );
 
-    let reading = store.reading_for(&seat(None), &second).expect("a reading");
-    assert_eq!(fraction_of(&reading.fast, "fast"), 0.30);
+    assert_eq!(held_five_hour(&store, &seat(None), &second), Some(0.30));
 }
 
 #[test]
@@ -240,10 +225,9 @@ fn an_incoming_unknown_preserves_a_still_fresh_known() {
         snapshot(second, QuotaWindow::Unknown, QuotaWindow::Unknown),
     );
 
-    let reading = store.reading_for(&seat(None), &second).expect("a reading");
     assert_eq!(
-        fraction_of(&reading.fast, "fast"),
-        0.30,
+        held_five_hour(&store, &seat(None), &second),
+        Some(0.30),
         "one response that carried no header is not evidence the budget changed"
     );
 }
@@ -270,12 +254,9 @@ fn an_incoming_unknown_leaves_unknown_once_the_stored_reading_expired() {
         snapshot(after_reset, QuotaWindow::Unknown, QuotaWindow::Unknown),
     );
 
-    let reading = store
-        .reading_for(&seat(None), &after_reset)
-        .expect("a reading");
     assert_eq!(
-        reading.fast,
-        QuotaWindow::Unknown,
+        fresh_five_hour(&store, &seat(None), &after_reset),
+        None,
         "a window past its own reset must never be revived by a merge"
     );
 }
@@ -283,12 +264,12 @@ fn an_incoming_unknown_leaves_unknown_once_the_stored_reading_expired() {
 /// An unknown header arriving after the stored window expired speaks for that
 /// window at its own stamp, so a reading observed before it and delivered
 /// after it must not revive the window. Positive control: the same delayed
-/// reading without the unknown header is accepted and places the seat.
+/// reading without the unknown header is accepted and ranks the seat.
 #[test]
 fn a_delayed_reading_older_than_an_unknown_after_expiry_never_revives_the_window() {
     let t0 = stamp_at(Duration::ZERO);
     let t2 = stamp_at(Duration::from_mins(90));
-    let t3 = stamp_at(Duration::from_hours(2));
+    let t3 = stamp_at(Duration::from_mins(93));
     let first = snapshot(
         t0,
         known(0.70, &t0, Duration::from_hours(1)),
@@ -315,22 +296,19 @@ fn a_delayed_reading_older_than_an_unknown_after_expiry_never_revives_the_window
 
         store.observe(&seat(None), delayed.clone());
 
-        let fast = store.reading_for(&seat(None), &t3).expect("a reading").fast;
-        let tiers = seat_tiers(
-            &store,
-            &[Some(seat(None))],
-            Some(ANTHROPIC_PROVIDER_KIND),
+        let fast = fresh_five_hour(&store, &seat(None), &t3);
+        let tier = standing(
+            reading(&store, &seat(None), &t3).as_ref(),
+            "claude-opus-4-7",
             &t3,
-        );
+        )
+        .tier;
         if with_unknown {
-            assert_eq!(fast, QuotaWindow::Unknown, "row: {name}");
-            assert_eq!(tiers, vec![SeatQuota::Unknown], "row: {name}");
+            assert_eq!(fast, None, "row: {name}");
+            assert_eq!(tier, Tier::Unread, "row: {name}");
         } else {
-            assert_eq!(fraction_of(&fast, "fast"), 0.10, "row: {name}");
-            assert!(
-                matches!(tiers.as_slice(), [SeatQuota::BelowCap { .. }]),
-                "row: {name}: {tiers:?}"
-            );
+            assert_eq!(fast, Some(0.10), "row: {name}");
+            assert_eq!(tier, Tier::Roomy, "row: {name}");
         }
     }
 }
@@ -345,11 +323,8 @@ fn an_incoming_unknown_leaves_unknown_when_no_prior_reading_exists() {
         snapshot(observed, QuotaWindow::Unknown, QuotaWindow::Unknown),
     );
 
-    let reading = store
-        .reading_for(&seat(None), &observed)
-        .expect("a reading");
-    assert_eq!(reading.fast, QuotaWindow::Unknown);
-    assert_eq!(reading.slow, QuotaWindow::Unknown);
+    assert_eq!(held_five_hour(&store, &seat(None), &observed), None);
+    assert_eq!(held_seven_day(&store, &seat(None), &observed), None);
 }
 
 /// Responses complete out of order, and a late arrival describes an EARLIER
@@ -382,10 +357,9 @@ fn an_older_observation_never_overwrites_a_newer_one() {
     // window it describes rather than by refusing the whole snapshot. A
     // snapshot-level refusal would also throw away this arrival's OTHER
     // windows, which may be the newest readings there are for them.
-    let reading = store.reading_for(&seat(None), &later).expect("a reading");
     assert_eq!(
-        fraction_of(&reading.fast, "fast"),
-        0.40,
+        held_five_hour(&store, &seat(None), &later),
+        Some(0.40),
         "the newer reading stands; the late arrival describing an earlier moment did not \
          install itself over it"
     );
@@ -416,11 +390,10 @@ fn omitting_one_window_does_not_erase_the_other() {
         ),
     );
 
-    let reading = store.reading_for(&seat(None), &second).expect("a reading");
-    assert_eq!(fraction_of(&reading.fast, "fast"), 0.35);
+    assert_eq!(held_five_hour(&store, &seat(None), &second), Some(0.35));
     assert_eq!(
-        fraction_of(&reading.slow, "slow"),
-        0.60,
+        held_seven_day(&store, &seat(None), &second),
+        Some(0.60),
         "the omitted window keeps its own last reading"
     );
 }
@@ -440,13 +413,10 @@ fn a_window_past_its_own_reset_reads_unknown_at_read_time() {
         ),
     );
 
-    let reading = store
-        .reading_for(&seat(None), &stamp_at(Duration::from_hours(2)))
-        .expect("the entry still exists");
+    let fast = fresh_five_hour(&store, &seat(None), &stamp_at(Duration::from_hours(2)));
 
     assert_eq!(
-        reading.fast,
-        QuotaWindow::Unknown,
+        fast, None,
         "an expired window must read as no evidence, not as its last value -- \
          a low stale reading would attract every new session"
     );
@@ -468,11 +438,9 @@ fn a_reading_older_than_the_age_ceiling_reads_unknown_however_far_its_reset() {
         ),
     );
 
-    let reading = store
-        .reading_for(&seat(None), &stamp_at(MAX_OBSERVATION_AGE + WINDOW))
-        .expect("the entry still exists");
+    let fast = fresh_five_hour(&store, &seat(None), &stamp_at(MAX_OBSERVATION_AGE + WINDOW));
 
-    assert_eq!(reading.fast, QuotaWindow::Unknown);
+    assert_eq!(fast, None);
 }
 
 #[test]
@@ -497,14 +465,11 @@ fn two_seats_hold_independent_readings() {
     );
 
     assert_eq!(store.len(), 2);
-    let default_seat = store
-        .reading_for(&seat(None), &observed)
-        .expect("a reading");
-    let labeled_seat = store
-        .reading_for(&seat(Some("seat-b")), &observed)
-        .expect("a reading");
-    assert_eq!(fraction_of(&default_seat.fast, "fast"), 0.10);
-    assert_eq!(fraction_of(&labeled_seat.fast, "fast"), 0.80);
+    assert_eq!(held_five_hour(&store, &seat(None), &observed), Some(0.10));
+    assert_eq!(
+        held_five_hour(&store, &seat(Some("seat-b")), &observed),
+        Some(0.80)
+    );
 }
 
 // ---- Billing ----
@@ -529,7 +494,7 @@ fn an_incoming_unknown_billing_preserves_a_known_one() {
         snapshot(second, QuotaWindow::Unknown, QuotaWindow::Unknown),
     );
 
-    let reading = store.reading_for(&seat(None), &second).expect("a reading");
+    let reading = reading(&store, &seat(None), &second).expect("a configured seat");
     assert_eq!(
         reading.billing,
         Billing::Overage,
@@ -730,9 +695,8 @@ fn admit_seats_keeps_a_still_admitted_seats_reading() {
 
     store.admit_seats([seat(None), seat(Some("seat-c"))]);
 
-    let reading = store.reading_for(&seat(None), &observed);
     assert!(
-        reading.is_some(),
+        held_five_hour(&store, &seat(None), &observed).is_some(),
         "re-admitting a seat must not drop its existing reading",
     );
 }
@@ -808,26 +772,24 @@ fn a_late_window_reading_is_ordered_against_its_own_window_not_the_seat() {
         ),
     );
 
-    let reading = store.reading_for(&seat(None), &t3).expect("a reading");
     assert_eq!(
-        fraction_of(&reading.fast, "fast"),
-        0.80,
+        held_five_hour(&store, &seat(None), &t3),
+        Some(0.80),
         "the t2 FAST reading is the newest FAST observation and must stand; judging it \
          against the seat's t3 arrival would keep the stale t1 value"
     );
     assert_eq!(
-        fraction_of(&reading.slow, "slow"),
-        0.10,
+        held_seven_day(&store, &seat(None), &t3),
+        Some(0.10),
         "the SLOW reading is untouched by the late FAST arrival"
     );
 }
 
-/// Billing ages on the same ceiling as a window. It has no reset of its own, so
-/// without the check a seat that reported overage and then went quiet keeps
-/// reporting overage forever while its windows correctly read Unknown -- a cost
-/// signal outliving the capacity signal it arrived beside.
+/// An overage claim demotes a seat only while it is fresh. Without the bound a
+/// seat that reported overage once and then went quiet would stay demoted on
+/// evidence no longer in evidence.
 #[test]
-fn a_billing_state_past_the_age_ceiling_reads_unknown() {
+fn an_overage_claim_stops_demoting_a_seat_once_it_is_stale() {
     let store = store();
     let observed = stamp_at(Duration::ZERO);
     store.observe(
@@ -839,22 +801,18 @@ fn a_billing_state_past_the_age_ceiling_reads_unknown() {
             billing: Billing::Overage,
         },
     );
-
-    let fresh = store
-        .reading_for(&seat(None), &stamp_at(Duration::from_mins(5)))
-        .expect("a reading");
-    assert_eq!(fresh.billing, Billing::Overage, "still inside the ceiling");
-
-    let stale = store
-        .reading_for(
-            &seat(None),
-            &stamp_at(MAX_OBSERVATION_AGE + Duration::from_mins(1)),
+    let standing_at = |offset: Duration| {
+        let now = stamp_at(offset);
+        standing(
+            reading(&store, &seat(None), &now).as_ref(),
+            "claude-opus-4-7",
+            &now,
         )
-        .expect("a reading");
-    assert_eq!(
-        stale.billing,
-        Billing::Unknown,
-        "an aged-out billing state must not keep demoting a seat on evidence no longer \
-         in evidence"
-    );
+    };
+
+    let fresh = standing_at(Duration::from_mins(5));
+    let stale = standing_at(crate::quota::view::STALE_AFTER + Duration::from_secs(1));
+
+    assert_eq!(fresh.reason, crate::quota::placement::Reason::Overage);
+    assert_ne!(stale.reason, crate::quota::placement::Reason::Overage);
 }

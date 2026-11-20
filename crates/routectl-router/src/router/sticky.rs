@@ -1,46 +1,10 @@
 //! Sticky seat ordering + capacity snapshots.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use crate::quota::placement::{QuotaDecision, SeatQuota};
+use crate::quota::placement::Standing;
 
 use super::Router;
-
-/// Minimum seconds between two quota-placement diagnostics in one process.
-///
-/// The fall-through arms fire on EVERY birth pick of an unobserved pool, which
-/// on a fresh process is every new conversation, so an unthrottled line would
-/// turn the normal cap-dormant state into a log stream. The counters below
-/// stay exact regardless; the emitted line reports their running totals.
-const QUOTA_PLACEMENT_LOG_INTERVAL_SECS: u64 = 300;
-
-/// Epoch-second stamp of the last emitted quota-placement diagnostic. A
-/// process-wide stamp, not a per-pool one: what this bounds is repeats across
-/// REQUESTS, which no per-request scope can see.
-static QUOTA_PLACEMENT_LOG_STAMP: AtomicU64 = AtomicU64::new(0);
-
-/// Seconds since the Unix epoch, `0` on a pre-epoch clock (which then
-/// suppresses rather than emits -- the safe direction for a bounded log).
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
-/// Claim the right to emit one quota-placement line at `now_secs`, or refuse
-/// because the interval has not elapsed. One compare-and-swap, so concurrent
-/// claimants yield exactly one winner; `saturating_sub` makes a backwards
-/// clock jump suppress rather than re-open the window.
-fn claim_quota_placement_log(now_secs: u64) -> bool {
-    let last = QUOTA_PLACEMENT_LOG_STAMP.load(Ordering::Relaxed);
-    if now_secs.saturating_sub(last) < QUOTA_PLACEMENT_LOG_INTERVAL_SECS {
-        return false;
-    }
-    QUOTA_PLACEMENT_LOG_STAMP
-        .compare_exchange(last, now_secs, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-}
 
 impl Router {
     /// Non-mutating read of the capacity gate for the seat / model keyed by
@@ -61,111 +25,63 @@ impl Router {
         })
     }
 
-    /// The per-seat subscription-quota tiers for a birth pick over this pool,
-    /// or an EMPTY vec when quota must contribute nothing.
+    /// Each seat's pace-rule standing for a conversation on upstream model
+    /// `model`, index-aligned with `seats`, or EMPTY for a dormant pool (no
+    /// seat has an account the meter can read), which then places on
+    /// headroom and rotation alone.
     ///
-    /// Empty for a provider that curates no short recovering window, which is
-    /// how an uncurated egress stays dormant by construction: the pure
-    /// selector then ranks on RPM headroom with no cap consulted and no
-    /// diagnostic emitted.
-    ///
-    /// The provider kind is read off each SEAT's own `[providers]` entry
-    /// rather than the model's `provider` value: a pool-backed model's
-    /// `provider` names the pool, so resolving the kind from it would miss and
-    /// leave every pool permanently uncurated (silently dormant quota).
-    fn quota_tiers_for_birth(&self, seats: &[crate::seat_pool::SeatTarget]) -> Vec<SeatQuota> {
-        let provider_kind = seats.first().and_then(|seat| {
-            self.config
-                .providers
-                .get(&seat.provider_name)
-                .map(crate::config::ProviderEntry::kind_str)
-        });
+    /// A seat whose account has no reading yet stands unread, so a pool with
+    /// no readings at all (a fresh process) also places on headroom and
+    /// rotation: every seat ties in the unread bucket.
+    pub(super) fn birth_standings(
+        &self,
+        seats: &[crate::seat_pool::SeatTarget],
+        model: &str,
+    ) -> Vec<Standing> {
         let keys: Vec<Option<crate::quota::key::SeatKey>> = seats
             .iter()
             .map(|seat| crate::quota::key::seat_key_for_secret_ref(seat.auth_secret_ref.as_ref()))
             .collect();
-        crate::quota::placement::seat_tiers(
-            &self.quota_store,
-            &keys,
-            provider_kind,
-            &crate::quota::freshness::ObservationStamp::now(),
-        )
-    }
-
-    /// Count one quota-placement decision and emit at most one throttled line
-    /// per interval carrying every arm's running total.
-    ///
-    /// Nothing here names a session, a credential, an account or a header: the
-    /// only identifiers are the routectl-internal model nickname and the arm
-    /// that ran, and the only figures are counters.
-    fn record_quota_placement(&self, decision: QuotaDecision, nickname: &str) {
-        let totals = match decision {
-            // Nothing to decide on (an uncurated provider). A dormant pick is
-            // not an event: counting it would bury the real arms under every
-            // pick of a pool quota can never place.
-            QuotaDecision::Dormant => return,
-            _ => self.metrics.incr_quota_placement(decision),
-        };
-        if !claim_quota_placement_log(now_epoch_secs()) {
-            return;
+        if keys.iter().all(Option::is_none) {
+            return Vec::new();
         }
-        if decision.placed() {
-            tracing::debug!(
-                event = "quota_placement",
-                model = %routectl_core::sanitize_for_log(nickname),
-                arm = ?decision,
-                below_cap_total = totals.below_cap,
-                all_capped_total = totals.all_capped,
-                mixed_unknown_total = totals.mixed_unknown,
-                all_unknown_total = totals.all_unknown,
-                "subscription-quota partition chose the birth seat",
-            );
-        } else {
-            tracing::debug!(
-                event = "quota_placement_fallback",
-                model = %routectl_core::sanitize_for_log(nickname),
-                arm = ?decision,
-                below_cap_total = totals.below_cap,
-                all_capped_total = totals.all_capped,
-                mixed_unknown_total = totals.mixed_unknown,
-                all_unknown_total = totals.all_unknown,
-                "subscription-quota evidence was incomplete for this pool; \
-                 birth seat chosen by the unchanged capacity ranking",
-            );
-        }
+        let now = crate::quota::freshness::ObservationStamp::now();
+        let readings = self.quota_store.readings(&now).accounts;
+        keys.iter()
+            .map(|key| {
+                let reading = key.as_ref().and_then(|key| {
+                    readings
+                        .iter()
+                        .find(|reading| reading.account == key.as_str())
+                });
+                crate::quota::placement::standing(reading, model, &now)
+            })
+            .collect()
     }
 
     /// The walk order for a KEYLESS request on a multi-seat sticky pool.
     ///
     /// No session key means no pin to read and none to write, so this makes a
-    /// placement and not a sticky decision. It still consults quota: a keyless
-    /// request has no warm cache to protect, and cache preservation is the only
-    /// thing the milestone ranks above quota fairness.
-    ///
-    /// Falls back to the unchanged fill-first walk whenever the partition
-    /// declines.
+    /// placement and not a sticky decision. It places exactly as a birth does,
+    /// since a keyless request has no warm cache to protect. A dormant pool,
+    /// or one with nothing dispatchable, keeps the unchanged fill-first walk.
     pub(super) fn keyless_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         model: &crate::resolved::ResolvedModel,
     ) -> Vec<usize> {
-        let nickname = model.nickname.as_str();
-        let quota = self.quota_tiers_for_birth(seats);
-        let mut decision = QuotaDecision::Dormant;
-        let ordered = if quota.is_empty() {
+        let standings = self.birth_standings(seats, &model.upstream);
+        let ordered = if standings.is_empty() {
             None
         } else {
-            let now = Instant::now();
-            let snapshots = self.gather_capacity_snapshots(seats, nickname, now);
+            let snapshots = self.gather_capacity_snapshots(seats, &model.nickname, Instant::now());
             crate::seat_pool::keyless_quota_order(
                 seats.len(),
                 &snapshots,
-                &quota,
+                &standings,
                 self.sticky_pins.next_tiebreak(),
-                &mut decision,
             )
         };
-        self.record_quota_placement(decision, nickname);
         ordered.unwrap_or_else(|| crate::seat_pool::fill_first_order(seats.len()))
     }
 
@@ -181,16 +97,16 @@ impl Router {
     /// pin write -- the one-time cap + hysteresis. Never logs the raw session
     /// key.
     ///
-    /// Subscription-quota tiers are gathered for the BIRTH candidate set only
-    /// (the pure selector ignores them on every other path). A healthy pin
-    /// therefore never reads quota state at all, so no soft cap can move a
-    /// warm session. The quota partition changes WHICH seat a birth picks,
-    /// never whether or how the pin is written.
+    /// Pace-rule standings are read for a BIRTH only, for the conversation's
+    /// upstream model `upstream`. A healthy pin never reads usage at all, so
+    /// no reading can move a warm session; the rule changes WHICH seat a birth
+    /// picks, never whether or how the pin is written.
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         key: &str,
         nickname: &str,
+        upstream: &str,
     ) -> Vec<usize> {
         // A pinned member no longer present in this pool resolves to None
         // -> treated as a miss (re-pick), and `repinned` resets to false on
@@ -218,23 +134,22 @@ impl Router {
             0
         };
 
-        // Read quota ONLY for a genuine birth. A hit -- healthy or migrating
+        // Read usage ONLY for a genuine birth. A hit -- healthy or migrating
         // -- never consults it, so the store is not even touched.
-        let quota = if pin.is_none() {
-            self.quota_tiers_for_birth(seats)
+        let standings = if pin.is_none() {
+            self.birth_standings(seats, upstream)
         } else {
             Vec::new()
         };
 
-        let (order, outcome, quota_decision) = crate::seat_pool::sticky_least_loaded_order(
+        let (order, outcome) = crate::seat_pool::sticky_least_loaded_order(
             seats.len(),
             pin.map(|(i, _)| i),
             pin.is_some_and(|(_, r)| r),
             &snapshots,
             tiebreak,
-            &quota,
+            &standings,
         );
-        self.record_quota_placement(quota_decision, nickname);
         self.apply_sticky_outcome(key, nickname, seats, outcome);
         order
     }

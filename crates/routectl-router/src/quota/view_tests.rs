@@ -1,13 +1,12 @@
-//! Tests for the stale rule of the placement-safe view, and for how today's
-//! placement projection reads the same windows.
+//! Tests for the stale rule of the placement-safe view, and for how the pace
+//! rule reads the same windows.
 
 use std::time::{Instant, SystemTime};
 
 use super::*;
 
-use crate::quota::curation::ANTHROPIC_PROVIDER_KIND;
 use crate::quota::key::{SeatKey, seat_key_for_secret_ref};
-use crate::quota::placement::{SeatQuota, seat_tiers};
+use crate::quota::placement::{Reason, Standing, Tier, standing};
 use crate::quota::reading::{Scope, WindowKey, WindowSet};
 use crate::quota::reduce::QuotaSnapshot;
 use crate::quota::store::QuotaStore;
@@ -106,13 +105,10 @@ fn only_window(store: &QuotaStore, now: &ObservationStamp) -> AccountWindow {
     window.clone()
 }
 
-fn fast(store: &QuotaStore, now: &ObservationStamp) -> QuotaWindow {
-    store.reading_for(&seat(), now).expect("an entry").fast
-}
-
-fn tier(store: &QuotaStore, now: &ObservationStamp) -> SeatQuota {
-    let tiers = seat_tiers(store, &[Some(seat())], Some(ANTHROPIC_PROVIDER_KIND), now);
-    tiers.into_iter().next().expect("one seat")
+/// The seat's pace-rule standing at `now` for an Opus conversation.
+fn standing_at(store: &QuotaStore, now: &ObservationStamp) -> Standing {
+    let readings = store.readings(now);
+    standing(readings.accounts.first(), "claude-opus-4-7", now)
 }
 
 // ---- The stale rule ----
@@ -294,10 +290,10 @@ fn a_window_is_stale_when_the_read_instant_cannot_be_ordered_after_it() {
     }
 }
 
-/// Today's placement keeps its until-reset rule: a reading too old for the
-/// view still steers placement, so the view changes no routing.
+/// Placement reads the view's stale rule: a running window older than the
+/// stale bound no longer ranks the seat, however far its reset.
 #[test]
-fn placement_still_reads_a_thirty_minute_old_running_window_the_view_marks_stale() {
+fn placement_stops_ranking_on_a_running_window_once_the_view_marks_it_stale() {
     let clock = Clock::new();
     let store = store();
     let t0 = clock.at(Duration::ZERO);
@@ -311,17 +307,13 @@ fn placement_still_reads_a_thirty_minute_old_running_window_the_view_marks_stale
             &t0,
         )],
     );
-    let now = clock.at(Duration::from_mins(30));
+    let fresh = clock.at(STALE_AFTER);
+    let stale = clock.at(STALE_AFTER + ONE_MS);
 
-    let window = only_window(&store, &now);
-    let projected = fast(&store, &now);
-
-    assert!(window.stale);
-    assert!(
-        matches!(&projected, QuotaWindow::Known { utilization, .. } if utilization.fraction() == 0.25),
-        "{projected:?}"
-    );
-    assert_eq!(tier(&store, &now), SeatQuota::BelowCap { remaining: 0.75 });
+    assert!(!only_window(&store, &fresh).stale);
+    assert_eq!(standing_at(&store, &fresh).tier, Tier::Roomy);
+    assert!(only_window(&store, &stale).stale);
+    assert_eq!(standing_at(&store, &stale).reason, Reason::StaleReading);
 }
 
 // ---- What the view reports ----
@@ -439,68 +431,34 @@ fn an_unstarted_window_ages_out_but_its_provisional_reset_never_expires_it() {
 // ---- The placement projection of an unstarted window ----
 
 #[test]
-fn a_fresh_unstarted_five_hour_window_projects_as_known_zero_until_stale_after() {
+fn a_fresh_unstarted_window_ranks_until_stale_after_and_then_goes_unread() {
     let clock = Clock::new();
     let store = store();
     let t0 = clock.at(Duration::ZERO);
     poll(&store, t0, vec![unstarted(key(FIVE_HOURS, None), &t0)]);
-    let at_bound = clock.at(STALE_AFTER);
-    let past_bound = clock.at(STALE_AFTER + ONE_MS);
 
-    let fresh = fast(&store, &at_bound);
-    let aged = fast(&store, &past_bound);
+    let at_bound = standing_at(&store, &clock.at(STALE_AFTER));
+    let past_bound = standing_at(&store, &clock.at(STALE_AFTER + ONE_MS));
 
-    let QuotaWindow::Known {
-        utilization,
-        reset_at,
-    } = fresh
-    else {
-        panic!("a fresh unstarted FAST window is known: {fresh:?}");
-    };
-    assert_eq!(utilization.fraction(), 0.0);
     assert_eq!(
-        reset_at.at(),
-        base_wall() + STALE_AFTER,
-        "valid only until stale"
+        (at_bound.tier, at_bound.score, at_bound.reason),
+        (Tier::Roomy, Some(1.0), Reason::Unstarted)
     );
     assert_eq!(
-        tier(&store, &at_bound),
-        SeatQuota::BelowCap { remaining: 1.0 }
+        (past_bound.tier, past_bound.reason),
+        (Tier::Unread, Reason::StaleReading)
     );
-    assert_eq!(aged, QuotaWindow::Unknown);
-    assert_eq!(tier(&store, &past_bound), SeatQuota::Unknown);
 }
 
 #[test]
-fn an_unstarted_five_hour_window_read_across_a_suspend_projects_as_unknown() {
+fn an_unstarted_window_read_across_a_suspend_is_unread() {
     let clock = Clock::new();
     let store = store();
     let t0 = clock.at(Duration::ZERO);
     poll(&store, t0, vec![unstarted(key(FIVE_HOURS, None), &t0)]);
     let after_suspend = clock.split(Duration::from_hours(1), Duration::from_mins(1));
 
-    assert_eq!(fast(&store, &after_suspend), QuotaWindow::Unknown);
-}
-
-#[test]
-fn an_unstarted_window_that_is_scoped_or_not_five_hours_projects_nothing() {
-    let clock = Clock::new();
-    let rows: [(&str, WindowKey); 3] = [
-        ("scoped 5 h", key(FIVE_HOURS, Some("opus"))),
-        ("account-wide 4 h", key(4 * 3_600, None)),
-        ("account-wide 7 d", key(SEVEN_DAYS, None)),
-    ];
-    for (name, window_key) in rows {
-        let store = store();
-        let t0 = clock.at(Duration::ZERO);
-        poll(&store, t0, vec![unstarted(window_key, &t0)]);
-        let now = clock.at(Duration::from_mins(1));
-
-        let snapshot = store.reading_for(&seat(), &now).expect("an entry");
-
-        assert_eq!(snapshot.fast, QuotaWindow::Unknown, "row: {name}");
-        assert_eq!(snapshot.slow, QuotaWindow::Unknown, "row: {name}");
-    }
+    assert_eq!(standing_at(&store, &after_suspend).tier, Tier::Unread);
 }
 
 // ---- No wire shape ----

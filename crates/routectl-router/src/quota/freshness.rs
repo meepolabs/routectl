@@ -201,19 +201,6 @@ pub fn has_passed(at: SystemTime, now: &ObservationStamp) -> bool {
     now.wall >= at
 }
 
-/// The instant `span` after `observed` on the wall clock, accepted as a reset
-/// of a window of `window_duration`: the expiry of a claim that holds only for
-/// `span`. `None` when `span` is zero, longer than the window, or
-/// unrepresentable.
-pub fn reset_after(
-    observed: &ObservationStamp,
-    span: Duration,
-    window_duration: Duration,
-) -> Option<ValidatedReset> {
-    let at = observed.wall.checked_add(span)?;
-    accept_reset(at, observed, window_duration, Duration::ZERO).ok()
-}
-
 #[cfg(test)]
 #[path = "freshness_tests.rs"]
 mod freshness_tests;

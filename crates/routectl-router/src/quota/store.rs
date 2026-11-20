@@ -48,8 +48,8 @@
 //! `observe` counts the refusal, and the observation's caller counts its own
 //! with [`QuotaStore::record_rejection`].
 //!
-//! [`QuotaStore::reading_for`] projects an account back onto the two-role
-//! snapshot placement reads, applying read-time expiry.
+//! [`QuotaStore::readings`] reads every configured account back through the
+//! placement-safe view, applying the stale rule.
 //!
 //! # Log hygiene
 //!
@@ -408,23 +408,6 @@ impl QuotaStore {
             new_used = correction.new_used,
             "consecutive lower quota readings replaced the stored window",
         );
-    }
-
-    /// `key`'s reading projected onto today's two-role snapshot as of `now`,
-    /// with every window past its own bounds reported `Unknown` rather than
-    /// at its last value.
-    ///
-    /// FAST is the account-wide window of the curated five-hour length; SLOW
-    /// the account-wide window of the curated long length. `None` for a seat
-    /// with no entry at all. A seat WITH an entry whose every window has
-    /// expired answers `Some` with both windows `Unknown`, which a caller
-    /// treats exactly as no evidence -- the distinction exists so a
-    /// diagnostic can tell "never observed" from "observed and expired".
-    pub fn reading_for(&self, key: &SeatKey, now: &ObservationStamp) -> Option<QuotaSnapshot> {
-        self.seats
-            .lock()
-            .get(key)
-            .map(|meter| meter.projection(now))
     }
 
     /// A copy of `key`'s meter, or `None` when it has no entry.

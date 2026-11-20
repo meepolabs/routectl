@@ -15,7 +15,7 @@ use routectl_core::upstream_meta::{
 };
 
 use crate::quota::key::seat_key_for_secret_ref;
-use crate::quota::window::QuotaWindow;
+use crate::quota::test_support::{fresh_five_hour, held_five_hour};
 
 /// A real captured 5h reset in the epoch SECONDS the family reports.
 const CAPTURED_5H_RESET_SECS: u64 = 1_781_001_000;
@@ -80,11 +80,7 @@ fn chunk_with(meta: Option<UpstreamMeta>) -> ChatChunk {
 }
 
 fn stored_fraction(store: &QuotaStore) -> Option<f64> {
-    let reading = store.reading_for(&seat(), &ObservationStamp::now())?;
-    match reading.fast {
-        QuotaWindow::Known { utilization, .. } => Some(utilization.fraction()),
-        QuotaWindow::Unknown => None,
-    }
+    fresh_five_hour(store, &seat(), &ObservationStamp::now())
 }
 
 // ---- Non-streaming path ----
@@ -237,12 +233,10 @@ fn a_millis_scale_reset_puts_no_known_window_in_the_store() {
         &response_with(Some(UpstreamMeta::from_anthropic_unified(quota))),
     );
 
-    let reading = store
-        .reading_for(&seat(), &ObservationStamp::now())
-        .expect("the observation itself is recorded");
+    assert!(!store.is_empty(), "the observation itself is recorded");
     assert_eq!(
-        reading.fast,
-        QuotaWindow::Unknown,
+        held_five_hour(&store, &seat(), &ObservationStamp::now()),
+        None,
         "an implausible reset must leave the seat reading as no evidence, NOT \
          as permanently fresh at low utilization"
     );
@@ -291,14 +285,10 @@ fn a_freshly_fed_reading_is_effective_at_once() {
 
     feed_response(&store, Some(&seat()), &response_with(Some(meta("0.21"))));
 
-    let reading = store
-        .reading_for(
-            &seat(),
-            &ObservationStamp::from_parts(
-                SystemTime::now(),
-                Instant::now() + Duration::from_secs(1),
-            ),
-        )
-        .expect("a reading");
-    assert!(matches!(reading.fast, QuotaWindow::Known { .. }));
+    let fast = fresh_five_hour(
+        &store,
+        &seat(),
+        &ObservationStamp::from_parts(SystemTime::now(), Instant::now() + Duration::from_secs(1)),
+    );
+    assert_eq!(fast, Some(0.21));
 }

@@ -18,7 +18,7 @@ enum AfterDrop {
 enum Outcome {
     /// Refused as `Contradictory`, nothing advanced.
     Refused,
-    /// Accepted, projecting FAST known at this used fraction.
+    /// Accepted, holding the five-hour window at this used fraction.
     Known(f64),
 }
 
@@ -161,7 +161,7 @@ fn a_reading_after_a_complete_report_dropped_a_running_five_hour_window() {
         let result = feed_after_drop(&store, &next, t2);
 
         // Assert
-        let fast = store.reading_for(&seat("a"), &t2).expect("an entry").fast;
+        let fast = used_of(&store, &key(FIVE_HOURS, None));
         let meter = store.account(&seat("a")).expect("an entry");
         let Outcome::Known(expected) = outcome else {
             assert_eq!(
@@ -174,7 +174,7 @@ fn a_reading_after_a_complete_report_dropped_a_running_five_hour_window() {
                 held_before,
                 "row: {name}: no accepted state advances"
             );
-            assert_eq!(fast, QuotaWindow::Unknown, "row: {name}: never room");
+            assert_eq!(fast, None, "row: {name}: never room");
             assert_eq!(store.rejection_totals().contradictory, 1, "row: {name}");
             continue;
         };
@@ -184,10 +184,11 @@ fn a_reading_after_a_complete_report_dropped_a_running_five_hour_window() {
             "row: {name}: the kept window clears"
         );
         assert_eq!(store.rejection_totals().contradictory, 0, "row: {name}");
-        let QuotaWindow::Known { utilization, .. } = fast else {
-            panic!("row: {name}: the taken reading is known: {fast:?}");
-        };
-        assert_eq!(utilization.fraction(), expected, "row: {name}");
+        assert_eq!(
+            fast,
+            Some(expected),
+            "row: {name}: the taken reading is held"
+        );
     }
 }
 
@@ -240,11 +241,11 @@ fn a_dropped_weekly_window_is_not_kept() {
     // Assert
     assert_eq!(result, Ok(()));
     assert_eq!(store.rejection_totals().contradictory, 0);
-    let fast = store.reading_for(&seat("a"), &t2).expect("an entry").fast;
-    let QuotaWindow::Known { utilization, .. } = fast else {
-        panic!("the idle five-hour window is known: {fast:?}");
-    };
-    assert_eq!(utilization.fraction(), 0.0);
+    assert_eq!(
+        used_of(&store, &key(FIVE_HOURS, None)),
+        Some(0.0),
+        "the idle five-hour window is held"
+    );
 }
 
 /// An unstarted window's reset is provisional, not an expiry: dropping one
@@ -287,11 +288,11 @@ fn a_dropped_unstarted_window_with_a_provisional_reset_is_not_kept() {
     // Assert
     assert_eq!(kept, None, "nothing is kept for an unstarted window");
     assert_eq!(result, Ok(()));
-    let fast = store.reading_for(&seat("a"), &t2).expect("an entry").fast;
-    let QuotaWindow::Known { utilization, .. } = fast else {
-        panic!("the idle five-hour window is known: {fast:?}");
-    };
-    assert_eq!(utilization.fraction(), 0.0);
+    assert_eq!(
+        used_of(&store, &key(FIVE_HOURS, None)),
+        Some(0.0),
+        "the idle five-hour window is held"
+    );
 }
 
 /// A kept window ages on the monotonic ceiling like a stored one: after the

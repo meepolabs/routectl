@@ -626,24 +626,6 @@ struct RouterMetrics {
     /// rate-limited per process, this is not. Bumped once per skipped
     /// target by the window gate.
     window_gate_skips_total: AtomicU64,
-    /// Birth picks the subscription-quota partition decided by restricting to
-    /// the fresh-known-below-cap tier. Bumped once per birth pick by the
-    /// sticky chooser.
-    quota_placement_below_cap_total: AtomicU64,
-    /// Birth picks where every eligible seat was fresh-known and every one was
-    /// at or above its cap, so the pick took the most remaining and the
-    /// request was NOT failed. The soft-cap-never-fails path made visible.
-    quota_placement_all_capped_total: AtomicU64,
-    /// Birth picks that fell through to the unchanged capacity ranking on a
-    /// MIX of capped-known and unknown seats. Distinguished from the
-    /// all-unknown case because the two mean different things operationally:
-    /// this one says the pool is partially observed, which on a steady pool is
-    /// a signal the feed is missing a seat.
-    quota_placement_mixed_unknown_total: AtomicU64,
-    /// Birth picks that fell through because EVERY eligible seat was unknown.
-    /// The expected state of a fresh process and of an uncurated provider, so
-    /// a high count here is not by itself a fault.
-    quota_placement_all_unknown_total: AtomicU64,
     /// Dispatch targets that cleared the proactive window gate
     /// ([`window_gate_skips_total`](Self::window_gate_skips_total)) and then
     /// still hit a reactive `FailureClass::ContextWindow` rejection. Paired
@@ -746,15 +728,6 @@ struct RouterMetrics {
     repair_budget_exhausted: field_verdict_observability::LaneTally,
     /// Finished requests by the number of repairs each drew.
     repairs_per_request: field_verdict_observability::RepairDrawHistogram,
-}
-
-/// Running quota-placement totals, partitioned by the partition's arms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QuotaPlacementTotals {
-    below_cap: u64,
-    all_capped: u64,
-    mixed_unknown: u64,
-    all_unknown: u64,
 }
 
 /// Running pool totals, read once per snapshot line so the emitted fields
@@ -983,57 +956,6 @@ impl RouterMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Bump the counter for one quota-placement arm and return every arm's
-    /// running total, so the throttled diagnostic reports the whole partition
-    /// without a second pass.
-    ///
-    /// `Dormant` is not counted: it is the switched-off and
-    /// nothing-to-decide-on state, and counting it would make the kill
-    /// switch's OFF position observable in the diagnostics it must leave
-    /// silent.
-    fn incr_quota_placement(
-        &self,
-        decision: crate::quota::placement::QuotaDecision,
-    ) -> QuotaPlacementTotals {
-        use crate::quota::placement::QuotaDecision;
-        match decision {
-            QuotaDecision::Dormant => {}
-            QuotaDecision::BelowCapTier => {
-                self.quota_placement_below_cap_total
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            QuotaDecision::AllCappedMostRemaining => {
-                self.quota_placement_all_capped_total
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            QuotaDecision::MixedUnknownFallback => {
-                self.quota_placement_mixed_unknown_total
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            QuotaDecision::AllUnknownFallback => {
-                self.quota_placement_all_unknown_total
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        self.quota_placement_totals()
-    }
-
-    /// Every quota-placement arm's running total.
-    fn quota_placement_totals(&self) -> QuotaPlacementTotals {
-        QuotaPlacementTotals {
-            below_cap: self.quota_placement_below_cap_total.load(Ordering::Relaxed),
-            all_capped: self
-                .quota_placement_all_capped_total
-                .load(Ordering::Relaxed),
-            mixed_unknown: self
-                .quota_placement_mixed_unknown_total
-                .load(Ordering::Relaxed),
-            all_unknown: self
-                .quota_placement_all_unknown_total
-                .load(Ordering::Relaxed),
-        }
-    }
-
     /// Read the cumulative unknown-upstream-classification count.
     fn unknown_failure_classifications_total(&self) -> u64 {
         self.unknown_failure_classifications_total
@@ -1175,7 +1097,6 @@ impl RouterMetrics {
         wire_check: &crate::wire_check_state::CounterLog,
         seats: &status::PoolSeatTotals,
     ) {
-        let quota = self.quota_placement_totals();
         let pool = self.pool_totals();
         #[cfg(feature = "bedrock")]
         tracing::debug!(
@@ -1203,10 +1124,6 @@ impl RouterMetrics {
             rc_field_verdicts_learned_total = self.field_verdicts_learned_total(),
             rc_window_gate_skips_total = self.window_gate_skips_total(),
             rc_context_window_overflow_total = self.context_window_overflow_total(),
-            rc_quota_placement_below_cap_total = quota.below_cap,
-            rc_quota_placement_all_capped_total = quota.all_capped,
-            rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
-            rc_quota_placement_all_unknown_total = quota.all_unknown,
             rc_quota_refused_by_admission_total = quota_refused_by_admission_total,
             rc_pool_dispatch_total = pool.dispatch,
             rc_pool_degraded_dispatch_total = pool.degraded_dispatch,
@@ -1253,10 +1170,6 @@ impl RouterMetrics {
             rc_field_verdicts_learned_total = self.field_verdicts_learned_total(),
             rc_window_gate_skips_total = self.window_gate_skips_total(),
             rc_context_window_overflow_total = self.context_window_overflow_total(),
-            rc_quota_placement_below_cap_total = quota.below_cap,
-            rc_quota_placement_all_capped_total = quota.all_capped,
-            rc_quota_placement_mixed_unknown_total = quota.mixed_unknown,
-            rc_quota_placement_all_unknown_total = quota.all_unknown,
             rc_quota_refused_by_admission_total = quota_refused_by_admission_total,
             rc_pool_dispatch_total = pool.dispatch,
             rc_pool_degraded_dispatch_total = pool.degraded_dispatch,
@@ -3586,8 +3499,8 @@ mod state_carry_over_owner_tests;
 mod quota_feed_dispatch_tests;
 
 #[cfg(test)]
-#[path = "quota_placement_dispatch_tests.rs"]
-mod quota_placement_dispatch_tests;
+#[path = "pace_placement_dispatch_tests.rs"]
+mod pace_placement_dispatch_tests;
 
 #[cfg(all(test, feature = "openai-responses"))]
 #[path = "codex_reading_dispatch_tests.rs"]

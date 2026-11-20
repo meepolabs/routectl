@@ -348,19 +348,17 @@ impl Router {
 
         // Sticky least-loaded only engages on a multi-seat pool. Every OTHER
         // case (FillFirst, or single-seat StickyLeastLoaded) walks the fixed
-        // fill-first order, minting no pin and consulting no quota, since it
+        // fill-first order, minting no pin and reading no usage, since it
         // makes no pick at all.
         let order: Vec<usize> = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
                 let pin_key = sticky_pin_key(key, m.rotation_key());
-                self.sticky_seat_order(seats, &pin_key, &m.nickname)
+                self.sticky_seat_order(seats, &pin_key, &m.nickname, &m.upstream)
             }
             // Keyless StickyLeastLoaded has no session identity, so it mints
-            // no pin -- but it still places by remaining budget, because the
-            // only thing that outranks quota fairness is cache preservation
-            // and a keyless request has no warm cache to preserve. When quota
-            // contributes nothing it collapses to fill-first as it always
-            // has.
+            // no pin -- but it still places by the pace rule, because a
+            // keyless request has no warm cache to preserve. A dormant pool
+            // collapses to fill-first as it always has.
             (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => {
                 self.keyless_seat_order(seats, m)
             }

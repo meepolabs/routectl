@@ -70,21 +70,18 @@ impl Utilization {
     }
 }
 
-/// Which capacity horizon a window describes.
+/// Which capacity horizon a response-header window describes: the slot of a
+/// header snapshot it fills.
 ///
-/// The vocabulary is two-valued on purpose. FAST is the short recovering
-/// window a placement decision can act on, because a seat over its FAST cap
-/// recovers within the lifetime of a conversation. SLOW is the long window
-/// where being over cap is a durable fact about the seat rather than a
-/// transient one, so it informs a guard rather than a ranking. A window whose
+/// FAST is the short recovering window, SLOW the long one. A window whose
 /// horizon cannot be determined gets no role and stays
 /// [`QuotaWindow::Unknown`]; a role is never guessed from a window's upstream
 /// NAME.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowRole {
-    /// Short recovering window -- the placement signal.
+    /// Short recovering window.
     Fast,
-    /// Long window -- a durable fact about the seat, not a ranking value.
+    /// Long window.
     Slow,
 }
 

@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use routectl_auth::{SecretRef, SecretScheme};
 use routectl_core::Provider;
 
-use crate::quota::placement::{QuotaDecision, SeatQuota};
+use crate::quota::placement::Standing;
 use crate::runtime_state::{CapacitySnapshot, CircuitPhase};
 
 /// One credential seat of a pooled model: the member provider entry's name
@@ -397,51 +397,44 @@ impl StickyPins {
     }
 }
 
-/// The walk order for a KEYLESS request on a sticky-configured pool, ordered by
-/// remaining subscription budget.
+/// The walk order for a KEYLESS request on a sticky-configured pool, led by
+/// the seat the pace rule places a new conversation on.
 ///
 /// A keyless request carries no session identity, so there is no warm prompt
-/// cache to protect and nothing that outranks the budget: cache preservation is
-/// the only thing that ever outranks quota fairness, and a request with no cache
-/// has none to preserve. So it places by cap, and it mints no pin -- there is no
-/// key to pin under.
-///
-/// Shares the partition with the keyed birth pick rather than restating it, so
-/// keyless and keyed can never disagree about what "below cap" means. The chosen
-/// group leads the walk; every remaining eligible seat follows in the fixed
-/// order, so the existing fall-through behavior is preserved rather than
-/// replaced. When the partition declines -- all readings unknown, a mix of
-/// capped-known and unknown, an uncurated provider -- this returns `None` and
-/// the caller keeps the unchanged fill-first walk.
+/// cache to protect and no pin to mint. It places exactly as a keyed birth
+/// does (the same eligibility, the same `standings` bucket, the same headroom
+/// and rotation inside it), so the two can never disagree about which seat is
+/// best. The chosen seat leads; every other seat follows in the fixed order,
+/// so the fall-through walk is preserved. `None` when there is nothing to
+/// place on: a single seat, a dormant pool (`standings` empty), no
+/// dispatchable seat, or no eligible seat with a fresh reading. The caller
+/// then keeps the fill-first walk, so a keyless request with no evidence
+/// drains seats in order exactly as it did before the pace rule.
 pub fn keyless_quota_order(
     seat_count: usize,
     snapshots: &[CapacitySnapshot],
-    quota: &[SeatQuota],
+    standings: &[Standing],
     tiebreak: usize,
-    decision: &mut QuotaDecision,
 ) -> Option<Vec<usize>> {
-    if seat_count <= 1 {
+    if seat_count <= 1 || standings.is_empty() {
         return None;
     }
-    // The SAME eligibility the keyed pick uses -- dispatchability AND the
-    // Closed-over-HalfOpenReady preference. Filtering only dispatchability here
-    // would let a keyless request lead with a half-open probe that happened to
-    // have more budget than a healthy sibling.
     let all: Vec<usize> = (0..seat_count).collect();
-    let preferred = eligible_candidates(&all, snapshots);
-    let tied = crate::quota::placement::restrict_by_quota(&preferred, quota, decision)?;
-    let lead = tied[tiebreak % tied.len()];
-    let mut order = Vec::with_capacity(seat_count);
-    order.push(lead);
-    order.extend((0..seat_count).filter(|&i| i != lead));
-    Some(order)
+    let eligible = eligible_candidates(&all, snapshots);
+    let (tier, _) = crate::quota::placement::best_bucket(standings, &eligible)?;
+    if tier == crate::quota::placement::Tier::Unread {
+        return None;
+    }
+    let lead = pick_least_loaded(&all, snapshots, tiebreak, standings)?;
+    Some(order_home_first(lead, seat_count))
 }
 
 /// The fixed seat walk order for a pooled model: default seat first, then
 /// sorted labels, as built. `FillFirst` always walks it, so the chain drains
 /// one seat until it cools/parks before falling to the next, maximizing
 /// prompt-cache locality; `StickyLeastLoaded` walks it whenever it makes no
-/// pick (no session key, a single seat, or a declined quota partition).
+/// pick (a single seat, a dormant pool without a session key, or no
+/// dispatchable seat).
 ///
 /// Returns indices into the model's seat slice; the caller maps them back
 /// to [`SeatTarget`]s.
@@ -476,18 +469,6 @@ pub enum SelectionOutcome {
     DeferNoHealthy,
 }
 
-/// Pick the least-loaded HEALTHY index among `candidates`: dispatchable only,
-/// Closed preferred over HalfOpenReady, then the subscription-quota partition
-/// when it decides, otherwise max rpm_available (None=+inf), ties broken
-/// deterministically by `tiebreak`. None if no candidate is dispatchable.
-/// `candidates` are indices into `snapshots`.
-///
-/// `quota` is index-aligned with `snapshots` and EMPTY whenever quota
-/// contributes nothing -- a provider curating no short window, a migration
-/// pick. An empty slice makes
-/// [`restrict_by_quota`](crate::quota::placement::restrict_by_quota) answer
-/// `None`, so the RPM headroom ranking below runs exactly as it did before
-/// quota existed. `decision` records which arm ran, for the caller's counters.
 /// The candidate set every seat pick starts from: dispatchable seats, then the
 /// Closed-over-HalfOpenReady health preference.
 ///
@@ -525,37 +506,40 @@ fn eligible_candidates(candidates: &[usize], snapshots: &[CapacitySnapshot]) -> 
     }
 }
 
+/// Pick the least-loaded HEALTHY index among `candidates`: dispatchable only,
+/// Closed preferred over HalfOpenReady, then the pace rule's best bucket when
+/// `standings` is non-empty, then max rpm_available (None=+inf), ties broken
+/// deterministically by `tiebreak`. None if no candidate is dispatchable.
+/// `candidates` are indices into `snapshots`.
+///
+/// `standings` is index-aligned with `snapshots` and EMPTY for a dormant pool
+/// or a migration pick, which then ranks on headroom alone, exactly as before
+/// the pace rule existed.
 fn pick_least_loaded(
     candidates: &[usize],
     snapshots: &[CapacitySnapshot],
     tiebreak: usize,
-    quota: &[SeatQuota],
-    decision: &mut QuotaDecision,
+    standings: &[Standing],
 ) -> Option<usize> {
     let preferred = eligible_candidates(candidates, snapshots);
-    if preferred.is_empty() {
+    let ranked = if standings.is_empty() {
+        preferred
+    } else {
+        crate::quota::placement::best_bucket(standings, &preferred)
+            .map_or_else(Vec::new, |(_, tied)| tied)
+    };
+    if ranked.is_empty() {
         return None;
-    }
-
-    // The subscription-quota partition supersedes the headroom ranking below
-    // for a pool whose budget is known, and ONLY that ranking: the
-    // dispatchability filter and the health preference above have already run
-    // and are not re-derived, and the anti-herd tiebreak below still breaks
-    // the tie. When the partition declines -- every reading unknown, a mix of
-    // capped-known and unknown, or no readings at all -- the headroom path
-    // runs untouched.
-    if let Some(tied) = crate::quota::placement::restrict_by_quota(&preferred, quota, decision) {
-        return Some(tied[tiebreak % tied.len()]);
     }
 
     // Least loaded = most available RPM headroom. Treat unlimited (`None`) as
     // +infinity so an unlimited seat always wins the headroom comparison.
     let headroom = |idx: usize| -> f64 { snapshots[idx].rpm_available.unwrap_or(f64::INFINITY) };
-    let max_headroom = preferred
+    let max_headroom = ranked
         .iter()
         .map(|&i| headroom(i))
         .fold(f64::NEG_INFINITY, f64::max);
-    let tied: Vec<usize> = preferred
+    let tied: Vec<usize> = ranked
         .into_iter()
         .filter(|&i| headroom(i) == max_headroom)
         .collect();
@@ -565,16 +549,15 @@ fn pick_least_loaded(
 }
 
 /// Pure seat-selection math for `StickyLeastLoaded`. Decides the per-request
-/// walk order, the [`SelectionOutcome`] (whether/how to update the pin), and
-/// which arm of the subscription-quota partition ran.
+/// walk order and the [`SelectionOutcome`] (whether/how to update the pin).
 ///
 /// `snapshots` is index-aligned with the seat slice (`len == seat_count`),
 /// gathered for the hit AND miss path now (the overflow check reads the
 /// pinned home's snapshot). `pinned_index` is the seat this session is pinned
 /// to (`Some`), or `None` for a birth pick / pin miss. `already_repinned` is
 /// the pin's one-time overflow marker. `tiebreak` seeds the anti-herd
-/// rotation among equally-least-loaded candidates. `quota` is index-aligned
-/// with the seats and empty whenever quota contributes nothing.
+/// rotation among equally-least-loaded candidates. `standings` is
+/// index-aligned with the seats and empty for a dormant pool.
 ///
 /// One-time overflow-repin with hysteresis: a pinned home that goes
 /// non-dispatchable is migrated ONCE to the least-loaded healthy sibling and
@@ -582,84 +565,64 @@ fn pick_least_loaded(
 /// seat, so a recovered original cannot pull the session back (no A->B->A
 /// flap).
 ///
-/// QUOTA REACHES THE BIRTH PICK ONLY. A healthy pin is kept without quota
-/// being consulted at all, and the migration pick below is made on health and
-/// RPM exactly as before, because the trigger for a migration is a seat that
-/// cannot serve -- never a soft cap. A cap that could move a warm session
-/// would forfeit the prompt-cache locality the pin exists to hold, which is
-/// the one thing this ordering refuses to do.
+/// THE PACE RULE REACHES THE BIRTH PICK ONLY. A healthy pin is kept without
+/// standings being consulted at all, and the migration pick below is made on
+/// health and RPM, because the trigger for a migration is a seat that cannot
+/// serve -- never a usage reading. A reading that could move a warm session
+/// would forfeit the prompt-cache locality the pin exists to hold.
 pub fn sticky_least_loaded_order(
     seat_count: usize,
     pinned_index: Option<usize>,
     already_repinned: bool,
     snapshots: &[CapacitySnapshot],
     tiebreak: usize,
-    quota: &[SeatQuota],
-) -> (Vec<usize>, SelectionOutcome, QuotaDecision) {
-    let mut decision = QuotaDecision::Dormant;
+    standings: &[Standing],
+) -> (Vec<usize>, SelectionOutcome) {
     if seat_count <= 1 {
         return (
             (0..seat_count).collect(),
             SelectionOutcome::Stay { home: 0 },
-            decision,
         );
     }
 
     let n = seat_count;
     if let Some(home) = pinned_index {
-        // Healthy home: keep serving it; no pin write, no quota read.
+        // Healthy home: keep serving it; no pin write, no standings read.
         if snapshots[home].is_dispatchable() {
-            return (
-                order_home_first(home, n),
-                SelectionOutcome::Stay { home },
-                decision,
-            );
+            return (order_home_first(home, n), SelectionOutcome::Stay { home });
         }
         // Already migrated once: do NOT chase further. The gate + fallback
         // walk handles the dead home for this request. One-time cap.
         if already_repinned {
-            return (
-                order_home_first(home, n),
-                SelectionOutcome::Stay { home },
-                decision,
-            );
+            return (order_home_first(home, n), SelectionOutcome::Stay { home });
         }
         // First migration: pick the least-loaded healthy SIBLING, on health
         // and RPM alone.
         let siblings: Vec<usize> = (0..n).filter(|&i| i != home).collect();
-        match pick_least_loaded(&siblings, snapshots, tiebreak, &[], &mut decision) {
+        match pick_least_loaded(&siblings, snapshots, tiebreak, &[]) {
             Some(new_home) => (
                 order_home_first(new_home, n),
                 SelectionOutcome::OverflowRepin { home: new_home },
-                decision,
             ),
             // No healthy sibling: nowhere better. Stay (no flap, no pin);
             // the gate handles the dead home.
-            None => (
-                order_home_first(home, n),
-                SelectionOutcome::Stay { home },
-                decision,
-            ),
+            None => (order_home_first(home, n), SelectionOutcome::Stay { home }),
         }
     } else {
         // Birth pick: candidate set = all seats.
         let all: Vec<usize> = (0..n).collect();
-        match pick_least_loaded(&all, snapshots, tiebreak, quota, &mut decision) {
-            Some(home) => (
-                order_home_first(home, n),
-                SelectionOutcome::Birth { home },
-                decision,
-            ),
+        match pick_least_loaded(&all, snapshots, tiebreak, standings) {
+            Some(home) => (order_home_first(home, n), SelectionOutcome::Birth { home }),
             // All parked/exhausted: home 0, fill-first order, no pin. A
             // later turn re-picks once a seat is healthy.
-            None => (
-                order_home_first(0, n),
-                SelectionOutcome::DeferNoHealthy,
-                decision,
-            ),
+            None => (order_home_first(0, n), SelectionOutcome::DeferNoHealthy),
         }
     }
 }
+
+#[cfg(test)]
+#[path = "seat_pool_pace_tests.rs"]
+mod seat_pool_pace_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1037,7 +1000,7 @@ mod tests {
         // A birth pick (pinned_index=None) over all-equal candidates with
         // tiebreak=0 chooses seat 0 and yields the fill-first order, pinning 0.
         let snaps = vec![closed_unlimited(), closed_unlimited(), closed_unlimited()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 0 });
     }
@@ -1047,7 +1010,7 @@ mod tests {
         // An existing pin whose home is dispatchable stays: order leads with
         // the home, the rest ascending, and NO new pin is minted.
         let snaps = vec![closed_unlimited(), closed_unlimited(), closed_unlimited()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, Some(2), false, &snaps, 7, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, Some(2), false, &snaps, 7, &[]);
         assert_eq!(order, vec![2, 0, 1]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 2 });
     }
@@ -1057,7 +1020,7 @@ mod tests {
         // Home (index 0) is Open / non-dispatchable; sibling 1 is Closed. Not
         // yet repinned -> migrate ONCE to sibling 1, order leads with 1.
         let snaps = vec![open(), closed_unlimited(), open()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::OverflowRepin { home: 1 });
         assert_eq!(order, vec![1, 0, 2]);
     }
@@ -1068,7 +1031,7 @@ mod tests {
         // cap holds -> Stay, no second migration even though sibling 1 is
         // healthy.
         let snaps = vec![open(), closed_unlimited(), open()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, Some(0), true, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, Some(0), true, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
         assert_eq!(order, vec![0, 1, 2]);
     }
@@ -1078,7 +1041,7 @@ mod tests {
         // Pinned home non-dispatchable, every sibling also non-dispatchable,
         // not repinned -> Stay (no flap, no pin: nowhere better).
         let snaps = vec![open(), open(), open()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
         assert_eq!(order, vec![0, 1, 2]);
     }
@@ -1090,7 +1053,7 @@ mod tests {
         // the session back. The pin now points at sibling 1, which is
         // dispatchable -> Stay on 1.
         let recovered = vec![closed_unlimited(), closed_unlimited(), open()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, Some(1), true, &recovered, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, Some(1), true, &recovered, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 1 });
         assert_eq!(order, vec![1, 0, 2]);
     }
@@ -1100,12 +1063,12 @@ mod tests {
         // A miss still yields Birth on a healthy pool and DeferNoHealthy when
         // all seats are parked.
         let healthy = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
-        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &healthy, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, false, &healthy, 0, &[]);
         assert_eq!(order, vec![1, 0, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
 
         let parked = vec![open(), open(), open()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &parked, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, false, &parked, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
     }
@@ -1114,7 +1077,7 @@ mod tests {
     fn sticky_birth_picks_least_loaded_seat() {
         // Seat 1 has the most RPM headroom -> chosen as home and pinned.
         let snaps = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
-        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
         assert_eq!(order, vec![1, 0, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
     }
@@ -1132,7 +1095,7 @@ mod tests {
             },
             closed_with(3.0),
         ];
-        let (order, outcome, _) = sticky_least_loaded_order(2, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(2, None, false, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
         assert_eq!(order, vec![1, 0]);
     }
@@ -1165,7 +1128,7 @@ mod tests {
         // Every seat Open / not dispatchable: home 0, fill-first order, no
         // pin (a later turn re-picks once a seat is healthy).
         let snaps = vec![open(), open(), open()];
-        let (order, outcome, _) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
     }
@@ -1181,19 +1144,11 @@ mod tests {
         let snaps = vec![closed_unlimited()];
         assert_eq!(
             sticky_least_loaded_order(1, None, false, &snaps, 0, &[]),
-            (
-                vec![0],
-                SelectionOutcome::Stay { home: 0 },
-                QuotaDecision::Dormant
-            )
+            (vec![0], SelectionOutcome::Stay { home: 0 })
         );
         assert_eq!(
             sticky_least_loaded_order(0, None, false, &[], 0, &[]),
-            (
-                Vec::<usize>::new(),
-                SelectionOutcome::Stay { home: 0 },
-                QuotaDecision::Dormant
-            )
+            (Vec::<usize>::new(), SelectionOutcome::Stay { home: 0 })
         );
     }
 
@@ -1211,241 +1166,5 @@ mod tests {
         assert_eq!(pins.get("sess-x"), None);
         pins.put("sess-x", pin("opus#seat-b"));
         assert_eq!(pins.get("sess-x"), Some(pin("opus#seat-b")));
-    }
-
-    // ---- the quota partition inside the chooser ----
-    //
-    // The three layers the partition must NOT touch are pinned here against
-    // quota input that would flip the pick if the partition had swallowed
-    // them: a parked-but-empty seat, a HalfOpenReady-but-empty seat, and a tie
-    // inside the chosen tier.
-
-    /// A below-cap tier with `remaining` unspent.
-    fn below(remaining: f64) -> SeatQuota {
-        SeatQuota::BelowCap { remaining }
-    }
-
-    /// An at-cap tier with `remaining` unspent.
-    fn capped(remaining: f64) -> SeatQuota {
-        SeatQuota::AtCap { remaining }
-    }
-
-    #[test]
-    fn quota_supersedes_the_rpm_ranking_on_a_birth_pick() {
-        // Seat 0 has far more RPM headroom, but seat 1 has the emptier
-        // subscription window. On a subscription pool the window is the real
-        // constraint, so the quota tier decides.
-        let snaps = vec![closed_with(100.0), closed_with(1.0)];
-        let quota = vec![below(0.2), below(0.9)];
-
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
-
-        assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
-        assert_eq!(order, vec![1, 0]);
-        assert_eq!(decision, QuotaDecision::BelowCapTier);
-    }
-
-    #[test]
-    fn quota_never_resurrects_a_non_dispatchable_seat() {
-        // Seat 0 is parked and reports an EMPTY window; seat 1 is healthy and
-        // nearly spent. The dispatchability filter runs first and is not
-        // re-derived, so the parked seat is unreachable however good its
-        // reading -- otherwise a cap would route a request onto a seat that
-        // cannot serve it.
-        let snaps = vec![open(), closed_with(1.0)];
-        let quota = vec![below(1.0), capped(0.05)];
-
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
-
-        assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
-        assert_eq!(order, vec![1, 0]);
-        // Only the healthy seat was eligible, and it is capped-known.
-        assert_eq!(decision, QuotaDecision::AllCappedMostRemaining);
-    }
-
-    #[test]
-    fn a_keyless_order_never_leads_with_a_non_dispatchable_seat() {
-        // The keyless path shares the dispatchability filter, so an emptier but
-        // PARKED seat cannot lead its walk either -- and the parked seat still
-        // appears in the order so the chain can fall through to it.
-        let snaps = vec![open(), closed_with(1.0)];
-        let quota = vec![below(1.0), below(0.20)];
-        let mut decision = QuotaDecision::Dormant;
-
-        let order = keyless_quota_order(2, &snaps, &quota, 0, &mut decision)
-            .expect("one dispatchable below-cap seat orders the walk");
-
-        assert_eq!(
-            order,
-            vec![1, 0],
-            "the parked seat's empty window must not lead, and it must still follow"
-        );
-        assert_eq!(decision, QuotaDecision::BelowCapTier);
-    }
-
-    #[test]
-    fn a_keyless_order_keeps_the_closed_over_half_open_preference() {
-        // The defect this pins: filtering only dispatchability let a keyless
-        // request lead with a HalfOpenReady probe purely because it had more
-        // budget left than a healthy Closed sibling, handing traffic to a
-        // breaker still recovering. Both layers are shared with the keyed pick
-        // now, so the Closed seat leads despite being the fuller one.
-        let snaps = vec![
-            CapacitySnapshot {
-                rpm_available: Some(100.0),
-                circuit: CircuitPhase::HalfOpenReady,
-                credential: crate::runtime_state::CredentialState::Usable,
-                outage_remaining: None,
-            },
-            closed_with(100.0),
-        ];
-        let quota = vec![below(0.95), below(0.10)];
-        let mut decision = QuotaDecision::Dormant;
-
-        let order = keyless_quota_order(2, &snaps, &quota, 0, &mut decision)
-            .expect("the Closed seat is below cap, so quota orders the walk");
-
-        assert_eq!(
-            order[0], 1,
-            "the healthy Closed seat leads even though the half-open probe has \
-             more budget left"
-        );
-        assert!(
-            order.contains(&0),
-            "the half-open seat still follows so the chain can fall through"
-        );
-    }
-
-    #[test]
-    fn a_keyless_order_leads_with_the_emptiest_of_several_below_cap_seats() {
-        // Distinguishes "picks a below-cap seat" from "picks the MOST REMAINING
-        // one": the seat with the most budget left is deliberately not the one
-        // the fixed order reaches first. NOTE the helper takes REMAINING, so a
-        // larger value is an emptier seat.
-        let snaps = vec![closed_with(1.0), closed_with(1.0), closed_with(1.0)];
-        let quota = vec![below(0.30), below(0.95), below(0.40)];
-        let mut decision = QuotaDecision::Dormant;
-
-        let order = keyless_quota_order(3, &snaps, &quota, 0, &mut decision)
-            .expect("three below-cap seats order the walk");
-
-        assert_eq!(order[0], 1, "the most remaining below-cap seat leads");
-        assert_eq!(order.len(), 3, "every seat still follows");
-        assert_eq!(decision, QuotaDecision::BelowCapTier);
-    }
-
-    #[test]
-    fn quota_never_overrides_the_closed_over_half_open_preference() {
-        // Seat 0 is HalfOpenReady with an EMPTY window; seat 1 is fully Closed
-        // and over its cap. The health preference restricts to the Closed seat
-        // BEFORE quota is consulted, so a breaker recovering from failures is
-        // not handed traffic because its budget looks good.
-        let snaps = vec![
-            CapacitySnapshot {
-                rpm_available: Some(100.0),
-                circuit: CircuitPhase::HalfOpenReady,
-                credential: crate::runtime_state::CredentialState::Usable,
-                outage_remaining: None,
-            },
-            closed_with(3.0),
-        ];
-        let quota = vec![below(1.0), capped(0.05)];
-
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
-
-        assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
-        assert_eq!(order, vec![1, 0]);
-        assert_eq!(decision, QuotaDecision::AllCappedMostRemaining);
-    }
-
-    #[test]
-    fn quota_leaves_the_anti_herd_tiebreak_to_break_a_tier_tie() {
-        // Three seats tied on remaining inside the below-cap tier: the
-        // rotation still spreads a burst of new conversations across them
-        // rather than herding every one onto the first.
-        let snaps = vec![closed_with(5.0), closed_with(5.0), closed_with(5.0)];
-        let quota = vec![below(0.8), below(0.8), below(0.8)];
-
-        for (tiebreak, expected) in [(0, 0), (1, 1), (2, 2), (3, 0)] {
-            let (_, outcome, decision) =
-                sticky_least_loaded_order(3, None, false, &snaps, tiebreak, &quota);
-            assert_eq!(outcome, SelectionOutcome::Birth { home: expected });
-            assert_eq!(decision, QuotaDecision::BelowCapTier);
-        }
-    }
-
-    #[test]
-    fn a_mixed_or_unknown_pool_falls_back_to_the_rpm_ranking_exactly() {
-        // Cap-dormant: with no below-cap evidence and at least one unknown
-        // seat, the pick must be the one the RPM ranking makes on its own.
-        let snaps = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
-        let baseline = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
-
-        let mixed = vec![capped(0.3), SeatQuota::Unknown, SeatQuota::Unknown];
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(3, None, false, &snaps, 0, &mixed);
-        assert_eq!((order, outcome), (baseline.0.clone(), baseline.1));
-        assert_eq!(decision, QuotaDecision::MixedUnknownFallback);
-
-        let unknown = vec![SeatQuota::Unknown; 3];
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(3, None, false, &snaps, 0, &unknown);
-        assert_eq!((order, outcome), (baseline.0, baseline.1));
-        assert_eq!(decision, QuotaDecision::AllUnknownFallback);
-    }
-
-    #[test]
-    fn a_warm_pin_is_never_moved_to_honor_a_soft_cap() {
-        // THE ONE THING THIS ORDERING REFUSES TO DO. The pinned home is
-        // healthy and its window is fully spent, while a sibling reports an
-        // empty one. The session stays: a soft cap must never cost the warm
-        // prompt cache the pin exists to hold, so the over-cap session runs to
-        // ACTUAL exhaustion and is rescued by the reactive breaker path.
-        let snaps = vec![closed_with(1.0), closed_with(1.0)];
-        let quota = vec![capped(0.0), below(1.0)];
-
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(2, Some(0), false, &snaps, 0, &quota);
-
-        assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
-        assert_eq!(order, vec![0, 1]);
-        // Quota was not consulted at all on a healthy pin.
-        assert_eq!(decision, QuotaDecision::Dormant);
-    }
-
-    #[test]
-    fn a_migration_off_an_unhealthy_home_ignores_quota() {
-        // The trigger for a migration is a seat that cannot SERVE, never a
-        // soft cap, so the sibling pick is made on health and RPM exactly as
-        // before: sibling 2 has the most headroom and wins despite sibling 1
-        // reporting the emptier window.
-        let snaps = vec![open(), closed_with(1.0), closed_with(50.0)];
-        let quota = vec![SeatQuota::Unknown, below(1.0), capped(0.0)];
-
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &quota);
-
-        assert_eq!(outcome, SelectionOutcome::OverflowRepin { home: 2 });
-        assert_eq!(order, vec![2, 0, 1]);
-        assert_eq!(decision, QuotaDecision::Dormant);
-    }
-
-    #[test]
-    fn a_pool_with_no_dispatchable_seat_defers_regardless_of_quota() {
-        // Existing no-healthy behavior, unchanged: no pin is created and the
-        // fill-first order stands even though every seat reports an empty
-        // window.
-        let snaps = vec![open(), open()];
-        let quota = vec![below(1.0), below(1.0)];
-
-        let (order, outcome, decision) =
-            sticky_least_loaded_order(2, None, false, &snaps, 0, &quota);
-
-        assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
-        assert_eq!(order, vec![0, 1]);
-        assert_eq!(decision, QuotaDecision::Dormant);
     }
 }

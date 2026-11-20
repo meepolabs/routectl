@@ -2441,6 +2441,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   leaving the anti-herd rotation to break it. Reads only the FAST window: the
   SLOW near-exhaustion guard and the billing tri-state are extracted, curated
   and stored but deliberately UNWIRED here
+- `src/quota/model_scope.rs` -- the closed scope -> model family table
+  (`opus` -> `claude-opus-`, `sonnet` -> `claude-sonnet-`): `binds` says
+  whether a scoped usage window limits a conversation on an upstream model id;
+  any other scope never binds and is logged once per tag
+  (`placement_scope_ignored`) through a bounded process-global set
+- `src/quota/test_support.rs` -- test-only reads of an account's windows
+  through the placement-safe view (held vs fresh five-hour and weekly used)
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice
   (one `SeatTarget` per usable pool member, shared by Arc across every model

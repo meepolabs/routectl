@@ -261,10 +261,10 @@ fn a_complete_report_drops_older_omitted_windows_and_bars_late_ones() {
     );
 }
 
-/// A complete report that omits the five-hour window drops a running one,
-/// and the projection then has no FAST evidence: unknown, never room.
+/// A complete report that omits the five-hour window drops a running one: no
+/// five-hour evidence is left, never room.
 #[test]
-fn a_complete_report_omitting_the_five_hour_window_projects_fast_unknown() {
+fn a_complete_report_omitting_the_five_hour_window_drops_it() {
     let rows: [(&str, bool); 2] = [("weekly only", true), ("no windows", false)];
     for (name, reports_weekly) in rows {
         // Arrange
@@ -288,11 +288,6 @@ fn a_complete_report_omitting_the_five_hour_window_projects_fast_unknown() {
 
         // Assert
         assert_eq!(used_of(&store, &key(FIVE_HOURS, None)), None, "row: {name}");
-        assert_eq!(
-            store.reading_for(&seat("a"), &t1).expect("an entry").fast,
-            QuotaWindow::Unknown,
-            "row: {name}"
-        );
     }
 }
 
@@ -447,12 +442,6 @@ fn an_equal_stamp_tie_goes_to_the_complete_report() {
         assert_eq!(store.report_for(&seat("a")), report, "row: {name}");
         assert_eq!(used_of(&store, &five()), five_used, "row: {name}");
         assert_eq!(used_of(&store, &seven()), seven_used, "row: {name}");
-        let fast = store.reading_for(&seat("a"), &s).expect("an entry").fast;
-        assert_eq!(
-            matches!(fast, QuotaWindow::Known { .. }),
-            five_used.is_some(),
-            "row: {name}: the projection follows the stored window"
-        );
     }
 }
 
@@ -771,22 +760,15 @@ fn an_unstarted_reading_is_refused_only_over_a_running_window_still_in_effect() 
         );
 
         // Assert
-        let fast = store.reading_for(&seat("a"), &t1).expect("an entry").fast;
         if accepted {
             assert_eq!(result, Ok(()), "row: {name}");
             assert_eq!(used_of(&store, &five), Some(0.0), "row: {name}");
-            let QuotaWindow::Known {
-                utilization,
-                reset_at,
-            } = fast
-            else {
-                panic!("row: {name}: a fresh unstarted FAST window is known: {fast:?}");
-            };
-            assert_eq!(utilization.fraction(), 0.0, "row: {name}");
             assert_eq!(
-                reset_at.at(),
-                base_wall() + mins(minute) + crate::quota::view::STALE_AFTER,
-                "row: {name}: a provisional reset is not a running window's expiry"
+                store
+                    .account(&seat("a"))
+                    .and_then(|meter| meter.window(&five).map(|w| w.reading().started())),
+                Some(Started::No),
+                "row: {name}: the held window is the unstarted one"
             );
             assert_eq!(store.rejection_totals().contradictory, 0, "row: {name}");
         } else {
@@ -800,10 +782,11 @@ fn an_unstarted_reading_is_refused_only_over_a_running_window_still_in_effect() 
                 held_before,
                 "row: {name}: no accepted state advances"
             );
-            let QuotaWindow::Known { utilization, .. } = fast else {
-                panic!("row: {name}: the running window stands: {fast:?}");
-            };
-            assert_eq!(utilization.fraction(), 0.95, "row: {name}");
+            assert_eq!(
+                used_of(&store, &five),
+                Some(0.95),
+                "row: {name}: the running window stands"
+            );
             assert_eq!(store.rejection_totals().contradictory, 1, "row: {name}");
         }
     }
@@ -824,11 +807,11 @@ fn a_header_snapshot_more_than_the_slack_lower_on_the_same_reset_is_refused() {
 
     assert!(!merged);
     assert_eq!(store.rejection_totals().contradictory, 1);
-    let fast = store.reading_for(&seat("a"), &t1).expect("an entry").fast;
-    let QuotaWindow::Known { utilization, .. } = fast else {
-        panic!("the stored FAST reading stands");
-    };
-    assert_eq!(utilization.fraction(), 0.50);
+    assert_eq!(
+        used_of(&store, &key(FIVE_HOURS, None)),
+        Some(0.50),
+        "the stored reading stands"
+    );
 }
 
 // ---- Ordering across sources ----
@@ -881,68 +864,7 @@ fn a_non_admitted_account_is_refused_counted_and_creates_no_entry() {
     assert!(store.is_empty());
 }
 
-// ---- Projection ----
-
-/// FAST comes only from the account-wide window of the curated five-hour
-/// length: a scoped five-hour window or another short length never feeds it.
-#[test]
-fn the_projection_takes_fast_only_from_the_account_wide_five_hour_window() {
-    let clock = Clock::new();
-    let rows: [(&str, WindowKey, bool); 3] = [
-        ("account-wide 5 h", key(FIVE_HOURS, None), true),
-        ("scoped 5 h", key(FIVE_HOURS, Some("opus")), false),
-        ("account-wide 4 h", key(4 * 3_600, None), false),
-    ];
-    for (name, window_key, feeds_fast) in rows {
-        let store = store();
-        let t0 = clock.at(mins(0));
-        store
-            .observe_account(
-                &seat("a"),
-                &partial(
-                    ReadingSource::Poll,
-                    t0,
-                    vec![running(window_key, 0.10, mins(60), &t0)],
-                ),
-            )
-            .expect("accepted");
-
-        let fast = store.reading_for(&seat("a"), &t0).expect("an entry").fast;
-
-        assert_eq!(
-            matches!(fast, QuotaWindow::Known { .. }),
-            feeds_fast,
-            "row: {name}"
-        );
-    }
-}
-
-#[test]
-fn a_poll_window_feeds_the_projection_until_its_reset() {
-    let clock = Clock::new();
-    let store = store();
-    let t0 = clock.at(mins(0));
-    store
-        .observe_account(
-            &seat("a"),
-            &partial(
-                ReadingSource::Poll,
-                t0,
-                vec![running(key(FIVE_HOURS, None), 0.70, mins(60), &t0)],
-            ),
-        )
-        .expect("accepted");
-
-    let before = store
-        .reading_for(&seat("a"), &clock.at(mins(59)))
-        .expect("an entry");
-    let after = store
-        .reading_for(&seat("a"), &clock.at(mins(60)))
-        .expect("an entry");
-
-    assert!(matches!(before.fast, QuotaWindow::Known { .. }));
-    assert_eq!(after.fast, QuotaWindow::Unknown);
-}
+// ---- Header keys ----
 
 /// The header adapter maps a role onto one key, so every curated row in a role
 /// must share the length that key carries.

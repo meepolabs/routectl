@@ -1,9 +1,8 @@
 //! The placement-safe, read-only view of the account meter.
 //!
-//! Placement today reads the meter through `AccountMeter::projection`, which
-//! trusts a running window until its reset. This view applies the stricter
-//! stale rule instead, for `/status` and for any later placement that opts
-//! into it: a window is stale once its age exceeds [`STALE_AFTER`] on EITHER
+//! Placement and `/status` both read the meter through this view, which
+//! applies the stale rule: a window is stale once its age exceeds
+//! [`STALE_AFTER`] on EITHER
 //! clock, once a running window's reset has passed, or when its stamp cannot
 //! be ordered against the read instant. A stale window keeps its last values
 //! for display but gives no numeric room ([`AccountWindow::remaining`]).

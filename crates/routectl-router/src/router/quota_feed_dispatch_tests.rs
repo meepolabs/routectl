@@ -16,7 +16,6 @@ use routectl_core::{Choice, ChunkChoice, ChunkDelta, Message};
 
 use crate::config::ProviderEntry;
 use crate::quota::key::SeatKey;
-use crate::quota::window::QuotaWindow;
 
 const SEAT_PROVIDER: &str = "anthropic";
 const SEAT_LABEL: &str = "seat-b";
@@ -161,14 +160,11 @@ fn served_seat_key() -> SeatKey {
 /// The stored FAST fraction for the served seat, or `None` when it reads as no
 /// evidence.
 fn stored_fast_fraction(router: &Router) -> Option<f64> {
-    let reading = router.quota_store.reading_for(
+    crate::quota::test_support::fresh_five_hour(
+        &router.quota_store,
         &served_seat_key(),
         &crate::quota::freshness::ObservationStamp::now(),
-    )?;
-    match reading.fast {
-        QuotaWindow::Known { utilization, .. } => Some(utilization.fraction()),
-        QuotaWindow::Unknown => None,
-    }
+    )
 }
 
 fn req() -> ChatRequest {

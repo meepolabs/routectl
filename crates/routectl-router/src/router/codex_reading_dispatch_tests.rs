@@ -1,8 +1,7 @@
 //! Codex response headers reach the account meter through a real dispatch:
 //! every window the family reports, keyed and classed by the length it
-//! reports, readable through `Router::account_readings`. Placement stays
-//! dormant for Codex even when a reported window has the five-hour length the
-//! FAST projection reads.
+//! reports, readable through `Router::account_readings`, and ranked by the
+//! pace rule like any other account.
 
 use super::*;
 
@@ -12,10 +11,8 @@ use routectl_core::{Choice, Message};
 
 use crate::config::ProviderEntry;
 use crate::quota::freshness::ObservationStamp;
-use crate::quota::key::{SeatKey, seat_key_for_secret_ref};
-use crate::quota::placement::seat_tiers;
+use crate::quota::placement::{Reason, Tier, standing};
 use crate::quota::reading::{LengthClass, ReadingSource, Started};
-use crate::quota::window::QuotaWindow;
 
 const SEAT_PROVIDER: &str = "codex";
 const SEAT_LABEL: &str = "c";
@@ -111,10 +108,6 @@ fn secret_ref() -> routectl_auth::SecretRef {
     }
 }
 
-fn seat_key() -> SeatKey {
-    seat_key_for_secret_ref(Some(&secret_ref())).expect("an oauth ref yields a key")
-}
-
 /// One model on a managed Codex seat whose provider answers with the family.
 fn router() -> Router {
     let mut providers = BTreeMap::new();
@@ -208,33 +201,33 @@ async fn every_codex_header_window_reaches_the_account_readings_at_its_reported_
     );
 }
 
-/// The five-hour window lands on the key the FAST projection reads, so the
-/// projection does see it; what keeps Codex out of placement is the provider
-/// kind (Codex curates no FAST window), and that must hold.
+/// The readings a dispatch fed rank the account on pace, with no Codex special
+/// case: the weekly secondary (40% used, three of seven days left) is slower
+/// than the five-hour primary and decides; the `codex_bengalfox` extra limit
+/// binds no model and is ignored.
 #[tokio::test]
-async fn a_codex_five_hour_window_leaves_placement_dormant() {
+async fn codex_header_readings_rank_the_account_by_its_slowest_window() {
     // Arrange
     let router = router();
     router.complete(req()).await.expect("the dispatch succeeds");
     let now = ObservationStamp::now();
-    let projected = router
-        .quota_store
-        .reading_for(&seat_key(), &now)
-        .expect("an entry")
-        .fast;
-    assert!(
-        matches!(projected, QuotaWindow::Known { .. }),
-        "premise: the five-hour window matches the projection key: {projected:?}"
-    );
+    let readings = router.account_readings(&now);
+    let reading = readings
+        .accounts
+        .iter()
+        .find(|reading| reading.account == ACCOUNT);
 
     // Act
-    let tiers = seat_tiers(
-        &router.quota_store,
-        &[Some(seat_key())],
-        Some(routectl_core::provider_kind::config::OPENAI_RESPONSES),
-        &now,
-    );
+    let standing = standing(reading, "gpt-5-codex", &now);
 
     // Assert
-    assert!(tiers.is_empty(), "Codex placement stays dormant: {tiers:?}");
+    assert_eq!(
+        (standing.tier, standing.reason),
+        (Tier::Roomy, Reason::Pace)
+    );
+    let score = standing.score.expect("a read seat is scored");
+    assert!(
+        (score - 0.6 / (3.0 / 7.0)).abs() < 0.01,
+        "the weekly window decides: {score}"
+    );
 }
