@@ -46,6 +46,12 @@ const NO_WINDOWS: DensityException = DensityException {
     reason: "an account with no reading, or one that reported no window, lists none",
 };
 
+const NO_POOLS: DensityException = DensityException {
+    path: "data.accounts[].pools",
+    allowance: Allowance::MayBeEmpty,
+    reason: "an account no pool member dispatches on names no pool",
+};
+
 const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "usage",
@@ -75,7 +81,7 @@ const FIXTURES: &[Fixture] = &[
         name: "accounts",
         payload: accounts::fixture::populated_accounts,
         schema_version: accounts::SCHEMA_VERSION,
-        exceptions: &[UNAVAILABLE, NO_WINDOWS],
+        exceptions: &[UNAVAILABLE, NO_WINDOWS, NO_POOLS],
     },
     Fixture {
         name: "query grouped",
@@ -155,6 +161,10 @@ fn the_aggregate_carries_the_five_get_panels_densely_at_their_versions() {
         DensityException {
             path: "panels.accounts.data.accounts[].windows",
             ..NO_WINDOWS
+        },
+        DensityException {
+            path: "panels.accounts.data.accounts[].pools",
+            ..NO_POOLS
         },
         DensityException {
             path: "panels.doctor.data.report.panels.capability_matrix.lanes[].cells[].nickname_actions",
@@ -257,6 +267,10 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.accounts[].poll.last_result",
                 "data.placement.pools[].seats[].rank",
                 "data.placement.pools[].seats[].score",
+                "data.accounts[].credential.cause",
+                "data.accounts[].credential.since_ms",
+                "data.accounts[].credential.until_ms",
+                "data.accounts[].credential.fix",
             ],
         ),
         (

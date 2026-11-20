@@ -1,7 +1,8 @@
 //! `/status/accounts` panel: every configured credential account with its
 //! display identity, its account-meter readings under the stale rule and its
-//! background usage poll state, plus the meter's refusal and correction
-//! totals, the reading history counters, the usage poll driver's health and
+//! background usage poll state, its pools, its billing kind and its
+//! credential state, plus the meter's refusal and correction totals, the
+//! reading history counters, the refresh and usage poll drivers' health and
 //! the pace placement rule's counters and seat ranking.
 //!
 //! Built from memory only: one router snapshot (account identities, meter
@@ -19,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::State;
@@ -31,10 +32,11 @@ use routectl_router::{
     ReportState, Started, UsageVendor,
 };
 
-use super::router_view::StatusRouterView;
+use super::router_view::{AccountCredential, StatusRouterView};
 use super::usage_health::AccountReadingHistory;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
+use crate::commands::doctor::attention::credential_cause;
 use crate::server::seat_driver::SeatDriverHealthSnapshot;
 use crate::server::usage_poll::{PollApplicability, PollStateSnapshot, UsagePollState};
 
@@ -59,7 +61,9 @@ pub(super) struct AccountsPanel {
     /// The reading history writer's running counters.
     history: AccountReadingHistory,
     /// The background usage poll driver's health.
-    poll_driver: PollDriverRow,
+    poll_driver: DriverRow,
+    /// The background credential refresh driver's health.
+    refresh_driver: DriverRow,
     /// The pace rule's counters and its per-pool, per-model seat ranking.
     placement: placement::PlacementRow,
 }
@@ -83,6 +87,30 @@ struct AccountRow {
     /// The latest accepted reading, of any source.
     last_accepted: Option<LastAcceptedRow>,
     poll: PollRow,
+    /// The `[pools]` keys whose members dispatch on this account, sorted.
+    pools: Vec<String>,
+    /// Whether the account bills as a managed-OAuth subscription.
+    subscription: bool,
+    credential: CredentialRow,
+}
+
+/// Whether the account's credential can be dispatched on now. Every key is
+/// always present.
+#[derive(Debug, Clone, Serialize)]
+struct CredentialRow {
+    /// `usable`, `unusable`, `parked`, or `not_built` for an account no
+    /// built dispatch target names (its provider failed to build), about
+    /// which the router knows nothing.
+    state: &'static str,
+    /// The plain-words cause with its age, worded as the needs-attention
+    /// list words it; null for `usable` and `not_built`.
+    cause: Option<String>,
+    /// Epoch ms the account was first marked unusable.
+    since_ms: Option<i64>,
+    /// Epoch ms a park lapses into a re-test.
+    until_ms: Option<i64>,
+    /// The line that readmits an unusable account.
+    fix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,10 +169,10 @@ struct PollRow {
     failure_since_ms: Option<i64>,
 }
 
-/// The usage poll driver's health. Owned here so the health panel's driver
-/// row can change under its own version without moving this one.
+/// A background seat driver's health. Owned here so the health panel's
+/// driver rows can change under their own version without moving this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-struct PollDriverRow {
+struct DriverRow {
     running: bool,
     last_sweep_ms: Option<i64>,
     last_good_sweep_ms: Option<i64>,
@@ -180,8 +208,17 @@ pub(super) struct AccountSources {
     pub(super) poll: Option<PollStateSnapshot>,
     pub(super) history: AccountReadingHistory,
     pub(super) poll_driver: SeatDriverHealthSnapshot,
+    pub(super) refresh_driver: SeatDriverHealthSnapshot,
     /// Read at the same instant as `readings`.
     pub(super) placement: PlacementStatus,
+    /// Each configured account's pools; an absent account is in none.
+    pub(super) pools: BTreeMap<String, Vec<String>>,
+    /// Each configured account's subscription flag; absent reads false.
+    pub(super) subscriptions: BTreeMap<String, bool>,
+    /// The credential state of each account a built target names.
+    pub(super) credentials: BTreeMap<String, AccountCredential>,
+    /// The epoch-ms instant the credential states were read at.
+    pub(super) now_ms: i64,
 }
 
 pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
@@ -191,7 +228,12 @@ pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
         poll,
         history,
         poll_driver,
+        refresh_driver,
         placement,
+        mut pools,
+        subscriptions,
+        credentials,
+        now_ms,
     } = sources;
     let mut by_account: BTreeMap<String, AccountReading> = readings
         .accounts
@@ -202,8 +244,13 @@ pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
         .iter()
         .map(|(account, identity)| {
             let reading = by_account.remove(account);
-            let poll_row = map_poll(poll.as_ref(), account);
-            map_account(account, identity, reading, poll_row)
+            let standing = Standing {
+                poll: map_poll(poll.as_ref(), account),
+                pools: pools.remove(account).unwrap_or_default(),
+                subscription: subscriptions.get(account).copied().unwrap_or(false),
+                credential: map_credential(credentials.get(account), now_ms),
+            };
+            map_account(account, identity, reading, standing)
         })
         .collect();
     AccountsPanel {
@@ -225,16 +272,25 @@ pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
         refused_by_admission: readings.refused_by_admission,
         corrections_confirmed: readings.corrections_confirmed,
         history,
-        poll_driver: map_poll_driver(poll_driver),
+        poll_driver: map_driver(poll_driver),
+        refresh_driver: map_driver(refresh_driver),
         placement: placement::map_placement(placement),
     }
+}
+
+/// An account's row fields that do not come from its meter reading.
+struct Standing {
+    poll: PollRow,
+    pools: Vec<String>,
+    subscription: bool,
+    credential: CredentialRow,
 }
 
 fn map_account(
     account: &str,
     identity: &AccountIdentity,
     reading: Option<AccountReading>,
-    poll: PollRow,
+    standing: Standing,
 ) -> AccountRow {
     let (report, windows, last_accepted) = reading
         .map_or((ReportState::NoReading, Vec::new(), None), |reading| {
@@ -247,8 +303,32 @@ fn map_account(
         report: report_token(report),
         windows: windows.iter().map(map_window).collect(),
         last_accepted: last_accepted.map(map_last_accepted),
-        poll,
+        poll: standing.poll,
+        pools: standing.pools,
+        subscription: standing.subscription,
+        credential: standing.credential,
     }
+}
+
+/// The wire form of an account's credential state; `None` is an account no
+/// built target names.
+fn map_credential(credential: Option<&AccountCredential>, now_ms: i64) -> CredentialRow {
+    credential.map_or(
+        CredentialRow {
+            state: "not_built",
+            cause: None,
+            since_ms: None,
+            until_ms: None,
+            fix: None,
+        },
+        |credential| CredentialRow {
+            state: credential.state.as_str(),
+            cause: credential_cause(&credential.condition, now_ms),
+            since_ms: credential.since_ms,
+            until_ms: credential.until_ms,
+            fix: credential.fix.clone(),
+        },
+    )
 }
 
 fn map_window(window: &AccountWindow) -> WindowRow {
@@ -305,8 +385,8 @@ const fn applicability_token(applicability: PollApplicability) -> &'static str {
     }
 }
 
-const fn map_poll_driver(health: SeatDriverHealthSnapshot) -> PollDriverRow {
-    PollDriverRow {
+const fn map_driver(health: SeatDriverHealthSnapshot) -> DriverRow {
+    DriverRow {
         running: health.running,
         last_sweep_ms: health.last_sweep_ms,
         last_good_sweep_ms: health.last_good_sweep_ms,
@@ -378,22 +458,34 @@ fn duration_ms(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// Both seat drivers' health, read once each.
+struct DriverHealths {
+    poll: SeatDriverHealthSnapshot,
+    refresh: SeatDriverHealthSnapshot,
+}
+
 /// Read every source from one router snapshot and the poll state, the
 /// readings and the placement ranking at one instant.
 fn read_sources(
     view: &StatusRouterView,
     poll_state: Option<&UsagePollState>,
     history: AccountReadingHistory,
-    poll_driver: SeatDriverHealthSnapshot,
+    drivers: DriverHealths,
 ) -> AccountSources {
     let now = ObservationStamp::now();
+    let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
     AccountSources {
         identities: view.account_identities(),
         readings: view.account_readings(&now),
         poll: poll_state.map(|state| view.usage_poll_snapshot(state)),
         history,
-        poll_driver,
+        poll_driver: drivers.poll,
+        refresh_driver: drivers.refresh,
         placement: view.placement_status(&now),
+        pools: view.account_pools(),
+        subscriptions: view.account_subscriptions(),
+        credentials: view.account_credentials((Instant::now(), now_ms)),
+        now_ms,
     }
 }
 
@@ -401,14 +493,17 @@ pub(super) async fn build(state: &StatusState) -> Panel<AccountsPanel> {
     let view = state.router.view();
     let poll_state = state.daemon_meta.usage_poll_state().cloned();
     let history = state.usage_health.account_reading_history();
-    let poll_driver = state.daemon_meta.usage_poll_driver();
+    let drivers = DriverHealths {
+        poll: state.daemon_meta.usage_poll_driver(),
+        refresh: state.daemon_meta.seat_driver(),
+    };
     let as_of = now_utc_rfc3339();
     let panel = guard_panel(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
         move || {
-            let sources = read_sources(&view, poll_state.as_ref(), history, poll_driver);
+            let sources = read_sources(&view, poll_state.as_ref(), history, drivers);
             Panel::available(SCHEMA_VERSION, as_of, build_from_sources(sources))
         },
     )
@@ -441,3 +536,7 @@ mod poll_off_tests;
 #[cfg(test)]
 #[path = "accounts_placement_tests.rs"]
 mod placement_tests;
+
+#[cfg(test)]
+#[path = "accounts_fields_tests.rs"]
+mod fields_tests;

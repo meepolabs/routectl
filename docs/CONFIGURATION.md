@@ -5618,8 +5618,8 @@ is contacted and redirects are never followed.
 
 The running daemon's `/status/accounts` panel (schema 1, also under
 `panels.accounts` on the `/status` aggregate) shows every configured
-credential account with what the account meter holds for it and the usage
-poll's state. It is read from memory only: no usage database read and no
+credential account with what the account meter holds for it, the usage
+poll's state and whether its credential can be used. It is read from memory only: no usage database read and no
 vendor request, so it is cheap at the dashboard's poll rate. Every key is
 always present; times are epoch ms and durations ms.
 
@@ -5678,6 +5678,26 @@ always present; times are epoch ms and durations ms.
     was by `token_not_ready` and `superseded`. It is the input for "a usage poll failing for 15 minutes":
     `now - failure_since_ms`. A backward wall-clock step pulls it back to
     the new time, never into the future.
+  - `pools`: the `[pools]` keys whose members dispatch on this account,
+    sorted; an account several entries name lists every pool any of them
+    is in, and an account in no pool lists none (`[]`).
+  - `subscription`: `true` when the account bills as a managed-OAuth
+    subscription (an `oauth://` credential, the same rule the cost figures
+    use), else `false`.
+  - `credential`: whether the account can be dispatched on now, with
+    `state`, `cause`, `since_ms`, `until_ms` and `fix`. `state` is one of a
+    closed set: `usable`; `unusable` (marked not logged in, unreadable,
+    expired or revoked; only a fixed credential readmits it), with `since_ms`
+    when it was first marked and `fix`, the exact line that readmits it (for
+    a login, the bare `routectl login` command); `parked` (the provider
+    refused the credential; the park lapses into a re-test on its own), with
+    `until_ms` when it lapses and no `fix`; or `not_built` for an account
+    whose provider failed to build, about which the daemon knows nothing
+    more. An unusable mark outranks a park. `cause` is the plain-words reason
+    with its age ("Not logged in, for 2 h", "Credential refused by the
+    provider, retried in 8 min"), worded by the same function as the
+    daemon's needs-attention item for the same account. It, `since_ms`,
+    `until_ms` and `fix` are null where the state gives none.
 - `vendor_pauses`: each vendor whose polling is paused after a 429, with
   `vendor` and `paused_until_ms`.
 - `rejections`: the meter's running refusal counts by reason
@@ -5727,6 +5747,9 @@ always present; times are epoch ms and durations ms.
   `last_sweep_ms`, `last_good_sweep_ms`, `sweeps`, `transient` and
   `definitive`, today the same values as `/status/health`
   `usage_poll_driver`.
+- `refresh_driver`: the background token refresh driver's health, with the
+  same keys as `poll_driver` and read from its own counters (today the same
+  values as `/status/health` `seat_driver`).
 
 Every count resets on restart. The panel carries no token, credential
 reference, response body or header, and no vendor account id.

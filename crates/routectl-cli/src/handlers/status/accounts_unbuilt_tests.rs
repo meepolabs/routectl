@@ -201,6 +201,32 @@ async fn a_configured_login_whose_provider_did_not_build_is_listed_with_its_poll
     assert_eq!(seat_a["login_label"], "a", "{seat_a}");
 }
 
+/// An account no built target names reads `not_built` with every other
+/// credential field null: the router holds nothing about it, so it is never
+/// reported usable. The built seat beside it reads usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_login_whose_provider_did_not_build_reads_credential_not_built() {
+    // Arrange
+    let rig = Rig::new().await;
+    rig.assert_codex_did_not_build();
+
+    // Act
+    let json = rig.send("GET", "/status/accounts", "").await;
+
+    // Assert
+    let codex = by_key(&json["data"]["accounts"], "account", CODEX);
+    assert_eq!(
+        codex["credential"],
+        serde_json::json!({
+            "state": "not_built", "cause": null, "since_ms": null, "until_ms": null, "fix": null,
+        }),
+        "{codex}"
+    );
+    let seat_a = by_key(&json["data"]["accounts"], "account", SEAT_A);
+    assert_eq!(seat_a["credential"]["state"], "usable", "{seat_a}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn the_accounts_panel_lists_exactly_the_accounts_the_usage_poll_reads() {

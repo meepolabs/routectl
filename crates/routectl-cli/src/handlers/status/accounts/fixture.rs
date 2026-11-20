@@ -1,7 +1,11 @@
 //! Test-only fully populated `/status/accounts` panel, built by this panel's
 //! own `build_from_sources` from the shared fixture config's accounts.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
+
+use routectl_core::UpstreamReason;
+use routectl_router::runtime_state::UnusableCause;
 
 use routectl_router::{
     AccountIdentities, AccountReading, AccountReadings, AccountWindow, Billing, LastReading,
@@ -11,8 +15,12 @@ use routectl_router::{
 use serde_json::Value;
 
 use super::super::panel_fixtures::{FIXTURE_NOW_MS, fixture_as_of, fixture_config};
+use super::super::router_view::{AccountCredential, CredentialState};
 use super::super::usage_health::AccountReadingHistory;
 use super::{AccountSources, AccountsPanel, Panel, SCHEMA_VERSION, build_from_sources};
+use crate::commands::doctor::SeatFix;
+use crate::commands::doctor::attention::CredentialState as CredentialCondition;
+use crate::commands::pricing::is_subscription;
 use crate::server::seat_driver::SeatDriverHealthSnapshot;
 use crate::server::usage_poll::{PollStateSnapshot, SeatPollSnapshot};
 
@@ -24,8 +32,10 @@ pub fn populated_accounts() -> Value {
 /// Every account the fixture config names: the labeled Anthropic seat with a
 /// fresh polled window and a stale response window, the unlabeled Codex login
 /// with no windows, and the API-key entries with no reading; a paused vendor,
-/// nonzero refusal, correction and history counters, a running poll driver,
-/// and a placement ranking with a ranked and an unavailable seat.
+/// nonzero refusal, correction and history counters, both drivers running,
+/// and a placement ranking with a ranked and an unavailable seat. The seat
+/// is logged out and in two pools, Codex is parked, the API-key entries are
+/// usable and in no pool, and the cloud entry did not build.
 pub fn populated_accounts_panel() -> Panel<AccountsPanel> {
     let sources = AccountSources {
         identities: AccountIdentities::from_config(&fixture_config()),
@@ -46,9 +56,82 @@ pub fn populated_accounts_panel() -> Panel<AccountsPanel> {
             transient: 2,
             definitive: 1,
         },
+        refresh_driver: SeatDriverHealthSnapshot {
+            running: true,
+            last_sweep_ms: Some(FIXTURE_NOW_MS - 20_000),
+            last_good_sweep_ms: Some(FIXTURE_NOW_MS - 80_000),
+            sweeps: 12,
+            transient: 3,
+            definitive: 4,
+        },
         placement: placement(),
+        pools: [
+            ("anthropic#a", vec!["backup", "seats"]),
+            ("codex", vec!["seats"]),
+        ]
+        .into_iter()
+        .map(|(account, pools)| {
+            let pools = pools.into_iter().map(str::to_string).collect();
+            (account.to_string(), pools)
+        })
+        .collect(),
+        subscriptions: AccountIdentities::from_config(&fixture_config())
+            .iter()
+            .map(|(account, identity)| {
+                let flag = is_subscription(&fixture_config(), &identity.provider_entry);
+                (account.to_string(), flag)
+            })
+            .collect(),
+        credentials: credentials(),
+        now_ms: FIXTURE_NOW_MS,
     };
     Panel::available(SCHEMA_VERSION, fixture_as_of(), build_from_sources(sources))
+}
+
+/// The seat logged out for 2 hours, Codex parked for 10 more minutes, the
+/// API-key entries usable; the cloud entry is absent, as an unbuilt one is.
+fn credentials() -> BTreeMap<String, AccountCredential> {
+    let since_ms = FIXTURE_NOW_MS - 7_200_000;
+    let until_ms = FIXTURE_NOW_MS + 600_000;
+    let logged_out = AccountCredential {
+        state: CredentialState::Unusable,
+        cause: Some(UnusableCause::NotLoggedIn.as_str()),
+        since_ms: Some(since_ms),
+        until_ms: None,
+        fix: Some(SeatFix::of(&fixture_config(), "claude-seat").command()),
+        condition: CredentialCondition::Unusable {
+            cause: UnusableCause::NotLoggedIn,
+            since_ms,
+        },
+    };
+    let parked = AccountCredential {
+        state: CredentialState::Parked,
+        cause: Some(UpstreamReason::CredentialInvalid.as_str()),
+        since_ms: None,
+        until_ms: Some(until_ms),
+        fix: None,
+        condition: CredentialCondition::Parked {
+            reason: UpstreamReason::CredentialInvalid,
+            until_ms,
+        },
+    };
+    let usable = AccountCredential {
+        state: CredentialState::Usable,
+        cause: None,
+        since_ms: None,
+        until_ms: None,
+        fix: None,
+        condition: CredentialCondition::Usable,
+    };
+    [
+        ("anthropic#a", logged_out),
+        ("codex", parked),
+        ("#anthropic", usable.clone()),
+        ("#compat", usable),
+    ]
+    .into_iter()
+    .map(|(account, credential)| (account.to_string(), credential))
+    .collect()
 }
 
 fn at_ms(ms: i64) -> SystemTime {

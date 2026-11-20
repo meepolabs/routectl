@@ -83,7 +83,7 @@ fn bedrock_block() -> &'static str {
 /// One labeled Anthropic login reached through two entries (`seat-z` and
 /// `seat-b`), an unlabeled Codex login, an `env://` key, a `file://` key and
 /// an AWS cloud credential.
-pub(super) fn every_kind() -> Vec<Seat> {
+pub(in crate::handlers::status) fn every_kind() -> Vec<Seat> {
     vec![
         (
             "m-z",
@@ -124,7 +124,7 @@ pub(super) fn every_kind() -> Vec<Seat> {
     ]
 }
 
-fn config_of(seats: &[Seat]) -> Config {
+fn config_of(seats: &[Seat], extra: &str) -> Config {
     let mut text = format!("version = {CURRENT_CONFIG_VERSION}\n");
     let mut entries = std::collections::BTreeSet::new();
     for (_, entry, block, uri) in seats {
@@ -139,12 +139,18 @@ fn config_of(seats: &[Seat]) -> Config {
             "[models.{nickname}]\nprovider = \"{entry}\"\nupstream = \"u\"\n"
         ));
     }
+    text.push_str(extra);
     toml::from_str(&text).expect("fixture config parses")
 }
 
 /// One non-pooled model per seat.
 pub(in crate::handlers::status) fn router_of(seats: &[Seat]) -> Router {
-    let mut router = Router::new(Arc::new(config_of(seats)));
+    router_with(seats, "")
+}
+
+/// One non-pooled model per seat, over a config carrying `extra` TOML.
+pub(in crate::handlers::status) fn router_with(seats: &[Seat], extra: &str) -> Router {
+    let mut router = Router::new(Arc::new(config_of(seats, extra)));
     let provider: Arc<dyn Provider> = Arc::new(Unused);
     let models: BTreeMap<String, Arc<ResolvedModel>> = seats
         .iter()
@@ -192,7 +198,10 @@ fn land_poll(router: &Router, account: &str, percent: u32) {
         .expect("the body is accepted");
 }
 
-fn state_over(swap: Arc<ArcSwap<Router>>, meta: Arc<DaemonMeta>) -> Arc<StatusState> {
+pub(in crate::handlers::status) fn state_over(
+    swap: Arc<ArcSwap<Router>>,
+    meta: Arc<DaemonMeta>,
+) -> Arc<StatusState> {
     let app = AppState::for_test(swap);
     Arc::new(StatusState::from_app(&app, None, meta))
 }
@@ -208,7 +217,7 @@ async fn get_json(state: &Arc<StatusState>, uri: &str) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-pub(super) async fn read_accounts(state: &Arc<StatusState>) -> Value {
+pub(in crate::handlers::status) async fn read_accounts(state: &Arc<StatusState>) -> Value {
     let json = get_json(state, "/status/accounts").await;
     assert!(json["unavailable"].is_null(), "{json}");
     json
@@ -218,7 +227,7 @@ fn rows(json: &Value) -> &Vec<Value> {
     json["data"]["accounts"].as_array().expect("accounts array")
 }
 
-pub(super) fn row<'a>(json: &'a Value, account: &str) -> &'a Value {
+pub(in crate::handlers::status) fn row<'a>(json: &'a Value, account: &str) -> &'a Value {
     rows(json)
         .iter()
         .find(|row| row["account"] == account)
@@ -457,7 +466,7 @@ const fn zero_totals() -> RejectionTotals {
     }
 }
 
-fn sources(
+pub(super) fn sources(
     identities: AccountIdentities,
     readings: AccountReadings,
     poll: Option<PollStateSnapshot>,
@@ -468,7 +477,12 @@ fn sources(
         poll,
         history: AccountReadingHistory::default(),
         poll_driver: SeatDriverHealth::default().snapshot(),
+        refresh_driver: SeatDriverHealth::default().snapshot(),
         placement: no_placement(),
+        pools: BTreeMap::new(),
+        subscriptions: BTreeMap::new(),
+        credentials: BTreeMap::new(),
+        now_ms: 0,
     }
 }
 
@@ -821,7 +835,7 @@ fn the_poll_driver_row_carries_its_own_key_set() {
     };
 
     // Act
-    let json = serde_json::to_value(map_poll_driver(snapshot)).unwrap();
+    let json = serde_json::to_value(map_driver(snapshot)).unwrap();
 
     // Assert
     assert_eq!(

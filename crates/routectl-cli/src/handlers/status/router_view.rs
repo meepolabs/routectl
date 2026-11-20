@@ -28,6 +28,7 @@ use routectl_router::{
 };
 use routectl_usage::{AggRow, RowCost};
 
+use crate::commands::doctor::attention::CredentialState as CredentialCondition;
 use crate::commands::doctor::{
     ParkedSeat, ResidentLearned, SeatFix, ServedInputs, ServedPrices, UnusableSeat,
     unusable_seat_fix,
@@ -237,20 +238,34 @@ impl StatusRouterView {
                     identity.provider_entry.as_str()
                 });
             let credential = match (target.gate.credential_unusable, target.gate.credential_park) {
-                (Some(mark), _) => AccountCredential {
-                    state: CredentialState::Unusable,
-                    cause: Some(mark.cause.as_str()),
-                    since_ms: Some(epoch_ms_before(now_ms, mark.since_elapsed)),
-                    until_ms: None,
-                    fix: Some(self.seat_fix(entry).command()),
-                },
-                (None, Some(park)) if !park.remaining.is_zero() => AccountCredential {
-                    state: CredentialState::Parked,
-                    cause: Some(park.reason.as_str()),
-                    since_ms: None,
-                    until_ms: Some(epoch_ms_after(now_ms, park.remaining)),
-                    fix: None,
-                },
+                (Some(mark), _) => {
+                    let since_ms = epoch_ms_before(now_ms, mark.since_elapsed);
+                    AccountCredential {
+                        state: CredentialState::Unusable,
+                        cause: Some(mark.cause.as_str()),
+                        since_ms: Some(since_ms),
+                        until_ms: None,
+                        fix: Some(self.seat_fix(entry).command()),
+                        condition: CredentialCondition::Unusable {
+                            cause: mark.cause,
+                            since_ms,
+                        },
+                    }
+                }
+                (None, Some(park)) if !park.remaining.is_zero() => {
+                    let until_ms = epoch_ms_after(now_ms, park.remaining);
+                    AccountCredential {
+                        state: CredentialState::Parked,
+                        cause: Some(park.reason.as_str()),
+                        since_ms: None,
+                        until_ms: Some(until_ms),
+                        fix: None,
+                        condition: CredentialCondition::Parked {
+                            reason: park.reason,
+                            until_ms,
+                        },
+                    }
+                }
                 _ => AccountCredential::usable(),
             };
             out.insert(account, credential);
@@ -481,6 +496,9 @@ pub struct AccountCredential {
     pub until_ms: Option<i64>,
     /// What readmits an unusable account.
     pub fix: Option<String>,
+    /// The same state in the needs-attention builder's typed form, so every
+    /// surface words it through that builder's one function.
+    pub condition: CredentialCondition,
 }
 
 impl AccountCredential {
@@ -491,6 +509,7 @@ impl AccountCredential {
             since_ms: None,
             until_ms: None,
             fix: None,
+            condition: CredentialCondition::Usable,
         }
     }
 }
