@@ -792,6 +792,113 @@ fn an_unusable_account_with_a_failing_refresh_is_one_unusable_item_naming_the_re
 }
 
 #[test]
+fn a_parked_account_with_a_failing_refresh_is_one_parked_item_naming_the_refresh() {
+    let row = with_account(AccountSnapshot {
+        credential: CredentialState::Parked {
+            reason: UpstreamReason::CredentialExpired,
+            until_ms: NOW + 5 * MIN,
+        },
+        refresh_failure: Some(RefreshFailure {
+            first_failure_ms: NOW - 10 * MIN,
+            token: "transient",
+        }),
+        ..seat_a()
+    });
+
+    let items = active_items(&row);
+
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, AttentionKind::AccountParked);
+    assert_eq!(
+        items[0].raw_token,
+        "account_parked (credential-expired); refresh_failing (transient)"
+    );
+}
+
+fn near_limit_cause(window: WindowSnapshot) -> AttentionItem {
+    let row = with_account(AccountSnapshot {
+        windows: vec![window],
+        ..seat_a()
+    });
+    let items = active_items(&row);
+    assert_eq!(items.len(), 1, "{items:?}");
+    items.into_iter().next().expect("one item")
+}
+
+#[test]
+fn a_near_limit_cause_names_a_plain_scope_and_keeps_a_limit_id_to_the_raw_token() {
+    let scoped = |scope: Option<&str>| WindowSnapshot {
+        scope: scope.map(str::to_string),
+        ..window(7 * 86_400, 0.93)
+    };
+    let rows = [
+        (
+            "model family",
+            scoped(Some("sonnet")),
+            "93% of the 7 day sonnet window used, resets in 2 h",
+            ", scope=sonnet)",
+        ),
+        (
+            "vendor limit id",
+            scoped(Some("codex_bengalfox")),
+            "93% of the 7 day window used, resets in 2 h",
+            ", scope=codex_bengalfox)",
+        ),
+        (
+            "digits in the tag",
+            scoped(Some("gpt5")),
+            "93% of the 7 day window used, resets in 2 h",
+            ", scope=gpt5)",
+        ),
+        (
+            "non-ASCII letters",
+            scoped(Some("\u{fc}ber")),
+            "93% of the 7 day window used, resets in 2 h",
+            ", scope=\u{fc}ber)",
+        ),
+        (
+            "empty tag",
+            scoped(Some("")),
+            "93% of the 7 day window used, resets in 2 h",
+            ", scope=)",
+        ),
+        (
+            "account-wide",
+            scoped(None),
+            "93% of the 7 day window used, resets in 2 h",
+            "length_secs=604800)",
+        ),
+    ];
+
+    for (name, window, cause, token_tail) in rows {
+        let item = near_limit_cause(window);
+
+        assert_eq!(item.cause, cause, "{name}");
+        assert!(item.raw_token.ends_with(token_tail), "{name}: {item:?}");
+    }
+}
+
+#[test]
+fn a_near_limit_cause_reads_above_the_line_and_below_full_until_full() {
+    let rows = [
+        ("just past the line", 0.9001, "91%"),
+        ("a whole percent", 0.93, "93%"),
+        ("a hair under full", 0.995, "99%"),
+        ("full", 1.0, "100%"),
+    ];
+
+    for (name, used, percent) in rows {
+        let item = near_limit_cause(window(18_000, used));
+
+        assert_eq!(
+            item.cause,
+            format!("{percent} of the 5 h window used, resets in 2 h"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn credential_cause_words_each_state_with_its_age() {
     let rows = [
         ("usable", CredentialState::Usable, None),
@@ -918,7 +1025,7 @@ fn doctor_failures_and_dropped_records_count_but_never_move_the_verdict() {
             ],
             VerdictSeverity::Ok,
             "All routes healthy; 2 other items need attention",
-            Some(ViewTarget::Traffic),
+            None,
             Counts {
                 broken: 0,
                 degraded: 2,

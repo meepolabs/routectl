@@ -33,6 +33,9 @@ pub const NEAR_LIMIT_USED: f64 = 0.90;
 /// The doctor section whose failures `pool_empty` already names.
 const POOLS_SECTION: &str = "pools";
 
+/// The longest scope tag shown in plain words.
+const MAX_PLAIN_SCOPE_LEN: usize = 16;
+
 const MS_PER_MIN: i64 = 60_000;
 const MS_PER_HOUR: i64 = 60 * MS_PER_MIN;
 const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
@@ -423,7 +426,8 @@ pub struct Verdict {
     pub severity: VerdictSeverity,
     /// One sentence.
     pub text: String,
-    /// The view the worst item points at.
+    /// The view the worst routing or account item points at; `None` when
+    /// no such item is active.
     pub target: Option<ViewTarget>,
 }
 
@@ -508,7 +512,7 @@ fn verdict_of(items: &[AttentionItem]) -> Verdict {
         None => Verdict {
             severity: VerdictSeverity::Ok,
             text: format!("All routes healthy{others}"),
-            target: other.first().and_then(|item| item.target),
+            target: None,
         },
     }
 }
@@ -684,8 +688,8 @@ fn route_item(route: &RouteSnapshot, now: i64) -> Option<AttentionItem> {
 fn account_items(account: &AccountSnapshot, now: i64) -> Vec<AttentionItem> {
     let credential = credential_item(account, now);
     let refresh = match credential {
-        Some(_) if matches!(account.credential, CredentialState::Unusable { .. }) => None,
-        _ => refresh_item(account, now),
+        Some(_) => None,
+        None => refresh_item(account, now),
     };
     [
         credential,
@@ -706,15 +710,25 @@ fn credential_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem>
             cause: unusable,
             since_ms,
         } => Draft {
-            raw_token: unusable_token(unusable, account.refresh_failure.as_ref()),
+            raw_token: with_refresh(
+                format!(
+                    "{} ({})",
+                    EligibilityReason::CredentialUnusable.as_str(),
+                    unusable.as_str()
+                ),
+                account.refresh_failure.as_ref(),
+            ),
             since_ms: Some(since_ms),
             ..Draft::for_account(AttentionKind::AccountUnusable, account)
         },
         CredentialState::Parked { reason, until_ms } => Draft {
-            raw_token: format!(
-                "{} ({})",
-                EligibilityReason::AccountParked.as_str(),
-                reason.as_str()
+            raw_token: with_refresh(
+                format!(
+                    "{} ({})",
+                    EligibilityReason::AccountParked.as_str(),
+                    reason.as_str()
+                ),
+                account.refresh_failure.as_ref(),
             ),
             until_ms: Some(until_ms),
             ..Draft::for_account(AttentionKind::AccountParked, account)
@@ -730,15 +744,10 @@ fn credential_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem>
     )
 }
 
-/// The machine form of an unusable credential. A failing refresh on the same
-/// account is the same cause seen from the driver, so it is named here rather
-/// than listed again.
-fn unusable_token(cause: UnusableCause, refresh: Option<&RefreshFailure>) -> String {
-    let mark = format!(
-        "{} ({})",
-        EligibilityReason::CredentialUnusable.as_str(),
-        cause.as_str()
-    );
+/// A credential item's machine form. A failing refresh on an account whose
+/// credential is already listed is the same cause seen from the driver, so it
+/// is named here rather than listed again.
+fn with_refresh(mark: String, refresh: Option<&RefreshFailure>) -> String {
     match refresh {
         Some(failure) => format!("{mark}; {}", refresh_token(failure)),
         None => mark,
@@ -775,6 +784,7 @@ fn near_limit_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem>
     let scope_words = fullest
         .scope
         .as_deref()
+        .filter(|scope| is_plain_scope(scope))
         .map_or_else(String::new, |scope| format!(" {scope}"));
     let resets = fullest.reset_ms.map_or_else(String::new, |reset| {
         format!(", resets in {}", span(reset - now))
@@ -787,7 +797,7 @@ fn near_limit_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem>
         Draft {
             cause: format!(
                 "{}% of the {}{scope_words} window used{resets}",
-                (fullest.used * 100.0).floor(),
+                used_percent(fullest.used),
                 window_length(fullest.length_secs)
             ),
             raw_token: format!(
@@ -801,6 +811,25 @@ fn near_limit_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem>
         }
         .finish(),
     )
+}
+
+/// Whether a scope tag reads as a plain word (a model family such as
+/// `opus`) rather than a vendor limit id; only plain words enter a cause.
+fn is_plain_scope(scope: &str) -> bool {
+    (1..=MAX_PLAIN_SCOPE_LEN).contains(&scope.len())
+        && scope.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+/// A used fraction as a whole percent, rounded up so a value past the
+/// near-limit line never reads as the line itself, and held below 100 until
+/// the window is actually full.
+fn used_percent(used: f64) -> f64 {
+    let percent = (used * 100.0).ceil();
+    if used < 1.0 {
+        percent.min(99.0)
+    } else {
+        percent
+    }
 }
 
 /// A window length as an adjective: "5 h", "7 day".
