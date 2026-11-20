@@ -9,15 +9,17 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdic
 use routectl_core::wire_check::{
     EgressKind, IngressDialect, Lane, Leg, PathClass, RejectionProvenance, WirePath,
 };
+use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::{FieldRepairOutcome, WireCheckParams, WireCheckState};
 use routectl_router::{
-    BetaSeedScope, LearnedRegistryEntry, OverrideRegistry, PoolEligibility, VerdictValue,
+    BetaSeedScope, Config, LearnedRegistryEntry, OverrideRegistry, PoolEligibility, VerdictValue,
 };
 use serde_json::Value;
 
 use super::super::panel_fixtures::{
     FIXTURE_NOW_MS, fixture_as_of, fixture_config, fixture_targets,
 };
+use super::super::utc_rfc3339;
 use super::{
     HealthPanel, Panel, SCHEMA_VERSION, map_learned, map_pool, map_seat_driver, map_target,
     project_wire_check,
@@ -70,6 +72,41 @@ pub fn populated_health_panel() -> Panel<HealthPanel> {
         wire_check: project_wire_check(&wire_check_snapshot(), unix_now_secs()),
     };
     Panel::available(SCHEMA_VERSION, fixture_as_of(), dto)
+}
+
+/// The panel at `now_ms` over `targets` and `pools`, each unusable target
+/// carrying the fix `config` gives its entry, both seat drivers as given
+/// (refresh, then poll), no learned row and an empty wire check.
+pub fn health_panel_for(
+    config: &Config,
+    targets: Vec<RouteTargetStatus>,
+    pools: Vec<PoolEligibility>,
+    drivers: (SeatDriverHealthSnapshot, SeatDriverHealthSnapshot),
+    now_ms: i64,
+) -> Panel<HealthPanel> {
+    let (refresh, poll) = drivers;
+    let targets = targets
+        .into_iter()
+        .map(|target| {
+            let fix = target
+                .gate
+                .credential_unusable
+                .map(|_| SeatFix::of(config, &target.provider_name).command());
+            map_target(target, now_ms, fix)
+        })
+        .collect();
+    let dto = HealthPanel {
+        targets,
+        pools: pools.into_iter().map(map_pool).collect(),
+        seat_driver: map_seat_driver(refresh),
+        usage_poll_driver: map_seat_driver(poll),
+        learned_negatives: Vec::new(),
+        wire_check: project_wire_check(
+            &WireCheckState::default().snapshot(&WireCheckParams::default()),
+            unix_now_secs(),
+        ),
+    };
+    Panel::available(SCHEMA_VERSION, utc_rfc3339(now_ms), dto)
 }
 
 fn fixture_pools() -> Vec<PoolEligibility> {

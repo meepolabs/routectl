@@ -38,6 +38,8 @@ mod router_view;
 #[cfg(test)]
 pub(crate) mod test_hooks;
 mod types;
+#[cfg(test)]
+mod ui_case_fixtures;
 mod usage;
 mod usage_health;
 mod wire_check_rows;

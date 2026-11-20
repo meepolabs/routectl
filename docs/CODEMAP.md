@@ -7143,6 +7143,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `populated_accounts()`: every account the fixture config names with fresh,
   stale and absent readings, poll states, a vendor pause and nonzero counters,
   through the panel's own `build_from_sources`
+- `src/handlers/status/ui_case_fixtures.rs` -- `cfg(test)` review cases for
+  Now and Accounts (empty, one seat, five-seat pool, logged out, failing
+  poll): a case config, a seeded ledger and daemon state, served as the
+  aggregate, usage and QUERY answers through the panels' own builders at any
+  instant; the browser case tests and the loopback review server read them
 - `src/handlers/status/attention/fixture.rs` -- `cfg(test)`
   `populated_attention()` and its doctor-unavailable twin: two reads through
   the panel's own `AttentionState`, so the list carries a broken, degraded and

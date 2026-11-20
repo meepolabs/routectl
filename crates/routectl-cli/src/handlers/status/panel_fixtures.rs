@@ -26,10 +26,10 @@ use super::{AggregatePanels, StatusAggregate};
 /// The instant every fixture reads as "now": 2026-11-18T12:00:00Z.
 pub const FIXTURE_NOW_MS: i64 = 1_795_003_200_000;
 
-/// [`FIXTURE_NOW_MS`] as an `OffsetDateTime`.
-pub fn fixture_now() -> time::OffsetDateTime {
-    time::OffsetDateTime::from_unix_timestamp(FIXTURE_NOW_MS / 1000)
-        .expect("the fixture instant is representable")
+/// `ms` since the epoch as an `OffsetDateTime`.
+pub fn at_epoch_ms(ms: i64) -> time::OffsetDateTime {
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .expect("the instant is representable")
 }
 
 /// The `as_of` every fixture envelope carries.

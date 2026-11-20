@@ -3,7 +3,7 @@
 
 use routectl_auth::LocalProbe;
 use routectl_router::prices::parse_and_validate;
-use routectl_router::{compute_activation, derive_effective_view};
+use routectl_router::{Config, compute_activation, derive_effective_view};
 use serde_json::Value;
 
 use super::super::daemon_meta::DaemonMetaSnapshot;
@@ -63,4 +63,23 @@ fn price_table(date: &str, sonnet_input: f64) -> routectl_router::prices::PriceT
         ],
     });
     parse_and_validate(&serde_json::to_vec(&json).expect("json")).expect("a valid price table")
+}
+
+/// `config`'s effective view with no price table, served from `listen_addr`
+/// and stamped `as_of`, beside an activation inventory that probes no login.
+pub fn config_panel_for(config: &Config, listen_addr: &str, as_of: String) -> Panel<ConfigPanel> {
+    let effective = derive_effective_view(config, None, None);
+    let activation = compute_activation(&[], config);
+    let daemon = DaemonMetaSnapshot {
+        listen_addr: listen_addr.to_string(),
+        version: env!("CARGO_PKG_VERSION"),
+        config_loaded_age_ms: Some(42_000),
+    };
+    let dto = build_panel(
+        effective,
+        &activation,
+        Some("/fixture/routectl/config.toml"),
+        daemon,
+    );
+    Panel::available(SCHEMA_VERSION, as_of, dto)
 }

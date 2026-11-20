@@ -8,7 +8,8 @@
 // (page_browser_driver.js) and any scenario snippets injected before
 // `</body>`, answers /status, /status/usage and QUERY /status/query (every
 // grouping the page asks for, seat included) from the populated panel
-// fixtures with figures that change every round, loads the page in Chrome
+// fixtures with figures that change every round, or from one review case
+// (`run_case_scenario`) as its builders make it, loads the page in Chrome
 // under virtual time and returns the JSON the driver reports.
 //
 // Adding a topic: write `page_browser_<topic>_tests.rs` plus
@@ -61,8 +62,29 @@ pub(super) struct DriverReport {
     pub(super) requests: Vec<Value>,
 }
 
+/// What the harness serves: the populated panel fixtures, changed every
+/// round, or one review case as its builders make it, unchanged.
+enum Payloads {
+    Populated(Box<Populated>),
+    Case(Box<CaseServed>),
+}
+
+/// One review case and the instant its payloads are built at: a fixed one,
+/// or the wall clock at each answer.
+pub(super) struct CaseServed {
+    pub(super) source: crate::handlers::status::ui_case_fixtures::CaseSource,
+    pub(super) now_ms: Option<i64>,
+}
+
+impl CaseServed {
+    fn now_ms(&self) -> i64 {
+        self.now_ms
+            .unwrap_or_else(|| crate::local_time::unix_ms(time::OffsetDateTime::now_utc()))
+    }
+}
+
 /// The fixture payloads served, by route, before the per-round change.
-struct Payloads {
+struct Populated {
     aggregate: Value,
     usage_all: Value,
     query_model: Value,
@@ -72,8 +94,8 @@ struct Payloads {
     query_series: Value,
 }
 
-impl Payloads {
-    fn populated() -> Self {
+impl Populated {
+    fn new() -> Self {
         use crate::commands::usage::BucketUnit;
         use crate::handlers::status::query::fixture::populated_query_panel;
         use routectl_usage::GroupDim;
@@ -162,13 +184,23 @@ async fn serve_test_page(State(h): State<Arc<Harness>>) -> axum::response::Html<
 }
 
 async fn serve_aggregate(State(h): State<Arc<Harness>>) -> axum::response::Response {
-    let round = h.rounds.aggregate.fetch_add(1, Ordering::SeqCst);
-    json_response(at_round(&h.payloads.aggregate, round))
+    match &h.payloads {
+        Payloads::Populated(p) => {
+            let round = h.rounds.aggregate.fetch_add(1, Ordering::SeqCst);
+            json_response(at_round(&p.aggregate, round))
+        }
+        Payloads::Case(c) => json_response(c.source.aggregate(c.now_ms())),
+    }
 }
 
 async fn serve_usage_all(State(h): State<Arc<Harness>>) -> axum::response::Response {
-    let round = h.rounds.usage_all.fetch_add(1, Ordering::SeqCst);
-    json_response(at_round(&h.payloads.usage_all, round))
+    match &h.payloads {
+        Payloads::Populated(p) => {
+            let round = h.rounds.usage_all.fetch_add(1, Ordering::SeqCst);
+            json_response(at_round(&p.usage_all, round))
+        }
+        Payloads::Case(c) => json_response(c.source.usage_all(c.now_ms())),
+    }
 }
 
 async fn serve_query(
@@ -179,8 +211,17 @@ async fn serve_query(
     if method.as_str() != "QUERY" {
         return axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
+    let p = match &h.payloads {
+        Payloads::Populated(p) => p,
+        Payloads::Case(c) => {
+            return c.source.query(&body, c.now_ms()).map_or_else(
+                || axum::http::StatusCode::BAD_REQUEST.into_response(),
+                json_response,
+            );
+        }
+    };
     let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let Some(payload) = h.payloads.query_for(&parsed) else {
+    let Some(payload) = p.query_for(&parsed) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
     let round = h.rounds.query.fetch_add(1, Ordering::SeqCst);
@@ -311,7 +352,25 @@ pub(super) fn run_scenario(scenario: &Scenario) -> DriverReport {
 /// [`run_scenario`] with extra Chrome switches, such as a forced media
 /// preference.
 pub(super) fn run_scenario_with(scenario: &Scenario, chrome_switches: &[&str]) -> DriverReport {
-    run_page(scenario, page_with_driver(scenario), chrome_switches, None)
+    run_page(
+        scenario,
+        page_with_driver(scenario),
+        chrome_switches,
+        None,
+        Payloads::Populated(Box::new(Populated::new())),
+    )
+}
+
+/// [`run_scenario`] against one review case built at the fixture instant
+/// instead of the populated fixtures.
+pub(super) fn run_case_scenario(scenario: &Scenario, case: CaseServed) -> DriverReport {
+    run_page(
+        scenario,
+        page_with_driver(scenario),
+        &[],
+        None,
+        Payloads::Case(Box::new(case)),
+    )
 }
 
 /// [`run_scenario_with`] in a browser profile whose `Default/Preferences`
@@ -327,6 +386,7 @@ pub(super) fn run_scenario_in_profile(
         page_with_driver(scenario),
         chrome_switches,
         Some(preferences),
+        Payloads::Populated(Box::new(Populated::new())),
     )
 }
 
@@ -336,7 +396,47 @@ pub(super) fn run_scenario_on_patched_page(
     scenario: &Scenario,
     patch: impl FnOnce(String) -> String,
 ) -> DriverReport {
-    run_page(scenario, patch(page_with_driver(scenario)), &[], None)
+    run_page(
+        scenario,
+        patch(page_with_driver(scenario)),
+        &[],
+        None,
+        Payloads::Populated(Box::new(Populated::new())),
+    )
+}
+
+/// Serve the released page (no driver) and `case` built at the wall clock
+/// on a loopback port the OS picks, print the address, and keep serving
+/// until the process is killed. Reads no config folder and opens no
+/// outbound connection: every payload comes from the case's builders over
+/// a ledger in a temp dir.
+pub(super) fn serve_review_case(case: crate::handlers::status::ui_case_fixtures::UiCase) -> ! {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("a local address");
+    let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+    let harness = Arc::new(Harness {
+        page: PAGE.to_owned(),
+        payloads: Payloads::Case(Box::new(CaseServed {
+            source: crate::handlers::status::ui_case_fixtures::CaseSource::open(
+                case,
+                now_ms,
+                &addr.to_string(),
+            ),
+            now_ms: None,
+        })),
+        rounds: Rounds::default(),
+    });
+    println!("review case {} at http://{addr}/", case.token());
+    let app = harness_router(harness);
+    let served = runtime.block_on(async move { axum::serve(listener, app).await });
+    panic!("the review server stopped: {served:?}");
 }
 
 fn seed_profile(scratch: &Path, preferences: &Value) {
@@ -351,10 +451,11 @@ fn run_page(
     page: String,
     chrome_switches: &[&str],
     preferences: Option<&Value>,
+    payloads: Payloads,
 ) -> DriverReport {
     let harness = Arc::new(Harness {
         page,
-        payloads: Payloads::populated(),
+        payloads,
         rounds: Rounds::default(),
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -574,7 +675,7 @@ fn round_figures_change_and_untouched_keys_stay() {
 /// unattributed rows, so a view reading it can tell them apart.
 #[test]
 fn the_harness_answers_a_seat_grouped_query_from_the_seat_fixture() {
-    let payloads = Payloads::populated();
+    let payloads = Populated::new();
     let body = serde_json::json!({"window": "today", "group_by": "seat"});
 
     let answer = payloads.query_for(&body).expect("a seat-grouped answer");

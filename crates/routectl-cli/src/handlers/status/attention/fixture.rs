@@ -57,6 +57,14 @@ pub fn doctor_unavailable_attention_panel() -> Panel<AttentionPanel> {
     two_reads(false)
 }
 
+/// The panel one read of `sources` builds through a fresh daemon's state
+/// (the recovery memory over the pure builder), stamped at its `now_ms`.
+pub fn attention_panel_of(sources: AttentionSources) -> Panel<AttentionPanel> {
+    let as_of = super::super::utc_rfc3339(sources.now_ms);
+    let data = AttentionState::new().build(sources);
+    Panel::available(SCHEMA_VERSION, as_of, data)
+}
+
 fn two_reads(doctor_current: bool) -> Panel<AttentionPanel> {
     let state = AttentionState::new();
     let first_ms = FIXTURE_NOW_MS - FIRST_READ_BEFORE_MS;

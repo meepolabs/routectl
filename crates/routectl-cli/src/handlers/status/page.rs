@@ -1494,6 +1494,10 @@ mod tests {
             "page_browser_layout_tests.rs",
             include_str!("page_browser_layout_tests.rs"),
         ),
+        (
+            "page_browser_cases_tests.rs",
+            include_str!("page_browser_cases_tests.rs"),
+        ),
     ];
 
     /// The script points at the manual checklist, and the checklist points
@@ -2060,6 +2064,11 @@ mod tests {
     mod browser_accounts {
         use super::*;
         include!("page_browser_accounts_tests.rs");
+    }
+
+    mod browser_cases {
+        use super::*;
+        include!("page_browser_cases_tests.rs");
     }
 
     mod payload_keys {

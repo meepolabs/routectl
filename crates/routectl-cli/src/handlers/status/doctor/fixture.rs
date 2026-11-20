@@ -6,10 +6,11 @@
 //! gather probes the operator's credential store, which a fixture must never
 //! read.
 
+use routectl_router::router::RouteTargetStatus;
 use routectl_router::{
-    CapabilityMatrixPanel, DoctorPanels, DoctorReport, Finding, MatrixAvailability, MatrixCell,
-    MatrixLane, MatrixNicknameAction, MatrixReplaySummary, MatrixSource, MatrixWarm, Status,
-    WouldTrimPanel, seed_distinct_fidelity_counters_for_tests,
+    CapabilityMatrixPanel, Config, DoctorPanels, DoctorReport, Finding, MatrixAvailability,
+    MatrixCell, MatrixLane, MatrixNicknameAction, MatrixReplaySummary, MatrixSource, MatrixWarm,
+    Router, Status, WouldTrimPanel, seed_distinct_fidelity_counters_for_tests,
 };
 use serde_json::Value;
 
@@ -53,6 +54,36 @@ pub fn populated_doctor_panel() -> Panel<DoctorPanel> {
         observation: Some(observation()),
     };
     Panel::available(DOCTOR_SCHEMA_VERSION, fixture_as_of(), dto)
+}
+
+/// A clean no-network report (every check passed, no matrix) stamped
+/// `as_of`, beside the reachability of `targets`, a fresh router's lane
+/// counters over `config` and zero loss counters.
+pub fn clean_doctor_panel(
+    config: Config,
+    targets: Vec<RouteTargetStatus>,
+    as_of: String,
+) -> Panel<DoctorPanel> {
+    let router = Router::new(std::sync::Arc::new(config));
+    let dto = DoctorPanel {
+        report: DoctorReport {
+            schema_version: DOCTOR_SCHEMA_VERSION,
+            findings: vec![finding("version", "binary version", Status::Pass, None)],
+            panels: DoctorPanels::default(),
+        },
+        reachability: targets.into_iter().map(map_reachability).collect(),
+        capability_writes: CapabilityWriteCounters {
+            capability_events_dropped_full: 0,
+            write_errors: 0,
+            capability_writer_unavailable: 0,
+        },
+        lossy_repairs_by_lane: router.lossy_repairs_by_lane(),
+        budget_exhaustions_by_lane: router.budget_exhaustions_by_lane(),
+        repairs_per_request: router.repairs_per_request(),
+        ledger_health: LedgerHealth::default(),
+        observation: None,
+    };
+    Panel::available(DOCTOR_SCHEMA_VERSION, as_of, dto)
 }
 
 fn report() -> DoctorReport {

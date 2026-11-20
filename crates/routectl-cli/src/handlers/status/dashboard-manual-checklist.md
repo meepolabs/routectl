@@ -317,3 +317,110 @@ banner, no retry signal -- silently mislabeled data.
   zero failure counts, never full brightness and never red.
 - In the light theme, faint text (hints, labels, zeros) stays readable on
   both the page background and a card; the faint token clears 4.5:1 on each.
+
+## UI review cases
+
+The UI review of Now and Accounts runs over five cases. Each one is a small
+config, a seeded ledger and the daemon state the case needs, built by the
+panels' own builders in `ui_case_fixtures.rs` (test-only); no real account
+or vendor is involved. `page_browser_cases_tests.rs` pins each case's
+signature in headless Chrome:
+
+| Case (`ROUTECTL_UI_CASE`) | What it shows |
+|---|---|
+| `empty` | An empty ledger and no subscription seat: Now reads `No requests yet` with the base URL and `No subscription login in this config.`; Accounts lists the API-key and cloud entries under `Not in a pool`. |
+| `one-seat` | One seat alone in pool `main`, with two windows and traffic today. |
+| `five-seat-pool` | Five seats in pool `seats`: two carry traffic (one window 95% used), three are idle (a stale reading, a seat never read, a window not started). |
+| `logged-out` | Two seats in pool `seats`, `seat-b (b)` logged out for 40 min: its plain cause, its login fix and an `account_unusable` item on Now. |
+| `poll-failing` | One seat whose usage poll has failed for 15 min: a `usage_poll_failing` item on Now. |
+
+### Serving a case to a browser
+
+The review server is an ignored test that serves the released page and one
+case's payloads, built at the wall clock on every answer, on a loopback port
+the OS picks. It binds `127.0.0.1` only, reads no config folder (the case
+config is parsed from text and its ledger lives in a temp dir) and opens no
+outbound connection. Its name has no `page_browser` in it, so the browser
+test run never starts it. Run it from the repo root, one case at a time:
+
+```
+ROUTECTL_UI_CASE=logged-out \
+  cargo test -p routectl-cli --lib ui_review_case_server -- --ignored --nocapture
+```
+
+It prints the address it serves and keeps serving until killed (Ctrl+C in
+its terminal):
+
+```
+review case logged-out at http://127.0.0.1:<port>/
+```
+
+Browse that address normally:
+
+```
+agent-browser --session ui-review open http://127.0.0.1:<port>/#now
+agent-browser --session ui-review open http://127.0.0.1:<port>/#accounts
+```
+
+Payloads come back unchanged between rounds (only ages move with the
+clock), so a changed-value flash is not expected here; section 4 covers it
+on a live daemon.
+
+For each case check, on Now and on Accounts:
+
+- Widths 720, 1024 and 1440 px (`agent-browser set viewport <w> 900`), and
+  1440 px at 200% text: a browser profile whose `Default/Preferences` sets
+  `webkit.webprefs.default_font_size` to 32 (`--profile <dir>`), not page
+  zoom.
+- Both themes (`agent-browser set media dark`, then `light`).
+- Reduced motion (`agent-browser set media dark reduced-motion`): nothing
+  animates and nothing is lost.
+- The outage: with the page showing the case, block the aggregate
+  (`agent-browser network route 'http://127.0.0.1:<port>/status' --abort`;
+  or stop the server) and wait two polls. The status line keeps the last
+  sentence, dimmed, followed by `as of <time> - the daemon cannot be
+  reached`; tab badges keep their numbers dimmed, never an amber `stale`;
+  the open view keeps its sections, dimmed. Lift the block
+  (`agent-browser network unroute`) and the page recovers within a poll.
+  Run it on the `logged-out` case, where the verdict and badges carry a
+  problem.
+
+No case carries API-key or cloud traffic: in `empty` those rows read `no
+traffic today` like an idle seat. Their own request counts are checked on a
+live daemon (section 7).
+
+### Real-state checks on a hermetic daemon
+
+What only a running daemon shows (a login landing, a seat logged out
+against a credentials file, the drivers' first sweep) is checked on a
+hermetic daemon that cannot reach the network or the operator's config:
+
+```
+# one network namespace with only loopback, held by a sleeping process
+unshare -rn sh -c 'ip link set lo up; exec sleep infinity' &
+HOLDER=$!
+enter() { nsenter --preserve-credentials -t "$HOLDER" -U -n "$@"; }
+enter curl -sS -m 3 http://1.1.1.1 ; echo "rc=$?"   # must FAIL: positive control
+
+SCRATCH=$(mktemp -d)
+mkdir -p "$SCRATCH/routectl"
+# write "$SCRATCH/routectl/config.toml": `version = 5`, `[server] host =
+# "127.0.0.1"` and a free `port`, a pool of `oauth://anthropic#<label>`
+# members and one model on it; no credentials.json means every seat
+# starts logged out
+cargo build -p routectl-cli     # the binary lands in $CARGO_TARGET_DIR/debug
+enter env -u ROUTECTL_CONFIG HOME="$SCRATCH" XDG_CONFIG_HOME="$SCRATCH" \
+  XDG_DATA_HOME="$SCRATCH/data" "$CARGO_TARGET_DIR/debug/routectl" serve &
+```
+
+The namespace has its own loopback, so the host browser cannot reach the
+daemon directly: read it from inside (`enter curl -s
+http://127.0.0.1:<port>/status`), or run the browser there (`enter
+agent-browser --session hermetic open http://127.0.0.1:<port>/`). Never point a built binary at the real
+config folder, and never send anything to the live daemon's port.
+
+Stop it by pid, never by name: find the pid listening on the port
+(`enter ss -ltnp`), confirm it is this run with
+`tr '\0' '\n' < /proc/<pid>/environ | grep '^XDG_CONFIG_HOME='` naming
+`$SCRATCH`, then `kill <pid>`; finally `kill "$HOLDER"` and remove
+`$SCRATCH`.
