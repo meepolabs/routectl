@@ -49,7 +49,7 @@ overlays merge, what's reserved.
 - [Retry and fallback defaults](#retry-and-fallback-defaults)
 - [Proactive context-window gate (`[window_gate]`)](#proactive-context-window-gate-window_gate)
 - [Learned token-estimate correction](#learned-token-estimate-correction)
-- [Quota-aware seat placement](#quota-aware-seat-placement)
+- [Pace placement on seat pools](#pace-placement-on-seat-pools)
 
 **Caching and cost**
 - [Prompt-cache auto-emission (`[cache]`)](#prompt-cache-auto-emission-cache)
@@ -610,7 +610,7 @@ that value (`` `<path> = "<value>"` ``); any other value stays valid.
 | `retry.retry_on_429` | set `[retry.classes] rate-limited = <n>` |
 | `retry.retry_on_5xx` | set `[retry.classes] server-error = <n>` and `overloaded = <n>` |
 | `retry.retry_on_network` | set `[retry.classes] timeout = <n>` and `network-error = <n>` |
-| `seat_quota` | quota-aware placement always applies on sticky-least-loaded pools |
+| `seat_quota` | pace placement always applies on sticky-least-loaded pools |
 | `server.allow_disable_fallbacks` | the x-routectl-disable-fallbacks header is always honored |
 | `server.strict_translation` | lossy seams forward and count |
 | `trim` | the advisory trim uses fixed defaults |
@@ -2403,90 +2403,89 @@ see a learned correction move a skip. The startup warm logs its own
 tally: rows loaded, rows accepted, rows rejected, and how many lanes
 came back calibrated.
 
-## Quota-aware seat placement
+## Pace placement on seat pools
 
-On a multi-seat OAuth pool running `sticky-least-loaded`, a NEW
-conversation's birth seat is ordered by each credential account's
-remaining short-window subscription budget, read from the quota headers
-upstreams already return on every response and, for a seat that carries no
-traffic, from the vendor's usage endpoint (see
-[Background usage poll](#background-usage-poll)). This is what makes a pool of
-two subscription accounts actually spread new conversations instead of
-tying on available RPM (which is unlimited on a subscription seat) and
-falling through to the anti-herd rotation.
+On a multi-seat pool running `sticky-least-loaded`, a NEW conversation's
+seat is chosen from each credential account's usage readings: the quota
+headers upstreams return on every response and, for an account that
+carries no traffic, the vendor's usage endpoint (see
+[Background usage poll](#background-usage-poll)). Anthropic and Codex
+accounts are ranked by the same rule. A request without a session key is
+placed the same way, without a pin.
 
 `sticky-least-loaded`, the default, is the only strategy this applies to.
 A pool set to `fill-first` places exactly as it always has and never reads
-a seat's budget, *deliberately*: draining one seat is what that setting
-asks for. A pool that omits `seat_selection` gets quota-aware placement.
+an account's usage, *deliberately*: draining one seat is what that setting
+asks for.
 
-Nothing here can move an established conversation. Placement is
-consulted for a birth pick only, so a soft cap never evicts or migrates a
-session off the seat holding its warm prompt cache -- a pinned session
-over its budget runs to actual exhaustion and is rescued by the reactive
-path (an upstream refusal trips the per-seat breaker and the seat drops
-out of the dispatch filter), exactly as it is today.
+**The pace of an account.** For each of the account's relevant usage
+windows, routectl divides the room left (`1 - used`) by the fraction of
+the window still to run (time to its reset over its length). A window
+with 60% left and half its time to run paces at 1.2: it can take more
+traffic than it has so far. A window that has not started paces at 1.0,
+whatever its length. The account's score is its slowest relevant window,
+so a nearly exhausted weekly window is never hidden by a fresh five-hour
+one.
 
-It is best-effort and cap-dormant by construction. An untrustworthy
-reading never NARROWS a placement -- a seat routectl has no fresh reading
-for is never preferred on quota grounds, and never counted as having
-budget it did not report. When the evidence is too thin to act on,
-placement falls back to the pre-quota capacity ranking and an unobserved
-seat can still be picked there, which is what makes these cases resolve
-exactly as they did before quota placement existed: a fresh process
-before any response or poll has been observed, a seat whose reading has lapsed
-past its own window, a provider routectl curates no short recovering
-window for (the Codex subscription egress is one: its readings are
-listed on `/status/accounts` but do not place), and a pool where some seats are
-observed and the rest are not.
+The relevant windows are every account-wide window plus the per-model
+windows that limit the conversation's upstream model. Per-model windows
+are matched through a closed table: Anthropic's `opus` window counts for
+upstream ids beginning `claude-opus-`, and `sonnet` for `claude-sonnet-`.
+A window with any other scope (a Codex extra limit such as
+`codex_<limit>`, or a scope routectl does not know yet) does not count for
+placement; it is listed on `/status/accounts` and logged once per scope
+(`placement_scope_ignored`, see [LOGGING.md](LOGGING.md)).
 
-Concretely, among the seats the existing health and rate-limit filters
-already admit:
+**Standing.** Each eligible seat stands in one of three tiers, decided in
+this order:
 
-- any seat with a fresh reading below its budget threshold -> the pick is
-  restricted to those, taking the one with the most left;
-- every admitted seat observed and every one over its threshold -> the
-  pick takes the one with the most left, and the request is **never**
-  failed over a budget;
-- anything else -> the unchanged capacity ranking decides.
+1. `low_room`, score 0, when the account's billing reported overage within
+   the last 7 minutes.
+2. `roomy`, score 1.0, when the account's latest usage report, no older
+   than 7 minutes, says it has no usage windows.
+3. `unread` when no relevant window is held, or when any relevant window's
+   reading is stale: older than 7 minutes, or a running window past its
+   reset (the same stale rule `/status/accounts` shows).
+4. `low_room` when a relevant window has less than 10% room left (exactly
+   10% is roomy).
+5. `roomy` otherwise.
 
-Ties inside the chosen group still fall to the existing deterministic
-anti-herd rotation, so a burst of new conversations spreads rather than
-herding onto the emptiest seat.
+A birth takes the best tier (`roomy` over `low_room` over `unread`), then
+the highest score rounded to two decimals (half to even), so seats whose
+scores fall in one 0.01 bucket tie. A tie is broken as before: the most
+RPM headroom, then a deterministic rotation, so a burst of new
+conversations spreads across the tied seats and never reaches a seat in a
+lower bucket. Placement never refuses a request: an unread or
+low-room seat still takes a conversation when nothing better is eligible.
+The health filters run first and are unchanged: a parked, breaker-open or
+unusable seat is never chosen for its readings, and a closed breaker is
+preferred over a half-open one.
 
-Placement always applies; no config key turns it off.
+**When there is nothing to rank.** A pool none of whose seats has a
+credential account the meter can read (no OAuth login) places exactly as
+before: headroom and rotation. A fresh process has no readings (the
+stored history is never loaded back), so every seat stands `unread` and a
+birth also falls to headroom and rotation until a poll or a response
+brings a reading; a request without a session key keeps the fill-first
+walk while no eligible seat has a fresh reading. With the background
+usage poll switched off, an idle account goes `unread` 7 minutes after its
+last response.
 
-**Always on is safe because thin evidence places nothing.** A seat
-produces no reading until a real upstream response carries one or the
-background usage poll reads one, and a restart starts every seat with no
-reading (the stored reading history is never loaded back), so a fresh
-process places exactly as it did before quota placement existed until
-those readings arrive, and every case above that falls back (no fresh reading, a lapsed one, an
-uncurated provider, a partially observed pool) resolves through the
-unchanged capacity ranking. Conversation pins and the one-time migration
-off an unhealthy seat are never affected. A pool that should not place
-by budget at all sets `seat_selection = "fill-first"`.
+**Established conversations stay put.** Placement is consulted for a new
+conversation only. A pinned conversation keeps its seat whatever its
+readings say, so its warm prompt cache is never given up for a usage
+figure; it moves only when its seat cannot serve, exactly as described
+under [credential pools](#credential-pools-multiple-accounts-per-provider).
 
-**No tuning knobs.** The per-provider budget thresholds, the long-window
-guard and the freshness bounds are constants grounded in captured
-upstream evidence, not operator knobs: a threshold tuned per deployment
-turns a routing decision into a support surface, and the fallback in
-every direction is the pre-quota chooser rather than a denial.
+Placement always applies; no config key turns it off, and there are no
+tuning knobs. A pool that should not place by usage sets
+`seat_selection = "fill-first"`.
 
-Whether placement is acting is observable in the log: a throttled line
-(at most one per five minutes per process) names the model and which arm
-decided, with the running per-arm totals. A DEBUG line when a budget
-chose the seat, a WARN when the evidence was incomplete and the
-unchanged capacity ranking decided instead -- a steady stream of the
-latter on a busy pool means readings are not reaching routectl for some
-seat. Routectl-internal identifiers and counters only: no session key, no
-account identity, no credential, no header, nothing from a body.
-
-The per-request seat-selection decision vocabulary
-(`birth_pick` / `sticky_stay` / ... , see
+The per-request seat-selection decision vocabulary (`birth_pick` /
+`sticky_stay` / ... , see
 [credential pools](#credential-pools-multiple-accounts-per-provider)) is
-UNCHANGED by this feature: quota changes which seat a birth picks, never
-how that decision is named.
+unchanged: placement changes which seat a birth picks, never how that
+decision is named.
 
 ## Per-model knobs
 
@@ -5545,7 +5544,7 @@ is contacted and redirects are never followed.
 - A poll changes only the seat's reading and the poll's own state. It never
   marks a seat unusable, opens a breaker or touches a credential, whatever the
   endpoint answers.
-- An accepted reading feeds [quota-aware placement](#quota-aware-seat-placement)
+- An accepted reading feeds [pace placement](#pace-placement-on-seat-pools)
   exactly as a response header reading does, and is written to the usage
   database's `account_readings` history. The poll's state and the meter are
   memory-only: after a restart every seat starts with no reading. A seat also
@@ -5892,41 +5891,32 @@ to choose between and every strategy behaves identically:
   next. The drain IS this strategy's contract, not a
   rough edge on it: holding one seat keeps that seat's prompt cache warm,
   and running it down until the upstream refuses is the price of the
-  locality. Quota-aware placement deliberately does NOT apply here --
+  locality. Pace placement deliberately does NOT apply here --
   choosing `fill-first` is choosing that trade, and overriding it would
-  override a stated preference. An operator who wants budget-aware
+  override a stated preference. An operator who wants usage-aware
   spreading leaves the key out.
-- `sticky-least-loaded` (default) -- the ONLY strategy quota-aware
-  placement and the session-affinity layer apply to. Pin each conversation to one seat
+- `sticky-least-loaded` (default) -- the ONLY strategy pace placement and
+  the session-affinity layer apply to. Pin each conversation to one seat
   so its warm prompt cache is preserved, while balancing NEW conversations
-  across seats by available capacity. A conversation's first request
-  picks the least-loaded healthy seat (preferring seats with a closed
-  breaker, then -- on a subscription pool with observed budgets -- the
-  seat with the most remaining short-window budget, otherwise the most
-  RPM headroom, with a deterministic tiebreak so a burst of new
-  conversations does not herd onto one seat; see
-  [quota-aware seat placement](#quota-aware-seat-placement)); every
+  across seats. A conversation's first request picks a healthy seat
+  (preferring seats with a closed breaker, then the best standing by
+  account usage, then the most RPM headroom, with a deterministic
+  tiebreak so a burst of new conversations does not herd onto one seat;
+  see [pace placement](#pace-placement-on-seat-pools)); every
   later request for that conversation routes back to the same seat. If
   that seat later goes unhealthy (rate-limited or breaker-open), the
   conversation migrates ONCE to a healthy sibling and does not flap back
   when the original recovers. Requires an inbound per-conversation key
   (the `x-claude-code-session-id` header Claude Code sends, or body
   `metadata.session_id`). A request without one mints no pin, since there
-  is nothing to pin under; it still places by remaining subscription
-  budget when the evidence is complete enough to act on, because the only
-  thing that outranks quota fairness is protecting a warm prompt cache
-  and a keyless request has none. "Complete
-  enough" is the same bar the keyed pick uses: at least one eligible seat
-  fresh and below its threshold, or every eligible seat fresh-known and
-  over it. Mixed evidence -- some seats observed and over threshold, the
-  rest unobserved -- falls back to `fill-first`, as do a pool with no
-  readings at all. The per-request seat decision is not
+  is nothing to pin under; it is still placed by account usage, because
+  only a warm prompt cache outranks it and a keyless request has none.
+  With no eligible seat freshly read, or on a pool with no OAuth
+  accounts, it keeps the `fill-first` walk. The per-request seat decision is not
   persisted, and only partially logged: a DEBUG line marks a birth pick
   and an overflow repin, while a sticky stay, a pick deferred for lack of
   a healthy seat, and the keyless fall-through emit no selection line of
-  their own. Note
-  an incomplete-evidence fallback is separately visible in the throttled
-  quota-placement diagnostic. The usage ledger's
+  their own. The usage ledger's
   `selection_decision` column is write-stopped (retained in the schema,
   NULL for every row written by this version onward).
 
