@@ -85,7 +85,7 @@
   }
 
   // One card per NICKNAME, collapsing a pooled model's seats through the SAME
-  // worst-circuit rule the Routing tab uses (`targetsByNickname`): an open
+  // worst-circuit rule Traffic's routing chains use (`targetsByNickname`): an open
   // breaker on one seat is the fact an operator needs, not the closed one
   // beside it. The seats themselves are kept so a card can name how many it
   // speaks for and which learned negatives belong to it.

@@ -325,7 +325,7 @@
 }
 .hgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--col-hcell), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-hcell)), 1fr));
   gap: var(--sp-3) var(--sp-4);
   padding-top: var(--sp-3);
   border-top: 1px solid var(--border);
@@ -391,7 +391,7 @@
 
 .qlist {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--col-quota), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-quota)), 1fr));
   gap: var(--sp-2);
   min-width: 0;
 }
@@ -488,7 +488,7 @@
   border-radius: var(--r-lg);
   padding: var(--sp-3) var(--sp-5) var(--sp-4);
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--col-docpass), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-docpass)), 1fr));
   gap: var(--sp-3) var(--sp-5);
   min-width: 0;
 }

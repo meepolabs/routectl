@@ -6,8 +6,8 @@
   // containment for a cached page / mixed assets / a bad build, not version
   // negotiation. `query` sits alongside the four GET panels because the
   // QUERY aggregate is a source of its own (see SOURCES below).
-  // `accounts` is on the aggregate but no view reads it yet, so it is pinned
-  // here and not in GET_SOURCES.
+  // `accounts` is on the aggregate, but the Accounts view does not read the
+  // `accounts` panel yet, so it is pinned here and not in GET_SOURCES.
   var EXPECTED = { usage: 7, health: 9, config: 6, doctor: 32, query: 4, accounts: 1 };
 
   // The four panels of the aggregate round, each with its own envelope +

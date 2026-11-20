@@ -34,6 +34,10 @@
   // last '-' of a row id splits it back into (table id, encoded key), and its
   // leading 'k' keeps it from ever equaling a fixed suffix such as `wrap`.
   // Nothing else (no counter, no render order) may enter an id.
+  //
+  // Some ids carry the builder file's prefix (`overview-`, `usage-`,
+  // `health-`) rather than the id of the view that shows them (`now`,
+  // `traffic`, `accounts`, `models`).
   function idKey(raw) {
     var s = String(raw);
     var out = 'k';

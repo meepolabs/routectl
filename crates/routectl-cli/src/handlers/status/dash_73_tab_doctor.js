@@ -122,7 +122,7 @@
   }
 
   // The reachability rollup, which is the ONLY reachability reading on the
-  // page: the per-target last outcome it folds is the Health tab's subject, so
+  // page: the per-target last outcome it folds is the Models view's subject, so
   // repeating those rows here would show the same fact twice.
   function reachSummary(reachability) {
     if (!reachability.length) { return 'no dispatch target resolved yet'; }

@@ -287,7 +287,7 @@
   // Each quota row names the provider entry its seat is reported under, the
   // same entry a provider card is labeled with. The seat key is never split
   // to find it: an entry name and a login's vendor need not agree. A row that
-  // names no entry belongs to no card and is left to the Health tab's list.
+  // names no entry belongs to no card and is left to the Accounts view's list.
   function groupQuotaByProvider(rec) {
     if (!rec.data || !Array.isArray(rec.data.quota)) {
       throw new Error('usage payload carries no quota list');
@@ -378,7 +378,7 @@
   }
 
   // The provider's seats in full: ONE row per seat, each the same quota tile the
-  // Health tab renders. A modal rather than an inline expander because the seat
+  // Accounts view renders. A modal rather than an inline expander because the seat
   // list is a detour off the reading, not part of it -- and it deliberately
   // carries no footer figure over the seats it lists.
   //

@@ -331,7 +331,7 @@ td.num .unit, th.num .unit {
 /* ---- provider cards (a scope affordance plus the provider's seat quota) ---- */
 .provgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--col-provider), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-provider)), 1fr));
   gap: var(--sp-2);
 }
 /* The expanded overflow sits directly under the row it came from, so it reads
@@ -529,7 +529,7 @@ td.num .unit, th.num .unit {
    tile's minimum, which is how a larger text size reflows it. */
 .kpigrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(max(var(--col-kpi), calc((100% - 3px) / 4)), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, max(var(--col-kpi), calc((100% - 3px) / 4))), 1fr));
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
@@ -753,7 +753,7 @@ td.num .unit, th.num .unit {
 }
 .ucard-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(var(--col-ustat), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-ustat)), 1fr));
   gap: var(--sp-3) var(--sp-4);
   margin-top: var(--sp-3);
   padding-top: var(--sp-3);
