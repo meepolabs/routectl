@@ -12,35 +12,35 @@ use crate::quota::reading::Scope;
 use crate::quota::store::{ObserveRefusal, QuotaStore};
 use crate::quota::window::Utilization;
 
-const FIVE_HOURS: u64 = 5 * 3_600;
-const SEVEN_DAYS: u64 = 7 * 86_400;
+pub(super) const FIVE_HOURS: u64 = 5 * 3_600;
+pub(super) const SEVEN_DAYS: u64 = 7 * 86_400;
 
-fn base_wall() -> SystemTime {
+pub(super) fn base_wall() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(1_781_000_000)
 }
 
 /// Stamps `offset` past one base on both clocks, ordered alike.
-struct Clock {
+pub(super) struct Clock {
     monotonic: Instant,
 }
 
 impl Clock {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             monotonic: Instant::now(),
         }
     }
 
-    fn at(&self, offset: Duration) -> ObservationStamp {
+    pub(super) fn at(&self, offset: Duration) -> ObservationStamp {
         ObservationStamp::from_parts(base_wall() + offset, self.monotonic + offset)
     }
 }
 
-fn mins(n: u64) -> Duration {
+pub(super) fn mins(n: u64) -> Duration {
     Duration::from_mins(n)
 }
 
-fn seat(label: &str) -> SeatKey {
+pub(super) fn seat(label: &str) -> SeatKey {
     let secret_ref = routectl_auth::SecretRef::OAuth {
         provider: "anthropic".to_string(),
         label: Some(label.to_string()),
@@ -48,25 +48,30 @@ fn seat(label: &str) -> SeatKey {
     seat_key_for_secret_ref(Some(&secret_ref)).expect("an oauth ref yields a key")
 }
 
-fn store() -> QuotaStore {
+pub(super) fn store() -> QuotaStore {
     let store = QuotaStore::default();
     store.admit_seats([seat("a")]);
     store
 }
 
-fn key(length_secs: u64, scope: Option<&str>) -> WindowKey {
+pub(super) fn key(length_secs: u64, scope: Option<&str>) -> WindowKey {
     let scope = scope.map(|raw| Scope::new(raw).expect("a canonical scope"));
     WindowKey::new(length_secs, scope).expect("a classifiable length")
 }
 
 /// A running window at `used`, resetting `reset` past the base wall clock, so
 /// two observations name the same reset by passing the same offset.
-fn running(key: WindowKey, used: f64, reset: Duration, at: &ObservationStamp) -> WindowReading {
+pub(super) fn running(
+    key: WindowKey,
+    used: f64,
+    reset: Duration,
+    at: &ObservationStamp,
+) -> WindowReading {
     WindowReading::new(key, used, Some(base_wall() + reset), Started::Yes, at)
         .expect("a valid window")
 }
 
-fn observation(
+pub(super) fn observation(
     source: ReadingSource,
     at: ObservationStamp,
     report: ObservationReport,
@@ -74,7 +79,7 @@ fn observation(
     AccountObservation::new(source, at, report).expect("one stamp throughout")
 }
 
-fn partial(
+pub(super) fn partial(
     source: ReadingSource,
     at: ObservationStamp,
     windows: Vec<WindowReading>,
@@ -86,6 +91,14 @@ fn partial(
     )
 }
 
+/// `meter` with its correction streaks cleared: the accepted state a refusal
+/// must leave unchanged.
+pub(super) fn accepted_state(meter: Option<AccountMeter>) -> Option<AccountMeter> {
+    let mut meter = meter?;
+    meter.streaks.clear();
+    Some(meter)
+}
+
 fn used_of(store: &QuotaStore, key: &WindowKey) -> Option<f64> {
     store
         .account(&seat("a"))?
@@ -95,7 +108,7 @@ fn used_of(store: &QuotaStore, key: &WindowKey) -> Option<f64> {
 
 /// A header snapshot carrying a FAST reading at `used`, resetting `reset`
 /// past the base wall clock.
-fn header(at: ObservationStamp, used: f64, reset: Duration) -> QuotaSnapshot {
+pub(super) fn header(at: ObservationStamp, used: f64, reset: Duration) -> QuotaSnapshot {
     QuotaSnapshot {
         observed: at,
         fast: QuotaWindow::Known {
@@ -562,7 +575,7 @@ fn a_same_reset_drop_is_accepted_within_the_slack_and_refused_beyond_it() {
                 ),
             )
             .expect("accepted");
-        let before = store.account(&seat("a")).expect("an entry");
+        let before = accepted_state(store.account(&seat("a")));
 
         let result = store.observe_account(
             &seat("a"),
@@ -589,7 +602,11 @@ fn a_same_reset_drop_is_accepted_within_the_slack_and_refused_beyond_it() {
                     Err(ObserveRefusal::Rejected(RejectionReason::Contradictory)),
                     "row: {name}"
                 );
-                assert_eq!(after, before, "row: {name}: stored state identical");
+                assert_eq!(
+                    accepted_state(Some(after)),
+                    before,
+                    "row: {name}: accepted state identical"
+                );
                 assert_eq!(
                     store.rejection_totals().contradictory,
                     1,
@@ -600,8 +617,12 @@ fn a_same_reset_drop_is_accepted_within_the_slack_and_refused_beyond_it() {
     }
 }
 
+/// A reset outside the tolerance does not make a lower reading a new window
+/// while the stored one is still in effect: it is refused like a same-reset
+/// drop until it confirms.
 #[test]
-fn a_drop_with_a_different_reset_is_a_new_window_not_a_contradiction() {
+fn a_drop_with_a_different_reset_over_a_window_in_effect_is_a_contradiction() {
+    // Arrange
     let clock = Clock::new();
     let store = store();
     let (t0, t1) = (clock.at(mins(0)), clock.at(mins(1)));
@@ -616,19 +637,26 @@ fn a_drop_with_a_different_reset_is_a_new_window_not_a_contradiction() {
             ),
         )
         .expect("accepted");
+    let before = accepted_state(store.account(&seat("a")));
 
-    store
-        .observe_account(
-            &seat("a"),
-            &partial(
-                ReadingSource::Poll,
-                t1,
-                vec![running(five.clone(), 0.05, mins(60) + mins(6), &t1)],
-            ),
-        )
-        .expect("a reset outside the tolerance is a different window");
+    // Act
+    let result = store.observe_account(
+        &seat("a"),
+        &partial(
+            ReadingSource::Poll,
+            t1,
+            vec![running(five.clone(), 0.05, mins(60) + mins(6), &t1)],
+        ),
+    );
 
-    assert_eq!(used_of(&store, &five), Some(0.05));
+    // Assert
+    assert_eq!(
+        result,
+        Err(ObserveRefusal::Rejected(RejectionReason::Contradictory))
+    );
+    assert_eq!(used_of(&store, &five), Some(0.90));
+    assert_eq!(store.rejection_totals().contradictory, 1);
+    assert_eq!(accepted_state(store.account(&seat("a"))), before);
 }
 
 /// What is stored before an unstarted five-hour reading arrives.
@@ -663,7 +691,11 @@ fn seed(store: &QuotaStore, before: &Before, at: ObservationStamp) {
     }
 }
 
-fn unstarted(key: WindowKey, reset: Option<Duration>, at: &ObservationStamp) -> WindowReading {
+pub(super) fn unstarted(
+    key: WindowKey,
+    reset: Option<Duration>,
+    at: &ObservationStamp,
+) -> WindowReading {
     WindowReading::new(key, 0.0, reset.map(|r| base_wall() + r), Started::No, at)
         .expect("a valid unstarted window")
 }
@@ -726,7 +758,7 @@ fn an_unstarted_reading_is_refused_only_over_a_running_window_still_in_effect() 
         let five = key(FIVE_HOURS, None);
         let (t0, t1) = (clock.at(mins(0)), clock.at(mins(minute)));
         seed(&store, &before, t0);
-        let held_before = store.account(&seat("a"));
+        let held_before = accepted_state(store.account(&seat("a")));
 
         // Act
         let result = store.observe_account(
@@ -764,9 +796,9 @@ fn an_unstarted_reading_is_refused_only_over_a_running_window_still_in_effect() 
                 "row: {name}"
             );
             assert_eq!(
-                store.account(&seat("a")),
+                accepted_state(store.account(&seat("a"))),
                 held_before,
-                "row: {name}: nothing advances"
+                "row: {name}: no accepted state advances"
             );
             let QuotaWindow::Known { utilization, .. } = fast else {
                 panic!("row: {name}: the running window stands: {fast:?}");

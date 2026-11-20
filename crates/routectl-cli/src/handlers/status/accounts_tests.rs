@@ -422,9 +422,12 @@ fn a_reading_for_an_unconfigured_account_is_not_listed() {
             report: ReportState::NoWindows,
             windows: Vec::new(),
             last_accepted: None,
+            billing: routectl_router::Billing::Unknown,
+            billing_fresh: false,
         }],
         rejections: zero_totals(),
         refused_by_admission: 0,
+        corrections_confirmed: 0,
     };
 
     // Act
@@ -542,6 +545,7 @@ fn report_states_map_to_their_tokens() {
     let last = map_last_accepted(LastReading {
         observed_at: at_ms(5_000),
         source: ReadingSource::Response,
+        fresh: true,
     });
     assert_eq!(
         serde_json::to_value(last).unwrap(),
@@ -629,6 +633,7 @@ fn top_level_counters_come_from_their_own_sources() {
             malformed_body: 8,
         },
         refused_by_admission: 9,
+        corrections_confirmed: 0,
     };
     let mut sources = sources(AccountIdentities::default(), readings, None);
     sources.history = AccountReadingHistory {

@@ -9,8 +9,9 @@ use crate::quota::curation::ANTHROPIC_PROVIDER_KIND;
 use crate::quota::key::{SeatKey, seat_key_for_secret_ref};
 use crate::quota::placement::{SeatQuota, seat_tiers};
 use crate::quota::reading::{Scope, WindowKey, WindowSet};
+use crate::quota::reduce::QuotaSnapshot;
 use crate::quota::store::QuotaStore;
-use crate::quota::window::QuotaWindow;
+use crate::quota::window::{Billing, QuotaWindow};
 
 const FIVE_HOURS: u64 = 5 * 3_600;
 const SEVEN_DAYS: u64 = 7 * 86_400;
@@ -140,6 +141,82 @@ fn a_window_is_fresh_at_stale_after_and_stale_one_millisecond_later() {
     assert_eq!(at_bound.remaining(), Some(0.75));
     assert!(past_bound.stale);
     assert_eq!(past_bound.remaining(), None, "a stale window gives no room");
+}
+
+/// The one account the view lists for the seat at `now`.
+fn only_account(store: &QuotaStore, now: &ObservationStamp) -> AccountReading {
+    let readings = store.readings(now);
+    let [account] = readings.accounts.as_slice() else {
+        panic!("one configured account");
+    };
+    account.clone()
+}
+
+#[test]
+fn the_last_reading_is_fresh_at_stale_after_and_stale_one_millisecond_later() {
+    // Arrange
+    let clock = Clock::new();
+    let store = store();
+    let t0 = clock.at(Duration::ZERO);
+    poll(&store, t0, vec![unstarted(key(FIVE_HOURS, None), &t0)]);
+    let fresh_at = |now: Duration| {
+        only_account(&store, &clock.at(now))
+            .last_accepted
+            .expect("an accepted reading")
+            .fresh
+    };
+
+    // Act
+    let at_bound = fresh_at(STALE_AFTER);
+    let past_bound = fresh_at(STALE_AFTER + ONE_MS);
+
+    // Assert
+    assert!(at_bound);
+    assert!(!past_bound);
+}
+
+/// Billing keeps its last known value for display past the stale bound, but
+/// reads as fresh only within it, and an unknown claim is never fresh.
+#[test]
+fn billing_is_fresh_only_when_known_and_observed_within_stale_after() {
+    let rows = [
+        ("overage at the bound", Billing::Overage, STALE_AFTER, true),
+        (
+            "overage past the bound",
+            Billing::Overage,
+            STALE_AFTER + ONE_MS,
+            false,
+        ),
+        (
+            "included at the bound",
+            Billing::Included,
+            STALE_AFTER,
+            true,
+        ),
+        ("unknown at once", Billing::Unknown, Duration::ZERO, false),
+    ];
+    for (name, billing, read_after, fresh) in rows {
+        // Arrange
+        let clock = Clock::new();
+        let store = store();
+        let t0 = clock.at(Duration::ZERO);
+        assert!(store.observe(
+            &seat(),
+            QuotaSnapshot {
+                observed: t0,
+                fast: QuotaWindow::Unknown,
+                slow: QuotaWindow::Unknown,
+                billing: billing.clone(),
+            },
+        ));
+
+        // Act
+        let account = only_account(&store, &clock.at(read_after));
+
+        // Assert
+        assert_eq!(account.billing, billing, "row: {name}");
+        assert_eq!(account.billing_fresh, fresh, "row: {name}");
+    }
 }
 
 #[test]
@@ -295,7 +372,8 @@ fn the_view_lists_every_configured_account_with_its_windows_and_last_reading() {
         held.last_accepted,
         Some(LastReading {
             observed_at: base_wall(),
-            source: ReadingSource::Poll
+            source: ReadingSource::Poll,
+            fresh: true,
         })
     );
     let shapes: Vec<(u64, LengthClass, Option<&str>, f64, Started)> = held

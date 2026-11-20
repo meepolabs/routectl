@@ -20,6 +20,7 @@ use super::reading::{
     AccountObservation, LengthClass, ObservationReport, ReadingSource, Started, WindowReading,
 };
 use super::store::RejectionTotals;
+use super::window::Billing;
 
 /// How old a reading may be and still count as fresh.
 ///
@@ -114,13 +115,16 @@ pub struct LastReading {
     pub observed_at: SystemTime,
     /// Where it came from.
     pub source: ReadingSource,
+    /// Whether it is no older than [`STALE_AFTER`] at the read instant.
+    pub fresh: bool,
 }
 
 impl LastReading {
-    const fn of(last: LastAccepted) -> Self {
+    fn of(last: LastAccepted, now: &ObservationStamp) -> Self {
         Self {
             observed_at: last.observed.wall(),
             source: last.source,
+            fresh: within_stale_after(&last.observed, now),
         }
     }
 }
@@ -137,6 +141,11 @@ pub struct AccountReading {
     pub windows: Vec<AccountWindow>,
     /// The latest accepted reading, if any.
     pub last_accepted: Option<LastReading>,
+    /// The latest billing state the meter keeps.
+    pub billing: Billing,
+    /// Whether a known billing state was observed no longer than
+    /// [`STALE_AFTER`] before the read instant.
+    pub billing_fresh: bool,
 }
 
 impl AccountReading {
@@ -149,6 +158,8 @@ impl AccountReading {
                 report: ReportState::NoReading,
                 windows: Vec::new(),
                 last_accepted: None,
+                billing: Billing::Unknown,
+                billing_fresh: false,
             };
         };
         let mut windows: Vec<AccountWindow> = meter
@@ -158,11 +169,15 @@ impl AccountReading {
         windows.sort_by(|a, b| {
             (a.window.length_secs, &a.window.scope).cmp(&(b.window.length_secs, &b.window.scope))
         });
+        let (billing, billing_observed) = meter.billing();
         Self {
             account: account.to_owned(),
             report: meter.report(),
             windows,
-            last_accepted: meter.last_accepted().map(LastReading::of),
+            last_accepted: meter.last_accepted().map(|last| LastReading::of(last, now)),
+            billing: billing.clone(),
+            billing_fresh: *billing != Billing::Unknown
+                && within_stale_after(billing_observed, now),
         }
     }
 }
@@ -177,6 +192,9 @@ pub struct AccountReadings {
     /// Running count of writes refused because their account is not
     /// configured.
     pub refused_by_admission: u64,
+    /// Running count of stored windows replaced by a confirmed run of lower
+    /// readings.
+    pub corrections_confirmed: u64,
 }
 
 /// An observation the meter accepted, as reported.

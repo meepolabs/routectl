@@ -185,6 +185,7 @@ pub use quota::view::{
     AcceptedReading, AccountReading, AccountReadings, AccountWindow, LastReading, ReadingWindow,
     STALE_AFTER,
 };
+pub use quota::window::Billing;
 pub use resolved::ResolvedModel;
 pub use router::{
     ALIAS_MAX_RECURSION_DEPTH, AccountIdentities, AccountIdentity, ActingFieldVerdict,

@@ -164,8 +164,9 @@ fn a_newer_known_replaces_an_older_known() {
     assert_eq!(fraction_of(&reading.fast, "fast"), 0.40);
 }
 
-/// A window RESETTING is the case a smoothing merge would get wrong: a drop in
-/// utilization is a real reading, not an anomaly.
+/// A window RESETTING is the case a smoothing merge would get wrong: once the
+/// stored window's reset has passed, a drop in utilization is a real reading,
+/// not an anomaly.
 #[test]
 fn a_newer_known_replaces_an_older_one_even_when_utilization_decreases() {
     let store = store();
@@ -175,7 +176,7 @@ fn a_newer_known_replaces_an_older_one_even_when_utilization_decreases() {
         &seat(None),
         snapshot(
             first,
-            known(0.90, &first, Duration::from_mins(30)),
+            known(0.90, &first, Duration::from_mins(5)),
             QuotaWindow::Unknown,
         ),
     );
@@ -777,12 +778,12 @@ fn a_late_window_reading_is_ordered_against_its_own_window_not_the_seat() {
     let t2 = stamp_at(Duration::from_mins(10));
     let t3 = stamp_at(Duration::from_mins(20));
 
-    // t1: FAST known high.
+    // t1: FAST known low.
     store.observe(
         &seat(None),
         snapshot(
             t1,
-            known(0.80, &t1, Duration::from_hours(4)),
+            known(0.20, &t1, Duration::from_hours(4)),
             QuotaWindow::Unknown,
         ),
     );
@@ -802,7 +803,7 @@ fn a_late_window_reading_is_ordered_against_its_own_window_not_the_seat() {
         &seat(None),
         snapshot(
             t2,
-            known(0.20, &t2, Duration::from_hours(4)),
+            known(0.80, &t2, Duration::from_hours(4)),
             QuotaWindow::Unknown,
         ),
     );
@@ -810,7 +811,7 @@ fn a_late_window_reading_is_ordered_against_its_own_window_not_the_seat() {
     let reading = store.reading_for(&seat(None), &t3).expect("a reading");
     assert_eq!(
         fraction_of(&reading.fast, "fast"),
-        0.20,
+        0.80,
         "the t2 FAST reading is the newest FAST observation and must stand; judging it \
          against the seat's t3 arrival would keep the stale t1 value"
     );

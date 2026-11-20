@@ -155,7 +155,7 @@ fn a_reading_after_a_complete_report_dropped_a_running_five_hour_window() {
                 ),
             )
             .expect("the dropping report is accepted");
-        let held_before = store.account(&seat("a"));
+        let held_before = accepted_state(store.account(&seat("a")));
 
         // Act
         let result = feed_after_drop(&store, &next, t2);
@@ -169,7 +169,11 @@ fn a_reading_after_a_complete_report_dropped_a_running_five_hour_window() {
                 Err(ObserveRefusal::Rejected(RejectionReason::Contradictory)),
                 "row: {name}"
             );
-            assert_eq!(Some(meter), held_before, "row: {name}: nothing advances");
+            assert_eq!(
+                accepted_state(Some(meter)),
+                held_before,
+                "row: {name}: no accepted state advances"
+            );
             assert_eq!(fast, QuotaWindow::Unknown, "row: {name}: never room");
             assert_eq!(store.rejection_totals().contradictory, 1, "row: {name}");
             continue;

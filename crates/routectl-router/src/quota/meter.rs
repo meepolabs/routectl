@@ -4,7 +4,8 @@
 //! observation it came from and that observation's source, plus the account's
 //! last accepted reading and its billing state. Every change goes through
 //! [`AccountMeter::merged`], which returns a new state or refuses the whole
-//! observation; a refusal leaves the stored state exactly as it was.
+//! observation; a refusal leaves the accepted state exactly as it was, and
+//! changes only the correction streak of each key it found lower.
 //!
 //! # The merge rule
 //!
@@ -27,17 +28,25 @@
 //!   ordering mark at its stamp, and a reading observed before the mark is
 //!   discarded, so a delayed older reading cannot revive a lapsed window.
 //!   Over a window still in effect it is no evidence and leaves no mark.
-//! - Contradiction: a newer reading for a running window whose reset matches
-//!   the stored one within [`RESET_TOLERANCE`] but whose used fraction is LOWER
-//!   describes the same window going backwards. Within
-//!   [`CONTRADICTION_SLACK`] that is rounding (header fractions floor, the poll
-//!   endpoint rounds) and the reading is accepted at the higher of the two;
-//!   further than that it is refused as `Contradictory` and nothing advances.
-//!   An unstarted window's reset is provisional (it slides with each poll), so
-//!   it never takes part in this comparison. An unstarted reading for a key
-//!   whose stored window is running and still in effect at its stamp is
-//!   refused as `Contradictory` too: a window cannot stop before its reset,
-//!   and taking it would turn the fullest window into an empty one.
+//! - Contradiction: while the stored window for a key is running and in
+//!   effect at the incoming stamp, a newer reading is LOWER when it is
+//!   unstarted (a window cannot stop before its reset) or running with a used
+//!   fraction more than [`CONTRADICTION_SLACK`] below the stored one, whatever
+//!   its reset. A lower reading is refused as `Contradictory` until
+//!   [`CORRECTION_CONFIRMATIONS`] consecutive lower readings for the key agree
+//!   (both unstarted, or used within the slack and resets within
+//!   [`RESET_TOLERANCE`]), whichever source each came from; the confirming
+//!   reading is then taken as reported. A single bogus reading therefore never
+//!   creates room, and a stored reading the vendor has really abandoned does
+//!   not hold the account full until its reset. A streak advances only on a
+//!   newer stamp, and clears when a reading for the key is accepted without a
+//!   correction, when the stored window leaves effect, when a complete report
+//!   drops the key, or when the account is forgotten; it has no time expiry,
+//!   because an idle account's polls can be further apart than any freshness
+//!   bound. A same-reset reading lower by no more than the slack is rounding
+//!   (header fractions floor, the poll endpoint rounds) and is accepted at the
+//!   stored fraction. A multi-window observation is taken only when every
+//!   lower window in it has confirmed.
 //! - A complete report that drops the account-wide five-hour window (the one
 //!   placement reads) while it is running and in effect keeps that window
 //!   aside, and a later reading for the key is reconciled against it exactly
@@ -75,6 +84,10 @@ use super::window::{Billing, QuotaWindow, WindowRole};
 /// How far, as a fraction of the window, a same-reset reading may fall below
 /// the stored one and still be read as rounding rather than a contradiction.
 pub const CONTRADICTION_SLACK: f64 = 0.02;
+
+/// How many consecutive agreeing lower readings replace a stored window still
+/// in effect.
+pub const CORRECTION_CONFIRMATIONS: u32 = 3;
 
 /// Absorbs the binary representation of two decimal fractions, so a drop of
 /// exactly [`CONTRADICTION_SLACK`] (`0.47` to `0.45`) is not refused for the
@@ -172,6 +185,61 @@ impl StoredWindow {
     }
 }
 
+/// The consecutive lower readings seen for one key: the latest of them, its
+/// stamp, and how many agreed in a row.
+#[derive(Debug, Clone, PartialEq)]
+struct Streak {
+    last: WindowReading,
+    observed: ObservationStamp,
+    count: u32,
+}
+
+/// A stored window replaced by a confirmed lower reading.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Correction {
+    /// The corrected window's key.
+    pub(super) key: WindowKey,
+    /// The used fraction stored before the correction.
+    pub(super) old_used: f64,
+    /// The used fraction taken.
+    pub(super) new_used: f64,
+}
+
+/// An accepted merge: the new state and the corrections it confirmed.
+#[derive(Debug)]
+pub(super) struct Merged {
+    pub(super) meter: AccountMeter,
+    pub(super) corrections: Vec<Correction>,
+}
+
+/// A refused merge: why, and the state to keep, which differs from the stored
+/// one only in its correction streaks (`None` when nothing changed).
+#[derive(Debug)]
+pub(super) struct Refusal {
+    pub(super) reason: RejectionReason,
+    pub(super) carry: Option<Box<AccountMeter>>,
+}
+
+impl From<RejectionReason> for Refusal {
+    fn from(reason: RejectionReason) -> Self {
+        Self {
+            reason,
+            carry: None,
+        }
+    }
+}
+
+/// What the merge does with one incoming reading.
+enum Verdict {
+    /// Keep what is stored.
+    Keep,
+    /// Store this window.
+    Take(StoredWindow),
+    /// The reading is lower than the stored window in effect, whose used
+    /// fraction this is.
+    Lower(f64),
+}
+
 /// One account's meter state. Every field is private, so [`Self::merged`] is
 /// the only way to change one.
 #[derive(Debug, Clone, PartialEq)]
@@ -191,6 +259,9 @@ pub struct AccountMeter {
     /// was running and in effect; readings for its key reconcile against it
     /// while it stays in effect and nothing is stored for the key.
     dropped_fast: Option<StoredWindow>,
+    /// Per key, the lower readings refused so far; holds at most the keys
+    /// with a stored or kept window.
+    streaks: HashMap<WindowKey, Streak>,
     last_accepted: Option<LastAccepted>,
     billing: Billing,
     billing_observed: ObservationStamp,
@@ -205,6 +276,7 @@ impl AccountMeter {
             complete_floor: None,
             unknown_marks: HashMap::new(),
             dropped_fast: None,
+            streaks: HashMap::new(),
             last_accepted: None,
             billing: Billing::Unknown,
             billing_observed: observed,
@@ -227,6 +299,11 @@ impl AccountMeter {
         self.last_accepted
     }
 
+    /// The latest billing state kept and when a known one was last observed.
+    pub(super) const fn billing(&self) -> (&Billing, &ObservationStamp) {
+        (&self.billing, &self.billing_observed)
+    }
+
     /// Every stored window, in no particular order.
     pub fn windows(&self) -> impl Iterator<Item = &StoredWindow> {
         self.windows.values()
@@ -239,8 +316,8 @@ impl AccountMeter {
     }
 
     /// This state merged with `observation`, or the whole observation refused
-    /// as `Contradictory` with nothing advanced.
-    pub(super) fn merged(&self, observation: &AccountObservation) -> Result<Self, RejectionReason> {
+    /// as `Contradictory` with only the lower keys' streaks advanced.
+    pub(super) fn merged(&self, observation: &AccountObservation) -> Result<Merged, Refusal> {
         let observed = *observation.observed();
         let source = observation.source();
         let mut next = self.clone();
@@ -259,13 +336,49 @@ impl AccountMeter {
                 (&[][..], true)
             }
         };
+        let mut advanced = Vec::new();
+        let mut unconfirmed = false;
+        let mut corrections = Vec::new();
         for reading in incoming {
-            if let Some(stored) = self.merged_window(reading, &observed, source, is_complete)? {
-                next.unknown_marks.remove(reading.key());
-                next.dropped_fast
-                    .take_if(|kept| kept.reading.key() == reading.key());
-                next.windows.insert(reading.key().clone(), stored);
-            }
+            let stored = match self.merged_window(reading, &observed, source, is_complete)? {
+                Verdict::Keep => continue,
+                Verdict::Take(stored) => stored,
+                Verdict::Lower(old_used) => {
+                    let (streak, confirmed) = next.advanced_streak(reading, &observed);
+                    advanced.push((reading.key().clone(), streak));
+                    if !confirmed {
+                        unconfirmed = true;
+                        continue;
+                    }
+                    corrections.push(Correction {
+                        key: reading.key().clone(),
+                        old_used,
+                        new_used: reading.used().fraction(),
+                    });
+                    StoredWindow {
+                        reading: reading.clone(),
+                        observed,
+                        source,
+                    }
+                }
+            };
+            next.unknown_marks.remove(reading.key());
+            next.dropped_fast
+                .take_if(|kept| kept.reading.key() == reading.key());
+            next.streaks.remove(reading.key());
+            next.windows.insert(reading.key().clone(), stored);
+        }
+        if unconfirmed {
+            return Err(self.refused_with(advanced));
+        }
+        let lapsed: Vec<WindowKey> = next
+            .streaks
+            .keys()
+            .filter(|key| next.in_effect(key, &observed).is_none())
+            .cloned()
+            .collect();
+        for key in lapsed {
+            next.streaks.remove(&key);
         }
         if self
             .last_accepted
@@ -273,7 +386,60 @@ impl AccountMeter {
         {
             next.last_accepted = Some(LastAccepted { observed, source });
         }
-        Ok(next)
+        Ok(Merged {
+            meter: next,
+            corrections,
+        })
+    }
+
+    /// The streak `reading`, found lower, leaves for its key, and whether it
+    /// confirms the correction. A reading not newer than the streak's last
+    /// leaves it as it was and confirms nothing.
+    fn advanced_streak(
+        &self,
+        reading: &WindowReading,
+        observed: &ObservationStamp,
+    ) -> (Streak, bool) {
+        let fresh = Streak {
+            last: reading.clone(),
+            observed: *observed,
+            count: 1,
+        };
+        let Some(current) = self.streaks.get(reading.key()) else {
+            return (fresh, false);
+        };
+        if observed.monotonic() <= current.observed.monotonic() {
+            return (current.clone(), false);
+        }
+        if !agrees(&current.last, reading) {
+            return (fresh, false);
+        }
+        let count = current.count.saturating_add(1);
+        let streak = Streak { count, ..fresh };
+        (streak, count >= CORRECTION_CONFIRMATIONS)
+    }
+
+    /// This state with only `advanced` streaks replaced, as a refusal.
+    fn refused_with(&self, advanced: Vec<(WindowKey, Streak)>) -> Refusal {
+        let mut carry = self.clone();
+        carry.streaks.extend(advanced);
+        Refusal {
+            reason: RejectionReason::Contradictory,
+            carry: (carry != *self).then(|| Box::new(carry)),
+        }
+    }
+
+    /// The window that binds `key` at `observed`: the stored one, or the kept
+    /// dropped five-hour window, when it is in effect.
+    fn in_effect(&self, key: &WindowKey, observed: &ObservationStamp) -> Option<&StoredWindow> {
+        self.windows
+            .get(key)
+            .or_else(|| {
+                self.dropped_fast
+                    .as_ref()
+                    .filter(|kept| kept.reading.key() == key)
+            })
+            .filter(|stored| stored.is_effective(observed))
     }
 
     /// Drop every window a complete report at `observed` omits and is not
@@ -303,20 +469,22 @@ impl AccountMeter {
             if fast.as_ref() == Some(&key) && stored.is_effective(observed) {
                 self.dropped_fast = Some(stored);
             }
+            self.streaks.remove(&key);
         }
         self.complete_floor = Some(*observed);
     }
 
-    /// The window to store for `reading`, `None` to keep what is stored, or
-    /// `Contradictory`. `is_complete` says `reading` belongs to a complete
-    /// report, which takes an equal-stamp tie against the floor.
+    /// What to do with `reading`: keep what is stored, store a window, or
+    /// treat it as lower than the window in effect. `is_complete` says
+    /// `reading` belongs to a complete report, which takes an equal-stamp tie
+    /// against the floor.
     fn merged_window(
         &self,
         reading: &WindowReading,
         observed: &ObservationStamp,
         source: ReadingSource,
         is_complete: bool,
-    ) -> Result<Option<StoredWindow>, RejectionReason> {
+    ) -> Result<Verdict, RejectionReason> {
         let below_floor = self.complete_floor.is_some_and(|floor| {
             observed.monotonic() < floor.monotonic()
                 || (!is_complete && observed.monotonic() == floor.monotonic())
@@ -334,13 +502,18 @@ impl AccountMeter {
             || below_mark
             || stored.is_some_and(|s| observed.monotonic() < s.observed.monotonic())
         {
-            return Ok(None);
+            return Ok(Verdict::Keep);
         }
         let reading = match stored {
-            Some(stored) => reconciled(stored, reading, observed)?,
+            Some(stored) => match reconciled(stored, reading, observed)? {
+                Reconciled::Lower => {
+                    return Ok(Verdict::Lower(stored.reading.used().fraction()));
+                }
+                Reconciled::Take(reading) => reading,
+            },
             None => reading.clone(),
         };
-        Ok(Some(StoredWindow {
+        Ok(Verdict::Take(StoredWindow {
             reading,
             observed: *observed,
             source,
@@ -355,13 +528,19 @@ impl AccountMeter {
     /// omitted, so it never erases, and marks its key when the stored window
     /// is no longer in effect (see the module's merge rule). A snapshot with
     /// no known window still records its arrival and its billing state.
-    pub(super) fn merged_header(&self, snapshot: &QuotaSnapshot) -> Result<Self, RejectionReason> {
-        let mut next = match header_observation(snapshot)? {
+    pub(super) fn merged_header(&self, snapshot: &QuotaSnapshot) -> Result<Merged, Refusal> {
+        let Merged {
+            meter: mut next,
+            corrections,
+        } = match header_observation(snapshot)? {
             Some(observation) => self.merged(&observation)?,
             None => {
                 let mut next = self.clone();
                 next.latest = newer(self.latest, snapshot.observed);
-                next
+                Merged {
+                    meter: next,
+                    corrections: Vec::new(),
+                }
             }
         };
         for key in self.unknown_header_keys(snapshot) {
@@ -377,7 +556,10 @@ impl AccountMeter {
         {
             next.billing_observed = snapshot.observed;
         }
-        Ok(next)
+        Ok(Merged {
+            meter: next,
+            corrections,
+        })
     }
 
     /// The curated keys `snapshot` names unknown whose stored window, if any,
@@ -446,30 +628,42 @@ impl AccountMeter {
     }
 }
 
-/// `incoming` reconciled against the window stored for its key: itself, the
-/// same reading lifted to the stored used fraction when it is lower by no
-/// more than the slack, or `Contradictory` when it is lower by more or when
-/// it calls unstarted a window still running at its stamp.
+/// How an incoming reading stands against the window stored for its key.
+enum Reconciled {
+    /// Take this reading: the incoming one, or it lifted to the stored used
+    /// fraction when it is lower on the same reset by no more than the slack.
+    Take(WindowReading),
+    /// Lower than the stored window in effect (see the module rule).
+    Lower,
+}
+
+/// `incoming` reconciled against the window stored for its key.
 fn reconciled(
     stored: &StoredWindow,
     incoming: &WindowReading,
     observed: &ObservationStamp,
-) -> Result<WindowReading, RejectionReason> {
-    if incoming.started() == Started::No && stored.is_effective(observed) {
-        return Err(RejectionReason::Contradictory);
-    }
-    let (Some(stored_reset), Some(incoming_reset)) = (stored.reading.reset(), incoming.reset())
-    else {
-        return Ok(incoming.clone());
+) -> Result<Reconciled, RejectionReason> {
+    let in_effect_reset = stored
+        .reading
+        .reset()
+        .filter(|_| stored.is_effective(observed));
+    let Some(stored_reset) = in_effect_reset else {
+        return Ok(Reconciled::Take(incoming.clone()));
     };
-    let same_reset = abs_diff(stored_reset.at(), incoming_reset.at()) <= RESET_TOLERANCE;
+    let Some(incoming_reset) = incoming
+        .reset()
+        .filter(|_| incoming.started() != Started::No)
+    else {
+        return Ok(Reconciled::Lower);
+    };
     let stored_used = stored.reading.used().fraction();
     let drop = stored_used - incoming.used().fraction();
-    if !stored.is_effective(observed) || !same_reset || drop <= 0.0 {
-        return Ok(incoming.clone());
-    }
     if drop > CONTRADICTION_SLACK + SLACK_EPSILON {
-        return Err(RejectionReason::Contradictory);
+        return Ok(Reconciled::Lower);
+    }
+    let same_reset = abs_diff(stored_reset.at(), incoming_reset.at()) <= RESET_TOLERANCE;
+    if !same_reset || drop <= 0.0 {
+        return Ok(Reconciled::Take(incoming.clone()));
     }
     WindowReading::new(
         incoming.key().clone(),
@@ -478,6 +672,26 @@ fn reconciled(
         incoming.started(),
         observed,
     )
+    .map(Reconciled::Take)
+}
+
+/// Whether two lower readings for one key say the same thing: both unstarted,
+/// or both running with used fractions within the slack and resets within the
+/// tolerance.
+fn agrees(a: &WindowReading, b: &WindowReading) -> bool {
+    match (a.started() == Started::No, b.started() == Started::No) {
+        (true, true) => true,
+        (false, false) => {
+            let used_close = (a.used().fraction() - b.used().fraction()).abs()
+                <= CONTRADICTION_SLACK + SLACK_EPSILON;
+            let resets_close = match (a.reset(), b.reset()) {
+                (Some(ra), Some(rb)) => abs_diff(ra.at(), rb.at()) <= RESET_TOLERANCE,
+                _ => false,
+            };
+            used_close && resets_close
+        }
+        _ => false,
+    }
 }
 
 /// The account-wide key of the curated window in `role`. Every curated row in
@@ -551,3 +765,7 @@ fn abs_diff(a: std::time::SystemTime, b: std::time::SystemTime) -> Duration {
 #[cfg(test)]
 #[path = "meter_tests.rs"]
 mod meter_tests;
+
+#[cfg(test)]
+#[path = "meter_correction_tests.rs"]
+mod meter_correction_tests;

@@ -255,3 +255,43 @@ async fn a_streaming_reading_is_stored_before_the_stream_ends() {
         "waiting for end-of-stream would lose a reading the head carried"
     );
 }
+
+/// One header reading of the served seat's five-hour window at `utilization`,
+/// stamped now.
+fn header_reading(utilization: &str) -> crate::quota::reduce::QuotaSnapshot {
+    crate::quota::reduce::reduce_anthropic(
+        &live_quota(utilization),
+        &crate::quota::freshness::ObservationStamp::now(),
+    )
+    .snapshot
+}
+
+/// A hot reload carries the store `Arc`, so a correction streak begun on the
+/// outgoing Router completes on the incoming one.
+#[test]
+fn a_hot_reload_keeps_an_in_progress_correction_streak() {
+    // Arrange
+    let before = router_on_one_oauth_seat("0.90", "0.90");
+    let key = served_seat_key();
+    assert!(before.quota_store.observe(&key, header_reading("0.90")));
+    for _ in 0..2 {
+        assert!(
+            !before.quota_store.observe(&key, header_reading("0.30")),
+            "a lower reading is refused until it confirms"
+        );
+    }
+    let mut after = router_on_one_oauth_seat("0.90", "0.90");
+
+    // Act
+    after.carry_over_quota_from(&before);
+    let stored_at_reload = stored_fast_fraction(&after);
+    let confirmed = after.quota_store.observe(&key, header_reading("0.30"));
+
+    // Assert
+    assert_eq!(stored_at_reload, Some(0.90));
+    assert!(
+        confirmed,
+        "the third agreeing reading confirms after the reload"
+    );
+    assert_eq!(stored_fast_fraction(&after), Some(0.30));
+}

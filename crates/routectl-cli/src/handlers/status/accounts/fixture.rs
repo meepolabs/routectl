@@ -4,8 +4,8 @@
 use std::time::{Duration, SystemTime};
 
 use routectl_router::{
-    AccountIdentities, AccountReading, AccountReadings, AccountWindow, LastReading, LengthClass,
-    ReadingSource, ReadingWindow, RejectionTotals, ReportState, Started, UsageVendor,
+    AccountIdentities, AccountReading, AccountReadings, AccountWindow, Billing, LastReading,
+    LengthClass, ReadingSource, ReadingWindow, RejectionTotals, ReportState, Started, UsageVendor,
 };
 use serde_json::Value;
 
@@ -90,13 +90,18 @@ fn readings() -> AccountReadings {
                 last_accepted: Some(LastReading {
                     observed_at: at_ms(FIXTURE_NOW_MS - 60_000),
                     source: ReadingSource::Poll,
+                    fresh: true,
                 }),
+                billing: Billing::Unknown,
+                billing_fresh: false,
             },
             AccountReading {
                 account: "codex".to_string(),
                 report: ReportState::NoWindows,
                 windows: Vec::new(),
                 last_accepted: None,
+                billing: Billing::Unknown,
+                billing_fresh: false,
             },
         ],
         rejections: RejectionTotals {
@@ -110,6 +115,7 @@ fn readings() -> AccountReadings {
             malformed_body: 3,
         },
         refused_by_admission: 2,
+        corrections_confirmed: 0,
     }
 }
 

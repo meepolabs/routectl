@@ -43,7 +43,8 @@
 //! source-tagged observation, from the poll or from the Codex response
 //! headers, and [`QuotaStore::observe`] adapts one Anthropic response-header
 //! snapshot onto a partial observation of the curated windows. Both are
-//! refused whole when a reading contradicts the stored one for its window;
+//! refused whole when a reading contradicts the stored one for its window
+//! (a refusal stores only the advanced correction streaks);
 //! `observe` counts the refusal, and the observation's caller counts its own
 //! with [`QuotaStore::record_rejection`].
 //!
@@ -68,9 +69,9 @@ use parking_lot::Mutex;
 
 use super::freshness::ObservationStamp;
 use super::key::SeatKey;
-use super::meter::AccountMeter;
 #[cfg(test)]
 use super::meter::ReportState;
+use super::meter::{AccountMeter, Correction, Merged, Refusal};
 use super::reading::AccountObservation;
 use super::reduce::{QuotaSnapshot, RejectionReason};
 use super::view::{AccountReading, AccountReadings};
@@ -210,6 +211,8 @@ pub struct QuotaStore {
     /// Writes refused because their seat is not in the currently admitted
     /// set -- see [`QuotaStore::refused_by_admission_total`].
     refused_by_admission: AtomicU64,
+    /// Stored windows replaced by a confirmed run of lower readings.
+    corrections_confirmed: AtomicU64,
 }
 
 impl QuotaStore {
@@ -338,14 +341,16 @@ impl QuotaStore {
         &self,
         key: &SeatKey,
         observed: ObservationStamp,
-        merge: impl FnOnce(&AccountMeter) -> Result<AccountMeter, RejectionReason>,
+        merge: impl FnOnce(&AccountMeter) -> Result<Merged, Refusal>,
     ) -> Result<(), ObserveRefusal> {
         let outcome = self.merge_uncounted(key, observed, merge);
         self.count_refusal(key, outcome)
     }
 
     /// Apply `merge` to `key`'s meter (a fresh one stamped `observed` when it
-    /// has none) and store the result; a rejection is returned, not counted.
+    /// has none) and store the result; a rejection is returned, not counted,
+    /// and stores only the correction streaks it advanced. A confirmed
+    /// correction is counted and logged once the meter lock is released.
     ///
     /// Holds `seats` across BOTH the admission check and the insert (nesting
     /// `admitted` inside it via a brief, immediately-released acquisition)
@@ -359,24 +364,50 @@ impl QuotaStore {
         &self,
         key: &SeatKey,
         observed: ObservationStamp,
-        merge: impl FnOnce(&AccountMeter) -> Result<AccountMeter, RejectionReason>,
+        merge: impl FnOnce(&AccountMeter) -> Result<Merged, Refusal>,
     ) -> Result<(), ObserveRefusal> {
-        let mut guard = self.seats.lock();
-        if !self.admits(key) {
-            self.refused_by_admission.fetch_add(1, Ordering::Relaxed);
-            return Err(ObserveRefusal::NotAdmitted);
-        }
-        let merged = match guard.get(key) {
-            Some(stored) => merge(stored),
-            None => merge(&AccountMeter::new(observed)),
-        };
-        match merged {
-            Ok(meter) => {
-                guard.insert(key.clone(), meter);
-                Ok(())
+        let corrections = {
+            let mut guard = self.seats.lock();
+            if !self.admits(key) {
+                self.refused_by_admission.fetch_add(1, Ordering::Relaxed);
+                return Err(ObserveRefusal::NotAdmitted);
             }
-            Err(reason) => Err(ObserveRefusal::Rejected(reason)),
+            let merged = match guard.get(key) {
+                Some(stored) => merge(stored),
+                None => merge(&AccountMeter::new(observed)),
+            };
+            match merged {
+                Ok(Merged { meter, corrections }) => {
+                    guard.insert(key.clone(), meter);
+                    corrections
+                }
+                Err(Refusal { reason, carry }) => {
+                    if let Some(meter) = carry {
+                        guard.insert(key.clone(), *meter);
+                    }
+                    return Err(ObserveRefusal::Rejected(reason));
+                }
+            }
+        };
+        for correction in &corrections {
+            self.record_correction(key, correction);
         }
+        Ok(())
+    }
+
+    /// Count one confirmed correction and log it. The line names the
+    /// routectl-internal account key, the window and the two used fractions.
+    fn record_correction(&self, key: &SeatKey, correction: &Correction) {
+        self.corrections_confirmed.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            event = "quota_correction_confirmed",
+            seat = %key.as_str(),
+            window_secs = correction.key.length_secs(),
+            scope = correction.key.scope().map_or("", |scope| scope.as_str()),
+            old_used = correction.old_used,
+            new_used = correction.new_used,
+            "consecutive lower quota readings replaced the stored window",
+        );
     }
 
     /// `key`'s reading projected onto today's two-role snapshot as of `now`,
@@ -419,6 +450,7 @@ impl QuotaStore {
             accounts,
             rejections: self.rejections.totals(),
             refused_by_admission: self.refused_by_admission_total(),
+            corrections_confirmed: self.corrections_confirmed.load(Ordering::Relaxed),
         }
     }
 
