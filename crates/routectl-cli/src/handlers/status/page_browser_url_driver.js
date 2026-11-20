@@ -257,8 +257,8 @@
     return chain.then(function () { return steps; });
   });
 
-  // Open rows, dialogs, focus and scroll leave the address alone; the tab
-  // click in the middle is the control proving the observation sees a change.
+  // Open rows, focus and scroll leave the address alone; the tab click in
+  // the middle is the control proving the observation sees a change.
   d.scenario('url-ui-state-stays-out', function () {
     var obs = [];
     function observe(name) {
@@ -266,17 +266,15 @@
     }
     return waitSettled().then(function () {
       observe('start');
-      return d.waitForElement('overview-seats-kclaude_2d_seat');
-    }).then(function (open) {
-      open.click();
-      return d.waitForElement('overview-seats-close-kclaude_2d_seat');
-    }).then(function (close) {
-      close.focus();
+      return d.waitUntil('a glance link', function () {
+        return document.querySelector('#body-now .glance-link');
+      });
+    }).then(function (link) {
+      link.focus();
       window.scrollTo(0, 400);
       return d.sleep(200);
     }).then(function () {
-      observe('dialog open, focus inside, scrolled');
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      observe('focused, scrolled');
       click('tab-config');
       return d.waitForElement('config-models-kglm-toggle');
     }).then(function (toggle) {

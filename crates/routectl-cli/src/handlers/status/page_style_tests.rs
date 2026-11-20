@@ -348,7 +348,7 @@ fn no_rule_paints_a_raw_color() {
     assert!(
         css_decls(&css)
             .iter()
-            .any(|d| d.prop == "background" && d.value == "var(--backdrop)"),
+            .any(|d| d.prop == "background" && d.value == "var(--accent)"),
         "positive control: the scan reads rule declarations"
     );
 

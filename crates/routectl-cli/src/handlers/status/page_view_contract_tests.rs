@@ -296,8 +296,8 @@ fn the_listener_scan_flags_code_and_ignores_comments() {
 /// Every action a builder marks a node with has a handler, and every handler
 /// is reachable from some builder.
 ///
-/// Mutation check: rename the `'seat-close'` key in ACTIONS -> red (one
-/// marked action unhandled, one entry unused).
+/// Mutation check: rename the `'provider-overflow'` key in ACTIONS -> red
+/// (one marked action unhandled, one entry unused).
 #[test]
 fn every_marked_action_has_a_handler_and_every_handler_is_marked() {
     let builders = builder_parts();

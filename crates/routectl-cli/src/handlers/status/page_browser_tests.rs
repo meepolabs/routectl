@@ -500,17 +500,6 @@ fn page_browser_doctor_fix_command_selection_survives_rounds() {
     assert_figure_changed_every_round(&obs);
 }
 
-#[test]
-#[ignore = "drives a system headless Chrome"]
-fn page_browser_seat_dialog_stays_open_with_focus_inside() {
-    let report = run_scenario(&scenario("seat-dialog-focus", "now"));
-
-    let obs = observations(&report.result);
-
-    assert_flags(&obs, &["open", "same_dialog", "same_node", "focus_inside"]);
-    assert_figure_changed_every_round(&obs);
-}
-
 /// Models: a dispatch target card and the rate-limit figure inside it are the
 /// same nodes across two changed rounds, and the figure shows each round's
 /// value. Models has no control to focus or open, so the kept nodes are the

@@ -216,7 +216,7 @@
     if (!pane || !body) { return; }
     var view = viewFor(tab);
     var primary = SOURCES[view.sources[0]];
-    var pass = { faults: Object.create(null), touched: Object.create(null), overlay: null };
+    var pass = { faults: Object.create(null), touched: Object.create(null) };
     var marksChanges = paintedView === tab;
     paintedView = tab;
     renderPass = pass;
@@ -225,13 +225,11 @@
     } catch (e) {
       pass.faults[primary.name] = true;
       pass.touched[primary.name] = true;
-      pass.overlay = null;
       morphPanel(body, errorCard('invalid_payload',
         'this section could not be rendered from the payload it received'));
     } finally {
       renderPass = null;
     }
-    paintOverlay(pass.overlay, marksChanges);
     // What this pass ACTUALLY drew decides the fault map: a source every one of
     // whose sections built cleanly here has recovered, whatever an earlier pass
     // recorded, and a source that threw here is faulted even on a payload that
@@ -248,7 +246,7 @@
     }
   }
 
-  // The one way a pane body or the modal host is updated: `parent`'s children
+  // The one way a pane body is updated: `parent`'s children
   // are brought in line with `node` in place, so an element the rebuild keeps
   // (matched by id, else by tag) is the same node afterward and focus on it
   // survives. A node only, never markup: the morph library parses a string
@@ -338,21 +336,6 @@
     if (oldNode instanceof HTMLDetailsElement && freshNode instanceof HTMLDetailsElement) {
       freshNode.open = oldNode.open;
     }
-  }
-
-  // The modal host shows the overlay the pass just built, or nothing: an
-  // overlay whose owning section was not drawn this pass -- another tab, a
-  // state card in its place, a tab that failed to render -- cannot outlive it.
-  // Offered during the build (offerOverlay) and drawn after it, so an overlay
-  // that stays open is morphed, not torn down and rebuilt.
-  function paintOverlay(node, marksChanges) {
-    var host = el('modal-host');
-    if (!host) { return; }
-    morphPanel(host, node || document.createDocumentFragment(), marksChanges);
-  }
-
-  function offerOverlay(node) {
-    if (renderPass) { renderPass.overlay = node; }
   }
 
   // The sections built during the current render pass: which sources they read

@@ -258,9 +258,6 @@
     selectedGroupBy = next.group;
     selectedSort = next.sort;
     if (refetch) { resetMovedQuerySources(priorKeys); }
-    // The seat modal belongs to the Now provider row: leaving the view
-    // dismisses it rather than leaving it to reappear on return.
-    if (viewMoved) { seatModalProvider = null; }
     if (refetch && inputsMoved) { queryInputChanged(); }
     paintTabs();
     paintPending();
@@ -369,13 +366,6 @@
       if (!viewFor(arg) || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
       e.preventDefault();
       selectTab(arg);
-    },
-    'seat-open': function (arg) { if (arg) { openSeatModal(arg); } },
-    'seat-close': function () { closeSeatModal(); },
-    // Only a click on the backdrop itself closes; a click that bubbled up
-    // from inside the dialog does not.
-    'seat-backdrop': function (arg, node, e) {
-      if (e.target === node) { closeSeatModal(); }
     }
   };
 
@@ -392,12 +382,10 @@
     ACTIONS[name](node.getAttribute('data-arg'), node, e);
   }
 
-  // One click listener per pane root, one on the modal host and one on the
-  // verdict strip, installed once: the nodes beneath them are rebuilt every
-  // render, the roots are not.
+  // One click listener per pane root and one on the verdict strip, installed
+  // once: the nodes beneath them are rebuilt every render, the roots are not.
   function initActions() {
     var roots = VIEWS.map(function (view) { return el('pane-' + view.id); });
-    roots.push(el('modal-host'));
     roots.push(el('verdict'));
     roots.forEach(function (root) {
       if (!root) { return; }
@@ -462,9 +450,6 @@
     document.addEventListener('visibilitychange', updateFavicon);
     window.addEventListener('focus', updateFavicon);
     window.addEventListener('pageshow', updateFavicon);
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { closeSeatModal(); }
-    });
     document.addEventListener('animationend', clearChangedValue);
     tick();
     usageAllRound();

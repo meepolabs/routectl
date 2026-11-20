@@ -194,6 +194,188 @@
 
   // ---- end needs attention ---------------------------------------------
 
+  // ---- accounts at a glance --------------------------------------------
+
+  // Every subscription account in the current config, under each pool it
+  // dispatches in; an account in no pool is a pool of its own. Read from the
+  // accounts panel alone. API-key and cloud credentials report no usage
+  // windows and are left to the Accounts view.
+  //
+  // A meter stays the accent until a window is nearly used, then amber, then
+  // red at its limit, and a word rides with each of those colors. The line
+  // is the one the daemon's attention list uses for "near its limit"
+  // (above 90% used). A stale reading is dimmed, never recolored.
+  var GLANCE_NEAR_FULL = 0.9;
+  var DAY_SECS = 86400;
+  var HOUR_SECS = 3600;
+
+  function accountsGlanceSection(rec) {
+    var data = rec.data;
+    if (!isPlainObject(data) || !Array.isArray(data.accounts)) {
+      throw new Error('accounts payload carries no account list');
+    }
+    var wrap = document.createElement('div');
+    wrap.className = 'ovsection glance';
+    var head = sectionHead('Accounts', 'subscription logins by pool');
+    var detail = viewFor('accounts');
+    if (detail) {
+      var link = viewLink(detail);
+      link.className = 'glance-link';
+      head.appendChild(link);
+    }
+    wrap.appendChild(head);
+    var pools = glancePools(data.accounts);
+    if (!pools.length) {
+      wrap.appendChild(attentionText('p', 'glance-none', 'No subscription login in this config.'));
+      return wrap;
+    }
+    var grid = document.createElement('div');
+    grid.className = 'glance-grid';
+    var nowMs = panelNowMs(rec);
+    pools.forEach(function (pool) { grid.appendChild(glancePool(pool, nowMs)); });
+    wrap.appendChild(grid);
+    return wrap;
+  }
+
+  // Named pools first, by name, each listing its members in the panel's
+  // account order; then each pool-less account as a pool of one.
+  function glancePools(accounts) {
+    var named = Object.create(null);
+    var solo = [];
+    accounts.forEach(function (row) {
+      if (!isPlainObject(row) || row.subscription !== true) { return; }
+      var pools = Array.isArray(row.pools) ? row.pools : [];
+      if (!pools.length) {
+        solo.push({ key: String(row.account), name: null, seats: [row] });
+        return;
+      }
+      pools.forEach(function (p) {
+        var name = String(p);
+        if (!named[name]) { named[name] = { key: name, name: name, seats: [] }; }
+        named[name].seats.push(row);
+      });
+    });
+    return Object.keys(named).sort().map(function (k) { return named[k]; }).concat(solo);
+  }
+
+  function glancePool(pool, nowMs) {
+    var prefix = pool.name === null ? 'now-solo-' : 'now-pool-';
+    var id = prefix + idKey(pool.key);
+    var card = markRefreshUnit(document.createElement('div'), id);
+    card.id = id;
+    card.className = 'glance-pool';
+    card.appendChild(attentionText('div', 'glance-pool-name',
+      pool.name === null ? 'no pool' : 'pool ' + pool.name));
+    pool.seats.forEach(function (row) {
+      card.appendChild(glanceSeat(row, id, nowMs));
+    });
+    return card;
+  }
+
+  // A seat is named "provider_entry (login_label)", or by its entry alone
+  // when the login carries no label.
+  function glanceSeatName(row) {
+    var name = String(row.provider_entry);
+    return row.login_label ? name + ' (' + String(row.login_label) + ')' : name;
+  }
+
+  function glanceSeat(row, poolId, nowMs) {
+    var seat = document.createElement('div');
+    seat.id = poolId + '-' + idKey(row.account);
+    seat.className = 'glance-seat';
+    seat.setAttribute('data-account', String(row.account));
+    var head = document.createElement('div');
+    head.className = 'glance-seat-head';
+    head.appendChild(attentionText('span', 'glance-seat-name', glanceSeatName(row)));
+    head.appendChild(glanceLogin(row.credential));
+    seat.appendChild(head);
+    seat.appendChild(glanceReading(row, nowMs));
+    return seat;
+  }
+
+  // The login state as one word. The daemon's cause and fix for a login
+  // that needs one are the attention item's and the Accounts view's to show:
+  // on Now one cause appears once.
+  var GLANCE_LOGIN_WORDS = {
+    usable: 'usable',
+    unusable: 'unusable',
+    parked: 'parked',
+    not_built: 'not built'
+  };
+
+  function glanceLogin(credential) {
+    var c = isPlainObject(credential) ? credential : {};
+    var state = Object.prototype.hasOwnProperty.call(GLANCE_LOGIN_WORDS, c.state)
+      ? c.state : 'unknown';
+    var span = document.createElement('span');
+    span.className = 'glance-login glance-login--' + state;
+    var dot = document.createElement('span');
+    dot.className = 'glance-login-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    span.appendChild(dot);
+    var words = state === 'unknown' ? 'login state unknown' : GLANCE_LOGIN_WORDS[state];
+    span.appendChild(attentionText('span', 'glance-login-text', words));
+    return span;
+  }
+
+  // What the account has reported: its windows, the statement that it
+  // reports none, or that nothing has been read yet. Never a meter at zero
+  // standing in for a missing reading.
+  function glanceReading(row, nowMs) {
+    var windows = Array.isArray(row.windows) ? row.windows : [];
+    if (row.report === 'windows' && windows.length) {
+      var list = document.createElement('div');
+      list.className = 'glance-meters';
+      windows.forEach(function (w) { list.appendChild(glanceMeter(w, nowMs)); });
+      return list;
+    }
+    var text = row.report === 'no_windows' ? 'reports no usage windows' : 'no reading';
+    return attentionText('div', 'glance-noreading', text);
+  }
+
+  function glanceMeter(w, nowMs) {
+    var used = Math.max(0, num0(w.used));
+    var level = used >= 1 ? 'full' : (used > GLANCE_NEAR_FULL ? 'warn' : 'calm');
+    var line = document.createElement('div');
+    line.className = 'glance-meter glance-meter--' + level + (w.stale ? ' glance-meter--stale' : '');
+    line.appendChild(attentionText('span', 'glance-meter-label', glanceWindowLabel(w)));
+    var track = document.createElement('span');
+    track.className = 'glance-bar';
+    var fill = document.createElement('span');
+    fill.className = 'glance-bar-fill';
+    var pct = Math.min(100, used * 100);
+    fill.style.setProperty('--pct', pct);
+    markValue(fill, pct);
+    track.appendChild(fill);
+    line.appendChild(track);
+    var value = figure(String(Math.round(used * 100)), '%', null);
+    value.classList.add('glance-meter-pct');
+    line.appendChild(value);
+    var word = level === 'full' ? 'at limit' : (level === 'warn' ? 'nearly used' : '');
+    if (word) { line.appendChild(attentionText('span', 'glance-meter-word', word)); }
+    line.appendChild(attentionText('span', 'glance-meter-age', glanceAge(w, nowMs)));
+    return line;
+  }
+
+  // The window's length in whole days or hours, then its vendor scope.
+  function glanceWindowLabel(w) {
+    var secs = num0(w.length_secs);
+    var span;
+    if (secs > 0 && secs % DAY_SECS === 0) { span = (secs / DAY_SECS) + ' d'; }
+    else if (secs > 0 && secs % HOUR_SECS === 0) { span = (secs / HOUR_SECS) + ' h'; }
+    else { span = Math.round(secs / 60) + ' min'; }
+    return w.scope ? span + ' ' + String(w.scope) : span;
+  }
+
+  // The reading's age against the panel's own clock, and its stale mark.
+  function glanceAge(w, nowMs) {
+    var age = ageSince(w.observed_at_ms, nowMs);
+    var text = age === '-' ? 'age unknown' : age + ' ago';
+    return w.stale ? 'stale, ' + text : text;
+  }
+
+  // ---- end accounts at a glance ----------------------------------------
+
   // The live Overview: one query response feeds the provider cards, the eight
   // KPI tiles, and the eight per-tile sparklines. A live Overview payload
   // always carries the series its request shape asked for, so a missing one is
@@ -325,10 +507,7 @@
   //
   // Every card stays visible while a provider is scoped (the scoped one is
   // highlighted), so the operator can move the scope or reset it from the same
-  // row they set it in. The seat quota rides on the card because a provider's
-  // credential headroom is a fact about that provider; it comes from the usage
-  // source, not the query one, so it is read through the seat index below and a
-  // usage failure costs the seat surface alone.
+  // row they set it in.
   //
   // Named for the ROW it draws, not for its subject: every dash_*.js part is
   // concatenated into one function scope, so a bare `providerSection` here would
@@ -342,7 +521,6 @@
     wrap.className = 'ovsection';
     wrap.appendChild(sectionHead('Providers', 'pick one to scope the whole page'));
     var totalReq = num0(view.totals.requests);
-    var seats = seatIndex(SOURCES.usage);
     var ranked = view.groups.slice().sort(function (a, b) {
       return num0(b.metrics.requests) - num0(a.metrics.requests);
     });
@@ -350,41 +528,38 @@
     var rest = ranked.slice(PROVIDER_CARD_CAP);
     var grid = document.createElement('div');
     grid.className = 'provgrid';
-    grid.appendChild(aggregateCard(view.totals, seats));
+    grid.appendChild(aggregateCard(view.totals));
     shown.forEach(function (g) {
-      grid.appendChild(providerCard(g, totalReq, seats));
+      grid.appendChild(providerCard(g, totalReq));
     });
     if (rest.length) { grid.appendChild(overflowCard(rest, totalReq)); }
     wrap.appendChild(grid);
     if (rest.length && providerOverflowOpen) {
-      wrap.appendChild(providerOverflowList(rest, totalReq, seats));
+      wrap.appendChild(providerOverflowList(rest, totalReq));
     }
-    renderSeatModal(seats);
     return wrap;
   }
 
   // The leading card: the window's TOTALS, not a group -- one hundred percent of
   // the traffic by construction, and the affordance that lifts a provider scope.
-  function aggregateCard(totals, seats) {
+  function aggregateCard(totals) {
     var card = provCardShell(null, totals, 'all providers',
-      humanCount(totals.requests) + ' req', 100, seats);
+      humanCount(totals.requests) + ' req', 100);
     card.classList.add('provcard--all');
     return card;
   }
 
-  function providerCard(group, totalReq, seats) {
+  function providerCard(group, totalReq) {
     var m = group.metrics;
     var share = totalReq > 0 ? num0(m.requests) / totalReq * 100 : 0;
     return provCardShell(group.label, m, group.label,
-      humanCount(m.requests) + ' req', share, seats);
+      humanCount(m.requests) + ' req', share);
   }
 
   // The shared card face: name, cost, the design's two facts (requests and the
-  // share of traffic they are), the share bar, and the provider's seat
-  // affordance. The scope affordance is its own button INSIDE the card so the
-  // seat control beside it is separate -- a button cannot contain one, and a
-  // card-wide handler would fire the scope change on every seat click.
-  function provCardShell(label, m, name, reqFact, share, seats) {
+  // share of traffic they are) and the share bar, all inside the card's scope
+  // button.
+  function provCardShell(label, m, name, reqFact, share) {
     var scoped = selectedProvider === label;
     var cardEl = document.createElement('div');
     cardEl.className = 'provcard' + (scoped ? ' provcard--on' : '');
@@ -420,11 +595,6 @@
     btn.appendChild(shareBar(share));
     setAction(btn, 'provider-scope', label);
     cardEl.appendChild(btn);
-
-    if (label !== null) {
-      var seatBlock = providerSeats(label, seats);
-      if (seatBlock) { cardEl.appendChild(seatBlock); }
-    }
     return cardEl;
   }
 
@@ -462,189 +632,13 @@
   // The expanded overflow: the folded providers as their own cards, so a
   // provider reached through the overflow carries the same reading and the same
   // scope affordance as one on the row above.
-  function providerOverflowList(rest, totalReq, seats) {
+  function providerOverflowList(rest, totalReq) {
     var grid = document.createElement('div');
     grid.className = 'provgrid provgrid--rest';
     rest.forEach(function (g) {
-      grid.appendChild(providerCard(g, totalReq, seats));
+      grid.appendChild(providerCard(g, totalReq));
     });
     return grid;
-  }
-
-  // The usage panel's quota rows grouped by the provider whose credential each
-  // seat belongs to, or null when that source carries nothing renderable.
-  //
-  // Guarded exactly as `safeSection` guards a section node: a throw is recorded
-  // against the usage source so the pane status line and the page verdict
-  // report the degraded seat surface, while the KPI and provider blocks --
-  // which read the query source -- keep rendering untouched. Returning null
-  // rather than a card is what keeps the failure inside the seat affordance.
-  function seatIndex(rec) {
-    if (stateCard(rec)) { return null; }
-    try {
-      var index = groupQuotaByProvider(rec);
-      markRenderAttempt(rec.name);
-      return index;
-    } catch (e) {
-      recordRenderFault(rec.name);
-      return null;
-    }
-  }
-
-  // Each quota row names the provider entry its seat is reported under, the
-  // same entry a provider card is labeled with. The seat key is never split
-  // to find it: an entry name and a login's vendor need not agree. A row that
-  // names no entry belongs to no card and is left to the Accounts view's list.
-  function groupQuotaByProvider(rec) {
-    if (!rec.data || !Array.isArray(rec.data.quota)) {
-      throw new Error('usage payload carries no quota list');
-    }
-    var nowMs = panelNowMs(rec);
-    var byProvider = Object.create(null);
-    rec.data.quota.forEach(function (q) {
-      if (!q || !q.provider_entry) { return; }
-      var provider = String(q.provider_entry);
-      if (!byProvider[provider]) { byProvider[provider] = []; }
-      byProvider[provider].push(q);
-    });
-    return { byProvider: byProvider, nowMs: nowMs };
-  }
-
-  // The card's seat affordance: one dot per seat plus the seat count, opening a
-  // modal that lists every seat in full. Dots, never a pooled bar -- a pooled
-  // figure over several seats is a number no provider reported.
-  //
-  // A provider with no quota row of its own gets NO affordance at all -- an
-  // empty tile would read as a reported zero, and the quota fields are the only
-  // thing that may put a seat line on the page. When the usage source itself is
-  // not renderable the card says so in one faint line instead, so the absence
-  // is not mistaken for a provider that reports no quota.
-  function providerSeats(provider, seats) {
-    if (!seats) { return seatSurfaceUnavailable(); }
-    var rows = seats.byProvider[provider];
-    if (!rows || !rows.length) { return null; }
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.id = 'overview-seats-' + idKey(provider);
-    btn.className = 'provseats';
-    btn.title = 'show every seat';
-    btn.appendChild(seatDots(rows));
-    var note = document.createElement('span');
-    note.className = 'provseats-count';
-    note.textContent = seatSummary(rows);
-    btn.appendChild(note);
-    setAction(btn, 'seat-open', provider);
-    return btn;
-  }
-
-  // One dot per seat, in the order the panel reported them. A dot carries the
-  // seat's own name and nothing derived from its siblings.
-  function seatDots(rows) {
-    var wrap = document.createElement('span');
-    wrap.className = 'seatdots';
-    rows.forEach(function (q) {
-      var dot = document.createElement('span');
-      dot.className = 'seatdot';
-      if (q.seat) { dot.title = String(q.seat); }
-      wrap.appendChild(dot);
-    });
-    return wrap;
-  }
-
-  // How many seats this provider reports, and nothing else. No max, no average,
-  // no rollup across seats -- a seat's quota is a fact about one credential, and
-  // a headline over several would be a figure no provider reported.
-  function seatSummary(rows) {
-    return rows.length + phrase(rows.length, ' seat', ' seats');
-  }
-
-  function seatSurfaceUnavailable() {
-    var note = document.createElement('p');
-    note.className = 'footnote provseats-none';
-    note.textContent = 'seat quota unavailable';
-    return note;
-  }
-
-  // ---- seat modal ------------------------------------------------------
-
-  // The provider whose seat modal is open, or null. View state only: it drives
-  // the modal from the SAME render pass that draws the cards, so the seat
-  // figures behind it keep landing with every poll instead of freezing at the
-  // instant the modal was opened.
-  var seatModalProvider = null;
-
-  function openSeatModal(provider) {
-    seatModalProvider = provider;
-    renderActiveTab();
-  }
-
-  function closeSeatModal() {
-    if (seatModalProvider === null) { return; }
-    seatModalProvider = null;
-    renderActiveTab();
-  }
-
-  // The provider's seats in full: ONE row per seat, each the same quota tile the
-  // Accounts view renders. A modal rather than an inline expander because the seat
-  // list is a detour off the reading, not part of it -- and it deliberately
-  // carries no footer figure over the seats it lists.
-  //
-  // Offered to the page-level modal host (offerOverlay) rather than drawn into
-  // the section, because the panes are animated and an animated ancestor would
-  // make the fixed backdrop center on the pane instead of the viewport.
-  //
-  // Offers nothing when nothing is open, or when the open provider no longer
-  // has seats in the payload that just landed: a modal over a credential the
-  // panel has stopped reporting would show a snapshot nothing backs.
-  function renderSeatModal(seats) {
-    var rows = (seatModalProvider !== null && seats)
-      ? seats.byProvider[seatModalProvider]
-      : null;
-    if (!rows || !rows.length) { return; }
-    offerOverlay(seatModalNode(seatModalProvider, rows, seats.nowMs));
-  }
-
-  function seatModalNode(provider, rows, nowMs) {
-    // The backdrop's action closes the modal only for a click on the backdrop
-    // ITSELF (see ACTIONS), so a click inside the dialog never dismisses it.
-    var backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    setAction(backdrop, 'seat-backdrop', null);
-    var dialog = document.createElement('div');
-    dialog.id = 'overview-seats-dialog-' + idKey(provider);
-    dialog.className = 'modal';
-    dialog.setAttribute('role', 'dialog');
-    dialog.setAttribute('aria-modal', 'true');
-    dialog.setAttribute('aria-label', provider + ' seats');
-    dialog.appendChild(seatModalHead(provider, rows));
-    var body = document.createElement('div');
-    body.className = 'modal-body qlist qlist--card';
-    rows.forEach(function (q) { body.appendChild(quotaTile(q, nowMs)); });
-    dialog.appendChild(body);
-    backdrop.appendChild(dialog);
-    return backdrop;
-  }
-
-  function seatModalHead(provider, rows) {
-    var head = document.createElement('div');
-    head.className = 'modal-head';
-    var title = document.createElement('span');
-    title.className = 'modal-title';
-    title.textContent = provider;
-    head.appendChild(title);
-    var sub = document.createElement('span');
-    sub.className = 'modal-sub';
-    sub.textContent = seatSummary(rows) + ' - each reported on its own';
-    head.appendChild(sub);
-    var close = document.createElement('button');
-    close.type = 'button';
-    close.id = 'overview-seats-close-' + idKey(provider);
-    close.className = 'modal-close';
-    close.setAttribute('aria-label', 'Close');
-    close.textContent = 'esc x';
-    setAction(close, 'seat-close', null);
-    head.appendChild(close);
-    return head;
   }
 
   // The eight KPI tiles, hairline-gridded so they read as facets of one

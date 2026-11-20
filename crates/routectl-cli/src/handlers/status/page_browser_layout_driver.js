@@ -6,9 +6,8 @@
 // an ellipsis) and a scroller nobody can reach by keyboard. A truncated name
 // is allowed when its full text is in its `title`. It also reports any two
 // text runs in one Traffic stat row that draw over each other, and how each
-// Doctor fix command fits its box. On Now it then opens the seat dialog and
-// runs the same checks over it. The checks also run over planted controls,
-// so a clean report is not a check that cannot fire.
+// Doctor fix command fits its box. The checks also run over planted
+// controls, so a clean report is not a check that cannot fire.
 //
 // The fixtures carry small figures and short commands, which fit at any
 // text size, so the answers are rewritten to the magnitudes a real ledger
@@ -19,20 +18,15 @@
   var DIGIT = /[0-9]/;
   var SLACK_PX = 1;
 
-  // What each checked view shows once its slowest source has answered.
+  // What each checked view shows once its slowest sources have answered.
   var SETTLED_MARKER = {
-    now: '.kpigrid',
-    accounts: '.qtile',
-    traffic: '.ucard-stats',
-    models: '.hgrid',
-    config: '.cfgstrip',
-    doctor: '.docfix-text'
+    now: ['.kpigrid', '.glance-meter'],
+    accounts: ['.qtile'],
+    traffic: ['.ucard-stats'],
+    models: ['.hgrid'],
+    config: ['.cfgstrip'],
+    doctor: ['.docfix-text']
   };
-
-  // The Now card whose seat button opens the seat dialog, by the ids the
-  // overview gives them.
-  var SEAT_BUTTON = 'overview-seats-kclaude_2d_seat';
-  var SEAT_DIALOG = 'overview-seats-dialog-kclaude_2d_seat';
 
   var LONG_FIX = 'log in at least one of this pool\'s accounts ' +
     '(`routectl login <provider> --label <label>`); requests to a model naming ' +
@@ -82,10 +76,11 @@
     return location.hash.slice(1).split('?')[0];
   }
 
-  function settled(view, marker) {
+  function settled(view, markers) {
     return function () {
       var b = document.getElementById('body-' + view);
-      return !!b && !b.querySelector('.skeleton') && !!b.querySelector(marker);
+      return !!b && !b.querySelector('.skeleton') &&
+        markers.every(function (m) { return !!b.querySelector(m); });
     };
   }
 
@@ -251,19 +246,6 @@
     return found;
   }
 
-  // Open the Now seat dialog and audit it as drawn over the page: the dialog
-  // hides what overflows it, so a tile wider than the dialog is cut off.
-  function seatDialog() {
-    return d.waitForElement(SEAT_BUTTON).then(function (open) {
-      open.click();
-      return d.waitForElement(SEAT_DIALOG);
-    }).then(function (dialog) {
-      var found = audit(dialog);
-      found.tiles = dialog.querySelectorAll('.qtile').length;
-      return found;
-    });
-  }
-
   d.scenario('layout-check', function () {
     var view = addressView();
     var marker = SETTLED_MARKER[view];
@@ -280,13 +262,10 @@
           document.documentElement.scrollWidth > document.documentElement.clientWidth,
         strip: audit(document.getElementById('verdict')),
         body: audit(body),
-        controls: controls(body)
+        controls: controls(body),
+        glance_meters: body.querySelectorAll('.glance-meter').length
       };
-      if (view !== 'now') { return out; }
-      return seatDialog().then(function (dialog) {
-        out.seat_dialog = dialog;
-        return out;
-      });
+      return out;
     });
   });
 })(window.routectlDriver);

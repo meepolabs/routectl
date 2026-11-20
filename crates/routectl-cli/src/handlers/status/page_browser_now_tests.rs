@@ -1,9 +1,11 @@
-// The Now needs-attention section in a real headless Chrome: each item's
+// The Now view in a real headless Chrome. Needs attention: each item's
 // cause, raw token and fix drawn as text, the fix a focusable code element
 // whose selection survives refreshes, a recovered item grey and outside the
 // counts, every cause once, target links to their view, and an attention
-// failure confined to its own section. `include!`d into a child module of
-// `page::tests` beside `browser`; the scenarios live in
+// failure confined to its own section. Accounts at a glance: every
+// subscription account under its pool, a seat with no reading saying so,
+// and meters that turn amber then red with a word. `include!`d into a child
+// module of `page::tests` beside `browser`; the scenarios live in
 // page_browser_now_driver.js.
 
 use serde_json::Value;
@@ -274,4 +276,297 @@ fn now_reads_attention_accounts_the_series_query_and_config() {
         views::view_entry("now").sources,
         ["attention", "accounts", "QUERY_SERIES_SOURCE", "config"]
     );
+}
+
+// ---- accounts at a glance ---------------------------------------------------
+
+fn fixture_accounts() -> Vec<Value> {
+    crate::handlers::status::panel_fixtures::aggregate_json()["panels"]["accounts"]["data"]
+        ["accounts"]
+        .as_array()
+        .expect("the accounts fixture lists accounts")
+        .clone()
+}
+
+/// The pools the glance should draw from `accounts`, derived the way the
+/// page states it: subscription accounts only, named pools by name with
+/// their members in panel order, then each pool-less account alone.
+fn expected_pools(accounts: &[Value]) -> Vec<(String, Vec<String>)> {
+    let mut named: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut solo = Vec::new();
+    for row in accounts.iter().filter(|r| r["subscription"] == true) {
+        let account = str_of(&row["account"], "an account").to_string();
+        let pools = row["pools"].as_array().expect("a pool list");
+        if pools.is_empty() {
+            solo.push(("no pool".to_string(), vec![account]));
+            continue;
+        }
+        for pool in pools {
+            let name = format!("pool {}", str_of(pool, "a pool"));
+            named.entry(name).or_default().push(account.clone());
+        }
+    }
+    named.into_iter().chain(solo).collect()
+}
+
+fn drawn_pools(result: &Value) -> Vec<(String, Vec<String>)> {
+    result["pools"]
+        .as_array()
+        .expect("pools observed")
+        .iter()
+        .map(|pool| {
+            let seats = pool["seats"]
+                .as_array()
+                .expect("seats observed")
+                .iter()
+                .map(|seat| str_of(&seat["account"], "a seat account").to_string())
+                .collect();
+            (str_of(&pool["name"], "a pool name").to_string(), seats)
+        })
+        .collect()
+}
+
+fn drawn_seat<'a>(result: &'a Value, account: &str) -> &'a Value {
+    result["pools"]
+        .as_array()
+        .expect("pools observed")
+        .iter()
+        .flat_map(|pool| pool["seats"].as_array().expect("seats observed"))
+        .find(|seat| seat["account"] == account)
+        .unwrap_or_else(|| panic!("no seat for {account}: {result:#}"))
+}
+
+/// Every subscription account in the served panel is drawn under each pool
+/// it dispatches in, named "provider_entry (login_label)", with its login
+/// state as one word (the cause is the attention item's); Codex, which
+/// carries no traffic in the served ledger, is there too. No API-key or
+/// cloud account is drawn (positive control: the panel served some). The
+/// section links to the Accounts view.
+///
+/// Mutation check: drop the `row.subscription !== true` filter in
+/// glancePools -> red (API-key accounts appear in a pool of their own).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_every_subscription_account_appears_under_its_pool() {
+    let accounts = fixture_accounts();
+    let result = now_scenario("now-glance-as-served");
+    let expected = expected_pools(&accounts);
+
+    assert_eq!(drawn_pools(&result), expected, "{result:#}");
+    assert!(
+        expected
+            .iter()
+            .any(|(_, seats)| seats.iter().any(|s| s == "codex")),
+        "positive control: the trafficless Codex login is expected"
+    );
+    let not_subscription: Vec<&str> = accounts
+        .iter()
+        .filter(|r| r["subscription"] == false)
+        .map(|r| str_of(&r["account"], "an account"))
+        .collect();
+    assert!(
+        !not_subscription.is_empty(),
+        "positive control: the panel serves API-key and cloud accounts"
+    );
+    let drawn: Vec<String> = drawn_pools(&result)
+        .into_iter()
+        .flat_map(|(_, seats)| seats)
+        .collect();
+    for account in not_subscription {
+        assert!(
+            !drawn.iter().any(|a| a == account),
+            "{account} is not a subscription"
+        );
+    }
+    let seat = drawn_seat(&result, "anthropic#a");
+    let served = accounts
+        .iter()
+        .find(|r| r["account"] == "anthropic#a")
+        .expect("the seat row");
+    assert_eq!(seat["name"], "claude-seat (a)", "{seat:#}");
+    assert_eq!(served["credential"]["state"], "unusable", "{served:#}");
+    assert_eq!(seat["login_text"], "unusable", "{seat:#}");
+    assert!(
+        str_of(&seat["login"], "a login class").contains("glance-login--unusable"),
+        "{seat:#}"
+    );
+    let codex = drawn_seat(&result, "codex");
+    assert_eq!(codex["name"], "codex", "an unlabeled login: {codex:#}");
+    assert_eq!(codex["no_reading"], "reports no usage windows", "{codex:#}");
+    assert_eq!(codex["bars"], 0, "{codex:#}");
+    assert_eq!(result["link_href"], "#accounts", "{result:#}");
+}
+
+/// A seat the meter has never read says "no reading" and draws no meter at
+/// all, in a pool of its own when it is in no pool. Positive control: the
+/// read seat beside it draws one bar per window.
+///
+/// Mutation check: return `glanceMeter({ used: 0, length_secs: 0 }, nowMs)`
+/// in place of the no-reading line in glanceReading -> red (a bar appears
+/// and the text is gone).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_a_seat_with_no_reading_says_so_never_a_zero_meter() {
+    let result = now_scenario("now-glance-levels");
+    let codex = drawn_seat(&result, "codex");
+    let seat = drawn_seat(&result, "anthropic#a");
+
+    assert_eq!(codex["no_reading"], "no reading", "{codex:#}");
+    assert_eq!(codex["bars"], 0, "{codex:#}");
+    assert_eq!(codex["meters"], Value::Array(Vec::new()), "{codex:#}");
+    assert!(
+        drawn_pools(&result).contains(&("no pool".to_string(), vec!["codex".to_string()])),
+        "Codex in no pool is a pool of one: {result:#}"
+    );
+    assert_eq!(seat["bars"], 2, "positive control: {seat:#}");
+    assert_eq!(seat["no_reading"], Value::Null, "{seat:#}");
+}
+
+/// A window above 90% used reads amber with "nearly used"; one at its limit
+/// reads red with "at limit"; one under it is the calm meter color with no
+/// word. A stale reading keeps its level color, is dimmed, and says
+/// "stale" beside its age. Each meter shows its percentage and is labelled
+/// from its length.
+///
+/// Mutation checks: drop the `.glance-meter--warn` fill rule -> red (the
+/// 95% fill is the calm color); use `>=` 0.9 as the near-full line -> red
+/// (the stale 90% window turns amber).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_glance_meters_turn_amber_then_red_with_a_word() {
+    let levels = now_scenario("now-glance-levels");
+    let served = now_scenario("now-glance-as-served");
+    let palette = &levels["palette"];
+    let raised = drawn_seat(&levels, "anthropic#a")["meters"]
+        .as_array()
+        .expect("meters")
+        .clone();
+    let calm = drawn_seat(&served, "anthropic#a")["meters"]
+        .as_array()
+        .expect("meters")
+        .clone();
+
+    assert_ne!(palette["meter"], palette["meter_warn"], "{palette:#}");
+    assert_ne!(palette["meter_warn"], palette["meter_full"], "{palette:#}");
+    assert_eq!(raised[0]["pct"], "95%", "{raised:#?}");
+    assert_eq!(raised[0]["word"], "nearly used", "{raised:#?}");
+    assert_eq!(raised[0]["fill"], palette["meter_warn"], "{raised:#?}");
+    assert_eq!(raised[1]["pct"], "100%", "{raised:#?}");
+    assert_eq!(raised[1]["word"], "at limit", "{raised:#?}");
+    assert_eq!(raised[1]["fill"], palette["meter_full"], "{raised:#?}");
+    assert_eq!(calm[0]["label"], "5 h", "{calm:#?}");
+    assert_eq!(calm[0]["pct"], "42%", "{calm:#?}");
+    assert_eq!(calm[0]["word"], Value::Null, "{calm:#?}");
+    assert_eq!(calm[0]["fill"], served["palette"]["meter"], "{calm:#?}");
+    assert_eq!(calm[0]["opacity"], "1", "{calm:#?}");
+    let stale = &calm[1];
+    assert_eq!(stale["label"], "7 d opus", "{stale:#}");
+    assert_eq!(stale["pct"], "90%", "{stale:#}");
+    assert_eq!(stale["fill"], served["palette"]["meter"], "{stale:#}");
+    assert!(
+        str_of(&stale["age"], "an age").starts_with("stale, "),
+        "{stale:#}"
+    );
+    assert!(
+        str_of(&stale["opacity"], "an opacity")
+            .parse::<f64>()
+            .is_ok_and(|o| o < 1.0),
+        "a stale meter is dimmed: {stale:#}"
+    );
+}
+
+/// A refresh that moves a window's use moves the same bar to the new value,
+/// with its width animated; the figure beside it follows.
+///
+/// Mutation check: drop the width transition from `.glance-bar-fill` -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_a_glance_meter_moves_on_change() {
+    let result = now_scenario("now-glance-meter-moves");
+    let obs: Vec<&Value> = std::iter::once(&result["baseline"])
+        .chain(result["rounds"].as_array().expect("rounds observed"))
+        .collect();
+
+    assert_eq!(obs.len(), 3, "{result:#}");
+    for (i, o) in obs.iter().enumerate() {
+        assert_eq!(o["same_node"], true, "observation {i}: {o:#}");
+        assert_eq!(o["connected"], true, "observation {i}: {o:#}");
+        assert!(
+            str_of(&o["transition"], "a transition").contains("width"),
+            "{o:#}"
+        );
+    }
+    for pair in obs.windows(2) {
+        assert_ne!(pair[0]["pct"], pair[1]["pct"], "{obs:#?}");
+        assert_ne!(pair[0]["figure"], pair[1]["figure"], "{obs:#?}");
+    }
+}
+
+/// The seat dialog and its modal plumbing are gone from the page, and the
+/// Now part reads no quota from the usage panel.
+///
+/// Mutation check: put `roots.push(el('modal-host'));` back in initActions
+/// -> red.
+#[test]
+fn the_seat_dialog_and_modal_plumbing_are_gone() {
+    let code = strip_js_comments(&script());
+    let now_part = strip_js_comments(include_str!("dash_60_tab_overview.js"));
+    let markup = include_str!("dashboard.html");
+
+    assert!(
+        code.contains("accountsGlanceSection") && code.contains("viewSection("),
+        "positive control: the scan reads the assembled script"
+    );
+    for retired in [
+        "modal-host",
+        "offerOverlay",
+        "paintOverlay",
+        "seatModal",
+        "SeatModal",
+        "seatIndex",
+        "groupQuotaByProvider",
+        "'seat-open'",
+        "'seat-close'",
+        "'seat-backdrop'",
+    ] {
+        assert!(!code.contains(retired), "`{retired}` remains in the script");
+    }
+    assert!(!markup.contains("modal-host"), "the markup keeps the host");
+    assert!(
+        now_part.contains("rec.data") && !now_part.contains("quota"),
+        "the Now part reads no quota"
+    );
+    assert!(
+        !views::view_entry("now")
+            .sources
+            .iter()
+            .any(|s| s == "usage"),
+        "Now does not read the usage panel"
+    );
+}
+
+/// Now composes the glance from the accounts panel, between the attention
+/// list and the traffic.
+#[test]
+fn now_draws_the_glance_from_the_accounts_panel() {
+    let body = function_body("buildNow");
+
+    assert_eq!(
+        now_sections(&body)
+            .iter()
+            .filter(|s| *s == "viewSection")
+            .count(),
+        3,
+        "attention, the glance, then traffic: {body}"
+    );
+    let attention = body
+        .find("viewSection('attention'")
+        .expect("the attention section");
+    let glance = body
+        .find("viewSection('accounts', accountsGlanceSection")
+        .expect("the glance section reads the accounts panel");
+    let traffic = body
+        .find("viewSection(QUERY_SERIES_SOURCE")
+        .expect("the traffic section");
+    assert!(attention < glance && glance < traffic, "{body}");
 }

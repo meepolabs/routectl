@@ -279,24 +279,4 @@
       });
     });
   });
-
-  d.scenario('seat-dialog-focus', function () {
-    var dialogId = 'overview-seats-dialog-kclaude_2d_seat';
-    return d.waitForElement('overview-seats-kclaude_2d_seat').then(function (open) {
-      open.click();
-      var dialog = byId(dialogId);
-      var close = byId('overview-seats-close-kclaude_2d_seat');
-      close.focus();
-      return d.acrossRounds('/status', 2, function () {
-        var live = document.getElementById(dialogId);
-        return {
-          open: !!live,
-          same_dialog: dialog === live,
-          same_node: close === document.getElementById(close.id),
-          focus_inside: !!live && live.contains(document.activeElement),
-          figure: live ? live.textContent : ''
-        };
-      });
-    });
-  });
 })(window.routectlDriver);

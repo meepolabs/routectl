@@ -69,8 +69,8 @@ fn list<'a>(audit: &'a Value, key: &str) -> &'a Vec<Value> {
 /// in a stat row draw over each other, and every fix command fits its box.
 /// Positive controls: the page really ran at the setup's text size and width,
 /// the audit read elements carrying digits, the stat rows had text runs, and
-/// the view carried a fix command where one is expected. On Now the seat
-/// dialog, opened over the view, passes the same checks and shows its tiles.
+/// the view carried a fix command where one is expected, and Now drew its
+/// account meters.
 fn assert_readable(setup: &Setup, view: &str, out: &Value) {
     let at = format!("{view} at {}", setup.name);
     assert_eq!(out["view"], view, "{at}");
@@ -106,7 +106,10 @@ fn assert_readable(setup: &Setup, view: &str, out: &Value) {
         );
     }
     if view == "now" {
-        assert_seat_dialog_readable(&at, &out["seat_dialog"]);
+        assert!(
+            out["glance_meters"].as_u64().unwrap_or(0) > 0,
+            "{at}: Now drew no account meter: {out:#}"
+        );
     }
     let body = &out["body"];
     if view == "traffic" {
@@ -126,24 +129,6 @@ fn assert_readable(setup: &Setup, view: &str, out: &Value) {
     }
 }
 
-/// The seat dialog the audit opened over Now hides no text. Positive
-/// control: the audit read the dialog's quota tiles and their figures.
-fn assert_seat_dialog_readable(at: &str, dialog: &Value) {
-    assert!(
-        dialog["tiles"].as_u64().unwrap_or(0) > 0,
-        "{at}: the seat dialog showed no quota tile: {dialog:#}"
-    );
-    assert!(
-        dialog["digit_elements"].as_u64().unwrap_or(0) > 0,
-        "{at}: the seat dialog audit read no figure: {dialog:#}"
-    );
-    assert_eq!(
-        list(dialog, "hidden"),
-        &Vec::<Value>::new(),
-        "{at}: the seat dialog hides text"
-    );
-}
-
 fn assert_views_readable(setup: &Setup) {
     for (view, hash) in VIEWS {
         assert_readable(setup, view, &run_layout(setup, hash));
@@ -151,14 +136,13 @@ fn assert_views_readable(setup: &Setup) {
 }
 
 /// At 1440 px with the text doubled, every view (Traffic over a week, grouped
-/// by alias) and the Now seat dialog show every figure, label and fix command
-/// in full, the figures widened to the magnitudes a real ledger produces.
+/// by alias) shows every figure, label and fix command in full, the figures
+/// widened to the magnitudes a real ledger produces.
 ///
 /// Mutation checks: put `.ucard-stats` back on its px column minimum AND
 /// `.ustat-label` and `.ustat-value` back on no-wrap with an ellipsis -> red
 /// (figures are cut off); the column minimum alone stays green, because the
-/// wrapping labels still fit. Drop the `min(100%, ...)` cap from `.qlist`'s
-/// column -> red (the seat dialog cuts its quota tile off).
+/// wrapping labels still fit.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_figures_read_in_full_at_double_text_size() {

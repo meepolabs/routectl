@@ -522,23 +522,26 @@ fn the_html_sink_scan_flags_each_sink_in_code_and_ignores_comments() {
     }
 }
 
-/// Pane bodies and the modal host are morphed, never replaced wholesale; the
-/// only `replaceChildren` left is the pane status line. The positional updater
-/// is gone.
+/// Pane bodies are morphed, never replaced wholesale; the only
+/// `replaceChildren` left is the pane status line. The positional updater is
+/// gone.
 ///
 /// Mutation check: put `body.replaceChildren(` back in renderActiveTab -> red.
 #[test]
-fn pane_bodies_and_the_modal_host_are_only_morphed() {
+fn pane_bodies_are_only_morphed() {
     let code = strip_js_comments(&page_parts().iter().map(|(_, s)| *s).collect::<String>());
     let render = function_body("renderActiveTab");
-    let overlay = function_body("paintOverlay");
 
     assert_eq!(
         replace_children_callers(&page_parts()),
         vec!["renderSectionStatus"]
     );
     assert_eq!(render.matches("morphPanel(body, ").count(), 2);
-    assert!(overlay.contains("morphPanel(host, "));
+    assert_eq!(
+        code.matches("morphPanel(").count(),
+        render.matches("morphPanel(").count() + 1,
+        "morphPanel is called from renderActiveTab only (plus its declaration)"
+    );
     for symbol in RETIRED_UPDATER {
         assert!(!code.contains(symbol), "`{symbol}` must be gone");
     }
@@ -554,19 +557,6 @@ fn the_replace_children_scan_names_the_enclosing_function() {
     )];
 
     assert_eq!(replace_children_callers(&parts), vec!["paint", "status"]);
-}
-
-/// The seat modal is built as a node and handed to the render pass, which
-/// morphs it into the host; it never writes the host itself.
-#[test]
-fn the_seat_modal_is_offered_as_a_node_not_written_to_the_host() {
-    let modal = function_body("renderSeatModal");
-
-    assert!(modal.contains("offerOverlay(seatModalNode("));
-    assert!(
-        !modal.contains("modal-host"),
-        "renderSeatModal must not reach the host itself"
-    );
 }
 
 #[test]

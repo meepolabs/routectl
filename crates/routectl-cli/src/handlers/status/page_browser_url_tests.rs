@@ -569,19 +569,19 @@ fn page_browser_each_view_state_control_pushes_one_history_entry() {
     }
 }
 
-/// An open dialog, focus, scroll and an open row leave the address and the
-/// history alone; the tab click between them is the control that shows the
-/// observation sees a change.
+/// Focus, scroll and an open row leave the address and the history alone;
+/// the tab click between them is the control that shows the observation
+/// sees a change.
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_open_rows_dialogs_focus_and_scroll_stay_out_of_the_address() {
+fn page_browser_open_rows_focus_and_scroll_stay_out_of_the_address() {
     let obs = browser::run_scenario(&url_scenario("url-ui-state-stays-out", "now")).result;
 
     let obs = obs.as_array().expect("observations");
     let start_len = obs[0]["history_length"].as_u64().expect("a length");
     let expected: &[(&str, &str, u64)] = &[
         ("start", "#now", 0),
-        ("dialog open, focus inside, scrolled", "#now", 0),
+        ("focused, scrolled", "#now", 0),
         ("config tab", "#config", 1),
         ("row open, focused", "#config", 1),
     ];

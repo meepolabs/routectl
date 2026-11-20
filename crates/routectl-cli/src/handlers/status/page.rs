@@ -1637,28 +1637,6 @@ mod tests {
         );
     }
 
-    /// The provider cards file each quota row under the `provider_entry` the
-    /// usage panel names, never under a segment parsed out of the seat key:
-    /// a provider card is labeled with its `[providers]` entry, which need
-    /// not be the login's vendor.
-    ///
-    /// Mutation check: make `groupQuotaByProvider` key on `q.seat` again, or
-    /// split any value -> red.
-    #[test]
-    fn provider_seats_group_on_the_provider_entry() {
-        let body = function_body("groupQuotaByProvider");
-        assert!(
-            body.contains("q.provider_entry"),
-            "`groupQuotaByProvider` must read `provider_entry`: {body}"
-        );
-        for parsed in ["q.seat", ".split("] {
-            assert!(
-                !body.contains(parsed),
-                "`groupQuotaByProvider` must not derive the entry (`{parsed}`): {body}"
-            );
-        }
-    }
-
     /// The eligibility reasons the shared target-phase rule treats as needing
     /// attention must be tokens the server emits; a renamed or misspelled
     /// token would file a dead login back under "not observed yet".

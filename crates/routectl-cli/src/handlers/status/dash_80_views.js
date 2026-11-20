@@ -81,14 +81,14 @@
   // pending marks. Controls over the page selection sit beside the sections,
   // so a section showing a state card never takes them with it.
 
-  // What needs attention, from the daemon's list, then where traffic is
-  // going: the windowed QUERY's provider cards and tiles, with the seat quota
-  // on them read from the usage ledger and guarded inside. The scope reset
-  // line stands in for the provider cards when a scoped query has nothing
-  // renderable.
+  // What needs attention, from the daemon's list, then how each subscription
+  // account is doing, then where traffic is going: the windowed QUERY's
+  // provider cards and tiles. The scope reset line stands in for the provider
+  // cards when a scoped query has nothing renderable.
   function buildNow() {
     var stack = tabStack();
     stack.appendChild(viewSection('attention', attentionSection, 'Needs attention'));
+    stack.appendChild(viewSection('accounts', accountsGlanceSection, 'Accounts'));
     if (selectedProvider && stateCard(SOURCES[QUERY_SERIES_SOURCE])) {
       stack.appendChild(scopeRecovery());
     }

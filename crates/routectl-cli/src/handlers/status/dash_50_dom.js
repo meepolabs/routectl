@@ -65,7 +65,7 @@
 
   // Mark `node` as the trigger of one ACTIONS entry (dash_90_chrome.js). No
   // builder attaches a listener: the delegated listener on the pane root or
-  // the modal host dispatches by these attributes, so a rebuilt or reused
+  // the verdict strip dispatches by these attributes, so a rebuilt or reused
   // node always acts on what it currently says.
   function setAction(node, action, arg) {
     node.setAttribute('data-action', action);
