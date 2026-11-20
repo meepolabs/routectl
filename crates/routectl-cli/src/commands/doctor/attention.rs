@@ -1,0 +1,901 @@
+//! The needs-attention list: which current conditions need the operator,
+//! how bad each is, what it is in plain words, and what fixes it.
+//!
+//! A pure builder. Plain snapshots go in; items, a verdict and counts come
+//! out. Nothing here reads a clock, a file, the router or the config: the
+//! caller pins `now_ms` and copies every input across. The kind list is
+//! closed; renderers add no condition, wording or severity of their own.
+//!
+//! The verdict and the counts are folds of one item list
+//! ([`Attention::from_items`]), so a caller that adds recovered items to the
+//! active ones folds the merged list and gets a consistent summary.
+
+use routectl_core::{EligibilityReason, UpstreamReason};
+use routectl_router::runtime_state::UnusableCause;
+use routectl_router::{Finding, Status};
+use serde::{Serialize, Serializer};
+
+pub use crate::server::seat_driver::RefreshFailure;
+
+#[cfg(test)]
+#[path = "attention_tests.rs"]
+mod tests;
+
+/// A usage poll counts as failing once its current failure run is this old.
+pub const POLL_FAILING_AFTER_MS: i64 = 15 * MS_PER_MIN;
+
+/// A request-row loss counter rise keeps the list item active this long.
+pub const RECORDS_DROPPED_HOLD_MS: i64 = 5 * MS_PER_MIN;
+
+/// A non-stale window used past this fraction puts its account on the list.
+pub const NEAR_LIMIT_USED: f64 = 0.90;
+
+/// The doctor section whose failures `pool_empty` already names.
+const POOLS_SECTION: &str = "pools";
+
+const MS_PER_MIN: i64 = 60_000;
+const MS_PER_HOUR: i64 = 60 * MS_PER_MIN;
+const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
+const TWO_DAYS_MS: i64 = 2 * MS_PER_DAY;
+const SECS_PER_HOUR: u64 = 3_600;
+const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
+
+/// Every input of one build, copied out of the daemon by the caller.
+#[derive(Debug, Clone, Default)]
+pub struct AttentionInputs {
+    /// The instant the build describes, in epoch ms.
+    pub now_ms: i64,
+    /// Every configured pool's seat counts.
+    pub pools: Vec<PoolSnapshot>,
+    /// Every dispatch target's circuit state.
+    pub routes: Vec<RouteSnapshot>,
+    /// Every configured credential account.
+    pub accounts: Vec<AccountSnapshot>,
+    /// Whether each background seat driver is running.
+    pub drivers: DriverSnapshot,
+    /// How many managed (login) accounts the served config names.
+    pub managed_accounts: usize,
+    /// The request-row loss counters.
+    pub record_loss: RecordLoss,
+    /// The doctor report's findings; only failures become items.
+    pub doctor_findings: Vec<Finding>,
+}
+
+/// One pool's seat counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolSnapshot {
+    /// The `[pools]` key.
+    pub pool: String,
+    /// Seats the pool names.
+    pub configured: usize,
+    /// Seats a request could dispatch to now.
+    pub eligible: usize,
+}
+
+/// One dispatch target's circuit state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSnapshot {
+    /// The runtime state key (`nickname`, or `nickname#member` for a seat).
+    pub state_key: String,
+    /// The target's credential account, when it has one.
+    pub account: Option<String>,
+    /// Whether the target's circuit is open (not half-open).
+    pub circuit_open: bool,
+    /// When the circuit last opened, in epoch ms.
+    pub open_since_ms: Option<i64>,
+}
+
+/// One credential account.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountSnapshot {
+    /// The account key (`provider#label`).
+    pub account: String,
+    /// The display name, e.g. `claude-a (seat-a)`.
+    pub display: String,
+    /// The account's credential state.
+    pub credential: CredentialState,
+    /// The line that readmits the account's credential, when one exists.
+    pub fix: Option<String>,
+    /// The refresh driver's current failure run for the account.
+    pub refresh_failure: Option<RefreshFailure>,
+    /// The usage poll's current failure run for the account.
+    pub poll_failure: Option<PollFailure>,
+    /// The account's usage windows.
+    pub windows: Vec<WindowSnapshot>,
+}
+
+/// Whether an account's credential can be used, and if not, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialState {
+    /// Nothing is known against the credential.
+    Usable,
+    /// The credential is known not to work until it is replaced.
+    Unusable {
+        /// Why.
+        cause: UnusableCause,
+        /// When the account was first marked, in epoch ms.
+        since_ms: i64,
+    },
+    /// The upstream rejected the credential; the park lapses on its own.
+    Parked {
+        /// The rejection's reason.
+        reason: UpstreamReason,
+        /// When the park lapses into a re-test, in epoch ms.
+        until_ms: i64,
+    },
+}
+
+/// A current run of failed usage polls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollFailure {
+    /// When the run began, in epoch ms.
+    pub since_ms: i64,
+    /// The raw result token of the latest poll, when known.
+    pub last_result: Option<String>,
+}
+
+/// One usage window of an account.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSnapshot {
+    /// The window length, in seconds.
+    pub length_secs: u64,
+    /// The vendor scope tag, `None` for an account-wide window.
+    pub scope: Option<String>,
+    /// The used fraction, in `[0.0, 1.0]`.
+    pub used: f64,
+    /// Whether the reading is too old or past its reset to count.
+    pub stale: bool,
+    /// When the window resets, in epoch ms.
+    pub reset_ms: Option<i64>,
+}
+
+/// Whether each background seat driver is running.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DriverSnapshot {
+    /// The token refresh driver.
+    pub refresh_running: bool,
+    /// The usage poll driver.
+    pub poll_running: bool,
+}
+
+/// The request-row loss counters and when one last rose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecordLoss {
+    /// Rows the full writer channel refused.
+    pub dropped_full: u64,
+    /// Rows refused because the writer channel was closed.
+    pub dropped_closed: u64,
+    /// Writes the writer failed to persist.
+    pub write_errors: u64,
+    /// When any of the three last rose, in epoch ms.
+    pub last_rise_ms: Option<i64>,
+}
+
+/// The closed list of conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionKind {
+    /// A pool with seats configured and none usable.
+    PoolEmpty,
+    /// A route whose circuit is open.
+    RouteCircuitOpen,
+    /// An account whose credential is unusable.
+    AccountUnusable,
+    /// An account whose credential is parked.
+    AccountParked,
+    /// An account whose token refresh keeps failing.
+    AccountRefreshFailing,
+    /// A background seat driver not running while managed accounts exist.
+    DriverStopped,
+    /// An account with a window used past the near-limit fraction.
+    AccountNearLimit,
+    /// An account whose usage poll has failed for a while.
+    UsagePollFailing,
+    /// A request-row loss counter rose recently.
+    RecordsDropped,
+    /// A failing doctor finding.
+    DoctorFailure,
+}
+
+impl AttentionKind {
+    /// Every kind, in list order: broken kinds before degraded ones, so
+    /// list order is worst first.
+    pub const ALL: [Self; 10] = [
+        Self::PoolEmpty,
+        Self::RouteCircuitOpen,
+        Self::AccountUnusable,
+        Self::AccountParked,
+        Self::AccountRefreshFailing,
+        Self::DriverStopped,
+        Self::AccountNearLimit,
+        Self::UsagePollFailing,
+        Self::RecordsDropped,
+        Self::DoctorFailure,
+    ];
+
+    /// The wire token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PoolEmpty => "pool_empty",
+            Self::RouteCircuitOpen => "route_circuit_open",
+            Self::AccountUnusable => "account_unusable",
+            Self::AccountParked => "account_parked",
+            Self::AccountRefreshFailing => "account_refresh_failing",
+            Self::DriverStopped => "driver_stopped",
+            Self::AccountNearLimit => "account_near_limit",
+            Self::UsagePollFailing => "usage_poll_failing",
+            Self::RecordsDropped => "records_dropped",
+            Self::DoctorFailure => "doctor_failure",
+        }
+    }
+
+    /// How bad an item of this kind is.
+    pub const fn severity(self) -> Severity {
+        match self {
+            Self::PoolEmpty => Severity::Broken,
+            _ => Severity::Degraded,
+        }
+    }
+
+    /// Whether an item of this kind can move the verdict. Doctor failures and
+    /// dropped records are listed and counted but say nothing about routing.
+    pub const fn moves_verdict(self) -> bool {
+        !matches!(self, Self::RecordsDropped | Self::DoctorFailure)
+    }
+
+    /// The view that shows the item's detail.
+    pub const fn target(self) -> ViewTarget {
+        match self {
+            Self::RouteCircuitOpen => ViewTarget::Models,
+            Self::RecordsDropped => ViewTarget::Traffic,
+            Self::DoctorFailure => ViewTarget::Doctor,
+            Self::PoolEmpty
+            | Self::AccountUnusable
+            | Self::AccountParked
+            | Self::AccountRefreshFailing
+            | Self::DriverStopped
+            | Self::AccountNearLimit
+            | Self::UsagePollFailing => ViewTarget::Accounts,
+        }
+    }
+
+    fn list_rank(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|kind| *kind == self)
+            .unwrap_or(usize::MAX)
+    }
+}
+
+/// How bad an item is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Severity {
+    /// Something is not working, routing still has a way through.
+    Degraded,
+    /// Requests have nowhere to go.
+    Broken,
+}
+
+impl Severity {
+    /// The wire token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Degraded => "degraded",
+            Self::Broken => "broken",
+        }
+    }
+}
+
+/// The verdict's severity: an item severity, or nothing to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VerdictSeverity {
+    /// No active routing or account item.
+    Ok,
+    /// The worst active routing or account item is degraded.
+    Degraded,
+    /// The worst active routing or account item is broken.
+    Broken,
+}
+
+impl VerdictSeverity {
+    /// The wire token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Degraded => "degraded",
+            Self::Broken => "broken",
+        }
+    }
+}
+
+/// Whether an item's condition holds now or has cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ItemState {
+    /// The condition holds now.
+    Active,
+    /// The condition has cleared.
+    Recovered,
+}
+
+impl ItemState {
+    /// The wire token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Recovered => "recovered",
+        }
+    }
+}
+
+/// The dashboard view that shows an item's detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewTarget {
+    /// Accounts, pools and seat drivers.
+    Accounts,
+    /// Models and their routes.
+    Models,
+    /// Traffic read from the usage ledger.
+    Traffic,
+    /// The doctor report.
+    Doctor,
+}
+
+impl ViewTarget {
+    /// The wire token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accounts => "accounts",
+            Self::Models => "models",
+            Self::Traffic => "traffic",
+            Self::Doctor => "doctor",
+        }
+    }
+}
+
+macro_rules! serialize_as_token {
+    ($($ty:ty),+) => {$(
+        impl Serialize for $ty {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+    )+};
+}
+
+serialize_as_token!(
+    AttentionKind,
+    Severity,
+    VerdictSeverity,
+    ItemState,
+    ViewTarget
+);
+
+/// One entry of the list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttentionItem {
+    /// Stable identity of the condition: the kind plus its subject's key.
+    pub key: String,
+    /// The condition.
+    pub kind: AttentionKind,
+    /// How bad it is.
+    pub severity: Severity,
+    /// Whether it holds now.
+    pub state: ItemState,
+    /// What it is about, in display form.
+    pub subject: String,
+    /// The credential account it is about, when it is about one.
+    pub account: Option<String>,
+    /// Plain words, with the age where one is known.
+    pub cause: String,
+    /// The machine form, for grep and copy.
+    pub raw_token: String,
+    /// When the condition began, in epoch ms, when known.
+    pub since_ms: Option<i64>,
+    /// When the condition lapses on its own, in epoch ms, when known.
+    pub until_ms: Option<i64>,
+    /// When the condition was first seen cleared, in epoch ms.
+    pub recovered_at_ms: Option<i64>,
+    /// The line that fixes it, when one exists.
+    pub fix: Option<String>,
+    /// The view that shows its detail.
+    pub target: Option<ViewTarget>,
+}
+
+impl AttentionItem {
+    /// The same item, marked cleared at `at_ms`.
+    #[must_use]
+    pub fn into_recovered(self, at_ms: i64) -> Self {
+        Self {
+            state: ItemState::Recovered,
+            recovered_at_ms: Some(at_ms),
+            ..self
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.state == ItemState::Active
+    }
+}
+
+/// The one-line summary of the list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Verdict {
+    /// The worst active routing or account item's severity, or `ok`.
+    pub severity: VerdictSeverity,
+    /// One sentence.
+    pub text: String,
+    /// The view the worst item points at.
+    pub target: Option<ViewTarget>,
+}
+
+/// Item tallies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Counts {
+    /// Active broken items.
+    pub broken: usize,
+    /// Active degraded items.
+    pub degraded: usize,
+    /// Recovered items.
+    pub recovered: usize,
+    /// Active doctor failures.
+    pub doctor_fail: usize,
+}
+
+/// The list with its verdict and counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Attention {
+    /// The summary.
+    pub verdict: Verdict,
+    /// The tallies.
+    pub counts: Counts,
+    /// Every item, active first, worst first.
+    pub items: Vec<AttentionItem>,
+}
+
+impl Attention {
+    /// Order `items` and fold them into the verdict and counts. A caller
+    /// holding recovered items passes them in the same list; they are listed
+    /// but never counted as active and never move the verdict.
+    pub fn from_items(mut items: Vec<AttentionItem>) -> Self {
+        items.sort_by(|a, b| {
+            (a.state, a.kind.list_rank(), &a.key).cmp(&(b.state, b.kind.list_rank(), &b.key))
+        });
+        Self {
+            verdict: verdict_of(&items),
+            counts: counts_of(&items),
+            items,
+        }
+    }
+}
+
+fn counts_of(items: &[AttentionItem]) -> Counts {
+    let mut counts = Counts::default();
+    for item in items {
+        let tally = match (item.state, item.severity) {
+            (ItemState::Recovered, _) => &mut counts.recovered,
+            (ItemState::Active, Severity::Broken) => &mut counts.broken,
+            (ItemState::Active, Severity::Degraded) => &mut counts.degraded,
+        };
+        *tally += 1;
+        if item.is_active() && item.kind == AttentionKind::DoctorFailure {
+            counts.doctor_fail += 1;
+        }
+    }
+    counts
+}
+
+/// Expects `items` sorted active first, worst first.
+fn verdict_of(items: &[AttentionItem]) -> Verdict {
+    let (routing, other): (Vec<&AttentionItem>, Vec<&AttentionItem>) = items
+        .iter()
+        .filter(|item| item.is_active())
+        .partition(|item| item.kind.moves_verdict());
+    let others = others_text(other.len());
+    match routing.first() {
+        Some(worst) => {
+            let more = match routing.len() - 1 {
+                0 => String::new(),
+                n => format!(", and {n} more"),
+            };
+            Verdict {
+                severity: match worst.severity {
+                    Severity::Broken => VerdictSeverity::Broken,
+                    Severity::Degraded => VerdictSeverity::Degraded,
+                },
+                text: format!("{}: {}{more}{others}", worst.subject, worst.cause),
+                target: worst.target,
+            }
+        }
+        None => Verdict {
+            severity: VerdictSeverity::Ok,
+            text: format!("All routes healthy{others}"),
+            target: other.first().and_then(|item| item.target),
+        },
+    }
+}
+
+fn others_text(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => "; 1 other item needs attention".to_string(),
+        n => format!("; {n} other items need attention"),
+    }
+}
+
+/// The list for `inputs`: every active item, folded.
+pub fn build(inputs: &AttentionInputs) -> Attention {
+    Attention::from_items(active_items(inputs))
+}
+
+/// Every condition that holds at `inputs.now_ms`, one item per cause, in
+/// list order. A route blocked by its account's credential is named by the
+/// account item, not once per route.
+pub fn active_items(inputs: &AttentionInputs) -> Vec<AttentionItem> {
+    let now = inputs.now_ms;
+    let mut items: Vec<AttentionItem> = inputs.pools.iter().filter_map(pool_item).collect();
+    items.extend(
+        inputs
+            .routes
+            .iter()
+            .filter(|route| !account_blocked(inputs, route.account.as_deref()))
+            .filter_map(|route| route_item(route, now)),
+    );
+    for account in &inputs.accounts {
+        items.extend(account_items(account, now));
+    }
+    items.extend(driver_items(inputs));
+    items.extend(records_item(&inputs.record_loss, now));
+    items.extend(inputs.doctor_findings.iter().filter_map(doctor_item));
+    items
+}
+
+/// The plain-words cause of a credential state with its age, or `None` for
+/// a usable credential.
+pub fn credential_cause(state: &CredentialState, now_ms: i64) -> Option<String> {
+    match *state {
+        CredentialState::Usable => None,
+        CredentialState::Unusable { cause, since_ms } => Some(format!(
+            "{}, for {}",
+            unusable_words(cause),
+            span(now_ms - since_ms)
+        )),
+        CredentialState::Parked { until_ms, .. } => Some(format!(
+            "Credential refused by the provider, retried in {}",
+            span(until_ms - now_ms)
+        )),
+    }
+}
+
+const fn unusable_words(cause: UnusableCause) -> &'static str {
+    match cause {
+        UnusableCause::NotLoggedIn => "Not logged in",
+        UnusableCause::Unreadable => "Credential cannot be read",
+        UnusableCause::Expired => "Login expired",
+        UnusableCause::Revoked => "Login revoked by the provider",
+    }
+}
+
+/// A coarse length of time: under a minute, whole minutes, hours or days.
+fn span(ms: i64) -> String {
+    match ms {
+        ..MS_PER_MIN => "under 1 min".to_string(),
+        MS_PER_MIN..MS_PER_HOUR => format!("{} min", ms / MS_PER_MIN),
+        MS_PER_HOUR..MS_PER_DAY => format!("{} h", ms / MS_PER_HOUR),
+        MS_PER_DAY..TWO_DAYS_MS => "1 day".to_string(),
+        _ => format!("{} days", ms / MS_PER_DAY),
+    }
+}
+
+/// An item with the kind's own severity and target, active, not recovered.
+struct Draft {
+    kind: AttentionKind,
+    subject_key: String,
+    subject: String,
+    account: Option<String>,
+    cause: String,
+    raw_token: String,
+    since_ms: Option<i64>,
+    until_ms: Option<i64>,
+    fix: Option<String>,
+}
+
+impl Draft {
+    fn finish(self) -> AttentionItem {
+        AttentionItem {
+            key: format!("{}:{}", self.kind.as_str(), self.subject_key),
+            kind: self.kind,
+            severity: self.kind.severity(),
+            state: ItemState::Active,
+            subject: self.subject,
+            account: self.account,
+            cause: self.cause,
+            raw_token: self.raw_token,
+            since_ms: self.since_ms,
+            until_ms: self.until_ms,
+            recovered_at_ms: None,
+            fix: self.fix,
+            target: Some(self.kind.target()),
+        }
+    }
+
+    fn for_account(kind: AttentionKind, account: &AccountSnapshot) -> Self {
+        Self {
+            account: Some(account.account.clone()),
+            ..Self::for_subject(kind, &account.account, &account.display)
+        }
+    }
+
+    fn for_subject(kind: AttentionKind, key: &str, subject: &str) -> Self {
+        Self {
+            kind,
+            subject_key: key.to_string(),
+            subject: subject.to_string(),
+            account: None,
+            cause: String::new(),
+            raw_token: String::new(),
+            since_ms: None,
+            until_ms: None,
+            fix: None,
+        }
+    }
+}
+
+fn pool_item(pool: &PoolSnapshot) -> Option<AttentionItem> {
+    (pool.configured > 0 && pool.eligible == 0).then(|| {
+        Draft {
+            cause: format!("No usable seat, 0 of {}", pool.configured),
+            raw_token: format!(
+                "{} (eligible=0, configured={})",
+                AttentionKind::PoolEmpty.as_str(),
+                pool.configured
+            ),
+            ..Draft::for_subject(AttentionKind::PoolEmpty, &pool.pool, &pool.pool)
+        }
+        .finish()
+    })
+}
+
+fn account_blocked(inputs: &AttentionInputs, account: Option<&str>) -> bool {
+    account.is_some_and(|key| {
+        inputs
+            .accounts
+            .iter()
+            .any(|a| a.account == key && a.credential != CredentialState::Usable)
+    })
+}
+
+fn route_item(route: &RouteSnapshot, now: i64) -> Option<AttentionItem> {
+    route.circuit_open.then(|| {
+        let cause = route.open_since_ms.map_or_else(
+            || "Circuit open".to_string(),
+            |since| format!("Circuit open, for {}", span(now - since)),
+        );
+        let kind = AttentionKind::RouteCircuitOpen;
+        Draft {
+            account: route.account.clone(),
+            cause,
+            raw_token: EligibilityReason::BreakerOpen.as_str().to_string(),
+            since_ms: route.open_since_ms,
+            ..Draft::for_subject(kind, &route.state_key, &route.state_key)
+        }
+        .finish()
+    })
+}
+
+fn account_items(account: &AccountSnapshot, now: i64) -> Vec<AttentionItem> {
+    let credential = credential_item(account, now);
+    let refresh = match credential {
+        Some(_) if matches!(account.credential, CredentialState::Unusable { .. }) => None,
+        _ => refresh_item(account, now),
+    };
+    [
+        credential,
+        refresh,
+        near_limit_item(account, now),
+        poll_item(account, now),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn credential_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem> {
+    let cause = credential_cause(&account.credential, now)?;
+    let draft = match account.credential {
+        CredentialState::Usable => return None,
+        CredentialState::Unusable {
+            cause: unusable,
+            since_ms,
+        } => Draft {
+            raw_token: unusable_token(unusable, account.refresh_failure.as_ref()),
+            since_ms: Some(since_ms),
+            ..Draft::for_account(AttentionKind::AccountUnusable, account)
+        },
+        CredentialState::Parked { reason, until_ms } => Draft {
+            raw_token: format!(
+                "{} ({})",
+                EligibilityReason::AccountParked.as_str(),
+                reason.as_str()
+            ),
+            until_ms: Some(until_ms),
+            ..Draft::for_account(AttentionKind::AccountParked, account)
+        },
+    };
+    Some(
+        Draft {
+            cause,
+            fix: account.fix.clone(),
+            ..draft
+        }
+        .finish(),
+    )
+}
+
+/// The machine form of an unusable credential. A failing refresh on the same
+/// account is the same cause seen from the driver, so it is named here rather
+/// than listed again.
+fn unusable_token(cause: UnusableCause, refresh: Option<&RefreshFailure>) -> String {
+    let mark = format!(
+        "{} ({})",
+        EligibilityReason::CredentialUnusable.as_str(),
+        cause.as_str()
+    );
+    match refresh {
+        Some(failure) => format!("{mark}; {}", refresh_token(failure)),
+        None => mark,
+    }
+}
+
+fn refresh_token(failure: &RefreshFailure) -> String {
+    format!("refresh_failing ({})", failure.token)
+}
+
+fn refresh_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem> {
+    let failure = account.refresh_failure.as_ref()?;
+    Some(
+        Draft {
+            cause: format!(
+                "Token refresh failing, for {}",
+                span(now - failure.first_failure_ms)
+            ),
+            raw_token: refresh_token(failure),
+            since_ms: Some(failure.first_failure_ms),
+            fix: account.fix.clone(),
+            ..Draft::for_account(AttentionKind::AccountRefreshFailing, account)
+        }
+        .finish(),
+    )
+}
+
+fn near_limit_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem> {
+    let fullest = account
+        .windows
+        .iter()
+        .filter(|w| !w.stale && w.used > NEAR_LIMIT_USED)
+        .max_by(|a, b| a.used.total_cmp(&b.used))?;
+    let scope_words = fullest
+        .scope
+        .as_deref()
+        .map_or_else(String::new, |scope| format!(" {scope}"));
+    let resets = fullest.reset_ms.map_or_else(String::new, |reset| {
+        format!(", resets in {}", span(reset - now))
+    });
+    let scope_token = fullest
+        .scope
+        .as_deref()
+        .map_or_else(String::new, |scope| format!(", scope={scope}"));
+    Some(
+        Draft {
+            cause: format!(
+                "{}% of the {}{scope_words} window used{resets}",
+                (fullest.used * 100.0).floor(),
+                window_length(fullest.length_secs)
+            ),
+            raw_token: format!(
+                "{} (used={}, length_secs={}{scope_token})",
+                AttentionKind::AccountNearLimit.as_str(),
+                fullest.used,
+                fullest.length_secs
+            ),
+            until_ms: fullest.reset_ms,
+            ..Draft::for_account(AttentionKind::AccountNearLimit, account)
+        }
+        .finish(),
+    )
+}
+
+/// A window length as an adjective: "5 h", "7 day".
+fn window_length(secs: u64) -> String {
+    if secs >= SECS_PER_DAY && secs.is_multiple_of(SECS_PER_DAY) {
+        format!("{} day", secs / SECS_PER_DAY)
+    } else if secs >= SECS_PER_HOUR && secs.is_multiple_of(SECS_PER_HOUR) {
+        format!("{} h", secs / SECS_PER_HOUR)
+    } else {
+        format!("{} min", secs.div_ceil(60))
+    }
+}
+
+fn poll_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem> {
+    let failure = account
+        .poll_failure
+        .as_ref()
+        .filter(|failure| failure.since_ms <= now - POLL_FAILING_AFTER_MS)?;
+    let kind = AttentionKind::UsagePollFailing;
+    let raw_token = failure.last_result.as_deref().map_or_else(
+        || kind.as_str().to_string(),
+        |result| format!("{} ({result})", kind.as_str()),
+    );
+    Some(
+        Draft {
+            cause: format!("Usage poll failing, for {}", span(now - failure.since_ms)),
+            raw_token,
+            since_ms: Some(failure.since_ms),
+            ..Draft::for_account(kind, account)
+        }
+        .finish(),
+    )
+}
+
+fn driver_items(inputs: &AttentionInputs) -> Vec<AttentionItem> {
+    if inputs.managed_accounts == 0 {
+        return Vec::new();
+    }
+    let drivers = [
+        (
+            "refresh",
+            "token refresh driver",
+            inputs.drivers.refresh_running,
+        ),
+        ("poll", "usage poll driver", inputs.drivers.poll_running),
+    ];
+    drivers
+        .into_iter()
+        .filter(|(_, _, running)| !running)
+        .map(|(name, subject, _)| {
+            let kind = AttentionKind::DriverStopped;
+            Draft {
+                cause: "Not running".to_string(),
+                raw_token: format!("{} ({name})", kind.as_str()),
+                ..Draft::for_subject(kind, name, subject)
+            }
+            .finish()
+        })
+        .collect()
+}
+
+fn records_item(loss: &RecordLoss, now: i64) -> Option<AttentionItem> {
+    let rose = loss
+        .last_rise_ms
+        .filter(|rose| now - rose <= RECORDS_DROPPED_HOLD_MS)?;
+    let kind = AttentionKind::RecordsDropped;
+    Some(
+        Draft {
+            cause: format!("Usage records dropped, last {} ago", span(now - rose)),
+            raw_token: format!(
+                "{} (dropped_full={}, dropped_closed={}, write_errors={})",
+                kind.as_str(),
+                loss.dropped_full,
+                loss.dropped_closed,
+                loss.write_errors
+            ),
+            since_ms: Some(rose),
+            ..Draft::for_subject(kind, "ledger", "usage ledger")
+        }
+        .finish(),
+    )
+}
+
+fn doctor_item(finding: &Finding) -> Option<AttentionItem> {
+    if finding.status != Status::Fail || finding.section == POOLS_SECTION {
+        return None;
+    }
+    let path = format!("{}/{}", finding.section, finding.name);
+    Some(
+        Draft {
+            cause: finding.detail.clone(),
+            raw_token: format!("doctor_fail ({path})"),
+            fix: finding.remediation.clone(),
+            ..Draft::for_subject(AttentionKind::DoctorFailure, &path, &finding.name)
+        }
+        .finish(),
+    )
+}

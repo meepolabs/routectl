@@ -12,6 +12,7 @@
 //! ordered `SECTIONS` list is the single extension point where a new
 //! section is added with a one-line edit (producer + render title).
 
+pub mod attention;
 mod cache_section;
 mod gather;
 mod matrix;

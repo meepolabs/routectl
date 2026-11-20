@@ -8729,6 +8729,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   folders to list; `DoctorContext::legacy_folders` drops `Absent` folders and
   holds one `LegacyFolder` (`Entries` / `InspectError`) per old folder that
   still holds files or could not be listed
+- `src/commands/doctor/attention.rs` -- pure needs-attention builder: plain
+  snapshots (`AttentionInputs`, `now_ms` an input) -> active items of the
+  closed `AttentionKind` list, each with severity, plain-words cause, raw
+  token, fix and view target; `Attention::from_items` folds any item list
+  (active or recovered) into `{verdict, counts}`; `credential_cause` is the
+  shared plain-words credential wording. No I/O, clock or state
 - `src/commands/doctor/matrix.rs` -- capability matrix panel builder:
   `build_capability_matrix_panel(&DoctorContext) -> CapabilityMatrixPanel`.
   Rows are LEARNED LANES (`StateKey` serialized `provider_entry#upstream`):
