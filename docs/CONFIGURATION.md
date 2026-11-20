@@ -5509,6 +5509,16 @@ and Codex seats from `https://chatgpt.com/backend-api/wham/usage`, each with the
 seat's own access token (and, for Codex, its ChatGPT account id). No other host
 is contacted and redirects are never followed.
 
+- An Anthropic seat's usage call sends the `user_agent` of the `[providers]`
+  entry the seat is reported under (for a login several entries name, the
+  lexicographically smallest, the same entry `/status/accounts` shows as
+  `provider_entry`), or the built-in Claude Code `User-Agent` when that entry
+  sets none. Each poll reads the running config, so a reload that changes the
+  value applies to the next poll. A value that is not a valid HTTP header value
+  is not sent: the poll sends the built-in default instead and logs a WARN (see
+  [LOGGING.md](LOGGING.md#background-usage-poll-lines)). Codex usage calls
+  always send the built-in Codex `User-Agent`.
+
 - A seat is polled only after 5 minutes (plus a per-seat random jitter of up to
   a minute) without an accepted reading from either a response or an earlier
   poll. It is an accepted reading that suppresses the poll, not traffic: a

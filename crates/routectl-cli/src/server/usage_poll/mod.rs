@@ -35,6 +35,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use reqwest::header::HeaderValue;
 use routectl_auth::{OAuthStore, PeekedAccessToken, PeekedCredential};
 use routectl_core::sanitize_for_log;
 use routectl_router::{
@@ -46,11 +47,12 @@ use arc_swap::ArcSwap;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use self::client::{FetchResult, SeatCredential, UsagePollClient};
+use self::client::{FetchResult, SeatCredential, UsagePollClient, anthropic_user_agent};
 use self::schedule::{PollOutcome, PollSchedule, RandomJitter, SeatCandidate};
 use crate::handlers::status::DaemonMeta;
 use crate::server::seat_driver::{
-    ManagedSeat, SeatJob, SeatVerdict, accounts_awaiting_login, managed_seats, run_seat_driver,
+    ConfiguredUserAgent, ManagedSeat, SeatJob, SeatVerdict, accounts_awaiting_login, managed_seats,
+    run_seat_driver,
 };
 
 /// The wall clock the schedule runs on, in epoch ms. Injected so tests can
@@ -322,13 +324,14 @@ impl SeatJob for UsagePollJob {
         let store = Arc::clone(&self.store);
         let client = self.client.clone();
         let account = seat.account.clone();
+        let user_agent = (vendor == Some(UsageVendor::Anthropic)).then(|| seat_user_agent(seat));
         async move {
             let Some(vendor) = vendor else {
                 return PollAttempt::NotPolled;
             };
             let credential = store.peek_credential(&account).await;
             let reload_generation = credential.reload_generation;
-            let result = fetch_usage(&client, credential, vendor).await;
+            let result = fetch_usage(&client, credential, vendor, user_agent).await;
             PollAttempt::Attempted {
                 vendor,
                 attempted_ms,
@@ -419,16 +422,36 @@ pub(super) fn spawn_usage_poll_driver(
     )))
 }
 
+/// The `User-Agent` `seat`'s Anthropic usage call presents. A configured
+/// value that is not a valid header value is replaced by the compiled
+/// default, with one WARN that names the seat and never the value.
+fn seat_user_agent(seat: &ManagedSeat) -> HeaderValue {
+    let resolved = anthropic_user_agent(seat.user_agent.as_ref().map(ConfiguredUserAgent::as_str));
+    if resolved.configured_invalid {
+        tracing::warn!(
+            event = "usage_poll_user_agent_refused",
+            account = %sanitize_for_log(&seat.account),
+            reason = "invalid_header_value",
+            "configured user_agent is not a valid header value; the usage poll sends the default",
+        );
+    }
+    resolved.value
+}
+
 async fn fetch_usage(
     client: &UsagePollClient,
     credential: PeekedCredential,
     vendor: UsageVendor,
+    user_agent: Option<HeaderValue>,
 ) -> AttemptResult {
     let PeekedAccessToken::Ready(token) = credential.token else {
         return AttemptResult::TokenNotReady;
     };
     let seat_credential = match vendor {
-        UsageVendor::Anthropic => SeatCredential::Anthropic { token: &token },
+        UsageVendor::Anthropic => SeatCredential::Anthropic {
+            token: &token,
+            user_agent: user_agent.unwrap_or_else(|| anthropic_user_agent(None).value),
+        },
         UsageVendor::Codex => match credential.account_id.as_deref() {
             Some(account_id) => SeatCredential::Codex {
                 token: &token,
@@ -503,3 +526,7 @@ mod config_reload_tests;
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod daemon_tests;
+
+#[cfg(test)]
+#[path = "user_agent_tests.rs"]
+mod user_agent_tests;

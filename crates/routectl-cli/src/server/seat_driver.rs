@@ -11,6 +11,7 @@
 //! another refresh that lands while the job is in flight wins over it.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -48,6 +49,25 @@ pub(crate) struct ManagedSeat {
     pub(crate) provider: String,
     pub(crate) label: Option<String>,
     pub(crate) account: String,
+    /// The `user_agent` that entry sets, if any.
+    pub(crate) user_agent: Option<ConfiguredUserAgent>,
+}
+
+/// A provider entry's configured `user_agent`. Operator text: its `Debug`
+/// never prints the value.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ConfiguredUserAgent(String);
+
+impl ConfiguredUserAgent {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ConfiguredUserAgent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ConfiguredUserAgent(..)")
+    }
 }
 
 /// How one seat's outcome counts toward the driver's health.
@@ -205,6 +225,7 @@ fn managed_seat_of(config: &Config, entry_name: &str) -> Option<ManagedSeat> {
         provider,
         label,
         account,
+        user_agent: entry.user_agent.clone().map(ConfiguredUserAgent),
     })
 }
 

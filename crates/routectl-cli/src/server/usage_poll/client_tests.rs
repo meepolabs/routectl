@@ -12,7 +12,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use super::{
     ANTHROPIC_USAGE_URL, CODEX_USAGE_URL, FetchResult, MAX_USAGE_RETRY_AFTER, SeatCredential,
-    UsagePollClient,
+    UsagePollClient, anthropic_user_agent,
 };
 
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
@@ -58,9 +58,7 @@ impl Stubs {
 
     async fn fetch_anthropic(&self) -> FetchResult {
         let token = SecretToken::new(TOKEN_SENTINEL);
-        self.client
-            .fetch(SeatCredential::Anthropic { token: &token })
-            .await
+        self.client.fetch(default_anthropic(&token)).await
     }
 
     async fn fetch_codex(&self) -> FetchResult {
@@ -71,6 +69,14 @@ impl Stubs {
                 account_id: Some(ACCOUNT_SENTINEL),
             })
             .await
+    }
+}
+
+/// An Anthropic credential presenting the compiled default `User-Agent`.
+fn default_anthropic(token: &SecretToken) -> SeatCredential<'_> {
+    SeatCredential::Anthropic {
+        token,
+        user_agent: anthropic_user_agent(None).value,
     }
 }
 
@@ -113,10 +119,7 @@ fn the_production_client_targets_only_the_usage_constants() {
     let client = UsagePollClient::new().expect("the production client builds");
     let token = SecretToken::new(TOKEN_SENTINEL);
     let credentials = [
-        (
-            ANTHROPIC_USAGE_URL,
-            SeatCredential::Anthropic { token: &token },
-        ),
+        (ANTHROPIC_USAGE_URL, default_anthropic(&token)),
         (
             CODEX_USAGE_URL,
             SeatCredential::Codex {
@@ -140,7 +143,7 @@ fn the_bearer_and_account_id_are_sensitive_and_absent_from_request_debug() {
     let client = UsagePollClient::new().expect("the production client builds");
     let token = SecretToken::new(TOKEN_SENTINEL);
     let credentials = [
-        ("anthropic", SeatCredential::Anthropic { token: &token }),
+        ("anthropic", default_anthropic(&token)),
         (
             "codex",
             SeatCredential::Codex {
@@ -407,9 +410,7 @@ async fn an_unannounced_body_is_cut_at_the_cap_while_streaming() {
         let client = UsagePollClient::with_fronts_for_tests(&[(ANTHROPIC_HOST, &front)]);
         let token = SecretToken::new(TOKEN_SENTINEL);
 
-        let result = client
-            .fetch(SeatCredential::Anthropic { token: &token })
-            .await;
+        let result = client.fetch(default_anthropic(&token)).await;
 
         if too_large {
             assert_eq!(result, FetchResult::TooLarge, "{name}");
@@ -466,9 +467,7 @@ async fn a_body_that_drips_past_the_total_timeout_is_a_timeout() {
     let client = UsagePollClient::with_fronts_for_tests(&[(ANTHROPIC_HOST, &front)]);
     let token = SecretToken::new(TOKEN_SENTINEL);
 
-    let result = client
-        .fetch(SeatCredential::Anthropic { token: &token })
-        .await;
+    let result = client.fetch(default_anthropic(&token)).await;
 
     assert_eq!(result, FetchResult::Timeout);
 }
@@ -482,9 +481,7 @@ async fn an_unreachable_host_is_a_transport_failure() {
     let client = UsagePollClient::with_fronts_for_tests(&[(ANTHROPIC_HOST, &front)]);
     let token = SecretToken::new(TOKEN_SENTINEL);
 
-    let result = client
-        .fetch(SeatCredential::Anthropic { token: &token })
-        .await;
+    let result = client.fetch(default_anthropic(&token)).await;
 
     assert_eq!(result, FetchResult::Transport);
 }

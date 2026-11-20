@@ -44,8 +44,12 @@ pub const MAX_USAGE_RETRY_AFTER: Duration = Duration::from_hours(1);
 
 /// One seat's credential, naming the vendor whose endpoint it is sent to.
 pub enum SeatCredential<'a> {
-    /// An Anthropic managed login's access token.
-    Anthropic { token: &'a SecretToken },
+    /// An Anthropic managed login's access token and the `User-Agent` its
+    /// usage call presents (see [`anthropic_user_agent`]).
+    Anthropic {
+        token: &'a SecretToken,
+        user_agent: HeaderValue,
+    },
     /// A Codex managed login's access token and, when the login recorded
     /// one, its ChatGPT account id.
     Codex {
@@ -144,14 +148,11 @@ impl UsagePollClient {
 
     fn request(&self, credential: SeatCredential<'_>) -> RequestBuilder {
         match credential {
-            SeatCredential::Anthropic { token } => self
+            SeatCredential::Anthropic { token, user_agent } => self
                 .client
                 .get(ANTHROPIC_USAGE_URL)
                 .header(AUTHORIZATION, bearer(token))
-                .header(
-                    USER_AGENT,
-                    anthropic_identity::default_claude_code_user_agent(),
-                )
+                .header(USER_AGENT, user_agent)
                 .header("anthropic-beta", anthropic_identity::OAUTH_ANTHROPIC_BETA),
             SeatCredential::Codex { token, account_id } => {
                 let mut builder = self
@@ -168,6 +169,46 @@ impl UsagePollClient {
                 builder
             }
         }
+    }
+}
+
+/// The `User-Agent` an Anthropic usage call presents, and whether a
+/// configured value was set aside. `Debug` never prints the value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AnthropicUserAgent {
+    pub value: HeaderValue,
+    /// A configured value was given but is not a valid header value, so the
+    /// compiled default is sent in its place.
+    pub configured_invalid: bool,
+}
+
+impl fmt::Debug for AnthropicUserAgent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnthropicUserAgent")
+            .field("configured_invalid", &self.configured_invalid)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The `User-Agent` for an Anthropic usage call: the seat's configured
+/// `user_agent` when it is a valid header value (parsed as reqwest parses
+/// the request path's client-level override), else the compiled Claude
+/// Code default.
+pub fn anthropic_user_agent(configured: Option<&str>) -> AnthropicUserAgent {
+    let default = || HeaderValue::from_static(anthropic_identity::default_claude_code_user_agent());
+    match configured.map(HeaderValue::from_str) {
+        None => AnthropicUserAgent {
+            value: default(),
+            configured_invalid: false,
+        },
+        Some(Ok(value)) => AnthropicUserAgent {
+            value,
+            configured_invalid: false,
+        },
+        Some(Err(_)) => AnthropicUserAgent {
+            value: default(),
+            configured_invalid: true,
+        },
     }
 }
 
@@ -313,7 +354,10 @@ pub mod network_fence {
         let client = UsagePollClient::new().expect("the production client builds");
         let token = routectl_auth::oauth::SecretToken::new("fence-probe-token");
         let anthropic = client
-            .fetch(SeatCredential::Anthropic { token: &token })
+            .fetch(SeatCredential::Anthropic {
+                token: &token,
+                user_agent: super::anthropic_user_agent(None).value,
+            })
             .await;
         let codex = client
             .fetch(SeatCredential::Codex {

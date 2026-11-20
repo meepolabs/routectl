@@ -67,6 +67,10 @@ pub(super) fn now_ms() -> i64 {
 pub(super) struct ManualClock(AtomicI64);
 
 impl ManualClock {
+    pub(super) const fn starting_at(ms: i64) -> Self {
+        Self(AtomicI64::new(ms))
+    }
+
     pub(super) fn set(&self, ms: i64) {
         self.0.store(ms, Ordering::SeqCst);
     }

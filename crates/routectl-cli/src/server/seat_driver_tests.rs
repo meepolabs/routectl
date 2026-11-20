@@ -734,6 +734,7 @@ impl SeatJob for HangingJob {
             provider: "anthropic".into(),
             label: Some("a".into()),
             account: SEAT_A.into(),
+            user_agent: None,
         }]
     }
 
