@@ -7143,6 +7143,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `populated_accounts()`: every account the fixture config names with fresh,
   stale and absent readings, poll states, a vendor pause and nonzero counters,
   through the panel's own `build_from_sources`
+- `src/handlers/status/attention/fixture.rs` -- `cfg(test)`
+  `populated_attention()` and its doctor-unavailable twin: two reads through
+  the panel's own `AttentionState`, so the list carries a broken, degraded and
+  recovered item, and both doctor coverage states
 - `src/handlers/status/query/fixture.rs` -- `cfg(test)` `populated_query()`
   (grouped) and `populated_query_series()` (bucketed): a seeded ledger read
   through the route's `build_panel` and the facade's pricer

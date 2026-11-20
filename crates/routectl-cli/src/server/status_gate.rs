@@ -103,12 +103,17 @@
 //! of a sequential sum that must land inside the GET abort.
 //! [`QUERY_BUDGET_MS`] is not one of those terms: `/status/query` is its own
 //! route with its own abort. The usage panel is the one budgeted term; the
-//! health, config, doctor and accounts panels and the response write share a
-//! fixed reserve, [`AGGREGATE_RESERVE_MS`]:
+//! health, config, doctor, accounts and attention panels and the response
+//! write share a fixed reserve, [`AGGREGATE_RESERVE_MS`]:
 //!
 //! ```text
 //! USAGE_BUDGET_MS + AGGREGATE_RESERVE_MS = 2500 + 1000 = 3500 <= 3500 (TIMEOUT_MS)
 //! ```
+//!
+//! The attention panel fits the reserve only because, on the aggregate, it
+//! reads the Fail findings of the report the doctor panel just built instead
+//! of running a second no-network doctor gather. Its standalone route
+//! `/status/attention` runs one gather of its own.
 //!
 //! The same GET abort covers `/status/usage` on its own, where the usage
 //! budget is the whole server-side term. Raising [`USAGE_BUDGET_MS`] means
@@ -139,7 +144,7 @@ use crate::server::request_id::{self, RequestId};
 /// its own one-permit gate instead) -- see this module's own docs for that
 /// equivalence and for the timing numbers it composes with. A concurrent
 /// fan-out inside the aggregate would silently multiply the builder count by
-/// five while this const stayed at its face value.
+/// six while this const stayed at its face value.
 ///
 /// The builder half of the ceiling holds UNCONDITIONALLY, cancellation
 /// included. This layer's permit lives in the response future, so a client that
@@ -190,16 +195,18 @@ pub const QUERY_BUDGET_MS: u64 = 10_000;
 ///
 /// It is also sized against the CLIENT's per-GET abort: the `/status`
 /// aggregate composes its panels sequentially, so this budget is one term of a
-/// sum that must still land inside that abort, leaving room for the four
-/// cheap panels (health, config, doctor, accounts) and the response write. Raising it is not a local decision:
+/// sum that must still land inside that abort, leaving room for the five
+/// cheap panels (health, config, doctor, accounts, attention) and the response
+/// write. Raising it is not a local decision:
 /// see this module's own docs for the coupled numbers and the occupancy
 /// relationship with [`STATUS_MAX_INFLIGHT`].
 pub const USAGE_BUDGET_MS: u64 = 2500;
 
 /// Room the `/status` aggregate leaves after [`USAGE_BUDGET_MS`],
-/// milliseconds, for the health, config, doctor and accounts panels and the
-/// response write. None of them carries a deadline of its own except the doctor
-/// panel's cache-ignore read, which takes a fixed share. It bounds nothing at
+/// milliseconds, for the health, config, doctor, accounts and attention panels
+/// and the response write. None of them carries a deadline of its own except
+/// the doctor panel's cache-ignore read, which takes a fixed share; the
+/// attention panel reads the doctor panel's report rather than gathering one. It bounds nothing at
 /// runtime: it is the second term of the GET sum identity in this module's own
 /// docs.
 pub const AGGREGATE_RESERVE_MS: u64 = 1000;
@@ -1297,7 +1304,7 @@ mod tests {
     /// The capacity UNIT: `STATUS_MAX_INFLIGHT` bounds admitted requests AND,
     /// because no handler fans one admitted request into several builders, the
     /// concurrent BLOCKING panel builders behind them. The `/status` aggregate
-    /// is the only route that could break that equality -- it builds five
+    /// is the only route that could break that equality -- it builds six
     /// panels -- so it is the one this pins.
     ///
     /// Same idiom as the shed tests above: park work in-flight, count arrivals,
@@ -1306,9 +1313,9 @@ mod tests {
     /// invisible from the wire -- a fan-out answers 200 on every panel too.
     ///
     /// Far more requests than permits are fired, so the excess sheds and only
-    /// admitted ones can build. With the aggregate awaiting its five builders
+    /// admitted ones can build. With the aggregate awaiting its six builders
     /// sequentially the plateau is `STATUS_MAX_INFLIGHT`; a concurrent join
-    /// parks `5 * STATUS_MAX_INFLIGHT`.
+    /// parks `6 * STATUS_MAX_INFLIGHT`.
     ///
     /// Every assertion is deferred until AFTER `release`: a parked builder
     /// occupies a blocking worker that no unwind can reclaim, so a panic while
@@ -1334,7 +1341,7 @@ mod tests {
         let router = Router::new(Arc::new(Config::default()));
         let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
-        // all, so all five panels are genuinely in play.
+        // all, so all six panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         status.usage_db_path = dir.path().join("absent-usage.db");
         let app = apply_overload_layers(status_router().with_state(Arc::new(status)));
@@ -1363,7 +1370,7 @@ mod tests {
         // side the instant a handler decides to hand a builder to
         // `spawn_blocking`, so once the admitted requests have parked their
         // builders, every builder those requests will ever submit is already
-        // counted. A fan-out submits all five of a request's builders before
+        // counted. A fan-out submits all six of a request's builders before
         // any can be observed to start, so it registers here immediately --
         // no settle window, and nothing for a slow blocking pool to hide.
         let parked = probe.submitted();
@@ -1396,7 +1403,7 @@ mod tests {
         );
     }
 
-    /// Build a status app whose five panels all reach a real builder, plus the
+    /// Build a status app whose six panels all reach a real builder, plus the
     /// temp dir keeping its config path alive. Shared by the cancellation tests
     /// so they exercise the same wiring the capacity test above does.
     fn cancellation_test_app() -> (axum::Router, tempfile::TempDir) {
@@ -1417,7 +1424,7 @@ mod tests {
         let router = Router::new(Arc::new(Config::default()));
         let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
-        // all, so all five panels are genuinely in play.
+        // all, so all six panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         status.usage_db_path = dir.path().join("absent-usage.db");
         (
@@ -1550,7 +1557,7 @@ mod tests {
 
     /// CANCELLATION, aggregate route: the same property via `GET /status`.
     ///
-    /// Worth its own case because the aggregate is the route that composes five
+    /// Worth its own case because the aggregate is the route that composes six
     /// builders, so it is the one where a regression to a concurrent fan-out
     /// would break the permit accounting. The `uri` is the only difference from
     /// the single-panel case, which is the point: the permit lives in
@@ -1589,7 +1596,7 @@ mod tests {
         }
         // The aggregate is SEQUENTIAL, so each cancelled request had submitted
         // exactly its first builder -- the count is the saturation plateau, not
-        // five times it.
+        // six times it.
         let submitted_before = probe.submitted();
 
         let follow_up = {
@@ -1629,15 +1636,15 @@ mod tests {
              capacity: {submitted_while_detached} builders submitted, expected \
              {submitted_before}"
         );
-        // Capacity recovers and the whole aggregate completes -- all five of its
+        // Capacity recovers and the whole aggregate completes -- all six of its
         // builders ran through the same permit-owning path, which is also the
         // no-deadlock check (a sequential aggregate re-acquiring per panel must
         // not starve itself).
         assert_eq!(served.status(), StatusCode::OK);
         assert_eq!(
             probe.submitted(),
-            submitted_before + 5,
-            "the delayed aggregate must build all five panels once released"
+            submitted_before + 6,
+            "the delayed aggregate must build all six panels once released"
         );
     }
 

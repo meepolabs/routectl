@@ -105,6 +105,13 @@ pub(super) struct DoctorPanel {
     observation: Option<WindowObservation>,
 }
 
+impl DoctorPanel {
+    /// The failing findings of the embedded report.
+    pub(super) fn fail_findings(&self) -> Vec<Finding> {
+        fail_findings(&self.report)
+    }
+}
+
 /// The panel's ledger-derived inputs: the live loss counters and the
 /// observation block judged against them.
 #[derive(Debug, Clone, Copy)]
@@ -212,6 +219,8 @@ struct PinnedGather {
     served: ServedInputs,
     legacy_dirs: Vec<LegacyConfigDir>,
     handle: tokio::runtime::Handle,
+    #[cfg(test)]
+    gathers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PinnedGather {
@@ -231,12 +240,17 @@ impl PinnedGather {
             served,
             legacy_dirs: state.legacy_config_dirs().to_vec(),
             handle: tokio::runtime::Handle::current(),
+            #[cfg(test)]
+            gathers: Arc::clone(&state.test_hooks.doctor_gathers),
         }
     }
 
     /// Run the gather and build the report. Blocking: call it on a blocking
     /// worker.
     fn report(self, zone: &LocalZone) -> DoctorReport {
+        #[cfg(test)]
+        self.gathers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let ctx = self.handle.block_on(gather_context_no_network(
             &self.config_path,
             GatherSources::Served(Box::new(self.served)),

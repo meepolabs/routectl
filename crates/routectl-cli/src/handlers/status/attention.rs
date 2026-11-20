@@ -394,5 +394,11 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 }
 
 #[cfg(test)]
+pub(super) mod fixture;
+#[cfg(test)]
 #[path = "attention_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "attention_wire_tests.rs"]
+mod wire_tests;

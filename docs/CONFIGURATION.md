@@ -5762,6 +5762,66 @@ the traffic and cost figures. Each `/status/usage` `quota` row carries `seat`
 (the `account` key), `provider_entry` and `login_label`, with the values this
 panel gives that account.
 
+#### Needs-attention list on `/status/attention`
+
+The running daemon's `/status/attention` panel (schema 1, also under
+`panels.attention` on the `/status` aggregate) is the list of current
+conditions that need the operator, with a one-line verdict and counts. The
+daemon decides every condition, severity, wording, age and fix; a client
+renders the payload and adds none of its own. It is read from memory plus a
+no-network doctor report: no vendor request and no usage database scan of
+its own.
+
+On the aggregate the list is built from the Fail findings of the doctor
+report the `doctor` panel built for the same request, so one `/status` read
+runs the doctor gather once; that is what keeps the aggregate inside its
+fixed reserve beside the usage panel's budget. A client that polls `/status`
+should read `panels.attention` from it rather than also polling
+`/status/attention`, which runs a gather of its own.
+
+- `verdict`: `severity` (`ok`, `degraded` or `broken`), `text` (one
+  sentence) and `target` (the view that shows the worst item, or null when
+  the severity is `ok`). Only the routing and account kinds move it:
+  `doctor_failure` and `records_dropped` are listed and counted but leave
+  the verdict alone, and its text then adds "N other items need attention".
+- `counts`: `broken` and `degraded` (active items of each severity),
+  `recovered`, and `doctor_fail` (active `doctor_failure` items).
+- `coverage`: `doctor` is `current` when a doctor report was built for this
+  read, `unavailable` when none could be (no config file bound, or the
+  gather or the doctor panel failed). While it is `unavailable` the other
+  items are still listed, and a `doctor_failure` item seen earlier is held
+  as it was for up to 60 minutes, neither cleared nor marked recovered.
+- `items`: active items first, worst first, then recovered ones. Each item
+  carries `key` (stable identity: the kind and its subject), `kind`,
+  `severity`, `state` (`active` or `recovered`), `subject` (display form),
+  `account` (the credential account, or null), `cause` (plain words with the
+  age where one is known), `raw_token` (the machine form, for grep and
+  copy), `since_ms`, `until_ms`, `recovered_at_ms`, `fix` (the line that
+  fixes it, or null) and `target` (`accounts`, `models`, `traffic` or
+  `doctor`). Times are epoch ms; a key a kind does not use is null.
+
+The kinds form a closed set: `pool_empty` (a pool with seats configured and
+none usable; the only `broken` kind), `route_circuit_open`,
+`account_unusable`, `account_parked`, `account_refresh_failing`,
+`driver_stopped` (the token refresh or usage poll driver not running while
+managed logins exist), `account_near_limit` (a non-stale window more than
+90% used), `usage_poll_failing` (a run of failed usage polls at least 15
+minutes old), `records_dropped` (a request-row loss counter rose in the last
+5 minutes) and `doctor_failure` (a doctor Fail finding outside the `pools`
+section, which `pool_empty` covers). A route blocked by its account's
+credential is named once, by the account item. Every kind but `pool_empty`
+is `degraded`.
+
+A condition that clears stays listed as `recovered` for 60 minutes after the
+first read that saw it gone, and is listed `active` again if it returns.
+This memory lives in the daemon process only and is reconciled on reads, so
+a restart forgets it and a condition that comes and goes between two reads
+is never listed.
+
+Schema 1 is additive: a new kind, token or field does not bump
+`schema_version`, so a client must accept kinds it does not know. Removing
+a field or token, or changing what one means, bumps it.
+
 ### Credential pools (multiple accounts per provider)
 
 A single OAuth provider can hold more than one credential ("seat") in

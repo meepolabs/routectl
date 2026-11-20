@@ -29,6 +29,7 @@
 //! panel to degrade.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use super::field_verdict_log::FidelityEvent;
 
@@ -111,6 +112,11 @@ pub(crate) struct StatusTestHooks {
     /// the progress handler checks, so what a test observes is the request's
     /// drop reaching the read, not how fast a scan happens to be.
     pub(crate) stall_query_read: bool,
+    /// How many no-network doctor gathers this daemon's status surface has
+    /// run. A gather is the costliest step of a `/status` poll, and the
+    /// response looks the same however many ran, so only a count shows the
+    /// aggregate sharing one gather between its panels.
+    pub(crate) doctor_gathers: Arc<AtomicUsize>,
 }
 
 impl StatusTestHooks {
@@ -122,6 +128,7 @@ impl StatusTestHooks {
                 fidelity_observer: Some(observer),
                 fail_health_builder: false,
                 stall_query_read: false,
+                doctor_gathers: Arc::default(),
             },
             events,
         )

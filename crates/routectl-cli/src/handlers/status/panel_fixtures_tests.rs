@@ -6,7 +6,7 @@
 use serde_json::{Value, json};
 
 use super::{Allowance, DensityException, aggregate_json, density_gaps, missing_null_states};
-use crate::handlers::status::{accounts, config, doctor, health, query, usage};
+use crate::handlers::status::{accounts, attention, config, doctor, health, query, usage};
 
 /// One populated payload under test, with the exceptions its shape forces.
 struct Fixture {
@@ -84,6 +84,18 @@ const FIXTURES: &[Fixture] = &[
         exceptions: &[UNAVAILABLE, NO_WINDOWS, NO_POOLS],
     },
     Fixture {
+        name: "attention",
+        payload: attention::fixture::populated_attention,
+        schema_version: attention::SCHEMA_VERSION,
+        exceptions: &[UNAVAILABLE],
+    },
+    Fixture {
+        name: "attention doctor unavailable",
+        payload: attention::fixture::populated_attention_doctor_unavailable,
+        schema_version: attention::SCHEMA_VERSION,
+        exceptions: &[UNAVAILABLE],
+    },
+    Fixture {
         name: "query grouped",
         payload: query::fixture::populated_query,
         schema_version: query::SCHEMA_VERSION,
@@ -135,7 +147,7 @@ fn each_fixture_has_no_empty_array_and_no_always_null_key() {
 }
 
 #[test]
-fn the_aggregate_carries_the_five_get_panels_densely_at_their_versions() {
+fn the_aggregate_carries_the_six_get_panels_densely_at_their_versions() {
     let aggregate = aggregate_json();
     let exceptions = [
         DensityException {
@@ -156,6 +168,10 @@ fn the_aggregate_carries_the_five_get_panels_densely_at_their_versions() {
         },
         DensityException {
             path: "panels.accounts.unavailable",
+            ..UNAVAILABLE
+        },
+        DensityException {
+            path: "panels.attention.unavailable",
             ..UNAVAILABLE
         },
         DensityException {
@@ -181,6 +197,7 @@ fn the_aggregate_carries_the_five_get_panels_densely_at_their_versions() {
         ("config", config::SCHEMA_VERSION),
         ("doctor", doctor::DOCTOR_SCHEMA_VERSION),
         ("accounts", accounts::SCHEMA_VERSION),
+        ("attention", attention::SCHEMA_VERSION),
     ] {
         assert_eq!(
             aggregate["panels"][panel]["schema_version"],
@@ -194,7 +211,7 @@ fn the_aggregate_carries_the_five_get_panels_densely_at_their_versions() {
 /// proves a non-null occurrence, this proves a null one.
 #[test]
 fn each_fixture_shows_its_conditional_fields_in_both_states() {
-    let cases: [(&str, Value, &[&str]); 6] = [
+    let cases: [(&str, Value, &[&str]); 7] = [
         (
             "usage",
             usage::fixture::populated_usage(),
@@ -271,6 +288,16 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.accounts[].credential.since_ms",
                 "data.accounts[].credential.until_ms",
                 "data.accounts[].credential.fix",
+            ],
+        ),
+        (
+            "attention",
+            attention::fixture::populated_attention(),
+            &[
+                "data.items[].account",
+                "data.items[].until_ms",
+                "data.items[].recovered_at_ms",
+                "data.items[].fix",
             ],
         ),
         (

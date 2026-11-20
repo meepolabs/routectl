@@ -223,6 +223,7 @@ pub fn aggregate_json() -> Value {
             config: super::config::fixture::populated_config_panel(),
             doctor: super::doctor::fixture::populated_doctor_panel(),
             accounts: super::accounts::fixture::populated_accounts_panel(),
+            attention: super::attention::fixture::populated_attention_panel(),
         },
     };
     serde_json::to_value(aggregate).expect("the aggregate serializes")
