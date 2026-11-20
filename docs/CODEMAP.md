@@ -1890,7 +1890,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`cache_write_rates` / `set_cache_write_rate`), `CacheConfig`,
   `CacheCapability`, `MitmConfig` (transport only; a forwarded credential is
   a provider's `credential = "forwarded"`), `CapabilityConfig`,
-  `WindowGateConfig`, `UsageConfig`, `ProviderRuntimePolicy`, `SeatSelection`,
+  `WindowGateConfig`, `UsageConfig` (`db_path`, `retention_days`, and the
+  hot-reloading `poll` switch for the background usage poll), `ProviderRuntimePolicy`, `SeatSelection`,
   `ReasoningDialect` / `HistoryReasoning`, and `RetryPolicy` (`classes:
   BTreeMap<ConfigFailureClass, u32>`, the `[retry.classes] <class> = <n>`
   same-target retry counts; `hard_retry_cap`, `max_honored_retry_after`);
@@ -2325,18 +2326,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   epoch-millis-as-seconds value at the door); `is_fresh` requires BOTH a
   monotonic age ceiling and the window's own wall-clock reset, answering
   not-fresh on any arithmetic it cannot perform. Also `age` (larger of the two
-  clock ages, `None` when unorderable), `has_passed` and `reset_after`
-- `src/quota/curation.rs` -- the closed curated window table: ONE `const` slice
-  of `CuratedWindow`, each row carrying provider kind, the upstream's own window
-  id, role, expected DURATION (what bounds the reported reset, curated beside
-  the role so the two cannot drift) and the cap/guard threshold. Anthropic `5h`
-  = Fast at half full, `7d` = Slow at 90%; Codex has NO row (its windows reach
-  the account meter keyed by reported length via `codex_headers`), so its caps
-  are dormant by construction. `rows_for` / `row_for`
-  answer nothing for an uncurated provider kind, which is how a provider with no
-  row runs dormant. Self-tests hold the whole-table invariants (no duplicate
-  role or source window per provider, thresholds inside the utilization scale,
-  no zero duration, `RESET_TOLERANCE` narrower than every window it guards)
+  clock ages, `None` when unorderable) and `has_passed`
+- `src/quota/curation.rs` -- the closed curated header-window table: ONE
+  `const` slice of `CuratedWindow`, each row carrying provider kind, the
+  upstream's own window id, role and expected DURATION (what bounds the
+  reported reset and the length the meter keys it by, curated beside the role
+  so the two cannot drift). Anthropic `5h` = Fast, `7d` = Slow; Codex has NO
+  row (its windows reach the account meter keyed by reported length via
+  `codex_headers`). `rows_for` / `row_for` answer nothing for an uncurated
+  provider kind. Self-tests hold the whole-table invariants (no duplicate role
+  or source window per provider, no zero duration, `RESET_TOLERANCE` narrower
+  than every window it guards)
 - `src/quota/reading.rs` -- the account meter's reading model. `WindowKey`
   (reported length + optional canonical `Scope`, `[a-z0-9_]`, bounded) classed
   `LengthClass::Short` up to 24 h and `Long` up to 31 d by length alone;
@@ -2379,21 +2379,23 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   mismatch fails SILENTLY GREEN: every write lands, every read misses, and a
   hand-built-key unit test passes either way
 - `src/seat_pool.rs` `keyless_quota_order` -- the walk order for a KEYLESS
-  request on a sticky-configured pool, ordered by remaining budget and sharing
-  `restrict_by_quota` with the keyed birth pick so the two cannot disagree about
-  what "below cap" means. The chosen group leads; every other eligible seat
-  follows in the fixed order, preserving the fall-through walk. `None` when the
-  partition declines, and the caller then keeps the unchanged fill-first
-  collapse (token `keyless_fill_first`; `keyless_quota` when quota ordered it).
-  A keyless request mints NO pin either way -- there is no key to pin under
+  request on a sticky-configured pool, led by the seat the pace rule places a
+  new conversation on: the same eligibility, `placement::best_bucket` bucket,
+  headroom pick and rotation as a keyed birth, so the two cannot disagree. The
+  chosen seat leads; every other seat follows in the fixed order, preserving
+  the fall-through walk. `None` for a single seat, a dormant pool (no
+  standings), no dispatchable seat, or no eligible seat freshly read, and the
+  caller then keeps the fill-first walk. A keyless request mints NO pin either
+  way -- there is no key to pin under
 - `src/quota/store.rs` -- `QuotaStore`: one `AccountMeter` per admitted seat
   behind one mutex (the merge rule lives in `meter.rs`), bounded by
   `admit_seats` (which also prunes) and shared across hot reload by `Arc`.
   Writes: `observe` (Anthropic header snapshot), `observe_account` /
   `observe_account_uncounted` (a validated observation), `forget`; reads:
-  `reading_for` (placement's two-role projection), `readings` (the `view`),
-  `account`, `report_for`; per-reason `record_rejection` / `RejectionTotals`,
-  `ObserveRefusal` and `refused_by_admission_total`; see its module doc
+  `readings` (the `view`, plus the confirmed-correction count), `account`,
+  `report_for`; per-reason `record_rejection` / `RejectionTotals`,
+  `ObserveRefusal` and `refused_by_admission_total`; a refused observation
+  stores only its advanced correction streaks; see its module doc
 - `src/quota/feed.rs` -- the post-response feed, wired on BOTH completion paths.
   `feed_response` reads `ChatResponse::upstream_meta` at the terminal
   non-streaming success arm; `FirstChunkFeed` is armed with the served seat's key
@@ -2414,10 +2416,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   newest-wins per key on the monotonic clock; a partial never erases; a
   complete report drops older omitted windows and sets a floor late windows
   cannot cross; a same-reset reading lower by at most `CONTRADICTION_SLACK`
-  is kept at the higher value, further is refused `Contradictory` with
-  nothing advanced. `merged_header` adapts a header snapshot onto a partial of
-  the curated keys; `projection` gives placement's two-role snapshot (FAST =
-  account-wide window of the curated five-hour length)
+  is kept at the higher value. A lower reading against a window still in
+  effect is refused `Contradictory` until `CORRECTION_CONFIRMATIONS`
+  consecutive agreeing lower readings for the key (a per-key streak) confirm
+  it, then taken as reported. A running window a complete report drops is
+  kept aside (`kept.rs`) as that key's contradiction baseline.
+  `merged_header` adapts a header snapshot onto a partial of the curated keys
 - `src/quota/kept.rs` -- `KeptWindows`: the running windows a complete
   report dropped while in effect. Each binds the placement-safe view and is
   the contradiction baseline for its key until a reading for it is accepted
@@ -2427,25 +2431,24 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `STALE_AFTER` (7 min). A window is stale past `STALE_AFTER` on either clock,
   past a running window's reset, or on an unorderable stamp; a stale window
   gives no `remaining`. Plain owned, non-`Serialize` values
-  (`AccountReadings`, `AccountReading`, `AccountWindow`, `ReadingWindow`,
-  `LastReading`, `AcceptedReading`) behind `Router::account_readings` and
-  `Router::observe_polled_usage`; today's placement projection does not read it
-- `src/quota/placement.rs` -- the birth-placement PARTITION, the store's one
-  production reader. `seat_tiers` classifies each seat's FAST window against its
-  curated threshold into `SeatQuota::{Unknown, BelowCap, AtCap}` (empty vec for
-  a provider curating no FAST window -- dormant by construction); reading
-  through `QuotaStore::reading_for` means read-time expiry has already applied,
-  so a lapsed window reads Unknown and never at its last value.
-  `restrict_by_quota` PARTITIONS rather than scoring, because unknown has no
-  neutral number: fresh-known-below-cap restricts to that tier and takes the
-  most remaining (so known-zero beats unknown and unknown never competes);
-  all-known-and-all-capped takes the most remaining and NEVER fails the request;
-  every other case -- all-unknown, mixed capped-known + unknown, no tiers --
-  answers `None` and the caller's unchanged headroom ranking decides. That makes
-  the fail-closed rule structural rather than a constant. Returns the TIED set,
-  leaving the anti-herd rotation to break it. Reads only the FAST window: the
-  SLOW near-exhaustion guard and the billing tri-state are extracted, curated
-  and stored but deliberately UNWIRED here
+  (`AccountReadings` with `corrections_confirmed`, `AccountReading` with
+  `billing` / `billing_fresh`, `AccountWindow` with `kept`, `ReadingWindow`,
+  `LastReading` with `fresh`, `AcceptedReading`) behind
+  `Router::account_readings`, `Router::observe_polled_usage` and the pace
+  placement rule, which reads every account through it
+- `src/quota/placement.rs` -- the pace rule, the one placement rule: which
+  seat a NEW conversation is born on. `standing` gives each seat a `Standing`
+  (`Tier` `Roomy` / `LowRoom` / `Unread`, a score, a `Reason`) from its
+  account's placement-safe reading for the conversation's upstream model; the
+  score is the slowest pace over the relevant windows (room left over the
+  fraction of the window still to run), so a nearly exhausted weekly window is
+  never hidden by a fresh five-hour one. `best_bucket` / `ordered_buckets` keep
+  the candidates sharing the best tier and two-decimal score, leaving the tie
+  to the caller's headroom pick and anti-herd rotation; an unread seat ranks
+  below every read one but still places, so the rule never refuses a request.
+  `move_trigger` says when a pinned conversation leaves its home: an unusable
+  credential always, a park or open breaker only while at least `MOVE_FLOOR`
+  (5 min) of the outage is known to remain
 - `src/quota/model_scope.rs` -- the closed scope -> model family table
   (`opus` -> `claude-opus-`, `sonnet` -> `claude-sonnet-`): `binds` says
   whether a scoped usage window limits a conversation on an upstream model id;
@@ -2485,7 +2488,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   on the forwarded-credential path -- and the per-marker auto-cache decisions
   `cache_front_decision` / `cache_terminal_decision` beside the legacy
   aggregate `cache_strategy`, which now carries the TERMINAL marker's
-  token). Construction + hot-reload lifecycle: `new`,
+  token; and `placement`, the first pace-rule `PlacementRecord` a marked
+  target carried, kept when a later target serves). Construction + hot-reload lifecycle: `new`,
   `install_resolved_models`, the `carry_over_runtime_state_from` /
   `carry_over_sticky_from` / `carry_over_k_store_from` /
   `carry_over_prefix_epochs_from` /
@@ -3404,7 +3408,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   under a credential generation -> `AcceptedReading` or `PolledUsageRejection`),
   `account_readings`, `forget_account_readings`, and the `AccountIdentities`
   resolver (`from_config`: each configured credential account's
-  `AccountIdentity` provider entry + login label; targets carry `login_label`)
+  `AccountIdentity` provider entry + login label; targets carry `login_label`).
+  Also `Router::placement_status` -> `PlacementStatus` (`PlacementBirths`,
+  `PlacementMoves`, cap-forced moves, and per pool and upstream model a
+  `PoolPlacement` of `SeatPlacement` rank / tier / score / reason), ranked by
+  the same scorer and eligibility a birth uses, read-only
 - `src/router/count_tokens.rs` -- the token-counting dispatch path:
   `Router::count_tokens` (result-only, NON-SETTLING) and
   `count_tokens_with_meta` -> `CountedTokens` (SETTLING), both through
@@ -4321,15 +4329,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `PlacementEvent`, `PLACEMENT_RULE`, and the router-instance
   `PlacementCounters` (births by arm, moves by trigger, cap-forced moves)
 - `src/router/sticky.rs` -- sticky seat ordering + capacity snapshots:
-  `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
-  `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH
-  only -> `seat_pool::sticky_least_loaded_order`),
-  `gather_capacity_snapshots`, `quota_tiers_for_birth` (returns EMPTY for a
-  provider curating no FAST window -- no cap, no diagnostic),
-  `record_quota_placement` (per-arm counters plus one
-  throttled line, silent on the dormant arm), and
-  `apply_sticky_outcome` (applies the pin write the outcome implies; quota
-  changes which seat a birth picks, never the pin write)
+  `sticky_seat_order` / `sticky_seat_placement` (resolve session pin ->
+  gather non-mutating per-seat `capacity_snapshot_for` reads -> read pace
+  standings for the upstream model only when a pick is made, a birth or a
+  move -> `seat_pool::sticky_least_loaded_order` -> apply the pin write),
+  `keyless_seat_order` (a keyless request placed as a birth, no pin),
+  `birth_standings` / `seat_standings` (per-seat `Standing`s, EMPTY for a
+  dormant pool), `gather_capacity_snapshots`, `record_placement` (the
+  `PlacementRecord` of a won birth or move, counted once; none for a dormant
+  pool) and `apply_sticky_outcome` (writes only through the conditional
+  `StickyPins::claim_if_absent` / `repin_if`, returning the `PinWrite` this
+  turn won: `None`, `Born`, `Moved`, or `Adopted` when a concurrent turn of
+  the same conversation wrote first)
 - `src/router/transcript_defect.rs` -- a tool pairing defect as a per-request
   provenance fact on the complete, stream and count_tokens walks:
   `record_transcript_defect` (validates once, stores
@@ -4418,7 +4429,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   refresh so earlier evidence cannot re-park, mark or un-park the account),
   and the model gate takes it as an input (`admit_under_park`,
   `capacity_snapshot_under`, `gate_status_under`; `CapacitySnapshot::reason`
-  names the highest-priority `EligibilityReason`). An unusable mark refuses
+  names the highest-priority `EligibilityReason`, and
+  `CapacitySnapshot::outage_remaining` the time left in a live park or an
+  open breaker's window, `None` when the end is unknown). An unusable mark refuses
   with `GateDecision::CredentialUnusable`, a live park with
   `GateDecision::CredentialParked { reason, until }`;
   a lapsed park shares the slot's single half-open re-test with a lapsed
@@ -4452,7 +4465,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   account key: the OAuth seat identity, else the `[providers]` entry name
   behind the separator, `None` for a forwarded credential) with
   `is_entry_account`, the fixed fill-first walk (`fill_first_order`) and
-  the sticky least-loaded seat selection
+  the sticky least-loaded seat selection (`sticky_least_loaded_order` ->
+  `SelectionOutcome` {`Birth`, `Stay`, `Repin { home, trigger }`,
+  `DeferNoHealthy`}: a pinned home stays unless `placement::move_trigger`
+  names a lasting outage, and a move ranks the siblings as a birth does), and
+  `StickyPins`, the bounded LRU pin map whose dispatch writes are the
+  conditional `claim_if_absent` / `repin_if`
 - `src/state_key.rs` -- `StateKey`, the learned-store lane (provider entry,
   upstream): one constructor and one first-`#` parser over the serialized
   `provider_entry#upstream` ledger `lane_key`; no `Display`, only the
@@ -6397,19 +6415,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Codex seats (`managed_seats`, one per account via
   `AccountIdentities::from_config`) through one `SeatJob` (`KIND` names it in
   log lines; `RefreshJob` here, `UsagePollJob` in `usage_poll/`: due, run,
-  apply), acquiring each seat's credential generation before `run` and
+  apply; `is_switched_off`, checked before each seat's credential generation
+  is acquired, lets a job turned off mid-sweep leave waiting seats untouched), acquiring each seat's credential generation before `run` and
   applying under it; keeps the memory-only `SeatDriverHealth` that
   `DaemonMeta` holds. Spawned by `spawn_reload_pipeline` when a credential
   store exists; tests in `seat_driver_tests.rs`
 - `src/server/usage_poll/mod.rs` -- the background usage poll: `UsagePollJob`
   (a `SeatJob` that peeks each due seat's token, fetches its usage endpoint and
   lands an accepted body through `Router::observe_polled_usage`, plus its
-  history rows), `UsagePollState` / `PollStateSnapshot` (the schedule and its
-  read-only view for `/status/accounts`) and `spawn_usage_poll_driver`
+  history rows; switched off by `[usage] poll = false`, read from the live
+  router before each sweep, each seat and each landing, and sending an
+  Anthropic seat's configured `user_agent`), `UsagePollState` / `PollStateSnapshot` (the
+  schedule and its read-only view for `/status/accounts`, where a switched-off
+  seat reads `off`) and `spawn_usage_poll_driver`
 - `src/server/usage_poll/client.rs` -- the usage poll's HTTP client: the two
   compile-time vendor usage URLs, a no-redirect https-only client with 5 s
   connect / 10 s total timeouts, the body cut at `MAX_USAGE_BODY_BYTES`, the
-  lane's first-party identity headers, and the closed `FetchResult`; its
+  lane's first-party identity headers (`anthropic_user_agent`: the configured
+  Claude `user_agent` when it is a valid header value, else the compiled
+  default), and the closed `FetchResult`; its
   `network_fence` makes a test build resolve no host; tests in
   `client_tests.rs`
 - `src/server/usage_poll/history.rs` -- maps an accepted poll reading to
@@ -6925,7 +6949,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `mark_stream_stage`, which stamps `extra.stream_stage`
   (`pre_content_dispatch` vs `mid_stream`) so the ledger keeps a warm-hold
   pre-content dispatch failure distinct from a mid-stream cut (both are
-  `UpstreamError`). Also owns the `http_status` transport-status contract (the
+  `UpstreamError`), and stamps `extra.placement` from
+  `DispatchMeta::placement` (the pace-rule record of a won birth, move or
+  keyless placement). Also owns the `http_status` transport-status contract (the
   status the CLIENT received): `observe_response` stamps a fixed 200,
   `mark_stream_http_committed` stamps 200 at the first SSE event enqueue
   (idempotent -- writes only while `http_status` is unset; its first call
@@ -7034,9 +7060,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the host guard); token-less loopback keeps the zero-auth dev path
 - `src/handlers/status/accounts.rs` -- `/status/accounts` (schema_version 1):
   each configured credential account with its account, provider entry and
-  login label, its account-meter windows under the stale rule, and its usage
-  poll state; plus vendor pauses, refusal totals, history counters and the
-  poll driver's health. Memory-only, wire types owned here.
+  login label, its account-meter windows under the stale rule (kept windows
+  flagged), and its usage poll state (`off` when the poll is switched off);
+  plus vendor pauses, refusal totals, `corrections_confirmed`, history
+  counters, the poll driver's health and the top-level `placement` object
+  (`accounts/placement.rs`). Memory-only, wire types owned here.
 - `src/handlers/status/builder_probe.rs` -- test-only observation seam inside
   `guard_panel`, letting a test count and park blocking
   panel builders (the concurrency invariant is invisible from the wire, since
@@ -7171,7 +7199,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `learned_capabilities(now)` (each resident entry with its cell resolved
   through `lane_cell::resolve_entries` -> `ResolvedEntry`),
   `account_identities()` / `account_readings(now)` (the configured accounts
-  and their account-meter readings), `usage_poll_snapshot(state)`,
+  and their account-meter readings), `placement_status(now)` (the pace rule's
+  counters and seat ranking), `usage_poll_snapshot(state)`,
   `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
   see `field_verdict_log.rs`), `lossy_repairs_by_lane()` and the
