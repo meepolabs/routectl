@@ -90,18 +90,21 @@ impl UsagePollState {
     /// A seat the schedule has not swept yet reads as never attempted with
     /// no due time. A seat in `awaiting_login` is one the poll skips until a
     /// fresh login, so its sweep state was dropped and reads the same way.
+    /// With `[usage] poll` off in `config` every seat reads as switched off
+    /// with no sweep state, as the next sweep leaves it.
     pub fn snapshot(
         &self,
         config: &Config,
         awaiting_login: &BTreeSet<String>,
     ) -> PollStateSnapshot {
         let now_ms = self.clock.now_ms();
+        let switched_off = !config.usage.poll;
         let schedule = self.schedule.lock();
         let seats = managed_seats(config)
             .into_iter()
             .filter_map(|seat| {
                 let vendor = usage_vendor(&seat.provider)?;
-                let state = schedule.seat(&seat.account);
+                let state = schedule.seat(&seat.account).filter(|_| !switched_off);
                 Some(SeatPollSnapshot {
                     vendor,
                     awaiting_login: awaiting_login.contains(&seat.account),
@@ -123,6 +126,7 @@ impl UsagePollState {
             })
             .collect();
         PollStateSnapshot {
+            switched_off,
             seats,
             paused_until_ms,
         }
@@ -132,6 +136,9 @@ impl UsagePollState {
 /// One read of the poll state, for the status surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PollStateSnapshot {
+    /// Whether `[usage] poll` is off in the config the snapshot was read
+    /// against.
+    pub switched_off: bool,
     /// One entry per polled seat, in account order.
     pub seats: Vec<SeatPollSnapshot>,
     /// Each paused vendor and when its pause ends (epoch ms).
@@ -145,7 +152,9 @@ impl PollStateSnapshot {
             .iter()
             .find(|seat| seat.account == account)
             .map_or(PollApplicability::NotPolled, |seat| {
-                if seat.awaiting_login {
+                if self.switched_off {
+                    PollApplicability::SwitchedOff(seat.vendor)
+                } else if seat.awaiting_login {
                     PollApplicability::AwaitingLogin(seat.vendor)
                 } else {
                     PollApplicability::Polled(seat.vendor)
@@ -184,6 +193,9 @@ pub enum PollApplicability {
     /// A managed login of this vendor the poll skips until a fresh login,
     /// since its token is known dead.
     AwaitingLogin(UsageVendor),
+    /// A managed login of this vendor the poll would read, with the poll
+    /// switched off by `[usage] poll = false`. Not a fault.
+    SwitchedOff(UsageVendor),
     /// Any other credential: an API key, a cloud credential, a forwarded
     /// one, or a login of a vendor with no usage endpoint.
     NotPolled,
@@ -216,18 +228,26 @@ pub struct UsagePollJob {
     client: UsagePollClient,
     usage: UsageHandle,
     state: UsagePollState,
+    /// The published router, read when a result lands to see the current
+    /// `[usage] poll` switch.
+    live_router: Arc<ArcSwap<Router>>,
 }
 
 impl UsagePollJob {
     /// The production job. Building it resolves no vendor client identity:
     /// the Codex identity headers are read per request, so they reflect
     /// whatever the provider factory installed before the first poll.
-    pub fn new(store: Arc<OAuthStore>, usage: UsageHandle) -> reqwest::Result<Self> {
+    pub fn new(
+        store: Arc<OAuthStore>,
+        usage: UsageHandle,
+        live_router: Arc<ArcSwap<Router>>,
+    ) -> reqwest::Result<Self> {
         Ok(Self::with_parts(
             store,
             UsagePollClient::new()?,
             usage,
             UsagePollState::new(RandomJitter::from_os(), Arc::new(SystemClock)),
+            live_router,
         ))
     }
 
@@ -236,12 +256,14 @@ impl UsagePollJob {
         client: UsagePollClient,
         usage: UsageHandle,
         state: UsagePollState,
+        live_router: Arc<ArcSwap<Router>>,
     ) -> Self {
         Self {
             store,
             client,
             usage,
             state,
+            live_router,
         }
     }
 
@@ -289,7 +311,16 @@ impl SeatJob for UsagePollJob {
     /// the seat due). A seat awaiting a fresh login
     /// is left out, as the refresh job leaves it out: its token is known
     /// dead, and the login that revives it starts its schedule afresh.
+    /// With `[usage] poll` off nothing is due and every seat's schedule
+    /// state is dropped (vendor pauses are kept), so a failure run or
+    /// backoff from before the switch does not carry over once it is back
+    /// on.
     fn due(&self, router: &Router) -> Vec<ManagedSeat> {
+        if !router.config.usage.poll {
+            let now_ms = self.state.clock.now_ms();
+            let _ = self.state.schedule.lock().sweep(now_ms, &[]);
+            return Vec::new();
+        }
         let readings = router.account_readings(&ObservationStamp::now());
         let dead = accounts_awaiting_login(router);
         let seats: Vec<(ManagedSeat, UsageVendor)> = managed_seats(&router.config)
@@ -357,6 +388,12 @@ impl SeatJob for UsagePollJob {
         else {
             return SeatVerdict::Quiet;
         };
+        // `router` is the one the sweep loaded before the request went out;
+        // a reload that switched the poll off since then shows only on the
+        // published one.
+        if !self.live_router.load().config.usage.poll {
+            return SeatVerdict::Quiet;
+        }
         let outcome = if self.store.reload_generation() == reload_generation {
             match result {
                 AttemptResult::TokenNotReady => PollOutcome::TokenNotReady,
@@ -396,7 +433,7 @@ pub(super) fn spawn_usage_poll_driver(
     shutdown: &watch::Receiver<()>,
     daemon_meta: &DaemonMeta,
 ) -> Option<JoinHandle<()>> {
-    let job = match UsagePollJob::new(Arc::clone(store), usage.clone()) {
+    let job = match UsagePollJob::new(Arc::clone(store), usage.clone(), Arc::clone(router_swap)) {
         Ok(job) => job,
         Err(error) => {
             tracing::error!(
@@ -530,3 +567,7 @@ mod daemon_tests;
 #[cfg(test)]
 #[path = "user_agent_tests.rs"]
 mod user_agent_tests;
+
+#[cfg(test)]
+#[path = "switch_tests.rs"]
+mod switch_tests;

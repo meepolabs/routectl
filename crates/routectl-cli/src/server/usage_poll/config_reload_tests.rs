@@ -72,18 +72,20 @@ impl ReloadRig {
             .await
             .expect("router builds");
         let clock: Arc<dyn WallClock> = Arc::new(FixedClock(super::rig::now_ms()));
+        let swap = Arc::new(ArcSwap::from_pointee(router));
         let job = UsagePollJob::with_parts(
             store,
             UsagePollClient::with_fronts_for_tests(&[]),
             routectl_usage::handle_with_closed_channel(),
             UsagePollState::new(RandomJitter::seeded(3), clock),
+            Arc::clone(&swap),
         );
         Self {
             config_path,
             usage_db,
             config,
             secrets,
-            swap: Arc::new(ArcSwap::from_pointee(router)),
+            swap,
             job,
             _dir: dir,
         }

@@ -92,6 +92,7 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         "retry.probe_max_tokens",
         "server.max_body_bytes",
         "usage.db_path",
+        "usage.poll",
         "window_gate.enabled",
     ]
     .into();
@@ -114,10 +115,10 @@ fn a_fixture_setting_half_the_keys_tags_each_set_key_file_and_each_unset_key_def
         default, expected_default,
         "default-tagged keys; lines:\n{lines:#?}"
     );
-    assert_eq!((file.len(), default.len()), (18, 11));
+    assert_eq!((file.len(), default.len()), (18, 12));
     assert_eq!(
         lines.len(),
-        29,
+        30,
         "every line is tagged file or default, once"
     );
 }

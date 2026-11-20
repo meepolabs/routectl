@@ -95,18 +95,20 @@ impl UaRig {
         let client = UsagePollClient::with_fronts_for_tests(&[(ANTHROPIC_HOST, &front)]);
         let clock = Arc::new(ManualClock::starting_at(now_ms()));
         let wall: Arc<dyn WallClock> = clock.clone();
+        let swap = Arc::new(ArcSwap::from_pointee(router));
         let job = UsagePollJob::with_parts(
             store,
             client,
             routectl_usage::handle_with_closed_channel(),
             UsagePollState::new(RandomJitter::seeded(5), wall),
+            Arc::clone(&swap),
         );
         Self {
             config_path,
             usage_db,
             config,
             secrets,
-            swap: Arc::new(ArcSwap::from_pointee(router)),
+            swap,
             clock,
             stub,
             job,

@@ -870,12 +870,17 @@
     },
     "UsageConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[usage]` config block. Controls the\nusage-accounting subsystem, which always records. Each field carries\na default, so a config with no `[usage]` block deserializes to the\nsame value as `UsageConfig::default()`.\n\nReload semantics: both keys are restart-required (the writer opens\nthe db at boot and holds the handle, and pruning runs only at\nstartup). See `collect_restart_required_changes` in the CLI server\nmodule for the classification.",
+      "description": "Operator-facing `[usage]` config block. Controls the\nusage-accounting subsystem, which always records. Each field carries\na default, so a config with no `[usage]` block deserializes to the\nsame value as `UsageConfig::default()`.\n\nReload semantics: `db_path` and `retention_days` are restart-required\n(the writer opens the db at boot and holds the handle, and pruning runs\nonly at startup); `poll` hot-reloads. See\n`collect_restart_required_changes` in the CLI server module for the\nclassification.",
       "properties": {
         "db_path": {
           "default": "~/.config/routectl/usage.db",
           "description": "SQLite database path for persisted usage rows. Defaults to\n`<config-dir>/routectl/usage.db` with the user config dir\nresolved from `XDG_CONFIG_HOME` or `HOME` -- no literal `~`\never reaches SQLite. With neither variable an absolute path the\ndefault is empty, and every command that opens the database\nrefuses it until this key is set.",
           "type": "string"
+        },
+        "poll": {
+          "default": true,
+          "description": "Whether the daemon polls each managed Claude and Codex login's usage\nendpoint in the background. Default true. With `false` no usage\npoll request is sent, and placement reads response header readings\nonly, so an idle account has no fresh reading. Hot-reloads: the\npoll reads it before each sweep and again before landing a result.",
+          "type": "boolean"
         },
         "retention_days": {
           "default": 90,
@@ -1000,6 +1005,7 @@
       "$ref": "#/$defs/UsageConfig",
       "default": {
         "db_path": "~/.config/routectl/usage.db",
+        "poll": true,
         "retention_days": 90
       },
       "description": "Operator-facing `[usage]` block. Controls the usage-accounting\nsubsystem (per-request token/cost rows persisted to a local\nSQLite db). A missing block keeps all defaults: a db under the\nuser config dir, 90-day retention."

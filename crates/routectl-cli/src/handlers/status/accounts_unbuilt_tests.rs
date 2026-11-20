@@ -51,7 +51,12 @@ impl Rig {
             .expect("a failed provider no route names does not fail the build");
         let swap = Arc::new(ArcSwap::from_pointee(router));
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let job = UsagePollJob::new(store, routectl_usage::handle_over_channel(tx)).expect("job");
+        let job = UsagePollJob::new(
+            store,
+            routectl_usage::handle_over_channel(tx),
+            Arc::clone(&swap),
+        )
+        .expect("job");
         let meta = DaemonMeta::for_test();
         assert!(meta.install_usage_poll_state(job.state()).is_ok());
         let app = AppState::for_test(Arc::clone(&swap));

@@ -277,6 +277,7 @@ impl Rig {
             client,
             self.usage.clone(),
             UsagePollState::new(RandomJitter::seeded(7), clock),
+            Arc::clone(&self.swap),
         )
     }
 

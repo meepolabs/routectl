@@ -123,6 +123,7 @@ fn readings() -> AccountReadings {
 /// awaiting a fresh login, and Codex paused.
 fn poll() -> PollStateSnapshot {
     PollStateSnapshot {
+        switched_off: false,
         seats: vec![
             SeatPollSnapshot {
                 account: "anthropic#a".to_string(),

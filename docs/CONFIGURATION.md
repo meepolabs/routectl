@@ -205,7 +205,8 @@ version = 5           # config schema version; see "Config schema version"
                       # (enabled). Optional; default off.
 
 [usage]               # usage-accounting subsystem: db_path,
-                      # retention_days. Optional.
+                      # retention_days, and the background usage
+                      # poll switch (poll). Optional.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting api.anthropic.com.
@@ -2894,12 +2895,14 @@ block keeps every default below.
 [usage]
 db_path = "/home/you/.config/routectl/usage.db"  # default resolved path
 retention_days = 90                     # prune rows older than this; default 90
+poll = true                             # background usage poll; default true
 ```
 
 | Knob             | Default                          | Reload    |
 |------------------|----------------------------------|-----------|
 | `db_path`        | `<config-dir>/routectl/usage.db` | restart   |
 | `retention_days` | `90`                             | hot       |
+| `poll`           | `true`                           | hot       |
 
 - `db_path` -- the SQLite database file. The default resolves the user
   config dir from `XDG_CONFIG_HOME` (else `$HOME/.config`), so no
@@ -2915,6 +2918,12 @@ retention_days = 90                     # prune rows older than this; default 90
 - `retention_days` -- on daemon startup, rows older than this many days
   are pruned from the database. Hot-reloads; the new value applies at
   the next startup-time prune.
+- `poll` -- whether `routectl serve` runs the
+  [background usage poll](#background-usage-poll), a boolean (`config
+  check` refuses any other value). With `false` the daemon sends no usage
+  poll request for any managed login; the token refresh is a separate job
+  and is unaffected. Hot-reloads: see the poll's section for what a switch
+  does.
 
 **Token-count requests.** Each `POST /v1/messages/count_tokens` request
 whose body parses writes one row with `operation = count_tokens`. The
@@ -5550,6 +5559,21 @@ is contacted and redirects are never followed.
 - `/status/health` shows the poll driver's health as `usage_poll_driver`, with
   the same keys as `seat_driver`; a poll failure counts as `transient` and never
   as `definitive`.
+- `[usage] poll = false` turns the poll off for every managed login: no usage
+  request is sent at all. It is a standing setting, not a fault: the poll
+  calls vendor endpoints that are not a public API, and this is how an
+  operator declines that traffic. **The trade-off:** with the poll off an
+  account gets a reading only from its own responses' headers, so an idle
+  account has no fresh reading, and placement then steers new conversations
+  toward the busy accounts whose readings are fresh. The switch hot-reloads:
+  turning it off stops polling from the next sweep, and a poll already in
+  flight when it went off is discarded when it returns, without changing the
+  reading, the history or the poll's state. Turning it off also clears each
+  seat's poll schedule (its last attempt, result and failure run; vendor
+  pauses are kept), so once it is back on each seat is polled as soon as it
+  has gone 5 minutes without an accepted reading. `/status/accounts` reports
+  each managed login as `off` meanwhile, and the poll driver keeps running
+  (`usage_poll_driver.running` stays true).
 
 #### Account readings on `/status/accounts`
 
@@ -5593,7 +5617,10 @@ always present; times are epoch ms and durations ms.
     Anthropic or Codex login the running poll reads; `awaiting_login` for
     one the router holds as revoked or not logged in, which the poll skips
     until a fresh login (its schedule state is dropped, so the fields below
-    read null until it is polled again); `not_polled` for any other
+    read null until it is polled again); `off` for a managed Anthropic or
+    Codex login while `[usage] poll = false` (a setting, not a fault; the
+    fields below read null, and it takes precedence over `awaiting_login`);
+    `not_polled` for any other
     credential or a daemon running no poll. `vendor` (`anthropic`, `codex`,
     or null for `not_polled`), `last_attempt_ms`, `last_result` (the last poll's
     outcome: `accepted`, `no_windows`, `token_not_ready`, `paused`,

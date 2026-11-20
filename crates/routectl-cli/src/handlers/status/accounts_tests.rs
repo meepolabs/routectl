@@ -83,7 +83,7 @@ fn bedrock_block() -> &'static str {
 /// One labeled Anthropic login reached through two entries (`seat-z` and
 /// `seat-b`), an unlabeled Codex login, an `env://` key, a `file://` key and
 /// an AWS cloud credential.
-fn every_kind() -> Vec<Seat> {
+pub(super) fn every_kind() -> Vec<Seat> {
     vec![
         (
             "m-z",
@@ -208,7 +208,7 @@ async fn get_json(state: &Arc<StatusState>, uri: &str) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-async fn read_accounts(state: &Arc<StatusState>) -> Value {
+pub(super) async fn read_accounts(state: &Arc<StatusState>) -> Value {
     let json = get_json(state, "/status/accounts").await;
     assert!(json["unavailable"].is_null(), "{json}");
     json
@@ -218,7 +218,7 @@ fn rows(json: &Value) -> &Vec<Value> {
     json["data"]["accounts"].as_array().expect("accounts array")
 }
 
-fn row<'a>(json: &'a Value, account: &str) -> &'a Value {
+pub(super) fn row<'a>(json: &'a Value, account: &str) -> &'a Value {
     rows(json)
         .iter()
         .find(|row| row["account"] == account)
@@ -563,6 +563,7 @@ fn poll_state_maps_per_account_and_vendor_pauses_are_listed() {
     let identities = AccountIdentities::from_config(&router.config);
     let readings = router.account_readings(&routectl_router::ObservationStamp::now());
     let poll = PollStateSnapshot {
+        switched_off: false,
         seats: vec![SeatPollSnapshot {
             account: "anthropic#work".into(),
             vendor: UsageVendor::Anthropic,
@@ -683,13 +684,16 @@ async fn a_running_poll_marks_its_managed_logins_polled() {
     }
     let store = Arc::new(OAuthStore::open(&creds).await.expect("open the store"));
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let job = UsagePollJob::new(store, routectl_usage::handle_over_channel(tx)).expect("job");
+    let swap = Arc::new(ArcSwap::from_pointee(router_of(&every_kind())));
+    let job = UsagePollJob::new(
+        store,
+        routectl_usage::handle_over_channel(tx),
+        Arc::clone(&swap),
+    )
+    .expect("job");
     let meta = DaemonMeta::for_test();
     assert!(meta.install_usage_poll_state(job.state()).is_ok());
-    let state = state_over(
-        Arc::new(ArcSwap::from_pointee(router_of(&every_kind()))),
-        meta,
-    );
+    let state = state_over(swap, meta);
 
     // Act
     let json = read_accounts(&state).await;
@@ -709,7 +713,7 @@ async fn a_running_poll_marks_its_managed_logins_polled() {
     }
 }
 
-async fn state_with_running_poll(swap: Arc<ArcSwap<Router>>) -> Arc<StatusState> {
+pub(super) async fn state_with_running_poll(swap: Arc<ArcSwap<Router>>) -> Arc<StatusState> {
     let dir = tempfile::tempdir().expect("tempdir");
     let creds = dir.path().join("credentials.json");
     std::fs::write(&creds, br#"{"schema_version": 1, "providers": {}}"#).expect("write");
@@ -720,7 +724,12 @@ async fn state_with_running_poll(swap: Arc<ArcSwap<Router>>) -> Arc<StatusState>
     }
     let store = Arc::new(OAuthStore::open(&creds).await.expect("open the store"));
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let job = UsagePollJob::new(store, routectl_usage::handle_over_channel(tx)).expect("job");
+    let job = UsagePollJob::new(
+        store,
+        routectl_usage::handle_over_channel(tx),
+        Arc::clone(&swap),
+    )
+    .expect("job");
     let meta = DaemonMeta::for_test();
     assert!(meta.install_usage_poll_state(job.state()).is_ok());
     state_over(swap, meta)

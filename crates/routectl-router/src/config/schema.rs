@@ -322,10 +322,11 @@ const _: () = assert!(
 /// a default, so a config with no `[usage]` block deserializes to the
 /// same value as `UsageConfig::default()`.
 ///
-/// Reload semantics: both keys are restart-required (the writer opens
-/// the db at boot and holds the handle, and pruning runs only at
-/// startup). See `collect_restart_required_changes` in the CLI server
-/// module for the classification.
+/// Reload semantics: `db_path` and `retention_days` are restart-required
+/// (the writer opens the db at boot and holds the handle, and pruning runs
+/// only at startup); `poll` hot-reloads. See
+/// `collect_restart_required_changes` in the CLI server module for the
+/// classification.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UsageConfig {
@@ -341,6 +342,13 @@ pub struct UsageConfig {
     /// Default 90.
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
+    /// Whether the daemon polls each managed Claude and Codex login's usage
+    /// endpoint in the background. Default true. With `false` no usage
+    /// poll request is sent, and placement reads response header readings
+    /// only, so an idle account has no fresh reading. Hot-reloads: the
+    /// poll reads it before each sweep and again before landing a result.
+    #[serde(default = "default_true")]
+    pub poll: bool,
 }
 
 impl Default for UsageConfig {
@@ -348,6 +356,7 @@ impl Default for UsageConfig {
         Self {
             db_path: default_usage_db_path(),
             retention_days: default_retention_days(),
+            poll: true,
         }
     }
 }

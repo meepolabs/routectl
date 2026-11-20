@@ -676,8 +676,12 @@ async fn the_production_job_runs_on_the_system_wall_clock() {
     let rig = Rig::new().await;
 
     // Act
-    let job = UsagePollJob::new(Arc::clone(&rig.store), rig.usage_handle())
-        .expect("the production job builds");
+    let job = UsagePollJob::new(
+        Arc::clone(&rig.store),
+        rig.usage_handle(),
+        Arc::clone(&rig.swap),
+    )
+    .expect("the production job builds");
     let read = job.state().clock.now_ms();
 
     // Assert

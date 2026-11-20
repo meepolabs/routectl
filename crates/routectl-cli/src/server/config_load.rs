@@ -212,3 +212,7 @@ mod config_load_reload_warn_tests;
 #[cfg(test)]
 #[path = "config_load_preflight_tests.rs"]
 mod config_load_preflight_tests;
+
+#[cfg(test)]
+#[path = "config_load_usage_poll_tests.rs"]
+mod config_load_usage_poll_tests;

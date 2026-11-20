@@ -1,7 +1,7 @@
 //! Pin the `seat_selection` pool knob: a default, each explicit value, and a
 //! rejected unknown value. The field lives on the `pools.<name>` block, not
 //! on a provider entry.
-use crate::config::{Config, PoolEntry, SeatSelection};
+use crate::config::{Config, PoolEntry, SeatSelection, UsageConfig};
 
 fn pool_of<'a>(cfg: &'a Config, name: &str) -> &'a PoolEntry {
     cfg.pools.get(name).expect("pool")
@@ -180,6 +180,8 @@ host = "127.0.0.1"
 
     // Assert
     assert_eq!(cfg.usage.retention_days, 90);
+    assert!(cfg.usage.poll, "the usage poll defaults on");
+    assert_eq!(cfg.usage, UsageConfig::default());
     let db = cfg.usage.db_path.to_string_lossy();
     assert!(
         db.ends_with("routectl/usage.db"),
@@ -199,6 +201,7 @@ fn usage_block_explicit_overrides_defaults() {
 [usage]
 db_path = "/var/lib/routectl/usage.db"
 retention_days = 7
+poll = false
 "#;
     // Act
     let cfg: Config = toml::from_str(toml_text).expect("parse explicit usage block");
@@ -209,6 +212,7 @@ retention_days = 7
         std::path::PathBuf::from("/var/lib/routectl/usage.db")
     );
     assert_eq!(cfg.usage.retention_days, 7);
+    assert!(!cfg.usage.poll);
 }
 
 /// `deny_unknown_fields` rejects a typo'd key inside `[usage]`.

@@ -114,11 +114,12 @@ struct LastAcceptedRow {
 #[derive(Debug, Clone, Copy, Serialize)]
 struct PollRow {
     /// `polled` for a managed login the running poll reads,
-    /// `awaiting_login` for one it skips until a fresh login, else
-    /// `not_polled` (an API-key or cloud credential, a login of a vendor
-    /// with no usage endpoint, or a daemon running no poll).
+    /// `awaiting_login` for one it skips until a fresh login, `off` for one
+    /// it would read with `[usage] poll = false`, else `not_polled` (an
+    /// API-key or cloud credential, a login of a vendor with no usage
+    /// endpoint, or a daemon running no poll).
     applicability: &'static str,
-    /// `anthropic` or `codex` when polled or awaiting a login.
+    /// `anthropic` or `codex` when polled, awaiting a login or off.
     vendor: Option<&'static str>,
     last_attempt_ms: Option<i64>,
     /// The last poll's outcome token.
@@ -264,9 +265,9 @@ fn map_poll(poll: Option<&PollStateSnapshot>, account: &str) -> PollRow {
         snapshot.applicability(account)
     });
     let vendor = match applicability {
-        PollApplicability::Polled(vendor) | PollApplicability::AwaitingLogin(vendor) => {
-            Some(vendor)
-        }
+        PollApplicability::Polled(vendor)
+        | PollApplicability::AwaitingLogin(vendor)
+        | PollApplicability::SwitchedOff(vendor) => Some(vendor),
         PollApplicability::NotPolled => None,
     };
     let seat = poll.and_then(|snapshot| snapshot.seats.iter().find(|seat| seat.account == account));
@@ -284,6 +285,7 @@ const fn applicability_token(applicability: PollApplicability) -> &'static str {
     match applicability {
         PollApplicability::Polled(_) => "polled",
         PollApplicability::AwaitingLogin(_) => "awaiting_login",
+        PollApplicability::SwitchedOff(_) => "off",
         PollApplicability::NotPolled => "not_polled",
     }
 }
@@ -411,3 +413,7 @@ pub(super) mod tests;
 #[cfg(test)]
 #[path = "accounts_unbuilt_tests.rs"]
 mod unbuilt_tests;
+
+#[cfg(test)]
+#[path = "accounts_poll_off_tests.rs"]
+mod poll_off_tests;

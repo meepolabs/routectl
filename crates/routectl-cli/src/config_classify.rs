@@ -48,10 +48,12 @@ pub const HOT_RELOADABLE_SECTIONS: &[&str] = &[
 /// fields whose change requires a daemon restart to take effect. Per the
 /// architect-validated classification: bind, listener auth and the
 /// `DefaultBodyLimit` axum layer all stay restart-required.
-/// `usage.db_path` (the writer holds a handle opened at boot) and
-/// `usage.retention_days` (pruning runs only at startup, so a changed
-/// value takes effect only on the next daemon start) are
-/// restart-required too. A `[mitm]` edit
+/// The `[usage]` section is mixed: `usage.db_path` (the writer holds a
+/// handle opened at boot) and `usage.retention_days` (pruning runs only at
+/// startup, so a changed value takes effect only on the next daemon start)
+/// are restart-required, while `usage.poll` is hot (the usage poll reads it
+/// from the published router before each sweep and before landing each
+/// result), so it is deliberately not listed here. A `[mitm]` edit
 /// is restart-required because the front-proxy listener is spawned once at
 /// boot.
 pub fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'static str> {
@@ -282,6 +284,17 @@ mod tests {
         assert!(
             changes.contains(&"usage.retention_days"),
             "retention_days must be restart-required; got {changes:?}"
+        );
+
+        // usage.poll change -> hot, never restart-required: the switch must
+        // take effect without a restart.
+        prev = Config::default();
+        next = prev.clone();
+        next.usage.poll = false;
+        let changes = collect_restart_required_changes(&prev, &next);
+        assert!(
+            changes.is_empty(),
+            "usage.poll must hot-reload; got {changes:?}"
         );
 
         // [mitm] edit -> restart-required (the MITM listener is
