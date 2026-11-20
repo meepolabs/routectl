@@ -1872,6 +1872,43 @@ expansions that found at least one seat not dispatchable, and
 `rc_pool_unavailable_total` the subset that found none (plus any expansion
 of a pooled model with no seats at all, which no current build produces).
 
+## Pace placement counters and the ledger record
+
+A placement is a seat pick the pace rule made and won on a
+`sticky-least-loaded` pool: a new conversation's birth whose pin claim won, a
+move off a seat with a lasting outage whose repin won, or a request with no
+session key led by the best-standing seat. A conversation staying on its seat,
+a request of a conversation whose concurrent sibling wrote the pin first, a
+pool none of whose seats the usage meter can read, and a keyless request that
+walks the fill-first order because no eligible seat has a fresh reading make
+no placement.
+
+The router metrics snapshot (DEBUG, target `routectl_router::router::metrics`)
+carries running totals since the daemon started (a hot reload keeps them):
+
+| Field | Counts |
+|---|---|
+| `rc_placement_births_roomy` | Births and keyless placements on a seat of tier `roomy`. |
+| `rc_placement_births_low_room` | The same, on a `low_room` seat. |
+| `rc_placement_births_unread` | The same, on an `unread` seat (no fresh reading, as after a restart). |
+| `rc_placement_moves_credential_unusable` | Moves off a seat whose credential is unusable. |
+| `rc_placement_moves_account_parked` | Moves off a seat whose account is parked for at least 5 minutes. |
+| `rc_placement_moves_breaker_open` | Moves off a seat whose breaker is open for at least 5 minutes. |
+| `rc_placement_cap_forced_moves` | The `breaker_open` moves whose old seat stood `low_room` at the move: an outage that likely came from the account reaching its cap. |
+
+Each placement also lands in its request's usage row as `extra.placement`
+(no schema column), on the row whichever seat of the pool served:
+`{"rule": "pace_v1", "event": "birth" | "move" | "keyless", "arm": "roomy" |
+"low_room" | "unread", "seat": "<account key>", "trigger": "<reason>"}`.
+`arm` is the tier of the seat the request was placed on (for a move, the seat
+it moved to); `seat` is that seat's account key, the same value as the
+`requests.seat` column uses; `trigger` is present on a move only and is
+`credential_unusable`, `account_parked` or `breaker_open`. The record holds
+nothing else: no credential, header, session key or request content. Treat
+an unknown token as unknown. A row with no placement has no `placement` key.
+For example, `SELECT json_extract(extra, '$.placement.arm'), count(*) FROM
+requests WHERE json_extract(extra, '$.placement.event') = 'birth' GROUP BY 1`.
+
 ## Background usage poll lines
 
 The background usage poll (see [CONFIGURATION.md](CONFIGURATION.md#background-usage-poll))

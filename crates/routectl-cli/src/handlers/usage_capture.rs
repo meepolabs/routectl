@@ -525,6 +525,9 @@ impl UsageCapture {
                 "usage row disambiguated as forwarded-credential dispatch",
             );
         }
+        if let Some(placement) = &meta.placement {
+            self.stamp_extra_value("placement", placement.to_value());
+        }
         self.cache_strategy = meta.cache_strategy;
         self.record.would_trim_tokens = meta.would_trim_tokens;
         self.record.would_trim_break_even_k = meta.would_trim_break_even_k;

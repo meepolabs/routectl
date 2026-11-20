@@ -22,20 +22,20 @@ use crate::quota::usage_body::UsageVendor;
 use crate::runtime_state::UnusableCause;
 use crate::seat_pool::{SeatPin, SeatTarget};
 
-const POOL: &str = "move-pool";
-const OPUS: &str = "claude-opus-4-7";
-const SESSION: &str = "S";
+pub(super) const POOL: &str = "move-pool";
+pub(super) const OPUS: &str = "claude-opus-4-7";
+pub(super) const SESSION: &str = "S";
 /// The pool's members with the seat label each one's login carries; the
 /// first is the family's default seat.
-const MEMBERS: [(&str, Option<&str>); 3] = [
+pub(super) const MEMBERS: [(&str, Option<&str>); 3] = [
     ("seat-a", None),
     ("seat-b", Some("seat-b")),
     ("seat-c", Some("seat-c")),
 ];
-const LONG: Duration = Duration::from_mins(10);
+pub(super) const LONG: Duration = Duration::from_mins(10);
 
-struct SeatStub {
-    id: String,
+pub(super) struct SeatStub {
+    pub(super) id: String,
 }
 
 #[async_trait]
@@ -57,7 +57,7 @@ impl Provider for SeatStub {
     }
 }
 
-fn secret_ref(member: &str) -> routectl_auth::SecretRef {
+pub(super) fn secret_ref(member: &str) -> routectl_auth::SecretRef {
     let label = MEMBERS
         .iter()
         .find(|(name, _)| *name == member)
@@ -71,7 +71,7 @@ fn secret_ref(member: &str) -> routectl_auth::SecretRef {
 
 /// A sticky three-seat Anthropic login pool serving model `m` on upstream
 /// [`OPUS`], each seat limited to `rpm_limit` requests a minute.
-fn pool_router(rpm_limit: Option<u32>) -> Router {
+pub(super) fn pool_router(rpm_limit: Option<u32>) -> Router {
     let mut seats: Vec<SeatTarget> = Vec::new();
     let mut providers = BTreeMap::new();
     for (member, _) in MEMBERS {
@@ -111,7 +111,7 @@ fn pool_router(rpm_limit: Option<u32>) -> Router {
     router
 }
 
-fn state_key(member: &str) -> String {
+pub(super) fn state_key(member: &str) -> String {
     format!("m#{member}")
 }
 
@@ -120,7 +120,7 @@ fn slot(router: &Router, member: &str) -> Arc<Mutex<ProviderState>> {
 }
 
 /// Poll `member` at `percent` of a five-hour window with 2.5 hours to run.
-fn poll(router: &Router, member: &str, percent: u32) {
+pub(super) fn poll(router: &Router, member: &str, percent: u32) {
     let reset = time::OffsetDateTime::now_utc() + Duration::from_mins(150);
     let body = format!(
         r#"{{"five_hour": {{"utilization": {percent}, "resets_at": "{}"}}, "seven_day": null}}"#,
@@ -141,11 +141,11 @@ fn poll(router: &Router, member: &str, percent: u32) {
         .expect("the poll is accepted");
 }
 
-fn pin_key(session: &str) -> String {
+pub(super) fn pin_key(session: &str) -> String {
     super::chain::sticky_pin_key(session, POOL)
 }
 
-fn pin_to(router: &Router, session: &str, member: &str) {
+pub(super) fn pin_to(router: &Router, session: &str, member: &str) {
     router.sticky_pins.put(
         &pin_key(session),
         SeatPin {
@@ -167,7 +167,7 @@ fn place(router: &Router, session: &str) -> (Vec<String>, PinWrite) {
         .seats
         .clone()
         .expect("a pooled model");
-    let (order, write) = router.sticky_seat_placement(&seats, &pin_key(session), "m", OPUS);
+    let (order, write, _) = router.sticky_seat_placement(&seats, &pin_key(session), "m", OPUS);
     let members = order
         .into_iter()
         .map(|i| seats[i].provider_name.clone())
@@ -191,14 +191,14 @@ fn walk(router: &Router, session: &str) -> Vec<String> {
         .collect()
 }
 
-fn index_of(member: &str) -> usize {
+pub(super) fn index_of(member: &str) -> usize {
     MEMBERS
         .iter()
         .position(|(name, _)| *name == member)
         .expect("a declared member")
 }
 
-fn open_baseline(router: &Router, member: &str) {
+pub(super) fn open_baseline(router: &Router, member: &str) {
     let slot = slot(router, member);
     let mut slot = slot.lock();
     let now = Instant::now();
@@ -480,11 +480,11 @@ fn a_restart_forgets_the_moved_pin_and_births_unread() {
 
 // ---- concurrent turns on one conversation ----
 
-const TURNS: usize = 16;
+pub(super) const TURNS: usize = 16;
 const ROUNDS: usize = 40;
 
 /// Run `TURNS` concurrent selections for `session`, released together.
-fn concurrent_turns(router: &Router, session: &str) -> Vec<(Vec<String>, PinWrite)> {
+pub(super) fn concurrent_turns(router: &Router, session: &str) -> Vec<(Vec<String>, PinWrite)> {
     let barrier = Barrier::new(TURNS);
     std::thread::scope(|scope| {
         let turns: Vec<_> = (0..TURNS)

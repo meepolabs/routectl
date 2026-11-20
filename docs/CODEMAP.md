@@ -4310,6 +4310,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`,
   `claim_state_slot`, `state_slot_refusal`; the per-slot tuning stamp
   (`stamp_tuning` / `tuning_for`) every dispatch deadline reads
+- `src/router/placement_record.rs` -- the pace placement record and its
+  counters: `PlacementRecord` (`to_value` renders the `extra.placement`
+  JSON: `rule` `pace_v1`, `event`, `arm`, `seat`, `trigger` on a move),
+  `PlacementEvent`, `PLACEMENT_RULE`, and the router-instance
+  `PlacementCounters` (births by arm, moves by trigger, cap-forced moves)
 - `src/router/sticky.rs` -- sticky seat ordering + capacity snapshots:
   `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
   `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH

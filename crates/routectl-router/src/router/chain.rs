@@ -350,7 +350,7 @@ impl Router {
         // case (FillFirst, or single-seat StickyLeastLoaded) walks the fixed
         // fill-first order, minting no pin and reading no usage, since it
         // makes no pick at all.
-        let order: Vec<usize> = match (selection, session_key) {
+        let (order, placement) = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
                 let pin_key = sticky_pin_key(key, m.rotation_key());
                 self.sticky_seat_order(seats, &pin_key, &m.nickname, &m.upstream)
@@ -362,8 +362,9 @@ impl Router {
             (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => {
                 self.keyless_seat_order(seats, m)
             }
-            _ => crate::seat_pool::fill_first_order(seats.len()),
+            _ => (crate::seat_pool::fill_first_order(seats.len()), None),
         };
+        let placement = placement.map(Arc::new);
         for idx in order {
             let seat = &seats[idx];
             // Resolved per SEAT, not once per model: pool members are
@@ -375,7 +376,9 @@ impl Router {
                 .providers
                 .get(&seat.provider_name)
                 .map(crate::config::ProviderEntry::kind_str);
-            out.push(dispatch_target_for_seat(m, seat, provider_kind));
+            let mut target = dispatch_target_for_seat(m, seat, provider_kind);
+            target.placement.clone_from(&placement);
+            out.push(target);
         }
     }
 
@@ -591,6 +594,7 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         max_output_tokens: m.max_output_tokens,
+        placement: None,
         model: m,
     }
 }
@@ -650,6 +654,7 @@ pub(super) fn dispatch_target_for_seat(
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         max_output_tokens: m.max_output_tokens,
+        placement: None,
         model: m.clone(),
     }
 }

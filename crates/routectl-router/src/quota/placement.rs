@@ -47,6 +47,18 @@ pub enum Tier {
     Roomy,
 }
 
+impl Tier {
+    /// The stable snake_case token for this tier, as the placement record
+    /// and the counters name it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unread => "unread",
+            Self::LowRoom => "low_room",
+            Self::Roomy => "roomy",
+        }
+    }
+}
+
 /// Why a seat stands where it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {

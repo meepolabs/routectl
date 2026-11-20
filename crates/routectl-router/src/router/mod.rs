@@ -55,6 +55,7 @@ mod local_refusal;
 mod opening_lookup;
 mod outcome_rule;
 mod overlays;
+mod placement_record;
 mod precontent;
 mod prefix_rewrite;
 mod probe_clear_ack;
@@ -116,6 +117,7 @@ use opening_lookup::wire_upstream;
 pub use outcome_rule::class_debits;
 pub(crate) use overlays::is_auth_reserved;
 pub use overlays::{merge_header_extras, merge_payload_extras};
+pub use placement_record::{PLACEMENT_RULE, PlacementEvent, PlacementRecord};
 pub use probe_clear_ack::ProbeClearAcknowledgement;
 pub use probe_pass::ProbePassSummary;
 use routectl_core::capability::FailurePhase;
@@ -728,6 +730,9 @@ struct RouterMetrics {
     repair_budget_exhausted: field_verdict_observability::LaneTally,
     /// Finished requests by the number of repairs each drew.
     repairs_per_request: field_verdict_observability::RepairDrawHistogram,
+    /// Won pace-rule placements: births (keyless included) by arm, moves by
+    /// trigger, and the moves an open breaker forced off a `low_room` home.
+    placement: placement_record::PlacementCounters,
 }
 
 /// Running pool totals, read once per snapshot line so the emitted fields
@@ -1098,6 +1103,7 @@ impl RouterMetrics {
         seats: &status::PoolSeatTotals,
     ) {
         let pool = self.pool_totals();
+        let placement = self.placement.totals();
         #[cfg(feature = "bedrock")]
         tracing::debug!(
             target: "routectl_router::router::metrics",
@@ -1135,6 +1141,13 @@ impl RouterMetrics {
             rc_pool_seats_account_parked = seats.account_parked,
             rc_pool_seats_breaker_open = seats.breaker_open,
             rc_pool_seats_rate_limited = seats.rate_limited,
+            rc_placement_births_roomy = placement.births_of(crate::quota::placement::Tier::Roomy),
+            rc_placement_births_low_room = placement.births_of(crate::quota::placement::Tier::LowRoom),
+            rc_placement_births_unread = placement.births_of(crate::quota::placement::Tier::Unread),
+            rc_placement_moves_credential_unusable = placement.moves_of(routectl_core::EligibilityReason::CredentialUnusable),
+            rc_placement_moves_account_parked = placement.moves_of(routectl_core::EligibilityReason::AccountParked),
+            rc_placement_moves_breaker_open = placement.moves_of(routectl_core::EligibilityReason::BreakerOpen),
+            rc_placement_cap_forced_moves = placement.cap_forced_moves,
             rc_bedrock_validation_unmatched_total = self.bedrock_validation_unmatched_total(),
             rc_translation_drop_counts = ?routectl_providers::translation_drop_metrics::translation_drop_snapshot(),
             rc_translation_policy_action_counts = ?routectl_providers::translation_drop_metrics::translation_policy_action_snapshot(),
@@ -1181,6 +1194,13 @@ impl RouterMetrics {
             rc_pool_seats_account_parked = seats.account_parked,
             rc_pool_seats_breaker_open = seats.breaker_open,
             rc_pool_seats_rate_limited = seats.rate_limited,
+            rc_placement_births_roomy = placement.births_of(crate::quota::placement::Tier::Roomy),
+            rc_placement_births_low_room = placement.births_of(crate::quota::placement::Tier::LowRoom),
+            rc_placement_births_unread = placement.births_of(crate::quota::placement::Tier::Unread),
+            rc_placement_moves_credential_unusable = placement.moves_of(routectl_core::EligibilityReason::CredentialUnusable),
+            rc_placement_moves_account_parked = placement.moves_of(routectl_core::EligibilityReason::AccountParked),
+            rc_placement_moves_breaker_open = placement.moves_of(routectl_core::EligibilityReason::BreakerOpen),
+            rc_placement_cap_forced_moves = placement.cap_forced_moves,
             rc_translation_drop_counts = ?routectl_providers::translation_drop_metrics::translation_drop_snapshot(),
             rc_translation_policy_action_counts = ?routectl_providers::translation_drop_metrics::translation_policy_action_snapshot(),
             rc_wire_loss_total = ?wire_check.loss,
@@ -1532,6 +1552,11 @@ pub struct DispatchMeta {
     /// forwarded credential, no provider kind). Clones of this meta share the
     /// carrier's single scope, so it settles at most once.
     pub stream_evidence: Option<StreamEvidence>,
+    /// The pace-rule placement the served / terminal target's pool made for
+    /// this request, copied from that target. `None` when the target's pool
+    /// made none (a warm stay, a turn that lost its pin write, a dormant
+    /// pool, a fill-first walk) and for a target outside any pool.
+    pub placement: Option<PlacementRecord>,
 }
 
 /// Closed-set facts about one canonical pre-flight planning decision,
@@ -1754,6 +1779,7 @@ impl DispatchMeta {
             wire_reverts: Vec::new(),
             response_check: None,
             stream_evidence: None,
+            placement: None,
         }
     }
 
@@ -1794,6 +1820,7 @@ impl DispatchMeta {
         } else {
             target.seat.clone()
         };
+        self.placement = target.placement.as_deref().cloned();
         ServedIdentity {
             alias: Some(self.resolved_alias.clone()),
             model: self.served_model.clone(),
@@ -1951,6 +1978,9 @@ struct DispatchTarget {
     /// `ResolvedModel.max_output_tokens`. Zero means none configured: an
     /// egress that sends the field then selects its own baseline.
     max_output_tokens: u32,
+    /// The pace-rule placement this target's pool made for the request,
+    /// shared by every target of that pool; `None` when it made none.
+    placement: Option<Arc<PlacementRecord>>,
 }
 
 impl DispatchTarget {
@@ -3505,6 +3535,10 @@ mod pace_placement_dispatch_tests;
 #[cfg(test)]
 #[path = "replacement_dispatch_tests.rs"]
 mod replacement_dispatch_tests;
+
+#[cfg(test)]
+#[path = "placement_dispatch_tests.rs"]
+mod placement_dispatch_tests;
 
 #[cfg(all(test, feature = "openai-responses"))]
 #[path = "codex_reading_dispatch_tests.rs"]

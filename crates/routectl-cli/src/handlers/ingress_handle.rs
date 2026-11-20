@@ -1868,6 +1868,10 @@ mod opening_e2e_tests;
 mod opening_anchor_e2e_tests;
 
 #[cfg(test)]
+#[path = "placement_ledger_e2e_tests.rs"]
+mod placement_ledger_e2e_tests;
+
+#[cfg(test)]
 #[path = "opening_ledger_rig_tests.rs"]
 mod opening_ledger_rig;
 

@@ -192,9 +192,10 @@ pub use router::{
     CanaryPosture, CapabilityPersistenceHealth, DispatchMeta, Dispatched, DispatchedStream,
     FidelitySnapshot, FieldPreflight, FieldPreflightAuthorizationRecord, FieldRepairCounters,
     FieldVerdictStatus, LaneBudgetExhaustions, LaneLossyRepairs, LearnedFills,
-    LearnedLaneProjection, LiveSampleSink, OpeningLane, PolledUsageRejection, PoolEligibility,
-    PreflightBlockedReason, ProbeClearAcknowledgement, ResolvedLearnedLane, ResponseCheck, Router,
-    RouterOptions, StreamEvidence, acting_field_verdicts, class_debits,
+    LearnedLaneProjection, LiveSampleSink, OpeningLane, PLACEMENT_RULE, PlacementEvent,
+    PlacementRecord, PolledUsageRejection, PoolEligibility, PreflightBlockedReason,
+    ProbeClearAcknowledgement, ResolvedLearnedLane, ResponseCheck, Router, RouterOptions,
+    StreamEvidence, acting_field_verdicts, class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

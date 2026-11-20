@@ -2,9 +2,10 @@
 
 use std::time::Instant;
 
-use crate::quota::placement::Standing;
+use crate::quota::placement::{Standing, Tier};
 
 use super::Router;
+use super::placement_record::{PlacementEvent, PlacementRecord};
 
 impl Router {
     /// Non-mutating read of the capacity gate for the seat / model keyed by
@@ -59,42 +60,57 @@ impl Router {
             .collect()
     }
 
-    /// The walk order for a KEYLESS request on a multi-seat sticky pool.
+    /// The walk order for a KEYLESS request on a multi-seat sticky pool, and
+    /// the placement record when the pace rule chose its lead seat.
     ///
     /// No session key means no pin to read and none to write, so this makes a
     /// placement and not a sticky decision. It places exactly as a birth does,
     /// since a keyless request has no warm cache to protect. A dormant pool,
-    /// or one with nothing dispatchable, keeps the unchanged fill-first walk.
+    /// or one with nothing dispatchable or no eligible seat freshly read,
+    /// keeps the unchanged fill-first walk and records nothing: that walk is
+    /// not a pick of the rule.
     pub(super) fn keyless_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         model: &crate::resolved::ResolvedModel,
-    ) -> Vec<usize> {
+    ) -> (Vec<usize>, Option<PlacementRecord>) {
         let standings = self.birth_standings(seats, &model.upstream);
-        let ordered = if standings.is_empty() {
-            None
-        } else {
-            let snapshots = self.gather_capacity_snapshots(seats, &model.nickname, Instant::now());
-            crate::seat_pool::keyless_quota_order(
-                seats.len(),
-                &snapshots,
-                &standings,
-                self.sticky_pins.next_tiebreak(),
-            )
-        };
-        ordered.unwrap_or_else(|| crate::seat_pool::fill_first_order(seats.len()))
+        if standings.is_empty() {
+            return (crate::seat_pool::fill_first_order(seats.len()), None);
+        }
+        let snapshots = self.gather_capacity_snapshots(seats, &model.nickname, Instant::now());
+        match crate::seat_pool::keyless_quota_order(
+            seats.len(),
+            &snapshots,
+            &standings,
+            self.sticky_pins.next_tiebreak(),
+        ) {
+            Some(order) => {
+                let record = self.record_placement(
+                    seats,
+                    &standings,
+                    order[0],
+                    PlacementEvent::Keyless,
+                    None,
+                );
+                (order, record)
+            }
+            None => (crate::seat_pool::fill_first_order(seats.len()), None),
+        }
     }
 
     /// Resolve the sticky least-loaded seat walk order for `key` over a
-    /// multi-seat pool. See [`Self::sticky_seat_placement`].
+    /// multi-seat pool, and the placement record when this turn won a birth
+    /// or a move the pace rule ranked. See [`Self::sticky_seat_placement`].
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         key: &str,
         nickname: &str,
         upstream: &str,
-    ) -> Vec<usize> {
-        self.sticky_seat_placement(seats, key, nickname, upstream).0
+    ) -> (Vec<usize>, Option<PlacementRecord>) {
+        let (order, _, record) = self.sticky_seat_placement(seats, key, nickname, upstream);
+        (order, record)
     }
 
     /// The sticky least-loaded walk order for `key`, and which pin write, if
@@ -113,13 +129,17 @@ impl Router {
     /// a home with a lasting outage. A serving pin never reads usage, so no
     /// reading can move a warm conversation and a recovered seat never pulls
     /// one back.
+    ///
+    /// Only a won birth or move on a pool with standings yields a placement
+    /// record and bumps the placement counters; a stay, a loser and a dormant
+    /// pool yield neither.
     pub(super) fn sticky_seat_placement(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         key: &str,
         nickname: &str,
         upstream: &str,
-    ) -> (Vec<usize>, PinWrite) {
+    ) -> (Vec<usize>, PinWrite, Option<PlacementRecord>) {
         // A pinned member no longer present in this pool resolves to None
         // and is treated as a miss; the birth then replaces that pin.
         let held = self.sticky_pins.get(key);
@@ -150,12 +170,58 @@ impl Router {
         );
         let expected = held.as_ref().map(|p| p.member.as_str());
         let write = self.apply_sticky_outcome(key, nickname, seats, outcome, expected);
-        match write {
-            PinWrite::Adopted { home: Some(home) } => {
-                (crate::seat_pool::order_home_first(home, seats.len()), write)
+        let record = match write {
+            PinWrite::Born { home } => {
+                self.record_placement(seats, &standings, home, PlacementEvent::Birth, None)
             }
-            _ => (order, write),
+            PinWrite::Moved { home, trigger } => {
+                let cap_forced = trigger == routectl_core::EligibilityReason::BreakerOpen
+                    && pin.and_then(|old| standings.get(old)).map(|s| s.tier)
+                        == Some(Tier::LowRoom);
+                self.record_placement(
+                    seats,
+                    &standings,
+                    home,
+                    PlacementEvent::Move,
+                    Some((trigger, cap_forced)),
+                )
+            }
+            PinWrite::None | PinWrite::Adopted { .. } => None,
+        };
+        match write {
+            PinWrite::Adopted { home: Some(home) } => (
+                crate::seat_pool::order_home_first(home, seats.len()),
+                write,
+                record,
+            ),
+            _ => (order, write, record),
         }
+    }
+
+    /// The record of a won placement on seat `home`, counted once here, or
+    /// `None` (and nothing counted) for a dormant pool, whose `standings`
+    /// are empty. `moved` is a move's trigger and whether its home stood
+    /// `low_room` behind an open breaker.
+    fn record_placement(
+        &self,
+        seats: &[crate::seat_pool::SeatTarget],
+        standings: &[Standing],
+        home: usize,
+        event: PlacementEvent,
+        moved: Option<(routectl_core::EligibilityReason, bool)>,
+    ) -> Option<PlacementRecord> {
+        let arm = standings.get(home)?.tier;
+        let seat = seats.get(home)?.account()?;
+        match moved {
+            Some((trigger, cap_forced)) => self.metrics.placement.incr_move(trigger, cap_forced),
+            None => self.metrics.placement.incr_birth(arm),
+        }
+        Some(PlacementRecord::new(
+            event,
+            arm,
+            seat,
+            moved.map(|(trigger, _)| trigger),
+        ))
     }
 
     /// Gather the per-seat capacity snapshots for sticky least-loaded
