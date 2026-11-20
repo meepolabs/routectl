@@ -28,6 +28,11 @@ enum Next {
 /// Store a running five-hour poll window at 0.90 resetting at `reset_min`,
 /// observed at minute 0.
 fn seeded(clock: &Clock, reset_min: u64) -> QuotaStore {
+    seeded_on(clock, None, reset_min)
+}
+
+/// [`seeded`], on the five-hour window of `scope`.
+fn seeded_on(clock: &Clock, scope: Option<&str>, reset_min: u64) -> QuotaStore {
     let store = store();
     let t0 = clock.at(mins(0));
     store
@@ -36,7 +41,7 @@ fn seeded(clock: &Clock, reset_min: u64) -> QuotaStore {
             &partial(
                 ReadingSource::Poll,
                 t0,
-                vec![running(key(FIVE_HOURS, None), 0.90, mins(reset_min), &t0)],
+                vec![running(key(FIVE_HOURS, scope), 0.90, mins(reset_min), &t0)],
             ),
         )
         .expect("the seed is accepted");
@@ -44,7 +49,17 @@ fn seeded(clock: &Clock, reset_min: u64) -> QuotaStore {
 }
 
 fn feed(store: &QuotaStore, at: ObservationStamp, next: Next) -> Result<(), ObserveRefusal> {
-    let five = key(FIVE_HOURS, None);
+    feed_on(store, at, next, None)
+}
+
+/// [`feed`], with poll readings on the five-hour window of `scope`.
+fn feed_on(
+    store: &QuotaStore,
+    at: ObservationStamp,
+    next: Next,
+    scope: Option<&str>,
+) -> Result<(), ObserveRefusal> {
+    let five = key(FIVE_HOURS, scope);
     let reading = match next {
         Next::Header(used, reset_min) => {
             return if store.observe(&seat("a"), header(at, used, mins(reset_min))) {
@@ -77,55 +92,156 @@ fn consecutive(readings: &[Next]) -> Vec<(u64, Next)> {
 }
 
 fn stored_five(store: &QuotaStore) -> WindowReading {
+    stored_five_on(store, None)
+}
+
+/// [`stored_five`], for the five-hour window of `scope`.
+fn stored_five_on(store: &QuotaStore, scope: Option<&str>) -> WindowReading {
     store
         .account(&seat("a"))
         .expect("an entry")
-        .window(&key(FIVE_HOURS, None))
+        .window(&key(FIVE_HOURS, scope))
         .expect("a five-hour window")
         .reading()
         .clone()
 }
 
-/// One confirmation case: name, the three lower readings, and the used
-/// fraction, reset minute and started state the third one leaves stored.
-type ConfirmRow = (&'static str, [Next; 3], f64, Option<u64>, Started);
+/// The window the lower readings contradict.
+#[derive(Clone, Copy)]
+enum Binding {
+    /// Stored at minute 0.
+    Stored,
+    /// Stored at minute 0, then dropped by a complete report at minute 1 and
+    /// kept while in effect.
+    KeptAfterDrop,
+}
+
+/// One confirmation case: the window the readings contradict and its scope,
+/// the three lower readings (fed at minutes 2, 3, 4), and the used fraction,
+/// reset minute and started state the third one leaves stored.
+struct ConfirmRow {
+    name: &'static str,
+    binding: Binding,
+    scope: Option<&'static str>,
+    readings: [Next; 3],
+    used: f64,
+    reset_min: Option<u64>,
+    started: Started,
+}
+
+/// The seeded store with `binding` arranged over its five-hour window.
+fn bound(clock: &Clock, binding: Binding, scope: Option<&str>) -> QuotaStore {
+    let store = seeded_on(clock, scope, 180);
+    if matches!(binding, Binding::KeptAfterDrop) {
+        let t1 = clock.at(mins(1));
+        store
+            .observe_account(
+                &seat("a"),
+                &observation(ReadingSource::Poll, t1, ObservationReport::NoWindows),
+            )
+            .expect("the dropping report is accepted");
+        assert!(
+            store
+                .account(&seat("a"))
+                .expect("an entry")
+                .dropped_fast
+                .is_some(),
+            "the control: the dropped window is kept"
+        );
+    }
+    store
+}
+
+fn confirm_rows() -> [ConfirmRow; 7] {
+    let running = |used, reset_min| ConfirmRow {
+        name: "",
+        binding: Binding::Stored,
+        scope: None,
+        readings: [Next::Poll(0.30, reset_min); 3],
+        used,
+        reset_min: Some(reset_min),
+        started: Started::Yes,
+    };
+    [
+        ConfirmRow {
+            name: "running lower on the same reset",
+            readings: [
+                Next::Poll(0.30, 180),
+                Next::Poll(0.30, 181),
+                Next::Poll(0.31, 182),
+            ],
+            reset_min: Some(182),
+            ..running(0.31, 180)
+        },
+        ConfirmRow {
+            name: "unstarted over a running window",
+            readings: [Next::Idle; 3],
+            reset_min: None,
+            started: Started::No,
+            ..running(0.0, 180)
+        },
+        ConfirmRow {
+            name: "running lower, resetting earlier than the tolerance",
+            ..running(0.30, 120)
+        },
+        ConfirmRow {
+            name: "a scoped window, resetting earlier than the tolerance",
+            scope: Some("opus"),
+            ..running(0.30, 120)
+        },
+        ConfirmRow {
+            name: "the kept dropped five-hour window",
+            binding: Binding::KeptAfterDrop,
+            ..running(0.30, 180)
+        },
+        ConfirmRow {
+            name: "unstarted over the kept dropped five-hour window",
+            binding: Binding::KeptAfterDrop,
+            readings: [Next::Idle; 3],
+            reset_min: None,
+            started: Started::No,
+            ..running(0.0, 180)
+        },
+        ConfirmRow {
+            name: "each agreeing with the last, drifting past the slack overall",
+            readings: [
+                Next::Poll(0.30, 180),
+                Next::Poll(0.32, 180),
+                Next::Poll(0.34, 180),
+            ],
+            ..running(0.34, 180)
+        },
+    ]
+}
 
 /// The reading taken on confirmation is the third one as reported: its own
 /// used fraction, reset and started state, never a blend with the stored one.
 #[test]
 fn a_lower_reading_is_refused_twice_and_taken_on_the_third_agreeing_reading() {
-    let rows: [ConfirmRow; 2] = [
-        (
-            "running lower on the same reset",
-            [
-                Next::Poll(0.30, 180),
-                Next::Poll(0.30, 181),
-                Next::Poll(0.31, 182),
-            ],
-            0.31,
-            Some(182),
-            Started::Yes,
-        ),
-        (
-            "unstarted over a running window",
-            [Next::Idle, Next::Idle, Next::Idle],
-            0.0,
-            None,
-            Started::No,
-        ),
-    ];
-    for (name, readings, used, reset_min, started) in rows {
+    for row in confirm_rows() {
+        let ConfirmRow {
+            name,
+            binding,
+            scope,
+            readings,
+            used,
+            reset_min,
+            started,
+        } = row;
         // Arrange
         let clock = Clock::new();
-        let store = seeded(&clock, 180);
+        let store = bound(&clock, binding, scope);
 
         // Act
-        let outcomes = run(&store, &clock, &consecutive(&readings));
+        let outcomes: Vec<_> = (2..)
+            .zip(readings)
+            .map(|(minute, next)| feed_on(&store, clock.at(mins(minute)), next, scope))
+            .collect();
 
         // Assert
         assert_eq!(outcomes, [REFUSED, REFUSED, TAKEN], "row: {name}");
         assert_eq!(store.rejection_totals().contradictory, 2, "row: {name}");
-        let stored = stored_five(&store);
+        let stored = stored_five_on(&store, scope);
         assert_eq!(stored.used().fraction(), used, "row: {name}");
         assert_eq!(
             stored.reset().map(|r| r.at()),
@@ -209,9 +325,10 @@ fn a_disagreeing_lower_reading_restarts_the_streak_at_one() {
 #[test]
 fn a_duplicate_or_older_stamp_does_not_advance_the_streak() {
     let lower = Next::Poll(0.30, 180);
-    let rows: [(&str, [u64; 4]); 2] = [
+    let rows: [(&str, [u64; 4]); 3] = [
         ("a duplicate stamp", [1, 1, 2, 3]),
         ("an older stamp", [2, 1, 3, 4]),
+        ("the stamp of the window it contradicts", [0, 1, 2, 3]),
     ];
     for (name, minutes) in rows {
         // Arrange
@@ -314,47 +431,65 @@ enum Clearing {
     Lifted,
     CompleteReportDropsIt,
     Forget,
+    /// A replacement for a stored window that has reached its reset.
+    ReplacedAfterLapse,
 }
 
 /// Each event that clears a streak sends the next agreeing lower reading back
-/// to the start: refused twice more before it is taken.
+/// to the start: refused twice more before it is taken. Each row names the
+/// stored window's reset minute and the lower reading that primes the streak
+/// and follows the clearing event; an unstarted reading agrees with any
+/// unstarted streak, so it would confirm on an uncleared one.
 #[test]
 fn each_clearing_event_restarts_the_streak() {
+    let lower = Next::Poll(0.30, 180);
     let rows = [
-        ("an accepted higher reading", Clearing::Higher),
+        ("an accepted higher reading", Clearing::Higher, 180, lower),
         (
             "an accepted reading lifted within the slack",
             Clearing::Lifted,
+            180,
+            lower,
         ),
         (
             "a complete report dropping the window",
             Clearing::CompleteReportDropsIt,
+            180,
+            lower,
         ),
-        ("forgetting the account", Clearing::Forget),
+        ("forgetting the account", Clearing::Forget, 180, lower),
+        (
+            "a replacement accepted after the stored window lapsed",
+            Clearing::ReplacedAfterLapse,
+            30,
+            Next::Idle,
+        ),
     ];
-    let lower = Next::Poll(0.30, 180);
-    for (name, clearing) in rows {
+    for (name, clearing, reset_min, lower) in rows {
         // Arrange
         let clock = Clock::new();
-        let store = seeded(&clock, 180);
+        let store = seeded(&clock, reset_min);
         let primed = run(&store, &clock, &[(1, lower), (2, lower)]);
         assert_eq!(primed, [REFUSED, REFUSED], "row: {name}: primed");
-        let t3 = clock.at(mins(3));
+        let cleared_at = clock.at(mins(31));
         match clearing {
-            Clearing::Higher => assert_eq!(feed(&store, t3, Next::Poll(0.95, 180)), TAKEN),
-            Clearing::Lifted => assert_eq!(feed(&store, t3, Next::Poll(0.89, 180)), TAKEN),
+            Clearing::Higher => assert_eq!(feed(&store, cleared_at, Next::Poll(0.95, 180)), TAKEN),
+            Clearing::Lifted => assert_eq!(feed(&store, cleared_at, Next::Poll(0.89, 180)), TAKEN),
+            Clearing::ReplacedAfterLapse => {
+                assert_eq!(feed(&store, cleared_at, Next::Poll(0.80, 330)), TAKEN);
+            }
             Clearing::CompleteReportDropsIt => store
                 .observe_account(
                     &seat("a"),
                     &observation(
                         ReadingSource::Poll,
-                        t3,
+                        cleared_at,
                         ObservationReport::Complete(
                             WindowSet::new(vec![running(
                                 key(SEVEN_DAYS, None),
                                 0.20,
                                 mins(3_000),
-                                &t3,
+                                &cleared_at,
                             )])
                             .expect("a set"),
                         ),
@@ -368,8 +503,8 @@ fn each_clearing_event_restarts_the_streak() {
                         &seat("a"),
                         &partial(
                             ReadingSource::Poll,
-                            t3,
-                            vec![running(key(FIVE_HOURS, None), 0.90, mins(180), &t3)],
+                            cleared_at,
+                            vec![running(key(FIVE_HOURS, None), 0.90, mins(180), &cleared_at)],
                         ),
                     )
                     .expect("the re-seed is accepted");
@@ -377,7 +512,7 @@ fn each_clearing_event_restarts_the_streak() {
         }
 
         // Act
-        let outcomes = run(&store, &clock, &[(4, lower), (5, lower), (6, lower)]);
+        let outcomes = run(&store, &clock, &[(32, lower), (33, lower), (34, lower)]);
 
         // Assert
         assert_eq!(outcomes, [REFUSED, REFUSED, TAKEN], "row: {name}");

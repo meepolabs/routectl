@@ -39,14 +39,16 @@
 //!   reading is then taken as reported. A single bogus reading therefore never
 //!   creates room, and a stored reading the vendor has really abandoned does
 //!   not hold the account full until its reset. A streak advances only on a
-//!   newer stamp, and clears when a reading for the key is accepted without a
-//!   correction, when the stored window leaves effect, when a complete report
-//!   drops the key, or when the account is forgotten; it has no time expiry,
-//!   because an idle account's polls can be further apart than any freshness
-//!   bound. A same-reset reading lower by no more than the slack is rounding
-//!   (header fractions floor, the poll endpoint rounds) and is accepted at the
-//!   stored fraction. A multi-window observation is taken only when every
-//!   lower window in it has confirmed.
+//!   stamp newer than both its last reading and the window it contradicts
+//!   (an equal-stamp lower reading is refused without advancing it), and
+//!   clears when a reading for the key is accepted without a correction, when
+//!   the stored window leaves effect, when a complete report drops the key, or
+//!   when the account is forgotten; it has no time expiry, because an idle
+//!   account's polls can be further apart than any freshness bound. A
+//!   same-reset reading lower by no more than the slack is rounding (header
+//!   fractions floor, the poll endpoint rounds) and is accepted at the stored
+//!   fraction. A multi-window observation is taken only when every lower
+//!   window in it has confirmed.
 //! - A complete report that drops the account-wide five-hour window (the one
 //!   placement reads) while it is running and in effect keeps that window
 //!   aside, and a later reading for the key is reconciled against it exactly
@@ -235,9 +237,12 @@ enum Verdict {
     Keep,
     /// Store this window.
     Take(StoredWindow),
-    /// The reading is lower than the stored window in effect, whose used
-    /// fraction this is.
-    Lower(f64),
+    /// The reading is lower than the window in effect: its used fraction
+    /// and stamp.
+    Lower {
+        old_used: f64,
+        contradicted: ObservationStamp,
+    },
 }
 
 /// One account's meter state. Every field is private, so [`Self::merged`] is
@@ -343,9 +348,13 @@ impl AccountMeter {
             let stored = match self.merged_window(reading, &observed, source, is_complete)? {
                 Verdict::Keep => continue,
                 Verdict::Take(stored) => stored,
-                Verdict::Lower(old_used) => {
-                    let (streak, confirmed) = next.advanced_streak(reading, &observed);
-                    advanced.push((reading.key().clone(), streak));
+                Verdict::Lower {
+                    old_used,
+                    contradicted,
+                } => {
+                    let (streak, confirmed) =
+                        next.advanced_streak(reading, &observed, &contradicted);
+                    advanced.extend(streak.map(|s| (reading.key().clone(), s)));
                     if !confirmed {
                         unconfirmed = true;
                         continue;
@@ -392,31 +401,36 @@ impl AccountMeter {
         })
     }
 
-    /// The streak `reading`, found lower, leaves for its key, and whether it
-    /// confirms the correction. A reading not newer than the streak's last
-    /// leaves it as it was and confirms nothing.
+    /// The streak `reading`, found lower than the window stamped
+    /// `contradicted`, leaves for its key, and whether it confirms the
+    /// correction. A reading not newer than both that window and the streak's
+    /// last leaves the streak as it was, or absent, and confirms nothing.
     fn advanced_streak(
         &self,
         reading: &WindowReading,
         observed: &ObservationStamp,
-    ) -> (Streak, bool) {
+        contradicted: &ObservationStamp,
+    ) -> (Option<Streak>, bool) {
+        let current = self.streaks.get(reading.key());
+        let is_newer = observed.monotonic() > contradicted.monotonic()
+            && current.is_none_or(|c| observed.monotonic() > c.observed.monotonic());
+        if !is_newer {
+            return (current.cloned(), false);
+        }
         let fresh = Streak {
             last: reading.clone(),
             observed: *observed,
             count: 1,
         };
-        let Some(current) = self.streaks.get(reading.key()) else {
-            return (fresh, false);
+        let Some(current) = current else {
+            return (Some(fresh), false);
         };
-        if observed.monotonic() <= current.observed.monotonic() {
-            return (current.clone(), false);
-        }
         if !agrees(&current.last, reading) {
-            return (fresh, false);
+            return (Some(fresh), false);
         }
         let count = current.count.saturating_add(1);
         let streak = Streak { count, ..fresh };
-        (streak, count >= CORRECTION_CONFIRMATIONS)
+        (Some(streak), count >= CORRECTION_CONFIRMATIONS)
     }
 
     /// This state with only `advanced` streaks replaced, as a refusal.
@@ -507,7 +521,10 @@ impl AccountMeter {
         let reading = match stored {
             Some(stored) => match reconciled(stored, reading, observed)? {
                 Reconciled::Lower => {
-                    return Ok(Verdict::Lower(stored.reading.used().fraction()));
+                    return Ok(Verdict::Lower {
+                        old_used: stored.reading.used().fraction(),
+                        contradicted: stored.observed,
+                    });
                 }
                 Reconciled::Take(reading) => reading,
             },
