@@ -7480,7 +7480,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per-form recognition test that feeds each form in twice and asserts the
   collision is reported; (7) the two `/status/query` read shapes own SEPARATE
   source records, each `SOURCE_PANEL`-mapped to the query wire version, with
-  Overview and Usage naming different primaries in `TAB_SOURCES` and the
+  Now and Traffic naming different primaries in `VIEWS` and the
   transport wiring (`querySourceFor` arms, `queryRound` resolution,
   `applyQueryOutcome` writing only its `source` parameter) asserted from the
   extracted function bodies; (8) every `queryRound()` nudge in `runRound` sits
@@ -7509,7 +7509,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the window picker including its windowless dimming, and the tab bar
 - `src/handlers/status/dash_components.css` -- dashboard STYLE part 2 of 3: the
   shared component vocabulary. Tables that scroll inside their card
-  (`.tablewrap`) so the page never scrolls sideways from 380px to 1440px,
+  (`.tablewrap`) so the page never scrolls sideways from 720px up,
   cards, badges, the `.tok` value-domain token families (mirrored by the label
   maps in `dash_10_format.js` -- a new token is a paired edit in both),
   figures, notes, and the modal host
@@ -7517,114 +7517,95 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   per-tab layouts. Cascade order is load-bearing and is the `STYLE_PARTS`
   declaration order, so these rules land last and may lean on the component
   vocabulary above
-- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 14: the
-  client's shared state. `EXPECTED` (per-source wire versions, `accounts`
-  pinned though no view reads it yet), the seven DATA
+- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 15: the
+  client's shared state. `EXPECTED` (per-source wire versions; `accounts` is
+  pinned though the Accounts view does not read that panel yet), the seven DATA
   SOURCES -- `usage`/`health`/`config`/`doctor` off the GET `/status`
-  aggregate, plus `query`, `query_series`, and `usage_all` -- each with an
-  independent state record
-  (`loading|live|empty|unavailable|incompatible|invalid_payload|stale|dead`),
-  and `TAB_SOURCES` mapping them to the six tabs, so a dead QUERY degrades only
-  Overview and Usage while the four GET-backed tabs keep rendering. `query` and
-  `query_series` are the two `/status/query` READ SHAPES -- Usage's series-less
-  roll-up and Overview's bucketed one -- as separate records, because the two
-  payloads are not interchangeable (Overview's sparklines need the series Usage
-  does not request) and one shared record would let whichever tab polled last
-  define what the other rendered from. `usage_all`
-  is a SEPARATE GET of `/status/usage?window=all` on its own controller,
-  backoff index, timer, and `as_of`, validated against the usage panel's wire
-  version through `SOURCE_PANEL` (`expectedVersion` resolves a source name to
-  its panel; `query_series` resolves to the query panel the same way); it
-  exists because Routing attributes over ALL HISTORY while the
-  aggregate's usage panel stays today-scoped for the readers that want today
-  (the Health quota tiles, the Overview seat surface, the verdict strip). Also
-  holds the cadence and budget constants (`BASE_MS`, the shared
-  `BACKOFF_STEPS_MS` ladder, `TIMEOUT_MS` = 3500 and `QUERY_TIMEOUT_MS` = 12000,
-  longer than the 5s cadence -- see `server::status_gate` for the
-  coupled-timing derivation),
-  `WINDOWLESS_TABS`, the selection state (window / group-by / provider scope /
-  active tab), `SOURCES`, `RENDER_FAULTS`, `setSource`, and the one-line
-  `effectiveState` ternary
-- `src/handlers/status/dash_05_idiomorph.js` -- dashboard SCRIPT part 2 of 14:
+  aggregate, plus `query` (Traffic's series-less read), `query_series` (Now's
+  bucketed read) and `usage_all` (the all-history usage GET the routing
+  figures need) -- each with an independent state record
+  (`loading|live|empty|unavailable|incompatible|invalid_payload|stale|dead`)
+  carrying its own `liveAt`, `SOURCE_PANEL`/`expectedVersion`, the cadence and
+  budget constants (`BASE_MS`, the shared `BACKOFF_STEPS_MS` ladder,
+  `TIMEOUT_MS` = 3500, `QUERY_TIMEOUT_MS` = 12000 -- see
+  `server::status_gate` for the coupled-timing derivation), the selection
+  state (window / group-by / provider scope / sort / active view), `SOURCES`,
+  `RENDER_FAULTS`, `setSource`, and `effectiveState`
+- `src/handlers/status/dash_05_idiomorph.js` -- dashboard SCRIPT part 2 of 15:
   the vendored idiomorph v0.8.0 `dist/idiomorph.js` (0BSD), byte-for-byte
   upstream, sha256
   `4cda2ad0d39c630100957eeb5ec3115f84d57351c6c313579d2441cf48e9880d` (pinned
   by `page::tests::morph`). Declares one name, `Idiomorph`; page code reaches
   it only through `morphPanel` in `dash_40_render.js`, which takes a DOM node
   and never markup, and updates every pane body and the modal host in place
-- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 3 of 14:
+- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 3 of 15:
   number and time humanizers matched to the CLI's usage formatters
-  (`humanCount` mirrors `human_count`, `num0` coercion, percent / timestamp /
-  relative-age / duration text) plus `WINDOW_SPAN` and the `LABELS` token
-  vocabulary with `labelFor`/`labelCell`, so a wire token renders as
-  plain-language text in exactly one place
+  (`humanCount` mirrors `human_count`, percent / timestamp / relative-age /
+  duration text) plus `WINDOW_SPAN` and the `LABELS` token vocabulary with
+  `labelFor`/`labelCell`, so a wire token renders as plain-language text in
+  exactly one place
 - `src/handlers/status/dash_20_query_vocab.js` -- dashboard SCRIPT part 4 of
-  14: the `/status/query` field vocabulary and its adapter. `QUERY_METRICS`
-  (numeric) + `QUERY_TOKENS` (pass-through, e.g. `cost_status`) are the ONLY
-  home of raw query field names, consumed solely by the thin `QueryAdapter`
-  flat-extraction layer (num0 coercion on the numeric half, no rename, no
-  computed model); render code reads adapter properties. `queryViewOf(name)`
-  adapts ONE query source's payload (`queryView` for Usage's series-less read,
-  `querySeriesView` for Overview's bucketed one), so neither tab can render from
-  the other's shape. `QUERY_SHAPES` is the
-  COMPLETE request vocabulary -- every selectable window x every group_by x
-  each series mode -- written as strict JSON so the Rust guard can feed each
-  shape to the server's own parser verbatim
-- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 5 of 14:
+  15: the payload field vocabulary. `QUERY_METRICS` / `QUERY_NULLABLE_METRICS`
+  / `QUERY_TOKENS` name every `/status/query` metric (the nullable list equals
+  the DTO's `Option` members), and `USAGE_FIELDS` / `HEALTH_FIELDS` /
+  `CONFIG_FIELDS` / `DOCTOR_FIELDS` declare every key the page reads from each
+  GET panel; `page::tests::payload_keys` pins each list to the keys the real
+  DTOs serialize and every member read in the script to the declared union.
+  `isQueryShape` validates a query payload in full (groups, totals, series
+  buckets; a missing or non-numeric required metric is `invalid_payload`, never
+  a zero) before `QueryAdapter`/`queryViewOf` adapt it without coercion.
+  `QUERY_SHAPES` is the COMPLETE request vocabulary -- every selectable window
+  x every group_by x each series mode -- as strict JSON the Rust guard feeds to
+  the server's own parser
+- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 5 of 15:
   every fetch on the page. `safeRequest` is the SOLE fetch call site and the
   shared outcome classifier (`ok`/`overloaded`/`forbidden`/`rejected`/
-  `timeout`/`network`), so the GET poll and the QUERY aggregate cannot drift in
-  failure vocabulary. `queryStatus` issues `method:'QUERY'` +
-  `Content-Type: application/json` + a stable stringified body +
-  `cache:'no-store'` under the `QUERY_TIMEOUT_MS` abort, SINGLE-FLIGHT (aborts
-  the previous request and bumps a GENERATION so a late old response cannot
-  repaint a newer selection; `queryInFlight()` makes `runRound`'s per-round
-  nudge skip while a query or a short busy retry is outstanding, so a slow read
-  is never superseded by its own top-up), on backoff state SEPARATE from the GET loop's (a
-  QUERY failure never slows the healthy 5s GET cadence): 403 terminal,
-  400/405 -> incompatible and not retried until the input changes, and
-  503/network/timeout plus the 200-borne `QUERY_RETRY_CODES`
-  (`db_busy`/`db_unavailable`/`query_timeout`) -> QUERY-only 10/20/30s backoff
-  off the shared `BACKOFF_STEPS_MS` ladder, over which QUERY and GET keep
-  separate indexes. A `db_busy` answer that follows the page's OWN abort
-  (`queryOwnAbortPending`) is the server still releasing the aborted read's
-  gate permit, so `retrySupersededBusy` re-arms the same round on the short
-  `SUPERSEDED_BUSY_RETRY_MS` schedule (150/300/600ms) with the panel left
-  loading, outside the backoff ladder and before `applyQueryOutcome`.
-  `shapeFor(tab)` picks the request shape and
-  `querySourceFor(tab)` the record its response lands in, so each round writes
-  the source belonging to the shape it asked for. Also the aggregate round
-  (`runRound`/`tick`/
-  `scheduleNext`), the visibility-aware refresh, and the independent
-  `usage_all` round with its own controller, generation, and schedule
-- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 6 of 14: the
-  render dispatch and every per-source error boundary. `renderPanel` validates
-  `schema_version` BEFORE reading `data`, then enforces the envelope invariant
-  (exactly one of a meaningful `data` xor an `unavailable` code; zero or both
-  -> `invalid_payload` with no transport backoff) and fails closed per source;
-  `renderPanelGuarded` wraps each source independently so one malformed panel
-  cannot fail the whole round; `safeSection(rec, build)` is the section-level
-  boundary a multi-source tab builder wraps EVERY `TAB_SOURCES` dependency in,
-  so a secondary source's fault costs that section only; `renderActiveTab`'s
-  own try/catch is the whole-tab last resort. A section builder that throws is
-  recorded in `RENDER_FAULTS` against its source (per-pass
-  `markRenderAttempt`/`reconcileRenderFaults` bookkeeping), so
-  `effectiveState` reports that source `invalid_payload` to the pane status
-  line, the tab badges, the page verdict, and the favicon rather than calling
-  it live beside an error card. Also the shared state cards (skeleton, error,
-  incompatible, empty), the banner, the verdict strip, the poll indicator, and
-  the tab badges
-- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 7 of 14: the
-  DOM construction vocabulary, `textContent` only and never `innerHTML`.
-  Column descriptors and table builders (`mkTable`/`trow`/`xrow` expandable
-  rows/`buildDefList`/`buildExpander`), the state-dot and token pills, the
-  card / section / figure / share-bar primitives, and the SVG sparkline family
-  -- `sparkSvg` + `drawSegments`, which draws a sparse series as BREAKS at each
-  bucket's own `start_ms` rather than bridging a gap. Every data-age figure is
-  computed against the as_of of the record it came from (`panelNowMs(rec)`,
-  `ageSince`); there is no page-global render clock
+  `timeout`/`network`). Every independently fetched source (the aggregate GET,
+  `usage_all`, the query) takes a source-local ticket (`issueFetchTicket`: an
+  epoch plus the normalized request key) and applies an answer only while
+  `fetchTicketIsCurrent`; `invalidateEveryFetch` aborts every controller on
+  terminal mode. `queryStatus` issues `method:'QUERY'` single-flight under the
+  `QUERY_TIMEOUT_MS` abort on backoff state separate from the GET loop's (403
+  terminal, 400/405 incompatible until the input changes, 503/network/timeout
+  and the 200-borne `QUERY_RETRY_CODES` on the shared ladder, and a `db_busy`
+  that follows the page's own abort re-armed by `retrySupersededBusy` on the
+  short `SUPERSEDED_BUSY_RETRY_MS` schedule). `queryKeysBySource` /
+  `resetMovedQuerySources` reset only the query sources whose request key a
+  selection change moved, whichever view is active, and
+  `markQuerySourcesTransport` marks them stale when the aggregate round fails.
+  Also the aggregate round (`runRound`/`tick`/`scheduleNext`), the
+  visibility-aware refresh, and the independent `usage_all` round
+- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 6 of 15: the
+  render host. `renderPanel` validates `schema_version` and the envelope
+  invariant per source (`renderPanelGuarded` isolates each); a transport
+  failure keeps a rendered source's data marked `stale` and marks a
+  never-rendered one `dead`; `markPending`/`paintPending` mark the active pane
+  `aria-busy` until a current answer settles it. `renderActiveTab` builds the
+  active view and hands it to `morphPanel`, the ONLY `Idiomorph.morph` call
+  site (node-only, never markup), whose `morphGate` keeps `<details>` open
+  state, skips the refresh unit holding a text selection, and marks changed
+  `data-v` figures; scroll is held and restored around it. `viewSection` is the
+  host-owned section boundary every view composes through: it draws the
+  loading / unavailable / invalid / stale / pending states, contains a builder
+  throw in that section's titled error card (`guardedContent`, `safeSection`),
+  and records faults in `RENDER_FAULTS` for the badges and status line. Also
+  the state cards, the banner, the verdict strip (`verdictState` reads routing
+  targets, pool eligibility and account usability only, "Checking routing
+  state" until a current, well-formed health payload), the poll indicator,
+  and the tab badges
+- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 7 of 15: the
+  DOM construction vocabulary, `textContent` only and never `innerHTML`. Stable
+  ids (`idKey`, the id scheme comment) and delegated actions (`setAction`
+  writes `data-action`/`data-arg`; no builder attaches a listener), the shared
+  table (`mkTable(id, caption, cols, {expandable, sortable, rowKey})` with
+  `sortBy` columns, keyed rows that throw on a duplicate key, nulls last and
+  ties by key), `markRefreshUnit`, the changed-value marks (`markValue`,
+  `markChangedValue`, `clearChangedValue`), the state-dot and token pills, the
+  card / section / figure / share-bar primitives, `emptyCard`, and the SVG
+  sparkline family (`sparkSvg` + `drawSegments`, which draws a sparse series as
+  breaks). Data-age figures use the as_of of their own record (`panelNowMs`)
 - `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 8 of
-  14: the Overview sections, the whole of the Now view, MULTI-SOURCE (`query_series` primary -- the bucketed
+  15: the Overview sections, the whole of the Now view, MULTI-SOURCE (`query_series` primary -- the bucketed
   read whose series feeds the sparklines -- plus `usage` for the
   seat surface). The provider row leads with an all-providers AGGREGATE card
   built from the query `totals` (the scope reset), then the busiest
@@ -7647,14 +7628,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   surface and leaves the KPI and provider blocks live. The provider row builder
   is `providerRowSection`, named for the row rather than its subject because the
   script parts share one function scope with Config's provider TABLE builder
-- `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 9 of 14:
+- `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 9 of 15:
   the Usage sections, the head of the Traffic view, single-source (`query`). Renders the group-by picker
   (model/alias/provider, re-issuing the non-series query through
   `queryInputChanged`) outside the section boundary, then one two-line card per
   query group ranked by requests, with zero-traffic groups omitted and their
   count reported in the header
 - `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 10 of
-  14: the Routing sections, built under the Usage sections in the Traffic
+  15: the Routing sections, built under the Usage sections in the Traffic
   view, MULTI-SOURCE (built around `config`, plus `usage_all` and `health`);
   its figures span ALL HISTORY whatever the picker says, and its header and
   note say so. The
@@ -7669,7 +7650,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   worst-circuit rule Health shares. Each of the three sources is wrapped in its
   own `safeSection`, so health going dark costs the state list alone
 - `src/handlers/status/dash_71_tab_health.js` -- dashboard SCRIPT part 11 of
-  14: the Health sections, with no view entry point of its own: the target
+  15: the Health sections, with no view entry point of its own: the target
   section (`healthTargetSection`) is the Models view, and the pool, seat-driver
   and quota sections are the Accounts view. MULTI-SOURCE (`health`, plus
   `usage` for the quota tiles). Per-target
@@ -7686,7 +7667,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Each source has its own `safeSection`, so a dark ledger costs the quota tiles
   alone and a dark health source leaves the quota tiles live
 - `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 12 of
-  14: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
+  15: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
   tab -- the payload is validated in one place before any section is built, so
   a version mismatch or a malformed panel never partially renders config
   vocabulary. Renders a source strip (config path, load age, resolved
@@ -7704,7 +7685,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and the retry-class policy whose columns are exactly retry cap / fallback /
   breaker debit (the wire's `debits_breaker`) / source
 - `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 13 of
-  14: the Doctor tab, the second single-source FAIL-CLOSED tab (`doctor`) --
+  15: the Doctor tab, the second single-source FAIL-CLOSED tab (`doctor`) --
   `validatedReport` checks every finding severity against the fixed
   `Pass|Warn|Fail` triad and every reachability verdict against
   `reachable|degraded|unknown` before a section is built, so an unknown token
@@ -7719,49 +7700,39 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   capability matrix -- a state line, the replay tally, and a default-closed
   lane-by-capability table (lane, kind, nicknames, then `verdict (layer)`
   cells whose tooltip carries the source, action, learned timestamps and
-  learned value).
-  Also carries
-  `BUILDERS`, the per-tab `buildX` registry the render dispatch reads
+  learned value)
 - `src/handlers/status/dash_80_views.js` -- dashboard SCRIPT part 14 of 15:
   `VIEWS`, the one view registry (`{id, label, sources, span, build}`, array
   order = tab order): Now (the Overview sections), Accounts (pools, seat
   driver, seat quota), Traffic (Usage then Routing), Models (the health target
-  section), Config and Doctor, with the `buildAccounts` / `buildTraffic` /
-  `buildModels` compositions. Accounts, Models, Config and Doctor carry the
-  `current state` span; Now and Traffic are windowed. `LEGACY_VIEW_IDS` and
-  `canonicalViewId` map the old tab tokens (overview -> now, usage and
-  routing -> traffic, health -> accounts) so an old link opens the view that
-  took over its content. `sources[0]` is a view's primary source (freshness line,
-  tab badge, whole-view state card, and the QUERY a query-backed view issues,
-  via `viewQuerySource`); a non-null `span` makes the view windowless and is
-  the label beside the dimmed picker (`spanLabel`). `viewFor` looks a view up
-  by id. `page::tests::views` pins the markup tab / badge / pane / status /
-  body ids to the VIEWS ids in order
-- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 14 of 14:
-  the page chrome and the load-time wiring. The 1s age ticker, the four inline
-  `data:` SVG favicons and the `faviconState` rollup, the refresh control, the
-  URL-hash read/write (view + window; an old tab token is canonicalized
-  through `canonicalViewId` and the hash rewritten in place), the window
-  picker including its dimming and span label on every view with a `span`, tab selection with keyboard
-  navigation, and the single load-time statement that starts the loops
-- `src/handlers/status/dashboard-manual-checklist.md` -- the client's ONLY
-  coverage for behavior. The `dash_*.js` sources have no runtime harness (the
-  `page.rs` guards scan the concatenated script as TEXT), so this checklist is
-  the by-hand verification any change to the transport / render / DOM / chrome
-  parts must run: initial load with zero external requests, SELECTION
-  SUPERSESSION under throttling (the worst uncovered failure -- a superseded
-  QUERY response repainting a newer selection reads as `live`, so it is
-  silently mislabeled data), hidden-tab and failure recovery, and window /
-  visual truthfulness. It also names the three deliberately untested transport
-  rules -- the single-flight generation guard, per-pass fault reconciliation,
-  and the DOM/animation surface -- because a source-text assertion on them
-  would pin a string rather than the behavior and hide the gap. Pointed at from
-  the parts it concerns and pinned by `page.rs`'s
-  `dashboard_script_points_at_the_manual_checklist`, so deleting it without
-  replacement fails the build
-
-### ingress
-
+  section), Config and Doctor. Each composition wraps every section in
+  `viewSection` bound to that section's source, and keeps view controls (the
+  scope reset, the group-by strip) outside the section boundary. Accounts,
+  Models, Config and Doctor carry the `current state` span; Now and Traffic
+  are windowed. `LEGACY_VIEW_IDS` / `canonicalViewId` map the old tab tokens
+  (overview -> now, usage and routing -> traffic, health -> accounts).
+  `sources[0]` is a view's primary source (freshness line, tab badge, and the
+  QUERY a query-backed view issues, via `viewQuerySource`). `page::tests::views`
+  pins the markup ids to the VIEWS ids in order
+- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 15 of 15:
+  the page chrome and the load-time wiring. The view-state codec, the only
+  code that reads or writes the address: `#<view>?range=&scope=&group=&sort=`
+  (`parseViewHash`/`formatViewHash`/`writeViewHash`, closed vocabularies, a
+  bounded scope with hidden characters refused, `SORT_TABLES`; a user change
+  pushes one history entry through `commitViewState`, cleanup replaces it).
+  The `ACTIONS` map and one delegated click listener per pane root and the
+  modal host, the favicons (`FAVICON_BY_VERDICT` follows the verdict), the
+  age ticker, the refresh control, the window picker and its dimming, tab
+  selection with keyboard navigation, the `animationend` listener that clears
+  a changed mark, and the single load-time statement that starts the loops
+- `src/handlers/status/dashboard-manual-checklist.md` -- the by-hand checks the
+  browser tests cannot make (a real slow ledger, the drawn surface at each
+  width and theme, a fade ending by itself), with a "What the browser tests
+  cover" section naming the headless-Chrome suites (`page::tests::browser*`,
+  run with `cargo test -p routectl-cli page_browser -- --ignored`: real page,
+  scripted /status answers, system Chrome, nothing in the release build). Pinned
+  by `page.rs`'s `dashboard_script_points_at_the_manual_checklist`, which also
+  requires the checklist to name every browser suite
 - `src/ingress/mod.rs` -- `IngressAdapter` trait (incl. `early_frame`:
   warm-hold first-body-byte SSE events, default no-op; Anthropic emits the
   synthesized `message_start`, OpenAI / Responses emit nothing; and
