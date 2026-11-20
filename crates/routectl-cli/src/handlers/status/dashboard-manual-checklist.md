@@ -277,11 +277,11 @@ banner, no retry signal -- silently mislabeled data.
   provider entry name differs from its login's vendor (for example entry
   `work` with `credential = "oauth://anthropic#a"`) against a ledger copy
   holding quota rows for that seat and for a seat the config no longer names.
-  On Overview the `work` card shows one seat dot (`1 seat`) and its modal
-  lists that seat alone; no card, dot or Health quota tile shows the retired
-  seat. Drop the entry from the config and reload: within one poll the dot,
-  the modal and the Health tile for it are gone, and the Usage figures are
-  unchanged.
+  On Now the `work` card shows one seat dot (`1 seat`) and its modal
+  lists that seat alone; no card, dot or Accounts seat quota tile shows the
+  retired seat. Drop the entry from the config and reload: within one poll the
+  dot, the modal and the Accounts tile for it are gone, and the Traffic figures
+  are unchanged.
 - Zero counts render faint: `0` in `eligible 0 of 2` and the seat driver's
   zero failure counts, never full brightness and never red.
 - In the light theme, faint text (hints, labels, zeros) stays readable on

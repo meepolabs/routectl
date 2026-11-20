@@ -196,10 +196,10 @@
     }
     return waitSettled().then(function () {
       observe('start');
-      return d.waitForElement('overview-seats-kanthropic');
+      return d.waitForElement('overview-seats-kclaude_2d_seat');
     }).then(function (open) {
       open.click();
-      return d.waitForElement('overview-seats-close-kanthropic');
+      return d.waitForElement('overview-seats-close-kclaude_2d_seat');
     }).then(function (close) {
       close.focus();
       window.scrollTo(0, 400);

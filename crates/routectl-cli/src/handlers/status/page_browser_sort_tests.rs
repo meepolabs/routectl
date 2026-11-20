@@ -40,7 +40,7 @@ fn fixture_models() -> Vec<(String, String, Option<String>)> {
 
 /// The orders below are written out by hand; this pins the fixture they were
 /// read from, so a fixture change fails here rather than as a puzzling order.
-fn assert_fixture_models_are_the_known_four() {
+fn assert_fixture_models_are_the_known_five() {
     let some = |s: &str| Some(s.to_owned());
     let expected = vec![
         (
@@ -48,6 +48,7 @@ fn assert_fixture_models_are_the_known_four() {
             "bed".into(),
             some("anthropic.claude-test-v1:0"),
         ),
+        ("codex-mini".into(), "codex".into(), some("gpt-5-codex")),
         ("glm".into(), "compat".into(), some("glm-5")),
         (
             "seat-sonnet".into(),
@@ -89,12 +90,12 @@ fn assert_table(label: &str, report: &Value, order: &[&str], sort: Value, hash: 
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_header_click_sorts_and_the_order_survives_a_reload() {
-    assert_fixture_models_are_the_known_four();
+    assert_fixture_models_are_the_known_five();
     let out = browser::run_scenario(&sort_scenario("sort-click-reload", "config")).result;
 
-    let builder = ["bedclaude", "glm", "seat-sonnet", "sonnet"];
-    let asc = ["sonnet", "bedclaude", "seat-sonnet", "glm"];
-    let desc = ["glm", "seat-sonnet", "bedclaude", "sonnet"];
+    let builder = ["bedclaude", "codex-mini", "glm", "seat-sonnet", "sonnet"];
+    let asc = ["sonnet", "bedclaude", "seat-sonnet", "codex-mini", "glm"];
+    let desc = ["glm", "codex-mini", "seat-sonnet", "bedclaude", "sonnet"];
     let desc_hash = "#config?sort=config-models.provider.desc";
     assert_table(
         "unsorted",
@@ -143,10 +144,10 @@ fn page_browser_a_header_click_sorts_and_the_order_survives_a_reload() {
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_sort_and_a_refresh_keep_the_focused_header_and_the_open_row() {
-    assert_fixture_models_are_the_known_four();
+    assert_fixture_models_are_the_known_five();
     let out = browser::run_scenario(&sort_scenario("sort-keeps-nodes", "config")).result;
 
-    let sorted_order = ["bedclaude", "seat-sonnet", "sonnet", "glm"];
+    let sorted_order = ["bedclaude", "seat-sonnet", "sonnet", "glm", "codex-mini"];
     assert_ne!(
         out["sorted"]["order"], out["unsorted"],
         "the sort moved no row"
@@ -188,10 +189,10 @@ fn page_browser_a_sort_and_a_refresh_keep_the_focused_header_and_the_open_row() 
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_absent_values_sort_last_and_ties_sort_by_row_key() {
-    assert_fixture_models_are_the_known_four();
+    assert_fixture_models_are_the_known_five();
     let out = browser::run_scenario(&sort_scenario("sort-null-and-tie", "config")).result;
 
-    let served = ["sonnet", "seat-sonnet", "glm", "bedclaude"];
+    let served = ["sonnet", "seat-sonnet", "glm", "codex-mini", "bedclaude"];
     assert_eq!(names(&out["unsorted"]), served, "{out:#}");
     assert_eq!(
         out["null_cell"], "-",
@@ -199,12 +200,12 @@ fn page_browser_absent_values_sort_last_and_ties_sort_by_row_key() {
     );
     assert_eq!(
         names(&out["asc"]),
-        ["seat-sonnet", "sonnet", "glm", "bedclaude"],
+        ["seat-sonnet", "sonnet", "glm", "codex-mini", "bedclaude"],
         "{out:#}"
     );
     assert_eq!(
         names(&out["desc"]),
-        ["glm", "seat-sonnet", "sonnet", "bedclaude"],
+        ["codex-mini", "glm", "seat-sonnet", "sonnet", "bedclaude"],
         "{out:#}"
     );
 }

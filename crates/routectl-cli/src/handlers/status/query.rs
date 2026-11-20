@@ -318,6 +318,23 @@ fn name_groups(
     }
 }
 
+/// `panel` with its result, if any, as the wire payload named by
+/// [`name_groups`].
+fn name_panel_groups(
+    panel: Panel<QueryResult>,
+    group_by: GroupDim,
+    identities: &AccountIdentities,
+) -> Panel<QueryPayload> {
+    Panel {
+        schema_version: panel.schema_version,
+        as_of: panel.as_of,
+        data: panel
+            .data
+            .map(|result| name_groups(result, group_by, identities)),
+        unavailable: panel.unavailable,
+    }
+}
+
 fn seat_identity(label: &str, identities: &AccountIdentities) -> SeatIdentity {
     if label == UNATTRIBUTED {
         return SeatIdentity {
@@ -533,14 +550,7 @@ async fn read_under_permit(
             now,
             &limit,
         );
-        Panel {
-            schema_version: panel.schema_version,
-            as_of: panel.as_of,
-            data: panel
-                .data
-                .map(|result| name_groups(result, group_by, &identities)),
-            unavailable: panel.unavailable,
-        }
+        name_panel_groups(panel, group_by, &identities)
     })
     .await
 }

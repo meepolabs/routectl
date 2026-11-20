@@ -7078,6 +7078,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/doctor/fixture.rs` -- `cfg(test)` `populated_doctor()`: a
   no-network report in the router's DTOs (never gathered: the gather probes the
   credential store) beside the panel's reachability mapper and live lane counters
+- `src/handlers/status/accounts/fixture.rs` -- `cfg(test)`
+  `populated_accounts()`: every account the fixture config names with fresh,
+  stale and absent readings, poll states, a vendor pause and nonzero counters,
+  through the panel's own `build_from_sources`
 - `src/handlers/status/query/fixture.rs` -- `cfg(test)` `populated_query()`
   (grouped) and `populated_query_series()` (bucketed): a seeded ledger read
   through the route's `build_panel` and the facade's pricer

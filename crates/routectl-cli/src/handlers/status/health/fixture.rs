@@ -32,7 +32,7 @@ pub fn populated_health() -> Value {
 }
 
 /// Every target state the panel distinguishes (eligible, unusable with its
-/// fix, breaker open, parked), two pools, a running seat driver, a learned
+/// fix, breaker open, parked), two pools, both seat drivers running, a learned
 /// negative an override outranks, a verified positive, a learned value, and
 /// one row of each wire-check section.
 pub fn populated_health_panel() -> Panel<HealthPanel> {
@@ -56,6 +56,14 @@ pub fn populated_health_panel() -> Panel<HealthPanel> {
             last_good_sweep_ms: Some(FIXTURE_NOW_MS - 90_000),
             sweeps: 12,
             transient: 1,
+            definitive: 1,
+        }),
+        usage_poll_driver: map_seat_driver(SeatDriverHealthSnapshot {
+            running: true,
+            last_sweep_ms: Some(FIXTURE_NOW_MS - 45_000),
+            last_good_sweep_ms: Some(FIXTURE_NOW_MS - 300_000),
+            sweeps: 7,
+            transient: 2,
             definitive: 1,
         }),
         learned_negatives: learned_rows(),

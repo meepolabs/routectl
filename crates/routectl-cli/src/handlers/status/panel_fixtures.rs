@@ -37,9 +37,10 @@ pub fn fixture_as_of() -> String {
     super::utc_rfc3339(FIXTURE_NOW_MS)
 }
 
-/// The served config the config, doctor and query fixtures share: a priced
-/// API-key provider, a subscription seat, an unpriced compat provider and a
-/// cloud provider, a model per provider, both alias shapes, an operator retry
+/// The served config the config, doctor, query, usage and accounts fixtures
+/// share: a priced API-key provider, a labeled subscription seat, an unlabeled
+/// Codex login, an unpriced compat provider and a cloud provider, a model per
+/// provider, both alias shapes, an operator retry
 /// count and both capability override verdicts.
 pub fn fixture_config() -> Config {
     let text = format!(
@@ -64,6 +65,12 @@ base_url = "https://compat.example/v1"
 credential = "env://FIXTURE_COMPAT_KEY"
 auth = "bearer"
 
+[providers.codex]
+format = "openai-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = "oauth://codex"
+auth = "bearer"
+
 [providers.bed]
 format = "bedrock-invoke"
 cloud = {{ name = "aws", region = "us-east-1" }}
@@ -86,6 +93,10 @@ upstream = "claude-sonnet-4-5"
 [models.glm]
 provider = "compat"
 upstream = "glm-5"
+
+[models.codex-mini]
+provider = "codex"
+upstream = "gpt-5-codex"
 
 [models.bedclaude]
 provider = "bed"
@@ -128,6 +139,7 @@ pub fn fixture_targets() -> Vec<RouteTargetStatus> {
         upstream: upstream.to_string(),
         seat_label: None,
         account: Some(format!("#{provider}")),
+        login_label: None,
         learned_lane: StateKey::parse(&format!("{provider}#{upstream}")),
         gate,
     };
@@ -145,6 +157,7 @@ pub fn fixture_targets() -> Vec<RouteTargetStatus> {
     let unusable = RouteTargetStatus {
         seat_label: Some("a".to_string()),
         account: Some("anthropic#a".to_string()),
+        login_label: Some("a".to_string()),
         ..target(
             "seat-sonnet",
             "claude-seat",
@@ -209,6 +222,7 @@ pub fn aggregate_json() -> Value {
             health: super::health::fixture::populated_health_panel(),
             config: super::config::fixture::populated_config_panel(),
             doctor: super::doctor::fixture::populated_doctor_panel(),
+            accounts: super::accounts::fixture::populated_accounts_panel(),
         },
     };
     serde_json::to_value(aggregate).expect("the aggregate serializes")

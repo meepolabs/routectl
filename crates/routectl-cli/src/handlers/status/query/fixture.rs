@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use routectl_router::prices::PriceBook;
-use routectl_usage::{GroupDim, QueryResult, QuerySpec, ReadLimit, open};
+use routectl_usage::{GroupDim, QuerySpec, ReadLimit, open};
 use serde_json::Value;
 
 use super::super::panel_fixtures::{FIXTURE_NOW_MS, fixture_as_of, fixture_now, fixture_router};
 use super::super::router_view::StatusRouterHandle;
-use super::{Panel, build_panel};
+use super::{Panel, QueryPayload, build_panel, name_panel_groups};
 use crate::commands::usage::{BucketUnit, WindowFlag, window_bounds};
 use crate::local_time::LocalZone;
 
@@ -37,9 +37,14 @@ fn serialized(group_by: GroupDim, bucket: Option<BucketUnit>) -> Value {
 }
 
 /// Today's window over a seeded ledger holding a priced API-key model, a
-/// subscription seat, an unpriced compat model and a pre-dispatch hangup,
-/// read the way the route reads it.
-pub fn populated_query_panel(group_by: GroupDim, bucket: Option<BucketUnit>) -> Panel<QueryResult> {
+/// subscription seat served twice (so its provider ranks into the Overview
+/// cards that carry seat quota), an unpriced compat model and a pre-dispatch
+/// hangup,
+/// read and named the way the route reads and names it.
+pub fn populated_query_panel(
+    group_by: GroupDim,
+    bucket: Option<BucketUnit>,
+) -> Panel<QueryPayload> {
     let dir = tempfile::tempdir().expect("a temp dir");
     let db_path = dir.path().join("usage.db");
     seed_ledger(&db_path);
@@ -57,16 +62,19 @@ pub fn populated_query_panel(group_by: GroupDim, bucket: Option<BucketUnit>) -> 
     let router = StatusRouterHandle::new(Arc::new(ArcSwap::from_pointee(fixture_router())));
     let book = Arc::new(PriceBook::new(dir.path().join("prices.json")));
     let limit = ReadLimit::from(Instant::now() + Duration::from_secs(30));
-    build_panel(
+    let pricer = router.pricer(book);
+    let identities = pricer.account_identities();
+    let panel = build_panel(
         &db_path,
         spec,
         bucket,
-        &router.pricer(book).pin(),
+        &pricer.pin(),
         fixture_as_of(),
         &zone,
         now,
         &limit,
-    )
+    );
+    name_panel_groups(panel, group_by, &identities)
 }
 
 /// One seeded ledger row: `(request id, hours before the fixture instant,
@@ -81,7 +89,7 @@ type Seed = (
     Option<&'static str>,
 );
 
-const SEEDS: [Seed; 7] = [
+const SEEDS: [Seed; 8] = [
     (
         "sonnet-ok-1",
         1,
@@ -112,6 +120,15 @@ const SEEDS: [Seed; 7] = [
     (
         "seat-ok",
         2,
+        "smart",
+        Some("seat-sonnet"),
+        Some("claude-seat"),
+        "ok",
+        None,
+    ),
+    (
+        "seat-ok-2",
+        4,
         "smart",
         Some("seat-sonnet"),
         Some("claude-seat"),

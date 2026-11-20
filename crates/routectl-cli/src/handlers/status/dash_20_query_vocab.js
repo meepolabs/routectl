@@ -70,7 +70,7 @@
     'schema_version', 'unavailable', 'as_of', 'data',
     'window', 'groups', 'totals', 'quota',
     'alias', 'model', 'requests', 'errors',
-    'seat', 'provider_kind', 'claim', 'status', 'ts_start_ms', 'reset_ms',
+    'seat', 'provider_entry', 'provider_kind', 'claim', 'status', 'ts_start_ms', 'reset_ms',
     'utilization', 'overage_utilization', 'overage_status'
   ];
 

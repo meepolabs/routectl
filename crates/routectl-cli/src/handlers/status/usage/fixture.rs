@@ -1,12 +1,13 @@
 //! Test-only fully populated `/status/usage` panel, folded by this panel's own
 //! `assemble` from ledger-shaped rows.
 
+use routectl_router::AccountIdentities;
 use routectl_usage::{AggRow, GroupKey, QuotaSnapshot};
 use serde_json::Value;
 
-use super::super::panel_fixtures::{FIXTURE_NOW_MS, fixture_as_of};
+use super::super::panel_fixtures::{FIXTURE_NOW_MS, fixture_as_of, fixture_config};
 use super::super::usage_health::WindowObservation;
-use super::{Panel, SCHEMA_VERSION, UsagePanel, assemble};
+use super::{Panel, SCHEMA_VERSION, UsagePanel, assemble, configured_quota};
 use crate::commands::usage::WindowBounds;
 
 const DAY_MS: i64 = 86_400_000;
@@ -18,8 +19,9 @@ pub fn populated_usage() -> Value {
 
 /// Today's window over a dispatched group served in two eras (so the
 /// coalesce runs), a pre-dispatch group with no provider, model or upstream,
-/// errors in two classes, a full quota snapshot and a sparse one, and an
-/// incomplete observation block.
+/// errors in two classes, a full quota snapshot and a sparse one for the
+/// fixture config's two logins (a snapshot for a login it no longer names is
+/// dropped), and an incomplete observation block.
 pub fn populated_usage_panel() -> Panel<UsagePanel> {
     let bounds = WindowBounds {
         from_ms: FIXTURE_NOW_MS - DAY_MS / 2,
@@ -51,7 +53,7 @@ pub fn populated_usage_panel() -> Panel<UsagePanel> {
         bounds,
         rows,
         breakdown,
-        quota(),
+        configured_quota(quota(), &AccountIdentities::from_config(&fixture_config())),
         observation(bounds),
     );
     Panel::available(SCHEMA_VERSION, fixture_as_of(), dto)
@@ -110,8 +112,9 @@ fn agg_row(key: GroupKey, requests: i64, errors: i64, cancelled: i64) -> AggRow 
     }
 }
 
-/// An Anthropic seat reporting every quota column, and a codex seat that
-/// reports only claim, utilization and reset, the way that vendor does.
+/// An Anthropic seat reporting every quota column, a codex seat that
+/// reports only claim and utilization, the way that vendor does, and a seat
+/// the config no longer names.
 fn quota() -> Vec<QuotaSnapshot> {
     vec![
         QuotaSnapshot {
@@ -133,6 +136,17 @@ fn quota() -> Vec<QuotaSnapshot> {
             status: None,
             overage_status: None,
             utilization: Some(0.35),
+            overage_utilization: None,
+            reset: None,
+        },
+        QuotaSnapshot {
+            seat: Some("anthropic#retired".to_string()),
+            provider_kind: Some("anthropic-api".to_string()),
+            ts_start: FIXTURE_NOW_MS - 86_400_000,
+            claim: Some("five_hour".to_string()),
+            status: Some("allowed".to_string()),
+            overage_status: None,
+            utilization: Some(0.5),
             overage_utilization: None,
             reset: None,
         },

@@ -402,6 +402,9 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 }
 
 #[cfg(test)]
+pub(super) mod fixture;
+
+#[cfg(test)]
 #[path = "accounts_tests.rs"]
 pub(super) mod tests;
 

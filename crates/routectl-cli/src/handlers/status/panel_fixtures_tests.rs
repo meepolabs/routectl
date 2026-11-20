@@ -6,7 +6,7 @@
 use serde_json::{Value, json};
 
 use super::{Allowance, DensityException, aggregate_json, density_gaps, missing_null_states};
-use crate::handlers::status::{config, doctor, health, query, usage};
+use crate::handlers::status::{accounts, config, doctor, health, query, usage};
 
 /// One populated payload under test, with the exceptions its shape forces.
 struct Fixture {
@@ -40,6 +40,12 @@ const FULLY_PRICED_BUCKETS: DensityException = DensityException {
     reason: "a priced or zero-traffic bucket names no missing dimension",
 };
 
+const NO_WINDOWS: DensityException = DensityException {
+    path: "data.accounts[].windows",
+    allowance: Allowance::MayBeEmpty,
+    reason: "an account with no reading, or one that reported no window, lists none",
+};
+
 const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "usage",
@@ -64,6 +70,12 @@ const FIXTURES: &[Fixture] = &[
         payload: doctor::fixture::populated_doctor,
         schema_version: doctor::DOCTOR_SCHEMA_VERSION,
         exceptions: &[UNAVAILABLE, AGREED_CELLS],
+    },
+    Fixture {
+        name: "accounts",
+        payload: accounts::fixture::populated_accounts,
+        schema_version: accounts::SCHEMA_VERSION,
+        exceptions: &[UNAVAILABLE, NO_WINDOWS],
     },
     Fixture {
         name: "query grouped",
@@ -117,7 +129,7 @@ fn each_fixture_has_no_empty_array_and_no_always_null_key() {
 }
 
 #[test]
-fn the_aggregate_carries_the_four_get_panels_densely_at_their_versions() {
+fn the_aggregate_carries_the_five_get_panels_densely_at_their_versions() {
     let aggregate = aggregate_json();
     let exceptions = [
         DensityException {
@@ -137,6 +149,14 @@ fn the_aggregate_carries_the_four_get_panels_densely_at_their_versions() {
             ..UNAVAILABLE
         },
         DensityException {
+            path: "panels.accounts.unavailable",
+            ..UNAVAILABLE
+        },
+        DensityException {
+            path: "panels.accounts.data.accounts[].windows",
+            ..NO_WINDOWS
+        },
+        DensityException {
             path: "panels.doctor.data.report.panels.capability_matrix.lanes[].cells[].nickname_actions",
             ..AGREED_CELLS
         },
@@ -150,6 +170,7 @@ fn the_aggregate_carries_the_four_get_panels_densely_at_their_versions() {
         ("health", health::SCHEMA_VERSION),
         ("config", config::SCHEMA_VERSION),
         ("doctor", doctor::DOCTOR_SCHEMA_VERSION),
+        ("accounts", accounts::SCHEMA_VERSION),
     ] {
         assert_eq!(
             aggregate["panels"][panel]["schema_version"],
@@ -163,7 +184,7 @@ fn the_aggregate_carries_the_four_get_panels_densely_at_their_versions() {
 /// proves a non-null occurrence, this proves a null one.
 #[test]
 fn each_fixture_shows_its_conditional_fields_in_both_states() {
-    let cases: [(&str, Value, &[&str]); 5] = [
+    let cases: [(&str, Value, &[&str]); 6] = [
         (
             "usage",
             usage::fixture::populated_usage(),
@@ -171,6 +192,7 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.groups[].provider",
                 "data.groups[].model",
                 "data.groups[].upstream",
+                "data.quota[].login_label",
                 "data.quota[].status",
                 "data.quota[].overage_utilization",
                 "data.quota[].reset_ms",
@@ -187,6 +209,7 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.targets[].account",
                 "data.targets[].learned_lane",
                 "data.targets[].seat_label",
+                "data.targets[].login_label",
                 "data.targets[].rpm_available",
                 "data.targets[].open_since_ms",
                 "data.targets[].last_outcome",
@@ -218,6 +241,20 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.report.panels.capability_matrix.lanes[].cells[].supported",
                 "data.report.panels.capability_matrix.lanes[].cells[].value",
                 "data.report.panels.capability_matrix.lanes[].cells[].nickname_actions[].layer",
+            ],
+        ),
+        (
+            "accounts",
+            accounts::fixture::populated_accounts(),
+            &[
+                "data.accounts[].login_label",
+                "data.accounts[].last_accepted",
+                "data.accounts[].windows[].scope",
+                "data.accounts[].windows[].remaining",
+                "data.accounts[].windows[].reset_at_ms",
+                "data.accounts[].windows[].age_ms",
+                "data.accounts[].poll.vendor",
+                "data.accounts[].poll.last_result",
             ],
         ),
         (

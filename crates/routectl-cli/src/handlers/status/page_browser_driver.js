@@ -281,11 +281,11 @@
   });
 
   d.scenario('seat-dialog-focus', function () {
-    var dialogId = 'overview-seats-dialog-kanthropic';
-    return d.waitForElement('overview-seats-kanthropic').then(function (open) {
+    var dialogId = 'overview-seats-dialog-kclaude_2d_seat';
+    return d.waitForElement('overview-seats-kclaude_2d_seat').then(function (open) {
       open.click();
       var dialog = byId(dialogId);
-      var close = byId('overview-seats-close-kanthropic');
+      var close = byId('overview-seats-close-kclaude_2d_seat');
       close.focus();
       return d.acrossRounds('/status', 2, function () {
         var live = document.getElementById(dialogId);
