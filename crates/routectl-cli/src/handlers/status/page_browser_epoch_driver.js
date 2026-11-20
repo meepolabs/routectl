@@ -6,8 +6,9 @@
 // currency check is the only thing between a late answer and the screen), or
 // replace its status. Every request is logged with when it was issued and
 // delivered, whether and when the page aborted it, the view selected when it
-// was issued, and the `totals.requests` of the answer the server sent, so a
-// test can tell which answer is on screen.
+// was issued, and the `totals.requests` of the answer the server sent (and,
+// for a seat-grouped answer, each account's own count), so a test can tell
+// which answer is on screen.
 (function (d) {
   'use strict';
 
@@ -47,6 +48,22 @@
     }
   }
 
+  // Each account's request count in a seat-grouped answer, or null for an
+  // answer of any other grouping.
+  function seatRequests(text) {
+    try {
+      var data = JSON.parse(text).data;
+      if (!data || !Array.isArray(data.groups)) { return null; }
+      var seats = data.groups.filter(function (g) { return Object.prototype.hasOwnProperty.call(g, 'account'); });
+      if (!seats.length) { return null; }
+      var out = {};
+      seats.forEach(function (g) { if (g.account) { out[g.account] = g.metrics.requests; } });
+      return out;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function selectedView() {
     var tab = document.querySelector('[role="tab"][aria-selected="true"]');
     return tab ? tab.id : null;
@@ -71,7 +88,8 @@
       aborted_at: null,
       delivered_at: null,
       status: null,
-      requests: null
+      requests: null,
+      seat_requests: null
     };
     log.push(entry);
     var signal = init && init.signal;
@@ -89,6 +107,7 @@
           entry.delivered_at = Date.now();
           entry.status = rule.status || resp.status;
           entry.requests = totalRequests(text);
+          entry.seat_requests = seatRequests(text);
           return new Response(rule.status ? '' : text, {
             status: entry.status,
             headers: resp.headers
@@ -260,6 +279,71 @@
       };
     });
   });
+  // ---- Traffic to Accounts ------------------------------------------------
+
+  var ACCOUNTS_SEAT_TRAFFIC = 'accounts-row-kseats-kanthropic_23_a-traffic';
+
+  // What the labeled seat's traffic line says: its request figure, or the
+  // words standing in for one.
+  function seatTrafficFigure() {
+    var line = document.getElementById(ACCOUNTS_SEAT_TRAFFIC);
+    if (!line) { return null; }
+    var shown = line.querySelector('.acct-traffic-req') || line.querySelector('.acct-traffic-note');
+    return shown ? shown.textContent : line.textContent;
+  }
+
+  // Every distinct figure the labeled seat's traffic line shows, from the
+  // first paint on: a mutation observer, so a payload drawn and replaced
+  // between two samples is still seen.
+  function watchSeatTraffic() {
+    var seen = [];
+    function sample() {
+      var text = seatTrafficFigure();
+      if (text !== null && seen.indexOf(text) < 0) { seen.push(text); }
+    }
+    new MutationObserver(sample).observe(document.getElementById('body-accounts'), {
+      subtree: true, childList: true, characterData: true
+    });
+    return seen;
+  }
+
+  function accountsShown() {
+    var lines = document.querySelectorAll('#body-accounts .acct-traffic');
+    return {
+      stats: document.getElementById('verdict-stats').textContent,
+      seat_line: seatTrafficFigure(),
+      lines: Array.prototype.map.call(lines, function (n) { return n.textContent; })
+    };
+  }
+
+  // Traffic's first QUERY is held and delivered after the page aborted it.
+  // The operator opens Accounts while it is out; Accounts asks for its seat
+  // grouping and draws it, then the late Traffic answer lands.
+  d.scenario('epoch-traffic-to-accounts', function () {
+    holdFirstQuery({ ms: 3000, ignoreAbort: true });
+    var seen = watchSeatTraffic();
+    var out = {};
+    return d.waitUntil('the Traffic QUERY', function () { return nthQuery(0); }).then(function () {
+      document.getElementById('tab-accounts').click();
+      return waitDelivered('the Accounts QUERY', function () { return nthQuery(1); });
+    }).then(function () {
+      return d.waitUntil('the seat traffic figures', function () {
+        var line = document.getElementById(ACCOUNTS_SEAT_TRAFFIC);
+        return line && line.querySelector('.acct-traffic-req');
+      });
+    }).then(function () {
+      out.before = accountsShown();
+      return waitDelivered('the held Traffic QUERY', function () { return nthQuery(0); });
+    }).then(function () {
+      return d.sleep(300);
+    }).then(function () {
+      out.after = accountsShown();
+      out.queries = queries();
+      out.seen = seen;
+      return out;
+    });
+  });
+
   // The seat probe view's first QUERY, answered and drawn.
   d.scenario('epoch-seat-probe-first-query', function () {
     return waitDelivered('the first QUERY', function () { return nthQuery(0); }).then(function () {

@@ -1,8 +1,8 @@
 // The Accounts view in a real headless Chrome: one row per configured
 // account under each pool that dispatches on it, the login state with the
 // daemon's cause and a focusable fix, every window labelled from its length
-// with room, reset, age, source and stale mark, the poll state, and the two
-// background drivers. `include!`d into a child module of `page::tests`; the
+// with room, reset, age, source and stale mark, the traffic over the
+// selected range, the poll state, and the two background drivers. `include!`d into a child module of `page::tests`; the
 // scenarios live in page_browser_accounts_driver.js.
 
 use serde_json::Value;
@@ -12,13 +12,16 @@ const ACCOUNTS_DRIVER: &str = include_str!("page_browser_accounts_driver.js");
 const ACCOUNTS_BUDGET_MS: u64 = 30_000;
 
 fn accounts_scenario(name: &'static str) -> Value {
+    accounts_scenario_at(name, "accounts").result
+}
+
+fn accounts_scenario_at(name: &'static str, hash: &'static str) -> browser::DriverReport {
     browser::run_scenario(&browser::Scenario {
         name,
-        hash: "accounts",
+        hash,
         snippets: &[ACCOUNTS_DRIVER],
         budget_ms: ACCOUNTS_BUDGET_MS,
     })
-    .result
 }
 
 fn text<'a>(value: &'a Value, what: &str) -> &'a str {
@@ -264,6 +267,219 @@ fn page_browser_accounts_stopped_driver_reads_amber() {
     assert_eq!(stopped["stopped_class"], true, "{out:#}");
     assert_ne!(running["state_color"], stopped["state_color"], "{out:#}");
     assert_ne!(running["border"], stopped["border"], "{out:#}");
+}
+
+/// "<n> req" for an answer's request count, as a traffic line shows it.
+fn req_text(answer: &Value) -> String {
+    format!(
+        "{} req",
+        answer
+            .as_u64()
+            .unwrap_or_else(|| panic!("a request count: {answer}"))
+    )
+}
+
+/// Each row's traffic comes from the seat group whose account is exactly
+/// the row's key: a group for a login not in config (`anthropic#retired`)
+/// and one whose key differs from a configured account only in case
+/// (`CODEX`) create no row and land on none, and the same seat listed under
+/// two pools shows one count under each.
+///
+/// Mutation check: key the join on `g.account.toLowerCase()` in
+/// acctSeatTraffic -> red (the Codex row shows the `CODEX` group's count).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_traffic_joins_seat_groups_on_the_exact_account_key() {
+    let out = accounts_scenario("accounts-traffic");
+
+    let answered: Vec<&str> = out["answered_accounts"]
+        .as_array()
+        .expect("the answer's accounts")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for decoy in ["anthropic#retired", "CODEX"] {
+        assert!(
+            answered.contains(&decoy),
+            "positive control: the answer carried `{decoy}`: {out:#}"
+        );
+    }
+    let rows = out["row_accounts"].as_array().expect("row accounts");
+    assert_eq!(rows.len(), 6, "{out:#}");
+    for decoy in ["anthropic#retired", "CODEX"] {
+        assert!(
+            !rows.iter().any(|r| r == decoy),
+            "`{decoy}` became a row: {out:#}"
+        );
+    }
+    assert_eq!(out["traffic_lines"], 6, "one traffic line per row: {out:#}");
+    let seat_req = req_text(&out["answered_seat_requests"]);
+    assert_eq!(out["seat"]["req"], seat_req.as_str(), "{out:#}");
+    assert_eq!(out["seat_in_backup"]["req"], seat_req.as_str(), "{out:#}");
+    assert_eq!(out["codex"]["req"], Value::Null, "{out:#}");
+    assert_eq!(out["codex"]["note"], "no traffic today", "{out:#}");
+    assert_ne!(
+        req_text(&out["answered_decoy_requests"]),
+        seat_req,
+        "positive control: the decoy's count is its own: {out:#}"
+    );
+}
+
+/// A configured account with no seat group reads as having no traffic in
+/// the range, in words, never as 0; a credential the ledger never attributes
+/// per account says that instead of claiming no traffic.
+///
+/// Mutation check: make acctNoTrafficText answer `0 req` -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_an_account_with_no_seat_group_shows_no_traffic_not_zero() {
+    let out = accounts_scenario("accounts-traffic");
+
+    let codex = text(&out["codex"]["text"], "the Codex traffic line");
+    assert_eq!(codex, "trafficno traffic today", "{out:#}");
+    assert!(!codex.contains('0'), "{out:#}");
+    assert_eq!(
+        out["cloud"]["note"], "not recorded per account for this credential",
+        "{out:#}"
+    );
+    assert!(
+        out["seat"]["req"].is_string(),
+        "positive control: a row with a group shows its count: {out:#}"
+    );
+}
+
+/// A seat answer whose groups carry no account identity (a payload of
+/// another grouping) is not read as the accounts' traffic: every line says
+/// the traffic is not available, none says there was none, and the rows and
+/// windows still render.
+///
+/// Mutation check: drop the seat-grouping check in acctSeatTraffic -> red
+/// (every row reads "no traffic today").
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_a_payload_not_grouped_by_seat_is_never_read_as_traffic() {
+    let out = accounts_scenario("accounts-traffic-not-seat");
+
+    assert_eq!(out["seat"]["note"], "not available", "{out:#}");
+    assert_eq!(out["codex"]["note"], "not available", "{out:#}");
+    assert_eq!(out["seat"]["req"], Value::Null, "{out:#}");
+    assert_eq!(
+        out["rows"], 6,
+        "positive control: the rows still render: {out:#}"
+    );
+    assert_eq!(out["error_cards"], 0, "{out:#}");
+}
+
+/// Subscription traffic shows its API-price equivalent as "~$" with "At API
+/// prices" and no spend figure; a priced group shows its spend; a partial one
+/// says its figure is the priced subtotal only.
+///
+/// Mutation check: drop the `~$` prefix in acctCostNodes -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_traffic_cost_names_an_equivalent_as_one() {
+    let out = accounts_scenario("accounts-traffic");
+
+    assert_eq!(out["seat"]["cost"], Value::Null, "{out:#}");
+    assert_eq!(out["seat"]["alt"], "~$1.23At API prices", "{out:#}");
+    assert_eq!(out["api_key"]["cost"], "$0.500", "{out:#}");
+    assert_eq!(out["api_key"]["alt"], Value::Null, "{out:#}");
+    assert_eq!(
+        out["compat"]["cost"], "$0.250priced subtotal only",
+        "{out:#}"
+    );
+}
+
+/// A provider scope carried in from another view narrows the seat QUERY;
+/// Accounts names it in the heading and the no-traffic words and offers the
+/// control that lifts it, while every row still lists.
+///
+/// Mutation check: drop the scope strip in buildAccounts -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_a_provider_scope_is_named_and_can_be_lifted() {
+    let report = accounts_scenario_at("accounts-traffic-scoped", "accounts?scope=claude-seat");
+    let out = &report.result;
+
+    let seat_query = report
+        .requests
+        .iter()
+        .filter(|r| r["method"] == "QUERY")
+        .filter_map(|r| r["body"].as_str())
+        .map(|b| serde_json::from_str::<Value>(b).expect("a JSON body"))
+        .find(|b| b["group_by"] == "seat")
+        .unwrap_or_else(|| panic!("a seat QUERY: {:#?}", report.requests));
+    assert_eq!(seat_query["provider"], "claude-seat", "{seat_query}");
+    assert_eq!(
+        out["head"], "Traffic today - requests and cost per account, through claude-seat only",
+        "{out:#}"
+    );
+    assert_eq!(
+        out["codex_note"], "no traffic through claude-seat today",
+        "{out:#}"
+    );
+    assert_eq!(out["reset"], "all providers", "{out:#}");
+    assert_eq!(out["rows"], 6, "{out:#}");
+}
+
+/// The traffic heading names the selected range and moves with the picker,
+/// which is live on Accounts with its covers text. While the new range's
+/// answer is out the lines say so; every login, window and poll line reads
+/// the same before, during and after, in the same nodes, and the account
+/// section is never marked pending.
+///
+/// Mutation checks: give `accounts` the span `'current state'` in VIEWS ->
+/// red (the picker is dimmed and Week never applies); name a fixed range in
+/// acctTrafficHeadText -> red (the heading stays on today).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_traffic_follows_the_range_and_nothing_else_does() {
+    let out = accounts_scenario("accounts-traffic-range");
+    let (today, held, week) = (&out["today"], &out["held"], &out["week"]);
+
+    let heading = "Traffic {} - requests and cost per account";
+    assert_eq!(today["head"], heading.replace("{}", "today"), "{out:#}");
+    assert_eq!(held["head"], heading.replace("{}", "this week"), "{out:#}");
+    assert_eq!(week["head"], held["head"], "{out:#}");
+    assert_eq!(today["windowless"], "false", "{out:#}");
+    assert_eq!(today["covers_hidden"], false, "{out:#}");
+    assert!(
+        text(&today["covers"], "covers").starts_with("Today:"),
+        "{out:#}"
+    );
+    assert!(
+        text(&week["covers"], "covers").starts_with("Week:"),
+        "{out:#}"
+    );
+    assert_eq!(week["week_pressed"], "true", "{out:#}");
+
+    assert_eq!(
+        today["seat"]["req"],
+        req_text(&out["today_requests"]).as_str(),
+        "{out:#}"
+    );
+    assert_eq!(held["seat"]["note"], "loading", "{out:#}");
+    assert_eq!(
+        week["seat"]["req"],
+        req_text(&out["week_requests"]).as_str(),
+        "{out:#}"
+    );
+    assert_ne!(
+        today["seat"]["req"], week["seat"]["req"],
+        "positive control: the week answer carried other figures: {out:#}"
+    );
+
+    for (when, seen) in [("held", held), ("week", week)] {
+        assert_eq!(seen["rows"], today["rows"], "{when}: {out:#}");
+        assert_eq!(seen["seat_row_kept"], true, "{when}: {out:#}");
+        assert_eq!(seen["window_kept"], true, "{when}: {out:#}");
+        assert_eq!(seen["pools_pending"], false, "{when}: {out:#}");
+        assert_eq!(seen["pools_skeleton"], false, "{when}: {out:#}");
+    }
+    assert!(
+        !today["rows"].as_array().expect("rows").is_empty(),
+        "positive control: the rows were read: {out:#}"
+    );
 }
 
 /// Whether `code` (comments stripped) reads a `quota` member, in either

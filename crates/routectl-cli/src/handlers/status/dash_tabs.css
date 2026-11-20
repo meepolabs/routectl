@@ -778,6 +778,36 @@
   color: var(--muted);
 }
 .acct-poll { font-size: var(--fs-xs); color: var(--faint); overflow-wrap: anywhere; }
+.acct-traffic-range {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-bottom: var(--sp-2);
+}
+.acct-traffic {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.acct-traffic--stale { opacity: 0.6; }
+.acct-traffic-req,
+.acct-traffic-cost,
+.acct-traffic-alt {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.acct-traffic-alt { color: var(--muted); }
+.acct-traffic-qual {
+  margin-left: var(--sp-1);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+.acct-traffic-note { color: var(--faint); }
 .acct-drivers {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-quota)), 1fr));

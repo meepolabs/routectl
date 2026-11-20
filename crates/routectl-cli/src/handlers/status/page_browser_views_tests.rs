@@ -49,7 +49,7 @@ const VIEW_CASES: &[ViewCase] = &[
         id: "accounts",
         shows: &["Accounts by pool", "Background seat drivers"],
         omits: &["Dispatch targets", "Fallback chains"],
-        windowed: false,
+        windowed: true,
     },
     ViewCase {
         id: "traffic",
@@ -147,7 +147,7 @@ fn assert_picker(case: &ViewCase, report: &Value) {
 /// Each view opened by its own id shows its own sections and no error card,
 /// and the picker is live exactly on the windowed views.
 ///
-/// Mutation check: give `accounts` a null span in VIEWS -> red (picker live).
+/// Mutation check: give `models` a null span in VIEWS -> red (picker live).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_each_view_renders_its_sections_from_the_fixtures() {

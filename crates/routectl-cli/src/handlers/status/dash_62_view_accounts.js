@@ -7,7 +7,9 @@
   // flag are the panel's; the page adds only how far an instant is from the
   // panel's own as_of. A pool header's usable count comes from the health
   // panel, read through acctPoolCounts so a dark health source costs that
-  // count alone.
+  // count alone. Each row's traffic over the selected range comes from the
+  // seat-grouped QUERY, read through acctSeatTraffic on the same terms; it is
+  // the only part of a row the range picker moves.
 
   // A window this full reads amber, and red once at or over its limit. The
   // same line the needs-attention list draws for a nearly used window.
@@ -113,14 +115,20 @@
         'its usage windows.', ['current state']));
       return wrap;
     }
-    var nowMs = panelNowMs(rec);
+    var head = acctText('div', 'acct-traffic-range', acctTrafficHeadText());
+    head.id = 'accounts-traffic-range';
+    wrap.appendChild(head);
+    var ctx = {
+      nowMs: panelNowMs(rec),
+      traffic: acctSeatTraffic(SOURCES[QUERY_SEATS_SOURCE])
+    };
     var counts = acctPoolCounts(SOURCES.health);
     acctPoolNames(rows).forEach(function (pool) {
       var members = rows.filter(function (row) { return row.pools.indexOf(pool) >= 0; });
-      wrap.appendChild(acctPoolGroup(pool, members, counts, nowMs));
+      wrap.appendChild(acctPoolGroup(pool, members, counts, ctx));
     });
     var loose = rows.filter(function (row) { return !row.pools.length; });
-    if (loose.length) { wrap.appendChild(acctLooseGroup(loose, nowMs)); }
+    if (loose.length) { wrap.appendChild(acctLooseGroup(loose, ctx)); }
     return wrap;
   }
 
@@ -176,7 +184,7 @@
     return acctCountText(p.eligible) + ' of ' + acctCountText(p.configured) + ' usable';
   }
 
-  function acctPoolGroup(pool, members, counts, nowMs) {
+  function acctPoolGroup(pool, members, counts, ctx) {
     var group = document.createElement('div');
     group.id = 'accounts-pool-' + idKey(pool);
     group.className = 'acct-pool';
@@ -184,13 +192,13 @@
     var list = document.createElement('div');
     list.className = 'acct-list';
     members.forEach(function (row) {
-      list.appendChild(acctRow(row, 'accounts-row-' + idKey(pool) + '-' + idKey(row.account), nowMs));
+      list.appendChild(acctRow(row, 'accounts-row-' + idKey(pool) + '-' + idKey(row.account), ctx));
     });
     group.appendChild(list);
     return group;
   }
 
-  function acctLooseGroup(rows, nowMs) {
+  function acctLooseGroup(rows, ctx) {
     var group = document.createElement('div');
     group.id = 'accounts-nopool';
     group.className = 'acct-pool';
@@ -198,7 +206,7 @@
     var list = document.createElement('div');
     list.className = 'acct-list';
     rows.forEach(function (row) {
-      list.appendChild(acctRow(row, 'accounts-row-' + idKey(row.account), nowMs));
+      list.appendChild(acctRow(row, 'accounts-row-' + idKey(row.account), ctx));
     });
     group.appendChild(list);
     return group;
@@ -208,7 +216,7 @@
 
   // One account, its own refresh unit: a selection inside its fix holds this
   // row alone while the rest of the list keeps updating.
-  function acctRow(row, id, nowMs) {
+  function acctRow(row, id, ctx) {
     var cred = row.credential;
     var rowEl = markRefreshUnit(document.createElement('div'), id);
     rowEl.id = id;
@@ -217,8 +225,9 @@
     var cause = acctCauseText(cred);
     if (cause) { rowEl.appendChild(acctText('div', 'acct-cause', cause)); }
     if (cred.fix) { rowEl.appendChild(acctFix(cred.fix)); }
-    rowEl.appendChild(acctWindows(row, id, nowMs));
-    rowEl.appendChild(acctPollLine(row.poll, nowMs));
+    rowEl.appendChild(acctWindows(row, id, ctx.nowMs));
+    rowEl.appendChild(acctTrafficLine(row, ctx.traffic, id + '-traffic'));
+    rowEl.appendChild(acctPollLine(row.poll, ctx.nowMs));
     return rowEl;
   }
 
@@ -388,6 +397,97 @@
     if (!isFinite(nowMs)) { return 'resets at ' + fmtTs(Number(w.reset_at_ms)); }
     var left = Number(w.reset_at_ms) - nowMs;
     return left <= 0 ? 'reset time passed' : 'resets in ' + acctSpanText(left);
+  }
+
+  // ---- traffic in the selected range --------------------------------------
+
+  // What the traffic lines count, named for the range the picker selects
+  // (and the provider scope, when one is set): the one heading that moves
+  // with the picker on this view.
+  function acctTrafficHeadText() {
+    var text = 'Traffic ' + WINDOW_SPAN[selectedWindow] + ' - requests and cost per account';
+    return selectedProvider ? text + ', through ' + selectedProvider + ' only' : text;
+  }
+
+  // The seat-grouped answer as metrics by exact account key, or the reason
+  // there is none. A group whose account is null (the unattributed rows) or
+  // names no configured account (a retired login) has no row to land on.
+  // Guarded as acctPoolCounts guards health: an answer that is not current,
+  // or not grouped by seat, costs the traffic lines alone.
+  function acctSeatTraffic(rec) {
+    if (rec.state === 'loading') { return { note: 'loading', byAccount: null, stale: false }; }
+    var view = queryViewOf(rec.name);
+    if (!view) { return { note: 'not available', byAccount: null, stale: false }; }
+    try {
+      var byAccount = Object.create(null);
+      rec.data.groups.forEach(function (g, i) {
+        if (!Object.prototype.hasOwnProperty.call(g, 'account')) {
+          throw new Error('query payload is not grouped by seat');
+        }
+        if (typeof g.account === 'string') { byAccount[g.account] = view.groups[i].metrics; }
+      });
+      markRenderAttempt(rec.name);
+      return { note: null, byAccount: byAccount, stale: rec.state === 'stale' };
+    } catch (e) {
+      recordRenderFault(rec.name);
+      return { note: 'not available', byAccount: null, stale: false };
+    }
+  }
+
+  function acctTrafficLine(row, traffic, id) {
+    var line = document.createElement('div');
+    line.id = id;
+    line.className = 'acct-traffic' + (traffic.stale ? ' acct-traffic--stale' : '');
+    line.appendChild(acctText('span', 'acct-label', 'traffic'));
+    var m = traffic.byAccount ? traffic.byAccount[row.account] : null;
+    if (!m) {
+      line.appendChild(acctText('span', 'acct-traffic-note', traffic.note || acctNoTrafficText(row)));
+      return line;
+    }
+    var req = document.createElement('span');
+    req.className = 'acct-traffic-req';
+    req.appendChild(figure(humanCount(m.requests), null, null));
+    req.appendChild(document.createTextNode(' req'));
+    line.appendChild(req);
+    acctCostNodes(m).forEach(function (node) { line.appendChild(node); });
+    if (traffic.stale) { line.appendChild(acctText('span', 'acct-stale', 'stale')); }
+    return line;
+  }
+
+  // A configured account with no seat group carried nothing in the range,
+  // which is said in words. The ledger attributes a request to an account
+  // only for a subscription login, so an API-key or cloud credential never
+  // has a group: its traffic is not known per account, which is not zero.
+  function acctNoTrafficText(row) {
+    if (row.subscription !== true) { return 'not recorded per account for this credential'; }
+    var through = selectedProvider ? ' through ' + selectedProvider : '';
+    return 'no traffic' + through + ' ' + WINDOW_SPAN[selectedWindow];
+  }
+
+  // Real spend where rows were priced, a partial subtotal saying so, and the
+  // subscription rows' API-price equivalent as a separate figure, never added
+  // to spend. With neither, the cost status in words, never a dollar zero.
+  function acctCostNodes(m) {
+    var nodes = [];
+    if (acctHasNumber(m.cost_usd)) {
+      var spend = document.createElement('span');
+      spend.className = 'acct-traffic-cost';
+      spend.appendChild(figure(money(m.cost_usd), null, '$'));
+      if (m.cost_status === 'partial') {
+        spend.appendChild(acctText('span', 'acct-traffic-qual', PARTIAL_COST_NOTE));
+      }
+      nodes.push(spend);
+    }
+    if (acctHasNumber(m.equivalent_cost_usd)) {
+      var alt = document.createElement('span');
+      alt.className = 'acct-traffic-alt';
+      alt.appendChild(figure(money(m.equivalent_cost_usd), null, '~$'));
+      alt.appendChild(acctText('span', 'acct-traffic-qual', 'At API prices'));
+      alt.title = 'what this traffic would cost on pay-as-you-go API pricing';
+      nodes.push(alt);
+    }
+    if (!nodes.length) { nodes.push(faintFigure(labelFor('cost', m.cost_status).label)); }
+    return nodes;
   }
 
   // ---- usage poll ----------------------------------------------------------

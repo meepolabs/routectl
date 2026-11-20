@@ -129,8 +129,9 @@ banner, no retry signal -- silently mislabeled data.
 
 ## 4. Window and visual truthfulness
 
-- Accounts, Models, Config, and Doctor must **disable** the window picker
-  (dimmed, inert, labeled "Current state"). Now and Traffic keep it live.
+- Models, Config, and Doctor must **disable** the window picker (dimmed,
+  inert, labeled "Current state"). Now, Accounts and Traffic keep it live;
+  on Accounts it moves the traffic lines only.
 - A **sparse series draws gaps as BREAKS, never bridged**: produce traffic
   with an idle stretch in the middle of the window and confirm the sparkline
   and segment charts leave a hole instead of interpolating across it.
@@ -256,6 +257,16 @@ banner, no retry signal -- silently mislabeled data.
   endpoint) and wait 7 minutes: the window dims, reads `room unknown` and
   carries a `stale` mark, and its age keeps advancing. A seat with no
   reading yet says `no reading yet`, never a meter at zero.
+- Send a few requests through one pool seat. On Accounts the heading above
+  the pools reads `Traffic today - requests and cost per account`, and that
+  seat's `traffic` line shows its request count and `~$<n> At API prices`
+  (never a bare dollar figure for subscription traffic). A configured seat
+  that carried nothing reads `no traffic today`, never `0 req`; an API-key
+  or cloud entry reads `not recorded per account for this credential`.
+  Pick Week: the heading and the counts move to this week, while every
+  login state, window, reset time and poll line stays exactly as it was.
+  Remove a seat from the config and reload: its traffic does not appear as
+  a row.
 - The "Background seat drivers" section shows the credential refresh and
   usage poll drivers, each `running` on a daemon with a credential store,
   `never` for the sweep stamps before the first sweep, and `0` (not `-`) for

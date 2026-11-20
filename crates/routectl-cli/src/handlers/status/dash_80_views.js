@@ -36,8 +36,8 @@
     {
       id: 'accounts',
       label: 'Accounts',
-      sources: ['accounts', 'health'],
-      span: 'current state',
+      sources: ['accounts', 'health', QUERY_SEATS_SOURCE],
+      span: null,
       build: buildAccounts
     },
     {
@@ -102,10 +102,17 @@
   }
 
   // Every configured credential by pool, from the accounts panel, with the
-  // pool headers' usable counts read from health inside it; then the two
-  // background drivers that keep the logins and readings fresh.
+  // pool headers' usable counts read from health and each row's traffic in
+  // the selected range read from the seat QUERY inside it; then the two
+  // background drivers that keep the logins and readings fresh. The range
+  // moves the traffic lines only: logins and windows are current state. An
+  // inherited provider scope narrows that QUERY, so it is shown and can be
+  // lifted here.
   function buildAccounts() {
     var stack = tabStack();
+    if (selectedProvider) {
+      stack.appendChild(scopeStrip('accounts', 'the traffic lines count this provider only'));
+    }
     stack.appendChild(viewSection('accounts', accountsPoolSection, 'Accounts by pool'));
     stack.appendChild(viewSection('accounts', accountsDriverSection, 'Background seat drivers'));
     return stack;

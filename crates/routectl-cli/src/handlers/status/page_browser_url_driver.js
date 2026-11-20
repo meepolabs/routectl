@@ -223,7 +223,7 @@
       });
     });
     return chain.then(function () {
-      click('tab-accounts');
+      click('tab-models');
       return waitSettled();
     }).then(function () {
       out.windowless = coversReport();

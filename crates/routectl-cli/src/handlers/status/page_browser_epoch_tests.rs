@@ -221,6 +221,67 @@ fn page_browser_a_late_aggregate_after_a_query_403_keeps_the_page_terminal() {
     );
 }
 
+/// Traffic to Accounts with Traffic's model QUERY still out: Accounts asks
+/// for its own seat grouping and draws it, every traffic line it ever shows
+/// is either loading or the seat answer's own count, and the late Traffic
+/// answer, delivered after the page aborted it, changes nothing on screen.
+///
+/// Mutation check: list `QUERY_SOURCE` in place of `QUERY_SEATS_SOURCE` in
+/// the Accounts entry of VIEWS -> red (Accounts asks for and reads a model
+/// payload).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_switching_traffic_to_accounts_never_paints_a_non_seat_payload() {
+    let report = browser::run_scenario(&epoch_scenario("epoch-traffic-to-accounts", 30_000));
+    let result = &report.result;
+
+    let queries = result["queries"].as_array().expect("query log");
+    assert_eq!(queries.len(), 2, "{queries:#?}");
+    let (traffic, accounts) = (&queries[0], &queries[1]);
+    assert_eq!(traffic["view"], "tab-traffic", "{traffic:#}");
+    assert_eq!(traffic["body"]["group_by"], "model", "{traffic:#}");
+    assert_eq!(accounts["view"], "tab-accounts", "{accounts:#}");
+    assert_eq!(accounts["body"]["group_by"], "seat", "{accounts:#}");
+    assert!(
+        delivered_at(traffic) > delivered_at(accounts),
+        "the Traffic answer landed after the Accounts one"
+    );
+    assert_eq!(
+        traffic["aborted"], true,
+        "the page aborted the Traffic QUERY"
+    );
+
+    let seat_count = accounts["seat_requests"]["anthropic#a"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the seat answer counted the seat: {accounts:#}"));
+    let seat_line = format!("{seat_count} req");
+    let seen = result["seen"].as_array().expect("seen lines");
+    assert!(
+        seen.iter().any(|t| *t == seat_line.as_str()),
+        "positive control: the seat answer was drawn: {seen:?}"
+    );
+    for text in seen {
+        assert!(
+            *text == "loading" || *text == seat_line.as_str(),
+            "Accounts showed a line from another payload: {text} (seen {seen:?})"
+        );
+    }
+    let stats = result["before"]["stats"].as_str().expect("stats text");
+    assert!(
+        stats.starts_with(&stats_for(answered_requests(accounts))),
+        "the strip counts the seat answer: {stats:?}"
+    );
+    assert_ne!(
+        answered_requests(traffic),
+        answered_requests(accounts),
+        "positive control: the Traffic answer differs, so a repaint would show"
+    );
+    assert_eq!(
+        result["after"], result["before"],
+        "the late Traffic answer repainted Accounts"
+    );
+}
+
 /// The Models entry of VIEWS as the page registers it.
 const MODELS_ENTRY: &str = "      id: 'models',
       label: 'Models',
@@ -229,7 +290,7 @@ const MODELS_ENTRY: &str = "      id: 'models',
       build: buildModels";
 
 /// A windowed view led by a GET source that also lists the per-seat QUERY,
-/// standing in for Models, as no shipped view lists that source yet.
+/// standing in for Models so its own minimal section isolates the host.
 const SEAT_PROBE_ENTRY: &str = "      id: 'models',
       label: 'Models',
       sources: ['health', QUERY_SEATS_SOURCE],
