@@ -33,7 +33,8 @@
     'ctx_avg',
     'ctx_peak',
     'cache_hit_pct',
-    'cost_usd'
+    'cost_usd',
+    'equivalent_cost_usd'
   ];
 
   // The metrics the server sends as an explicit null when no row could
@@ -50,7 +51,8 @@
     'ctx_avg',
     'ctx_peak',
     'cache_hit_pct',
-    'cost_usd'
+    'cost_usd',
+    'equivalent_cost_usd'
   ];
 
   // Fields whose value is a TOKEN, not a figure: carried through verbatim,
@@ -114,18 +116,22 @@
   ];
 
   // The COMPLETE set of request bodies this page can issue: every selectable
-  // window crossed with every group-by the tabs use, in both the series read
-  // path (Overview) and the non-series one (Usage), each carrying the bucket
-  // that window resolves to -- hourly reads well over a day, anything wider
-  // needs daily. An emitted body is one of these entries verbatim plus the
-  // optional provider scope, so nothing is overwritten at runtime and the
-  // page.rs drift test validates the whole request vocabulary through the
-  // server's own parser. Written as strict JSON for that test.
+  // window crossed with every group-by the views use, in both the series read
+  // path (Overview) and the non-series one (Usage and the per-seat read), each
+  // series body carrying the bucket that window resolves to. A calendar window
+  // wider than a day needs daily; the trailing ranges stay hourly, since seven
+  // days of hours sits well under the server's series bucket cap. An emitted
+  // body is one of these entries verbatim plus the optional provider scope, so
+  // nothing is overwritten at runtime and the page.rs drift test validates the
+  // whole request vocabulary through the server's own parser. Written as
+  // strict JSON for that test.
   var QUERY_SHAPES = [
     {"window":"today","group_by":"provider","bucket":"hour"},
     {"window":"week","group_by":"provider","bucket":"day"},
     {"window":"month","group_by":"provider","bucket":"day"},
     {"window":"all","group_by":"provider","bucket":"day"},
+    {"window":"last24h","group_by":"provider","bucket":"hour"},
+    {"window":"last7d","group_by":"provider","bucket":"hour"},
     {"window":"today","group_by":"model"},
     {"window":"today","group_by":"alias"},
     {"window":"today","group_by":"provider"},
@@ -137,7 +143,19 @@
     {"window":"month","group_by":"provider"},
     {"window":"all","group_by":"model"},
     {"window":"all","group_by":"alias"},
-    {"window":"all","group_by":"provider"}
+    {"window":"all","group_by":"provider"},
+    {"window":"last24h","group_by":"model"},
+    {"window":"last24h","group_by":"alias"},
+    {"window":"last24h","group_by":"provider"},
+    {"window":"last7d","group_by":"model"},
+    {"window":"last7d","group_by":"alias"},
+    {"window":"last7d","group_by":"provider"},
+    {"window":"today","group_by":"seat"},
+    {"window":"week","group_by":"seat"},
+    {"window":"month","group_by":"seat"},
+    {"window":"all","group_by":"seat"},
+    {"window":"last24h","group_by":"seat"},
+    {"window":"last7d","group_by":"seat"}
   ];
 
   // Flatten ONE validated metrics object (see isMetricsShape): every field
