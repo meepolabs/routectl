@@ -1185,6 +1185,8 @@ list with more narrative.
 
 ### Security
 
+- **`provider add --api-key-env` refuses a value that is not a variable name without printing it.** An argument outside `[A-Za-z_][A-Za-z0-9_]*` (for example a key pasted in place of the name of the variable holding it) now fails with a fixed message asking for the variable NAME, before the environment is read; the argument is not repeated. A valid name that is unset, empty or not Unicode is still named in its error. Library callers: `routectl_auth::SecretCaptureError` gains `NotAnEnvName`, returned by `env_ref`.
+
 - **routectl no longer depends on `chrono`, which is unmaintained (RUSTSEC-2026-0543).** Timestamps are formatted and parsed with `time`, and the local time-zone rules behind `routectl usage` windows and the local timestamps it prints come from `tz-rs` on Unix (the `TZ` variable, then `/etc/localtime`) and from the OS on Windows. Every timestamp routectl writes or prints keeps its text form and every usage window keeps its edges. A host zone that cannot be read still falls back to UTC, now with one WARN line.
 
 - **A retired-key refusal no longer repeats a quoted entry name.** In the retired-key lines printed by `config check`, `doctor`, `serve` start, `config set` and the hot-reload WARN log, an entry name that is not a bare TOML key (letters, digits, `_` and `-`) is shown as `<quoted name>`, the same rule the config parse-error redaction applies, since a quoted name can be a pasted credential. Bare names are shown as written. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#retired-config-keys).

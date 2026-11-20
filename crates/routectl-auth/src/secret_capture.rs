@@ -100,6 +100,16 @@ pub enum SecretCaptureError {
         var: String,
     },
 
+    /// The argument is not an environment variable name. The message never
+    /// carries the argument: an operator who pastes the secret itself in
+    /// place of a variable name would otherwise see it printed back.
+    #[error(
+        "the value given is not an environment variable name (letters, digits \
+         and `_`, not starting with a digit); pass the NAME of a variable that \
+         holds the key, not the key itself"
+    )]
+    NotAnEnvName,
+
     /// The named environment variable holds a non-Unicode value.
     #[error("environment variable `{var}` contains invalid unicode")]
     EnvNotUnicode {
@@ -242,8 +252,13 @@ impl ManagedSecretStore {
 }
 
 /// Verify `var` resolves to a non-empty value NOW and return an `env://`
-/// reference. Stores nothing on disk.
+/// reference. Stores nothing on disk. A `var` that is not a variable name
+/// is refused as [`SecretCaptureError::NotAnEnvName`] before the
+/// environment is read.
 pub fn env_ref(var: &str) -> SecretCaptureResult<SecretRef> {
+    if !is_env_name(var) {
+        return Err(SecretCaptureError::NotAnEnvName);
+    }
     match std::env::var(var) {
         Ok(v) if !v.is_empty() => Ok(SecretRef::Env(var.to_string())),
         Ok(_) => Err(SecretCaptureError::EnvEmpty {
@@ -256,6 +271,15 @@ pub fn env_ref(var: &str) -> SecretCaptureResult<SecretRef> {
             var: var.to_string(),
         }),
     }
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`: the portable environment variable name.
+fn is_env_name(var: &str) -> bool {
+    let mut bytes = var.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Sentinel filename for an empty `name`. A lone `%` can never be produced
@@ -681,6 +705,77 @@ mod tests {
         assert!(
             matches!(err, SecretCaptureError::EnvNotSet { .. }),
             "expected EnvNotSet, got {err:?}"
+        );
+        restore_env(key, prev);
+    }
+
+    #[test]
+    fn env_ref_refuses_a_non_name_without_echoing_it() {
+        let cases: &[(&str, &str)] = &[
+            ("pasted key", "sk-ant-api03-PASTEDKEYVALUE"),
+            ("hyphen", "MY-KEY"),
+            ("space", "MY KEY"),
+            ("leading digit", "1KEY"),
+            ("non-ascii", "CL\u{c9}"),
+            ("equals sign", "KEY=value"),
+            ("nul byte", "KEY\0X"),
+            ("empty", ""),
+        ];
+        for (label, input) in cases {
+            // Act
+            let err = env_ref(input).unwrap_err();
+
+            // Assert
+            assert!(
+                matches!(err, SecretCaptureError::NotAnEnvName),
+                "{label}: expected NotAnEnvName, got {err:?}"
+            );
+            if !input.is_empty() {
+                let shown = err.to_string();
+                assert!(
+                    !shown.contains(input),
+                    "{label}: message echoes the input: {shown}"
+                );
+                assert!(
+                    !format!("{err:?}").contains(input),
+                    "{label}: Debug echoes the input"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_ref_accepts_lowercase_and_underscore_names() {
+        for key in ["routectl_secret_capture_lower", "_ROUTECTL_LEADING_US"] {
+            // Arrange
+            let prev = std::env::var(key).ok();
+            set_env(key, "present");
+
+            // Act
+            let sref = env_ref(key);
+
+            // Assert
+            assert_eq!(sref.unwrap(), SecretRef::Env(key.to_string()), "{key}");
+            restore_env(key, prev);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_ref_unset_error_names_the_variable() {
+        // Arrange
+        let key = "ROUTECTL_SECRET_CAPTURE_UNSET_NAMED";
+        let prev = std::env::var(key).ok();
+        unset_env(key);
+
+        // Act
+        let err = env_ref(key).unwrap_err();
+
+        // Assert
+        assert!(
+            err.to_string().contains(key),
+            "an unset valid name is named: {err}"
         );
         restore_env(key, prev);
     }

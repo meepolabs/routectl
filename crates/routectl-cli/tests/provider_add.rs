@@ -587,6 +587,56 @@ fn the_pool_flag_is_refused_without_a_login_before_any_capture() {
     }
 }
 
+/// The real binary given a key value where `--api-key-env` expects a
+/// variable name exits non-zero and prints the value on neither stream. The
+/// paired control is the same invocation with a valid but unset name, which
+/// is named on stderr, so the capture would show an echoed argument.
+#[test]
+fn api_key_env_given_a_key_value_never_prints_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let path = write_config(dir.path(), &current_base());
+    let before = std::fs::read(&path).unwrap();
+    let run = |var: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+            .args(["--config", path.to_str().unwrap(), "provider", "add"])
+            .args(["--format", "anthropic-messages", "--name", "claude"])
+            .args(["--api-key-env", var, "--yes"])
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env_remove(var)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run routectl")
+    };
+
+    let pasted = "sk-ant-TESTVALUE";
+    let refused = run(pasted);
+
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "a key value must exit non-zero");
+    assert!(
+        !stdout.contains(pasted),
+        "stdout echoes the value: {stdout}"
+    );
+    assert!(
+        !stderr.contains(pasted),
+        "stderr echoes the value: {stderr}"
+    );
+    assert!(
+        stderr.contains("not an environment variable name"),
+        "the refusal says why: {stderr}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before, "nothing written");
+
+    let unset = "ROUTECTL_API_KEY_ENV_CONTROL_UNSET";
+    let control = run(unset);
+
+    let stderr = String::from_utf8_lossy(&control.stderr);
+    assert!(!control.status.success(), "an unset name exits non-zero");
+    assert!(stderr.contains(unset), "an unset name is named: {stderr}");
+}
+
 #[test]
 fn missing_required_input_without_tty_errors_within_bounded_time() {
     let dir = tempfile::tempdir().unwrap();
