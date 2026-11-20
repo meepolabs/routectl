@@ -170,6 +170,46 @@
     });
   });
 
+  // The computed color `color: var(--faint)` resolves to in the page's theme.
+  function faintColor() {
+    var probe = document.createElement('span');
+    probe.style.color = 'var(--faint)';
+    document.body.appendChild(probe);
+    var color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }
+
+  // The mark a header button draws after its label, and in which color.
+  function markReport(column) {
+    var btn = headerButton(column);
+    var after = getComputedStyle(btn, '::after');
+    return { content: after.content, color: after.color, label_color: getComputedStyle(btn).color };
+  }
+
+  // An unpressed sortable header shows the neutral mark in the faint color,
+  // a header without a sort button shows none, and a pressed header shows
+  // its direction instead.
+  d.scenario('sort-mark', function () {
+    return waitForTable().then(function () {
+      var plain = document.querySelector('#config-aliases thead th');
+      var out = {
+        faint: faintColor(),
+        unpressed: markReport('provider'),
+        plain_header: {
+          has_button: !!plain.querySelector('button'),
+          after: getComputedStyle(plain, '::after').content
+        }
+      };
+      headerButton('provider').click();
+      out.ascending = markReport('provider');
+      out.other_unpressed = markReport('upstream');
+      headerButton('provider').click();
+      out.descending = markReport('provider');
+      return out;
+    });
+  });
+
   function sectionReport() {
     var body = byId('body-config');
     return {

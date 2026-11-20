@@ -259,6 +259,50 @@ fn page_browser_a_duplicate_row_key_errors_only_its_section() {
     assert!(titles.contains(&Value::from("Aliases")), "{out:#}");
 }
 
+/// Chrome switches that pin the page's color scheme, labelled by theme.
+const THEMES: &[(&str, &str)] = &[
+    ("dark", "--blink-settings=preferredColorScheme=0"),
+    ("light", "--blink-settings=preferredColorScheme=1"),
+];
+
+/// Before any header is pressed, a sortable header's button draws a neutral
+/// mark in the faint color; a plain header draws none; pressing a header
+/// swaps its mark for the direction, `^` then `v`, while the other sortable
+/// headers keep the neutral mark. Positive control: the two themes resolve
+/// the faint color differently, so a match in each is not one fixed color.
+///
+/// Mutation check: delete the unpressed `.sort-btn::after` rule -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_an_unpressed_sortable_header_shows_a_faint_neutral_mark() {
+    let mut faint_by_theme = Vec::new();
+    for (theme, switch) in THEMES {
+        let scenario = sort_scenario("sort-mark", "config");
+        let out = browser::run_scenario_with(&scenario, &[switch]).result;
+
+        let neutral = Value::from("\" ^v\" / \"\"");
+        assert_eq!(out["unpressed"]["content"], neutral, "{theme}: {out:#}");
+        assert_eq!(out["unpressed"]["color"], out["faint"], "{theme}: {out:#}");
+        assert_eq!(
+            out["other_unpressed"]["content"], neutral,
+            "{theme}: {out:#}"
+        );
+        assert_eq!(out["plain_header"]["has_button"], false, "{theme}: {out:#}");
+        assert_eq!(out["plain_header"]["after"], "none", "{theme}: {out:#}");
+        assert_eq!(out["ascending"]["content"], "\" ^\"", "{theme}: {out:#}");
+        assert_eq!(out["descending"]["content"], "\" v\"", "{theme}: {out:#}");
+        assert_eq!(
+            out["ascending"]["color"], out["ascending"]["label_color"],
+            "{theme}: {out:#}"
+        );
+        faint_by_theme.push(out["faint"].clone());
+    }
+    assert_ne!(
+        faint_by_theme[0], faint_by_theme[1],
+        "the theme switch applied"
+    );
+}
+
 // ---- source check: the sort registry and the sortable columns ---------------
 
 use view_contract::{call_args, call_end, quoted_literal, split_args};

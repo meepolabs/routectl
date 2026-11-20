@@ -289,6 +289,30 @@ fn ms(value: &str) -> f64 {
         .unwrap_or_else(|| panic!("`{value}` is not a millisecond duration"))
 }
 
+/// The browser's default font size the page's rem sizes are read against.
+const DEFAULT_FONT_PX: f64 = 16.0;
+
+/// The size `selector`'s last top-level `font-size` declaration computes to
+/// in one theme at the default font, `var(--x)` followed to a `rem` or `px`
+/// literal.
+fn font_size_px(css: &str, selector: &str, light: bool) -> f64 {
+    let decls = css_decls(css);
+    let (_, value) = block(&decls, "", selector)
+        .into_iter()
+        .rfind(|(prop, _)| *prop == "font-size")
+        .unwrap_or_else(|| panic!("{selector} declares no font-size"));
+    let tokens = theme_tokens(css, light);
+    let value = match value.strip_prefix("var(").and_then(|v| v.strip_suffix(')')) {
+        Some(name) => resolve(&tokens, name.trim()),
+        None => value,
+    };
+    let number = |unit: &str| value.strip_suffix(unit).and_then(|v| v.parse::<f64>().ok());
+    number("rem")
+        .map(|rem| rem * DEFAULT_FONT_PX)
+        .or_else(|| number("px"))
+        .unwrap_or_else(|| panic!("{selector}: `{value}` is not a rem or px size"))
+}
+
 #[test]
 fn every_color_token_has_a_light_value() {
     let css = style();
@@ -365,12 +389,12 @@ fn a_raw_color_in_a_rule_is_reported() {
 }
 
 #[test]
-fn the_change_highlight_is_short_and_fades_only_its_background() {
+fn the_change_highlight_lasts_400ms_and_fades_only_its_background() {
     let css = style();
     let decls = css_decls(&css);
     for light in [false, true] {
         let dur = ms(resolve(&theme_tokens(&css, light), "--dur-change"));
-        assert!((150.0..=500.0).contains(&dur), "--dur-change {dur}ms");
+        assert_eq!(dur, 400.0, "--dur-change (light: {light})");
     }
     let changed = block(&decls, "", ".changed");
     assert_eq!(
@@ -392,6 +416,40 @@ fn the_change_highlight_is_short_and_fades_only_its_background() {
             prop == "background-color" || prop == "opacity",
             "changefade animates `{prop}`"
         );
+    }
+}
+
+/// The Now tile sub-labels (the tile names, and the keys of a split tile
+/// such as IN / OUT and READ / WRITE) read at the page's small text size,
+/// never below 11 px at the default font, in both themes.
+#[test]
+fn the_tile_sub_labels_are_at_least_eleven_px() {
+    let css = style();
+    for selector in [".kpi-label", ".kpi-key"] {
+        for light in [false, true] {
+            let px = font_size_px(&css, selector, light);
+
+            assert!(px >= 11.0, "{selector} is {px}px (light: {light})");
+        }
+    }
+}
+
+#[test]
+fn the_font_size_reader_follows_tokens_and_units() {
+    let css = ":root { --small: 0.6rem; --xs: 0.72rem; }\n\
+               @media (prefers-color-scheme: light) { :root { --xs: 13px; } }\n\
+               .rem { font-size: 0.58rem; } .tok { font-size: var(--xs); }\n\
+               .px { color: var(--a); font-size: 10px; } .px { font-size: 12px; }";
+    let cases = [
+        ("a rem literal", ".rem", false, 9.28),
+        ("a token, dark", ".tok", false, 11.52),
+        ("a token the light theme overrides", ".tok", true, 13.0),
+        ("the later of two declarations", ".px", false, 12.0),
+    ];
+    for (label, selector, light, expected) in cases {
+        let px = font_size_px(css, selector, light);
+
+        assert!((px - expected).abs() < 1e-9, "{label}: {px}");
     }
 }
 
