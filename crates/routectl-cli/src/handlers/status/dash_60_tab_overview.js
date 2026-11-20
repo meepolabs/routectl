@@ -16,6 +16,10 @@
   // grid off the first screen.
   var PROVIDER_CARD_CAP = 3;
 
+  // A partial cost is the sum of the priced rows only; the qualifier rides
+  // every figure that is one, so no partial dollar amount reads as the total.
+  var PARTIAL_COST_NOTE = 'priced subtotal only';
+
   // Whether the overflow list under the provider row is open. View state only:
   // it survives the per-poll rebuild and reaches no fetch.
   var providerOverflowOpen = false;
@@ -58,7 +62,9 @@
       providerRowView = view;
       providerRowWindow = selectedWindow;
     }
-    if (num0(view.totals.requests) <= 0) { return overviewEmpty(); }
+    if (num0(view.totals.requests) <= 0) {
+      return ledgerIsEmpty() ? firstRunEmpty() : overviewEmpty();
+    }
     var row = providerRowWindow === selectedWindow ? providerRowView : null;
     var stack = tabStack();
     stack.appendChild(providerRowSection(row || view));
@@ -73,6 +79,55 @@
       'Nothing was routed ' + WINDOW_SPAN[selectedWindow] +
       '. Pick a wider window, or send a request through the proxy.',
       ['polling every 5s', WINDOW_SPAN[selectedWindow]]);
+  }
+
+  // Whether the ledger holds no request at all, as opposed to none in the
+  // selected window or scope. An unscoped all-time window answers it
+  // directly; a provider scope never does. Otherwise the all-history usage
+  // read answers it, and while that read has no live answer the question
+  // stays open and the window's own empty state is shown. Neither that read
+  // nor config is a source of this view, so a late answer from either shows
+  // here on the view's next render (within one 5 s round).
+  function ledgerIsEmpty() {
+    if (selectedProvider) { return false; }
+    if (selectedWindow === 'all') { return true; }
+    var rec = SOURCES[USAGE_ALL_SOURCE];
+    if (rec.state !== 'live' || !rec.data || !rec.data.totals) { return false; }
+    return num0(rec.data.totals.requests) <= 0;
+  }
+
+  // First run: nothing has ever been routed, so the one useful fact is where
+  // to point a client. The address is the config panel's listener; while that
+  // panel has no live answer the line is left out rather than guessed.
+  function firstRunEmpty() {
+    var card = emptyCard('No requests yet',
+      'Nothing has been routed through this daemon. Point a client at the base URL ' +
+      'below and its requests appear here.',
+      ['polling every 5s']);
+    var url = clientBaseAddress();
+    if (url) { card.querySelector('.empty-inner').appendChild(baseUrlLine(url)); }
+    return card;
+  }
+
+  function clientBaseAddress() {
+    var rec = SOURCES.config;
+    if (rec.state !== 'live' || !rec.data || !rec.data.source) { return null; }
+    var addr = rec.data.source.listen_addr;
+    return addr ? 'http://' + String(addr) : null;
+  }
+
+  function baseUrlLine(url) {
+    var line = document.createElement('div');
+    line.className = 'empty-baseurl';
+    var label = document.createElement('span');
+    label.textContent = 'base URL';
+    var code = document.createElement('code');
+    code.className = 'code-inline';
+    code.tabIndex = 0;
+    code.textContent = url;
+    line.appendChild(label);
+    line.appendChild(code);
+    return line;
   }
 
   // Scope every figure on this tab to one provider. Picking a DIFFERENT provider
@@ -204,6 +259,12 @@
     cost.className = 'provcard-cost';
     cost.appendChild(costFigure(m));
     btn.appendChild(cost);
+    if (m.cost_status === 'partial') {
+      var qual = document.createElement('span');
+      qual.className = 'provcard-qual';
+      qual.textContent = PARTIAL_COST_NOTE;
+      btn.appendChild(qual);
+    }
 
     var facts = document.createElement('span');
     facts.className = 'provcard-facts';
@@ -618,11 +679,52 @@
     return note;
   }
 
+  // The spend figure, then the API-price equivalent of the subscription rows
+  // as a separate figure: the two are different quantities (money spent and
+  // notional replacement value) and are never added together.
   function costTile(t, series, gap) {
-    return kpiTile('Est. cost',
+    var tile = kpiTile('Est. cost',
       costFigure(t),
       wrappedNote(costNote(t)),
       sparkArea(bucketSamples(series, function (m) { return m.cost_usd; }), gap));
+    var spark = tile.lastChild;
+    var alt = apiPriceBlock(t.equivalent_cost_usd);
+    if (alt) { tile.insertBefore(alt, tile.querySelector('.kpi-sub')); }
+    if (t.cost_status === 'partial') { tile.insertBefore(costSparkCaption(), spark); }
+    return tile;
+  }
+
+  // Absent, not zero, when no subscription row could be priced at API rates:
+  // the server sends null then, and there is nothing to approximate.
+  function apiPriceBlock(equivalent) {
+    if (equivalent === null || equivalent === undefined) { return null; }
+    var block = document.createElement('div');
+    block.className = 'kpi-alt';
+    var head = document.createElement('div');
+    head.className = 'kpi-alt-head';
+    var label = document.createElement('span');
+    label.className = 'kpi-alt-label';
+    label.textContent = 'At API prices';
+    var value = figure(money(equivalent), null, '~$');
+    value.classList.add('kpi-alt-value');
+    head.appendChild(label);
+    head.appendChild(value);
+    var note = document.createElement('div');
+    note.className = 'kpi-alt-note';
+    note.textContent = 'what this traffic would cost on pay-as-you-go API pricing';
+    block.appendChild(head);
+    block.appendChild(note);
+    return block;
+  }
+
+  // Each bucket is priced over its own rows, so a row unpriced over the
+  // window can be priced in a bucket, and the buckets can then add up to more
+  // than a partial headline.
+  function costSparkCaption() {
+    var caption = document.createElement('div');
+    caption.className = 'kpi-caption';
+    caption.textContent = 'each bucket priced on its own; buckets need not sum to the subtotal';
+    return caption;
   }
 
   // The honest cost read: a dollar figure ONLY where the rows were priced. An
@@ -642,7 +744,7 @@
     if (t.cost_status === 'priced') {
       return req > 0 ? '$' + (num0(t.cost_usd) / req).toFixed(3) + ' avg/req' : 'priced';
     }
-    if (t.cost_status === 'partial') { return 'priced subtotal only - some rows have no price'; }
+    if (t.cost_status === 'partial') { return PARTIAL_COST_NOTE + ' - some rows have no price'; }
     if (t.cost_status === 'subscription') { return 'managed subscription - no per-token cost'; }
     if (t.cost_status === 'unpriced') { return 'no price resolved - configure pricing'; }
     return labelFor('cost', t.cost_status).label;

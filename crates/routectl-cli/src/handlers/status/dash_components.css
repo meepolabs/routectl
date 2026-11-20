@@ -631,6 +631,63 @@ td.num .unit, th.num .unit {
   margin-left: 0.08em;
 }
 
+/* The cost tile's second figure: the API-price equivalent, set apart from the
+   spend above it and smaller, so the two never read as one sum. Labels and
+   notes are prose (UI face); only the figure is data. */
+.kpi-alt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.kpi-alt-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.kpi-alt-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.kpi-alt-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-lg);
+  line-height: 1.15;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.kpi-alt-value .unit {
+  font-size: 0.75em;
+  color: var(--faint);
+  margin-right: 0.08em;
+}
+.kpi-alt-note,
+.kpi-caption {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+/* A partial cost's qualifier on a provider card, under its figure. */
+.provcard-qual {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+/* First run: the base URL a client is pointed at, selectable as one token. */
+.empty-baseurl {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
 /* ---- usage: group-by picker + group cards ---- */
 .gbstrip {
   display: flex;

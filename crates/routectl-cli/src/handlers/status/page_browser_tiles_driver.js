@@ -110,3 +110,185 @@
     ]);
   });
 })(window.routectlDriver);
+
+// ---- scenarios: the cost tile, the provider card costs, the first run ----
+//
+// The n-th series answer has the n-th entry of the scenario's `rounds` (the
+// last repeats) applied to its totals and groups, so each observation reads
+// cost fields the scenario chose rather than whatever the fixture priced.
+(function (d) {
+  'use strict';
+
+  var COST_TILE = 'Est. cost';
+
+  function textOr(node, selector) {
+    var found = node.querySelector(selector);
+    return found ? found.textContent : null;
+  }
+
+  // The totals and groups of the last series answer handed to the page, as
+  // rewritten.
+  var lastTotals = {};
+  var lastGroups = [];
+
+  // `round.totals` is merged into the totals; `round.groups[i]` into the
+  // i-th group's metrics (cycling, so every group gets one).
+  function rewriteCosts(rounds) {
+    var served = 0;
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status/query') { return text; }
+      var panel = JSON.parse(text);
+      if (!panel.data || !panel.data.series) { return text; }
+      var round = rounds[Math.min(served, rounds.length - 1)];
+      served += 1;
+      merge(panel.data.totals, round.totals);
+      panel.data.groups.forEach(function (g, i) {
+        merge(g.metrics, round.groups[i % round.groups.length]);
+      });
+      lastTotals = panel.data.totals;
+      lastGroups = panel.data.groups;
+      return JSON.stringify(panel);
+    });
+  }
+
+  function merge(into, from) {
+    Object.keys(from).forEach(function (k) { into[k] = from[k]; });
+  }
+
+  function costTile() {
+    var tiles = document.querySelectorAll('#body-now .kpi');
+    for (var i = 0; i < tiles.length; i++) {
+      if (textOr(tiles[i], '.kpi-label') === COST_TILE) { return tiles[i]; }
+    }
+    return null;
+  }
+
+  // The cost tile's reading, and every drawn provider card's cost with the
+  // cost status the round gave it: its group's, or the totals' for the
+  // all-providers card. A card whose name matches no group reports
+  // `unmatched`, so a test cannot mistake it for an unqualified one.
+  function costObservation() {
+    var tile = costTile();
+    if (!tile) { throw new Error('no ' + COST_TILE + ' tile'); }
+    var statusOf = {};
+    lastGroups.forEach(function (g) { statusOf[g.label] = g.metrics.cost_status; });
+    var cards = Array.prototype.map.call(
+      document.querySelectorAll('#body-now .provcard-scope[aria-pressed]'),
+      function (btn) {
+        var name = textOr(btn, '.provcard-name');
+        return {
+          id: btn.id,
+          status: btn.id === 'overview-provider-all'
+            ? lastTotals.cost_status
+            : (statusOf[name] || 'unmatched'),
+          cost: textOr(btn, '.provcard-cost'),
+          qual: textOr(btn, '.provcard-qual')
+        };
+      });
+    return {
+      value: textOr(tile, '.kpi-value'),
+      alt_label: textOr(tile, '.kpi-alt-label'),
+      alt_value: textOr(tile, '.kpi-alt-value'),
+      alt_note: textOr(tile, '.kpi-alt-note'),
+      sub: textOr(tile, '.kpi-sub'),
+      caption: textOr(tile, '.kpi-caption'),
+      caption_before_spark: captionPrecedesSpark(tile),
+      cards: cards
+    };
+  }
+
+  function captionPrecedesSpark(tile) {
+    var caption = tile.querySelector('.kpi-caption');
+    var spark = tile.querySelector('svg.spark');
+    return !!(caption && spark && caption.nextElementSibling === spark);
+  }
+
+  function costAcrossRounds(rounds) {
+    rewriteCosts(rounds);
+    return d.waitUntil('the cost tile', costTile).then(function () {
+      var out = [costObservation()];
+      var step = Promise.resolve();
+      for (var r = 1; r < rounds.length; r++) {
+        step = step.then(function () { return d.waitFor('/status/query', 1); })
+          .then(function () { out.push(costObservation()); });
+      }
+      return step.then(function () { return out; });
+    });
+  }
+
+  d.scenario('tiles-cost-equivalent', function () {
+    var group = { cost_status: 'priced', cost_usd: 1.25, equivalent_cost_usd: null };
+    return costAcrossRounds([
+      { totals: { cost_status: 'priced', cost_usd: 12.5, equivalent_cost_usd: 40.25 },
+        groups: [group] },
+      { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 40.25 },
+        groups: [group] },
+      { totals: { cost_status: 'priced', cost_usd: 12.5, equivalent_cost_usd: null },
+        groups: [group] }
+    ]);
+  });
+
+  d.scenario('tiles-cost-partial', function () {
+    return costAcrossRounds([
+      {
+        totals: { cost_status: 'partial', cost_usd: 30.85, equivalent_cost_usd: null },
+        groups: [
+          { cost_status: 'partial', cost_usd: 27.39 },
+          { cost_status: 'priced', cost_usd: 3.46 }
+        ]
+      },
+      {
+        totals: { cost_status: 'priced', cost_usd: 30.85, equivalent_cost_usd: null },
+        groups: [{ cost_status: 'priced', cost_usd: 10.0 }]
+      }
+    ]);
+  });
+
+  // The series answer reports no request in the window; the all-history
+  // usage read reports `ledgerRequests`.
+  function emptyWindow(ledgerRequests) {
+    d.rewrite(function (url, text) {
+      var panel = JSON.parse(text);
+      if (url.pathname === '/status/query' && panel.data && panel.data.series) {
+        panel.data.totals.requests = 0;
+        panel.data.groups = [];
+        return JSON.stringify(panel);
+      }
+      if (url.pathname === '/status/usage' && panel.data && ledgerRequests !== null) {
+        panel.data.totals.requests = ledgerRequests;
+        return JSON.stringify(panel);
+      }
+      return text;
+    });
+  }
+
+  function emptyObservation() {
+    var card = document.querySelector('#body-now .card.empty');
+    if (!card) { return null; }
+    var code = card.querySelector('.empty-baseurl code');
+    return {
+      title: textOr(card, '.empty-title'),
+      body: textOr(card, '.empty-body'),
+      base_url: code ? code.textContent : null,
+      base_url_focusable: code ? code.tabIndex === 0 : false
+    };
+  }
+
+  // Observe once the all-history read and a series answer after it have both
+  // landed, so the empty state is the one drawn with the ledger known.
+  function emptyAfterLedgerRead() {
+    return d.waitFor('/status/usage', 1)
+      .then(function () { return d.waitFor('/status/query', 1); })
+      .then(function () { return d.waitUntil('the empty state', emptyObservation); });
+  }
+
+  d.scenario('tiles-first-run', function () {
+    emptyWindow(0);
+    return emptyAfterLedgerRead();
+  });
+
+  d.scenario('tiles-empty-window', function () {
+    emptyWindow(null);
+    return emptyAfterLedgerRead();
+  });
+})(window.routectlDriver);

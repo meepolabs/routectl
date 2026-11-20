@@ -1,5 +1,7 @@
-// The Now KPI tile sparklines in a real headless Chrome: a bucket with no
-// reported value draws as a gap, a reported 0 draws on the baseline.
+// The Now KPI tiles in a real headless Chrome: a bucket with no reported
+// value draws as a gap, a reported 0 draws on the baseline; the cost tile
+// keeps spend and the API-price equivalent apart and qualifies a partial
+// cost; an empty ledger names the base URL.
 // `include!`d into a child module of `page::tests` beside `browser`; the
 // scenarios live in page_browser_tiles_driver.js, which serves a synthetic
 // six-bucket series one bucket width apart.
@@ -124,4 +126,152 @@ fn page_browser_tiles_unreported_cache_write_buckets_draw_no_write_points() {
 
     assert_eq!(runs(none, "a").len(), 1, "{none:#}");
     assert!(runs(none, "b").is_empty(), "{none:#}");
+}
+
+/// The fixture's configured listener, as the config panel reports it.
+const FIXTURE_BASE_URL: &str = "http://127.0.0.1:8787";
+
+const PARTIAL_QUALIFIER: &str = "priced subtotal only";
+
+fn text<'a>(obs: &'a Value, key: &str) -> Option<&'a str> {
+    obs[key].as_str()
+}
+
+/// Spend and the API-price equivalent are two figures: the spend in the tile
+/// value, the "~$" equivalent labelled "At API prices" with its one-line
+/// explanation beside it. With no spend the tile value never carries the
+/// equivalent, and with no equivalent nothing labelled "At API prices" is
+/// drawn.
+///
+/// Mutation checks: apiPriceBlock dropped from costTile -> red (round 0 has no
+/// "At API prices"); costFigure handed `cost_usd + equivalent_cost_usd` ->
+/// red (round 0 value is $52.75); costFigure reading `equivalent_cost_usd`
+/// when `cost_usd` is null -> red (round 1 value carries 40.25).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_cost_tile_keeps_spend_and_api_price_apart() {
+    let rounds = run("tiles-cost-equivalent");
+    let (both, no_spend, no_equiv) = (&rounds[0], &rounds[1], &rounds[2]);
+
+    assert_eq!(text(both, "value"), Some("$12.50"), "{both:#}");
+    assert_eq!(text(both, "alt_label"), Some("At API prices"), "{both:#}");
+    assert_eq!(text(both, "alt_value"), Some("~$40.25"), "{both:#}");
+    assert_eq!(
+        text(both, "alt_note"),
+        Some("what this traffic would cost on pay-as-you-go API pricing"),
+        "{both:#}"
+    );
+
+    let spend = text(no_spend, "value").expect("a value");
+    assert!(
+        !spend.contains('$') && !spend.contains("40.25"),
+        "{no_spend:#}"
+    );
+    assert_eq!(text(no_spend, "alt_value"), Some("~$40.25"), "{no_spend:#}");
+
+    assert_eq!(text(no_equiv, "value"), Some("$12.50"), "{no_equiv:#}");
+    assert!(no_equiv["alt_label"].is_null(), "{no_equiv:#}");
+    assert!(no_equiv["alt_value"].is_null(), "{no_equiv:#}");
+}
+
+/// A partial window qualifies its cost on the tile and on every provider card
+/// whose own cost is partial (the all-providers card included, since it reads
+/// the partial totals), and on no other card; the cost sparkline is
+/// captioned directly above it. A priced window carries neither.
+///
+/// Mutation checks: the provider card qualifier branch removed -> red; the
+/// tile's partial note reworded -> red; costSparkCaption not appended -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_a_partial_cost_is_qualified_on_the_tile_and_its_cards() {
+    let rounds = run("tiles-cost-partial");
+    let (partial, priced) = (&rounds[0], &rounds[1]);
+
+    let sub = text(partial, "sub").expect("a sub line");
+    assert!(sub.contains(PARTIAL_QUALIFIER), "{partial:#}");
+    assert!(
+        text(partial, "caption").is_some_and(|c| c.contains("each bucket priced on its own")),
+        "{partial:#}"
+    );
+    assert_eq!(partial["caption_before_spark"], true, "{partial:#}");
+
+    let cards = partial["cards"].as_array().expect("cards");
+    assert!(
+        cards.iter().all(|c| c["status"] != "unmatched"),
+        "every card resolves to its group: {partial:#}"
+    );
+    let partial_cards: Vec<&Value> = cards.iter().filter(|c| c["status"] == "partial").collect();
+    let other_cards: Vec<&Value> = cards.iter().filter(|c| c["status"] != "partial").collect();
+    assert!(
+        !partial_cards.is_empty(),
+        "a partial card is drawn: {partial:#}"
+    );
+    assert!(
+        other_cards.iter().any(|c| c["status"] == "priced"),
+        "a priced card is drawn as the control: {partial:#}"
+    );
+    for card in &partial_cards {
+        assert_eq!(text(card, "qual"), Some(PARTIAL_QUALIFIER), "{card:#}");
+    }
+    for card in &other_cards {
+        assert!(card["qual"].is_null(), "{card:#}");
+    }
+
+    assert!(
+        !text(priced, "sub")
+            .expect("a sub line")
+            .contains(PARTIAL_QUALIFIER),
+        "{priced:#}"
+    );
+    assert!(priced["caption"].is_null(), "{priced:#}");
+    assert!(
+        priced["cards"]
+            .as_array()
+            .expect("cards")
+            .iter()
+            .all(|c| c["qual"].is_null()),
+        "{priced:#}"
+    );
+}
+
+/// With nothing ever routed, Now says "No requests yet" and names the
+/// configured listener as the base URL, in a focusable code element.
+///
+/// Mutation checks: ledgerIsEmpty returning false -> red (the window's empty
+/// state is drawn); clientBaseAddress reading another field -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_an_empty_ledger_names_the_base_url() {
+    let obs = &browser::run_scenario(&browser::Scenario {
+        name: "tiles-first-run",
+        hash: "now",
+        snippets: &[TILES_DRIVER],
+        budget_ms: TILES_BUDGET_MS,
+    })
+    .result;
+
+    assert_eq!(text(obs, "title"), Some("No requests yet"), "{obs:#}");
+    assert_eq!(text(obs, "base_url"), Some(FIXTURE_BASE_URL), "{obs:#}");
+    assert_eq!(obs["base_url_focusable"], true, "{obs:#}");
+}
+
+/// The control: a window with no traffic over a ledger that has some keeps
+/// the window's own empty state and names no base URL.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_an_empty_window_over_a_used_ledger_is_not_first_run() {
+    let obs = &browser::run_scenario(&browser::Scenario {
+        name: "tiles-empty-window",
+        hash: "now",
+        snippets: &[TILES_DRIVER],
+        budget_ms: TILES_BUDGET_MS,
+    })
+    .result;
+
+    assert_eq!(
+        text(obs, "title"),
+        Some("No requests in this window"),
+        "{obs:#}"
+    );
+    assert!(obs["base_url"].is_null(), "{obs:#}");
 }
