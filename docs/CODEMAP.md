@@ -2446,7 +2446,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   whether a scoped usage window limits a conversation on an upstream model id;
   any other scope never binds and is logged once per tag
   (`placement_scope_ignored`) through a bounded process-global set
-- `src/quota/test_support.rs` -- test-only reads of an account's windows
+- `src/quota/view_test_support.rs` -- test-only reads of an account's windows
   through the placement-safe view (held vs fresh five-hour and weekly used)
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning
   defaults, header/payload extras per `[models.X]`; optional `seats` slice

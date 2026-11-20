@@ -278,7 +278,7 @@ pub const RETIRED_KEYS: &[RetiredKey] = &[
     RetiredKey {
         path: &["seat_quota"],
         refused_value: None,
-        replacement: "quota-aware placement always applies on sticky-least-loaded pools",
+        replacement: "pace placement always applies on sticky-least-loaded pools",
     },
     RetiredKey {
         path: &["server", "allow_disable_fallbacks"],

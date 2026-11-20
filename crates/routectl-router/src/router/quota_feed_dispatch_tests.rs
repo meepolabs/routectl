@@ -160,7 +160,7 @@ fn served_seat_key() -> SeatKey {
 /// The stored FAST fraction for the served seat, or `None` when it reads as no
 /// evidence.
 fn stored_fast_fraction(router: &Router) -> Option<f64> {
-    crate::quota::test_support::fresh_five_hour(
+    crate::quota::view_test_support::fresh_five_hour(
         &router.quota_store,
         &served_seat_key(),
         &crate::quota::freshness::ObservationStamp::now(),

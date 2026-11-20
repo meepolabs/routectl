@@ -331,7 +331,7 @@ fn a_polled_idle_seat_projects_a_known_empty_fast_window() {
 
     // Assert
     let key = crate::quota::key::seat_key_for_served_identity(ACCOUNT);
-    let fast = crate::quota::test_support::fresh_five_hour(
+    let fast = crate::quota::view_test_support::fresh_five_hour(
         &router.quota_store,
         &key,
         &ObservationStamp::now(),

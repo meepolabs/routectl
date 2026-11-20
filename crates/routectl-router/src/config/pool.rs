@@ -33,7 +33,7 @@ pub struct PoolEntry {
     /// How dispatch picks among this pool's members for one request.
     /// `sticky-least-loaded` (the default) pins each conversation to one
     /// member for prompt-cache affinity while balancing new conversations
-    /// across members by load, and is the only strategy quota-aware
+    /// across members by load, and is the only strategy pace
     /// placement applies to; `fill-first` drains one member before moving
     /// to the next. Applied per request whenever the pool resolves to more
     /// than one usable member.

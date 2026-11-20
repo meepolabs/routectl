@@ -14,7 +14,7 @@ use std::time::Instant;
 use crate::quota::freshness::accept_reset;
 use crate::quota::key::seat_key_for_secret_ref;
 use crate::quota::placement::{Tier, standing};
-use crate::quota::test_support::{fresh_five_hour, held_five_hour, held_seven_day, reading};
+use crate::quota::view_test_support::{fresh_five_hour, held_five_hour, held_seven_day, reading};
 use crate::quota::window::{Billing, QuotaWindow, Utilization};
 
 const SEAT_PROVIDER: &str = "anthropic";

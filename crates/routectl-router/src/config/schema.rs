@@ -1828,9 +1828,9 @@ pub struct ProviderRuntimePolicy {
 /// on one account for prompt-cache affinity and spreads new conversations
 /// by load. A single-member pool behaves identically under either strategy.
 ///
-/// Subscription-quota-aware placement and the session-affinity layer reach
-/// `sticky-least-loaded` ONLY. `fill-first` keeps its own contract: it
-/// neither pins a session nor reads a seat's remaining budget.
+/// Pace placement and the session-affinity layer reach `sticky-least-loaded`
+/// ONLY. `fill-first` keeps its own contract: it neither pins a session nor
+/// reads an account's usage.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -1841,7 +1841,7 @@ pub enum SeatSelection {
     /// The drain IS the contract, not a shortcoming of it: holding one seat
     /// keeps its prompt cache warm, and running that seat down until the
     /// upstream refuses is the price of that locality. An operator wanting
-    /// budget-aware spreading picks `sticky-least-loaded` instead.
+    /// usage-aware spreading picks `sticky-least-loaded` instead.
     FillFirst,
     /// Pin each conversation to one seat for prompt-cache affinity, and
     /// balance NEW conversations across seats by load. The contract: a
@@ -1854,9 +1854,9 @@ pub enum SeatSelection {
     /// dispatch gate and the fill-first fallback walk stay authoritative, so
     /// a stale or wrong pin only costs locality, never correctness.
     ///
-    /// The ONLY variant subscription-quota-aware placement applies to: a birth
-    /// (and a keyless request, which mints no pin) ranks candidates by
-    /// remaining short-window budget when the evidence suffices.
+    /// The ONLY variant pace placement applies to: a birth (and a keyless
+    /// request, which mints no pin) ranks candidates by their accounts' usage
+    /// readings.
     #[default]
     StickyLeastLoaded,
 }

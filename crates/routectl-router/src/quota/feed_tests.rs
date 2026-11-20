@@ -15,7 +15,7 @@ use routectl_core::upstream_meta::{
 };
 
 use crate::quota::key::seat_key_for_secret_ref;
-use crate::quota::test_support::{fresh_five_hour, held_five_hour};
+use crate::quota::view_test_support::{fresh_five_hour, held_five_hour};
 
 /// A real captured 5h reset in the epoch SECONDS the family reports.
 const CAPTURED_5H_RESET_SECS: u64 = 1_781_001_000;

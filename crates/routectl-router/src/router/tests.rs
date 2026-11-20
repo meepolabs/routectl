@@ -802,7 +802,7 @@ fn observed_quota_reading(utilization: &str) -> crate::quota::reduce::QuotaSnaps
 /// The used fraction of a seat's fresh five-hour window, or `None` when it
 /// holds none.
 fn quota_fast_fraction(router: &Router, key: &crate::quota::key::SeatKey) -> Option<f64> {
-    crate::quota::test_support::fresh_five_hour(
+    crate::quota::view_test_support::fresh_five_hour(
         &router.quota_store,
         key,
         &crate::quota::freshness::ObservationStamp::now(),

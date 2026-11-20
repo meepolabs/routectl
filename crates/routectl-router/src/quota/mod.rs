@@ -59,8 +59,8 @@ pub mod placement;
 pub mod reading;
 pub mod reduce;
 pub mod store;
-#[cfg(test)]
-pub mod test_support;
 pub mod usage_body;
 pub mod view;
+#[cfg(test)]
+pub mod view_test_support;
 pub mod window;
