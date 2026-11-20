@@ -47,14 +47,15 @@
     return Date.now() > nextDueAtMs + TIMEOUT_MS + FRESH_SLACK_MS;
   }
 
-  // The icon follows the verdict strip: red for a stopped page or a broken
-  // verdict, kept red while that verdict is the last known one, since the
-  // router was last seen unable to route. Any other verdict that is not
-  // current, or data the wall clock says has aged out, reads grey rather than
-  // a reassuring green or a stale amber.
+  // The icon follows the verdict strip: red for a stopped page or a current
+  // broken verdict, amber for a current degraded one. A verdict that is not
+  // current (the daemon unreachable, the panel not answering), or data the
+  // wall clock says has aged out, reads grey whatever its last severity was:
+  // the icon reports what is known now, and the strip keeps the last verdict
+  // with its time.
   function faviconState() {
+    if (terminal) { return 'bad'; }
     var shown = shownVerdict(currentVerdict());
-    if (terminal || shown.kind === 'bad') { return 'bad'; }
     if (shown.note || isStaleUnknown()) { return 'idle'; }
     return shown.kind;
   }

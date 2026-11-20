@@ -301,17 +301,21 @@ fn page_browser_the_served_verdict_renders_as_text_tone_icon_and_link() {
 /// A broken verdict is shown, then two aggregate rounds fail as an
 /// unreachable daemon's do: after each the strip keeps the same sentence,
 /// dimmed, with the verdict's time and that the daemon cannot be reached,
-/// and the icon stays red. No sentence it took in between was the start-up
-/// text. A valid payload with another verdict then replaces it.
+/// and the icon is the grey unreachable one, not the last verdict's red. No
+/// sentence it took in between was the start-up text. A valid payload with
+/// another broken verdict then replaces it, and only that current verdict
+/// turns the icon red again.
 ///
-/// Mutation check: delete the `lastVerdict = current` assignment in
-/// renderVerdict -> red (the strip falls back to the start-up text).
+/// Mutation checks: delete the `lastVerdict = current` assignment in
+/// renderVerdict -> red (the strip falls back to the start-up text); return
+/// 'bad' for a shown bad verdict before the not-current check in
+/// faviconState -> red (the icon stays red through the outage).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_an_outage_keeps_the_last_verdict_with_its_time() {
     let after = verdict(
-        "degraded",
-        "claude-a (seat-a): Not logged in",
+        "broken",
+        "pool main: no usable seat, for 1 min",
         Some("accounts"),
     );
     let row = json!({ "verdict": broken(), "failures": 2, "after": after });
@@ -327,7 +331,7 @@ fn page_browser_an_outage_keeps_the_last_verdict_with_its_time() {
         assert_eq!(seen["text"], broken()["text"], "round {i}: {out:#}");
         assert_eq!(seen["kind"], "bad", "round {i}: {out:#}");
         assert_eq!(seen["dimmed"], true, "round {i}: {out:#}");
-        assert_eq!(seen["favicon"], ICON_BAD, "round {i}: {out:#}");
+        assert_eq!(seen["favicon"], ICON_STALE, "round {i}: {out:#}");
         assert_eq!(seen["link_text"], "see Accounts", "round {i}: {out:#}");
         let note = seen["note"].as_str().expect("a note");
         assert!(note.contains(served), "round {i}: {out:#}");
@@ -342,12 +346,14 @@ fn page_browser_an_outage_keeps_the_last_verdict_with_its_time() {
     assert_eq!(recovered["text"], after["text"], "{out:#}");
     assert_eq!(recovered["dimmed"], false, "{out:#}");
     assert_eq!(recovered["note"], Value::Null, "{out:#}");
-    assert_eq!(recovered["favicon"], ICON_WARN, "{out:#}");
+    assert_eq!(recovered["kind"], "bad", "{out:#}");
+    assert_eq!(recovered["favicon"], ICON_BAD, "{out:#}");
 }
 
 /// The daemon answers but the attention panel is refused: the last verdict
 /// stays, dimmed, with its time and that the verdict is not current, not
-/// that the daemon cannot be reached.
+/// that the daemon cannot be reached, and the icon is grey rather than the
+/// last verdict's red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_refused_attention_panel_keeps_the_verdict_as_not_current() {
@@ -357,7 +363,7 @@ fn page_browser_a_refused_attention_panel_keeps_the_verdict_as_not_current() {
 
     let refused = &out["refused"];
     assert_eq!(refused["text"], broken()["text"], "{out:#}");
-    assert_eq!(refused["favicon"], ICON_BAD, "{out:#}");
+    assert_eq!(refused["favicon"], ICON_STALE, "{out:#}");
     let note = refused["note"].as_str().expect("a note");
     let served = out["served_time"].as_str().expect("served time");
     assert!(note.contains(served), "{out:#}");
@@ -434,18 +440,44 @@ fn badge_rows() -> Vec<BadgeRow> {
             counts: counts(0, 0, 3, 0),
             badge: None,
         },
+        BadgeRow {
+            name: "degraded missing",
+            counts: json!({ "broken": 0, "recovered": 0, "doctor_fail": 0 }),
+            badge: Some(INVALID_BADGE),
+        },
+        BadgeRow {
+            name: "broken null",
+            counts: json!({ "broken": null, "degraded": 0, "recovered": 0, "doctor_fail": 0 }),
+            badge: Some(INVALID_BADGE),
+        },
+        BadgeRow {
+            name: "degraded as text",
+            counts: json!({ "broken": 0, "degraded": "2", "recovered": 0, "doctor_fail": 0 }),
+            badge: Some(INVALID_BADGE),
+        },
+        BadgeRow {
+            name: "recovered missing",
+            counts: json!({ "broken": 1, "degraded": 0, "doctor_fail": 0 }),
+            badge: Some(INVALID_BADGE),
+        },
     ]
 }
+
+/// The badge an attention payload that does not match its shape shows.
+const INVALID_BADGE: (&str, &str) = ("n/a", "muted");
 
 /// The Doctor badge counts the daemon's active attention items (broken +
 /// degraded; recovered never count), toned by the worst of them, and Now
 /// shows the same badge, while the doctor report on the open Doctor view
-/// carries a different number of Warn findings. Positive control per row:
-/// those findings are rendered, so the report really carried them.
+/// carries a different number of Warn findings. Counts with a tally missing
+/// or not a count are an invalid payload, badged `n/a`, never a hidden badge
+/// that reads as nothing wrong. Positive control per row: those findings are
+/// rendered, so the report really carried them.
 ///
 /// Mutation checks: badge Doctor from its primary (drop `badge:
 /// 'attention'`) -> red; add `recovered` to the attention count -> red
-/// (every row carrying recovered items).
+/// (every row carrying recovered items); return the counts unchecked from
+/// attentionTally -> red (the invalid rows show no badge or a number).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_the_doctor_badge_counts_active_attention_items() {
@@ -468,11 +500,16 @@ fn page_browser_the_doctor_badge_counts_active_attention_items() {
 /// Two aggregate rounds fail as an unreachable daemon's do: after each,
 /// every badge that showed a number keeps that number and tone, dimmed, and
 /// no badge reads "stale". A valid round then shows those numbers undimmed
-/// again. Positive control: Now, Doctor and Models showed a number before the
-/// outage, so there were badges to keep.
+/// again. A badge that showed nothing stays hidden before, during and after
+/// the outage: Traffic, never opened, gains no offline badge for a query it
+/// never sent. Positive control: Now, Doctor and Models showed a number
+/// before the outage, so there were badges to keep, and Traffic's badge is
+/// on the page, hidden.
 ///
-/// Mutation check: put back the `{ label: 'stale', kind: 'warn' }` badge in
-/// markSourceTransport -> red.
+/// Mutation checks: put back the `{ label: 'stale', kind: 'warn' }` badge in
+/// markSourceTransport -> red; drop the never-requested skip in
+/// markQuerySourcesTransport -> red (Traffic shows `offline` through the
+/// outage and after it).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_an_outage_keeps_every_badge_number_dimmed() {
@@ -488,6 +525,10 @@ fn page_browser_an_outage_keeps_every_badge_number_dimmed() {
     for view in ["now", "doctor", "models"] {
         assert!(!live[view].is_null(), "`{view}` showed no badge: {out:#}");
     }
+    assert!(
+        live.get("traffic").is_some_and(Value::is_null),
+        "positive control: Traffic's badge is on the page, hidden: {out:#}"
+    );
     let failed = out["failed"].as_array().expect("failed rounds");
     assert_eq!(failed.len(), 2, "{out:#}");
     for (i, seen) in failed.iter().enumerate() {
@@ -495,6 +536,7 @@ fn page_browser_an_outage_keeps_every_badge_number_dimmed() {
             let during = &seen[view.as_str()];
             assert_ne!(during["text"], "stale", "round {i} `{view}`: {out:#}");
             if before.is_null() {
+                assert!(during.is_null(), "round {i} `{view}`: {out:#}");
                 continue;
             }
             assert_eq!(
@@ -508,7 +550,7 @@ fn page_browser_an_outage_keeps_every_badge_number_dimmed() {
             assert_eq!(during["dimmed"], true, "round {i} `{view}`: {out:#}");
         }
     }
-    for (view, before) in live.iter().filter(|(_, before)| !before.is_null()) {
+    for (view, before) in live {
         assert_eq!(
             &out["recovered"][view.as_str()],
             before,

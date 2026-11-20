@@ -422,6 +422,33 @@ fn page_browser_now_a_seat_with_no_reading_says_so_never_a_zero_meter() {
     assert_eq!(seat["no_reading"], Value::Null, "{seat:#}");
 }
 
+/// A window whose used fraction arrives null draws no meter at all, never a
+/// 0% one: the glance shows the invalid-payload card in its own section, and
+/// the attention list and the traffic tiles beside it still render (the
+/// positive control that the page drew Now from the same answer).
+///
+/// Mutation check: read `used` through num0 again in glanceMeter, without
+/// the shape check -> red (a `0%` meter is drawn and no card).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_a_glance_window_with_no_used_fraction_is_an_invalid_payload() {
+    let result = now_scenario("now-glance-window-unread");
+
+    assert_eq!(result["meters"], Value::Array(Vec::new()), "{result:#}");
+    assert!(
+        str_of(&result["card_text"], "the card").contains("invalid_payload"),
+        "{result:#}"
+    );
+    assert!(
+        result["attention_rows"].as_u64().unwrap_or(0) > 0,
+        "the attention list renders: {result:#}"
+    );
+    assert!(
+        result["kpis"].as_u64().unwrap_or(0) > 0,
+        "the tiles render: {result:#}"
+    );
+}
+
 /// A window above 90% used reads amber with "nearly used"; one at its limit
 /// reads red with "at limit"; one under it is the calm meter color with no
 /// word. A stale reading keeps its level color, is dimmed, and says

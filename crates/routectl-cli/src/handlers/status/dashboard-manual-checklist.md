@@ -287,9 +287,10 @@ banner, no retry signal -- silently mislabeled data.
   failure only on its own sections.
 - With a seat logged out, stop the daemon and wait two polls. The status
   line keeps the same sentence, dimmed, followed by `as of <time> - the
-  daemon cannot be reached`; the icon stays red for a broken verdict. It
-  never returns to `Checking routing state`. Start the daemon again: within
-  a poll the current sentence replaces it and the dimming clears.
+  daemon cannot be reached`; the icon turns grey, even for a broken
+  verdict. It never returns to `Checking routing state`. Start the daemon
+  again: within a poll the current sentence replaces it, the dimming clears
+  and the icon takes that verdict's color again.
 - The Models tab badge counts every target with an eligibility reason or a
   non-closed breaker once: two logged-out seats badge `2`, and a seat that is
   both logged out and breaker-open still counts once.

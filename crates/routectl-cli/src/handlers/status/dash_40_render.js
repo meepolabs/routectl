@@ -743,13 +743,28 @@
       return open > 0 ? { label: String(open), kind: 'warn' } : null;
     }
     if (name === 'attention') {
-      var counts = data.counts || {};
-      var broken = num0(counts.broken);
-      var active = broken + num0(counts.degraded);
+      var counts = attentionTally(data.counts);
+      var active = counts.broken + counts.degraded;
       if (active === 0) { return null; }
-      return { label: String(active), kind: broken > 0 ? 'error' : 'warn' };
+      return { label: String(active), kind: counts.broken > 0 ? 'error' : 'warn' };
     }
     return null;
+  }
+
+  var ATTENTION_COUNT_KEYS = ['broken', 'degraded', 'recovered', 'doctor_fail'];
+
+  // The attention panel's tallies, each a whole count the daemon always
+  // sends. A tally that is missing or not a count throws, so the payload
+  // lands as invalid_payload: a hidden badge would read as nothing wrong.
+  function attentionTally(counts) {
+    if (!isPlainObject(counts)) { throw new Error('attention payload carries no counts'); }
+    ATTENTION_COUNT_KEYS.forEach(function (key) {
+      var n = counts[key];
+      if (!isFiniteNumber(n) || n < 0 || Math.floor(n) !== n) {
+        throw new Error('attention count ' + key + ' is not a count');
+      }
+    });
+    return counts;
   }
 
   // Surface each tab's badge from its badge source (its `badge`, else its

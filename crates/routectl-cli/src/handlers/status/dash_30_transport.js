@@ -326,14 +326,21 @@
 
   // The aggregate failed on transport. A healthy QUERY is only re-requested
   // by the aggregate round's nudge, so while the daemon is down nothing else
-  // would ever mark it: every query source takes the same transport state as
-  // the GET sources. A source no request will answer (no body for the
-  // selection, or a body the daemon refused) is left as it is, since no
-  // recovery would clear the mark. The first good round's nudge refetches.
+  // would ever mark it: a query source the outage touches takes the same
+  // transport state as the GET sources. That is one holding a rendered
+  // payload, or the one the active view issues (any request in flight is
+  // that view's; an answer for another is dropped). A source no view has
+  // asked for yet is left loading: nothing of it failed, and only its own
+  // view's round would clear a mark. A source no request will answer (no
+  // body for the selection, or a body the daemon refused) is left as it is,
+  // since no recovery would clear the mark. The first good round's nudge
+  // refetches.
   function markQuerySourcesTransport() {
+    var issued = querySourceFor(activeTab);
     QUERY_SOURCES.forEach(function (name) {
       var body = queryBodyForSource(name);
       if (!body || queryRejectedKeyBySource[name] === queryBodyKey(body)) { return; }
+      if (name !== issued && SOURCES[name].data === null) { return; }
       markSourceTransport(name);
     });
   }

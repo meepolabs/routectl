@@ -59,13 +59,14 @@
 
   function attentionSection(rec) {
     var data = rec.data;
-    if (!Array.isArray(data.items) || !isPlainObject(data.counts)) {
-      throw new Error('attention payload carries no item list or counts');
+    if (!Array.isArray(data.items)) {
+      throw new Error('attention payload carries no item list');
     }
+    var counts = attentionTally(data.counts);
     var wrap = document.createElement('div');
     wrap.className = 'ovsection attn';
     var head = sectionHead('Needs attention', null);
-    head.appendChild(attentionCounts(data.counts));
+    head.appendChild(attentionCounts(counts));
     wrap.appendChild(head);
     var active = data.items.filter(function (item) { return item.state !== 'recovered'; });
     if (!active.length) { wrap.appendChild(attentionClear()); }
@@ -79,7 +80,7 @@
     var strip = document.createElement('span');
     strip.className = 'attn-counts';
     [['broken', counts.broken], ['degraded', counts.degraded]].forEach(function (c) {
-      var n = num0(c[1]);
+      var n = c[1];
       if (n <= 0) { return; }
       var part = document.createElement('span');
       part.className = 'attn-count attn-count--' + c[0];
@@ -333,8 +334,14 @@
     return attentionText('div', 'glance-noreading', text);
   }
 
+  // A window's used fraction and length are always sent with it; one missing
+  // either throws to the section's invalid_payload card rather than drawing
+  // a measured-looking 0% meter.
   function glanceMeter(w, nowMs) {
-    var used = Math.max(0, num0(w.used));
+    if (!isPlainObject(w) || !isFiniteNumber(w.used) || !isFiniteNumber(w.length_secs)) {
+      throw new Error('accounts window carries no used fraction or length');
+    }
+    var used = Math.max(0, w.used);
     var level = used >= 1 ? 'full' : (used > GLANCE_NEAR_FULL ? 'warn' : 'calm');
     var line = document.createElement('div');
     line.className = 'glance-meter glance-meter--' + level + (w.stale ? ' glance-meter--stale' : '');
@@ -359,7 +366,7 @@
 
   // The window's length in whole days or hours, then its vendor scope.
   function glanceWindowLabel(w) {
-    var secs = num0(w.length_secs);
+    var secs = w.length_secs;
     var span;
     if (secs > 0 && secs % DAY_SECS === 0) { span = (secs / DAY_SECS) + ' d'; }
     else if (secs > 0 && secs % HOUR_SECS === 0) { span = (secs / HOUR_SECS) + ' h'; }

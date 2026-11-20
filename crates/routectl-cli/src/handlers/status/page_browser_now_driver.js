@@ -349,6 +349,31 @@
     });
   });
 
+  // The labelled seat's first window arrives with its used fraction null:
+  // the payload no longer matches its shape.
+  d.scenario('now-glance-window-unread', function () {
+    rewriteAccounts(function (rows) {
+      accountRow(rows, 'anthropic#a').windows[0].used = null;
+    });
+    return d.waitUntil('the glance section drawn and the Now tiles', function () {
+      var body = document.getElementById('body-now');
+      var node = document.querySelector(GLANCE);
+      var drawn = node && (node.querySelector('.unavailable-msg') || node.querySelector('.glance-seat'));
+      return drawn && body.querySelectorAll('.kpi').length > 0;
+    }).then(function () {
+      var body = document.getElementById('body-now');
+      var card = glance().querySelector('.unavailable-msg');
+      return {
+        card_text: card ? card.textContent : null,
+        meters: Array.prototype.map.call(glance().querySelectorAll('.glance-meter-pct'), function (n) {
+          return n.textContent;
+        }),
+        attention_rows: body.querySelectorAll('[data-source="attention"] .attn-item').length,
+        kpis: body.querySelectorAll('.kpi').length
+      };
+    });
+  });
+
   // The first window's use moves on every answer: the bar is the same node,
   // its width follows the reading, and the width change is animated.
   d.scenario('now-glance-meter-moves', function () {
