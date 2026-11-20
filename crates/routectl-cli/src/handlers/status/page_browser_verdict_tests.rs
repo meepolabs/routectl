@@ -1,8 +1,9 @@
-// The verdict strip and the favicon in a real headless Chrome: the strip
-// renders the daemon's attention verdict as text with a link to the view it
-// names, keeps the last known verdict with its time through an outage, and
-// the favicon follows it; the request count beside the span is shown only
-// when it covers that span. `include!`d into a child module of `page::tests`;
+// The verdict strip, the favicon and the tab badges in a real headless
+// Chrome: the strip renders the daemon's attention verdict as text with a
+// link to the view it names, keeps the last known verdict with its time
+// through an outage, and the favicon follows it; the badges count the same
+// attention list and dim rather than turn amber through an outage; the
+// request count beside the span is shown only when it covers that span. `include!`d into a child module of `page::tests`;
 // the scenarios live in page_browser_verdict_driver.js.
 
 use serde_json::{Value, json};
@@ -395,6 +396,125 @@ fn page_browser_the_request_count_is_shown_only_for_the_span_it_covers() {
     assert_eq!(out["unanswered"]["stats"], "this month", "{out:#}");
     let answered = out["answered"]["stats"].as_str().expect("stats text");
     assert!(answered.ends_with(" req this month"), "{out:#}");
+}
+
+/// Warn findings the doctor report carries in the badge rows: a count the
+/// old doctor-derived badge would have shown, and no row's attention count.
+const DOCTOR_WARNS: u64 = 3;
+
+/// One set of attention counts and the badge Now and Doctor show for it.
+struct BadgeRow {
+    name: &'static str,
+    counts: Value,
+    badge: Option<(&'static str, &'static str)>,
+}
+
+fn badge_rows() -> Vec<BadgeRow> {
+    let counts = |broken: u64, degraded: u64, recovered: u64, doctor_fail: u64| {
+        json!({
+            "broken": broken,
+            "degraded": degraded,
+            "recovered": recovered,
+            "doctor_fail": doctor_fail,
+        })
+    };
+    vec![
+        BadgeRow {
+            name: "broken and degraded",
+            counts: counts(1, 4, 2, 1),
+            badge: Some(("5", "error")),
+        },
+        BadgeRow {
+            name: "degraded only",
+            counts: counts(0, 2, 0, 0),
+            badge: Some(("2", "warn")),
+        },
+        BadgeRow {
+            name: "recovered only",
+            counts: counts(0, 0, 3, 0),
+            badge: None,
+        },
+    ]
+}
+
+/// The Doctor badge counts the daemon's active attention items (broken +
+/// degraded; recovered never count), toned by the worst of them, and Now
+/// shows the same badge, while the doctor report on the open Doctor view
+/// carries a different number of Warn findings. Positive control per row:
+/// those findings are rendered, so the report really carried them.
+///
+/// Mutation checks: badge Doctor from its primary (drop `badge:
+/// 'attention'`) -> red; add `recovered` to the attention count -> red
+/// (every row carrying recovered items).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_the_doctor_badge_counts_active_attention_items() {
+    for row in badge_rows() {
+        let name = row.name;
+        let set = json!({ "counts": row.counts, "doctor_warn": DOCTOR_WARNS });
+
+        let out = verdict_scenario("badges-counts", "doctor", Some(set));
+
+        assert_eq!(out["doctor_findings"], DOCTOR_WARNS, "`{name}`: {out:#}");
+        let expected = match row.badge {
+            Some((text, kind)) => json!({ "text": text, "kind": kind, "dimmed": false }),
+            None => Value::Null,
+        };
+        assert_eq!(out["badges"]["doctor"], expected, "`{name}`: {out:#}");
+        assert_eq!(out["badges"]["now"], expected, "`{name}`: {out:#}");
+    }
+}
+
+/// Two aggregate rounds fail as an unreachable daemon's do: after each,
+/// every badge that showed a number keeps that number and tone, dimmed, and
+/// no badge reads "stale". A valid round then shows those numbers undimmed
+/// again. Positive control: Now, Doctor and Models showed a number before the
+/// outage, so there were badges to keep.
+///
+/// Mutation check: put back the `{ label: 'stale', kind: 'warn' }` badge in
+/// markSourceTransport -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_an_outage_keeps_every_badge_number_dimmed() {
+    let row = json!({
+        "counts": { "broken": 1, "degraded": 4, "recovered": 0, "doctor_fail": 0 },
+        "doctor_warn": DOCTOR_WARNS,
+        "failures": 2,
+    });
+
+    let out = verdict_scenario_for("badges-outage", "now", Some(row), OUTAGE_BUDGET_MS);
+
+    let live = out["live"].as_object().expect("live badges");
+    for view in ["now", "doctor", "models"] {
+        assert!(!live[view].is_null(), "`{view}` showed no badge: {out:#}");
+    }
+    let failed = out["failed"].as_array().expect("failed rounds");
+    assert_eq!(failed.len(), 2, "{out:#}");
+    for (i, seen) in failed.iter().enumerate() {
+        for (view, before) in live {
+            let during = &seen[view.as_str()];
+            assert_ne!(during["text"], "stale", "round {i} `{view}`: {out:#}");
+            if before.is_null() {
+                continue;
+            }
+            assert_eq!(
+                during["text"], before["text"],
+                "round {i} `{view}`: {out:#}"
+            );
+            assert_eq!(
+                during["kind"], before["kind"],
+                "round {i} `{view}`: {out:#}"
+            );
+            assert_eq!(during["dimmed"], true, "round {i} `{view}`: {out:#}");
+        }
+    }
+    for (view, before) in live.iter().filter(|(_, before)| !before.is_null()) {
+        assert_eq!(
+            &out["recovered"][view.as_str()],
+            before,
+            "`{view}`: {out:#}"
+        );
+    }
 }
 
 /// The page derives no verdict of its own: the health-reading verdict and

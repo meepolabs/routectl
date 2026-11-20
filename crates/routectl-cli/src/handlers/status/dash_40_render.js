@@ -105,17 +105,25 @@
 
   // A failed background refresh (503, timeout, network) never closes what the
   // source last rendered: a source holding a payload keeps it and its DOM,
-  // marked stale (the section dims, the status line says since when). A
-  // source with nothing rendered yet has nothing to keep, so it shows the
-  // transport error state. Siblings are untouched either way.
+  // marked stale (the section dims, the status line says since when), and
+  // its badge keeps its last number, dimmed: amber on a badge means a
+  // problem, and old data is not one. A source with nothing rendered yet has
+  // nothing to keep, so it shows the transport error state. Siblings are
+  // untouched either way.
   function markSourceTransport(name) {
-    var kept = SOURCES[name].data !== null;
+    var prev = SOURCES[name];
+    var kept = prev.data !== null;
     setSource(name, {
       state: kept ? 'stale' : 'dead',
       code: null,
-      badge: kept ? { label: 'stale', kind: 'warn' } : { label: 'offline', kind: 'error' }
+      badge: kept ? dimmedBadge(prev.badge) : { label: 'offline', kind: 'error' }
     });
     renderSourceChanged(name);
+  }
+
+  function dimmedBadge(badge) {
+    if (!badge) { return null; }
+    return { label: badge.label, kind: badge.kind, title: badge.title, dimmed: true };
   }
 
   // Polling has stopped for good: nothing on screen is current any more, and
@@ -719,8 +727,10 @@
 
   // The badge for a source, computed ONLY from a fresh successful render.
   // Counts a genuine problem: usage errors, health targets with a non-closed
-  // circuit or an eligibility reason (once each), doctor warn+fail findings. Config carries no error concept, so it never
-  // badges. A zero count returns null so a clean source shows nothing.
+  // circuit or an eligibility reason (once each), the daemon's active
+  // attention items (broken + degraded; recovered ones never count). Config
+  // carries no error concept, so it never badges. A zero count returns null
+  // so a clean source shows nothing.
   function sourceBadge(name, data) {
     if (name === 'usage') {
       var errs = num0((data.totals || {}).errors);
@@ -732,27 +742,23 @@
       }).length;
       return open > 0 ? { label: String(open), kind: 'warn' } : null;
     }
-    if (name === 'doctor') {
-      var findings = (data.report || {}).findings || [];
-      var warn = 0, fail = 0;
-      findings.forEach(function (f) {
-        if (f.status === 'Warn') { warn += 1; }
-        else if (f.status === 'Fail') { fail += 1; }
-      });
-      var total = warn + fail;
-      if (total === 0) { return null; }
-      return { label: String(total), kind: fail > 0 ? 'error' : 'warn' };
+    if (name === 'attention') {
+      var counts = data.counts || {};
+      var broken = num0(counts.broken);
+      var active = broken + num0(counts.degraded);
+      if (active === 0) { return null; }
+      return { label: String(active), kind: broken > 0 ? 'error' : 'warn' };
     }
     return null;
   }
 
-  // Surface each tab's badge from its PRIMARY source, so a problem is
-  // visible without switching to that tab. A source whose section failed to
-  // render badges as unusable rather than carrying the badge computed from the
-  // last payload that did render.
+  // Surface each tab's badge from its badge source (its `badge`, else its
+  // primary), so a problem is visible without switching to that tab. A
+  // source whose section failed to render badges as unusable rather than
+  // carrying the badge computed from the last payload that did render.
   function syncTabBadges() {
     VIEWS.forEach(function (view) {
-      var rec = SOURCES[view.sources[0]];
+      var rec = SOURCES[view.badge || view.sources[0]];
       setTabBadge(view.id, effectiveState(rec) === 'invalid_payload'
         ? { label: 'n/a', kind: 'muted' }
         : rec.badge);
@@ -771,7 +777,7 @@
     }
     badge.hidden = false;
     badge.textContent = state.label;
-    badge.className = 'tab-badge tab-badge--' + state.kind;
+    badge.className = 'tab-badge tab-badge--' + state.kind + (state.dimmed ? ' tab-badge--dimmed' : '');
     if (state.title) { badge.title = state.title; }
     else { badge.removeAttribute('title'); }
   }

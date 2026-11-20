@@ -316,4 +316,88 @@
       return out;
     });
   });
+
+  // ---- tab badges ---------------------------------------------------------
+
+  // Every tab badge as shown: its text, its tone and whether it is dimmed,
+  // keyed by view. A hidden badge reads as null.
+  function badges() {
+    var out = {};
+    Array.prototype.forEach.call(document.querySelectorAll('.tab-badge'), function (node) {
+      var view = node.id.replace(/^badge-/, '');
+      out[view] = node.hidden ? null : {
+        text: node.textContent,
+        kind: ['warn', 'error', 'muted'].filter(function (k) {
+          return node.classList.contains('tab-badge--' + k);
+        }).join(','),
+        dimmed: node.classList.contains('tab-badge--dimmed')
+      };
+    });
+    return out;
+  }
+
+  // The aggregate with the row's attention counts and a doctor report of
+  // `row.doctor_warn` Warn findings, so the old doctor-derived count differs
+  // from the attention one.
+  function withCounts(row) {
+    return function (json) {
+      json.panels.attention.data.counts = row.counts;
+      var findings = [];
+      for (var i = 0; i < row.doctor_warn; i++) {
+        findings.push({ section: 'config', name: 'warn ' + i, status: 'Warn', detail: 'warn ' + i, remediation: null });
+      }
+      json.panels.doctor.data.report.findings = findings;
+      return json;
+    };
+  }
+
+  d.scenario('badges-counts', function () {
+    var row = window.routectlVerdictRow;
+    rules.push(onAggregate(withCounts(row)));
+    return nextAnswer('/status', 30000).then(function () {
+      return nextAnswer('/status', 30000);
+    }).then(function () {
+      return {
+        badges: badges(),
+        doctor_findings: document.querySelectorAll('#body-doctor .docfinding').length
+      };
+    });
+  });
+
+  // Badges with figures in them, then `row.failures` aggregate rounds that
+  // fail the way an unreachable daemon's do, observed after each, then a
+  // round that answers again.
+  d.scenario('badges-outage', function () {
+    var row = window.routectlVerdictRow;
+    rules.push(onAggregate(withCounts(row)));
+    var failing = false;
+    rules.push(function (path) { return (failing && path === '/status') ? { fail: true } : null; });
+    var out = { failed: [] };
+    var step = nextAnswer('/status', 30000).then(function () {
+      return nextAnswer('/status', 30000);
+    }).then(function () {
+      out.live = badges();
+      failing = true;
+    });
+    for (var i = 0; i < row.failures; i++) {
+      step = step.then(function () {
+        return nextAnswer('/status', 40000);
+      }).then(function () {
+        return d.waitUntil('the strip to mark the failure', function () {
+          return strip().dimmed;
+        });
+      }).then(function () {
+        out.failed.push(badges());
+      });
+    }
+    return step.then(function () {
+      failing = false;
+      return d.waitUntil('the recovered strip', function () {
+        return !strip().dimmed;
+      }, 45000);
+    }).then(function () {
+      out.recovered = badges();
+      return out;
+    });
+  });
 })(window.routectlDriver);

@@ -3,13 +3,23 @@
 // `page::tests`, so the script helpers there (`script`, `strip_js_comments`,
 // `skip_string_literal`, ...) are in scope; do not add `use` lines here.
 
-/// One registered view as written in the script: its id, its tab label and
-/// its `sources` entries as the identifiers or literals they are written as.
+/// One registered view as written in the script: its id, its tab label, its
+/// `sources` entries as the identifiers or literals they are written as, and
+/// the `badge` source it declares, if any.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ViewEntry {
     pub(super) id: String,
     pub(super) label: String,
     pub(super) sources: Vec<String>,
+    pub(super) badge: Option<String>,
+}
+
+impl ViewEntry {
+    /// The source the tab badge reads: the declared `badge`, else the
+    /// primary.
+    pub(super) fn badge_source(&self) -> &str {
+        self.badge.as_deref().unwrap_or(&self.sources[0])
+    }
 }
 
 /// The index just past the bracket that closes the one opened at
@@ -109,6 +119,7 @@ pub(super) fn view_entries(src: &str) -> Vec<ViewEntry> {
                     .map(unquote)
                     .filter(|s| !s.is_empty())
                     .collect(),
+                badge: field_text(object, "badge").map(|badge| unquote(&badge)),
             }
         })
         .collect()
@@ -223,10 +234,10 @@ fn reordered_markup_is_reported_against_the_view_registry() {
 }
 
 #[test]
-fn the_view_registry_parser_reads_ids_and_sources_in_order() {
+fn the_view_registry_parser_reads_ids_sources_and_badge_in_order() {
     let src = "var VIEWS = [\n  // { id: 'ghost', sources: ['x'] },\n  \
                { id: 'a', label: 'A', sources: [Q_SRC, 'usage'], span: null, build: buildA },\n  \
-               { id: 'b', label: 'B, b', sources: ['config'], span: 'all history', build: buildB }\n];";
+               { id: 'b', label: 'B, b', sources: ['config'], badge: 'other', span: 'all history', build: buildB }\n];";
 
     assert_eq!(
         view_entries(src),
@@ -235,13 +246,44 @@ fn the_view_registry_parser_reads_ids_and_sources_in_order() {
                 id: "a".to_string(),
                 label: "A".to_string(),
                 sources: vec!["Q_SRC".to_string(), "usage".to_string()],
+                badge: None,
             },
             ViewEntry {
                 id: "b".to_string(),
                 label: "B, b".to_string(),
                 sources: vec!["config".to_string()],
+                badge: Some("other".to_string()),
             },
         ]
+    );
+}
+
+/// The tab badges count what needs attention from one list: Doctor declares
+/// the attention source as its badge and Now's primary is that source, so the
+/// two tabs and the verdict strip read the same items. A declared badge names
+/// a source the page fetches.
+///
+/// Mutation check: drop `badge: 'attention'` from the Doctor entry -> red.
+#[test]
+fn doctor_and_now_badge_from_the_attention_list() {
+    let views = view_entries(&script());
+    let gets = string_array("GET_SOURCES");
+
+    assert_eq!(view_entry("doctor").badge.as_deref(), Some("attention"));
+    assert_eq!(view_entry("doctor").badge_source(), "attention");
+    assert_eq!(view_entry("now").badge_source(), "attention");
+    for view in &views {
+        if let Some(badge) = &view.badge {
+            assert!(
+                gets.contains(badge),
+                "`{}` badges from `{badge}`, which the page never fetches",
+                view.id
+            );
+        }
+    }
+    assert!(
+        views.iter().any(|view| view.badge.is_some()),
+        "positive control: some view declares a badge"
     );
 }
 

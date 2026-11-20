@@ -392,6 +392,8 @@ body {
 .tab-badge--warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
 .tab-badge--error { background: var(--pill-err-bg); color: var(--pill-err-fg); }
 .tab-badge--muted { background: var(--pill-neutral-bg); color: var(--faint); }
+/* A badge whose source is not current keeps its number and hue, dimmed. */
+.tab-badge--dimmed { opacity: 0.55; }
 
 /* ---- banner ---- */
 .banner {

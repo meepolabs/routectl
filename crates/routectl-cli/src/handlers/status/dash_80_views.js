@@ -8,12 +8,16 @@
   //            only when one of ITS sources lands, so a dead QUERY degrades
   //            the query-backed views and leaves the GET-backed ones alone.
   //            The FIRST entry is the view's primary source: it drives the
-  //            freshness line, the tab badge and the whole-view state card,
-  //            so a multi-source view names the source that owns its subject
-  //            first (Traffic leads with the QUERY its usage cards read; the
-  //            routing sections under them guard their own sources). The
+  //            freshness line, the tab badge (unless `badge` names another
+  //            source) and the whole-view state card, so a multi-source view
+  //            names the source that owns its subject first (Traffic leads
+  //            with the QUERY its usage cards read; the routing sections
+  //            under them guard their own sources). The
   //            FIRST QUERY source listed, primary or not, is the one request
   //            the view issues (viewQuerySource); a view lists at most one.
+  //   badge    optional: the source whose problem count the tab badge
+  //            shows, when that is not the primary. It need not be one of
+  //            `sources`.
   //   span     null for a windowed view. Otherwise what the view's figures
   //            span instead of a window: the picker dims and goes inert on
   //            it rather than promising a filter that does not reach the
@@ -61,6 +65,7 @@
       id: 'doctor',
       label: 'Doctor',
       sources: ['doctor'],
+      badge: 'attention',
       span: 'current state',
       build: buildDoctorView
     }
