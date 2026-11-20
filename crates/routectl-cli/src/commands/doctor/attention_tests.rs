@@ -399,8 +399,9 @@ fn records_dropped_is_listed_for_five_minutes_after_a_loss_counter_rise() {
     assert_rows(AttentionKind::RecordsDropped, rows);
 }
 
-/// A pools-section Fail is left to `pool_empty` only when `pools` carries
-/// that pool's live counts; otherwise nothing else names it, so it is listed.
+/// A pools-section Fail is left to `pool_empty` only when a `pool_empty`
+/// item for that pool is listed; otherwise, whether its live counts are
+/// missing or show a usable seat, nothing else names it, so it is listed.
 #[test]
 fn doctor_failure_is_listed_per_fail_finding_unless_pool_empty_reads_its_pool() {
     let with_findings = |doctor_findings| AttentionInputs {
@@ -448,6 +449,14 @@ fn doctor_failure_is_listed_per_fail_finding_unless_pool_empty_reads_its_pool() 
                 vec![finding("pools", "pool-a", Status::Fail)],
             ),
             0,
+        ),
+        (
+            "fail in pools, its pool counted and not empty",
+            with_pools(
+                vec![pool("pool-a", 2, 1)],
+                vec![finding("pools", "pool-a", Status::Fail)],
+            ),
+            1,
         ),
         (
             "fail named like a pool outside the pools section",

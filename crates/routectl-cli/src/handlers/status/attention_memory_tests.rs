@@ -346,17 +346,23 @@ fn with_pool_failure(now_ms: i64, pool_counted: bool) -> AttentionInputs {
 }
 
 /// An item the builder stops listing because a worse item now names the same
-/// problem has not cleared, so it is never shown recovered: a refresh still
-/// failing once the token expires, a route still open once its account is
-/// marked unusable or parked, a pools Fail once the pool's live counts are
-/// read. Each row's `cleared` read is the positive control: the same key,
-/// really gone, is recovered.
+/// problem has not cleared, so it is never shown recovered while folded: a
+/// refresh still failing once the token expires, a route still open once its
+/// account is marked unusable or parked, a pools Fail once the pool's live
+/// counts are read. What the read after the folded one shows depends on
+/// what it carries: still folded, the item stays hidden; the worse item gone
+/// and the folded condition still holding, it is active again; both gone, it
+/// is recovered from that read. The `control` outcome, the same key cleared
+/// with no folded read between, shows the key is recoverable at all.
 #[test]
 fn an_item_folded_into_a_worse_one_is_never_stamped_recovered() {
     let refresh_key = format!("account_refresh_failing:{ACCOUNT}");
     let route_key = "route_circuit_open:fast".to_string();
     type Read = fn(i64) -> AttentionInputs;
-    let rows: Vec<(&str, String, Read, Read, Read)> = vec![
+    // Each case: the folded condition listed on its own (also the read where
+    // the worse item clears and it still holds), the read where a worse item
+    // names it, and the read where both are gone.
+    let cases: Vec<(&str, String, Read, Read, Read)> = vec![
         (
             "refresh under an expired credential",
             refresh_key.clone(),
@@ -393,31 +399,72 @@ fn an_item_folded_into_a_worse_one_is_never_stamped_recovered() {
             at,
         ),
     ];
+    let then = START + 2 * READ_EVERY;
 
-    for (name, key, listed, folded, cleared) in rows {
-        let memory = AttentionMemory::new();
-        let first = read(&memory, listed(START));
-        let during = read(&memory, folded(START + READ_EVERY));
+    for (case, key, listed, folded, cleared) in cases {
+        let outcomes: [(&str, bool, Read, Option<ItemState>); 4] = [
+            ("stays folded", true, folded, None),
+            ("worse item clears", true, listed, Some(ItemState::Active)),
+            ("both clear", true, cleared, Some(ItemState::Recovered)),
+            ("control", false, cleared, Some(ItemState::Recovered)),
+        ];
+        for (outcome, folds_first, next, expected) in outcomes {
+            let name = format!("{case}, {outcome}");
+            let memory = AttentionMemory::new();
+            let first = read(&memory, listed(START));
+            let during = folds_first.then(|| read(&memory, folded(START + READ_EVERY)));
 
-        assert_eq!(
-            expect_item(&first, &key).state,
-            ItemState::Active,
-            "{name}: premise, listed on its own"
-        );
-        assert!(
-            find(&during, &key).is_none(),
-            "{name}: folded, not recovered: {during:#?}"
-        );
+            let after = read(&memory, next(then));
 
-        let control = AttentionMemory::new();
-        read(&control, listed(START));
-        let gone = read(&control, cleared(START + READ_EVERY));
-        assert_eq!(
-            expect_item(&gone, &key).state,
-            ItemState::Recovered,
-            "{name}: control, a cleared condition is recovered"
-        );
+            assert_eq!(
+                expect_item(&first, &key).state,
+                ItemState::Active,
+                "{name}: premise, listed on its own"
+            );
+            if let Some(during) = &during {
+                assert!(
+                    find(during, &key).is_none(),
+                    "{name}: folded, not recovered: {during:#?}"
+                );
+            }
+            let shown = find(&after, &key);
+            assert_eq!(shown.map(|item| item.state), expected, "{name}: {after:#?}");
+            if expected == Some(ItemState::Recovered) {
+                assert_eq!(
+                    shown.and_then(|item| item.recovered_at_ms),
+                    Some(then),
+                    "{name}: recovered from the first read without it"
+                );
+            }
+        }
     }
+}
+
+/// A condition shown recovered that returns folded into a worse item has not
+/// stayed cleared: it leaves the list, and when both clear later it is
+/// recovered from that later read, not from its first recovery.
+#[test]
+fn a_recovered_item_that_returns_folded_recovers_from_its_new_clearing() {
+    let memory = AttentionMemory::new();
+    let key = format!("account_refresh_failing:{ACCOUNT}");
+    let failing = |t| with_seat(t, seat(CredentialState::Usable, true), false);
+    let folded = |t| with_seat(t, seat(expired(START), true), false);
+    let clear = |t| with_seat(t, seat(CredentialState::Usable, false), false);
+    read(&memory, failing(START));
+    let first_clear = read(&memory, clear(START + READ_EVERY));
+    let returned = read(&memory, folded(START + 2 * READ_EVERY));
+
+    let after = read(&memory, clear(START + 3 * READ_EVERY));
+
+    assert_eq!(
+        expect_item(&first_clear, &key).recovered_at_ms,
+        Some(START + READ_EVERY),
+        "premise: recovered once"
+    );
+    assert!(find(&returned, &key).is_none(), "{returned:#?}");
+    let item = expect_item(&after, &key);
+    assert_eq!(item.state, ItemState::Recovered);
+    assert_eq!(item.recovered_at_ms, Some(START + 3 * READ_EVERY));
 }
 
 /// Once the worse item clears while the folded condition still holds, the

@@ -5823,7 +5823,7 @@ included plan within the last 7 minutes; an older claim raises nothing),
 `usage_poll_failing` (a run of failed usage polls at least 15 minutes old),
 `records_dropped` (a request-row loss counter rose in the last 5 minutes)
 and `doctor_failure` (a doctor Fail finding; a `pools` section Fail about a
-pool the list reads seat counts for is left to `pool_empty`). A route
+pool listed as `pool_empty` is left to that item). A route
 blocked by its account's credential is named once, by the account item,
 and a failing token refresh on an account whose credential item is listed
 is named in that item's `raw_token`. Every kind but `pool_empty`

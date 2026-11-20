@@ -424,6 +424,11 @@ fn badge_rows() -> Vec<BadgeRow> {
             "doctor_fail": doctor_fail,
         })
     };
+    let counts_with = |key: &str, value: Value| {
+        let mut all = counts(0, 1, 0, 0);
+        all[key] = value;
+        all
+    };
     vec![
         BadgeRow {
             name: "broken and degraded",
@@ -453,6 +458,16 @@ fn badge_rows() -> Vec<BadgeRow> {
         BadgeRow {
             name: "degraded as text",
             counts: json!({ "broken": 0, "degraded": "2", "recovered": 0, "doctor_fail": 0 }),
+            badge: Some(INVALID_BADGE),
+        },
+        BadgeRow {
+            name: "broken negative",
+            counts: counts_with("broken", json!(-1)),
+            badge: Some(INVALID_BADGE),
+        },
+        BadgeRow {
+            name: "degraded fractional",
+            counts: counts_with("degraded", json!(1.5)),
             badge: Some(INVALID_BADGE),
         },
         BadgeRow {
@@ -557,6 +572,46 @@ fn page_browser_an_outage_keeps_every_badge_number_dimmed() {
             "`{view}`: {out:#}"
         );
     }
+}
+
+/// Traffic, answered once and then left for Now, is marked stale by each of
+/// two outages it sits out, and an aggregate recovery does not clear it:
+/// only its own QUERY can. Opened after each recovery with that QUERY held,
+/// it shows its kept figures stale; once the held answer lands on the second
+/// visit, the section is current again. Positive control: before the
+/// outages the section was current, and its badge stays hidden throughout
+/// (a source with figures is dimmed, never badged offline).
+///
+/// Mutation check: skip every inactive query source in
+/// markQuerySourcesTransport (`name !== issued` alone) -> red (Traffic is
+/// current on both revisits).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_query_source_left_behind_stays_stale_until_its_own_query() {
+    let out = verdict_scenario_for("badges-outage-revisit", "now", None, OUTAGE_BUDGET_MS);
+
+    assert_eq!(out["answered"]["present"], true, "{out:#}");
+    assert_eq!(
+        out["answered"]["stale"], false,
+        "positive control: current before the outages: {out:#}"
+    );
+    let cycles = out["cycles"].as_array().expect("outage cycles");
+    assert_eq!(cycles.len(), 2, "{out:#}");
+    for (i, cycle) in cycles.iter().enumerate() {
+        assert!(
+            cycle["during"]["traffic_badge"].is_null(),
+            "cycle {i}: {out:#}"
+        );
+        assert_eq!(cycle["revisit"]["stale"], true, "cycle {i}: {out:#}");
+        let status = cycle["revisit"]["status"].as_str().expect("status line");
+        assert!(status.starts_with("stale: "), "cycle {i}: {out:#}");
+        assert!(
+            cycle["revisit"]["traffic_badge"].is_null(),
+            "cycle {i}: {out:#}"
+        );
+    }
+    assert_eq!(out["cleared"]["stale"], false, "{out:#}");
+    assert_eq!(out["cleared"]["status"], "", "{out:#}");
 }
 
 /// The page derives no verdict of its own: the health-reading verdict and

@@ -70,6 +70,7 @@ const BUILT_IN_MEMBERS: &[&str] = &[
     "hidden",
     "remove",
     "style",
+    "title",
     "toggle",
     "type",
     "hash",
@@ -321,6 +322,85 @@ fn every_lowercase_member_read_is_declared_built_or_built_in() {
          (a payload field goes in its panel's *_FIELDS list in the query vocabulary part): \
          {unaccounted:?}"
     );
+}
+
+/// The Accounts view part, whose placement section reads the ranking.
+const ACCOUNTS_VIEW_PART: &str = "dash_62_view_accounts.js";
+
+/// The comment heading that opens the placement section of the Accounts view;
+/// the section runs to the next `// ---- ` heading.
+const PLACEMENT_SECTION: &str = "// ---- placement rank";
+
+/// The source of the Accounts view's placement section.
+fn placement_section() -> String {
+    let part = super::view_contract::NAMED_PARTS
+        .iter()
+        .find(|(name, _)| *name == ACCOUNTS_VIEW_PART)
+        .map(|(_, src)| *src)
+        .expect("the Accounts view part is named");
+    let start = part
+        .find(PLACEMENT_SECTION)
+        .expect("the Accounts view has a placement section");
+    let body = &part[start + PLACEMENT_SECTION.len()..];
+    let end = body.find("// ---- ").unwrap_or(body.len());
+    body[..end].to_string()
+}
+
+/// The member reads of `section` that neither `fields`, the section's own
+/// object-literal keys nor the named built-ins account for. Keys built
+/// elsewhere on the page do not count: other views build `seats` and `model`.
+fn reads_outside(section: &str, fields: &[String]) -> Vec<String> {
+    let scan = scan_members(section);
+    scan.reads
+        .into_iter()
+        .filter(|read| {
+            !fields.contains(read)
+                && !scan.literal_keys.contains(read)
+                && !BUILT_IN_MEMBERS.contains(&read.as_str())
+                && !VENDORED_MEMBERS.contains(&read.as_str())
+        })
+        .collect()
+}
+
+/// The placement ranking is an Accounts payload field, so every payload
+/// member the placement section reads is declared in `ACCOUNTS_FIELDS`
+/// itself: another panel's list declaring the same name does not count.
+/// Positive control: the section really reads the ranking's own fields.
+#[test]
+fn the_placement_reads_are_declared_as_accounts_fields() {
+    let section = placement_section();
+    let reads = scan_members(&section).reads;
+    for field in ["pool", "model", "seats", "rank", "reason", "account"] {
+        assert!(
+            reads.contains(field),
+            "positive control: the placement section reads `{field}`"
+        );
+    }
+
+    let undeclared = reads_outside(&section, &string_array("ACCOUNTS_FIELDS"));
+
+    assert!(
+        undeclared.is_empty(),
+        "the placement section reads members ACCOUNTS_FIELDS does not declare: {undeclared:?}"
+    );
+}
+
+/// The placement check is per panel: with `seats` left out of the Accounts
+/// list it is reported, though the health list still declares `seats`.
+#[test]
+fn a_placement_read_declared_only_by_another_panel_is_reported() {
+    assert!(
+        string_array("HEALTH_FIELDS").contains(&"seats".to_string()),
+        "premise: another panel declares `seats`"
+    );
+    let fields: Vec<String> = string_array("ACCOUNTS_FIELDS")
+        .into_iter()
+        .filter(|field| field != "seats")
+        .collect();
+
+    let undeclared = reads_outside(&placement_section(), &fields);
+
+    assert_eq!(undeclared, vec!["seats".to_string()]);
 }
 
 /// The scan sees the page's real payload reads, and an undeclared read added

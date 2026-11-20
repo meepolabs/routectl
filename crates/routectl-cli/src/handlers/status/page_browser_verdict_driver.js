@@ -98,6 +98,10 @@
     return seen;
   }
 
+  // How long a held QUERY answer waits on the page's clock: long enough to
+  // read the pane before it lands, short of the page's own QUERY timeout.
+  var QUERY_HOLD_MS = 3000;
+
   function selectView(view) {
     var tab = document.getElementById('tab-' + view);
     if (tab.getAttribute('aria-selected') !== 'true') { tab.click(); }
@@ -399,5 +403,95 @@
       out.recovered = badges();
       return out;
     });
+  });
+
+  // ---- a query source left behind through outages --------------------------
+
+  var TRAFFIC_SECTION = '#body-traffic [data-source="query"]';
+
+  // Traffic's query section as its pane shows it.
+  function trafficSection() {
+    var section = document.querySelector(TRAFFIC_SECTION);
+    var status = document.getElementById('status-traffic');
+    return {
+      present: !!section,
+      stale: !!section && section.classList.contains('section--stale'),
+      status: status ? status.textContent : null
+    };
+  }
+
+  // Traffic is opened and answered once, then left for Now. The aggregate
+  // fails and recovers twice while Traffic is away. After each recovery
+  // Traffic is opened with its own QUERY held, so the pane shows what the
+  // page kept for it before that answer lands; after the first the page
+  // goes back to Now before the held answer arrives, after the second the
+  // answer is let land.
+  d.scenario('badges-outage-revisit', function () {
+    var failing = false;
+    var holdingQuery = false;
+    rules.push(function (path) { return (failing && path === '/status') ? { fail: true } : null; });
+    d.hold(function (url) {
+      return (holdingQuery && url.pathname === '/status/query') ? QUERY_HOLD_MS : 0;
+    });
+    var out = { cycles: [] };
+
+    function openTraffic() {
+      selectView('traffic');
+      return d.waitUntil('the Traffic query section', function () {
+        return trafficSection().present;
+      });
+    }
+
+    function outageAndRecovery() {
+      var cycle = {};
+      failing = true;
+      return nextAnswer('/status', 40000).then(function () {
+        return d.waitUntil('the strip to mark the failure', function () { return strip().dimmed; });
+      }).then(function () {
+        cycle.during = { traffic_badge: badges().traffic };
+        failing = false;
+        return d.waitUntil('the recovered strip', function () { return !strip().dimmed; }, 45000);
+      }).then(function () {
+        holdingQuery = true;
+        cycle.query_answers = answers('/status/query');
+        return openTraffic();
+      }).then(function () {
+        cycle.revisit = trafficSection();
+        cycle.revisit.traffic_badge = badges().traffic;
+        out.cycles.push(cycle);
+        return cycle;
+      });
+    }
+
+    var step = nextAnswer('/status', 30000).then(function () {
+      selectView('traffic');
+      return nextAnswer('/status/query', 30000);
+    }).then(function () {
+      return d.waitUntil('Traffic answered', function () {
+        var seen = trafficSection();
+        return seen.present && !seen.stale;
+      });
+    }).then(function () {
+      out.answered = trafficSection();
+      selectView('now');
+      return d.waitUntil('the Now view', function () {
+        return document.getElementById('tab-now').getAttribute('aria-selected') === 'true';
+      });
+    }).then(outageAndRecovery).then(function () {
+      holdingQuery = false;
+      selectView('now');
+      return d.waitUntil('the Now view', function () {
+        return document.getElementById('tab-now').getAttribute('aria-selected') === 'true';
+      });
+    }).then(outageAndRecovery).then(function (last) {
+      return d.waitUntil('Traffic cleared by its own query', function () {
+        return !trafficSection().stale && answers('/status/query') > last.query_answers;
+      }, 30000);
+    }).then(function () {
+      holdingQuery = false;
+      out.cleared = trafficSection();
+      return out;
+    });
+    return step;
   });
 })(window.routectlDriver);

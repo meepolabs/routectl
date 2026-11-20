@@ -563,8 +563,8 @@ pub struct ActiveItems {
     /// The keys of conditions that hold but are named by another item in
     /// `items`: a refresh failing on an account whose credential item is
     /// listed, an open route whose account is unusable or parked, and a
-    /// pools-section doctor Fail for a pool `pool_empty` reads. None of them
-    /// has cleared.
+    /// pools-section doctor Fail for a pool a listed `pool_empty` names. None
+    /// of them has cleared.
     pub subsumed: BTreeSet<String>,
 }
 
@@ -583,6 +583,7 @@ pub fn active_items_with_subsumed(inputs: &AttentionInputs) -> ActiveItems {
         items: inputs.pools.iter().filter_map(pool_item).collect(),
         subsumed: BTreeSet::new(),
     };
+    let pool_empty_keys: BTreeSet<String> = out.items.iter().map(|item| item.key.clone()).collect();
     for route in &inputs.routes {
         let Some(item) = route_item(route, now) else {
             continue;
@@ -602,7 +603,7 @@ pub fn active_items_with_subsumed(inputs: &AttentionInputs) -> ActiveItems {
         let Some(item) = doctor_item(finding) else {
             continue;
         };
-        if pool_reads_it(inputs, finding) {
+        if pool_empty_names_it(&pool_empty_keys, finding) {
             out.subsumed.insert(item.key);
         } else {
             out.items.push(item);
@@ -611,10 +612,15 @@ pub fn active_items_with_subsumed(inputs: &AttentionInputs) -> ActiveItems {
     out
 }
 
-/// Whether `finding` is a pools-section finding about a pool whose live seat
-/// counts `inputs` carries, so `pool_empty` reads that pool.
-fn pool_reads_it(inputs: &AttentionInputs, finding: &Finding) -> bool {
-    finding.section == POOLS_SECTION && inputs.pools.iter().any(|pool| pool.pool == finding.name)
+/// Whether `finding` is a pools-section finding about a pool that one of
+/// `pool_empty_keys`, the `pool_empty` items this read lists, names.
+fn pool_empty_names_it(pool_empty_keys: &BTreeSet<String>, finding: &Finding) -> bool {
+    finding.section == POOLS_SECTION
+        && pool_empty_keys.contains(&format!(
+            "{}:{}",
+            AttentionKind::PoolEmpty.as_str(),
+            finding.name
+        ))
 }
 
 /// The plain-words cause of a credential state with its age, or `None` for

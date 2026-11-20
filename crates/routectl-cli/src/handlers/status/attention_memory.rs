@@ -77,6 +77,9 @@ struct Entry {
     first_seen_ms: i64,
     last_seen_ms: i64,
     recovered_at_ms: Option<i64>,
+    /// Held in the last read but named there by a worse item, so left off
+    /// the list without being recovered.
+    folded: bool,
 }
 
 /// The highest loss totals seen so far and when one of them last rose. The
@@ -125,14 +128,14 @@ impl Store {
             .map(|item| self.remember_active(item, now))
             .collect();
         let current: BTreeSet<String> = active.iter().map(|item| item.key.clone()).collect();
-        self.forget_subsumed(&built.subsumed);
-        self.settle_absent(&current, coverage, now);
+        self.fold_subsumed(&built.subsumed, now);
+        self.settle_absent(&current, &built.subsumed, coverage, now);
         self.evict_past_bound(&current);
         let mut items = active;
         items.extend(
             self.entries
                 .iter()
-                .filter(|(key, _)| !current.contains(*key))
+                .filter(|(key, entry)| !current.contains(*key) && !entry.folded)
                 .map(|(_, entry)| entry.shown()),
         );
         items
@@ -158,24 +161,40 @@ impl Store {
                 first_seen_ms,
                 last_seen_ms: now,
                 recovered_at_ms: None,
+                folded: false,
             },
         );
         item
     }
 
-    /// Forgets the items this read left out because a worse item names them.
-    /// Their condition still holds, so they are never marked recovered; the
-    /// worse item carries them until it clears.
-    fn forget_subsumed(&mut self, subsumed: &BTreeSet<String>) {
-        self.entries.retain(|key, _| !subsumed.contains(key));
+    /// Hides the stored items this read left out because a worse item names
+    /// them. Their condition still holds, so they are not recovered: one
+    /// shown recovered has returned, and recovers anew once it clears.
+    fn fold_subsumed(&mut self, subsumed: &BTreeSet<String>, now: i64) {
+        for key in subsumed {
+            let Some(entry) = self.entries.get_mut(key) else {
+                continue;
+            };
+            if entry.recovered_at_ms.take().is_some() {
+                entry.first_seen_ms = now;
+            }
+            entry.folded = true;
+            entry.last_seen_ms = now;
+        }
     }
 
-    /// Marks stored items missing from this read as recovered, holds doctor
-    /// items while the doctor report is unavailable, and forgets what has
-    /// outlived its hold.
-    fn settle_absent(&mut self, current: &BTreeSet<String>, coverage: DoctorCoverage, now: i64) {
+    /// Marks stored items neither active nor folded in this read as
+    /// recovered, holds doctor items while the doctor report is unavailable,
+    /// and forgets what has outlived its hold.
+    fn settle_absent(
+        &mut self,
+        current: &BTreeSet<String>,
+        subsumed: &BTreeSet<String>,
+        coverage: DoctorCoverage,
+        now: i64,
+    ) {
         self.entries.retain(|key, entry| {
-            if current.contains(key) {
+            if current.contains(key) || subsumed.contains(key) {
                 return true;
             }
             let held = coverage == DoctorCoverage::Unavailable
@@ -184,6 +203,7 @@ impl Store {
             if held {
                 return now - entry.last_seen_ms <= FORGET_AFTER_MS;
             }
+            entry.folded = false;
             let recovered_at = *entry.recovered_at_ms.get_or_insert(now);
             now - recovered_at <= FORGET_AFTER_MS
         });
