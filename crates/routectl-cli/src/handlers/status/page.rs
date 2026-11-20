@@ -1452,6 +1452,10 @@ mod tests {
             "page_browser_host_tests.rs",
             include_str!("page_browser_host_tests.rs"),
         ),
+        (
+            "page_browser_layout_tests.rs",
+            include_str!("page_browser_layout_tests.rs"),
+        ),
     ];
 
     /// The script points at the manual checklist, and the checklist points
@@ -2015,6 +2019,11 @@ mod tests {
     mod browser_host {
         use super::*;
         include!("page_browser_host_tests.rs");
+    }
+
+    mod browser_layout {
+        use super::*;
+        include!("page_browser_layout_tests.rs");
     }
 
     mod payload_keys {

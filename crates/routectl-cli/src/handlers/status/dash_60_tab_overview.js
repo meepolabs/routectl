@@ -197,6 +197,7 @@
     var nameEl = document.createElement('span');
     nameEl.className = 'provcard-name';
     nameEl.textContent = name;
+    nameEl.title = name;
     btn.appendChild(nameEl);
 
     var cost = document.createElement('span');

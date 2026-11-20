@@ -50,20 +50,24 @@
 
   --strip-h: 46px;
 
-  /* Layout dimensions, all on the 8px grid. Named rather than inlined so a
-     column min-width is a decision with a home, not a number in a rule. The
-     grid stops at layout: hairlines, control padding, and dot sizes stay at
-     their intentional off-grid values. */
-  --col-provider: 200px;
-  --col-kpi: 216px;
-  --col-ustat: 136px;
-  --col-hcell: 160px;
-  --col-quota: 304px;
-  --col-docpass: 176px;
-  --fb-ucard-id: 224px;
-  --fb-docverdict: 304px;
-  --w-step: 208px;
-  --w-step-narrow: 176px;
+  /* Layout dimensions. Named rather than inlined so a column min-width is a
+     decision with a home, not a number in a rule. Sized in rem so a column
+     widens with the text it holds: at a larger text size the grids reflow to
+     fewer columns instead of cutting figures off. At the default 16px each
+     is a whole number of 8px steps. The grid stops at layout: hairlines,
+     control padding, and dot sizes stay at their intentional off-grid
+     values. */
+  --col-provider: 12.5rem;
+  --col-kpi: 13.5rem;
+  --col-ustat: 8.5rem;
+  --col-hcell: 10rem;
+  --col-quota: 19rem;
+  --col-docpass: 11rem;
+  --col-state: 20rem;
+  --fb-ucard-id: 14rem;
+  --fb-docverdict: 19rem;
+  --w-step: 13rem;
+  --w-step-narrow: 11rem;
   --h-kpi-spark: 34px;
 
   --bg: #0d0f12;

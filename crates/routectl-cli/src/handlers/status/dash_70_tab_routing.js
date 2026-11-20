@@ -164,6 +164,7 @@
     prov.className = 'step-prov';
     if (provider) {
       prov.textContent = provider;
+      prov.title = provider;
     } else {
       prov.classList.add('mag-zero');
       prov.textContent = 'no model entry';

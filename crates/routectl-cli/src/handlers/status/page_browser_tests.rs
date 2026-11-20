@@ -307,7 +307,23 @@ pub(super) fn run_scenario(scenario: &Scenario) -> DriverReport {
 /// [`run_scenario`] with extra Chrome switches, such as a forced media
 /// preference.
 pub(super) fn run_scenario_with(scenario: &Scenario, chrome_switches: &[&str]) -> DriverReport {
-    run_page(scenario, page_with_driver(scenario), chrome_switches)
+    run_page(scenario, page_with_driver(scenario), chrome_switches, None)
+}
+
+/// [`run_scenario_with`] in a browser profile whose `Default/Preferences`
+/// starts as `preferences`, for a setting only the profile carries (the
+/// default font size).
+pub(super) fn run_scenario_in_profile(
+    scenario: &Scenario,
+    chrome_switches: &[&str],
+    preferences: &Value,
+) -> DriverReport {
+    run_page(
+        scenario,
+        page_with_driver(scenario),
+        chrome_switches,
+        Some(preferences),
+    )
 }
 
 /// [`run_scenario`] on the page as `patch` rewrites it, for a test that needs
@@ -316,10 +332,22 @@ pub(super) fn run_scenario_on_patched_page(
     scenario: &Scenario,
     patch: impl FnOnce(String) -> String,
 ) -> DriverReport {
-    run_page(scenario, patch(page_with_driver(scenario)), &[])
+    run_page(scenario, patch(page_with_driver(scenario)), &[], None)
 }
 
-fn run_page(scenario: &Scenario, page: String, chrome_switches: &[&str]) -> DriverReport {
+fn seed_profile(scratch: &Path, preferences: &Value) {
+    let dir = scratch.join("profile").join("Default");
+    std::fs::create_dir_all(&dir).expect("create the profile dir");
+    std::fs::write(dir.join("Preferences"), preferences.to_string())
+        .expect("write the profile preferences");
+}
+
+fn run_page(
+    scenario: &Scenario,
+    page: String,
+    chrome_switches: &[&str],
+    preferences: Option<&Value>,
+) -> DriverReport {
     let harness = Arc::new(Harness {
         page,
         payloads: Payloads::populated(),
@@ -338,6 +366,9 @@ fn run_page(scenario: &Scenario, page: String, chrome_switches: &[&str]) -> Driv
     runtime.spawn(async move { axum::serve(listener, app).await });
 
     let scratch = tempfile::tempdir().expect("a scratch dir");
+    if let Some(preferences) = preferences {
+        seed_profile(scratch.path(), preferences);
+    }
     let dom = dump_dom(
         &format!("{origin}/#{}", scenario.hash),
         scenario.budget_ms,

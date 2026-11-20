@@ -37,14 +37,14 @@
   font-size: var(--fs-xs);
   color: var(--faint);
 }
-/* The steps scroll INSIDE the card; the page never scrolls sideways. */
+/* The steps wrap to a new line inside the card rather than scrolling: every
+   step stays readable and reachable without a sideways scroller. */
 .chain-steps {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   gap: var(--sp-2);
-  margin: var(--sp-3) calc(-1 * var(--sp-4)) 0;
-  padding: 0 var(--sp-4);
-  overflow-x: auto;
+  margin-top: var(--sp-3);
 }
 .step-sep {
   display: flex;
@@ -99,7 +99,7 @@
 
 .statelist {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-state)), 1fr));
   gap: var(--sp-1) var(--sp-4);
   min-width: 0;
 }
@@ -131,9 +131,8 @@
 .state-meta {
   font-size: var(--fs-xs);
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .attr {
@@ -294,9 +293,7 @@
 .hreason {
   font-size: var(--fs-xs);
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .hcard--attention .hreason { color: var(--neg); }
 .hanchors {
@@ -345,7 +342,6 @@
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: var(--faint);
-  white-space: nowrap;
 }
 .hcell-value {
   font-family: var(--font-mono);
@@ -353,8 +349,7 @@
   font-size: var(--fs-sm);
   color: var(--muted);
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 .hcell-value .unit { font-size: 0.8em; color: var(--faint); }
 .hage { color: var(--faint); padding-left: var(--sp-2); }
@@ -372,8 +367,8 @@
   font-size: var(--fs-xs);
   color: var(--muted);
   user-select: all;
-  white-space: nowrap;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   max-width: 100%;
 }
 .hchips {
@@ -461,9 +456,8 @@
 .qline-label {
   font-size: var(--fs-xs);
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .qline-value {
   font-family: var(--font-mono);
@@ -509,16 +503,13 @@
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--faint);
-  white-space: nowrap;
 }
 .cfgfact-value {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-sm);
   color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 /* ---- doctor: verdict card, findings, collapsed passes ----
@@ -567,9 +558,7 @@
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .doccounts {
   display: flex;
@@ -656,8 +645,9 @@
   letter-spacing: 0.07em;
   color: var(--faint);
 }
-/* A remediation is something to run verbatim, so it keeps its own spacing
-   and scrolls inside its own box rather than wrapping mid-token. */
+/* A remediation is something to run verbatim, so it keeps its own spacing,
+   and it wraps inside its own box so all of it is readable without
+   scrolling: a long token breaks rather than running out of the box. */
 .docfix-text {
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
@@ -667,13 +657,13 @@
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3);
   max-width: 100%;
-  overflow-x: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .docpassgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-state)), 1fr));
   gap: var(--sp-1) var(--sp-5);
   padding-top: var(--sp-2);
   border-top: 1px solid var(--border);
@@ -696,9 +686,7 @@
   font-size: var(--fs-sm);
   color: var(--muted);
   flex: 0 0 9rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .docpass-detail {
   font-family: var(--font-mono);
@@ -706,16 +694,10 @@
   color: var(--faint);
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 /* ---- narrow viewport (down to 380px) ---- */
-@media (max-width: 1000px) {
-  .kpigrid { grid-template-columns: repeat(auto-fit, minmax(var(--col-kpi), 1fr)); }
-}
-
 @media (max-width: 640px) {
   :root { --fs-stat: 1.35rem; }
   .verdict { padding: var(--sp-3) var(--sp-4); gap: var(--sp-3); }
@@ -726,7 +708,6 @@
   .tablewrap { margin: 0 calc(-1 * var(--sp-4)); padding: 0 var(--sp-4); }
   .ucard-figs { gap: var(--sp-4); }
   .ucard-head { gap: var(--sp-3); }
-  .chain-steps { margin: var(--sp-3) calc(-1 * var(--sp-4)) 0; padding: 0 var(--sp-4); }
   .chain-step { width: var(--w-step-narrow); }
   .attr-step { grid-template-columns: 4.2rem minmax(0, 1fr) 4.4rem 3rem; }
   .hanchors { gap: var(--sp-4); }

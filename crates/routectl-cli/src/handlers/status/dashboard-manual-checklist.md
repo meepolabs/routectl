@@ -35,6 +35,11 @@ has not verified the failure that matters most.
   `dash_50_dom.js`, `dash_90_chrome.js`): `page_browser_motion_tests.rs`.
 - **The address and the views** (`dash_90_chrome.js`):
   `page_browser_url_tests.rs` and `page_browser_views_tests.rs`.
+- **Figures read in full at each text size** (`dash_*.css`):
+  `page_browser_layout_tests.rs` loads Now, Traffic and Doctor at 720 px,
+  at 1440 px and at 1440 px with a 32 px default font, and fails on any text
+  a box cuts off, a scroller the keyboard cannot reach, or stat labels drawn
+  over each other.
 
 ## What is NOT covered by any test
 
@@ -42,8 +47,9 @@ has not verified the failure that matters most.
    answers on the page's clock; nothing automated supersedes a read that is
    slow on the server, which is what section 2 exercises.
 2. **The drawn surface** (`dash_50_dom.js`, `dash_90_chrome.js`). The age
-   ticker, sparkline and segment drawing, layout at each width, and how the
-   fade and pane transitions look. The tests read classes and computed
+   ticker, sparkline and segment drawing, the look of the layout at each
+   width (the layout tests catch hidden text, not a poor arrangement), and
+   how the fade and pane transitions look. The tests read classes and computed
    styles, never pixels.
 3. **The fade reaching its end by itself.** Headless Chrome under virtual
    time renders too few frames for a CSS animation to finish, so the browser

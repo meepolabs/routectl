@@ -111,7 +111,7 @@ tr.exp-row { cursor: pointer; }
 .tablewrap .deflist { max-width: calc(100cqi - 2 * var(--sp-4) - 2px); }
 .deflist {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17.5rem), 1fr));
   gap: var(--sp-2) var(--sp-5);
   margin: 0;
   white-space: normal;
@@ -354,7 +354,7 @@ td.num .unit, th.num .unit {
    card closes it and is not a reading of its own, so it carries no fill. */
 .provcard--all .provcard-name { color: var(--fg); }
 .provcard--more { background: transparent; }
-.provcard--more .provcard-name { color: var(--faint); }
+.provcard--more .provcard-name { color: var(--faint); white-space: normal; }
 /* The scope button fills the card's reading area; the seat affordance below it
    is a separate control, so the two cannot fire each other. */
 .provcard-scope {
@@ -396,9 +396,7 @@ td.num .unit, th.num .unit {
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-xs);
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 /* The share bar sits at the bottom of the card's reading area, so cards of
    different fact lengths still align their bars. The card is a COLUMN flex, so
@@ -448,9 +446,7 @@ td.num .unit, th.num .unit {
   font-size: var(--fs-xs);
   color: var(--faint);
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .provseats-none {
   padding-top: var(--sp-2);
@@ -528,10 +524,12 @@ td.num .unit, th.num .unit {
   margin-top: 0;
 }
 
-/* ---- KPI tile grid (facets of one reading: hairline grid, no card each) ---- */
+/* ---- KPI tile grid (facets of one reading: hairline grid, no card each) ----
+   At most four columns; fewer once a quarter of the row is narrower than a
+   tile's minimum, which is how a larger text size reflows it. */
 .kpigrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(max(var(--col-kpi), calc((100% - 3px) / 4)), 1fr));
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
@@ -573,12 +571,9 @@ td.num .unit, th.num .unit {
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-xs);
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   min-height: 1.4em;
 }
-.kpi-sub-wrap { white-space: normal; }
 /* The tile's trend bleeds to the tile edges: it is a backdrop to the figure,
    not a chart of its own. */
 .kpi > .spark {
@@ -775,16 +770,13 @@ td.num .unit, th.num .unit {
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: var(--faint);
-  white-space: nowrap;
 }
 .ustat-value {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-sm);
   color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .ustat-value .unit { font-size: 0.8em; color: var(--faint); }
 .upair-sep { color: var(--faint); padding: 0 3px; }

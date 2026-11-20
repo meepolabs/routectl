@@ -1,0 +1,265 @@
+// ---- scenarios: every figure readable in full at the page's text size ----
+//
+// Test-only snippet injected after page_browser_driver.js. Once the view on
+// screen has settled, `layout-check` walks every rendered element and
+// reports what hides text: a box that cuts its text off (hidden overflow, or
+// an ellipsis) and a scroller nobody can reach by keyboard. A truncated name
+// is allowed when its full text is in its `title`. It also reports any two
+// text runs in one Traffic stat row that draw over each other, and how each
+// Doctor fix command fits its box. The same checks then run over planted
+// controls, so a clean report is not a check that cannot fire.
+//
+// The fixtures carry small figures and short commands, which fit at any
+// text size, so the answers are rewritten to the magnitudes a real ledger
+// and a real Doctor report produce.
+(function (d) {
+  'use strict';
+
+  var DIGIT = /[0-9]/;
+  var SLACK_PX = 1;
+
+  // What each checked view shows once its slowest source has answered.
+  var SETTLED_MARKER = {
+    now: '.kpigrid',
+    traffic: '.ucard-stats',
+    doctor: '.docfix-text'
+  };
+
+  var LONG_FIX = 'log in at least one of this pool\'s accounts ' +
+    '(`routectl login <provider> --label <label>`); requests to a model naming ' +
+    'the pool are refused with `credential_unusable` until one member has a credential';
+  var LONG_PROVIDER = 'provider-with-a-rather-long-configured-name';
+
+  var WIDE_METRICS = {
+    input_tokens: 2912345,
+    output_tokens: 10234567,
+    cache_read_billed: 1234567890,
+    cache_write_tokens: 23456789,
+    cache_write_present: 316,
+    ttft_avg_ms: 11634,
+    ttft_max_ms: 579412,
+    throughput_tok_s: 584.2,
+    ctx_peak: 449412,
+    ctx_avg: 162345,
+    stream_count: 7311,
+    cost_usd: 1234.56
+  };
+
+  function widenMetrics(m) {
+    Object.keys(WIDE_METRICS).forEach(function (k) { m[k] = WIDE_METRICS[k]; });
+  }
+
+  d.rewrite(function (url, text) {
+    if (url.pathname === '/status/query') {
+      var q = JSON.parse(text);
+      var data = q.data || {};
+      (data.groups || []).forEach(function (g) { widenMetrics(g.metrics); });
+      if (data.totals) { widenMetrics(data.totals); }
+      if (data.groups && data.groups[0]) { data.groups[0].label = LONG_PROVIDER; }
+      return JSON.stringify(q);
+    }
+    if (url.pathname === '/status') {
+      var agg = JSON.parse(text);
+      var doctor = agg.panels.doctor.data;
+      doctor.report.findings.forEach(function (f) {
+        if (f.remediation) { f.remediation = LONG_FIX; }
+      });
+      return JSON.stringify(agg);
+    }
+    return text;
+  });
+
+  function addressView() {
+    return location.hash.slice(1).split('?')[0];
+  }
+
+  function settled(view, marker) {
+    return function () {
+      var b = document.getElementById('body-' + view);
+      return !!b && !b.querySelector('.skeleton') && !!b.querySelector(marker);
+    };
+  }
+
+  function rendered(el) {
+    return el.getClientRects().length > 0;
+  }
+
+  function ownText(el) {
+    return el.textContent.replace(/\s+/g, ' ').trim();
+  }
+
+  function focusable(el) {
+    return el.tabIndex >= 0 ||
+      !!el.querySelector('a[href], button, input, select, textarea, summary, [tabindex]');
+  }
+
+  function describe(el) {
+    return el.tagName.toLowerCase() + '.' + String(el.className).split(' ').join('.') +
+      ' "' + ownText(el).slice(0, 80) + '"';
+  }
+
+  // How `el` treats text it cannot fit: null when nothing is hidden, else
+  // { kind, ... }. A scroller the keyboard can reach and a name whose full
+  // text is its title are allowed; a wide table scrolling inside its card is
+  // filed on its own; anything else hides text. An inline box
+  // reports no client width, so only boxes that clip are judged here; text
+  // that spills out of a box shows up as a collision instead.
+  function hiding(el) {
+    var text = ownText(el);
+    if (!text || el.classList.contains('sr-only')) { return null; }
+    var cs = getComputedStyle(el);
+    var overX = cs.overflowX !== 'visible' && el.scrollWidth > el.clientWidth + SLACK_PX;
+    var overY = cs.overflowY !== 'visible' && el.scrollHeight > el.clientHeight + SLACK_PX;
+    if (!overX && !overY) { return null; }
+    var scrolls = (overX && /auto|scroll/.test(cs.overflowX)) ||
+      (overY && /auto|scroll/.test(cs.overflowY));
+    if (scrolls) {
+      if (focusable(el)) { return null; }
+      var table = el.classList.contains('tablewrap');
+      return { kind: table ? 'table-scroller' : 'unreachable-scroller', el: describe(el) };
+    }
+    if (cs.textOverflow === 'ellipsis' && overX && el.getAttribute('title') === el.textContent) {
+      return { kind: 'titled-name', el: describe(el) };
+    }
+    return {
+      kind: cs.textOverflow === 'ellipsis' ? 'ellipsis' : 'clipped',
+      el: describe(el),
+      digits: DIGIT.test(text)
+    };
+  }
+
+  // A box whose text runs past the window's right edge, outside any scroller.
+  // The page clips its own sideways overflow, so nothing else reports this.
+  function offscreen(el) {
+    if (!el.firstChild || el.firstChild.nodeType !== Node.TEXT_NODE) { return null; }
+    if (el.getBoundingClientRect().right <= document.documentElement.clientWidth + SLACK_PX) {
+      return null;
+    }
+    for (var a = el.parentElement; a; a = a.parentElement) {
+      if (/auto|scroll/.test(getComputedStyle(a).overflowX)) { return null; }
+    }
+    return { kind: 'offscreen', el: describe(el), digits: DIGIT.test(ownText(el)) };
+  }
+
+  function textRects(node) {
+    var range = document.createRange();
+    range.selectNodeContents(node);
+    return Array.prototype.slice.call(range.getClientRects()).filter(function (r) {
+      return r.width > 0 && r.height > 0;
+    });
+  }
+
+  function intersects(a, b) {
+    return a.left < b.right - SLACK_PX && b.left < a.right - SLACK_PX &&
+      a.top < b.bottom - SLACK_PX && b.top < a.bottom - SLACK_PX;
+  }
+
+  // Every label and value run in one stat row, against every other run in
+  // that row: a pair whose drawn text shares pixels is a collision.
+  function rowCollisions(row) {
+    var runs = [];
+    Array.prototype.forEach.call(row.querySelectorAll('.ustat-label, .ustat-value'), function (n) {
+      textRects(n).forEach(function (r) { runs.push({ node: n, rect: r }); });
+    });
+    var hits = [];
+    for (var i = 0; i < runs.length; i++) {
+      for (var j = i + 1; j < runs.length; j++) {
+        if (runs[i].node !== runs[j].node && intersects(runs[i].rect, runs[j].rect)) {
+          hits.push(ownText(runs[i].node) + ' x ' + ownText(runs[j].node));
+        }
+      }
+    }
+    return { runs: runs.length, hits: hits };
+  }
+
+  function fixFit(el) {
+    var cs = getComputedStyle(el);
+    var hidden = el.scrollWidth > el.clientWidth + SLACK_PX;
+    return {
+      text: ownText(el),
+      hidden_overflow: hidden && !(el.tabIndex >= 0 && /auto|scroll/.test(cs.overflowX)),
+      box_inside_card: el.getBoundingClientRect().right <=
+        el.closest('.docfinding').getBoundingClientRect().right + SLACK_PX
+    };
+  }
+
+  // The checks over every rendered element under `root`.
+  function audit(root) {
+    var out = { inspected: 0, digit_elements: 0, hidden: [], titled_names: [], table_scrollers: [],
+      stat_rows: 0, stat_runs: 0, collisions: [], fixes: [] };
+    Array.prototype.forEach.call(root.querySelectorAll('*'), function (el) {
+      if (!rendered(el)) { return; }
+      out.inspected += 1;
+      if (DIGIT.test(el.textContent)) { out.digit_elements += 1; }
+      var h = hiding(el) || offscreen(el);
+      if (!h) { return; }
+      var bucket = { 'titled-name': out.titled_names, 'table-scroller': out.table_scrollers };
+      (bucket[h.kind] || out.hidden).push(h);
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('.ucard-stats'), function (row) {
+      if (!rendered(row)) { return; }
+      var c = rowCollisions(row);
+      out.stat_rows += 1;
+      out.stat_runs += c.runs;
+      out.collisions = out.collisions.concat(c.hits);
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('.docfix-text'), function (el) {
+      if (rendered(el)) { out.fixes.push(fixFit(el)); }
+    });
+    return out;
+  }
+
+  // Planted cases the audit must catch, and one it must let through. Each
+  // sits in its own box at a fixed width so its outcome does not depend on
+  // the view around it.
+  function controls(host) {
+    var box = document.createElement('div');
+    box.id = 'layout-controls';
+    box.innerHTML =
+      '<div class="ctl" id="ctl-ellipsis" style="width:3rem;overflow:hidden;' +
+        'text-overflow:ellipsis;white-space:nowrap">123456789012345</div>' +
+      '<div class="ctl" id="ctl-clipped" style="width:3rem;overflow:hidden;' +
+        'white-space:nowrap">987654321098765</div>' +
+      '<div class="ctl" id="ctl-titled" title="named-provider-with-a-long-name" ' +
+        'style="width:3rem;overflow:hidden;text-overflow:ellipsis;' +
+        'white-space:nowrap">named-provider-with-a-long-name</div>' +
+      '<div class="ctl" id="ctl-scroller" style="width:3rem;overflow-x:auto;' +
+        'white-space:pre">routectl login anthropic --label a</div>' +
+      '<div class="ctl" id="ctl-offscreen" style="position:relative;' +
+        'left:100vw">555555555555</div>' +
+      '<div class="ctl" id="ctl-scroller-focus" tabindex="0" style="width:3rem;' +
+        'overflow-x:auto;white-space:pre">routectl login anthropic --label a</div>' +
+      '<div class="ucard-stats" style="display:grid;grid-template-columns:' +
+        'repeat(2, 2rem);gap:0">' +
+        '<div class="ustat"><span class="ustat-label" style="white-space:nowrap">' +
+          'CACHE READ / WRITE</span></div>' +
+        '<div class="ustat"><span class="ustat-label" style="white-space:nowrap">' +
+          'TTFT AVG / MAX</span></div>' +
+      '</div>';
+    host.appendChild(box);
+    var found = audit(box);
+    host.removeChild(box);
+    return found;
+  }
+
+  d.scenario('layout-check', function () {
+    var view = addressView();
+    var marker = SETTLED_MARKER[view];
+    if (!marker) { throw new Error('no settle marker for view ' + view); }
+    return d.waitUntil('the view to settle', settled(view, marker)).then(function () {
+      return d.waitFor('/status', 1);
+    }).then(function () {
+      var body = document.getElementById('body-' + view);
+      return {
+        view: view,
+        inner_width: window.innerWidth,
+        root_font_px: parseFloat(getComputedStyle(document.documentElement).fontSize),
+        page_scrolls_sideways:
+          document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        strip: audit(document.getElementById('verdict')),
+        body: audit(body),
+        controls: controls(body)
+      };
+    });
+  });
+})(window.routectlDriver);
