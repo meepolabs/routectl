@@ -117,6 +117,10 @@
   --meter: var(--accent);
   --meter-warn: var(--warn);
   --meter-full: var(--neg);
+  /* An old reading's meter fill is dimmed by this much and no further: the
+     dimmed fill keeps 3:1 against its track in both themes. Text of an old
+     reading is never dimmed by opacity; it takes --muted instead. */
+  --stale-mark-opacity: 0.85;
 
   /* Value-domain pill palette, derived from the state tokens above so a
      pill can never drift out of contrast with its own theme. The palette
@@ -515,6 +519,7 @@ main { display: block; }
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   padding: 1px 6px;
+  user-select: all;
 }
 
 .unavailable-msg {

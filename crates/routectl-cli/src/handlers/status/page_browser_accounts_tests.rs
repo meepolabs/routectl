@@ -115,6 +115,68 @@ fn page_browser_accounts_row_shows_the_login_cause_and_a_focusable_fix() {
     );
 }
 
+/// A login that is not usable reads red when no login in its pool is usable
+/// (the fixture seat: logged out, its pool siblings parked or absent), and
+/// amber when it is in no pool (the unreadable compat key); a usable login
+/// reads green.
+///
+/// Mutation check: return `blocked` for every unusable login in loginKind
+/// -> red (the seat is amber).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_an_unusable_login_is_red_only_when_its_pool_has_none() {
+    let out = accounts_scenario("accounts-rows");
+
+    let class = |key: &str| {
+        text(&out[key], key)
+            .split(' ')
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        class("seat_login_class").contains(&"acct-login--broken".to_owned()),
+        "{out:#}"
+    );
+    assert!(
+        class("seat_row_class").contains(&"acct-row--broken".to_owned()),
+        "{out:#}"
+    );
+    assert!(
+        class("compat_login_class").contains(&"acct-login--blocked".to_owned()),
+        "{out:#}"
+    );
+    assert!(
+        class("api_key_login_class").contains(&"acct-login--usable".to_owned()),
+        "{out:#}"
+    );
+}
+
+/// Ctrl+A pressed on the logged-out seat's focused fix command selects the
+/// served command alone, and a click selects it whole; on the focused pane
+/// the page leaves the key alone (control).
+///
+/// Mutation check: drop the keydown listener in initActions -> red (the
+/// selection is empty).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_ctrl_a_on_a_focused_fix_selects_only_the_command() {
+    let seat = fixture_row("anthropic#a");
+
+    let out = accounts_scenario("accounts-fix-select-all");
+
+    assert_eq!(out["fix_text"], seat["credential"]["fix"], "{out:#}");
+    assert_eq!(out["fix"]["focused"], true, "{out:#}");
+    assert_eq!(out["fix"]["prevented"], true, "{out:#}");
+    assert_eq!(
+        out["fix"]["selection"], seat["credential"]["fix"],
+        "{out:#}"
+    );
+    assert_eq!(out["user_select"], "all", "{out:#}");
+    assert_eq!(out["pane"]["focused"], true, "{out:#}");
+    assert_eq!(out["pane"]["prevented"], false, "{out:#}");
+    assert_eq!(out["pane"]["selection"], "", "{out:#}");
+}
+
 /// An unusable API-key row, which no single command readmits, shows the
 /// daemon's correction as plain text and no fix code element; the
 /// logged-out seat beside it keeps its login command as fix code and draws
@@ -178,7 +240,9 @@ fn page_browser_accounts_poll_state_reads_neutrally_for_every_token() {
 
     let seat_poll = text(&out["seat_poll"], "the seat poll line");
     assert!(
-        seat_poll.starts_with("usage poll: last timeout 1 min ago - failing since 2 min ago"),
+        seat_poll.starts_with(
+            "usage poll: last attempt failed (timed out) 1 min ago - failing since 2 min ago"
+        ),
         "{out:#}"
     );
     assert_eq!(out["compat_poll"], "usage poll off", "{out:#}");
@@ -189,6 +253,32 @@ fn page_browser_accounts_poll_state_reads_neutrally_for_every_token() {
         colors.iter().all(|c| *c == colors[2]),
         "an unknown or off poll token is colored apart from a skipped row: {out:#}"
     );
+}
+
+/// The last poll result reads in words with the raw token in the line's
+/// title; a result token this build does not know is shown as sent, also
+/// with its title.
+///
+/// Mutation check: print `poll.last_result` as sent in acctPollText -> red
+/// (the seat line reads "last timeout").
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_poll_result_reads_in_words_with_the_token_kept() {
+    let out = accounts_scenario("accounts-poll-result");
+    let (seat, codex) = (&out["seat"], &out["codex"]);
+
+    assert!(
+        text(&seat["text"], "the seat line")
+            .starts_with("usage poll: last attempt failed (timed out) 1 min ago"),
+        "{out:#}"
+    );
+    assert_eq!(seat["title"], "last result: timeout", "{out:#}");
+    assert!(
+        text(&codex["text"], "the Codex line")
+            .starts_with("usage poll: last not_yet_named 1 min ago"),
+        "{out:#}"
+    );
+    assert_eq!(codex["title"], "last result: not_yet_named", "{out:#}");
 }
 
 /// An Accounts row and its meter are the same DOM nodes across two changed
@@ -256,10 +346,11 @@ fn page_browser_accounts_meter_names_its_level_beside_its_color() {
 }
 
 /// A fresh window resets "in" a relative time and names its age and source;
-/// a stale one shows its age, the stale mark and no room, dimmed rather than
-/// recolored.
+/// a stale one shows its age, the stale mark and no room, its text muted at
+/// full opacity rather than recolored or faded.
 ///
-/// Mutation check: drop the stale mark in acctWindowMeta -> red.
+/// Mutation checks: drop the stale mark in acctWindowMeta -> red; restore
+/// `.acct-win--stale { opacity: 0.6; }` -> red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_accounts_stale_window_shows_its_age_and_mark() {
@@ -280,7 +371,15 @@ fn page_browser_accounts_stale_window_shows_its_age_and_mark() {
     );
     assert_eq!(stale["stale_mark"], "stale", "{out:#}");
     assert_eq!(stale["room"], "room unknown", "{out:#}");
-    assert_ne!(stale["opacity"], "1", "{out:#}");
+    assert_eq!(stale["opacity"], "1", "stale text is not dimmed: {out:#}");
+    assert_eq!(
+        stale["used_color"], stale["label_color"],
+        "a stale figure takes the muted label color: {out:#}"
+    );
+    assert_ne!(
+        fresh["used_color"], fresh["label_color"],
+        "control: a fresh figure is brighter than its label: {out:#}"
+    );
     assert_eq!(stale["level"], Value::Null, "{out:#}");
 }
 

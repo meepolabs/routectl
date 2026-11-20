@@ -107,6 +107,24 @@
     });
   });
 
+  // Ctrl+A pressed on the focused fix command, on the focused raw token,
+  // and on the focused pane itself, which carries no command.
+  d.scenario('now-fix-select-all', function () {
+    return waitForRows().then(function () {
+      var row = rowWithToken(FIX_ITEM_TOKEN);
+      var fix = row.querySelector('.attn-fix-code');
+      var raw = row.querySelector('.attn-raw-code');
+      return {
+        fix_text: fix.textContent,
+        raw_text: raw.textContent,
+        fix: d.pressSelectAll(fix),
+        raw: d.pressSelectAll(raw),
+        pane: d.pressSelectAll(document.getElementById('pane-now')),
+        user_select: getComputedStyle(fix).userSelect
+      };
+    });
+  });
+
   // A color as the page computes it for `value` (a token reference).
   function resolvedColor(value) {
     var probe = document.createElement('span');
@@ -267,6 +285,15 @@
     return color;
   }
 
+  function resolvedColor(value) {
+    var probe = document.createElement('span');
+    probe.style.color = value;
+    document.body.appendChild(probe);
+    var color = getComputedStyle(probe).color;
+    document.body.removeChild(probe);
+    return color;
+  }
+
   function meterObservation(meter) {
     var fill = meter.querySelector('.glance-bar-fill');
     var word = meter.querySelector('.glance-meter-word');
@@ -277,7 +304,9 @@
       word: word ? word.textContent : null,
       age: meter.querySelector('.glance-meter-age').textContent,
       fill: getComputedStyle(fill).backgroundColor,
-      opacity: getComputedStyle(meter).opacity
+      opacity: getComputedStyle(meter).opacity,
+      fill_opacity: getComputedStyle(fill).opacity,
+      pct_color: getComputedStyle(meter.querySelector('.glance-meter-pct')).color
     };
   }
 
@@ -308,7 +337,8 @@
     return {
       meter: resolvedBackground('var(--meter)'),
       meter_warn: resolvedBackground('var(--meter-warn)'),
-      meter_full: resolvedBackground('var(--meter-full)')
+      meter_full: resolvedBackground('var(--meter-full)'),
+      muted: resolvedColor('var(--muted)')
     };
   }
 

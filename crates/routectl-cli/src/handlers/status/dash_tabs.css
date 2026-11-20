@@ -371,6 +371,7 @@
   overflow-wrap: anywhere;
   max-width: 100%;
 }
+.helig-fix:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hchips {
   display: flex;
   flex-wrap: wrap;
@@ -664,7 +665,10 @@
   gap: var(--sp-2);
   min-width: 0;
 }
+/* A login that is not usable: amber while its pool still has a usable
+   login, red when its pool has none (loginKind in dash_50_dom.js). */
 .acct-row--blocked { border-color: var(--warn); }
+.acct-row--broken { border-color: var(--neg); }
 .acct-head {
   display: flex;
   align-items: baseline;
@@ -691,6 +695,7 @@
 }
 .acct-login--usable { background: var(--pill-ok-bg); color: var(--pill-ok-fg); }
 .acct-login--blocked { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+.acct-login--broken { background: var(--pill-err-bg); color: var(--pill-err-fg); }
 .acct-cause {
   font-size: var(--fs-sm);
   color: var(--muted);
@@ -721,6 +726,7 @@
   overflow-wrap: anywhere;
   min-width: 0;
 }
+.acct-fix-code { user-select: all; }
 .acct-fix-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .acct-remediation-text {
   font-size: var(--fs-sm);
@@ -744,7 +750,6 @@
   gap: var(--sp-1) var(--sp-3);
   min-width: 0;
 }
-.acct-win--stale { opacity: 0.6; }
 .acct-win-label {
   font-size: var(--fs-sm);
   color: var(--muted);
@@ -770,6 +775,8 @@
 .acct-win .sharebar-fill { background: var(--meter); }
 .acct-win--near .sharebar-fill { background: var(--meter-warn); }
 .acct-win--full .sharebar-fill { background: var(--meter-full); }
+.acct-win--stale .acct-win-used { color: var(--muted); }
+.acct-win--stale .sharebar-fill { opacity: var(--stale-mark-opacity); }
 .acct-win-meta {
   flex: 1 1 100%;
   font-size: var(--fs-xs);
@@ -815,7 +822,6 @@
   font-size: var(--fs-sm);
   min-width: 0;
 }
-.acct-traffic--stale { opacity: 0.6; }
 .acct-traffic-req,
 .acct-traffic-cost,
 .acct-traffic-alt {
@@ -825,6 +831,8 @@
   white-space: nowrap;
 }
 .acct-traffic-alt { color: var(--muted); }
+.acct-traffic--stale .acct-traffic-req,
+.acct-traffic--stale .acct-traffic-cost { color: var(--muted); }
 .acct-traffic-qual {
   margin-left: var(--sp-1);
   font-family: var(--font-ui);

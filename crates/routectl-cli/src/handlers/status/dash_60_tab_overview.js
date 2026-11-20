@@ -141,12 +141,12 @@
   }
 
   // The fix is the line to run, so it carries the item's emphasis and is a
-  // focusable code element: Tab reaches it and Ctrl+A / Ctrl+C copy it.
+  // copyable code element: Tab reaches it, and Ctrl+A then Ctrl+C copy it.
   function attentionFix(fix) {
     var wrap = document.createElement('div');
     wrap.className = 'attn-fix';
     wrap.appendChild(attentionText('span', 'attn-label', 'fix'));
-    wrap.appendChild(attentionCode('attn-fix-code', fix));
+    wrap.appendChild(copyableCode('attn-fix-code', fix));
     return wrap;
   }
 
@@ -164,16 +164,8 @@
     var wrap = document.createElement('div');
     wrap.className = 'attn-raw';
     wrap.appendChild(attentionText('span', 'attn-label', 'raw'));
-    wrap.appendChild(attentionCode('attn-raw-code', token));
+    wrap.appendChild(copyableCode('attn-raw-code', token));
     return wrap;
-  }
-
-  function attentionCode(cls, value) {
-    var code = document.createElement('code');
-    code.className = cls;
-    code.tabIndex = 0;
-    code.textContent = String(value);
-    return code;
   }
 
   function attentionText(tag, cls, value) {
@@ -216,7 +208,8 @@
   // A meter stays the accent until a window is nearly used, then amber, then
   // red at its limit, and a word rides with each of those colors. The line
   // is the one the daemon's attention list uses for "near its limit"
-  // (above 90% used). A stale reading is dimmed, never recolored.
+  // (above 90% used). A stale reading is dimmed, never recolored. A seat's
+  // login dot follows loginKind, the same rule as the Accounts tag.
   var GLANCE_NEAR_FULL = 0.9;
   var DAY_SECS = 86400;
   var HOUR_SECS = 3600;
@@ -237,6 +230,7 @@
     }
     wrap.appendChild(head);
     var pools = glancePools(data.accounts);
+    var usablePools = poolsWithUsableLogin(data.accounts);
     if (!pools.length) {
       wrap.appendChild(attentionText('p', 'glance-none', 'No subscription login in this config.'));
       return wrap;
@@ -244,7 +238,10 @@
     var grid = document.createElement('div');
     grid.className = 'glance-grid';
     var nowMs = panelNowMs(rec);
-    pools.forEach(function (pool) { grid.appendChild(glancePool(pool, nowMs)); });
+    pools.forEach(function (pool) {
+      var poolHasUsable = pool.name === null ? null : usablePools[pool.name] === true;
+      grid.appendChild(glancePool(pool, poolHasUsable, nowMs));
+    });
     wrap.appendChild(grid);
     return wrap;
   }
@@ -270,7 +267,7 @@
     return Object.keys(named).sort().map(function (k) { return named[k]; }).concat(solo);
   }
 
-  function glancePool(pool, nowMs) {
+  function glancePool(pool, poolHasUsable, nowMs) {
     var prefix = pool.name === null ? 'now-solo-' : 'now-pool-';
     var id = prefix + idKey(pool.key);
     var card = markRefreshUnit(document.createElement('div'), id);
@@ -279,7 +276,7 @@
     card.appendChild(attentionText('div', 'glance-pool-name',
       pool.name === null ? 'no pool' : 'pool ' + pool.name));
     pool.seats.forEach(function (row) {
-      card.appendChild(glanceSeat(row, id, nowMs));
+      card.appendChild(glanceSeat(row, id, poolHasUsable, nowMs));
     });
     return card;
   }
@@ -291,7 +288,7 @@
     return row.login_label ? name + ' (' + String(row.login_label) + ')' : name;
   }
 
-  function glanceSeat(row, poolId, nowMs) {
+  function glanceSeat(row, poolId, poolHasUsable, nowMs) {
     var seat = document.createElement('div');
     seat.id = poolId + '-' + idKey(row.account);
     seat.className = 'glance-seat';
@@ -299,7 +296,7 @@
     var head = document.createElement('div');
     head.className = 'glance-seat-head';
     head.appendChild(attentionText('span', 'glance-seat-name', glanceSeatName(row)));
-    head.appendChild(glanceLogin(row.credential));
+    head.appendChild(glanceLogin(row.credential, poolHasUsable));
     seat.appendChild(head);
     seat.appendChild(glanceReading(row, nowMs));
     return seat;
@@ -315,12 +312,12 @@
     not_built: 'not built'
   };
 
-  function glanceLogin(credential) {
+  function glanceLogin(credential, poolHasUsable) {
     var c = isPlainObject(credential) ? credential : {};
     var state = Object.prototype.hasOwnProperty.call(GLANCE_LOGIN_WORDS, c.state)
       ? c.state : 'unknown';
     var span = document.createElement('span');
-    span.className = 'glance-login glance-login--' + state;
+    span.className = 'glance-login glance-login--' + loginKind(c.state, poolHasUsable);
     var dot = document.createElement('span');
     dot.className = 'glance-login-dot';
     dot.setAttribute('aria-hidden', 'true');
@@ -467,12 +464,8 @@
     line.className = 'empty-baseurl';
     var label = document.createElement('span');
     label.textContent = 'base URL';
-    var code = document.createElement('code');
-    code.className = 'code-inline';
-    code.tabIndex = 0;
-    code.textContent = url;
     line.appendChild(label);
-    line.appendChild(code);
+    line.appendChild(copyableCode('code-inline', url));
     return line;
   }
 

@@ -391,7 +391,9 @@ For each case check, on Now and on Accounts:
   sentence, dimmed, followed by `as of <time> - the daemon cannot be
   reached`; tab badges keep their numbers dimmed, never an amber `stale`;
   the open view keeps its sections, dimmed. Lift the block
-  (`agent-browser network unroute`) and the page recovers within a poll.
+  (`agent-browser network unroute`) and the page recovers at its next
+  attempt, which the backoff spaces up to 30 s apart (10 s, 20 s, then 30 s
+  after each failed round); Refresh stays disabled until then.
   Run it on the `logged-out` case, where the verdict and badges carry a
   problem.
 

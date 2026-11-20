@@ -612,6 +612,46 @@
     return head;
   }
 
+  // A login's color, one rule for every view that draws one: `usable`;
+  // `blocked` (amber) for a known state that is not usable while its pool
+  // still has a usable login, or when it is in no pool; `broken` (red) when
+  // no login in its pool is usable; `other` (neutral) for a state this build
+  // does not know. `poolHasUsable` is null for an account in no pool.
+  var LOGIN_STATES = ['usable', 'unusable', 'parked', 'not_built'];
+
+  function loginKind(state, poolHasUsable) {
+    if (state === 'usable') { return 'usable'; }
+    if (LOGIN_STATES.indexOf(state) < 0) { return 'other'; }
+    return poolHasUsable === false ? 'broken' : 'blocked';
+  }
+
+  // The pools, among every account row of the accounts panel, with at least
+  // one usable login: name -> true.
+  function poolsWithUsableLogin(rows) {
+    var out = Object.create(null);
+    rows.forEach(function (row) {
+      if (!isPlainObject(row) || !Array.isArray(row.pools) || !isPlainObject(row.credential)) { return; }
+      if (row.credential.state !== 'usable') { return; }
+      row.pools.forEach(function (pool) { out[String(pool)] = true; });
+    });
+    return out;
+  }
+
+  // A command or token the operator copies: focusable, so Tab reaches it,
+  // and marked with COPY_ATTR, so Ctrl+A / Cmd+A while it has focus selects
+  // its text alone (the delegated keydown in dash_90_chrome.js) rather than
+  // the whole page.
+  var COPY_ATTR = 'data-copy';
+
+  function copyableCode(cls, value) {
+    var code = document.createElement('code');
+    code.className = cls;
+    code.tabIndex = 0;
+    code.setAttribute(COPY_ATTR, '');
+    code.textContent = String(value);
+    return code;
+  }
+
   // A refresh unit is a section the in-place update holds back, whole, while
   // the operator has text selected inside it (morphPanel), so a selection is
   // never cut by a refresh. Card and section wrappers mark themselves with a

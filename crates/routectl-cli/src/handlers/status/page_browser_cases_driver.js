@@ -9,6 +9,24 @@
 (function (d) {
   'use strict';
 
+  // A color as the page resolves `value` (a token reference) for `prop`.
+  function resolved(prop, value) {
+    var probe = document.createElement('span');
+    probe.style[prop] = value;
+    document.body.appendChild(probe);
+    var out = getComputedStyle(probe)[prop];
+    document.body.removeChild(probe);
+    return out;
+  }
+
+  function stateColors() {
+    return {
+      ok: resolved('color', 'var(--ok)'),
+      warn: resolved('color', 'var(--warn)'),
+      neg: resolved('color', 'var(--neg)')
+    };
+  }
+
   function texts(root, selector) {
     return Array.prototype.map.call(root.querySelectorAll(selector), function (n) {
       return n.textContent;
@@ -46,6 +64,13 @@
           seats: texts(pool, '.glance-seat-name')
         };
       }),
+      login_dots: Array.prototype.map.call(body.querySelectorAll('.glance-seat'), function (seat) {
+        return {
+          seat: textIn(seat, '.glance-seat-name'),
+          color: getComputedStyle(seat.querySelector('.glance-login-dot')).backgroundColor
+        };
+      }),
+      colors: stateColors(),
       attention: attentionRows(),
       attention_clear: textIn(body, '.attn-clear')
     };
@@ -71,6 +96,8 @@
         id: row.id,
         name: textIn(row, '.acct-name'),
         login: textIn(row, '.acct-login'),
+        login_color: getComputedStyle(row.querySelector('.acct-login')).color,
+        border_color: getComputedStyle(row).borderTopColor,
         cause: textIn(row, '.acct-cause'),
         fix: textIn(row, '.acct-fix-code'),
         nowin: textIn(row, '.acct-nowin'),
@@ -88,6 +115,7 @@
       pools: texts(body, '.acct-pool > .card-head .card-title'),
       pool_hints: texts(body, '.acct-pool > .card-head .card-hint'),
       rows: accountRows(),
+      colors: stateColors(),
       error_cards: body.querySelectorAll('.unavailable-msg, .incompatible-msg').length
     };
   }

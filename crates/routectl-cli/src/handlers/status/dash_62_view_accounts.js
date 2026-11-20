@@ -38,6 +38,24 @@
     off: 'usage poll off'
   };
 
+  // The last poll's result, in words: what the attempt did, and for a
+  // failure, why. A token this build does not know is shown as sent; the
+  // token itself rides in the line's title for copying.
+  var ACCT_POLL_RESULT_WORDS = {
+    accepted: 'reading accepted',
+    no_windows: 'read, no usage windows reported',
+    token_not_ready: 'skipped, no usable access token',
+    paused: 'deferred, the provider asked to wait',
+    redirect: 'failed (redirected)',
+    auth: 'failed (access refused)',
+    http: 'failed (HTTP error)',
+    timeout: 'failed (timed out)',
+    transport: 'failed (connection error)',
+    too_large: 'failed (answer too large)',
+    malformed: 'failed (answer not understood)',
+    superseded: 'dropped, the login changed meanwhile'
+  };
+
   var ACCT_SOURCE_WORDS = {
     poll: 'from the usage poll',
     response: 'from a response'
@@ -140,7 +158,8 @@
     var ctx = {
       nowMs: panelNowMs(rec),
       traffic: acctSeatTraffic(SOURCES[QUERY_SEATS_SOURCE]),
-      places: acctPlacementIndex(rec.data.placement)
+      places: acctPlacementIndex(rec.data.placement),
+      usablePools: poolsWithUsableLogin(rows)
     };
     var counts = acctPoolCounts(SOURCES.health);
     acctPoolNames(rows).forEach(function (pool) {
@@ -212,7 +231,7 @@
     var list = document.createElement('div');
     list.className = 'acct-list';
     members.forEach(function (row) {
-      list.appendChild(acctRow(row, 'accounts-row-' + idKey(pool) + '-' + idKey(row.account), ctx));
+      list.appendChild(acctRow(row, 'accounts-row-' + idKey(pool) + '-' + idKey(row.account), ctx, pool));
     });
     group.appendChild(list);
     return group;
@@ -226,7 +245,7 @@
     var list = document.createElement('div');
     list.className = 'acct-list';
     rows.forEach(function (row) {
-      list.appendChild(acctRow(row, 'accounts-row-' + idKey(row.account), ctx));
+      list.appendChild(acctRow(row, 'accounts-row-' + idKey(row.account), ctx, null));
     });
     group.appendChild(list);
     return group;
@@ -234,14 +253,16 @@
 
   // ---- one account ---------------------------------------------------------
 
-  // One account, its own refresh unit: a selection inside its fix holds this
-  // row alone while the rest of the list keeps updating.
-  function acctRow(row, id, ctx) {
+  // One account under `pool` (null for no pool), its own refresh unit: a
+  // selection inside its fix holds this row alone while the rest of the list
+  // keeps updating.
+  function acctRow(row, id, ctx, pool) {
     var cred = row.credential;
     var rowEl = markRefreshUnit(document.createElement('div'), id);
     rowEl.id = id;
-    rowEl.className = 'acct-row acct-row--' + acctLoginKind(cred.state);
-    rowEl.appendChild(acctHead(row));
+    var kind = loginKind(cred.state, pool === null ? null : ctx.usablePools[pool] === true);
+    rowEl.className = 'acct-row acct-row--' + kind;
+    rowEl.appendChild(acctHead(row, kind));
     var cause = acctCauseText(cred);
     if (cause) { rowEl.appendChild(acctText('div', 'acct-cause', cause)); }
     if (cred.fix) { rowEl.appendChild(acctFix(cred.fix)); }
@@ -256,7 +277,7 @@
 
   // "provider_entry (login_label)", or the entry alone for an unlabeled
   // credential. The account key other panels join on rides in the title.
-  function acctHead(row) {
+  function acctHead(row, kind) {
     var head = document.createElement('div');
     head.className = 'acct-head';
     var name = acctText('span', 'acct-name', row.login_label
@@ -264,14 +285,9 @@
       : row.provider_entry);
     name.title = row.account;
     head.appendChild(name);
-    head.appendChild(acctText('span', 'acct-login acct-login--' + acctLoginKind(row.credential.state),
+    head.appendChild(acctText('span', 'acct-login acct-login--' + kind,
       acctLoginWord(row.credential.state, row.subscription === true)));
     return head;
-  }
-
-  function acctLoginKind(state) {
-    if (state === 'usable') { return 'usable'; }
-    return Object.prototype.hasOwnProperty.call(ACCT_LOGIN_WORDS, state) ? 'blocked' : 'other';
   }
 
   function acctLoginWord(state, subscription) {
@@ -295,16 +311,12 @@
   }
 
   // The fix is the line to run, so it carries the row's emphasis and is a
-  // focusable code element: Tab reaches it and Ctrl+A / Ctrl+C copy it.
+  // copyable code element: Tab reaches it, and Ctrl+A then Ctrl+C copy it.
   function acctFix(fix) {
     var wrap = document.createElement('div');
     wrap.className = 'acct-fix';
     wrap.appendChild(acctText('span', 'acct-label', 'fix'));
-    var code = document.createElement('code');
-    code.className = 'acct-fix-code';
-    code.tabIndex = 0;
-    code.textContent = String(fix);
-    wrap.appendChild(code);
+    wrap.appendChild(copyableCode('acct-fix-code', fix));
     return wrap;
   }
 
@@ -594,7 +606,17 @@
     var line = document.createElement('div');
     line.className = 'acct-poll';
     line.textContent = acctPollText(poll, nowMs);
+    if (poll.applicability === 'polled' && poll.last_result) {
+      line.title = 'last result: ' + String(poll.last_result);
+    }
     return line;
+  }
+
+  function acctPollResultText(token) {
+    if (!token) { return 'attempt'; }
+    return Object.prototype.hasOwnProperty.call(ACCT_POLL_RESULT_WORDS, token)
+      ? 'attempt ' + ACCT_POLL_RESULT_WORDS[token]
+      : String(token);
   }
 
   function acctPollText(poll, nowMs) {
@@ -608,7 +630,7 @@
     var last = acctAgo(poll.last_attempt_ms, nowMs);
     parts.push(last === null
       ? 'usage poll: not attempted yet'
-      : 'usage poll: last ' + (poll.last_result || 'attempt') + ' ' + last);
+      : 'usage poll: last ' + acctPollResultText(poll.last_result) + ' ' + last);
     var failing = acctAgo(poll.failure_since_ms, nowMs);
     if (failing !== null) { parts.push('failing since ' + failing); }
     if (acctHasNumber(poll.next_due_ms) && isFinite(nowMs)) {

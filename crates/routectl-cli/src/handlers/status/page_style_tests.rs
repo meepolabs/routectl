@@ -545,3 +545,159 @@ fn the_contrast_formula_matches_the_wcag_reference_points() {
     assert!((contrast(srgba("#767676"), white) - 4.54).abs() < 0.01);
     assert!((relative_luminance(srgba("oklch(1 0 0)")) - 1.0).abs() < 1e-3);
 }
+
+/// The classes that mark a reading as old. Text inside them is dimmed by
+/// color, never by opacity, and an opacity is allowed only on a meter fill.
+const STALE_READING_CLASSES: &[&str] = &[
+    ".glance-meter--stale",
+    ".acct-win--stale",
+    ".acct-traffic--stale",
+];
+
+/// The backgrounds a reading's text is drawn on.
+const TEXT_BACKGROUNDS: &[&str] = &["--bg", "--surface", "--surface-2"];
+
+/// Every `(selector, prop, value)` declared at top level whose selector names
+/// `class`, one entry per selector of a selector list.
+fn decls_naming(css: &str, class: &str) -> Vec<(String, String, String)> {
+    css_decls(css)
+        .into_iter()
+        .filter(|d| d.context.len() == 1)
+        .flat_map(|d| {
+            d.context[0]
+                .split(',')
+                .map(str::trim)
+                .filter(|sel| {
+                    sel.split(|c: char| c.is_whitespace() || c == '>')
+                        .any(|part| part == class || part.starts_with(&format!("{class}.")))
+                })
+                .map(|sel| (sel.to_string(), d.prop.clone(), d.value.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// What breaks the stale-reading text rule in `css`: an opacity on anything
+/// but a fill, or a text color under 4.5:1 on a reading's background in
+/// either theme. Empty when the rule holds.
+fn stale_text_faults(css: &str) -> Vec<String> {
+    let mut faults = Vec::new();
+    for class in STALE_READING_CLASSES {
+        for (sel, prop, value) in decls_naming(css, class) {
+            if prop == "opacity" && !sel.ends_with("-fill") {
+                faults.push(format!("{sel} dims text with opacity {value}"));
+            }
+            if prop != "color" {
+                continue;
+            }
+            let token = value
+                .strip_prefix("var(")
+                .and_then(|v| v.strip_suffix(')'))
+                .unwrap_or_else(|| panic!("{sel}: color `{value}` is not a token"));
+            for light in [false, true] {
+                let tokens = theme_tokens(css, light);
+                let text = srgba(resolve(&tokens, token));
+                for bg in TEXT_BACKGROUNDS {
+                    let ratio = contrast(text, srgba(resolve(&tokens, bg)));
+                    if ratio < 4.5 {
+                        faults.push(format!("{sel} on {bg} is {ratio:.2}:1 (light: {light})"));
+                    }
+                }
+            }
+        }
+    }
+    faults
+}
+
+/// A stale reading's text keeps 4.5:1 in both themes: no rule dims it with
+/// opacity, and every color a stale rule gives it passes on each reading
+/// background. Positive control: each stale class recolors some text.
+///
+/// Mutation check: restore `.acct-win--stale { opacity: 0.6; }` -> red.
+#[test]
+fn stale_reading_text_keeps_four_and_a_half_to_one_in_both_themes() {
+    let css = style();
+    for class in STALE_READING_CLASSES {
+        assert!(
+            decls_naming(&css, class)
+                .iter()
+                .any(|(_, prop, _)| prop == "color"),
+            "{class} recolors no text; the scan is not seeing it"
+        );
+    }
+
+    assert_eq!(stale_text_faults(&css), Vec::<String>::new());
+}
+
+#[test]
+fn the_stale_text_scan_reports_opacity_and_a_low_contrast_color() {
+    let css = style();
+    let dimmed = format!("{css}\n.acct-win--stale {{ opacity: 0.6; }}\n");
+    let faint_fill = format!("{css}\n.glance-meter--stale .glance-bar-fill {{ opacity: 0.5; }}\n");
+    let low = format!("{css}\n.acct-traffic--stale .x {{ color: var(--border-strong); }}\n");
+
+    assert_eq!(
+        stale_text_faults(&dimmed),
+        vec![".acct-win--stale dims text with opacity 0.6"]
+    );
+    assert!(stale_text_faults(&faint_fill).is_empty());
+    assert!(
+        stale_text_faults(&low)
+            .iter()
+            .any(|f| f.starts_with(".acct-traffic--stale .x on --bg")),
+        "{:?}",
+        stale_text_faults(&low)
+    );
+}
+
+/// A stale meter's fill is dimmed, and at that opacity every meter color
+/// keeps 3:1 against its track and against the card, in both themes.
+#[test]
+fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
+    let css = style();
+    for light in [false, true] {
+        let tokens = theme_tokens(&css, light);
+        let alpha: f64 = resolve(&tokens, "--stale-mark-opacity")
+            .parse()
+            .expect("the stale mark opacity is a number");
+        assert!(alpha < 1.0, "the stale fill is dimmed");
+        for meter in ["--meter", "--meter-warn", "--meter-full"] {
+            let [r, g, b, _] = srgba(resolve(&tokens, meter));
+            for behind in ["--border", "--surface"] {
+                let base = srgba(resolve(&tokens, behind));
+                let fill = over([r, g, b, alpha], base);
+                let ratio = contrast(fill, base);
+                assert!(
+                    ratio >= 3.0,
+                    "{meter} dimmed on {behind} is {ratio:.2}:1 (light: {light})"
+                );
+            }
+        }
+    }
+}
+
+/// The Now "see Accounts" link keeps 4.5:1 on the page and on a card in
+/// both themes.
+///
+/// Mutation check: color `.glance-link` with `var(--accent)` -> red (light
+/// on --bg is 4.43:1).
+#[test]
+fn the_glance_link_keeps_four_and_a_half_to_one() {
+    let css = style();
+    let decls = css_decls(&css);
+    let (_, value) = block(&decls, "", ".glance-link")
+        .into_iter()
+        .rfind(|(prop, _)| *prop == "color")
+        .expect(".glance-link declares a color");
+    let token = value
+        .strip_prefix("var(")
+        .and_then(|v| v.strip_suffix(')'))
+        .expect("the link color is a token");
+    for light in [false, true] {
+        let tokens = theme_tokens(&css, light);
+        for bg in TEXT_BACKGROUNDS {
+            let ratio = contrast(srgba(resolve(&tokens, token)), srgba(resolve(&tokens, bg)));
+            assert!(ratio >= 4.5, "on {bg}: {ratio:.2}:1 (light: {light})");
+        }
+    }
+}

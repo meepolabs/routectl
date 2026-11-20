@@ -462,3 +462,51 @@ fn no_built_in_member_is_a_panel_key() {
         "allowlisted names are panel keys: {shadowing:?}"
     );
 }
+
+/// The usage poll job's source, where its result tokens are spelled.
+const POLL_SCHEDULE_SOURCE: &str = include_str!("../../server/usage_poll/schedule.rs");
+
+/// The `=> "token"` arms of the first `fn as_str` in `src`, up to the next
+/// function.
+fn as_str_tokens(src: &str) -> std::collections::BTreeSet<String> {
+    let start = src
+        .find("fn as_str(")
+        .expect("the source declares `fn as_str`");
+    let body = &src[start..];
+    let end = body[1..].find("fn ").map_or(body.len(), |i| i + 1);
+    body[..end]
+        .split("=> \"")
+        .skip(1)
+        .map(|arm| arm.split('"').next().expect("a closed token").to_string())
+        .collect()
+}
+
+/// The keys of the `var <name> = { ... }` object literal in the page script.
+fn object_literal_keys(name: &str) -> std::collections::BTreeSet<String> {
+    scan_members(&format!("var x = {{{}}};", literal_body(name, '{', '}'))).literal_keys
+}
+
+/// The Accounts poll line has words for every result token the usage poll
+/// lands, and for nothing else. Positive control: the producer's set holds
+/// the token the poll-failing fixture serves.
+#[test]
+fn every_poll_result_token_has_words_on_the_accounts_view() {
+    let produced = as_str_tokens(POLL_SCHEDULE_SOURCE);
+    assert!(
+        produced.contains("http") && produced.len() >= 10,
+        "{produced:?}"
+    );
+
+    assert_eq!(object_literal_keys("ACCT_POLL_RESULT_WORDS"), produced);
+}
+
+#[test]
+fn the_token_reader_takes_only_the_as_str_arms() {
+    let src = "fn other() { x => \"no\" }\n fn as_str(self) -> &str {\n match self {\n \
+               A => \"a_tok\",\n B(_) => \"b\",\n }\n }\n fn verdict() { C => \"not_this\" }";
+
+    assert_eq!(
+        as_str_tokens(src).into_iter().collect::<Vec<_>>(),
+        vec!["a_tok".to_string(), "b".to_string()]
+    );
+}

@@ -269,10 +269,7 @@
     }
     line.appendChild(document.createTextNode(parts.join(' - ')));
     if (e.fix) {
-      var fix = document.createElement('code');
-      fix.className = 'helig-fix';
-      fix.textContent = e.fix;
-      line.appendChild(fix);
+      line.appendChild(copyableCode('helig-fix', e.fix));
     }
     return line;
   }

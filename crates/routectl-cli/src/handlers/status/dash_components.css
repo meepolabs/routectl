@@ -708,6 +708,9 @@ td.num .unit, th.num .unit {
   overflow-wrap: anywhere;
   min-width: 0;
 }
+/* A click selects the whole command or token, ready to copy. */
+.attn-fix-code,
+.attn-raw-code { user-select: all; }
 .attn-fix-code:focus-visible,
 .attn-raw-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .attn-item--recovered { background: transparent; }
@@ -724,12 +727,13 @@ td.num .unit, th.num .unit {
    One card per pool, each seat a name, its login state and one compact
    meter per window. The meter is the accent until a window is nearly used,
    then amber, then red at its limit; the percentage and a word ride with
-   the color. A stale reading is dimmed, never recolored. The fill moves to
+   the color. A stale reading is dimmed, never recolored: its fill fades and
+   its figure takes the muted text color. The fill moves to
    its new width on a refresh (instant under reduced motion). */
 .glance-link {
   margin-left: auto;
   font-size: var(--fs-xs);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .glance-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .glance-none {
@@ -800,9 +804,10 @@ td.num .unit, th.num .unit {
   border-radius: 50%;
   background: var(--faint);
 }
+/* The same rule as the Accounts login tag (loginKind in dash_50_dom.js). */
 .glance-login--usable .glance-login-dot { background: var(--ok); }
-.glance-login--parked .glance-login-dot { background: var(--warn); }
-.glance-login--unusable .glance-login-dot { background: var(--neg); }
+.glance-login--blocked .glance-login-dot { background: var(--warn); }
+.glance-login--broken .glance-login-dot { background: var(--neg); }
 .glance-noreading {
   font-size: var(--fs-xs);
   color: var(--faint);
@@ -825,7 +830,6 @@ td.num .unit, th.num .unit {
 }
 .glance-meter--warn { --meter-fill: var(--meter-warn); }
 .glance-meter--full { --meter-fill: var(--meter-full); }
-.glance-meter--stale { opacity: 0.55; }
 .glance-meter-label {
   flex: 0 0 auto;
   min-width: 4.5rem;
@@ -856,6 +860,8 @@ td.num .unit, th.num .unit {
 .glance-meter--warn .glance-meter-word { color: var(--warn); }
 .glance-meter--full .glance-meter-word { color: var(--neg); }
 .glance-meter-age { color: var(--faint); }
+.glance-meter--stale .glance-meter-pct { color: var(--muted); }
+.glance-meter--stale .glance-bar-fill { opacity: var(--stale-mark-opacity); }
 
 /* ---- usage: group-by picker + group cards ---- */
 .gbstrip {

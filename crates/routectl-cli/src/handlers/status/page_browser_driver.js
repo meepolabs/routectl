@@ -125,6 +125,25 @@
     return step.then(function () { return out; });
   }
 
+  // Focus `node`, clear any selection, and press Ctrl+A on it as a keydown
+  // that bubbles from the focused element the way a key press does. Reports
+  // the focus, whether the page took over the key, and the selection after.
+  function pressSelectAll(node) {
+    node.focus();
+    window.getSelection().removeAllRanges();
+    var ev = new KeyboardEvent('keydown', {
+      key: 'a', code: 'KeyA', ctrlKey: true, bubbles: true, cancelable: true
+    });
+    document.activeElement.dispatchEvent(ev);
+    var out = {
+      focused: document.activeElement === node,
+      prevented: ev.defaultPrevented,
+      selection: window.getSelection().toString()
+    };
+    window.getSelection().removeAllRanges();
+    return out;
+  }
+
   function report(out) {
     out.requests = requests;
     var pre = document.createElement('pre');
@@ -154,7 +173,8 @@
     waitUntil: waitUntil,
     waitFor: waitFor,
     waitForElement: waitForElement,
-    acrossRounds: acrossRounds
+    acrossRounds: acrossRounds,
+    pressSelectAll: pressSelectAll
   };
   window.routectlDriver = api;
 })();

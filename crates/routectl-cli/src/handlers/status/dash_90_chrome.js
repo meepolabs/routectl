@@ -383,12 +383,32 @@
     ACTIONS[name](node.getAttribute('data-arg'), node, e);
   }
 
-  // One click listener per pane root and one on the verdict strip, installed
-  // once: the nodes beneath them are rebuilt every render, the roots are not.
+  // Ctrl+A / Cmd+A on a focused copyable code element (COPY_ATTR, set by
+  // copyableCode in dash_50_dom.js) selects that element's text alone, so
+  // the copy that follows carries the command and nothing else.
+  function selectFocusedCode(root, e) {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) { return; }
+    if (e.key !== 'a' && e.key !== 'A') { return; }
+    var node = e.target;
+    if (!node || node.nodeType !== 1 || !node.hasAttribute(COPY_ATTR) || !root.contains(node)) { return; }
+    e.preventDefault();
+    var range = document.createRange();
+    range.selectNodeContents(node);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  // One click and one keydown listener per pane root and one click listener
+  // on the verdict strip, installed once: the nodes beneath them are rebuilt
+  // every render, the roots are not.
   function initActions() {
-    var roots = VIEWS.map(function (view) { return el('pane-' + view.id); });
-    roots.push(el('verdict'));
-    roots.forEach(function (root) {
+    var panes = VIEWS.map(function (view) { return el('pane-' + view.id); });
+    panes.forEach(function (root) {
+      if (!root) { return; }
+      root.addEventListener('keydown', function (e) { selectFocusedCode(root, e); });
+    });
+    panes.concat([el('verdict')]).forEach(function (root) {
       if (!root) { return; }
       root.addEventListener('click', function (e) { dispatchAction(root, e); });
     });

@@ -92,6 +92,31 @@ fn page_browser_now_a_selected_fix_command_survives_refreshes_and_takes_focus() 
     assert_eq!(focus["focused"], true, "{focus:#}");
 }
 
+/// Ctrl+A pressed on the focused fix command selects that command alone, as
+/// does Ctrl+A on the focused raw token; a click selects it whole. On the
+/// focused pane, which is no command, the page leaves the key alone
+/// (control: the handler acts on copyable code only).
+///
+/// Mutation check: drop the keydown listener in initActions -> red (the
+/// selection is empty).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_ctrl_a_on_a_focused_fix_selects_only_the_command() {
+    let result = now_scenario("now-fix-select-all");
+    let (fix, raw, pane) = (&result["fix"], &result["raw"], &result["pane"]);
+    let command = str_of(&result["fix_text"], "the fix command");
+
+    assert!(command.starts_with("routectl "), "{result:#}");
+    assert_eq!(fix["focused"], true, "{result:#}");
+    assert_eq!(fix["prevented"], true, "{result:#}");
+    assert_eq!(fix["selection"], command, "{result:#}");
+    assert_eq!(raw["selection"], result["raw_text"], "{result:#}");
+    assert_eq!(result["user_select"], "all", "{result:#}");
+    assert_eq!(pane["focused"], true, "{result:#}");
+    assert_eq!(pane["prevented"], false, "{result:#}");
+    assert_eq!(pane["selection"], "", "{result:#}");
+}
+
 /// Every fixture item is drawn once, in the panel's order, with its subject,
 /// cause, raw token and fix as the daemon sent them, and a link to its view
 /// that opens it. Each cause appears in the Now body exactly once.
@@ -421,8 +446,8 @@ fn page_browser_now_every_subscription_account_appears_under_its_pool() {
     assert_eq!(served["credential"]["state"], "unusable", "{served:#}");
     assert_eq!(seat["login_text"], "unusable", "{seat:#}");
     assert!(
-        str_of(&seat["login"], "a login class").contains("glance-login--unusable"),
-        "{seat:#}"
+        str_of(&seat["login"], "a login class").contains("glance-login--broken"),
+        "no login in its pools is usable, so it reads red: {seat:#}"
     );
     let codex = drawn_seat(&result, "codex");
     assert_eq!(codex["name"], "codex", "an unlabeled login: {codex:#}");
@@ -491,7 +516,8 @@ fn page_browser_now_a_glance_window_with_no_used_fraction_is_an_invalid_payload(
 ///
 /// Mutation checks: drop the `.glance-meter--warn` fill rule -> red (the
 /// 95% fill is the calm color); use `>=` 0.9 as the near-full line -> red
-/// (the stale 90% window turns amber).
+/// (the stale 90% window turns amber); replace the muted stale figure rule
+/// with `.glance-meter--stale { opacity: 0.55; }` -> red (stale text faded).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_now_glance_meters_turn_amber_then_red_with_a_word() {
@@ -528,12 +554,22 @@ fn page_browser_now_glance_meters_turn_amber_then_red_with_a_word() {
         str_of(&stale["age"], "an age").starts_with("stale, "),
         "{stale:#}"
     );
+    assert_eq!(stale["opacity"], "1", "stale text is not dimmed: {stale:#}");
+    assert_eq!(
+        stale["pct_color"], served["palette"]["muted"],
+        "a stale figure takes the muted text color: {stale:#}"
+    );
+    assert_ne!(
+        calm[0]["pct_color"], served["palette"]["muted"],
+        "control: a fresh figure is not muted: {calm:#?}"
+    );
     assert!(
-        str_of(&stale["opacity"], "an opacity")
+        str_of(&stale["fill_opacity"], "an opacity")
             .parse::<f64>()
             .is_ok_and(|o| o < 1.0),
-        "a stale meter is dimmed: {stale:#}"
+        "a stale meter's fill is dimmed: {stale:#}"
     );
+    assert_eq!(calm[0]["fill_opacity"], "1", "{calm:#?}");
 }
 
 /// A refresh that moves a window's use moves the same bar to the new value,

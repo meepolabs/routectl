@@ -77,6 +77,10 @@
         names: texts(body, '.acct-name'),
         seat_in_both_pools: !!document.getElementById(SEAT_ROW_IN_BACKUP),
         seat_login: textIn(seat, '.acct-login'),
+        seat_login_class: seat.querySelector('.acct-login').className,
+        seat_row_class: seat.className,
+        api_key_login_class: byId(API_KEY_ROW).querySelector('.acct-login').className,
+        compat_login_class: byId(COMPAT_ROW).querySelector('.acct-login').className,
         seat_cause: textIn(seat, '.acct-cause'),
         seat_fix: fix ? { tag: fix.tagName.toLowerCase(), tab_index: fix.tabIndex, text: fix.textContent } : null,
         seat_poll: textIn(seat, '.acct-poll'),
@@ -98,6 +102,39 @@
           return color(byId(id).querySelector('.acct-poll'), 'color');
         }),
         error_cards: body.querySelectorAll('.unavailable-msg, .incompatible-msg').length
+      };
+    });
+  });
+
+  // The seat's last poll as served (a timeout), and Codex polled with a
+  // result token this build does not know.
+  d.scenario('accounts-poll-result', function () {
+    rewriteAccounts(function (data) {
+      var codex = row(data, 'codex').poll;
+      codex.applicability = 'polled';
+      codex.last_result = 'not_yet_named';
+      codex.last_attempt_ms = row(data, 'anthropic#a').poll.last_attempt_ms;
+    });
+    return settled().then(function () {
+      var seat = byId(SEAT_ROW).querySelector('.acct-poll');
+      var codex = byId(CODEX_ROW).querySelector('.acct-poll');
+      return {
+        seat: { text: seat.textContent, title: seat.title },
+        codex: { text: codex.textContent, title: codex.title }
+      };
+    });
+  });
+
+  // Ctrl+A pressed on the logged-out seat's focused fix command, and on the
+  // focused pane itself, which carries no command.
+  d.scenario('accounts-fix-select-all', function () {
+    return settled().then(function () {
+      var fix = byId(SEAT_ROW).querySelector('.acct-fix-code');
+      return {
+        fix_text: fix.textContent,
+        fix: d.pressSelectAll(fix),
+        pane: d.pressSelectAll(byId('pane-accounts')),
+        user_select: getComputedStyle(fix).userSelect
       };
     });
   });
@@ -153,7 +190,10 @@
       meta: textIn(node, '.acct-win-meta'),
       stale_mark: textIn(node, '.acct-stale'),
       opacity: color(node, 'opacity'),
-      fill: fill ? color(fill, 'backgroundColor') : null
+      fill: fill ? color(fill, 'backgroundColor') : null,
+      fill_opacity: fill ? color(fill, 'opacity') : null,
+      used_color: color(node.querySelector('.acct-win-used'), 'color'),
+      label_color: color(node.querySelector('.acct-win-label'), 'color')
     };
   }
 

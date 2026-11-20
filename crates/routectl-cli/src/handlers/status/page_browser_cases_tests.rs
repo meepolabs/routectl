@@ -238,6 +238,45 @@ fn page_browser_case_logged_out_seat_shows_its_cause_fix_and_item() {
     );
 }
 
+/// The logged-out seat in a pool that still has a usable seat reads amber
+/// on both views: the Now glance dot and the Accounts tag and border. Its
+/// usable sibling reads green on both (control: the dots are not one fixed
+/// color).
+///
+/// Mutation check: color an unusable login red regardless of its pool in
+/// loginKind -> red (both views turn red, neither is amber).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_case_logged_out_seat_is_amber_on_now_and_accounts() {
+    let now = on_now(UiCase::LoggedOut);
+    let accounts = on_accounts(UiCase::LoggedOut);
+    let dots = now["login_dots"].as_array().expect("login dots");
+    let dot_of = |name: &str| {
+        dots.iter()
+            .find(|d| d["seat"] == name)
+            .unwrap_or_else(|| panic!("no `{name}` on Now: {now:#}"))["color"]
+            .clone()
+    };
+    let (warn, ok) = (&now["colors"]["warn"], &now["colors"]["ok"]);
+
+    assert_eq!(dot_of("seat-b (b)"), *warn, "{now:#}");
+    assert_eq!(dot_of("seat-a (a)"), *ok, "control: {now:#}");
+    let out = row(&accounts, "seat-b (b)");
+    assert_eq!(
+        out["login_color"], accounts["colors"]["warn"],
+        "{accounts:#}"
+    );
+    assert_eq!(
+        out["border_color"], accounts["colors"]["warn"],
+        "{accounts:#}"
+    );
+    assert_eq!(
+        row(&accounts, "seat-a (a)")["login_color"],
+        accounts["colors"]["ok"],
+        "control: {accounts:#}"
+    );
+}
+
 /// A usage poll failing for 15 minutes: Now lists the daemon's
 /// `usage_poll_failing` item; the one-seat case, the same seat polling
 /// cleanly, lists none.
