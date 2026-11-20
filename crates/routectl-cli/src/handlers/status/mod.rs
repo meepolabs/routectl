@@ -17,6 +17,7 @@
 //! zero-auth dev path. `/v1/*` inherits none of the status-only middleware.
 
 mod accounts;
+mod attention;
 mod attention_memory;
 pub(crate) mod builder_probe;
 mod config;
@@ -185,6 +186,9 @@ pub struct StatusState {
     /// shared `Arc` the writer holds and exposes only reads, which is what lets the
     /// health reads exist without weakening the contract above.
     pub usage_health: usage_health::UsageHealthView,
+    /// The needs-attention list's per-daemon memory (first-seen ages and
+    /// recovered items), reconciled on every attention read.
+    attention: Arc<attention::AttentionState>,
     /// The change gate on the shared fidelity INFO line, held for the daemon's
     /// lifetime so an unchanged snapshot is not re-emitted on every poll.
     fidelity_gate: Arc<field_verdict_log::FidelityGate>,
@@ -221,6 +225,7 @@ impl StatusState {
             builder_capacity: BuilderCapacity::default(),
             ledger_read: query::LedgerReadGate::default(),
             usage_health,
+            attention: Arc::new(attention::AttentionState::new()),
             fidelity_gate: Arc::default(),
             warm_report: WarmReport::not_run(),
             legacy_config_dirs: Vec::new(),
@@ -288,6 +293,7 @@ pub struct PanelObservability {
     pub doctor: PanelCounters,
     pub query: PanelCounters,
     pub accounts: PanelCounters,
+    pub attention: PanelCounters,
     /// The `/status/query` series mode. Tracked apart from `query` because a
     /// series read fails on its own terms (a wider GROUP BY over a larger temp
     /// b-tree), and one shared detector would let a healthy aggregate poll mask
@@ -304,6 +310,7 @@ impl Default for PanelObservability {
             doctor: PanelCounters::new("doctor"),
             query: PanelCounters::new("status_query"),
             accounts: PanelCounters::new("accounts"),
+            attention: PanelCounters::new("attention"),
             query_series: PanelCounters::new("status_query_series"),
         }
     }
@@ -533,6 +540,7 @@ pub fn status_router() -> AxumRouter<Arc<StatusState>> {
         .route("/status/config", get(config::handler))
         .route("/status/doctor", get(doctor::handler))
         .route("/status/accounts", get(accounts::handler))
+        .route("/status/attention", get(attention::handler))
         .route("/status/query", any(query::handler))
 }
 
@@ -620,6 +628,7 @@ mod tests {
         "/status/config",
         "/status/doctor",
         "/status/accounts",
+        "/status/attention",
     ];
 
     #[tokio::test]
@@ -727,6 +736,16 @@ mod tests {
             ("query.rs", include_str!("query.rs"), &panel_forbidden),
             ("health.rs", include_str!("health.rs"), &panel_forbidden),
             ("accounts.rs", include_str!("accounts.rs"), &panel_forbidden),
+            (
+                "attention.rs",
+                include_str!("attention.rs"),
+                &panel_forbidden,
+            ),
+            (
+                "attention_memory.rs",
+                include_str!("attention_memory.rs"),
+                &panel_forbidden,
+            ),
             ("config.rs", include_str!("config.rs"), &panel_forbidden),
             ("doctor.rs", include_str!("doctor.rs"), &panel_forbidden),
             (

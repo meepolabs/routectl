@@ -7065,6 +7065,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   plus vendor pauses, refusal totals, `corrections_confirmed`, history
   counters, the poll driver's health and the top-level `placement` object
   (`accounts/placement.rs`). Memory-only, wire types owned here.
+- `src/handlers/status/attention.rs` -- `/status/attention` (schema_version 1):
+  the needs-attention list with its verdict, counts and doctor coverage.
+  Gathers plain snapshots from one pinned router snapshot, both seat drivers'
+  health, the refresh driver's current failures, the usage poll state, the
+  request-row loss counters and a no-network doctor report's Fail findings,
+  then runs the pure builder through `AttentionMemory`. Read-only.
 - `src/handlers/status/attention_memory.rs` -- `AttentionMemory`, the
   per-daemon in-process memory behind the needs-attention list: reconciles
   each read's active items by key into active plus recovered (held 60 min from

@@ -34,7 +34,7 @@ use serde::Serialize;
 
 use routectl_core::failure_class::LastOutcome;
 use routectl_router::router::RouteTargetStatus;
-use routectl_router::{DoctorReport, LaneBudgetExhaustions, LaneLossyRepairs};
+use routectl_router::{DoctorReport, Finding, LaneBudgetExhaustions, LaneLossyRepairs, Status};
 use routectl_usage::open_readonly_fastfail;
 
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
@@ -46,9 +46,10 @@ use super::usage_health::{
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::commands::doctor::{
-    GatherSources, SCHEMA_VERSION, build_report_no_network, gather_context_no_network,
+    GatherSources, SCHEMA_VERSION, ServedInputs, build_report_no_network, gather_context_no_network,
 };
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
+use crate::config_folder::LegacyConfigDir;
 
 /// Wire-shape version of the doctor panel payload. IS the no-network
 /// [`DoctorReport`]'s own `schema_version`: the panel embeds that report
@@ -204,6 +205,79 @@ fn build_panel_data(
     }
 }
 
+/// The no-network gather's inputs, pinned on the async side from one live
+/// router snapshot so the gather can run on a blocking worker.
+struct PinnedGather {
+    config_path: PathBuf,
+    served: ServedInputs,
+    legacy_dirs: Vec<LegacyConfigDir>,
+    handle: tokio::runtime::Handle,
+}
+
+impl PinnedGather {
+    fn pin(state: &StatusState, view: &StatusRouterView, config_path: PathBuf) -> Self {
+        let reload_failure = state
+            .daemon_meta
+            .reload_failure(crate::local_time::unix_ms(time::OffsetDateTime::now_utc()));
+        let served = view
+            .served_doctor_inputs(
+                *state.warm_report(),
+                Arc::clone(&state.prices),
+                state.usage_db_path.clone(),
+            )
+            .with_reload_failure(reload_failure);
+        Self {
+            config_path,
+            served,
+            legacy_dirs: state.legacy_config_dirs().to_vec(),
+            handle: tokio::runtime::Handle::current(),
+        }
+    }
+
+    /// Run the gather and build the report. Blocking: call it on a blocking
+    /// worker.
+    fn report(self, zone: &LocalZone) -> DoctorReport {
+        let ctx = self.handle.block_on(gather_context_no_network(
+            &self.config_path,
+            GatherSources::Served(Box::new(self.served)),
+            &self.legacy_dirs,
+            zone,
+        ));
+        build_report_no_network(&ctx)
+    }
+}
+
+/// The failing findings of `report`.
+pub(super) fn fail_findings(report: &DoctorReport) -> Vec<Finding> {
+    report
+        .findings
+        .iter()
+        .filter(|finding| finding.status == Status::Fail)
+        .cloned()
+        .collect()
+}
+
+/// The failing findings of a no-network doctor report built for this read,
+/// or `None` when no report can be built (no on-disk config path, or the
+/// gather failed). Builds no panel: it records no doctor availability and
+/// emits no fidelity line.
+pub(super) async fn report_fail_findings(state: &StatusState) -> Option<Vec<Finding>> {
+    let config_path = state.config_path.clone()?;
+    let gather = PinnedGather::pin(state, &state.router.view(), config_path);
+    let as_of = now_utc_rfc3339();
+    guard_panel(
+        &state.builder_capacity,
+        DOCTOR_SCHEMA_VERSION,
+        codes::DOCTOR_UNAVAILABLE,
+        move || {
+            let report = gather.report(&LocalZone::load());
+            Panel::available(DOCTOR_SCHEMA_VERSION, as_of, fail_findings(&report))
+        },
+    )
+    .await
+    .data
+}
+
 /// Build the panel for a daemon with an on-disk config path. The gather's
 /// served inputs and reachability are read from the SAME live router snapshot,
 /// pinned before the blocking work; the gather runs inside the
@@ -215,16 +289,7 @@ async fn build_from_path(
     emission: FidelityEmission,
 ) -> Panel<DoctorPanel> {
     let view = state.router.view();
-    let reload_failure = state
-        .daemon_meta
-        .reload_failure(crate::local_time::unix_ms(time::OffsetDateTime::now_utc()));
-    let served = view
-        .served_doctor_inputs(
-            *state.warm_report(),
-            Arc::clone(&state.prices),
-            state.usage_db_path.clone(),
-        )
-        .with_reload_failure(reload_failure);
+    let gather = PinnedGather::pin(state, &view, config_path);
     // Counter reads, not I/O, so these stay out here beside the router snapshot.
     let writer_degraded = state.usage_health.writer_degraded();
     let capability_writes = state.usage_health.capability_writes();
@@ -232,8 +297,6 @@ async fn build_from_path(
     let usage_db_path = state.usage_db_path.clone();
     let now = time::OffsetDateTime::now_utc();
     let gate = Arc::clone(&state.fidelity_gate);
-    let legacy_dirs = state.legacy_config_dirs().to_vec();
-    let handle = tokio::runtime::Handle::current();
     // The snapshot is pinned now, so request time IS the read time.
     let as_of = now_utc_rfc3339();
     // The daemon's own fidelity observer, when a test installed one -- attached at
@@ -247,13 +310,7 @@ async fn build_from_path(
         move || {
             let zone = LocalZone::load();
             let today = window_bounds(&zone, WindowFlag::Today, now);
-            let ctx = handle.block_on(gather_context_no_network(
-                &config_path,
-                GatherSources::Served(Box::new(served)),
-                &legacy_dirs,
-                &zone,
-            ));
-            let report = build_report_no_network(&ctx);
+            let report = gather.report(&zone);
             let schema_version = report.schema_version;
             let ledger = LedgerInputs {
                 health: ledger_health,

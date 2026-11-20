@@ -9,14 +9,6 @@
 //! and is bounded by entry count and by age. Time arrives as the read's
 //! `now_ms`; the module reads no clock.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "held by the status state once the panel serves it"
-    )
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use parking_lot::Mutex;
