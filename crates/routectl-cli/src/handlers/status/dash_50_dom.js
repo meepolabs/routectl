@@ -498,7 +498,9 @@
   // Hand-rolled trend sparkline over `{t, v}` samples (a query series'
   // buckets, keyed by bucket start). The polyline splits into independent
   // segments wherever the inter-sample gap exceeds `gapMs`, so a hole in the
-  // grid renders as a break, never a line drawn across it.
+  // grid renders as a break, never a line drawn across it. A sample whose `v`
+  // is null or not a finite number is absent: it breaks the run the same way
+  // and is left out of the vertical scale, while a measured 0 is plotted.
   function sparkline(samples, gapMs) {
     return sparkSvg([{ samples: samples, b: false, fill: false }], gapMs);
   }
@@ -518,9 +520,10 @@
   }
 
   // The shared sparkline geometry. The vertical scale fits the min/max of
-  // EVERY series with a div-by-zero guard (a flat series draws a centered
-  // line); the horizontal one spans the samples' own timestamps, so a point
-  // sits where its bucket starts rather than on an assumed stride.
+  // EVERY series' present samples with a div-by-zero guard (a flat series
+  // draws a centered line); the horizontal one spans every sample's own
+  // timestamp, absent ones included, so a point sits where its bucket starts
+  // rather than on an assumed stride.
   function sparkSvg(series, gapMs) {
     var W = 120, H = 24;
     var svg = document.createElementNS(SVG_NS, 'svg');
@@ -530,11 +533,14 @@
     svg.setAttribute('aria-hidden', 'true');
     var all = [];
     series.forEach(function (s) { if (s.samples) { all = all.concat(s.samples); } });
-    if (all.length < 2) { return svg; }
-    var min = all[0].v, max = all[0].v, t0 = all[0].t, t1 = all[0].t;
-    all.forEach(function (s) {
+    var present = all.filter(isPresentSample);
+    if (present.length < 2) { return svg; }
+    var min = present[0].v, max = present[0].v, t0 = all[0].t, t1 = all[0].t;
+    present.forEach(function (s) {
       if (s.v < min) { min = s.v; }
       if (s.v > max) { max = s.v; }
+    });
+    all.forEach(function (s) {
       if (s.t < t0) { t0 = s.t; }
       if (s.t > t1) { t1 = s.t; }
     });
@@ -550,10 +556,10 @@
     return svg;
   }
 
-  // Append one series as one polyline per gap-free run of samples, each run
-  // optionally backed by the area under it. The area is a polygon closed on the
-  // baseline rather than a filled polyline, so a run with a hole beside it
-  // fills only its own span.
+  // Append one series as one polyline per gap-free run of present samples,
+  // each run optionally backed by the area under it. The area is a polygon
+  // closed on the baseline rather than a filled polyline, so a run with a hole
+  // beside it fills only its own span.
   function drawSegments(svg, series, gapMs, px, H) {
     var samples = series.samples;
     var seg = [];
@@ -568,10 +574,15 @@
       seg = [];
     }
     for (var i = 0; i < samples.length; i++) {
+      if (!isPresentSample(samples[i])) { flush(); continue; }
       if (i > 0 && gapMs > 0 && (samples[i].t - samples[i - 1].t) > gapMs) { flush(); }
       seg.push(px(samples[i]));
     }
     flush();
+  }
+
+  function isPresentSample(s) {
+    return typeof s.v === 'number' && isFinite(s.v);
   }
 
   // The run's own points plus the two baseline corners under its first and last

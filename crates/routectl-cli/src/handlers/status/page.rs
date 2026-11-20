@@ -2026,6 +2026,11 @@ mod tests {
         include!("page_browser_layout_tests.rs");
     }
 
+    mod browser_tiles {
+        use super::*;
+        include!("page_browser_tiles_tests.rs");
+    }
+
     mod payload_keys {
         use super::*;
         include!("page_payload_keys_tests.rs");

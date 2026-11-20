@@ -475,9 +475,11 @@
     return wrap;
   }
 
+  // One sample per bucket, its value exactly as read: a bucket with nothing
+  // reported stays null so its sparkline draws a gap, never a zero.
   function bucketSamples(series, read) {
     return series.buckets.map(function (b) {
-      return { t: b.start_ms, v: num0(read(b.metrics)) };
+      return { t: b.start_ms, v: read(b.metrics) };
     });
   }
 
