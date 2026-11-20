@@ -1897,7 +1897,9 @@ carries running totals since the daemon started (a hot reload keeps them):
 | `rc_placement_cap_forced_moves` | The `breaker_open` moves whose old seat stood `low_room` at the move: an outage that likely came from the account reaching its cap. |
 
 Each placement also lands in its request's usage row as `extra.placement`
-(no schema column), on the row whichever seat of the pool served:
+(no schema column), whichever target served: another seat of the pool, or a
+later model of the alias chain outside the pool. When two pools in one chain
+both place, the first pool's record is stored:
 `{"rule": "pace_v1", "event": "birth" | "move" | "keyless", "arm": "roomy" |
 "low_room" | "unread", "seat": "<account key>", "trigger": "<reason>"}`.
 `arm` is the tier of the seat the request was placed on (for a move, the seat

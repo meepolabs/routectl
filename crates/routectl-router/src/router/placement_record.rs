@@ -23,6 +23,7 @@ use crate::quota::placement::Tier;
 pub const PLACEMENT_RULE: &str = "pace_v1";
 
 /// What kind of placement a record describes.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlacementEvent {
     /// A new keyed conversation was pinned to the seat.

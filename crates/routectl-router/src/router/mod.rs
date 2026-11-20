@@ -1553,10 +1553,12 @@ pub struct DispatchMeta {
     /// forwarded credential, no provider kind). Clones of this meta share the
     /// carrier's single scope, so it settles at most once.
     pub stream_evidence: Option<StreamEvidence>,
-    /// The pace-rule placement the served / terminal target's pool made for
-    /// this request, copied from that target. `None` when the target's pool
-    /// made none (a warm stay, a turn that lost its pin write, a dormant
-    /// pool, a fill-first walk) and for a target outside any pool.
+    /// The first pace-rule placement made for this request, copied from the
+    /// first marked target that carries one and kept when a later target
+    /// (a pool sibling, a target outside any pool, or a second pool in the
+    /// alias chain) serves. `None` when no pool the dispatch reached made
+    /// one (a warm stay, a turn that lost its pin write, a dormant pool, a
+    /// fill-first walk, no pool at all).
     pub placement: Option<PlacementRecord>,
 }
 
@@ -1821,7 +1823,12 @@ impl DispatchMeta {
         } else {
             target.seat.clone()
         };
-        self.placement = target.placement.as_deref().cloned();
+        // A placement record describes the pool's won pick, not the target
+        // that served: a later target outside the pool keeps it, and with
+        // two placing pools in one chain the first pool's record stands.
+        if self.placement.is_none() {
+            self.placement = target.placement.as_deref().cloned();
+        }
         ServedIdentity {
             alias: Some(self.resolved_alias.clone()),
             model: self.served_model.clone(),
@@ -2405,8 +2412,8 @@ impl Router {
     /// Carried by SHARING the `Arc` rather than copying entries, the same
     /// fix `carry_over_k_store_from` applies to the K-estimator store: a
     /// snapshot-and-replay has a window between the snapshot and the new
-    /// Router's publish where a pin written through the outgoing Router (an
-    /// overflow-repin racing the swap) would land only in the map this
+    /// Router's publish where a pin written through the outgoing Router (a
+    /// repin racing the swap) would land only in the map this
     /// carry-over is about to discard. Sharing the map means both Routers'
     /// writes land on the one LRU, so a pin racing the swap is neither lost
     /// nor written to a copy nobody reads. This also shares the anti-herd

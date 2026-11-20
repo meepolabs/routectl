@@ -83,6 +83,50 @@ fn a_keyed_birth_records_on_every_target_and_the_meta_of_a_sibling_that_serves()
 }
 
 #[test]
+fn the_meta_keeps_the_first_placement_whatever_target_is_marked_later() {
+    // Arrange: a birth on seat-c, a second pool's record, and a target
+    // outside any pool.
+    let router = pool_router(None);
+    poll(&router, "seat-c", 10);
+    let placed = chain(&router, Some(SESSION)).swap_remove(0);
+    let first = placed
+        .placement
+        .as_deref()
+        .cloned()
+        .expect("a birth records");
+    let mut other_pool = placed.clone();
+    other_pool.placement = Some(Arc::new(PlacementRecord::new(
+        PlacementEvent::Keyless,
+        Tier::Unread,
+        &account("seat-a"),
+        None,
+    )));
+    let mut outside_any_pool = placed.clone();
+    outside_any_pool.placement = None;
+    // (row, targets marked after the placing one, in order)
+    let rows: [(&str, Vec<&DispatchTarget>); 3] = [
+        ("then a target outside any pool", vec![&outside_any_pool]),
+        ("then a second placing pool", vec![&other_pool]),
+        (
+            "then both",
+            vec![&outside_any_pool, &other_pool, &outside_any_pool],
+        ),
+    ];
+    for (row, later) in rows {
+        let mut meta = DispatchMeta::for_alias("m");
+
+        // Act
+        meta.mark_target(&placed, "m");
+        for target in later {
+            meta.mark_target(target, "m");
+        }
+
+        // Assert
+        assert_eq!(meta.placement.as_ref(), Some(&first), "{row}");
+    }
+}
+
+#[test]
 fn a_warm_stay_records_nothing_and_counts_nothing() {
     // Arrange
     let router = pool_router(None);

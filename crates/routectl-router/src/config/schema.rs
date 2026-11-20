@@ -1844,19 +1844,23 @@ pub enum SeatSelection {
     /// usage-aware spreading picks `sticky-least-loaded` instead.
     FillFirst,
     /// Pin each conversation to one seat for prompt-cache affinity, and
-    /// balance NEW conversations across seats by load. The contract: a
-    /// conversation's first request picks the least-loaded healthy seat at
-    /// birth; every subsequent request for that conversation routes back to
-    /// the same seat so its warm prompt cache is preserved (avoiding a cold
-    /// miss on every turn). If a pinned home goes unhealthy the conversation
-    /// migrates once to a healthy sibling and stays there (no flapping back).
-    /// The selection is a best-effort reorder of the walk: the per-seat
-    /// dispatch gate and the fill-first fallback walk stay authoritative, so
-    /// a stale or wrong pin only costs locality, never correctness.
+    /// place NEW conversations by pace. The contract: a conversation's first
+    /// request pins it to the eligible seat whose account usage readings
+    /// pace best (then by load); every subsequent request for that
+    /// conversation routes back to the same seat so its warm prompt cache
+    /// is preserved (avoiding a cold miss on every turn). The conversation
+    /// moves only when its home has a lasting outage (an unusable
+    /// credential, or a parked account or open breaker with at least five
+    /// minutes left), to the sibling that paces best, and it can move again
+    /// on a later lasting outage; a recovered seat never pulls it back, and
+    /// a shorter outage leaves it pinned. The selection is a best-effort
+    /// reorder of the walk: the per-seat dispatch gate and the fill-first
+    /// fallback walk stay authoritative, so a stale or wrong pin only costs
+    /// locality, never correctness.
     ///
-    /// The ONLY variant pace placement applies to: a birth (and a keyless
-    /// request, which mints no pin) ranks candidates by their accounts' usage
-    /// readings.
+    /// The ONLY variant pace placement applies to: a birth, a move, and a
+    /// keyless request (which mints no pin) rank candidates by their
+    /// accounts' usage readings.
     #[default]
     StickyLeastLoaded,
 }

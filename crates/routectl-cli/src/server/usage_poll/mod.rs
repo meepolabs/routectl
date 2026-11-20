@@ -205,6 +205,9 @@ pub enum PollApplicability {
 pub(super) enum PollAttempt {
     /// The seat's provider has no usage endpoint; nothing was read or sent.
     NotPolled,
+    /// A reload switched `[usage] poll` off after the sweep picked the seat;
+    /// the token was not read and nothing was sent.
+    SwitchedOff,
     Attempted {
         vendor: UsageVendor,
         attempted_ms: i64,
@@ -228,8 +231,8 @@ pub struct UsagePollJob {
     client: UsagePollClient,
     usage: UsageHandle,
     state: UsagePollState,
-    /// The published router, read when a result lands to see the current
-    /// `[usage] poll` switch.
+    /// The published router, read before a token is read and again when a
+    /// result lands, to see the current `[usage] poll` switch.
     live_router: Arc<ArcSwap<Router>>,
 }
 
@@ -354,13 +357,20 @@ impl SeatJob for UsagePollJob {
         let vendor = usage_vendor(&seat.provider);
         let store = Arc::clone(&self.store);
         let client = self.client.clone();
-        let account = seat.account.clone();
-        let user_agent = (vendor == Some(UsageVendor::Anthropic)).then(|| seat_user_agent(seat));
+        let seat = seat.clone();
+        let live_router = Arc::clone(&self.live_router);
         async move {
             let Some(vendor) = vendor else {
                 return PollAttempt::NotPolled;
             };
-            let credential = store.peek_credential(&account).await;
+            // The sweep's router is the one loaded before the first seat's
+            // request; a reload during an earlier seat's request shows only
+            // on the published one.
+            if !live_router.load().config.usage.poll {
+                return PollAttempt::SwitchedOff;
+            }
+            let user_agent = (vendor == UsageVendor::Anthropic).then(|| seat_user_agent(&seat));
+            let credential = store.peek_credential(&seat.account).await;
             let reload_generation = credential.reload_generation;
             let result = fetch_usage(&client, credential, vendor, user_agent).await;
             PollAttempt::Attempted {

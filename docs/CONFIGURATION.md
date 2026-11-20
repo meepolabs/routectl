@@ -5587,7 +5587,8 @@ is contacted and redirects are never followed.
   account gets a reading only from its own responses' headers, so an idle
   account has no fresh reading, and placement then steers new conversations
   toward the busy accounts whose readings are fresh. The switch hot-reloads:
-  turning it off stops polling from the next sweep, and a poll already in
+  turning it off stops polling at once, including any seat still waiting in a
+  sweep already under way (its token is not read), and a poll already in
   flight when it went off is discarded when it returns, without changing the
   reading, the history or the poll's state. Turning it off also clears each
   seat's poll schedule (its last attempt, result and failure run; vendor

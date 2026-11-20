@@ -70,6 +70,35 @@ async fn pool_router(upstream: &Upstream) -> Router {
     build(cfg).await
 }
 
+/// The sticky pool behind `opus`, then a direct (non-pool) API-key
+/// provider behind `direct`, chained in that order under `claude-opus`.
+async fn pool_then_direct_router(upstream: &Upstream) -> Router {
+    let mut providers: Vec<(&str, _)> = SEATS
+        .iter()
+        .map(|seat| {
+            (
+                *seat,
+                oauth_seat(upstream.base(), &format!("/{seat}"), seat),
+            )
+        })
+        .collect();
+    providers.push(("direct", anthropic_provider(upstream.base(), "/direct")));
+    let mut cfg = config(
+        providers,
+        &[
+            ("opus", "pool", "claude-opus-4-7"),
+            ("direct-opus", "direct", "claude-opus-4-7"),
+        ],
+        &[("claude-opus", &["opus", "direct-opus"])],
+    );
+    cfg.pools.insert(
+        "pool".to_string(),
+        PoolEntry::new(SEATS.iter().map(|s| (*s).to_string()).collect())
+            .with_seat_selection(SeatSelection::StickyLeastLoaded),
+    );
+    build(cfg).await
+}
+
 fn serve_every_seat(upstream: &Upstream) {
     for seat in SEATS {
         upstream.mount(
@@ -124,9 +153,14 @@ impl Rig {
         assert_eq!(turn.status, axum::http::StatusCode::OK, "{}", turn.raw);
     }
 
-    /// `json_extract(extra, path)` and the served seat of `request_id`'s row,
-    /// once `rows` rows have landed.
-    async fn read(&self, rows: u64, request_id: &str, path: &str) -> (Option<String>, String) {
+    /// `json_extract(extra, path)` and the served seat of `request_id`'s row
+    /// (`None` for a target outside any seat), once `rows` rows have landed.
+    async fn read(
+        &self,
+        rows: u64,
+        request_id: &str,
+        path: &str,
+    ) -> (Option<String>, Option<String>) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.usage.counters().persisted() < rows {
             assert!(Instant::now() < deadline, "{rows} usage rows never landed");
@@ -182,7 +216,7 @@ async fn a_keyed_birth_reaches_the_ledger_with_only_its_closed_fields() {
     assert_eq!(record["seat"], account("seat-b").as_str());
     assert_eq!(
         seat,
-        account("seat-b"),
+        Some(account("seat-b")),
         "the record names the requests.seat key"
     );
     assert_eq!(keys(&record), ["arm", "event", "rule", "seat"]);
@@ -214,7 +248,46 @@ async fn the_record_is_kept_when_a_sibling_serves_after_the_chosen_seat_fails() 
         1,
         "premise: chosen first"
     );
-    assert_ne!(served, account("seat-b"), "premise: a sibling served");
+    assert_ne!(served, Some(account("seat-b")), "premise: a sibling served");
+    assert_eq!(record["event"], "birth");
+    assert_eq!(record["seat"], account("seat-b").as_str());
+}
+
+#[tokio::test]
+async fn the_record_is_kept_when_a_direct_fallback_serves_after_every_pool_seat_fails() {
+    // Arrange: seat-b paces best; every pool seat fails before any content,
+    // and the direct model after the pool in the alias chain serves.
+    let upstream = Upstream::start().await;
+    for seat in SEATS {
+        upstream.mount(
+            &format!("/{seat}/v1/messages"),
+            "",
+            Script::sse(anthropic_start(None) + &anthropic_overloaded()),
+        );
+    }
+    upstream.mount(
+        "/direct/v1/messages",
+        "",
+        Script::sse(anthropic_stream(None, Some(InputUsage::plain(10)))),
+    );
+    let router = pool_then_direct_router(&upstream).await;
+    poll(&router, "seat-a", 60);
+    poll(&router, "seat-b", 10);
+    let rig = Rig::new(router);
+
+    // Act
+    rig.turn("past-the-pool", Some("s-direct")).await;
+
+    // Assert
+    let record = rig.placement(1, "past-the-pool").await;
+    let (_, served) = rig.read(1, "past-the-pool", "$.placement").await;
+    assert_eq!(
+        upstream.hits("/direct/v1/messages"),
+        1,
+        "premise: the direct fallback served"
+    );
+    assert_eq!(served, None, "premise: no pool seat served");
+    let record = record.expect("the pool's record survives the fallback");
     assert_eq!(record["event"], "birth");
     assert_eq!(record["seat"], account("seat-b").as_str());
 }
@@ -242,7 +315,10 @@ async fn a_move_writes_its_trigger_and_a_warm_stay_writes_nothing() {
     assert_eq!(moved["event"], "move");
     assert_eq!(trigger.as_deref(), Some("breaker_open"));
     assert_eq!(moved["arm"], "unread", "the moved-to seat's tier");
-    assert_eq!(moved["seat"], served.as_str());
+    assert_eq!(
+        Some(moved["seat"].as_str().expect("a seat")),
+        served.as_deref()
+    );
     assert_eq!(keys(&moved), ["arm", "event", "rule", "seat", "trigger"]);
 }
 
@@ -261,5 +337,5 @@ async fn a_keyless_placement_writes_keyless() {
     // Assert
     let (event, served) = rig.read(1, "keyless", "$.placement.event").await;
     assert_eq!(event.as_deref(), Some("keyless"));
-    assert_eq!(served, account("seat-c"));
+    assert_eq!(served, Some(account("seat-c")));
 }

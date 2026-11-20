@@ -216,7 +216,7 @@ impl Router {
 
     /// Gather the per-seat capacity snapshots for sticky least-loaded
     /// selection (one lock each; N is small and locks are uncontended). The
-    /// overflow check needs every seat's snapshot, including the pinned
+    /// move check needs every seat's snapshot, including the pinned
     /// home's, so this reads ALL seats (both hit and miss).
     pub(super) fn gather_capacity_snapshots(
         &self,

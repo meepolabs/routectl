@@ -48,7 +48,7 @@ pub(super) fn anthropic_body(percent: u32, resets_at: &str) -> String {
 }
 
 /// A Codex usage body with a running 5-hour primary window at `percent`.
-fn codex_body(percent: u32) -> String {
+pub(super) fn codex_body(percent: u32) -> String {
     let reset_at = unix_now() + 3_600;
     format!(
         r#"{{"plan_type": "plus", "rate_limit": {{"allowed": true, "limit_reached": false, "primary_window": {{"used_percent": {percent}, "limit_window_seconds": 18000, "reset_after_seconds": 3600, "reset_at": {reset_at}}}, "secondary_window": null}}}}"#
