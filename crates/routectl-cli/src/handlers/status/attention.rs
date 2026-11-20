@@ -168,7 +168,7 @@ fn inputs_from(sources: AttentionSources) -> AttentionInputs {
     let accounts = identities
         .iter()
         .map(|(account, identity)| {
-            let (windows, billing) = reading_parts(by_account.remove(account));
+            let (windows, billing, billing_fresh) = reading_parts(by_account.remove(account));
             AccountSnapshot {
                 account: account.to_string(),
                 display: display_of(identity),
@@ -178,6 +178,7 @@ fn inputs_from(sources: AttentionSources) -> AttentionInputs {
                 poll_failure: poll_failure(poll.as_ref(), account),
                 windows,
                 billing,
+                billing_fresh,
             }
         })
         .collect();
@@ -254,13 +255,15 @@ fn poll_failure(poll: Option<&PollStateSnapshot>, account: &str) -> Option<PollF
     })
 }
 
-/// The reading-derived half of an account snapshot: its windows and billing
-/// state. An account with no reading has no windows and unknown billing.
-fn reading_parts(reading: Option<AccountReading>) -> (Vec<WindowSnapshot>, Billing) {
-    reading.map_or((Vec::new(), Billing::Unknown), |reading| {
+/// The reading-derived half of an account snapshot: its windows, billing
+/// state and whether that billing is fresh. An account with no reading has no
+/// windows and unknown, never fresh, billing.
+fn reading_parts(reading: Option<AccountReading>) -> (Vec<WindowSnapshot>, Billing, bool) {
+    reading.map_or((Vec::new(), Billing::Unknown, false), |reading| {
         (
             reading.windows.iter().map(window_snapshot).collect(),
             reading.billing,
+            reading.billing_fresh,
         )
     })
 }

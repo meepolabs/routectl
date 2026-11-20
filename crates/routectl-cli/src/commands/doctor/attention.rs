@@ -107,6 +107,8 @@ pub struct AccountSnapshot {
     pub windows: Vec<WindowSnapshot>,
     /// The budget the upstream last reported billing against.
     pub billing: Billing,
+    /// Whether that billing claim is known and recent enough to act on.
+    pub billing_fresh: bool,
 }
 
 /// Whether an account's credential can be used, and if not, why.
@@ -851,12 +853,13 @@ fn window_length(secs: u64) -> String {
     }
 }
 
-/// Overage is read only from the upstream's billing claim, never from a full
-/// window: a saturated window and an overage seat look alike. It is a cost
+/// Overage is read only from a fresh upstream billing claim, never from a
+/// full window: a saturated window and an overage seat look alike, and an old
+/// claim may describe a billing period that has since reset. It is a cost
 /// cause, not a credential one, so it is listed beside any credential item.
 fn overage_item(account: &AccountSnapshot) -> Option<AttentionItem> {
     let kind = AttentionKind::AccountOverage;
-    (account.billing == Billing::Overage).then(|| {
+    (account.billing_fresh && account.billing == Billing::Overage).then(|| {
         Draft {
             cause: "Billing beyond the included plan, at extra-usage rates".to_string(),
             raw_token: format!("{} (billing=overage)", kind.as_str()),

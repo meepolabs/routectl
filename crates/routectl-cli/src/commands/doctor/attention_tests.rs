@@ -36,6 +36,7 @@ fn account(name: &str) -> AccountSnapshot {
         poll_failure: None,
         windows: Vec::new(),
         billing: Billing::Unknown,
+        billing_fresh: false,
     }
 }
 
@@ -312,22 +313,41 @@ fn account_near_limit_is_listed_for_a_fresh_window_used_past_ninety_percent() {
     assert_rows(AttentionKind::AccountNearLimit, rows);
 }
 
-/// Overage comes only from the billing claim: a full window with included or
-/// unknown billing is saturation, not overage.
+/// Overage comes only from a fresh billing claim: a full window with
+/// included or unknown billing is saturation, not overage, and an overage
+/// claim that is no longer fresh raises nothing.
 #[test]
-fn account_overage_is_listed_only_for_an_overage_billing_claim() {
-    let billed = |billing: Billing, used: f64| {
+fn account_overage_is_listed_only_for_a_fresh_overage_billing_claim() {
+    let billed = |billing: Billing, billing_fresh: bool, used: f64| {
         with_account(AccountSnapshot {
             billing,
+            billing_fresh,
             windows: vec![window(18_000, used)],
             ..seat_a()
         })
     };
     let rows = vec![
-        ("overage", billed(Billing::Overage, 0.40), 1),
-        ("overage at used 1.0", billed(Billing::Overage, 1.0), 1),
-        ("included at used 1.0", billed(Billing::Included, 1.0), 0),
-        ("unknown at used 1.0", billed(Billing::Unknown, 1.0), 0),
+        ("overage", billed(Billing::Overage, true, 0.40), 1),
+        (
+            "overage at used 1.0",
+            billed(Billing::Overage, true, 1.0),
+            1,
+        ),
+        (
+            "overage but not fresh",
+            billed(Billing::Overage, false, 0.40),
+            0,
+        ),
+        (
+            "included at used 1.0",
+            billed(Billing::Included, true, 1.0),
+            0,
+        ),
+        (
+            "unknown at used 1.0",
+            billed(Billing::Unknown, false, 1.0),
+            0,
+        ),
         ("no reading", with_account(seat_a()), 0),
     ];
 
@@ -599,6 +619,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
             AttentionKind::AccountOverage,
             with_account(AccountSnapshot {
                 billing: Billing::Overage,
+                billing_fresh: true,
                 ..seat_a()
             }),
             Expected {
@@ -834,6 +855,7 @@ fn an_overage_account_with_a_credential_item_lists_both_causes_once() {
         let row = with_account(AccountSnapshot {
             credential,
             billing: Billing::Overage,
+            billing_fresh: true,
             ..seat_a()
         });
 

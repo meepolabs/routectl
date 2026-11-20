@@ -590,43 +590,48 @@ fn a_poll_failure_comes_only_from_a_recorded_failure_run() {
     }
 }
 
-fn reading_billed(billing: Billing) -> AccountReading {
+fn reading_billed(billing: Billing, billing_fresh: bool) -> AccountReading {
     AccountReading {
         account: "anthropic#work".to_string(),
         report: ReportState::NoReading,
         windows: Vec::new(),
         last_accepted: None,
         billing,
-        billing_fresh: false,
+        billing_fresh,
     }
 }
 
-/// The account reading's billing state is copied across as is; an account
-/// with no reading has unknown billing.
+/// The account reading's billing state and its freshness are copied across
+/// as is; an account with no reading has unknown billing that is not fresh.
 #[test]
-fn an_account_snapshot_carries_its_reading_billing() {
+fn an_account_snapshot_carries_its_reading_billing_and_freshness() {
     let rows = [
         (
-            "overage",
-            Some(reading_billed(Billing::Overage)),
-            Billing::Overage,
+            "fresh overage",
+            Some(reading_billed(Billing::Overage, true)),
+            (Billing::Overage, true),
         ),
         (
-            "included",
-            Some(reading_billed(Billing::Included)),
-            Billing::Included,
+            "overage not fresh",
+            Some(reading_billed(Billing::Overage, false)),
+            (Billing::Overage, false),
+        ),
+        (
+            "fresh included",
+            Some(reading_billed(Billing::Included, true)),
+            (Billing::Included, true),
         ),
         (
             "unknown",
-            Some(reading_billed(Billing::Unknown)),
-            Billing::Unknown,
+            Some(reading_billed(Billing::Unknown, false)),
+            (Billing::Unknown, false),
         ),
-        ("no reading", None, Billing::Unknown),
+        ("no reading", None, (Billing::Unknown, false)),
     ];
     for (name, reading, expected) in rows {
-        let (_, billing) = reading_parts(reading);
+        let (_, billing, billing_fresh) = reading_parts(reading);
 
-        assert_eq!(billing, expected, "{name}");
+        assert_eq!((billing, billing_fresh), expected, "{name}");
     }
 }
 

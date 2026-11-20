@@ -52,6 +52,7 @@ async fn a_logged_out_seats_credential_fix_and_cause_equal_its_attention_item() 
             poll_failure: None,
             windows: Vec::new(),
             billing: Billing::Unknown,
+            billing_fresh: false,
         }],
         ..AttentionInputs::default()
     };

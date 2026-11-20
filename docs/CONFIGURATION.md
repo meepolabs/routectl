@@ -5810,9 +5810,11 @@ none usable; the only `broken` kind), `route_circuit_open`,
 `account_unusable`, `account_parked`, `account_refresh_failing`,
 `driver_stopped` (the token refresh or usage poll driver not running while
 managed logins exist), `account_near_limit` (a non-stale window more than
-90% used), `usage_poll_failing` (a run of failed usage polls at least 15
-minutes old), `records_dropped` (a request-row loss counter rose in the last
-5 minutes) and `doctor_failure` (a doctor Fail finding outside the `pools`
+90% used), `account_overage` (the upstream reported billing beyond the
+included plan within the last 7 minutes; an older claim raises nothing),
+`usage_poll_failing` (a run of failed usage polls at least 15 minutes old),
+`records_dropped` (a request-row loss counter rose in the last 5 minutes)
+and `doctor_failure` (a doctor Fail finding outside the `pools`
 section, which `pool_empty` covers). A route blocked by its account's
 credential is named once, by the account item. Every kind but `pool_empty`
 is `degraded`.
