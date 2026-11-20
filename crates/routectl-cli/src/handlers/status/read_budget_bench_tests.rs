@@ -230,7 +230,6 @@ impl Bench<'_> {
             token,
             bounds,
             LedgerHealth::default(),
-            &routectl_router::AccountIdentities::default(),
             no_deadline(),
         )
         .expect("collection completes");

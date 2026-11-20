@@ -79,15 +79,7 @@ fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
         to_ms: TO_MS,
     };
     let deadline = Instant::now() + Duration::from_mins(10);
-    let panel = collect(
-        db,
-        "all",
-        bounds,
-        LedgerHealth::default(),
-        &routectl_router::AccountIdentities::default(),
-        deadline,
-    )
-    .expect("usage panel");
+    let panel = collect(db, "all", bounds, LedgerHealth::default(), deadline).expect("usage panel");
     let spec = QuerySpec {
         from_ms: FROM_MS,
         to_ms: TO_MS,

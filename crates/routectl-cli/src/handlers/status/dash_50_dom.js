@@ -410,21 +410,6 @@
     return isFinite(parsed) ? parsed : NaN;
   }
 
-  // Quota reset cell: a reset instant at or before the panel's as_of has
-  // already passed, so it renders "elapsed" (with the absolute time in the
-  // title) rather than as a live countdown target. Non-positive / absent
-  // -> "-".
-  function quotaResetCell(resetMs, nowMs) {
-    if (resetMs === null || resetMs === undefined || Number(resetMs) <= 0) { return '-'; }
-    if (isFinite(nowMs) && Number(resetMs) <= nowMs) {
-      var span = document.createElement('span');
-      span.textContent = 'elapsed';
-      span.title = 'reset time already passed: ' + fmtTs(resetMs);
-      return span;
-    }
-    return fmtTs(resetMs);
-  }
-
   // A humanized numeric cell that carries the error color only when the
   // value is positive (errors / negative signals), else a plain figure.
   // Renders through magSpan so its K/M/B suffix stays muted like the rest.

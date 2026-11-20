@@ -219,10 +219,6 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.groups[].provider",
                 "data.groups[].model",
                 "data.groups[].upstream",
-                "data.quota[].login_label",
-                "data.quota[].status",
-                "data.quota[].overage_utilization",
-                "data.quota[].reset_ms",
             ],
         ),
         (

@@ -2979,7 +2979,7 @@ the per-window observation totals include them. A body that fails to
 parse writes no row.
 
 **Walk counts on the status surface.** The `observation` block on
-`/status/usage` (usage panel schema 7, for the requested window) and on
+`/status/usage` (usage panel schema 8, for the requested window) and on
 `/status/doctor` (doctor schema 32, for today) sums five walk counts over
 every `requests` row in the window, token-count rows included:
 `request_caused_failures` (failed attempts the request itself caused,
@@ -4944,7 +4944,7 @@ the count of requests that reported a cache-write value (an observed zero
 counts, a request reporting nothing does not). `cache_write_5m` and
 `cache_write_1h` sum only rows written before usage schema 21; newer rows
 leave those columns empty, so read `cache_write_tokens` for the write
-volume. The `/status/usage` panel (schema 7) carries the same two fields,
+volume. The `/status/usage` panel (schema 8) carries the same two fields,
 with the same meaning, on its `totals` and on every group, and the
 dashboard's cache-write figures read `cache_write_tokens`.
 
@@ -5754,13 +5754,12 @@ always present; times are epoch ms and durations ms.
 Every count resets on restart. The panel carries no token, credential
 reference, response body or header, and no vendor account id.
 
-The `quota` list on `/status/usage` (one latest ledger snapshot per seat) and
-the quota lines under the `routectl usage` table follow the same configured
+The quota lines under the `routectl usage` table follow the same configured
 rule: a seat appears only while the config names it, and a row with no seat
 recorded is not shown. A retired seat's ledger rows stay and still count in
-the traffic and cost figures. Each `/status/usage` `quota` row carries `seat`
-(the `account` key), `provider_entry` and `login_label`, with the values this
-panel gives that account.
+the traffic and cost figures. `/status/usage` carries no per-seat quota list
+(it was removed at usage schema 8); read each account's usage windows from
+this panel.
 
 #### Needs-attention list on `/status/attention`
 

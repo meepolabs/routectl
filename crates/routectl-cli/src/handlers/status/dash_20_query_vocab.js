@@ -70,10 +70,8 @@
   // reading goes into its panel's list here.
   var USAGE_FIELDS = [
     'schema_version', 'unavailable', 'as_of', 'data',
-    'window', 'groups', 'totals', 'quota',
-    'alias', 'model', 'requests', 'errors',
-    'seat', 'provider_entry', 'provider_kind', 'claim', 'status', 'ts_start_ms', 'reset_ms',
-    'utilization', 'overage_utilization', 'overage_status'
+    'window', 'groups', 'totals',
+    'alias', 'model', 'requests', 'errors'
   ];
 
   var HEALTH_FIELDS = [

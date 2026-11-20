@@ -143,7 +143,7 @@ fn write_one_login(path: &Path, seat: &str) {
     }
 }
 
-/// One quota-bearing ledger row per seat, recent enough for every window.
+/// One ledger row per seat, recent enough for every window.
 fn seed_seat_rows(path: &Path, seats: &[&str]) {
     let db = routectl_usage::open(path).expect("open ledger");
     let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
@@ -153,9 +153,9 @@ fn seed_seat_rows(path: &Path, seats: &[&str]) {
                 "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
                  requested_model, alias, model, provider, upstream, stream, outcome, \
                  latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
-                 input_tokens, output_tokens, seat, quota_utilization) \
+                 input_tokens, output_tokens, seat) \
                  VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 'm', 'p', 'u', 0, 'ok', \
-                 5, 0, 0, 1, 0, 10, 20, ?3, 0.25)",
+                 5, 0, 0, 1, 0, 10, 20, ?3)",
                 rusqlite::params![now + i64::try_from(i).unwrap_or(0), format!("r{i}"), seat],
             )
             .expect("seed row");
@@ -247,14 +247,13 @@ async fn the_accounts_panel_lists_exactly_the_accounts_the_usage_poll_reads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
-async fn usage_quota_and_query_seat_groups_name_a_login_whose_provider_did_not_build() {
+async fn query_seat_groups_name_a_login_whose_provider_did_not_build() {
     // Arrange
     let rig = Rig::new().await;
     rig.assert_codex_did_not_build();
     seed_seat_rows(&rig.state.usage_db_path, &[SEAT_A, CODEX]);
 
     // Act
-    let usage = rig.send("GET", "/status/usage?window=all", "").await;
     let query = rig
         .send(
             "QUERY",
@@ -264,10 +263,6 @@ async fn usage_quota_and_query_seat_groups_name_a_login_whose_provider_did_not_b
         .await;
 
     // Assert
-    let quota = by_key(&usage["data"]["quota"], "seat", CODEX);
-    assert_eq!(quota["provider_entry"], CODEX_ENTRY, "{quota}");
-    assert!(quota["login_label"].is_null(), "{quota}");
-    assert_eq!(quota["utilization"], 0.25, "{quota}");
     let group = by_key(&query["data"]["groups"], "label", CODEX);
     assert_eq!(group["account"], CODEX, "{group}");
     assert_eq!(group["provider_entry"], CODEX_ENTRY, "{group}");

@@ -417,7 +417,6 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
         "today",
         bounds,
         LedgerHealth::default(),
-        &routectl_router::AccountIdentities::default(),
         Instant::now() + Duration::from_mins(10),
     )
     .expect("panel fold");
@@ -709,7 +708,7 @@ fn every_metric_token_is_shared_or_declared_one_sided() {
     );
 
     // The panel's metric surface is its totals plus its rollup groups; the
-    // envelope fields (window, bounds, quota, observation) are not part of the
+    // envelope fields (window, bounds, observation) are not part of the
     // per-request metric vocabulary this guard governs.
     let panel_json = serde_json::to_value(&panel).expect("serialize UsagePanel");
     let mut panel_keys = keys_of(&panel_json["totals"]);

@@ -6,13 +6,8 @@
 //! since SQLite is synchronous), aggregates the requested calendar window,
 //! and maps the result to an aggregates-only DTO. It never caches a
 //! connection, never touches the writer handle, and never exposes request
-//! rows, ids, bodies, or prompts -- only rollups, windowed totals, the
-//! per-seat quota snapshots, and the window's observation totals with its
-//! completeness verdict.
-//!
-//! The quota list carries only the accounts the served config names: a
-//! seat that was logged out of or removed from the config keeps its ledger
-//! rows for traffic history, but its last snapshot is no longer reported.
+//! rows, ids, bodies, or prompts -- only rollups, windowed totals, and the
+//! window's observation totals with its completeness verdict.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,10 +20,9 @@ use axum::extract::{Query, State};
 use rusqlite::ErrorCode;
 use serde::{Deserialize, Serialize};
 
-use routectl_router::{AccountIdentities, AccountIdentity};
 use routectl_usage::{
-    AggRow, DeadlineGuard, GroupKey, OpenError, QueryError, QuotaSnapshot, UsageDb, aggregate,
-    errors_by_class, latest_quota_by_seat, open_readonly_fastfail,
+    AggRow, DeadlineGuard, GroupKey, OpenError, QueryError, UsageDb, aggregate, errors_by_class,
+    open_readonly_fastfail,
 };
 
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
@@ -49,7 +43,10 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 /// panel dropped its `would_trim` block: no dashboard view rendered it, so the
 /// panel no longer pays for that windowed ledger read. The summary stays
 /// available from `routectl usage --detail` and the doctor `would_trim` panel.
-pub const SCHEMA_VERSION: u32 = 7;
+/// At 8 the panel dropped its per-seat `quota` list: `/status/accounts` reports
+/// every account's usage windows, so the panel no longer reads the ledger's
+/// latest snapshot per seat.
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// The `window` query parameter for `GET /status/usage`.
 #[derive(Debug, Deserialize)]
@@ -58,9 +55,8 @@ pub(super) struct WindowQuery {
 }
 
 /// Aggregates-only usage payload. Carries per-`(alias, provider, model,
-/// upstream)` rollups, windowed totals, one latest quota snapshot per
-/// configured seat, and the window's observation totals. It never carries request rows, ids,
-/// bodies, or prompts.
+/// upstream)` rollups, windowed totals, and the window's observation totals.
+/// It never carries request rows, ids, bodies, or prompts.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct UsagePanel {
     /// The resolved calendar window token: `today`, `week`, `month`, `all`.
@@ -71,7 +67,6 @@ pub(super) struct UsagePanel {
     to_ms: i64,
     totals: UsageTotals,
     groups: Vec<UsageGroup>,
-    quota: Vec<UsageQuota>,
     /// The window's summed per-request observation counts, its ledger gaps,
     /// and whether its rows are complete.
     observation: WindowObservation,
@@ -184,40 +179,6 @@ impl UsageGroup {
     }
 }
 
-/// One configured seat's latest quota-bearing snapshot. The `quota_*` ledger
-/// columns are shared across vendors, so `provider_kind` is the discriminator
-/// a client MUST read to interpret `utilization` (a fraction of a
-/// per-provider window) and to know which of the remaining fields that vendor
-/// populates at all.
-#[derive(Debug, Clone, Serialize)]
-struct UsageQuota {
-    /// The credential account this snapshot belongs to, the key
-    /// `/status/accounts` lists it under.
-    seat: String,
-    /// The `[providers]` entry the account is reported under, by the same
-    /// rule as `/status/accounts`.
-    provider_entry: String,
-    /// The `<label>` of an `oauth://<provider>#<label>` login; null for an
-    /// unlabeled login.
-    login_label: Option<String>,
-    /// Provider kind of the row this snapshot came from -- the cross-vendor
-    /// discriminator for every other field here.
-    provider_kind: Option<String>,
-    /// Freshness of THIS snapshot: the `ts_start` of the row it came from,
-    /// epoch-ms. Distinct from the panel envelope's query-time `as_of`.
-    ts_start_ms: i64,
-    claim: Option<String>,
-    status: Option<String>,
-    overage_status: Option<String>,
-    utilization: Option<f64>,
-    overage_utilization: Option<f64>,
-    /// Quota-reset instant in epoch MILLISECONDS. The ledger stamps quota
-    /// resets in epoch SECONDS (see the observer), so the seconds value is
-    /// scaled by 1000 here to make the `_ms` name truthful and keep it
-    /// consistent with `ts_start_ms`.
-    reset_ms: Option<i64>,
-}
-
 /// Map the `window` query value to its flag and canonical token. An unknown
 /// or absent value defaults to `today`.
 fn parse_window(raw: Option<&str>) -> (WindowFlag, &'static str) {
@@ -247,16 +208,13 @@ async fn build_window(
     // Stamp `as_of` at request time (before the blocking read), so a lock
     // wait or slow disk cannot skew the freshness marker.
     let as_of = now_utc_rfc3339();
-    // Read beside `as_of` too, so a reload during the ledger read cannot pair
-    // the snapshots with a config they were not filtered against.
-    let configured = state.router.view().account_identities();
     let panel = guard_panel(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
         move || {
             let bounds = window_bounds(&LocalZone::load(), flag, now);
-            build_panel(&db_path, token, bounds, health, &configured, as_of)
+            build_panel(&db_path, token, bounds, health, as_of)
         },
     )
     .await;
@@ -286,7 +244,6 @@ fn build_panel(
     token: &'static str,
     bounds: WindowBounds,
     health: LedgerHealth,
-    configured: &AccountIdentities,
     as_of: String,
 ) -> Panel<UsagePanel> {
     let deadline = Instant::now() + Duration::from_millis(USAGE_BUDGET_MS);
@@ -294,13 +251,13 @@ fn build_panel(
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
-    match collect(&mut db, token, bounds, health, configured, deadline) {
+    match collect(&mut db, token, bounds, health, deadline) {
         Ok(dto) => Panel::available(SCHEMA_VERSION, as_of, dto),
         Err(code) => Panel::unavailable(SCHEMA_VERSION, code),
     }
 }
 
-/// Run the four read-only ledger queries and assemble the DTO. On a query
+/// Run the three read-only ledger queries and assemble the DTO. On a query
 /// failure, returns the mapped shed code.
 ///
 /// ONE deadline covers the whole collection rather than any single statement:
@@ -314,7 +271,6 @@ fn collect(
     token: &'static str,
     bounds: WindowBounds,
     health: LedgerHealth,
-    configured: &AccountIdentities,
     deadline: Instant,
 ) -> Result<UsagePanel, &'static str> {
     let guard = DeadlineGuard::install(db, deadline).map_err(|e| query_error_code(&e))?;
@@ -322,28 +278,9 @@ fn collect(
     let rows = aggregate(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
     let breakdown =
         errors_by_class(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
-    let quota = latest_quota_by_seat(db).map_err(|e| query_error_code(&e))?;
     let observation = window_observation(db, bounds.from_ms, bounds.to_ms, health)
         .map_err(|e| query_error_code(&e))?;
-    let quota = configured_quota(quota, configured);
-    Ok(assemble(token, bounds, rows, breakdown, quota, observation))
-}
-
-/// The snapshots of the configured accounts, each with its display identity.
-/// A snapshot with no seat (pre-seat history, a forwarded client credential)
-/// names no configured account and is dropped with the retired ones.
-fn configured_quota(
-    snapshots: Vec<QuotaSnapshot>,
-    configured: &AccountIdentities,
-) -> Vec<UsageQuota> {
-    snapshots
-        .into_iter()
-        .filter_map(|snapshot| {
-            let account = snapshot.seat.clone()?;
-            let identity = configured.get(&account)?.clone();
-            Some(map_quota(account, identity, snapshot))
-        })
-        .collect()
+    Ok(assemble(token, bounds, rows, breakdown, observation))
 }
 
 /// Fold the query results into the wire DTO. Totals are summed over the
@@ -363,7 +300,6 @@ fn assemble(
     bounds: WindowBounds,
     rows: Vec<AggRow>,
     breakdown: Vec<(GroupKey, String, i64)>,
-    quota: Vec<UsageQuota>,
     observation: WindowObservation,
 ) -> UsagePanel {
     let mut per_group: std::collections::HashMap<GroupKey, BTreeMap<String, i64>> =
@@ -407,7 +343,6 @@ fn assemble(
         to_ms: bounds.to_ms,
         totals,
         groups,
-        quota,
         observation,
     }
 }
@@ -444,24 +379,6 @@ fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup 
         cache_read_present: row.cache_read_present,
         cache_write_tokens: row.cache_write_tokens,
         cache_write_present: row.cache_write_present,
-    }
-}
-
-fn map_quota(account: String, identity: AccountIdentity, snapshot: QuotaSnapshot) -> UsageQuota {
-    UsageQuota {
-        seat: account,
-        provider_entry: identity.provider_entry,
-        login_label: identity.login_label,
-        provider_kind: snapshot.provider_kind,
-        ts_start_ms: snapshot.ts_start,
-        claim: snapshot.claim,
-        status: snapshot.status,
-        overage_status: snapshot.overage_status,
-        utilization: snapshot.utilization,
-        overage_utilization: snapshot.overage_utilization,
-        // Ledger quota resets are epoch SECONDS; scale to ms so the `_ms`
-        // field name is truthful and the client's ms formatter is correct.
-        reset_ms: snapshot.reset.and_then(|s| s.checked_mul(1000)),
     }
 }
 
@@ -532,7 +449,6 @@ mod read_budget_bench_tests;
 mod tests {
     use super::*;
     use crate::handlers::status::DaemonMeta;
-    use crate::handlers::status::accounts::tests::{anthropic_block, codex_block, router_of};
     use crate::server::AppState;
     use arc_swap::ArcSwap;
     use axum::body::{Body, to_bytes};
@@ -549,48 +465,11 @@ mod tests {
 
     /// Build a `StatusState` whose usage-ledger path is `db_path`.
     fn state_with_ledger(db_path: PathBuf) -> Arc<StatusState> {
-        state_over_router(db_path, Router::new(Arc::new(Config::default())))
-    }
-
-    /// Build a `StatusState` serving `router` over the ledger at `db_path`.
-    fn state_over_router(db_path: PathBuf, router: Router) -> Arc<StatusState> {
-        state_over_swap(db_path, Arc::new(ArcSwap::from_pointee(router)))
-    }
-
-    fn state_over_swap(db_path: PathBuf, swap: Arc<ArcSwap<Router>>) -> Arc<StatusState> {
-        let app = AppState::for_test(swap);
+        let router = Router::new(Arc::new(Config::default()));
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         let mut status = StatusState::from_app(&app, None, DaemonMeta::for_test());
         status.usage_db_path = db_path;
         Arc::new(status)
-    }
-
-    /// A router whose config names `oauth://anthropic#a` and `oauth://codex`.
-    fn anthropic_a_and_codex() -> Router {
-        router_of(&[
-            (
-                "m-a",
-                "seat-a",
-                anthropic_block(),
-                "oauth://anthropic#a".into(),
-            ),
-            (
-                "m-codex",
-                "codex-one",
-                codex_block(),
-                "oauth://codex".into(),
-            ),
-        ])
-    }
-
-    fn quota_rows(json: &Value) -> &Vec<Value> {
-        json["data"]["quota"].as_array().expect("quota array")
-    }
-
-    fn seats_of(json: &Value) -> Vec<&str> {
-        quota_rows(json)
-            .iter()
-            .map(|q| q["seat"].as_str().expect("a listed seat is a string"))
-            .collect()
     }
 
     /// Seed a WAL ledger with one `ok` row per timestamp, all sharing the
@@ -684,273 +563,6 @@ mod tests {
             "empty healthy ledger must carry a data payload: {json}"
         );
         assert_eq!(json["data"]["totals"]["requests"], 0);
-        assert_eq!(
-            json["data"]["quota"].as_array().map(Vec::len),
-            Some(0),
-            "an empty ledger reports zero seats, not a missing field: {json}"
-        );
-    }
-
-    /// One seeded quota row: `(request_id, seat, provider_kind, quota_status,
-    /// quota_utilization, quota_reset)`. `quota_reset` is epoch SECONDS, the
-    /// unit the ledger stores.
-    type SeatQuotaSeed<'a> = (
-        &'a str,
-        Option<&'a str>,
-        Option<&'a str>,
-        Option<&'a str>,
-        Option<f64>,
-        Option<i64>,
-    );
-
-    /// Seed one quota-bearing row per [`SeatQuotaSeed`], each at a distinct
-    /// `ts_start` so the per-seat newest-row resolution is deterministic.
-    fn seed_seat_quota_ledger(path: &Path, rows: &[SeatQuotaSeed<'_>]) {
-        let db = open(path).expect("open ledger");
-        let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
-        for (i, (id, seat, provider_kind, status, utilization, reset_s)) in rows.iter().enumerate()
-        {
-            db.conn()
-                .execute(
-                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
-                     requested_model, alias, model, provider, upstream, stream, outcome, \
-                     latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
-                     seat, provider_kind, quota_status, quota_utilization, quota_reset) \
-                     VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 'm', 'p', 'u', 0, 'ok', \
-                     5, 0, 0, 1, 0, ?3, ?4, ?5, ?6, ?7)",
-                    rusqlite::params![
-                        now + i64::try_from(i).unwrap_or(0),
-                        id,
-                        seat,
-                        provider_kind,
-                        status,
-                        utilization,
-                        reset_s
-                    ],
-                )
-                .expect("seed seat quota row");
-        }
-    }
-
-    #[tokio::test]
-    async fn quota_renders_one_entry_per_seat_with_reset_scaled_from_seconds() {
-        // Arrange: two seats reporting different vendor shapes -- an Anthropic
-        // row with a status token and a codex row with utilization only -- plus
-        // an older row for the Anthropic seat that the per-seat read supersedes.
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("usage.db");
-        seed_seat_quota_ledger(
-            &path,
-            &[
-                (
-                    "a-old",
-                    Some("anthropic#a"),
-                    Some("anthropic-api"),
-                    Some("allowed"),
-                    Some(0.1),
-                    Some(1_000),
-                ),
-                (
-                    "a-new",
-                    Some("anthropic#a"),
-                    Some("anthropic-api"),
-                    Some("throttled"),
-                    Some(0.9),
-                    Some(9_000),
-                ),
-                (
-                    "c-1",
-                    Some("codex"),
-                    Some("codex"),
-                    None,
-                    Some(0.16),
-                    Some(1_786_210_114),
-                ),
-            ],
-        );
-
-        // Act
-        let state = state_over_router(path.clone(), anthropic_a_and_codex());
-        let (status, json) = get_usage(state, "/status/usage?window=all").await;
-
-        // Assert
-        assert_eq!(status, StatusCode::OK);
-        let quota = quota_rows(&json);
-        assert_eq!(quota.len(), 2, "one entry per seat: {json}");
-        let anthropic = quota
-            .iter()
-            .find(|q| q["seat"] == "anthropic#a")
-            .expect("anthropic seat present");
-        assert_eq!(anthropic["provider_kind"], "anthropic-api");
-        assert_eq!(anthropic["status"], "throttled", "the newer row wins");
-        assert_eq!(anthropic["reset_ms"], 9_000_000, "seconds scaled to ms");
-        let codex = quota
-            .iter()
-            .find(|q| q["seat"] == "codex")
-            .expect("codex seat present");
-        assert_eq!(codex["provider_kind"], "codex");
-        assert!(
-            codex["status"].is_null(),
-            "codex reports no status token: {codex}"
-        );
-        assert_eq!(codex["utilization"], 0.16);
-        assert_eq!(codex["reset_ms"], 1_786_210_114_000_i64);
-    }
-
-    /// The quota list carries only the accounts the served config names, each
-    /// with the identity `/status/accounts` gives it. A seat that left the
-    /// config (logged out of and its entry removed) and a seatless row
-    /// (pre-seat history, a forwarded credential) keep their ledger rows for
-    /// the traffic totals but report no snapshot.
-    #[tokio::test]
-    async fn quota_lists_only_configured_seats_with_their_identity() {
-        // Arrange
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("usage.db");
-        seed_seat_quota_ledger(
-            &path,
-            &[
-                (
-                    "configured",
-                    Some("anthropic#a"),
-                    Some("anthropic-api"),
-                    Some("allowed"),
-                    Some(0.3),
-                    Some(9_000),
-                ),
-                (
-                    "retired",
-                    Some("anthropic#gone"),
-                    Some("anthropic-api"),
-                    Some("allowed"),
-                    Some(0.7),
-                    Some(9_000),
-                ),
-                ("seatless", None, None, Some("allowed"), Some(0.2), None),
-                (
-                    "unlabeled",
-                    Some("codex"),
-                    Some("codex"),
-                    None,
-                    Some(0.1),
-                    None,
-                ),
-            ],
-        );
-        let state = state_over_router(path.clone(), anthropic_a_and_codex());
-
-        // Act
-        let (status, json) = get_usage(state, "/status/usage?window=all").await;
-
-        // Assert
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["schema_version"], 7, "an additive change: {json}");
-        assert_eq!(
-            json["data"]["totals"]["requests"], 4,
-            "every row still counts toward the traffic totals: {json}"
-        );
-        let mut seats = seats_of(&json);
-        seats.sort_unstable();
-        assert_eq!(seats, ["anthropic#a", "codex"], "{json}");
-        let labeled = &quota_rows(&json)[seats_of(&json)
-            .iter()
-            .position(|seat| *seat == "anthropic#a")
-            .expect("configured seat listed")];
-        assert_eq!(labeled["provider_entry"], "seat-a", "{labeled}");
-        assert_eq!(labeled["login_label"], "a", "{labeled}");
-        assert_eq!(labeled["utilization"], 0.3, "{labeled}");
-        let unlabeled = &quota_rows(&json)[seats_of(&json)
-            .iter()
-            .position(|seat| *seat == "codex")
-            .expect("unlabeled login listed")];
-        assert_eq!(unlabeled["provider_entry"], "codex-one", "{unlabeled}");
-        assert!(unlabeled["login_label"].is_null(), "{unlabeled}");
-    }
-
-    /// A login two entries name is one quota row under the smaller entry,
-    /// the identity `/status/accounts` gives it, whatever the model order.
-    #[tokio::test]
-    async fn a_login_under_two_entries_reports_the_smaller_entry() {
-        // Arrange
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("usage.db");
-        seed_seat_quota_ledger(
-            &path,
-            &[(
-                "w",
-                Some("anthropic#work"),
-                Some("anthropic-api"),
-                Some("allowed"),
-                Some(0.3),
-                None,
-            )],
-        );
-        let router = router_of(&[
-            (
-                "a-model",
-                "zeta",
-                anthropic_block(),
-                "oauth://anthropic#work".into(),
-            ),
-            (
-                "b-model",
-                "alpha",
-                anthropic_block(),
-                "oauth://anthropic#work".into(),
-            ),
-        ]);
-        let state = state_over_router(path.clone(), router);
-
-        // Act
-        let (_, json) = get_usage(state, "/status/usage?window=all").await;
-
-        // Assert
-        let [row] = quota_rows(&json).as_slice() else {
-            panic!("one quota row: {json}");
-        };
-        assert_eq!(row["seat"], "anthropic#work", "{row}");
-        assert_eq!(row["provider_entry"], "alpha", "{row}");
-        assert_eq!(row["login_label"], "work", "{row}");
-    }
-
-    /// The filter reads the config being served at request time: a reload
-    /// that drops a login drops its snapshot on the next read, with the
-    /// ledger unchanged.
-    #[tokio::test]
-    async fn a_reload_that_drops_a_login_drops_its_quota_row() {
-        // Arrange
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("usage.db");
-        seed_seat_quota_ledger(
-            &path,
-            &[
-                (
-                    "a",
-                    Some("anthropic#a"),
-                    Some("anthropic-api"),
-                    Some("allowed"),
-                    Some(0.3),
-                    None,
-                ),
-                ("c", Some("codex"), Some("codex"), None, Some(0.1), None),
-            ],
-        );
-        let swap = Arc::new(ArcSwap::from_pointee(anthropic_a_and_codex()));
-        let state = state_over_swap(path.clone(), Arc::clone(&swap));
-        let (_, before) = get_usage(Arc::clone(&state), "/status/usage?window=all").await;
-        assert_eq!(seats_of(&before).len(), 2, "premise: both listed: {before}");
-
-        // Act
-        swap.store(Arc::new(router_of(&[(
-            "m-codex",
-            "codex-one",
-            codex_block(),
-            "oauth://codex".into(),
-        )])));
-        let (_, after) = get_usage(state, "/status/usage?window=all").await;
-
-        // Assert
-        assert_eq!(seats_of(&after), ["codex"], "{after}");
     }
 
     #[tokio::test]
@@ -1022,78 +634,6 @@ mod tests {
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["unavailable"], "db_unavailable");
-    }
-
-    fn identity() -> AccountIdentity {
-        AccountIdentity {
-            provider_entry: "seat-a".into(),
-            login_label: Some("a".into()),
-        }
-    }
-
-    #[test]
-    fn quota_reset_seconds_scaled_to_milliseconds() {
-        // The ledger stamps quota resets in epoch SECONDS; the panel field is
-        // named `reset_ms`, so the seconds value must be scaled by 1000. A
-        // `None` reset stays `None`. Seat and provider_kind pass through as the
-        // client's discriminator for the shared quota columns.
-        let snapshot = QuotaSnapshot {
-            seat: Some("anthropic#a".into()),
-            provider_kind: Some("anthropic-api".into()),
-            ts_start: 1_700_000_000_000,
-            claim: None,
-            status: Some("ok".into()),
-            overage_status: None,
-            utilization: Some(0.5),
-            overage_utilization: None,
-            reset: Some(9_000),
-        };
-        let mapped = map_quota("anthropic#a".into(), identity(), snapshot);
-        assert_eq!(
-            mapped.reset_ms,
-            Some(9_000_000),
-            "9000s must map to 9_000_000ms"
-        );
-        assert_eq!(
-            mapped.ts_start_ms, 1_700_000_000_000,
-            "ts_start passes through as ms"
-        );
-        assert_eq!(mapped.seat, "anthropic#a");
-        assert_eq!(mapped.provider_kind.as_deref(), Some("anthropic-api"));
-
-        let no_reset = QuotaSnapshot {
-            seat: None,
-            provider_kind: None,
-            ts_start: 0,
-            claim: None,
-            status: None,
-            overage_status: None,
-            utilization: None,
-            overage_utilization: None,
-            reset: None,
-        };
-        let mapped = map_quota("anthropic#a".into(), identity(), no_reset);
-        assert_eq!(mapped.reset_ms, None, "absent reset stays absent");
-    }
-
-    #[test]
-    fn quota_reset_overflowing_millisecond_scale_maps_to_none() {
-        let snapshot = QuotaSnapshot {
-            seat: None,
-            provider_kind: None,
-            ts_start: 0,
-            claim: None,
-            status: None,
-            overage_status: None,
-            utilization: None,
-            overage_utilization: None,
-            reset: Some(i64::MAX / 1000 + 1),
-        };
-        let mapped = map_quota("anthropic#a".into(), identity(), snapshot);
-        assert_eq!(
-            mapped.reset_ms, None,
-            "a reset that overflows the ms scale drops the field instead of panicking"
-        );
     }
 
     #[test]
@@ -1244,7 +784,6 @@ mod tests {
                 "http-5xx".into(),
                 1,
             )],
-            Vec::new(),
             WindowObservation {
                 from_ms: 0,
                 to_ms: 100,
@@ -1666,7 +1205,7 @@ mod tests {
             json["unavailable"].is_null(),
             "a migrated v12 DB must read as available: {json}"
         );
-        assert_eq!(json["schema_version"], 7);
+        assert_eq!(json["schema_version"], 8);
         assert_eq!(json["data"]["totals"]["requests"], 2);
     }
 
@@ -1708,7 +1247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_panel_reports_schema_version_seven_without_would_trim() {
+    async fn usage_panel_reports_schema_version_eight_without_would_trim_or_quota() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_ledger(
@@ -1718,7 +1257,7 @@ mod tests {
         for uri in ["/status/usage", "/status/usage?window=all"] {
             let (status, json) = get_usage(state_with_ledger(path.clone()), uri).await;
             assert_eq!(status, StatusCode::OK, "{uri}");
-            assert_eq!(json["schema_version"], 7, "{uri}");
+            assert_eq!(json["schema_version"], 8, "{uri}");
             let data = json["data"]
                 .as_object()
                 .unwrap_or_else(|| panic!("{uri} must carry a data object: {json}"));
@@ -1726,6 +1265,10 @@ mod tests {
             assert!(
                 !data.contains_key("would_trim"),
                 "{uri} must not carry would_trim: {json}"
+            );
+            assert!(
+                !data.contains_key("quota"),
+                "{uri} must not carry quota: {json}"
             );
         }
     }
@@ -2014,20 +1557,12 @@ mod tests {
             .expect("instant predates the process start");
 
         // Act
-        let shed = collect(
-            &mut db,
-            "all",
-            ALL_TIME,
-            LedgerHealth::default(),
-            &AccountIdentities::default(),
-            expired,
-        );
+        let shed = collect(&mut db, "all", ALL_TIME, LedgerHealth::default(), expired);
         let after = collect(
             &mut db,
             "all",
             ALL_TIME,
             LedgerHealth::default(),
-            &AccountIdentities::default(),
             Instant::now() + Duration::from_mins(10),
         );
 
@@ -2095,7 +1630,6 @@ mod tests {
             "all",
             ALL_TIME,
             LedgerHealth::default(),
-            &AccountIdentities::default(),
             started + Duration::from_millis(USAGE_BUDGET_MS),
         );
         let elapsed = started.elapsed();

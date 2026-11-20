@@ -6,7 +6,7 @@
   // containment for a cached page / mixed assets / a bad build, not version
   // negotiation. `query` sits alongside the GET panels because the QUERY
   // aggregate is a source of its own (see SOURCES below).
-  var EXPECTED = { usage: 7, health: 9, config: 6, doctor: 32, query: 4, accounts: 1, attention: 1 };
+  var EXPECTED = { usage: 8, health: 9, config: 6, doctor: 32, query: 4, accounts: 1, attention: 1 };
 
   // The panels of the aggregate round, each with its own envelope +
   // freshness. NOT the same list as the views (VIEWS in dash_80_views.js): a
@@ -29,8 +29,8 @@
   // The all-history usage read: its OWN fetch, its OWN backoff, its OWN
   // as_of. Routing attributes over ALL HISTORY, so it must never read the
   // aggregate's today-scoped usage panel -- and the aggregate panel must stay
-  // today-scoped for the readers that want today (the Health quota tiles, the
-  // verdict strip). Two windows of one panel are two sources.
+  // today-scoped for the readers that want today. Two windows of one panel are
+  // two sources.
   var USAGE_ALL_SOURCE = 'usage_all';
   var USAGE_ALL_URL = '/status/usage?window=all';
   var ALL_SOURCES = GET_SOURCES.concat(QUERY_SOURCES, [USAGE_ALL_SOURCE]);
