@@ -1,6 +1,6 @@
 use routectl_core::UpstreamReason;
 use routectl_router::runtime_state::UnusableCause;
-use routectl_router::{Finding, Status};
+use routectl_router::{Billing, Finding, Status};
 use serde_json::Value;
 
 use super::*;
@@ -35,6 +35,7 @@ fn account(name: &str) -> AccountSnapshot {
         refresh_failure: None,
         poll_failure: None,
         windows: Vec::new(),
+        billing: Billing::Unknown,
     }
 }
 
@@ -311,6 +312,28 @@ fn account_near_limit_is_listed_for_a_fresh_window_used_past_ninety_percent() {
     assert_rows(AttentionKind::AccountNearLimit, rows);
 }
 
+/// Overage comes only from the billing claim: a full window with included or
+/// unknown billing is saturation, not overage.
+#[test]
+fn account_overage_is_listed_only_for_an_overage_billing_claim() {
+    let billed = |billing: Billing, used: f64| {
+        with_account(AccountSnapshot {
+            billing,
+            windows: vec![window(18_000, used)],
+            ..seat_a()
+        })
+    };
+    let rows = vec![
+        ("overage", billed(Billing::Overage, 0.40), 1),
+        ("overage at used 1.0", billed(Billing::Overage, 1.0), 1),
+        ("included at used 1.0", billed(Billing::Included, 1.0), 0),
+        ("unknown at used 1.0", billed(Billing::Unknown, 1.0), 0),
+        ("no reading", with_account(seat_a()), 0),
+    ];
+
+    assert_rows(AttentionKind::AccountOverage, rows);
+}
+
 #[test]
 fn usage_poll_failing_is_listed_once_the_failure_run_is_fifteen_minutes_old() {
     let failing_since = |since_ms| {
@@ -573,6 +596,25 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
             },
         ),
         (
+            AttentionKind::AccountOverage,
+            with_account(AccountSnapshot {
+                billing: Billing::Overage,
+                ..seat_a()
+            }),
+            Expected {
+                key: "account_overage:anthropic#seat-a",
+                severity: Severity::Degraded,
+                subject: DISPLAY,
+                account: Some(ACCOUNT),
+                cause: "Billing beyond the included plan, at extra-usage rates",
+                raw_token: "account_overage (billing=overage)",
+                since_ms: None,
+                until_ms: None,
+                fix: None,
+                target: ViewTarget::Accounts,
+            },
+        ),
+        (
             AttentionKind::UsagePollFailing,
             with_account(AccountSnapshot {
                 poll_failure: Some(PollFailure {
@@ -765,6 +807,46 @@ fn two_windows_past_the_limit_on_one_account_are_one_item_naming_the_fullest() {
         items[0].raw_token,
         "account_near_limit (used=0.97, length_secs=604800)"
     );
+}
+
+/// Overage is a cost cause, not a credential one: an overage account whose
+/// credential is unusable or parked lists both, and the credential item does
+/// not name the billing.
+#[test]
+fn an_overage_account_with_a_credential_item_lists_both_causes_once() {
+    let rows = [
+        (
+            "unusable",
+            logged_out(NOW - MIN),
+            AttentionKind::AccountUnusable,
+        ),
+        (
+            "parked",
+            CredentialState::Parked {
+                reason: UpstreamReason::CredentialExpired,
+                until_ms: NOW + 5 * MIN,
+            },
+            AttentionKind::AccountParked,
+        ),
+    ];
+
+    for (name, credential, credential_kind) in rows {
+        let row = with_account(AccountSnapshot {
+            credential,
+            billing: Billing::Overage,
+            ..seat_a()
+        });
+
+        let items = active_items(&row);
+
+        let kinds: Vec<AttentionKind> = items.iter().map(|item| item.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![credential_kind, AttentionKind::AccountOverage],
+            "{name}"
+        );
+        assert!(!items[0].raw_token.contains("overage"), "{name}: {items:?}");
+    }
 }
 
 #[test]
@@ -987,6 +1069,13 @@ fn the_verdict_is_the_worst_active_routing_or_account_item() {
             vec![seat.clone()],
             VerdictSeverity::Degraded,
             "claude-a (a): claude-a (a) cause",
+            Some(ViewTarget::Accounts),
+        ),
+        (
+            "overage alone",
+            vec![item(AttentionKind::AccountOverage, "claude-b (b)")],
+            VerdictSeverity::Degraded,
+            "claude-b (b): claude-b (b) cause",
             Some(ViewTarget::Accounts),
         ),
         (

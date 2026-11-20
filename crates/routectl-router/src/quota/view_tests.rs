@@ -461,6 +461,23 @@ fn an_unstarted_window_read_across_a_suspend_is_unread() {
     assert_eq!(standing_at(&store, &after_suspend).tier, Tier::Unread);
 }
 
+// ---- Billing ----
+
+#[test]
+fn an_account_with_no_meter_reads_billing_unknown() {
+    let clock = Clock::new();
+    let store = store();
+
+    let readings = store.readings(&clock.at(Duration::ZERO));
+
+    let [account] = readings.accounts.as_slice() else {
+        panic!("one configured account");
+    };
+    assert_eq!(account.report, ReportState::NoReading);
+    assert_eq!(account.billing, Billing::Unknown);
+    assert!(!account.billing_fresh);
+}
+
 // ---- No wire shape ----
 
 /// Resolves only when `T` does not implement `Serialize`: with an impl, both
@@ -488,6 +505,7 @@ fn the_public_view_types_have_no_serialize_impl() {
     <LengthClass as AmbiguousIfSerialize<_>>::assert_not_serialize();
     <Started as AmbiguousIfSerialize<_>>::assert_not_serialize();
     <ReadingSource as AmbiguousIfSerialize<_>>::assert_not_serialize();
+    <Billing as AmbiguousIfSerialize<_>>::assert_not_serialize();
     <crate::quota::usage_body::UsageVendor as AmbiguousIfSerialize<_>>::assert_not_serialize();
     <crate::router::PolledUsageRejection as AmbiguousIfSerialize<_>>::assert_not_serialize();
 }

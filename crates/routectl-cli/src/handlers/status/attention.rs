@@ -20,8 +20,8 @@ use axum::extract::State;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
 use routectl_router::{
-    AccountIdentities, AccountIdentity, AccountReading, AccountReadings, AccountWindow, Finding,
-    ObservationStamp, PoolEligibility,
+    AccountIdentities, AccountIdentity, AccountReading, AccountReadings, AccountWindow, Billing,
+    Finding, ObservationStamp, PoolEligibility,
 };
 use serde::Serialize;
 
@@ -167,17 +167,18 @@ fn inputs_from(sources: AttentionSources) -> AttentionInputs {
         .collect();
     let accounts = identities
         .iter()
-        .map(|(account, identity)| AccountSnapshot {
-            account: account.to_string(),
-            display: display_of(identity),
-            credential: credential_state(credentials.get(account)),
-            fix: fixes.get(account).cloned(),
-            refresh_failure: refresh_failures.get(account).copied(),
-            poll_failure: poll_failure(poll.as_ref(), account),
-            windows: by_account
-                .remove(account)
-                .map(|reading| reading.windows.iter().map(window_snapshot).collect())
-                .unwrap_or_default(),
+        .map(|(account, identity)| {
+            let (windows, billing) = reading_parts(by_account.remove(account));
+            AccountSnapshot {
+                account: account.to_string(),
+                display: display_of(identity),
+                credential: credential_state(credentials.get(account)),
+                fix: fixes.get(account).cloned(),
+                refresh_failure: refresh_failures.get(account).copied(),
+                poll_failure: poll_failure(poll.as_ref(), account),
+                windows,
+                billing,
+            }
         })
         .collect();
     AttentionInputs {
@@ -250,6 +251,17 @@ fn poll_failure(poll: Option<&PollStateSnapshot>, account: &str) -> Option<PollF
     Some(PollFailure {
         since_ms: seat.failure_since_ms?,
         last_result: seat.last_result.map(str::to_string),
+    })
+}
+
+/// The reading-derived half of an account snapshot: its windows and billing
+/// state. An account with no reading has no windows and unknown billing.
+fn reading_parts(reading: Option<AccountReading>) -> (Vec<WindowSnapshot>, Billing) {
+    reading.map_or((Vec::new(), Billing::Unknown), |reading| {
+        (
+            reading.windows.iter().map(window_snapshot).collect(),
+            reading.billing,
+        )
     })
 }
 

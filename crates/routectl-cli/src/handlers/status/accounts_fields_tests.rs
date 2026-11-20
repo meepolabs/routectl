@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use routectl_core::UpstreamReason;
+use routectl_router::Billing;
 use routectl_router::runtime_state::UnusableCause;
 use serde_json::{Value, json};
 
@@ -50,6 +51,7 @@ async fn a_logged_out_seats_credential_fix_and_cause_equal_its_attention_item() 
             refresh_failure: None,
             poll_failure: None,
             windows: Vec::new(),
+            billing: Billing::Unknown,
         }],
         ..AttentionInputs::default()
     };

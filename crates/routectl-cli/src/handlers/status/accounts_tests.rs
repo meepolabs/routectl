@@ -13,9 +13,9 @@ use futures::stream::BoxStream;
 use routectl_auth::{OAuthStore, SecretRef};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
 use routectl_router::{
-    AccountReading, AccountReadings, AccountWindow, CURRENT_CONFIG_VERSION, Config, LastReading,
-    LengthClass, PlacementBirths, PlacementMoves, PlacementStatus, ReadingSource, ReadingWindow,
-    RejectionTotals, ReportState, ResolvedModel, Router, Started, UsageVendor,
+    AccountReading, AccountReadings, AccountWindow, Billing, CURRENT_CONFIG_VERSION, Config,
+    LastReading, LengthClass, PlacementBirths, PlacementMoves, PlacementStatus, ReadingSource,
+    ReadingWindow, RejectionTotals, ReportState, ResolvedModel, Router, Started, UsageVendor,
 };
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -431,7 +431,7 @@ fn a_reading_for_an_unconfigured_account_is_not_listed() {
             report: ReportState::NoWindows,
             windows: Vec::new(),
             last_accepted: None,
-            billing: routectl_router::Billing::Unknown,
+            billing: Billing::Unknown,
             billing_fresh: false,
         }],
         rejections: zero_totals(),

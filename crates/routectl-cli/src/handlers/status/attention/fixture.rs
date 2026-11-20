@@ -9,9 +9,9 @@ use std::time::{Duration, SystemTime};
 use routectl_core::UpstreamReason;
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{
-    AccountIdentities, AccountReading, AccountReadings, AccountWindow, Finding, LastReading,
-    LengthClass, PoolEligibility, ReadingSource, ReadingWindow, RejectionTotals, ReportState,
-    Started, Status, UsageVendor,
+    AccountIdentities, AccountReading, AccountReadings, AccountWindow, Billing, Finding,
+    LastReading, LengthClass, PoolEligibility, ReadingSource, ReadingWindow, RejectionTotals,
+    ReportState, Started, Status, UsageVendor,
 };
 use serde_json::Value;
 
@@ -36,9 +36,10 @@ pub fn populated_attention() -> Value {
 
 /// The list with its doctor report current: an empty pool (broken), an open
 /// route, a logged-out seat, a parked login, a failing token refresh, a
-/// window near its limit, a failing usage poll, a stopped poll driver, a
-/// recent record loss and a doctor failure (all degraded), and a second pool
-/// that was empty on the earlier read and has recovered.
+/// window near its limit, a login billing at overage, a failing usage poll,
+/// a stopped poll driver, a recent record loss and a doctor failure (all
+/// degraded), and a second pool that was empty on the earlier read and has
+/// recovered.
 pub fn populated_attention_panel() -> Panel<AttentionPanel> {
     two_reads(true)
 }
@@ -197,7 +198,8 @@ fn at_ms(ms: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(ms.unsigned_abs())
 }
 
-/// Codex has a fresh 5-hour window 95% used.
+/// Codex has a fresh 5-hour window 95% used; the default Anthropic login
+/// reports billing beyond its included plan.
 fn readings() -> AccountReadings {
     let near_limit = AccountWindow {
         window: ReadingWindow {
@@ -212,17 +214,31 @@ fn readings() -> AccountReadings {
         observed_at: at_ms(FIXTURE_NOW_MS - 60_000),
         age: Some(Duration::from_mins(1)),
         stale: false,
+        kept: false,
     };
     AccountReadings {
-        accounts: vec![AccountReading {
-            account: "codex".to_string(),
-            report: ReportState::Windows,
-            windows: vec![near_limit],
-            last_accepted: Some(LastReading {
-                observed_at: at_ms(FIXTURE_NOW_MS - 60_000),
-                source: ReadingSource::Response,
-            }),
-        }],
+        accounts: vec![
+            AccountReading {
+                account: "codex".to_string(),
+                report: ReportState::Windows,
+                windows: vec![near_limit],
+                last_accepted: Some(LastReading {
+                    observed_at: at_ms(FIXTURE_NOW_MS - 60_000),
+                    source: ReadingSource::Response,
+                    fresh: true,
+                }),
+                billing: Billing::Unknown,
+                billing_fresh: false,
+            },
+            AccountReading {
+                account: "#anthropic".to_string(),
+                report: ReportState::NoReading,
+                windows: Vec::new(),
+                last_accepted: None,
+                billing: Billing::Overage,
+                billing_fresh: true,
+            },
+        ],
         rejections: RejectionTotals {
             invalid_utilization: 0,
             expired_reset: 0,
@@ -234,6 +250,7 @@ fn readings() -> AccountReadings {
             malformed_body: 0,
         },
         refused_by_admission: 0,
+        corrections_confirmed: 0,
     }
 }
 
@@ -250,5 +267,6 @@ fn poll() -> PollStateSnapshot {
             failure_since_ms: Some(FIXTURE_NOW_MS - 1_200_000),
         }],
         paused_until_ms: Vec::new(),
+        switched_off: false,
     }
 }

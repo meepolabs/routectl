@@ -12,7 +12,7 @@
 
 use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::runtime_state::UnusableCause;
-use routectl_router::{Finding, Status};
+use routectl_router::{Billing, Finding, Status};
 use serde::{Serialize, Serializer};
 
 pub use crate::server::seat_driver::RefreshFailure;
@@ -105,6 +105,8 @@ pub struct AccountSnapshot {
     pub poll_failure: Option<PollFailure>,
     /// The account's usage windows.
     pub windows: Vec<WindowSnapshot>,
+    /// The budget the upstream last reported billing against.
+    pub billing: Billing,
 }
 
 /// Whether an account's credential can be used, and if not, why.
@@ -191,6 +193,8 @@ pub enum AttentionKind {
     DriverStopped,
     /// An account with a window used past the near-limit fraction.
     AccountNearLimit,
+    /// An account the upstream reports billing beyond its included budget.
+    AccountOverage,
     /// An account whose usage poll has failed for a while.
     UsagePollFailing,
     /// A request-row loss counter rose recently.
@@ -202,7 +206,7 @@ pub enum AttentionKind {
 impl AttentionKind {
     /// Every kind, in list order: broken kinds before degraded ones, so
     /// list order is worst first.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::PoolEmpty,
         Self::RouteCircuitOpen,
         Self::AccountUnusable,
@@ -210,6 +214,7 @@ impl AttentionKind {
         Self::AccountRefreshFailing,
         Self::DriverStopped,
         Self::AccountNearLimit,
+        Self::AccountOverage,
         Self::UsagePollFailing,
         Self::RecordsDropped,
         Self::DoctorFailure,
@@ -225,6 +230,7 @@ impl AttentionKind {
             Self::AccountRefreshFailing => "account_refresh_failing",
             Self::DriverStopped => "driver_stopped",
             Self::AccountNearLimit => "account_near_limit",
+            Self::AccountOverage => "account_overage",
             Self::UsagePollFailing => "usage_poll_failing",
             Self::RecordsDropped => "records_dropped",
             Self::DoctorFailure => "doctor_failure",
@@ -257,6 +263,7 @@ impl AttentionKind {
             | Self::AccountRefreshFailing
             | Self::DriverStopped
             | Self::AccountNearLimit
+            | Self::AccountOverage
             | Self::UsagePollFailing => ViewTarget::Accounts,
         }
     }
@@ -695,6 +702,7 @@ fn account_items(account: &AccountSnapshot, now: i64) -> Vec<AttentionItem> {
         credential,
         refresh,
         near_limit_item(account, now),
+        overage_item(account),
         poll_item(account, now),
     ]
     .into_iter()
@@ -841,6 +849,21 @@ fn window_length(secs: u64) -> String {
     } else {
         format!("{} min", secs.div_ceil(60))
     }
+}
+
+/// Overage is read only from the upstream's billing claim, never from a full
+/// window: a saturated window and an overage seat look alike. It is a cost
+/// cause, not a credential one, so it is listed beside any credential item.
+fn overage_item(account: &AccountSnapshot) -> Option<AttentionItem> {
+    let kind = AttentionKind::AccountOverage;
+    (account.billing == Billing::Overage).then(|| {
+        Draft {
+            cause: "Billing beyond the included plan, at extra-usage rates".to_string(),
+            raw_token: format!("{} (billing=overage)", kind.as_str()),
+            ..Draft::for_account(kind, account)
+        }
+        .finish()
+    })
 }
 
 fn poll_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem> {

@@ -19,7 +19,8 @@ use routectl_core::{
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::{CircuitPhase, ProviderGateStatus, UnusableCause};
 use routectl_router::{
-    CURRENT_CONFIG_VERSION, Config, Finding, ResolvedModel, Router, Status, parse_config,
+    CURRENT_CONFIG_VERSION, Config, Finding, ReportState, ResolvedModel, Router, Status,
+    parse_config,
 };
 use routectl_testkit::ScopedEnv;
 use serde_json::Value;
@@ -568,6 +569,7 @@ fn a_poll_failure_comes_only_from_a_recorded_failure_run() {
             poll_seat("awaiting", true, None),
         ],
         paused_until_ms: Vec::new(),
+        switched_off: false,
     };
     let rows = [
         (
@@ -585,6 +587,46 @@ fn a_poll_failure_comes_only_from_a_recorded_failure_run() {
     ];
     for (account, poll, expected) in rows {
         assert_eq!(poll_failure(poll, account), expected, "{account}");
+    }
+}
+
+fn reading_billed(billing: Billing) -> AccountReading {
+    AccountReading {
+        account: "anthropic#work".to_string(),
+        report: ReportState::NoReading,
+        windows: Vec::new(),
+        last_accepted: None,
+        billing,
+        billing_fresh: false,
+    }
+}
+
+/// The account reading's billing state is copied across as is; an account
+/// with no reading has unknown billing.
+#[test]
+fn an_account_snapshot_carries_its_reading_billing() {
+    let rows = [
+        (
+            "overage",
+            Some(reading_billed(Billing::Overage)),
+            Billing::Overage,
+        ),
+        (
+            "included",
+            Some(reading_billed(Billing::Included)),
+            Billing::Included,
+        ),
+        (
+            "unknown",
+            Some(reading_billed(Billing::Unknown)),
+            Billing::Unknown,
+        ),
+        ("no reading", None, Billing::Unknown),
+    ];
+    for (name, reading, expected) in rows {
+        let (_, billing) = reading_parts(reading);
+
+        assert_eq!(billing, expected, "{name}");
     }
 }
 

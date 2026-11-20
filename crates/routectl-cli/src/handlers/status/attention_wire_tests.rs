@@ -229,6 +229,7 @@ fn the_closed_token_sets_are_welded_to_their_enums() {
             "account_refresh_failing",
             "driver_stopped",
             "account_near_limit",
+            "account_overage",
             "usage_poll_failing",
             "records_dropped",
             "doctor_failure",
@@ -322,6 +323,11 @@ fn the_fixtures_carry_every_item_state_and_both_doctor_coverages() {
     assert_eq!(
         items_where(&current, "recovered", "broken"),
         ["pool_empty:backup"]
+    );
+    assert!(
+        items_where(&current, "active", "degraded")
+            .contains(&"account_overage:#anthropic".to_string()),
+        "{current}"
     );
     assert_eq!(current["data"]["coverage"]["doctor"], "current");
     assert_eq!(current["data"]["verdict"]["severity"], "broken");
