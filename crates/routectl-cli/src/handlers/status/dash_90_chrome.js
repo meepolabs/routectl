@@ -27,12 +27,12 @@
   var FAVICON_OK = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%234caf50'></circle></svg>";
   var FAVICON_WARN = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23f0a020'></circle></svg>";
   var FAVICON_STALE = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%239aa5b5'></circle></svg>";
-  var FAVICON_TERMINAL = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23d32f2f'></circle></svg>";
+  var FAVICON_BAD = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23d32f2f'></circle></svg>";
   var FAVICONS = {
     ok: FAVICON_OK,
-    warn_error: FAVICON_WARN,
-    stale_unknown: FAVICON_STALE,
-    terminal: FAVICON_TERMINAL
+    warn: FAVICON_WARN,
+    idle: FAVICON_STALE,
+    bad: FAVICON_BAD
   };
 
   // Stale-or-unknown: the GET loop is backing off, OR no round has ever
@@ -47,20 +47,16 @@
     return Date.now() > nextDueAtMs + TIMEOUT_MS + FRESH_SLACK_MS;
   }
 
-  // The icon follows the verdict strip (ok, warn or bad, or idle while routing
-  // state is not current), behind the two arms the strip does not carry: a
-  // stopped page, and data the wall clock says has aged out.
-  var FAVICON_BY_VERDICT = {
-    ok: 'ok',
-    warn: 'warn_error',
-    bad: 'warn_error',
-    idle: 'stale_unknown'
-  };
-
+  // The icon follows the verdict strip: red for a stopped page or a broken
+  // verdict, kept red while that verdict is the last known one, since the
+  // router was last seen unable to route. Any other verdict that is not
+  // current, or data the wall clock says has aged out, reads grey rather than
+  // a reassuring green or a stale amber.
   function faviconState() {
-    if (terminal) { return 'terminal'; }
-    if (isStaleUnknown()) { return 'stale_unknown'; }
-    return FAVICON_BY_VERDICT[verdictState().kind];
+    var shown = shownVerdict(currentVerdict());
+    if (terminal || shown.kind === 'bad') { return 'bad'; }
+    if (shown.note || isStaleUnknown()) { return 'idle'; }
+    return shown.kind;
   }
 
   function updateFavicon() {
@@ -225,6 +221,13 @@
     return '#' + state.view + (query ? QUERY_MARK + query : '');
   }
 
+  // The address of view `id` with the rest of the selection as it is now.
+  function viewLinkHash(id) {
+    var state = currentViewState();
+    state.view = id;
+    return formatViewHash(state);
+  }
+
   function writeViewHash(state, push) {
     var hash = formatViewHash(state);
     if (location.hash === hash) { return; }
@@ -360,6 +363,13 @@
     'provider-overflow': function () { onProviderOverflow(); },
     'group-by': function (arg) { if (arg) { onGroupBy(arg); } },
     'sort-column': function (arg) { if (arg) { onSortColumn(arg); } },
+    // A same-page link: the view switch goes through the one view-state path
+    // so the rest of the selection is kept, not reset by the bare hash.
+    'open-view': function (arg, node, e) {
+      if (!viewFor(arg) || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
+      e.preventDefault();
+      selectTab(arg);
+    },
     'seat-open': function (arg) { if (arg) { openSeatModal(arg); } },
     'seat-close': function () { closeSeatModal(); },
     // Only a click on the backdrop itself closes; a click that bubbled up
@@ -382,11 +392,13 @@
     ACTIONS[name](node.getAttribute('data-arg'), node, e);
   }
 
-  // One click listener per pane root and one on the modal host, installed
-  // once: the nodes beneath them are rebuilt every render, the roots are not.
+  // One click listener per pane root, one on the modal host and one on the
+  // verdict strip, installed once: the nodes beneath them are rebuilt every
+  // render, the roots are not.
   function initActions() {
     var roots = VIEWS.map(function (view) { return el('pane-' + view.id); });
     roots.push(el('modal-host'));
+    roots.push(el('verdict'));
     roots.forEach(function (root) {
       if (!root) { return; }
       root.addEventListener('click', function (e) { dispatchAction(root, e); });

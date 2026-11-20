@@ -585,90 +585,99 @@
 
   // ---- verdict strip ---------------------------------------------------
 
-  // The plain-language verdict: ONE sentence about whether routing is
-  // working, plus the window's req/span figures and the poll indicator. The
-  // favicon follows the verdict, so it is repainted here too.
-  // Deliberately carries NO cost figure -- cost is a Usage/Overview reading,
+  // The plain-language verdict: ONE sentence the daemon wrote about whether
+  // routing works (attention.verdict), a link to the view that shows its
+  // cause, the window's req/span figures and the poll indicator. The page
+  // adds no wording of its own to the sentence. The favicon follows the
+  // verdict, so it is repainted here too.
+  // Deliberately carries NO cost figure -- cost is a Now/Traffic reading,
   // and repeating it here would show the same fact twice.
   function renderVerdict() {
+    var current = currentVerdict();
+    if (current) { lastVerdict = current; }
+    var shown = shownVerdict(current);
     var strip = el('verdict');
-    var verdict = verdictState();
     strip.classList.remove('verdict--ok', 'verdict--warn', 'verdict--bad', 'verdict--idle');
-    strip.classList.add('verdict--' + verdict.kind);
-    el('verdict-text').textContent = verdict.text;
+    strip.classList.add('verdict--' + shown.kind);
+    strip.classList.toggle('verdict--stale', !!shown.note);
+    el('verdict-text').textContent = shown.text;
+    var note = el('verdict-note');
+    note.hidden = !shown.note;
+    note.textContent = shown.note || '';
+    syncVerdictLink(shown.target);
     el('verdict-stats').textContent = verdictStats();
     renderPollIndicator();
     updateFavicon();
   }
 
-  // The verdict reads routing state only: whether the targets and pool seats
-  // a request can dispatch to are usable, from the health payload. A stopped
-  // page says so. Health that is not current (no payload yet, a refusal, a
-  // payload that failed to render, or one RETAINED as stale after a failed
-  // refresh) says nothing about routing now, so the strip reads neutral rather
-  // than repeating an old reading or guessing at a cause; the failure itself
-  // shows on the panels it costs. No other source moves the verdict.
-  function verdictState() {
-    if (terminal) { return { kind: 'bad', text: 'Polling stopped - open this page on the bound address' }; }
-    var checking = { kind: 'idle', text: 'Checking routing state' };
-    if (!healthIsCurrent()) { return checking; }
-    var data = SOURCES.health.data;
-    if (!verdictInputsKnown(data)) { return checking; }
-    return seatVerdict(data) || { kind: 'ok', text: 'All routes healthy' };
+  var VERDICT_KIND = { ok: 'ok', degraded: 'warn', broken: 'bad' };
+
+  // The last current verdict the strip showed, kept so an outage or a panel
+  // that stops answering never returns the strip to the start-up text.
+  var lastVerdict = null;
+
+  // The verdict of a CURRENT attention payload, or null when attention is
+  // not current (no payload yet, a refusal, a failed refresh) or its verdict
+  // is not one this page can read.
+  function currentVerdict() {
+    var rec = SOURCES.attention;
+    if (effectiveState(rec) !== 'live' || !isPlainObject(rec.data)) { return null; }
+    var v = rec.data.verdict;
+    var known = isPlainObject(v) && Object.prototype.hasOwnProperty.call(VERDICT_KIND, v.severity) &&
+      typeof v.text === 'string' && (v.target === null || typeof v.target === 'string');
+    if (!known) { return null; }
+    return { severity: v.severity, text: v.text, target: v.target, as_of: rec.asOf };
   }
 
-  // Every field seatVerdict reads, well typed: pools[] { pool, eligible,
-  // configured } and targets[] { nickname, eligibility.reason (string|null) }.
-  // Anything else leaves the strip neutral, never healthy on an unmade reading.
-  function verdictInputsKnown(data) {
-    if (!Array.isArray(data.pools) || !Array.isArray(data.targets)) { return false; }
-    var poolsKnown = data.pools.every(function (p) {
-      return isPlainObject(p) && typeof p.pool === 'string' &&
-        isFiniteNumber(p.eligible) && isFiniteNumber(p.configured);
-    });
-    return poolsKnown && data.targets.every(function (t) {
-      return isPlainObject(t) && typeof t.nickname === 'string' && isPlainObject(t.eligibility) &&
-        (t.eligibility.reason === null || typeof t.eligibility.reason === 'string');
-    });
-  }
-
-  function healthIsCurrent() {
-    var rec = SOURCES.health;
-    return effectiveState(rec) === 'live' && !!rec.data;
-  }
-
-  // Seats a request cannot use, from a current health payload: a pool with no
-  // eligible seat is bad; a pool missing some seats, or any target with an
-  // eligibility reason, is a warning. Pool seats are also targets, so the pool
-  // arms come first and a pool's outage is named once, by the pool. Null when
-  // every seat is usable.
-  function seatVerdict(data) {
-    var pools = data.pools;
-    var empty = pools.filter(function (p) { return p.eligible <= 0 && p.configured > 0; });
-    if (empty.length) {
-      return { kind: 'bad', text: 'No usable seat in ' + namedFew(empty.map(poolName)) + ' - see Accounts' };
+  // What the strip shows: the current verdict; else, once one has been
+  // shown, that last verdict marked with its time and why it is not current;
+  // only before any verdict, the start-up text. A stopped page says so.
+  function shownVerdict(current) {
+    if (terminal) {
+      return { kind: 'bad', text: 'Polling stopped - open this page on the bound address', target: null, note: null };
     }
-    var short = pools.filter(function (p) { return p.eligible < p.configured; });
-    if (short.length) {
-      return { kind: 'warn', text: 'Some seats unusable in ' + namedFew(short.map(poolName)) + ' - see Accounts' };
-    }
-    var blocked = [];
-    data.targets.forEach(function (t) {
-      if (!t.eligibility.reason) { return; }
-      if (blocked.indexOf(t.nickname) < 0) { blocked.push(t.nickname); }
-    });
-    if (blocked.length) {
-      return { kind: 'warn', text: namedFew(blocked) + ' not usable right now - see Accounts' };
-    }
-    return null;
+    var known = current || lastVerdict;
+    if (!known) { return { kind: 'idle', text: 'Checking routing state', target: null, note: null }; }
+    return {
+      kind: VERDICT_KIND[known.severity],
+      text: known.text,
+      target: known.target,
+      note: current ? null : staleVerdictNote(known.as_of)
+    };
   }
 
-  function poolName(p) { return p.pool; }
+  // A failed refresh means the daemon did not answer; any other state means
+  // it answered without a current verdict.
+  function staleVerdictNote(asOf) {
+    var state = SOURCES.attention.state;
+    var why = (state === 'stale' || state === 'dead')
+      ? 'the daemon cannot be reached'
+      : 'verdict not current';
+    return 'as of ' + verdictTime(asOf) + ' - ' + why;
+  }
 
-  // The first name, and how many more, so the sentence stays one line.
-  function namedFew(names) {
-    if (names.length <= 1) { return names[0] || ''; }
-    return names[0] + ' and ' + (names.length - 1) + ' more';
+  function verdictTime(asOf) {
+    var then = asOf ? new Date(asOf) : null;
+    return (then && !isNaN(then.getTime())) ? then.toLocaleTimeString() : 'an unknown time';
+  }
+
+  // The link to the view a verdict points at, labelled from that view. A
+  // token naming no registered view gets no link. A link already showing the
+  // same view is kept, so keyboard focus on it survives the refresh.
+  function syncVerdictLink(target) {
+    var slot = el('verdict-link');
+    var view = (typeof target === 'string') ? viewFor(target) : null;
+    var kept = slot.firstElementChild;
+    if (kept && (!view || kept.getAttribute('data-arg') !== view.id)) {
+      slot.removeChild(kept);
+      kept = null;
+    }
+    if (!view) { return; }
+    if (!kept) {
+      kept = viewLink(view);
+      slot.appendChild(kept);
+    }
+    kept.setAttribute('href', viewLinkHash(view.id));
   }
 
   // req/span for the ACTIVE tab. A count is shown only beside the span it

@@ -28,8 +28,9 @@
 <body>
   <!--
     The persistent verdict strip: a state dot, ONE plain-language sentence,
-    the window's req/span figures, the window picker, and the poll
-    indicator. It carries no cost figure by design -- cost is a
+    when it is not current the time it was last current and why, a link to
+    the view that shows its cause, the window's req/span figures, the window
+    picker, and the poll indicator. It carries no cost figure by design -- cost is a
     Now/Traffic reading, and repeating it here would show the same fact
     twice.
   -->
@@ -37,6 +38,8 @@
     <div class="verdict-lead">
       <span class="verdict-dot" id="verdict-dot" aria-hidden="true"></span>
       <span class="verdict-text" id="verdict-text" role="status" aria-live="polite"></span>
+      <span class="verdict-note" id="verdict-note" aria-live="polite" hidden></span>
+      <span class="verdict-link" id="verdict-link"></span>
       <span class="verdict-stats" id="verdict-stats"></span>
     </div>
     <div class="verdict-side">

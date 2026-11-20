@@ -233,6 +233,22 @@ body {
   color: var(--fg);
   min-width: 0;
 }
+/* A last known verdict, shown while no current one is: dimmed, with the
+   note saying when it was current and why it is not now. */
+.verdict--stale .verdict-dot,
+.verdict--stale .verdict-text { opacity: 0.55; }
+.verdict-note {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.verdict-note[hidden] { display: none; }
+.verdict-link a {
+  font-size: var(--fs-sm);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.verdict-link a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* req/span figures ride beside the sentence in mono so they read as data. */
 .verdict-stats {
   font-family: var(--font-mono);

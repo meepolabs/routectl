@@ -72,6 +72,17 @@
     if (arg !== null && arg !== undefined) { node.setAttribute('data-arg', String(arg)); }
   }
 
+  // A link to view `view`, labelled from the view's own label. The click is
+  // dispatched through the `open-view` action; the href is the view's
+  // address, so the link also works as a link (copied, opened in a new tab).
+  function viewLink(view) {
+    var a = document.createElement('a');
+    a.textContent = 'see ' + view.label;
+    a.setAttribute('href', viewLinkHash(view.id));
+    setAction(a, 'open-view', view.id);
+    return a;
+  }
+
   // A sortable column: `id` names it in the address
   // (`sort=<table>.<id>.<asc|desc>`) and `value(row)` is what it sorts by, a
   // number or a string of one type per column, or null when the row has none.

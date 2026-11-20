@@ -224,23 +224,12 @@
 
   // ---- missing data reads as unavailable, never as a zero ---------------
 
-  // Every other pool is full and every target usable, so the absent pool
-  // count is the only thing standing between the verdict and "All routes
-  // healthy".
   function withoutData(json) {
     var health = json.panels.health.data;
     delete json.panels.usage;
     delete health.seat_driver.sweeps;
-    health.pools.forEach(function (p) { p.eligible = p.configured; });
     delete health.pools[0].eligible;
-    health.targets.forEach(function (t) { t.eligibility.reason = null; });
     return json;
-  }
-
-  function faviconFill() {
-    var href = document.getElementById('favicon').getAttribute('href');
-    var m = /fill='%23([0-9a-f]{6})'/.exec(href);
-    return m ? m[1] : href;
   }
 
   function definition(root, term) {
@@ -260,45 +249,9 @@
       sweeps: definition(driver, 'sweeps'),
       first_pool_eligible: definition(pools, 'eligible'),
       quota_card: quota ? textOf('#body-accounts [data-source="usage"] .unavailable-msg') : null,
-      quota_zero_figures: quota ? quota.querySelectorAll('.mag-zero').length : null,
-      verdict: textOf('#verdict-text'),
-      favicon: faviconFill()
+      quota_zero_figures: quota ? quota.querySelectorAll('.mag-zero').length : null
     };
   }
-
-  // Every pool full and every target usable: the verdict's healthy reading.
-  function allUsable(json) {
-    var health = json.panels.health.data;
-    health.pools.forEach(function (p) { p.eligible = p.configured; });
-    health.targets.forEach(function (t) { t.eligibility.reason = null; });
-    return json;
-  }
-
-  function withoutTargets(json) {
-    delete allUsable(json).panels.health.data.targets;
-    return json;
-  }
-
-  d.scenario('states-missing-targets', function () {
-    var missing = false;
-    rules.push(function (entry) {
-      if (!isAggregate(entry)) { return null; }
-      return { rewrite: missing ? withoutTargets : allUsable };
-    });
-    var out = {};
-    return nextAnswer('/status').then(function () {
-      return settledView('accounts');
-    }).then(function () {
-      out.present = accountsReading();
-      missing = true;
-      return nextAnswer('/status');
-    }).then(function () {
-      return d.sleep(200);
-    }).then(function () {
-      out.missing = accountsReading();
-      return out;
-    });
-  });
 
   d.scenario('states-missing-data', function () {
     var missing = false;

@@ -210,14 +210,9 @@ fn page_browser_a_superseded_range_ends_pending_on_the_newer_answer() {
 }
 
 /// A panel absent from the answer shows its unavailable card, and a figure
-/// absent from a payload reads as a dash; neither becomes a zero. A pool
-/// count or the target list the verdict needs being absent leaves the
-/// verdict and the favicon neutral, never healthy.
+/// absent from a payload reads as a dash; neither becomes a zero.
 ///
-/// Mutation check: make seatCountText answer `0` for an absent count -> red;
-/// drop the verdictInputsKnown check in verdictState -> red (the verdict
-/// reads healthy); drop its targets array check -> red (the missing-targets
-/// row reads healthy).
+/// Mutation check: make seatCountText answer `0` for an absent count -> red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_missing_data_reads_as_unavailable_never_zero() {
@@ -236,27 +231,7 @@ fn page_browser_missing_data_reads_as_unavailable_never_zero() {
         "{missing:#}"
     );
     assert_eq!(missing["quota_zero_figures"], 0, "{missing:#}");
-    assert_eq!(missing["verdict"], "Checking routing state", "{missing:#}");
-    assert_eq!(missing["favicon"], ICON_STALE_UNKNOWN, "{missing:#}");
-    assert_ne!(
-        present["verdict"], missing["verdict"],
-        "positive control: the populated pools move the verdict: {present:#}"
-    );
-    assert_ne!(present["favicon"], ICON_STALE_UNKNOWN, "{present:#}");
-
-    let result = states_scenario("states-missing-targets", "accounts", 30_000);
-    let (present, missing) = (&result["present"], &result["missing"]);
-    assert_eq!(
-        present["verdict"], "All routes healthy",
-        "positive control: full pools and usable targets read healthy: {present:#}"
-    );
-    assert_ne!(present["favicon"], ICON_STALE_UNKNOWN, "{present:#}");
-    assert_eq!(missing["verdict"], "Checking routing state", "{missing:#}");
-    assert_eq!(missing["favicon"], ICON_STALE_UNKNOWN, "{missing:#}");
 }
-
-/// The stale-or-unknown favicon fill, as the driver reads it from the href.
-const ICON_STALE_UNKNOWN: &str = "9aa5b5";
 
 /// A grouping changed by the address while Accounts is showing resets the
 /// Traffic query too: opening Traffic with the new answer held shows a busy
@@ -385,7 +360,7 @@ fn page_browser_a_stale_query_reports_its_own_last_success() {
 /// After a good round with Now and Traffic populated, the daemon goes
 /// unreachable for both the aggregate and the QUERY: the Traffic section
 /// keeps its figure node, marked stale with its own status line, the
-/// verdict reads neutral and nothing reads 0; once the daemon answers again
+/// verdict keeps its last sentence and nothing reads 0; once the daemon answers again
 /// the query is refetched and the stale mark clears.
 ///
 /// Mutation check: drop the markQuerySourcesTransport call in runRound ->
@@ -406,7 +381,7 @@ fn page_browser_an_unreachable_daemon_marks_the_query_section_stale() {
     assert_eq!(down["figure"], good["figure"], "the kept figure moved");
     assert_eq!(down["error_cards"], 0, "{down:#}");
     assert_eq!(down["zero_figures"], good["zero_figures"], "{down:#}");
-    assert_eq!(down["verdict"], "Checking routing state", "{down:#}");
+    assert_eq!(down["verdict"], good["verdict"], "{down:#}");
     assert!(
         text(&down["status"], "the status line").starts_with("stale: last success at "),
         "{down:#}"

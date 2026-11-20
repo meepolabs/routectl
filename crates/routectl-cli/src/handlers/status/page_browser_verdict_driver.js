@@ -5,7 +5,8 @@
 // for a path applies in order, rewriting the answer's JSON, and any rule that
 // fails it makes the answer fail the way an unreachable daemon does. A row a
 // test supplies arrives as `window.routectlVerdictRow`, set by a snippet ahead
-// of this one.
+// of this one. Every wait is on a page state or an answer count, never on a
+// span of time, so a slow machine only makes a run take longer.
 (function (d) {
   'use strict';
 
@@ -30,24 +31,29 @@
     });
   };
 
-  function nextAnswer(path, limitMs) {
-    var target = (answered[path] || 0) + 1;
-    return d.waitUntil('the next ' + path + ' answer', function () {
-      return (answered[path] || 0) >= target;
-    }, limitMs);
-  }
+  function answers(path) { return answered[path] || 0; }
 
-  // Every pool full and no target with an eligibility reason, so the verdict
-  // reads healthy and any source that moved it would show.
-  function healthyRouting(json) {
-    var data = json.panels.health.data;
-    data.pools.forEach(function (p) { p.eligible = p.configured; });
-    data.targets.forEach(function (t) { t.eligibility.reason = null; });
-    return json;
+  function nextAnswer(path, limitMs) {
+    var target = answers(path) + 1;
+    return d.waitUntil('the next ' + path + ' answer', function () {
+      return answers(path) >= target;
+    }, limitMs);
   }
 
   function onAggregate(rewrite) {
     return function (path) { return path === '/status' ? { rewrite: rewrite } : null; };
+  }
+
+  // The aggregate with `verdict` as the attention panel's verdict. The
+  // envelope's as_of is what the strip's time is read from, so it is noted.
+  var servedAsOf = null;
+  function withVerdict(verdict) {
+    return function (json) {
+      var env = json.panels.attention;
+      env.data.verdict = verdict;
+      servedAsOf = env.as_of;
+      return json;
+    };
   }
 
   function faviconFill() {
@@ -58,14 +64,38 @@
 
   function strip() {
     var node = document.getElementById('verdict');
+    var note = document.getElementById('verdict-note');
+    var link = document.getElementById('verdict-link');
+    var anchor = link.querySelector('a');
     return {
       text: document.getElementById('verdict-text').textContent,
       kind: ['ok', 'warn', 'bad', 'idle'].filter(function (k) {
         return node.classList.contains('verdict--' + k);
       }).join(','),
+      dimmed: node.classList.contains('verdict--stale'),
+      note: note.hidden ? null : note.textContent,
+      link_children: link.childElementCount,
+      link_text: anchor ? anchor.textContent : null,
+      link_href: anchor ? anchor.getAttribute('href') : null,
       favicon: faviconFill(),
       stats: document.getElementById('verdict-stats').textContent
     };
+  }
+
+  // The time the strip should name for the served verdict, formatted the way
+  // this browser formats a local time.
+  function servedTime() {
+    return new Date(servedAsOf).toLocaleTimeString();
+  }
+
+  // Every text the strip's sentence takes, in order, from the moment this is
+  // called.
+  function recordTexts() {
+    var seen = [];
+    var node = document.getElementById('verdict-text');
+    new MutationObserver(function () { seen.push(node.textContent); })
+      .observe(node, { childList: true, characterData: true, subtree: true });
+    return seen;
   }
 
   function selectView(view) {
@@ -73,7 +103,7 @@
     if (tab.getAttribute('aria-selected') !== 'true') { tab.click(); }
   }
 
-  // ---- a failing doctor, usage or QUERY source leaves the verdict alone ---
+  // ---- a failing non-attention source leaves the verdict alone ------------
 
   // How a row breaks its source's answer: `unavailable` swaps the envelope
   // for a refusal, `invalid` keeps the data and adds a refusal (an envelope
@@ -107,20 +137,18 @@
     return !!document.querySelector(row.card);
   }
 
-  // One row on a fresh page: routing healthy, the row's view open on its
+  // One row on a fresh page: an ok verdict, the row's view open on its
   // source's first answer, then that source broken until it shows on the
   // source itself and one more aggregate round has landed.
   d.scenario('verdict-source-fails', function () {
     var row = window.routectlVerdictRow;
-    rules.push(onAggregate(healthyRouting));
+    rules.push(onAggregate(withVerdict(row.verdict)));
     var seen = {};
-    return d.waitUntil('a health verdict', function () {
-      return strip().text === 'All routes healthy';
+    return d.waitUntil('the served verdict', function () {
+      return strip().text === row.verdict.text;
     }).then(function () {
       selectView(row.view);
       return nextAnswer(row.path, 30000);
-    }).then(function () {
-      return d.sleep(200);
     }).then(function () {
       seen.before = strip();
       seen.control_before = controlShows(row);
@@ -132,42 +160,140 @@
       seen.control_after = true;
       return nextAnswer('/status', 30000);
     }).then(function () {
-      return d.sleep(200);
-    }).then(function () {
       seen.after = strip();
       return seen;
     });
   });
 
-  // ---- before the first health payload -----------------------------------
+  // ---- before the first verdict -------------------------------------------
 
-  d.scenario('verdict-before-first-health', function () {
+  d.scenario('verdict-before-first', function () {
     var held = true;
     d.hold(function (url) { return (held && url.pathname === '/status') ? 3000 : 0; });
+    rules.push(onAggregate(withVerdict(window.routectlVerdictRow.verdict)));
     var out = {};
-    return d.sleep(1500).then(function () {
+    return d.waitUntil('the start-up text', function () {
+      return strip().text !== '';
+    }).then(function () {
       out.held = strip();
       held = false;
-      return nextAnswer('/status', 30000);
+      return d.waitUntil('the served verdict', function () {
+        return strip().text === window.routectlVerdictRow.verdict.text;
+      }, 30000);
     }).then(function () {
       out.answered = strip();
       return out;
     });
   });
 
-  // ---- an empty pool ------------------------------------------------------
+  // ---- a verdict as served ------------------------------------------------
 
-  function emptyFirstPool(json) {
-    json.panels.health.data.pools[0].eligible = 0;
-    return json;
-  }
+  d.scenario('verdict-live', function () {
+    var row = window.routectlVerdictRow;
+    rules.push(onAggregate(withVerdict(row.verdict)));
+    return d.waitUntil('the served verdict', function () {
+      return strip().text === row.verdict.text;
+    }, 30000).then(function () {
+      var out = strip();
+      out.marked_up = document.getElementById('verdict').querySelectorAll('b, i, script, img').length;
+      return out;
+    });
+  });
 
-  d.scenario('verdict-empty-pool', function () {
-    rules.push(onAggregate(emptyFirstPool));
-    return d.waitUntil('a seat verdict', function () {
-      return strip().kind !== 'idle';
+  // ---- the last known verdict through an outage ---------------------------
+
+  // A verdict lands; the daemon then fails `row.failures` aggregate rounds
+  // in a row, observed after each; then it answers again with `row.after`.
+  // Every sentence the strip takes from the first verdict on is recorded.
+  d.scenario('verdict-outage', function () {
+    var row = window.routectlVerdictRow;
+    var verdict = row.verdict;
+    rules.push(onAggregate(function (json) { return withVerdict(verdict)(json); }));
+    var failing = false;
+    rules.push(function (path) { return (failing && path === '/status') ? { fail: true } : null; });
+    var out = { failed: [] };
+    var texts = null;
+    var step = d.waitUntil('the served verdict', function () {
+      return strip().text === verdict.text;
+    }, 30000).then(function () {
+      texts = recordTexts();
+      out.live = strip();
+      out.served_time = servedTime();
+      failing = true;
+    });
+    for (var i = 0; i < row.failures; i++) {
+      step = step.then(function () {
+        return nextAnswer('/status', 40000);
+      }).then(function () {
+        return d.waitUntil('the strip to mark the failure', function () {
+          return strip().dimmed;
+        });
+      }).then(function () {
+        out.failed.push(strip());
+      });
+    }
+    return step.then(function () {
+      verdict = row.after;
+      failing = false;
+      return d.waitUntil('the recovered verdict', function () {
+        return strip().text === row.after.text;
+      }, 45000);
     }).then(function () {
-      return strip();
+      out.recovered = strip();
+      out.texts = texts;
+      return out;
+    });
+  });
+
+  // ---- a verdict the panel stops serving ----------------------------------
+
+  // A verdict lands, then the attention panel answers with a refusal while
+  // the daemon itself keeps answering.
+  d.scenario('verdict-panel-unavailable', function () {
+    var row = window.routectlVerdictRow;
+    var refusing = false;
+    rules.push(onAggregate(function (json) {
+      if (!refusing) { return withVerdict(row.verdict)(json); }
+      json.panels.attention = brokenEnvelope(json.panels.attention, 'unavailable');
+      return json;
+    }));
+    var out = {};
+    return d.waitUntil('the served verdict', function () {
+      return strip().text === row.verdict.text;
+    }, 30000).then(function () {
+      out.served_time = servedTime();
+      refusing = true;
+      return d.waitUntil('the strip to mark the refusal', function () {
+        return strip().dimmed;
+      }, 30000);
+    }).then(function () {
+      out.refused = strip();
+      return out;
+    });
+  });
+
+  // ---- the target link ----------------------------------------------------
+
+  // A verdict whose target names a view links to it; following the link
+  // opens that view.
+  d.scenario('verdict-link-opens', function () {
+    var row = window.routectlVerdictRow;
+    rules.push(onAggregate(withVerdict(row.verdict)));
+    var out = {};
+    return d.waitUntil('the verdict link', function () {
+      return document.querySelector('#verdict-link a');
+    }, 30000).then(function (link) {
+      out.before = strip();
+      link.click();
+      return d.waitUntil('the linked view', function () {
+        var tab = document.getElementById('tab-' + row.verdict.target);
+        return tab.getAttribute('aria-selected') === 'true';
+      });
+    }).then(function () {
+      out.hash = location.hash;
+      out.pane_hidden = document.getElementById('pane-' + row.verdict.target).hidden;
+      out.after = strip();
+      return out;
     });
   });
 
@@ -187,30 +313,6 @@
       }, 45000);
     }).then(function () {
       out.answered = strip();
-      return out;
-    });
-  });
-
-  // ---- a network failure after a good round -------------------------------
-
-  d.scenario('verdict-network-failure', function () {
-    rules.push(onAggregate(healthyRouting));
-    var failing = false;
-    rules.push(function () { return failing ? { fail: true } : null; });
-    var out = {};
-    return d.waitUntil('a health verdict', function () {
-      return strip().text === 'All routes healthy';
-    }).then(function () {
-      return nextAnswer('/status', 30000);
-    }).then(function () {
-      out.good = strip();
-      failing = true;
-      return nextAnswer('/status', 30000);
-    }).then(function () {
-      return d.sleep(200);
-    }).then(function () {
-      out.failed = strip();
-      out.health_badge = document.getElementById('badge-accounts').textContent;
       return out;
     });
   });

@@ -116,8 +116,8 @@ banner, no retry signal -- silently mislabeled data.
   point the daemon at a path it cannot read) while the page polls. Expected:
   a source that had rendered keeps its last values, dimmed and marked stale
   (a source that never rendered shows its error card), the pane status line
-  names the not-current source, the verdict line and favicon keep reading
-  routing state (a ledger fault is not a routing fault), and
+  names the not-current source, the verdict line and favicon keep the
+  daemon's verdict (a ledger fault is not a routing fault), and
   the data age stays visible rather than the last-good numbers reading as
   current.
 - Restore the ledger. Recovery returns to live cadence with no duplicate
@@ -245,19 +245,22 @@ banner, no retry signal -- silently mislabeled data.
   a credential store, `never` for the sweep stamps before the first sweep,
   and `0` (not `-`) for zero counts. After a minute the last sweep
   age appears and `sweeps` reads `1`.
-- With both pool seats logged out, the status line at the top reads `No
-  usable seat in <pool> - see Accounts` in red, never "All routes healthy".
-  With one of two seats out it reads `Some seats unusable in <pool> - see
-  Accounts` in amber; with both logged in it reads `All routes healthy`. A
-  rate-limited or breaker-open seat also turns the line amber while it lasts.
+- With both pool seats logged out, the status line at the top reads the
+  daemon's sentence naming the empty pool in red, with a `see Accounts`
+  link, and the tab icon is red. With one of two seats out it reads the
+  sentence naming that seat in amber, with an amber icon; with both logged
+  in it reads `All routes healthy` with no link. Clicking `see Accounts`
+  opens Accounts and keeps the selected range in the address.
 - With a seat still unusable, block `/status/usage?window=all` in the
   browser devtools (request blocking; it is the one source fetched on its
-  own, while config, health and doctor ride the `/status` aggregate) and wait
-  two polls. The status line still reads the seat sentence alone (red with
-  every seat out, amber with some): a source other than health never moves
-  it, and the blocked source shows its failure only on its own sections.
-  Log every seat in with the block still on: the line reads `All routes
-  healthy`.
+  own) and wait two polls. The status line still reads the seat sentence:
+  only the attention panel moves it, and the blocked source shows its
+  failure only on its own sections.
+- With a seat logged out, stop the daemon and wait two polls. The status
+  line keeps the same sentence, dimmed, followed by `as of <time> - the
+  daemon cannot be reached`; the icon stays red for a broken verdict. It
+  never returns to `Checking routing state`. Start the daemon again: within
+  a poll the current sentence replaces it and the dimming clears.
 - The Accounts and Models tab badges each count every target with an
   eligibility reason or a non-closed breaker once: two logged-out seats badge `2`, and a seat that is
   both logged out and breaker-open still counts once. The favicon turns amber
