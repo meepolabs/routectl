@@ -5,8 +5,9 @@
 // request (a fetch that does not honour its signal, so the page's own
 // currency check is the only thing between a late answer and the screen), or
 // replace its status. Every request is logged with when it was issued and
-// delivered, whether the page aborted it, and the `totals.requests` of the
-// answer the server sent, so a test can tell which answer is on screen.
+// delivered, whether and when the page aborted it, the view selected when it
+// was issued, and the `totals.requests` of the answer the server sent, so a
+// test can tell which answer is on screen.
 (function (d) {
   'use strict';
 
@@ -46,6 +47,11 @@
     }
   }
 
+  function selectedView() {
+    var tab = document.querySelector('[role="tab"][aria-selected="true"]');
+    return tab ? tab.id : null;
+  }
+
   function ruleFor(entry) {
     var picked = null;
     rules.forEach(function (rule) { picked = rule(entry) || picked; });
@@ -60,14 +66,21 @@
       method: (init && init.method) || 'GET',
       body: (init && typeof init.body === 'string') ? JSON.parse(init.body) : null,
       issued_at: Date.now(),
+      view: selectedView(),
       aborted: false,
+      aborted_at: null,
       delivered_at: null,
       status: null,
       requests: null
     };
     log.push(entry);
     var signal = init && init.signal;
-    if (signal) { signal.addEventListener('abort', function () { entry.aborted = true; }); }
+    if (signal) {
+      signal.addEventListener('abort', function () {
+        entry.aborted = true;
+        entry.aborted_at = Date.now();
+      });
+    }
     var rule = ruleFor(entry) || {};
     var deaf = !!rule.ignoreAbort;
     return inner(input, deaf ? withoutSignal(init) : init).then(function (resp) {
@@ -113,11 +126,13 @@
   }
 
   // What the query-backed view shows: the verdict's request figure (read from
-  // the applied QUERY record) and the group cards built from it.
+  // the applied QUERY record) and the group cards or probe line built from it.
   function queryShown() {
+    var probe = document.getElementById('seat-probe');
     return {
       stats: document.getElementById('verdict-stats').textContent,
-      cards: textOfAll('.ucard')
+      cards: textOfAll('.ucard'),
+      probe: probe ? probe.textContent : null
     };
   }
 
@@ -242,6 +257,72 @@
         shown: pageShown(),
         requests: log.length,
         log: log
+      };
+    });
+  });
+  // The seat probe view's first QUERY, answered and drawn.
+  d.scenario('epoch-seat-probe-first-query', function () {
+    return waitDelivered('the first QUERY', function () { return nthQuery(0); }).then(function () {
+      return d.waitUntil('the probe line', function () {
+        return document.getElementById('seat-probe');
+      });
+    }).then(function () {
+      return { queries: queries(), shown: queryShown() };
+    });
+  });
+
+  // Every QUERY is held long enough to still be out when the operator moves:
+  // probe view, then Traffic while the probe's QUERY is out, then back while
+  // Traffic's is out, then a cadence round on the probe view.
+  d.scenario('epoch-seat-probe-switch', function () {
+    rules.push(function (entry) { return isQuery(entry) ? { ms: 1500 } : null; });
+    return d.waitUntil('the first QUERY', function () { return nthQuery(0); }).then(function () {
+      document.getElementById('tab-traffic').click();
+      return d.waitUntil('the Traffic QUERY', function () { return nthQuery(1); });
+    }).then(function () {
+      document.getElementById('tab-models').click();
+      return waitDelivered('the probe QUERY on return', function () { return nthQuery(2); });
+    }).then(function () {
+      return d.waitUntil('a cadence QUERY', function () { return nthQuery(3); }, 15000);
+    }).then(function () {
+      return waitDelivered('the cadence QUERY', function () { return nthQuery(3); });
+    }).then(function () {
+      return { queries: queries() };
+    });
+  });
+
+  // A seat QUERY is held past a 403 on the next aggregate round, then
+  // delivered although the page aborted it.
+  d.scenario('epoch-seat-probe-terminal', function () {
+    var held = null;
+    var refused = null;
+    var terminal = {};
+    return waitDelivered('the first QUERY', function () { return nthQuery(0); }).then(function () {
+      rules.push(function (entry) {
+        if (isQuery(entry) && !held) {
+          held = entry;
+          return { ms: 8000, ignoreAbort: true };
+        }
+        if (held && !refused && entry.path === '/status') {
+          refused = entry;
+          return { status: 403 };
+        }
+        return null;
+      });
+      return d.waitUntil('the terminal banner', function () {
+        return document.querySelector('#banner.banner--terminal');
+      }, 30000);
+    }).then(function () {
+      terminal = { at: Date.now(), shown: pageShown(), query: queryShown() };
+      return waitDelivered('the held seat QUERY', function () { return held; }, 15000);
+    }).then(function () {
+      return d.sleep(1000);
+    }).then(function () {
+      return {
+        terminal: terminal,
+        held: held,
+        shown: pageShown(),
+        query: queryShown()
       };
     });
   });

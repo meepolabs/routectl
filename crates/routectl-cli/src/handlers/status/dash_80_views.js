@@ -11,9 +11,9 @@
   //            freshness line, the tab badge and the whole-view state card,
   //            so a multi-source view names the source that owns its subject
   //            first (Traffic leads with the QUERY its usage cards read; the
-  //            routing sections under them guard their own sources). A
-  //            primary that is a QUERY source is also the request the view
-  //            issues (viewQuerySource).
+  //            routing sections under them guard their own sources). The
+  //            FIRST QUERY source listed, primary or not, is the one request
+  //            the view issues (viewQuerySource); a view lists at most one.
   //   span     null for a windowed view. Otherwise what the view's figures
   //            span instead of a window: the picker dims and goes inert on
   //            it rather than promising a filter that does not reach the
@@ -153,11 +153,13 @@
     return viewFor(token) ? token : VIEWS[0].id;
   }
 
-  // The QUERY source a view issues its request for, or null when the view is
-  // GET-backed: its primary source when that is one of the two QUERY reads.
+  // The QUERY source a view issues its request for, or null when the view
+  // reads no QUERY: the first QUERY read in its sources, which need not be
+  // its primary (a GET-led view can still carry a ranged roll-up).
   function viewQuerySource(view) {
-    var primary = view.sources[0];
-    if (primary === QUERY_SERIES_SOURCE || primary === QUERY_SOURCE) { return primary; }
+    for (var i = 0; i < view.sources.length; i++) {
+      if (QUERY_SOURCES.indexOf(view.sources[i]) >= 0) { return view.sources[i]; }
+    }
     return null;
   }
 

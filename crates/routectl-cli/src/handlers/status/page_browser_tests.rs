@@ -6,9 +6,10 @@
 // binary FAILS it rather than skipping. `run_scenario` serves the assembled
 // `PAGE` from a loopback test server, with the test-only driver
 // (page_browser_driver.js) and any scenario snippets injected before
-// `</body>`, answers /status, /status/usage and QUERY /status/query from the
-// populated panel fixtures with figures that change every round, loads the
-// page in Chrome under virtual time and returns the JSON the driver reports.
+// `</body>`, answers /status, /status/usage and QUERY /status/query (every
+// grouping the page asks for, seat included) from the populated panel
+// fixtures with figures that change every round, loads the page in Chrome
+// under virtual time and returns the JSON the driver reports.
 //
 // Adding a topic: write `page_browser_<topic>_tests.rs` plus
 // `page_browser_<topic>_driver.js`, attach the tests beside this module in
@@ -67,6 +68,7 @@ struct Payloads {
     query_model: Value,
     query_alias: Value,
     query_provider: Value,
+    query_seat: Value,
     query_series: Value,
 }
 
@@ -85,6 +87,7 @@ impl Payloads {
             query_model: query(GroupDim::Model, None),
             query_alias: query(GroupDim::Alias, None),
             query_provider: query(GroupDim::Provider, None),
+            query_seat: query(GroupDim::Seat, None),
             query_series: query(GroupDim::Provider, Some(BucketUnit::Hour)),
         }
     }
@@ -97,6 +100,7 @@ impl Payloads {
             (Some("model"), false) => Some(&self.query_model),
             (Some("alias"), false) => Some(&self.query_alias),
             (Some("provider"), false) => Some(&self.query_provider),
+            (Some("seat"), false) => Some(&self.query_seat),
             (Some("provider"), true) => Some(&self.query_series),
             _ => None,
         }
@@ -574,6 +578,37 @@ fn round_figures_change_and_untouched_keys_stay() {
     assert_eq!(next["data"]["source"]["loaded_age_ms"], 162_000);
     assert_eq!(next["data"]["quota"][0]["utilization"], 0.52);
     assert_eq!(at_round(&payload, 0), payload);
+}
+
+/// The seat-grouped answer names a configured account, one the served
+/// config no longer names and the unattributed rows, so a view reading it
+/// can tell all three apart.
+#[test]
+fn the_harness_answers_a_seat_grouped_query_from_the_seat_fixture() {
+    let payloads = Payloads::populated();
+    let body = serde_json::json!({"window": "today", "group_by": "seat"});
+
+    let answer = payloads.query_for(&body).expect("a seat-grouped answer");
+
+    let groups = answer["data"]["groups"].as_array().expect("groups");
+    let account = |label: &str| {
+        groups
+            .iter()
+            .find(|g| g["label"] == label)
+            .unwrap_or_else(|| panic!("a `{label}` group: {groups:#?}"))
+    };
+    assert_eq!(account("anthropic#a")["account"], "anthropic#a");
+    assert_eq!(account("anthropic#a")["provider_entry"], "claude-seat");
+    assert_eq!(account("anthropic#retired")["account"], "anthropic#retired");
+    assert_eq!(account("anthropic#retired")["provider_entry"], Value::Null);
+    assert_eq!(account("(unattributed)")["account"], Value::Null);
+    assert_eq!(groups.len(), 3, "{groups:#?}");
+    assert!(
+        payloads
+            .query_for(&serde_json::json!({"window": "today", "group_by": "model"}))
+            .is_some_and(|model| model["data"]["groups"][0].get("account").is_none()),
+        "positive control: a non-seat grouping carries no account identity"
+    );
 }
 
 #[test]

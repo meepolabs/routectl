@@ -1017,11 +1017,11 @@ mod tests {
 
     /// Drift guard on the per-shape QUERY source split.
     ///
-    /// Now reads `/status/query` bucketed and Traffic reads it series-less;
-    /// the two payloads are not interchangeable, since Now's sparklines
-    /// cannot be drawn from a payload whose `series` is null. They therefore get
-    /// their OWN source records, and this pins both halves of the split: the two
-    /// records EXIST (each declared, distinct, and validated against the
+    /// Now reads `/status/query` bucketed, Traffic reads it series-less and
+    /// the per-seat read groups it by seat; the payloads are not
+    /// interchangeable, since Now's sparklines cannot be drawn from a payload
+    /// whose `series` is null. They therefore get their OWN source records, and
+    /// this pins both halves of the split: the records EXIST (each declared, distinct, and validated against the
     /// server's `query` wire version through SOURCE_PANEL -- an unmapped source
     /// would compare against `undefined` and degrade a live source to the
     /// client's incompatible fallback), and the transport is WIRED to them (each
@@ -1041,7 +1041,7 @@ mod tests {
         // The two source keys, read from their own declarations so a rename
         // moves this test with them rather than pinning a spelling twice.
         let mut keys = Vec::new();
-        for decl in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE"] {
+        for decl in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"] {
             let needle = format!("var {decl} =");
             let at = script
                 .find(&needle)
@@ -1060,22 +1060,31 @@ mod tests {
             );
             keys.push(value);
         }
-        assert_ne!(
-            keys[0], keys[1],
-            "the two QUERY reads must name DIFFERENT source records, or whichever tab polled \
-             last defines what the other renders from"
+        let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            keys.len(),
+            "the QUERY reads must name DIFFERENT source records, or whichever view polled \
+             last defines what another renders from: {keys:?}"
         );
 
         // The bucketed read is the query PANEL at another request shape, so its
         // SOURCE_PANEL entry must name `query` specifically: an entry pointing
         // anywhere else validates a live query envelope against another panel's
         // version, which degrades it to the incompatible fallback.
+        for key in &keys[1..] {
+            assert_eq!(
+                object_entry(&panel_map, key).as_deref(),
+                Some("query"),
+                "SOURCE_PANEL must map the QUERY source `{key}` to the `query` panel, or its \
+                 envelope is validated against the wrong wire version"
+            );
+        }
         assert_eq!(
-            object_entry(&panel_map, &keys[1]).as_deref(),
-            Some("query"),
-            "SOURCE_PANEL must map the bucketed QUERY source `{}` to the `query` panel, or its \
-             envelope is validated against the wrong wire version",
-            keys[1]
+            string_array("QUERY_SOURCES"),
+            ["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"],
+            "QUERY_SOURCES must list every QUERY read: it is the set the transport, the \
+             epochs and viewQuerySource treat as QUERY-backed"
         );
         assert_eq!(
             keys[0], "query",
@@ -1100,9 +1109,9 @@ mod tests {
 
         // WIRING. `querySourceFor` is what actually routes a round's response:
         // it must resolve the view's registered query source, and that must be
-        // the view's primary when it is one of the two QUERY reads -- a
-        // separate per-view arm could drift from VIEWS and leave both records
-        // declared with both views rendering from one shape.
+        // the first QUERY read the view lists, primary or not -- a separate
+        // per-view arm could drift from VIEWS and leave every record declared
+        // with two views rendering from one shape.
         let routing = compact(&function_body("querySourceFor"));
         assert!(
             routing.contains("viewfor(tab)") && routing.contains("viewquerysource(view)"),
@@ -1110,13 +1119,13 @@ mod tests {
         );
         let query_source = compact(&function_body("viewQuerySource"));
         assert!(
-            query_source.contains("varprimary=view.sources[0];")
+            query_source.contains("for(vari=0;i<view.sources.length;i++)")
                 && query_source.contains(
-                    "if(primary===query_series_source||primary===query_source){returnprimary;}"
+                    "if(query_sources.indexof(view.sources[i])>=0){returnview.sources[i];}"
                 )
                 && query_source.ends_with("returnnull;"),
-            "viewQuerySource must return the view's primary source exactly when it is a QUERY \
-             read, and null otherwise"
+            "viewQuerySource must return the first QUERY read in the view's sources, in order, \
+             and null when it lists none"
         );
 
         // Each record asks for ITS OWN shape: the bucketed record a series at
@@ -1133,6 +1142,12 @@ mod tests {
                 "if(source===query_source){returnfindshape(selectedwindow,selectedgroupby,false);}"
             ),
             "shapeFor must ask for no series, at the group-by grain, for the series-less source"
+        );
+        assert!(
+            shape.contains(
+                "if(source===query_seats_source){returnfindshape(selectedwindow,'seat',false);}"
+            ),
+            "shapeFor must ask for no series, at seat grain, for the per-seat source"
         );
         assert!(
             compact(&function_body("queryBodyFor")).contains("shapefor(querysourcefor(tab))"),
@@ -1155,7 +1170,7 @@ mod tests {
             outcome.contains("renderPanelGuarded(source,") && outcome.contains("SOURCES[source]"),
             "applyQueryOutcome must render and read through its `source` parameter"
         );
-        for constant in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE"] {
+        for constant in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"] {
             assert!(
                 !outcome.contains(constant),
                 "applyQueryOutcome names `{constant}` directly; it must write only the record it \

@@ -23,6 +23,11 @@
   // sources -- the same rule that splits usage from usage_all below.
   var QUERY_SOURCE = 'query';
   var QUERY_SERIES_SOURCE = 'query_series';
+  // The per-seat roll-up: the same series-less read grouped by seat, for the
+  // traffic each account carried in the selected range. A third shape, so a
+  // third source.
+  var QUERY_SEATS_SOURCE = 'query_seats';
+  var QUERY_SOURCES = [QUERY_SOURCE, QUERY_SERIES_SOURCE, QUERY_SEATS_SOURCE];
   // The all-history usage read: its OWN fetch, its OWN backoff, its OWN
   // as_of. Routing attributes over ALL HISTORY, so it must never read the
   // aggregate's today-scoped usage panel -- and the aggregate panel must stay
@@ -30,18 +35,14 @@
   // verdict strip). Two windows of one panel are two sources.
   var USAGE_ALL_SOURCE = 'usage_all';
   var USAGE_ALL_URL = '/status/usage?window=all';
-  var ALL_SOURCES = GET_SOURCES.concat([
-    QUERY_SOURCE,
-    QUERY_SERIES_SOURCE,
-    USAGE_ALL_SOURCE
-  ]);
+  var ALL_SOURCES = GET_SOURCES.concat(QUERY_SOURCES, [USAGE_ALL_SOURCE]);
 
   // The panel a source's envelope belongs to, where the two differ. The
   // all-history read is the usage PANEL at another window, so it validates
   // against the usage wire version rather than one of its own; the bucketed
-  // QUERY is the query PANEL at another request shape, so it validates against
-  // the query wire version.
-  var SOURCE_PANEL = { usage_all: 'usage', query_series: 'query' };
+  // and per-seat QUERY reads are the query PANEL at other request shapes, so
+  // they validate against the query wire version.
+  var SOURCE_PANEL = { usage_all: 'usage', query_series: 'query', query_seats: 'query' };
 
   function expectedVersion(name) {
     return EXPECTED[SOURCE_PANEL[name] || name];

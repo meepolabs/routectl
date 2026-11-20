@@ -49,7 +49,7 @@
   // superseded request is only an optimization: an answer already on its way,
   // or a fetch that never honours the signal, is stopped here.
   var AGGREGATE_FETCH = 'aggregate';
-  var FETCH_SOURCES = [AGGREGATE_FETCH, USAGE_ALL_SOURCE, QUERY_SOURCE, QUERY_SERIES_SOURCE];
+  var FETCH_SOURCES = [AGGREGATE_FETCH, USAGE_ALL_SOURCE].concat(QUERY_SOURCES);
   var FETCH_EPOCHS = {};
   FETCH_SOURCES.forEach(function (name) { FETCH_EPOCHS[name] = 0; });
 
@@ -68,7 +68,7 @@
   // body it would send; a GET source asks for one fixed URL, so its key is
   // its own name.
   function wantedFetchKey(source) {
-    if (source !== QUERY_SOURCE && source !== QUERY_SERIES_SOURCE) { return source; }
+    if (QUERY_SOURCES.indexOf(source) < 0) { return source; }
     var body = queryBodyFor(activeTab);
     return (body && querySourceFor(activeTab) === source) ? queryBodyKey(body) : null;
   }
@@ -147,7 +147,8 @@
   // The request shape each query source stands for. The bucketed source asks
   // for a series; the series-less one deliberately does not (no chart, and a
   // byte-identical non-series read path), and its grain follows the group-by
-  // toggle.
+  // toggle. The per-seat source is series-less at seat grain whatever the
+  // toggle says.
   function shapeFor(source) {
     if (source === QUERY_SERIES_SOURCE) {
       return findShape(selectedWindow, 'provider', true);
@@ -155,14 +156,17 @@
     if (source === QUERY_SOURCE) {
       return findShape(selectedWindow, selectedGroupBy, false);
     }
+    if (source === QUERY_SEATS_SOURCE) {
+      return findShape(selectedWindow, 'seat', false);
+    }
     return null;
   }
 
   // The source record a view's QUERY response belongs to, or null when the
   // view is not query-backed: its registered query source (see
-  // viewQuerySource). One record per SHAPE, not one per route: the two shapes
+  // viewQuerySource). One record per SHAPE, not one per route: the shapes
   // answer with different payloads, so a single record would let whichever
-  // view polled last define what the other renders from.
+  // view polled last define what another renders from.
   function querySourceFor(tab) {
     var view = viewFor(tab);
     return view ? viewQuerySource(view) : null;
@@ -186,7 +190,7 @@
   }
 
   // Issue one QUERY for `source`. Single-flight: an in-flight request (for
-  // either query source) is aborted, and this one's ticket supersedes every
+  // any query source) is aborted, and this one's ticket supersedes every
   // earlier request for `source`, so a late response from the OLD selection
   // can never repaint the new one (it is dropped at the ticket check below
   // rather than rendered). Never reuses a consumed Request; the body is
@@ -320,8 +324,6 @@
     queryTimer = setTimeout(queryRound, BACKOFF_STEPS_MS[queryBackoffIndex]);
   }
 
-  var QUERY_SOURCES = [QUERY_SOURCE, QUERY_SERIES_SOURCE];
-
   // The aggregate failed on transport. A healthy QUERY is only re-requested
   // by the aggregate round's nudge, so while the daemon is down nothing else
   // would ever mark it: every query source takes the same transport state as
@@ -384,10 +386,10 @@
       return;
     }
     // Each source's refusal marker is checked against ITS OWN shape, not the
-    // active tab's: the two shapes can go stale on different tab switches,
+    // active tab's: the shapes can go stale on different tab switches,
     // and clearing only the active one would leave the inactive source
     // suppressed under a key its own next round will never produce again.
-    // Iterates ALL views (not just the two current query-backed ones) so a
+    // Iterates ALL views (not just the current query-backed ones) so a
     // future query-backed view is covered automatically -- queryBodyFor
     // returns null for a non-query view, which the guard below filters out.
     VIEWS.forEach(function (view) {

@@ -37,10 +37,10 @@ fn serialized(group_by: GroupDim, bucket: Option<BucketUnit>) -> Value {
 }
 
 /// Today's window over a seeded ledger holding a priced API-key model, a
-/// subscription seat served twice (so its provider ranks into the Overview
-/// cards that carry seat quota), an unpriced compat model and a pre-dispatch
-/// hangup,
-/// read and named the way the route reads and names it.
+/// subscription provider served twice (so it ranks into the Overview cards
+/// that carry seat quota), once under the configured login and once under a
+/// login the served config no longer names, an unpriced compat model and a
+/// pre-dispatch hangup, read and named the way the route reads and names it.
 pub fn populated_query_panel(
     group_by: GroupDim,
     bucket: Option<BucketUnit>,
@@ -78,11 +78,12 @@ pub fn populated_query_panel(
 }
 
 /// One seeded ledger row: `(request id, hours before the fixture instant,
-/// alias, model, provider, outcome, failure class)`.
+/// alias, model, provider, seat, outcome, failure class)`.
 type Seed = (
     &'static str,
     i64,
     &'static str,
+    Option<&'static str>,
     Option<&'static str>,
     Option<&'static str>,
     &'static str,
@@ -96,6 +97,7 @@ const SEEDS: [Seed; 8] = [
         "fast",
         Some("sonnet"),
         Some("anthropic"),
+        None,
         "ok",
         None,
     ),
@@ -105,6 +107,7 @@ const SEEDS: [Seed; 8] = [
         "fast",
         Some("sonnet"),
         Some("anthropic"),
+        None,
         "ok",
         None,
     ),
@@ -114,6 +117,7 @@ const SEEDS: [Seed; 8] = [
         "fast",
         Some("sonnet"),
         Some("anthropic"),
+        None,
         "upstream_error",
         Some("rate-limited"),
     ),
@@ -123,6 +127,7 @@ const SEEDS: [Seed; 8] = [
         "smart",
         Some("seat-sonnet"),
         Some("claude-seat"),
+        Some("anthropic#a"),
         "ok",
         None,
     ),
@@ -132,6 +137,7 @@ const SEEDS: [Seed; 8] = [
         "smart",
         Some("seat-sonnet"),
         Some("claude-seat"),
+        Some("anthropic#retired"),
         "ok",
         None,
     ),
@@ -141,6 +147,7 @@ const SEEDS: [Seed; 8] = [
         "smart",
         Some("glm"),
         Some("compat"),
+        None,
         "ok",
         None,
     ),
@@ -150,10 +157,20 @@ const SEEDS: [Seed; 8] = [
         "smart",
         Some("glm"),
         Some("compat"),
+        None,
         "cancelled",
         None,
     ),
-    ("hangup", 6, "smart", None, None, "client_disconnect", None),
+    (
+        "hangup",
+        6,
+        "smart",
+        None,
+        None,
+        None,
+        "client_disconnect",
+        None,
+    ),
 ];
 
 fn upstream_of(provider: &str) -> &'static str {
@@ -175,7 +192,7 @@ fn kind_of(provider: &str) -> &'static str {
 /// a server-tool map and a fallback; the hangup reports nothing.
 fn seed_ledger(path: &Path) {
     let db = open(path).expect("open the fixture ledger");
-    for (id, hours_ago, alias, model, provider, outcome, class) in SEEDS {
+    for (id, hours_ago, alias, model, provider, seat, outcome, class) in SEEDS {
         let ts = FIXTURE_NOW_MS - hours_ago * HOUR_MS;
         let served = provider.is_some();
         db.conn()
@@ -185,9 +202,9 @@ fn seed_ledger(path: &Path) {
                  outcome, resolved_class, latency_ms, ttfb_ms, tool_count, msg_count, \
                  attempt_count, fallback_count, input_tokens, output_tokens, \
                  reasoning_tokens, cache_read, cache_write_tokens, cache_write_lifetimes, \
-                 server_tool_use) \
+                 server_tool_use, seat) \
                  VALUES (?1, ?1 + 2000, ?2, 'anthropic', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, \
-                 ?11, 2000, ?12, 1, 4, 1, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                 ?11, 2000, ?12, 1, 4, 1, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 rusqlite::params![
                     ts,
                     id,
@@ -209,6 +226,7 @@ fn seed_ledger(path: &Path) {
                     served.then_some(120),
                     served.then_some(r#"{"300":120}"#),
                     served.then_some(r#"{"web_search":1}"#),
+                    seat,
                 ],
             )
             .expect("seed a fixture row");

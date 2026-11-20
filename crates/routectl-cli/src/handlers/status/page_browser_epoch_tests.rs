@@ -220,3 +220,206 @@ fn page_browser_a_late_aggregate_after_a_query_403_keeps_the_page_terminal() {
         result["log"]
     );
 }
+
+/// The Models entry of VIEWS as the page registers it.
+const MODELS_ENTRY: &str = "      id: 'models',
+      label: 'Models',
+      sources: ['health'],
+      span: 'current state',
+      build: buildModels";
+
+/// A windowed view led by a GET source that also lists the per-seat QUERY,
+/// standing in for Models, as no shipped view lists that source yet.
+const SEAT_PROBE_ENTRY: &str = "      id: 'models',
+      label: 'Models',
+      sources: ['health', QUERY_SEATS_SOURCE],
+      span: null,
+      build: buildModels";
+
+/// The Models view as the page composes it.
+const MODELS_VIEW: &str = "  function buildModels() {
+    return viewSection('health', healthTargetSection, 'Dispatch targets');
+  }";
+
+/// The probe composes its GET section and one line per seat group, each
+/// label beside its request count.
+const SEAT_PROBE_VIEW: &str = "  function buildModels() {
+    var stack = tabStack();
+    stack.appendChild(viewSection('health', healthTargetSection, 'Dispatch targets'));
+    stack.appendChild(viewSection(QUERY_SEATS_SOURCE, function (rec) {
+      var line = document.createElement('p');
+      line.id = 'seat-probe';
+      line.textContent = rec.data.groups.map(function (g) {
+        return g.label + '=' + g.metrics.requests;
+      }).join(' ');
+      return line;
+    }, 'Seats'));
+    return stack;
+  }";
+
+fn with_seat_probe_view(page: String) -> String {
+    for (expected, what) in [(MODELS_ENTRY, "registers"), (MODELS_VIEW, "composes")] {
+        assert_eq!(
+            page.matches(expected).count(),
+            1,
+            "the page {what} the Models view as this test expects"
+        );
+    }
+    page.replace(MODELS_ENTRY, SEAT_PROBE_ENTRY)
+        .replace(MODELS_VIEW, SEAT_PROBE_VIEW)
+}
+
+fn seat_probe_scenario(name: &'static str, budget_ms: u64) -> browser::Scenario {
+    browser::Scenario {
+        name,
+        hash: "models",
+        snippets: &[EPOCH_DRIVER],
+        budget_ms,
+    }
+}
+
+fn run_on_seat_probe(name: &'static str, budget_ms: u64) -> Value {
+    browser::run_scenario_on_patched_page(
+        &seat_probe_scenario(name, budget_ms),
+        with_seat_probe_view,
+    )
+    .result
+}
+
+/// A view led by a GET source still issues the QUERY it lists, at seat
+/// grain, and draws the seat-grouped answer.
+///
+/// Mutation check: viewQuerySource reading only the primary -> red (no QUERY
+/// is ever issued).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_get_led_view_listing_query_seats_issues_a_seat_query() {
+    let result = run_on_seat_probe("epoch-seat-probe-first-query", 30_000);
+
+    let first = &result["queries"][0];
+    assert_eq!(
+        first["body"],
+        serde_json::json!({"window": "today", "group_by": "seat"}),
+        "{first:#}"
+    );
+    assert_eq!(first["view"], "tab-models");
+    let probe = result["shown"]["probe"].as_str().expect("the probe line");
+    for label in ["anthropic#a=", "anthropic#retired=", "(unattributed)="] {
+        assert!(probe.contains(label), "`{label}` drawn: {probe:?}");
+    }
+    let stats = result["shown"]["stats"].as_str().expect("stats text");
+    assert!(
+        stats.starts_with(&stats_for(answered_requests(first))),
+        "the strip counts the seat answer: {stats:?}"
+    );
+}
+
+/// Today's seat QUERY is held past a move to Week; Week's answer applies and
+/// the late Today answer leaves the view as it was.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_late_seat_answer_for_an_old_range_never_repaints() {
+    let result = run_on_seat_probe("epoch-old-range-late", 30_000);
+
+    let queries = result["queries"].as_array().expect("query log");
+    assert_eq!(queries.len(), 2, "one QUERY per range: {queries:#?}");
+    let (old, new) = (&queries[0], &queries[1]);
+    assert_eq!((query_window(old), query_window(new)), ("today", "week"));
+    for q in queries {
+        assert_eq!(q["body"]["group_by"], "seat", "{q:#}");
+    }
+    assert!(
+        result["before"]["probe"].is_string(),
+        "positive control: the probe drew the week answer: {result:#}"
+    );
+
+    assert_late_answer_dropped(&result, old, new);
+}
+
+/// When a QUERY ended: aborted or delivered, whichever came first.
+fn ended_at(entry: &Value) -> f64 {
+    entry["aborted_at"]
+        .as_f64()
+        .or_else(|| entry["delivered_at"].as_f64())
+        .unwrap_or_else(|| panic!("the QUERY ended: {entry:#}"))
+}
+
+/// Probe view, Traffic, probe view again, then a cadence round, with every
+/// QUERY still out when the next move comes: each QUERY is the one the view
+/// selected at its issue asks for, and none starts before the previous one
+/// ended.
+///
+/// Mutation check: queryStatus no longer aborting the in-flight QUERY -> red
+/// (two QUERYs overlap).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_only_the_active_views_query_runs_and_never_two_at_once() {
+    let result = run_on_seat_probe("epoch-seat-probe-switch", 40_000);
+
+    let queries = result["queries"].as_array().expect("query log");
+    assert!(queries.len() >= 4, "{queries:#?}");
+    for q in queries {
+        let expected = match q["view"].as_str() {
+            Some("tab-models") => "seat",
+            Some("tab-traffic") => "model",
+            other => panic!("a QUERY issued on {other:?}: {q:#}"),
+        };
+        assert_eq!(q["body"]["group_by"], expected, "{q:#}");
+    }
+    let views: Vec<&str> = queries[..4]
+        .iter()
+        .map(|q| q["view"].as_str().expect("a view"))
+        .collect();
+    assert_eq!(
+        views,
+        ["tab-models", "tab-traffic", "tab-models", "tab-models"]
+    );
+    for pair in queries[..3].windows(2) {
+        let next_issued = pair[1]["issued_at"].as_f64().expect("issued_at");
+        assert!(
+            pair[0]["delivered_at"]
+                .as_f64()
+                .is_none_or(|at| at > next_issued),
+            "positive control: the move came before the previous answer: {pair:#?}"
+        );
+    }
+    for pair in queries.windows(2) {
+        assert!(
+            pair[1]["issued_at"].as_f64() >= Some(ended_at(&pair[0])),
+            "a QUERY was issued while another was out: {pair:#?}"
+        );
+    }
+}
+
+/// A seat QUERY held past the page going terminal and then delivered changes
+/// nothing: the per-seat source stays stopped.
+///
+/// Mutation check: invalidateEveryFetch skipping the per-seat epoch -> red
+/// (the late answer redraws the probe line).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_terminal_mode_drops_a_late_seat_answer() {
+    let result = run_on_seat_probe("epoch-seat-probe-terminal", 60_000);
+
+    let held = &result["held"];
+    assert_eq!(held["body"]["group_by"], "seat", "{held:#}");
+    assert_eq!(
+        held["aborted"], true,
+        "going terminal aborted the seat QUERY"
+    );
+    assert!(
+        delivered_at(held) > result["terminal"]["at"].as_f64().expect("terminal time"),
+        "the seat answer landed after the page went terminal"
+    );
+    assert!(
+        held["requests"].as_u64().is_some(),
+        "positive control: the late answer carried figures: {held:#}"
+    );
+    assert_eq!(
+        result["terminal"]["query"]["probe"],
+        Value::Null,
+        "terminal stopped the per-seat section: {result:#}"
+    );
+    assert_eq!(result["query"], result["terminal"]["query"]);
+    assert_eq!(result["shown"], result["terminal"]["shown"]);
+}
