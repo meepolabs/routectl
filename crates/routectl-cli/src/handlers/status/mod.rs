@@ -17,6 +17,7 @@
 //! zero-auth dev path. `/v1/*` inherits none of the status-only middleware.
 
 mod accounts;
+mod attention_memory;
 pub(crate) mod builder_probe;
 mod config;
 mod daemon_meta;

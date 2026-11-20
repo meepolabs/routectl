@@ -7065,6 +7065,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   plus vendor pauses, refusal totals, `corrections_confirmed`, history
   counters, the poll driver's health and the top-level `placement` object
   (`accounts/placement.rs`). Memory-only, wire types owned here.
+- `src/handlers/status/attention_memory.rs` -- `AttentionMemory`, the
+  per-daemon in-process memory behind the needs-attention list: reconciles
+  each read's active items by key into active plus recovered (held 60 min from
+  first observed recovery), keeps first-seen ages, detects request-row loss
+  counter rises, holds doctor items while the report is unavailable. Bounded
+  by count and age; never persisted; the clock is the read's `now_ms`.
 - `src/handlers/status/builder_probe.rs` -- test-only observation seam inside
   `guard_panel`, letting a test count and park blocking
   panel builders (the concurrency invariant is invisible from the wire, since
