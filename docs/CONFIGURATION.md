@@ -2471,11 +2471,29 @@ walk while no eligible seat has a fresh reading. With the background
 usage poll switched off, an idle account goes `unread` 7 minutes after its
 last response.
 
-**Established conversations stay put.** Placement is consulted for a new
-conversation only. A pinned conversation keeps its seat whatever its
-readings say, so its warm prompt cache is never given up for a usage
-figure; it moves only when its seat cannot serve, exactly as described
-under [credential pools](#credential-pools-multiple-accounts-per-provider).
+**Established conversations stay put until their seat is out for long.**
+A pinned conversation keeps its seat whatever its readings say, so its warm
+prompt cache is never given up for a usage figure. It is re-placed only
+when its seat will be out for at least 5 minutes (the shortest prompt-cache
+lifetime): the seat's credential is unusable, or its account is parked or
+its breaker is open with at least 5 minutes of that outage left and no
+re-test in flight. The move ranks the other eligible seats exactly as a
+birth ranks the pool (same tiers, same scores for the conversation's
+upstream model, then RPM headroom and the rotation) and pins the
+conversation there. With no eligible seat, it stays.
+
+A seat that refuses for less than that does not move anyone: the local RPM
+limit running dry, the 60 s baseline breaker cooldown, a breaker ready for
+its half-open probe, a probe or re-test in flight, or an outage whose end
+is not known. The request then walks the pinned seat first and the gate
+and fallback order handle it, as before.
+
+Re-placement happens every time the condition holds, not once per
+conversation: a conversation moved from A to B moves again by pace if B is
+later parked for 10 minutes. Nothing records where it has been, so it may
+return to A then if A ranks best. A recovered seat never pulls a
+conversation back on its own: a seat that can serve is never re-ranked.
+Pins live in memory; a hot reload keeps them, a restart drops them.
 
 Placement always applies; no config key turns it off, and there are no
 tuning knobs. A pool that should not place by usage sets
@@ -5904,9 +5922,11 @@ to choose between and every strategy behaves identically:
   tiebreak so a burst of new conversations does not herd onto one seat;
   see [pace placement](#pace-placement-on-seat-pools)); every
   later request for that conversation routes back to the same seat. If
-  that seat later goes unhealthy (rate-limited or breaker-open), the
-  conversation migrates ONCE to a healthy sibling and does not flap back
-  when the original recovers. Requires an inbound per-conversation key
+  that seat is later out for 5 minutes or more (unusable credential, or a
+  park or open breaker with that much left), the conversation is re-placed
+  on the best eligible sibling, every time this happens (see
+  [pace placement](#pace-placement-on-seat-pools)); a shorter refusal
+  keeps it where it is, and a recovered seat does not pull it back. Requires an inbound per-conversation key
   (the `x-claude-code-session-id` header Claude Code sends, or body
   `metadata.session_id`). A request without one mints no pin, since there
   is nothing to pin under; it is still placed by account usage, because
@@ -5914,7 +5934,7 @@ to choose between and every strategy behaves identically:
   With no eligible seat freshly read, or on a pool with no OAuth
   accounts, it keeps the `fill-first` walk. The per-request seat decision is not
   persisted, and only partially logged: a DEBUG line marks a birth pick
-  and an overflow repin, while a sticky stay, a pick deferred for lack of
+  and a repin (with its `trigger` reason), while a sticky stay, a pick deferred for lack of
   a healthy seat, and the keyless fall-through emit no selection line of
   their own. The usage ledger's
   `selection_decision` column is write-stopped (retained in the schema,

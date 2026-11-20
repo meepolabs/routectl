@@ -376,15 +376,13 @@ fn carry_over_sticky_from_preserves_pins() {
     // NOT drop StickyLeastLoaded pins, or every live conversation cold-
     // misses its warm-cache seat.
 
-    // Arrange: pin a session in the outgoing Router, with the one-time
-    // overflow marker set so we can prove it survives the rebuild.
+    // Arrange: pin a session in the outgoing Router.
     let config = Arc::new(Config::default());
     let before = Router::new(config.clone());
     before.sticky_pins.put(
         "sess-1",
         crate::seat_pool::SeatPin {
             member: "seat-b".into(),
-            repinned: true,
         },
     );
 
@@ -393,17 +391,13 @@ fn carry_over_sticky_from_preserves_pins() {
     // Act
     after.carry_over_sticky_from(&before);
 
-    // Assert: the pin survived the rebuild, INCLUDING the repinned flag --
-    // otherwise a reload would reset the one-time cap and re-open the flap
-    // window.
+    // Assert
     assert_eq!(
         after.sticky_pins.get("sess-1"),
         Some(crate::seat_pool::SeatPin {
             member: "seat-b".to_string(),
-            repinned: true,
         }),
-        "carry_over_sticky_from must preserve session->seat pins (with the \
-             repinned flag) across a rebuild",
+        "carry_over_sticky_from must preserve session->seat pins across a rebuild",
     );
 }
 
@@ -448,7 +442,6 @@ fn carry_over_sticky_from_makes_a_swap_window_pin_visible() {
         "late-sess",
         crate::seat_pool::SeatPin {
             member: "seat-b".into(),
-            repinned: false,
         },
     );
 
@@ -457,7 +450,6 @@ fn carry_over_sticky_from_makes_a_swap_window_pin_visible() {
         after.sticky_pins.get("late-sess"),
         Some(crate::seat_pool::SeatPin {
             member: "seat-b".to_string(),
-            repinned: false,
         }),
         "a pin written on the outgoing router after carry-over must land in \
              the map the new router reads",

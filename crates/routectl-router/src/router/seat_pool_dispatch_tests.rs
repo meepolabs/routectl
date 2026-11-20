@@ -183,7 +183,6 @@ async fn sticky_keyed_births_a_pin_on_the_home_then_stays_without_rewriting_it()
         birth[0],
         "the pin names the home seat"
     );
-    assert!(!pin.repinned, "a birth pin starts un-repinned");
 
     let mut stay = Vec::new();
     let rebirths = birth_pick_events(|| stay = chain_state_keys_for(&router, Some("S")));
@@ -498,6 +497,7 @@ fn sticky_birth_log_renders_the_seat_key_through_the_log_sanitizer() {
             &nickname,
             &seats,
             crate::seat_pool::SelectionOutcome::Birth { home: 0 },
+            None,
         );
     });
 
@@ -559,7 +559,6 @@ async fn sticky_stale_pin_not_in_pool_is_re_picked() {
         &super::chain::sticky_pin_key("S", POOL),
         crate::seat_pool::SeatPin {
             member: "anthropic-gone".to_string(),
-            repinned: false,
         },
     );
     let order = chain_state_keys_for(&router, Some("S"));
@@ -574,84 +573,6 @@ async fn sticky_stale_pin_not_in_pool_is_re_picked() {
     assert!(
         ["anthropic-a", "anthropic-b", "anthropic-c"].contains(&repaired.as_str()),
         "stale pin must re-pick a member the pool still serves, got {repaired}"
-    );
-}
-
-#[tokio::test]
-async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
-    // End-to-end overflow-repin: pin a session, force its home seat's breaker open,
-    // and assert a subsequent call leads with a healthy sibling AND the
-    // pin records repinned=true. Then heal the original and assert the
-    // session STAYS on the sibling (hysteresis -- no A->B->A flap). Then
-    // park the sibling (new home) and assert the already-repinned session
-    // STAYS (does not chase a third seat -- one-time cap).
-    let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
-
-    // Birth: pin session S to its home seat.
-    let first = chain_state_keys_for(&router, Some("S"));
-    let home = first[0].clone();
-    assert!(
-        !router
-            .sticky_pins
-            .get(&super::chain::sticky_pin_key("S", POOL))
-            .expect("pinned")
-            .repinned,
-        "birth pin must start un-repinned"
-    );
-
-    // Force the home seat's breaker open for a long cooldown.
-    assert!(
-        router.force_open_breaker(&home, Duration::from_hours(1)),
-        "home seat must own a state slot to trip"
-    );
-
-    // The session migrates ONCE to a healthy sibling.
-    let migrated = chain_state_keys_for(&router, Some("S"));
-    assert_ne!(
-        migrated[0], home,
-        "overflow-repin must migrate off the parked home seat"
-    );
-    let sibling = migrated[0].clone();
-    let pin_after = router
-        .sticky_pins
-        .get(&super::chain::sticky_pin_key("S", POOL))
-        .expect("re-pinned");
-    assert_eq!(
-        opus_state_key(&pin_after.member),
-        sibling,
-        "pin must point at the sibling"
-    );
-    assert!(
-        pin_after.repinned,
-        "overflow-repin must set repinned=true (the one-time cap marker)"
-    );
-
-    // Heal the original home seat. The session must NOT flap back: the pin
-    // now points at the healthy sibling, so it STAYS there.
-    let generation = router.credential_generation_for_tests(&home);
-    router.settle_seat_success_for_tests(&home, true, generation);
-    let healed = chain_state_keys_for(&router, Some("S"));
-    assert_eq!(
-        healed[0], sibling,
-        "a recovered original must NOT pull the session back (no A->B->A flap)"
-    );
-
-    // Park the NEW home (the sibling). An already-repinned session must
-    // STAY rather than chase a third seat (one-time cap).
-    assert!(
-        router.force_open_breaker(&sibling, Duration::from_hours(1)),
-        "sibling seat must own a state slot to trip"
-    );
-    let capped = chain_state_keys_for(&router, Some("S"));
-    assert_eq!(
-        capped[0], sibling,
-        "an already-repinned session must not chase a third seat"
-    );
-    let still_pinned = pinned_member(&router, "S").expect("still pinned");
-    assert_eq!(
-        opus_state_key(&still_pinned),
-        sibling,
-        "the pin must remain on the sibling -- no second migration"
     );
 }
 
@@ -1077,7 +998,6 @@ fn pin_session_to(router: &Router, session: &str, member: &str) {
         &super::chain::sticky_pin_key(session, "shared-pool"),
         crate::seat_pool::SeatPin {
             member: member.to_string(),
-            repinned: false,
         },
     );
 }
@@ -1132,17 +1052,13 @@ fn a_removed_members_pin_repicks_once_onto_a_survivor_and_counts_it() {
 #[test]
 fn a_surviving_members_pin_is_never_touched_by_a_membership_change() {
     // The blast radius: a member leaving costs a cold miss ONLY to the sessions
-    // pinned to it. Every other pin -- and its one-time overflow marker -- is
-    // left byte-for-byte alone.
+    // pinned to it. Every other pin is left byte-for-byte alone.
     let before = sticky_pool_router(&["anthropic-a", "anthropic-b", "anthropic-c"]);
     pin_session_to(&before, "doomed", "anthropic-c");
     before.sticky_pins.put(
         &super::chain::sticky_pin_key("survivor", "shared-pool"),
         crate::seat_pool::SeatPin {
             member: "anthropic-a".to_string(),
-            // Already migrated once: the marker must survive, or the reload
-            // would silently re-open this session's flap window.
-            repinned: true,
         },
     );
 
@@ -1158,10 +1074,6 @@ fn a_surviving_members_pin_is_never_touched_by_a_membership_change() {
     assert_eq!(
         kept.member, "anthropic-a",
         "a surviving member's pin must not move"
-    );
-    assert!(
-        kept.repinned,
-        "the one-time overflow marker must survive the reload"
     );
     assert_eq!(
         after.metrics.pool_totals().removed_pin_repick,

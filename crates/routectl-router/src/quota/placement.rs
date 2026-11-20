@@ -18,6 +18,16 @@
 //! places when nothing better is eligible: the rule orders seats, it never
 //! refuses a request. Nothing here reads a pin, so an established conversation
 //! never moves because its seat's reading changed.
+//!
+//! A pinned conversation moves only when [`move_trigger`] says its seat is out
+//! for long enough to cost more than the warm prompt cache a move gives up;
+//! the move then ranks the other seats by this same rule.
+
+use std::time::Duration;
+
+use routectl_core::EligibilityReason;
+
+use crate::runtime_state::CapacitySnapshot;
 
 use super::freshness::ObservationStamp;
 use super::meter::ReportState;
@@ -210,6 +220,37 @@ pub fn best_bucket(standings: &[Standing], candidates: &[usize]) -> Option<(Tier
     Some((best.0, tied))
 }
 
+/// The shortest outage worth moving a warm conversation for: the shortest
+/// prompt-cache lifetime, so a seat back within it would still have served
+/// the cache the move throws away.
+pub const MOVE_FLOOR: Duration = Duration::from_mins(5);
+
+/// Why a pinned conversation leaves its seat, `home`, or `None` when it
+/// stays.
+///
+/// An unusable credential always moves it. A parked account or an open
+/// breaker moves it only while at least [`MOVE_FLOOR`] of the outage is
+/// known to remain. Everything else stays: an empty local RPM bucket, a
+/// half-open breaker ready to re-test, a re-test or probe already in flight,
+/// and any outage whose end is unknown or nearer than the floor.
+pub fn move_trigger(home: &CapacitySnapshot) -> Option<EligibilityReason> {
+    let reason = home.reason()?;
+    let lasting = home
+        .outage_remaining
+        .is_some_and(|remaining| remaining >= MOVE_FLOOR);
+    match reason {
+        EligibilityReason::CredentialUnusable => Some(reason),
+        EligibilityReason::AccountParked | EligibilityReason::BreakerOpen if lasting => {
+            Some(reason)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[path = "placement_tests.rs"]
 mod placement_tests;
+
+#[cfg(test)]
+#[path = "placement_move_tests.rs"]
+mod placement_move_tests;

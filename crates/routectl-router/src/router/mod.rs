@@ -3502,6 +3502,10 @@ mod quota_feed_dispatch_tests;
 #[path = "pace_placement_dispatch_tests.rs"]
 mod pace_placement_dispatch_tests;
 
+#[cfg(test)]
+#[path = "replacement_dispatch_tests.rs"]
+mod replacement_dispatch_tests;
+
 #[cfg(all(test, feature = "openai-responses"))]
 #[path = "codex_reading_dispatch_tests.rs"]
 mod codex_reading_dispatch_tests;

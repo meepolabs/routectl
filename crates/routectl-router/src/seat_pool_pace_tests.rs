@@ -3,7 +3,8 @@
 //! Each test feeds standings that would flip the pick if the chooser let them
 //! override a layer they must not touch: dispatchability, the Closed over
 //! HalfOpenReady preference, the anti-herd rotation, a healthy pin, and a
-//! migration off an unhealthy one.
+//! home that is out but not for long enough to move. A move off a lasting
+//! outage ranks the siblings by the same rule as a birth.
 
 use super::*;
 
@@ -25,6 +26,14 @@ fn open() -> CapacitySnapshot {
         circuit: CircuitPhase::Open,
         credential: CredentialState::Usable,
         outage_remaining: None,
+    }
+}
+
+/// A breaker open for as long as a move needs.
+fn lasting_open() -> CapacitySnapshot {
+    CapacitySnapshot {
+        outage_remaining: Some(crate::quota::placement::MOVE_FLOOR),
+        ..open()
     }
 }
 
@@ -64,7 +73,7 @@ fn the_best_standing_supersedes_the_rpm_ranking_on_a_birth() {
     let snaps = vec![closed_with(100.0), closed_with(1.0)];
     let standings = vec![roomy(0.4), roomy(1.6)];
 
-    let (order, outcome) = sticky_least_loaded_order(2, None, false, &snaps, 0, &standings);
+    let (order, outcome) = sticky_least_loaded_order(2, None, &snaps, 0, &standings);
 
     assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
     assert_eq!(order, vec![1, 0]);
@@ -77,7 +86,7 @@ fn headroom_breaks_a_tie_inside_the_best_bucket_and_never_crosses_it() {
     let snaps = vec![closed_with(5.0), closed_with(9.0), closed_with(500.0)];
     let standings = vec![roomy(1.234), roomy(1.2349), roomy(1.22)];
 
-    let (_, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0, &standings);
+    let (_, outcome) = sticky_least_loaded_order(3, None, &snaps, 0, &standings);
 
     assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
 }
@@ -93,7 +102,7 @@ fn the_rotation_spreads_births_across_a_tied_bucket() {
     let standings = vec![roomy(1.204), low_room(9.0), roomy(1.196), roomy(1.19)];
 
     let homes: Vec<SelectionOutcome> = (0..4)
-        .map(|tiebreak| sticky_least_loaded_order(4, None, false, &snaps, tiebreak, &standings).1)
+        .map(|tiebreak| sticky_least_loaded_order(4, None, &snaps, tiebreak, &standings).1)
         .collect();
 
     assert_eq!(
@@ -112,7 +121,7 @@ fn a_non_dispatchable_seat_is_never_resurrected_by_its_standing() {
     let snaps = vec![open(), closed_with(1.0)];
     let standings = vec![roomy(9.0), low_room(0.0)];
 
-    let (order, outcome) = sticky_least_loaded_order(2, None, false, &snaps, 0, &standings);
+    let (order, outcome) = sticky_least_loaded_order(2, None, &snaps, 0, &standings);
 
     assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
     assert_eq!(order, vec![1, 0]);
@@ -123,7 +132,7 @@ fn the_closed_over_half_open_preference_runs_before_the_standing() {
     let snaps = vec![half_open(100.0), closed_with(3.0)];
     let standings = vec![roomy(9.0), unread()];
 
-    let (_, outcome) = sticky_least_loaded_order(2, None, false, &snaps, 0, &standings);
+    let (_, outcome) = sticky_least_loaded_order(2, None, &snaps, 0, &standings);
 
     assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
 }
@@ -133,9 +142,8 @@ fn no_standings_ranks_on_headroom_exactly_as_before() {
     let snaps = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
 
     for tiebreak in 0..3 {
-        let dormant = sticky_least_loaded_order(3, None, false, &snaps, tiebreak, &[]);
-        let all_unread =
-            sticky_least_loaded_order(3, None, false, &snaps, tiebreak, &[unread(); 3]);
+        let dormant = sticky_least_loaded_order(3, None, &snaps, tiebreak, &[]);
+        let all_unread = sticky_least_loaded_order(3, None, &snaps, tiebreak, &[unread(); 3]);
 
         assert_eq!(
             dormant,
@@ -150,29 +158,54 @@ fn a_healthy_pin_stays_whatever_the_standings() {
     let snaps = vec![closed_with(1.0), closed_with(1.0)];
     let standings = vec![low_room(0.0), roomy(9.0)];
 
-    let (order, outcome) = sticky_least_loaded_order(2, Some(0), false, &snaps, 0, &standings);
+    let (order, outcome) = sticky_least_loaded_order(2, Some(0), &snaps, 0, &standings);
 
     assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
     assert_eq!(order, vec![0, 1]);
 }
 
 #[test]
-fn a_migration_off_an_unhealthy_home_ignores_standings() {
-    let snaps = vec![open(), closed_with(1.0), closed_with(50.0)];
-    let standings = vec![unread(), roomy(9.0), low_room(0.0)];
+fn a_move_ranks_the_siblings_by_standing_before_headroom() {
+    let snaps = vec![
+        lasting_open(),
+        closed_with(1.0),
+        closed_with(50.0),
+        closed_with(1.0),
+    ];
+    let standings = vec![roomy(9.0), roomy(1.2), low_room(0.0), roomy(1.2)];
 
-    let (order, outcome) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &standings);
+    let moves: Vec<(Vec<usize>, SelectionOutcome)> = (0..2)
+        .map(|tiebreak| sticky_least_loaded_order(4, Some(0), &snaps, tiebreak, &standings))
+        .collect();
 
-    assert_eq!(outcome, SelectionOutcome::OverflowRepin { home: 2 });
-    assert_eq!(order, vec![2, 0, 1]);
+    let repin = |home| SelectionOutcome::Repin {
+        home,
+        trigger: routectl_core::EligibilityReason::BreakerOpen,
+    };
+    assert_eq!(
+        moves,
+        vec![(vec![1, 0, 2, 3], repin(1)), (vec![3, 0, 1, 2], repin(3))],
+        "the best-standing siblings share the moves; the home and the \
+         most-headroom seat never take one"
+    );
+}
+
+#[test]
+fn an_outage_too_short_to_move_for_keeps_the_home_whatever_the_standings() {
+    let snaps = vec![open(), closed_with(1.0)];
+    let standings = vec![unread(), roomy(9.0)];
+
+    let (order, outcome) = sticky_least_loaded_order(2, Some(0), &snaps, 0, &standings);
+
+    assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
+    assert_eq!(order, vec![0, 1]);
 }
 
 #[test]
 fn no_dispatchable_seat_defers_whatever_the_standings() {
     let snaps = vec![open(), open()];
 
-    let (order, outcome) =
-        sticky_least_loaded_order(2, None, false, &snaps, 0, &[roomy(1.0), roomy(1.0)]);
+    let (order, outcome) = sticky_least_loaded_order(2, None, &snaps, 0, &[roomy(1.0), roomy(1.0)]);
 
     assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
     assert_eq!(order, vec![0, 1]);

@@ -246,7 +246,7 @@ pub fn is_entry_account(account: &str) -> bool {
 }
 
 /// Pinned-seat record for one inbound conversation: which pool MEMBER
-/// (account) the session is pinned to, plus a one-time overflow-repin marker.
+/// (account) the session is pinned to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeatPin {
     /// The pinned seat's member `[providers]` table key -- the ACCOUNT, not a
@@ -262,10 +262,6 @@ pub struct SeatPin {
     /// pool and stable across a Router rebuild, so the identity survives a
     /// reload the same way a `state_key` did.
     pub(crate) member: String,
-    /// True once this session has been migrated off its birth seat by a
-    /// one-time overflow-repin. Caps migration at one and prevents an
-    /// A->B->A flap when the original seat recovers.
-    pub(crate) repinned: bool,
 }
 
 /// Maximum number of session->seat pins held at once. A bounded LRU keeps
@@ -276,7 +272,7 @@ pub struct SeatPin {
 const STICKY_PIN_CAPACITY: usize = 4096;
 
 /// Bounded LRU map of pin lookup key -> pinned [`SeatPin`] (the pinned pool
-/// MEMBER plus the one-time overflow-repin marker). The lookup key namespaces
+/// MEMBER). The lookup key namespaces
 /// the session by pool rather than by model, so a session holds ONE pin per
 /// pool -- see `sticky_pin_key`. Neither a positional seat index nor a
 /// model-scoped `state_key` is stored: indices shift on a Router rebuild, and
@@ -284,7 +280,11 @@ const STICKY_PIN_CAPACITY: usize = 4096;
 /// pool (see the field doc on [`SeatPin::member`]).
 ///
 /// Wraps a `parking_lot::Mutex<LruCache<..>>` for interior mutability so the
-/// map is read/written on the `&self` dispatch path.
+/// map is read/written on the `&self` dispatch path. The dispatch path writes
+/// only through [`StickyPins::claim_if_absent`] and [`StickyPins::repin_if`],
+/// each a check and a write under one lock acquisition, so two turns of one
+/// conversation that both chose a seat cannot both pin it: the second sees
+/// the first's pin and adopts it.
 ///
 /// This whole struct is held behind an `Arc` on
 /// `Router` and SHARED (not copied) across a hot-reload rebuild (see
@@ -340,11 +340,43 @@ impl StickyPins {
         self.tiebreak.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Insert or update the pin for `session_key`, marking it most-recently
-    /// used. Single setter: a birth pick passes `repinned: false`, a one-time
-    /// overflow-repin passes `repinned: true`.
+    /// Insert or overwrite the pin for `session_key` unconditionally. Test
+    /// seeding only: dispatch writes through the two conditional setters.
+    #[cfg(test)]
     pub(crate) fn put(&self, session_key: &str, pin: SeatPin) {
         self.pins.lock().put(session_key.to_string(), pin);
+    }
+
+    /// Pin `session_key` to `pin` only when it holds no pin, marking it
+    /// most-recently used either way. `Err` carries the pin another turn
+    /// stored first, which the caller adopts in place of its own pick.
+    pub(crate) fn claim_if_absent(&self, session_key: &str, pin: SeatPin) -> Result<(), SeatPin> {
+        let mut pins = self.pins.lock();
+        if let Some(held) = pins.get(session_key) {
+            return Err(held.clone());
+        }
+        pins.put(session_key.to_string(), pin);
+        Ok(())
+    }
+
+    /// Re-point `session_key` to `pin` only while it is still pinned to
+    /// `expected_member`, marking it most-recently used. `Err` carries what
+    /// the key holds instead: another turn's pin, or `None` when the pin was
+    /// evicted meanwhile.
+    pub(crate) fn repin_if(
+        &self,
+        session_key: &str,
+        expected_member: &str,
+        pin: SeatPin,
+    ) -> Result<(), Option<SeatPin>> {
+        let mut pins = self.pins.lock();
+        match pins.get_mut(session_key) {
+            Some(held) if held.member == expected_member => {
+                *held = pin;
+                Ok(())
+            }
+            held => Err(held.cloned()),
+        }
     }
 
     /// Re-pick, in place, every pin whose member `survivor_for` answers for,
@@ -357,12 +389,6 @@ impl StickyPins {
     /// left byte-for-byte alone, so a membership change never globally resets
     /// the pin map.
     ///
-    /// Re-picked pins land with `repinned: false`. The marker exists to cap
-    /// HEALTH-driven migration at one hop; a member the operator withdrew is
-    /// not a health event, so spending the session's one-time migration budget
-    /// on it would leave the session unable to escape a seat that later trips.
-    /// The move is a fresh birth on the survivor.
-    ///
     /// One lock acquisition for the whole walk, and `iter_mut` does not
     /// re-order the LRU, so a pin's eviction position is unchanged by being
     /// re-picked.
@@ -374,7 +400,6 @@ impl StickyPins {
         for (_, pin) in self.pins.lock().iter_mut() {
             if let Some(survivor) = survivor_for(&pin.member) {
                 pin.member = survivor;
-                pin.repinned = false;
                 moved += 1;
             }
         }
@@ -446,7 +471,7 @@ pub fn fill_first_order(seat_count: usize) -> Vec<usize> {
 /// index order. The home seat is a best-effort cache-locality hint; the
 /// ascending tail preserves the fill-first fallback so the existing
 /// sequential gate + chain fallback walk stays authoritative.
-fn order_home_first(home: usize, seat_count: usize) -> Vec<usize> {
+pub fn order_home_first(home: usize, seat_count: usize) -> Vec<usize> {
     let mut order = Vec::with_capacity(seat_count);
     order.push(home);
     order.extend((0..seat_count).filter(|&i| i != home));
@@ -458,13 +483,17 @@ fn order_home_first(home: usize, seat_count: usize) -> Vec<usize> {
 /// the pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionOutcome {
-    /// Pin miss (birth): caller pins `home` with `repinned: false`.
+    /// Pin miss (birth): caller claims a pin on `home`.
     Birth { home: usize },
-    /// Home healthy, OR already-repinned, OR no healthy sibling: no pin write.
+    /// The pinned home keeps the conversation: it can serve, its outage is
+    /// too short to move for, or no sibling is eligible. No pin write.
     Stay { home: usize },
-    /// First migration off a non-dispatchable home: caller pins the new
-    /// `home` with `repinned: true`.
-    OverflowRepin { home: usize },
+    /// The pinned home is out for `trigger`, long enough to move for: caller
+    /// re-points the pin to the new `home`.
+    Repin {
+        home: usize,
+        trigger: routectl_core::EligibilityReason,
+    },
     /// Pin miss with no dispatchable seat: fill-first order, no pin.
     DeferNoHealthy,
 }
@@ -512,9 +541,9 @@ fn eligible_candidates(candidates: &[usize], snapshots: &[CapacitySnapshot]) -> 
 /// deterministically by `tiebreak`. None if no candidate is dispatchable.
 /// `candidates` are indices into `snapshots`.
 ///
-/// `standings` is index-aligned with `snapshots` and EMPTY for a dormant pool
-/// or a migration pick, which then ranks on headroom alone, exactly as before
-/// the pace rule existed.
+/// `standings` is index-aligned with `snapshots` and EMPTY for a dormant pool,
+/// which then ranks on headroom alone, exactly as before the pace rule
+/// existed.
 fn pick_least_loaded(
     candidates: &[usize],
     snapshots: &[CapacitySnapshot],
@@ -552,28 +581,23 @@ fn pick_least_loaded(
 /// walk order and the [`SelectionOutcome`] (whether/how to update the pin).
 ///
 /// `snapshots` is index-aligned with the seat slice (`len == seat_count`),
-/// gathered for the hit AND miss path now (the overflow check reads the
-/// pinned home's snapshot). `pinned_index` is the seat this session is pinned
-/// to (`Some`), or `None` for a birth pick / pin miss. `already_repinned` is
-/// the pin's one-time overflow marker. `tiebreak` seeds the anti-herd
-/// rotation among equally-least-loaded candidates. `standings` is
+/// gathered for the hit AND miss path (the move check reads the pinned
+/// home's snapshot). `pinned_index` is the seat this session is pinned to
+/// (`Some`), or `None` for a birth pick / pin miss. `tiebreak` seeds the
+/// anti-herd rotation among equally-least-loaded candidates. `standings` is
 /// index-aligned with the seats and empty for a dormant pool.
 ///
-/// One-time overflow-repin with hysteresis: a pinned home that goes
-/// non-dispatchable is migrated ONCE to the least-loaded healthy sibling and
-/// never chased further -- we never compare against or return to the original
-/// seat, so a recovered original cannot pull the session back (no A->B->A
-/// flap).
-///
-/// THE PACE RULE REACHES THE BIRTH PICK ONLY. A healthy pin is kept without
-/// standings being consulted at all, and the migration pick below is made on
-/// health and RPM, because the trigger for a migration is a seat that cannot
-/// serve -- never a usage reading. A reading that could move a warm session
-/// would forfeit the prompt-cache locality the pin exists to hold.
+/// A pinned home keeps the conversation unless
+/// [`move_trigger`](crate::quota::placement::move_trigger) names a lasting
+/// outage. A move ranks the eligible siblings exactly as a birth ranks the
+/// pool, with the home excluded; there is no record of earlier homes, so a
+/// conversation can move again the next time its seat is out for long, and a
+/// recovered seat never pulls it back because a serving pin is never
+/// re-ranked. A home that is out but not moving, or that has no eligible
+/// sibling, leads the walk as before and the gate and fallback handle it.
 pub fn sticky_least_loaded_order(
     seat_count: usize,
     pinned_index: Option<usize>,
-    already_repinned: bool,
     snapshots: &[CapacitySnapshot],
     tiebreak: usize,
     standings: &[Standing],
@@ -587,26 +611,20 @@ pub fn sticky_least_loaded_order(
 
     let n = seat_count;
     if let Some(home) = pinned_index {
-        // Healthy home: keep serving it; no pin write, no standings read.
-        if snapshots[home].is_dispatchable() {
-            return (order_home_first(home, n), SelectionOutcome::Stay { home });
-        }
-        // Already migrated once: do NOT chase further. The gate + fallback
-        // walk handles the dead home for this request. One-time cap.
-        if already_repinned {
-            return (order_home_first(home, n), SelectionOutcome::Stay { home });
-        }
-        // First migration: pick the least-loaded healthy SIBLING, on health
-        // and RPM alone.
+        let stay = (order_home_first(home, n), SelectionOutcome::Stay { home });
+        let Some(trigger) = crate::quota::placement::move_trigger(&snapshots[home]) else {
+            return stay;
+        };
         let siblings: Vec<usize> = (0..n).filter(|&i| i != home).collect();
-        match pick_least_loaded(&siblings, snapshots, tiebreak, &[]) {
+        match pick_least_loaded(&siblings, snapshots, tiebreak, standings) {
             Some(new_home) => (
                 order_home_first(new_home, n),
-                SelectionOutcome::OverflowRepin { home: new_home },
+                SelectionOutcome::Repin {
+                    home: new_home,
+                    trigger,
+                },
             ),
-            // No healthy sibling: nowhere better. Stay (no flap, no pin);
-            // the gate handles the dead home.
-            None => (order_home_first(home, n), SelectionOutcome::Stay { home }),
+            None => stay,
         }
     } else {
         // Birth pick: candidate set = all seats.
@@ -931,7 +949,6 @@ mod tests {
     fn pin(member: &str) -> SeatPin {
         SeatPin {
             member: member.to_string(),
-            repinned: false,
         }
     }
 
@@ -1000,7 +1017,7 @@ mod tests {
         // A birth pick (pinned_index=None) over all-equal candidates with
         // tiebreak=0 chooses seat 0 and yields the fill-first order, pinning 0.
         let snaps = vec![closed_unlimited(), closed_unlimited(), closed_unlimited()];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, &snaps, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 0 });
     }
@@ -1010,52 +1027,35 @@ mod tests {
         // An existing pin whose home is dispatchable stays: order leads with
         // the home, the rest ascending, and NO new pin is minted.
         let snaps = vec![closed_unlimited(), closed_unlimited(), closed_unlimited()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(2), false, &snaps, 7, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, Some(2), &snaps, 7, &[]);
         assert_eq!(order, vec![2, 0, 1]);
         assert_eq!(outcome, SelectionOutcome::Stay { home: 2 });
     }
 
     #[test]
-    fn overflow_repin_migrates_to_healthy_sibling_once() {
-        // Home (index 0) is Open / non-dispatchable; sibling 1 is Closed. Not
-        // yet repinned -> migrate ONCE to sibling 1, order leads with 1.
-        let snaps = vec![open(), closed_unlimited(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
-        assert_eq!(outcome, SelectionOutcome::OverflowRepin { home: 1 });
-        assert_eq!(order, vec![1, 0, 2]);
-    }
+    fn a_lasting_outage_moves_to_a_sibling_and_none_eligible_stays() {
+        let lasting = CapacitySnapshot {
+            outage_remaining: Some(crate::quota::placement::MOVE_FLOOR),
+            ..open()
+        };
+        let moved =
+            sticky_least_loaded_order(3, Some(0), &[lasting, closed_unlimited(), open()], 0, &[]);
+        let stranded = sticky_least_loaded_order(3, Some(0), &[lasting, open(), open()], 0, &[]);
 
-    #[test]
-    fn already_repinned_unhealthy_home_stays() {
-        // Pinned home non-dispatchable but already_repinned=true: the one-time
-        // cap holds -> Stay, no second migration even though sibling 1 is
-        // healthy.
-        let snaps = vec![open(), closed_unlimited(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(0), true, &snaps, 0, &[]);
-        assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
-        assert_eq!(order, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn overflow_no_healthy_sibling_stays() {
-        // Pinned home non-dispatchable, every sibling also non-dispatchable,
-        // not repinned -> Stay (no flap, no pin: nowhere better).
-        let snaps = vec![open(), open(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(0), false, &snaps, 0, &[]);
-        assert_eq!(outcome, SelectionOutcome::Stay { home: 0 });
-        assert_eq!(order, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn no_flap_repinned_sibling_stays_when_original_recovers() {
-        // Hysteresis: after a session repins onto sibling 1 (repinned=true),
-        // a later call where the ORIGINAL seat 0 has recovered must NOT pull
-        // the session back. The pin now points at sibling 1, which is
-        // dispatchable -> Stay on 1.
-        let recovered = vec![closed_unlimited(), closed_unlimited(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, Some(1), true, &recovered, 0, &[]);
-        assert_eq!(outcome, SelectionOutcome::Stay { home: 1 });
-        assert_eq!(order, vec![1, 0, 2]);
+        assert_eq!(
+            moved,
+            (
+                vec![1, 0, 2],
+                SelectionOutcome::Repin {
+                    home: 1,
+                    trigger: routectl_core::EligibilityReason::BreakerOpen,
+                }
+            )
+        );
+        assert_eq!(
+            stranded,
+            (vec![0, 1, 2], SelectionOutcome::Stay { home: 0 })
+        );
     }
 
     #[test]
@@ -1063,12 +1063,12 @@ mod tests {
         // A miss still yields Birth on a healthy pool and DeferNoHealthy when
         // all seats are parked.
         let healthy = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &healthy, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, &healthy, 0, &[]);
         assert_eq!(order, vec![1, 0, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
 
         let parked = vec![open(), open(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &parked, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, &parked, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
     }
@@ -1077,7 +1077,7 @@ mod tests {
     fn sticky_birth_picks_least_loaded_seat() {
         // Seat 1 has the most RPM headroom -> chosen as home and pinned.
         let snaps = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, &snaps, 0, &[]);
         assert_eq!(order, vec![1, 0, 2]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
     }
@@ -1095,7 +1095,7 @@ mod tests {
             },
             closed_with(3.0),
         ];
-        let (order, outcome) = sticky_least_loaded_order(2, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(2, None, &snaps, 0, &[]);
         assert_eq!(outcome, SelectionOutcome::Birth { home: 1 });
         assert_eq!(order, vec![1, 0]);
     }
@@ -1106,19 +1106,19 @@ mod tests {
         // deterministically and wraps -- the anti-herd spread.
         let snaps = vec![closed_with(5.0), closed_with(5.0), closed_with(5.0)];
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 0, &[]).1,
+            sticky_least_loaded_order(3, None, &snaps, 0, &[]).1,
             SelectionOutcome::Birth { home: 0 }
         );
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 1, &[]).1,
+            sticky_least_loaded_order(3, None, &snaps, 1, &[]).1,
             SelectionOutcome::Birth { home: 1 }
         );
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 2, &[]).1,
+            sticky_least_loaded_order(3, None, &snaps, 2, &[]).1,
             SelectionOutcome::Birth { home: 2 }
         );
         assert_eq!(
-            sticky_least_loaded_order(3, None, false, &snaps, 3, &[]).1,
+            sticky_least_loaded_order(3, None, &snaps, 3, &[]).1,
             SelectionOutcome::Birth { home: 0 }
         );
     }
@@ -1128,7 +1128,7 @@ mod tests {
         // Every seat Open / not dispatchable: home 0, fill-first order, no
         // pin (a later turn re-picks once a seat is healthy).
         let snaps = vec![open(), open(), open()];
-        let (order, outcome) = sticky_least_loaded_order(3, None, false, &snaps, 0, &[]);
+        let (order, outcome) = sticky_least_loaded_order(3, None, &snaps, 0, &[]);
         assert_eq!(order, vec![0, 1, 2]);
         assert_eq!(outcome, SelectionOutcome::DeferNoHealthy);
     }
@@ -1143,11 +1143,11 @@ mod tests {
     fn sticky_single_seat_is_trivial() {
         let snaps = vec![closed_unlimited()];
         assert_eq!(
-            sticky_least_loaded_order(1, None, false, &snaps, 0, &[]),
+            sticky_least_loaded_order(1, None, &snaps, 0, &[]),
             (vec![0], SelectionOutcome::Stay { home: 0 })
         );
         assert_eq!(
-            sticky_least_loaded_order(0, None, false, &[], 0, &[]),
+            sticky_least_loaded_order(0, None, &[], 0, &[]),
             (Vec::<usize>::new(), SelectionOutcome::Stay { home: 0 })
         );
     }

@@ -505,7 +505,7 @@ fn a_warm_pin_stays_when_its_seat_reads_exhausted() {
 }
 
 #[test]
-fn a_pace_birth_writes_an_unrepinned_pin_that_a_follow_up_keeps() {
+fn a_pace_birth_writes_a_pin_that_a_follow_up_keeps() {
     let router = anthropic_pool();
     poll_pace(&router, "seat-c", 0, 4.0);
     let pin_key = super::chain::sticky_pin_key("S", SEAT_POOL);
@@ -519,7 +519,6 @@ fn a_pace_birth_writes_an_unrepinned_pin_that_a_follow_up_keeps() {
 
     assert_eq!(birth[0], "seat-c");
     assert_eq!(pin.member, "seat-c");
-    assert!(!pin.repinned);
     assert_eq!(stay, birth);
     assert_eq!(router.sticky_pins.get(&pin_key), Some(pin));
 }

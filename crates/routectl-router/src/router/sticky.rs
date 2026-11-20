@@ -86,21 +86,7 @@ impl Router {
     }
 
     /// Resolve the sticky least-loaded seat walk order for `key` over a
-    /// multi-seat pool. Resolves the pin (with its one-time overflow marker)
-    /// FIRST, gathers the per-seat capacity snapshots (one lock each; N is
-    /// small and locks are uncontended), then asks the pure selector for the
-    /// walk order and a
-    /// [`SelectionOutcome`](crate::seat_pool::SelectionOutcome). On a birth it
-    /// pins the chosen home (`repinned: false`); on a one-time overflow-repin
-    /// it pins the new home (`repinned: true`). A healthy home, an
-    /// already-repinned home, or a no-healthy-sibling case stays put with no
-    /// pin write -- the one-time cap + hysteresis. Never logs the raw session
-    /// key.
-    ///
-    /// Pace-rule standings are read for a BIRTH only, for the conversation's
-    /// upstream model `upstream`. A healthy pin never reads usage at all, so
-    /// no reading can move a warm session; the rule changes WHICH seat a birth
-    /// picks, never whether or how the pin is written.
+    /// multi-seat pool. See [`Self::sticky_seat_placement`].
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
@@ -108,50 +94,68 @@ impl Router {
         nickname: &str,
         upstream: &str,
     ) -> Vec<usize> {
+        self.sticky_seat_placement(seats, key, nickname, upstream).0
+    }
+
+    /// The sticky least-loaded walk order for `key`, and which pin write, if
+    /// any, this turn won.
+    ///
+    /// Resolves the pin FIRST, gathers the per-seat capacity snapshots (one
+    /// lock each; N is small and locks are uncontended), then asks the pure
+    /// selector for the walk order and a
+    /// [`SelectionOutcome`](crate::seat_pool::SelectionOutcome), and applies
+    /// it with [`Self::apply_sticky_outcome`]. A turn that lost its pin
+    /// write to a concurrent turn of the same conversation walks from the
+    /// winner's seat instead of its own pick. Never logs the raw session key.
+    ///
+    /// Pace-rule standings, for the conversation's upstream model
+    /// `upstream`, are read only when a pick is made: a birth, or a move off
+    /// a home with a lasting outage. A serving pin never reads usage, so no
+    /// reading can move a warm conversation and a recovered seat never pulls
+    /// one back.
+    pub(super) fn sticky_seat_placement(
+        &self,
+        seats: &[crate::seat_pool::SeatTarget],
+        key: &str,
+        nickname: &str,
+        upstream: &str,
+    ) -> (Vec<usize>, PinWrite) {
         // A pinned member no longer present in this pool resolves to None
-        // -> treated as a miss (re-pick), and `repinned` resets to false on
-        // the fresh birth -- correct.
-        let pin: Option<(usize, bool)> = self.sticky_pins.get(key).and_then(|p| {
-            seats
-                .iter()
-                .position(|s| s.provider_name == p.member)
-                .map(|i| (i, p.repinned))
-        });
+        // and is treated as a miss; the birth then replaces that pin.
+        let held = self.sticky_pins.get(key);
+        let pin: Option<usize> = held
+            .as_ref()
+            .and_then(|p| seats.iter().position(|s| s.provider_name == p.member));
 
         let now = Instant::now();
         let snapshots = self.gather_capacity_snapshots(seats, nickname, now);
 
-        // Advance the anti-herd counter only when a pick is actually
-        // attempted: a miss, or a hit whose home is non-dispatchable and not
-        // yet repinned. A sticky-stay does not consume tiebreak.
-        let will_attempt_pick = match pin {
-            None => true,
-            Some((home, repinned)) => !snapshots[home].is_dispatchable() && !repinned,
-        };
-        let tiebreak = if will_attempt_pick {
-            self.sticky_pins.next_tiebreak()
+        let will_attempt_pick = pin
+            .is_none_or(|home| crate::quota::placement::move_trigger(&snapshots[home]).is_some());
+        let (tiebreak, standings) = if will_attempt_pick {
+            (
+                self.sticky_pins.next_tiebreak(),
+                self.birth_standings(seats, upstream),
+            )
         } else {
-            0
-        };
-
-        // Read usage ONLY for a genuine birth. A hit -- healthy or migrating
-        // -- never consults it, so the store is not even touched.
-        let standings = if pin.is_none() {
-            self.birth_standings(seats, upstream)
-        } else {
-            Vec::new()
+            (0, Vec::new())
         };
 
         let (order, outcome) = crate::seat_pool::sticky_least_loaded_order(
             seats.len(),
-            pin.map(|(i, _)| i),
-            pin.is_some_and(|(_, r)| r),
+            pin,
             &snapshots,
             tiebreak,
             &standings,
         );
-        self.apply_sticky_outcome(key, nickname, seats, outcome);
-        order
+        let expected = held.as_ref().map(|p| p.member.as_str());
+        let write = self.apply_sticky_outcome(key, nickname, seats, outcome, expected);
+        match write {
+            PinWrite::Adopted { home: Some(home) } => {
+                (crate::seat_pool::order_home_first(home, seats.len()), write)
+            }
+            _ => (order, write),
+        }
     }
 
     /// Gather the per-seat capacity snapshots for sticky least-loaded
@@ -186,50 +190,93 @@ impl Router {
             .collect()
     }
 
-    /// Apply the pin write implied by `outcome`. A birth pins the chosen home
-    /// (`repinned: false`); a one-time overflow-repin pins the new home
-    /// (`repinned: true`); a stay or no-healthy case writes nothing. Never
-    /// logs the raw session key.
+    /// Apply the pin write implied by `outcome` and report which one this
+    /// turn won. `expected_member` is the pin the decision was made from:
+    /// `None` when the key held none, else its member (the home, or a member
+    /// this pool no longer serves). Every write is conditional on the key
+    /// still holding exactly that, so of several turns deciding from one pin,
+    /// one writes and the rest adopt the winner's pin and write nothing. A
+    /// stay or deferred pick writes nothing. Never logs the raw session key.
     pub(super) fn apply_sticky_outcome(
         &self,
         key: &str,
         nickname: &str,
         seats: &[crate::seat_pool::SeatTarget],
         outcome: crate::seat_pool::SelectionOutcome,
-    ) {
+        expected_member: Option<&str>,
+    ) -> PinWrite {
+        use crate::seat_pool::{SeatPin, SelectionOutcome};
+
+        let adopt = |winner: Option<SeatPin>| PinWrite::Adopted {
+            home: winner.and_then(|w| seats.iter().position(|s| s.provider_name == w.member)),
+        };
         match outcome {
-            crate::seat_pool::SelectionOutcome::Birth { home } => {
+            SelectionOutcome::Birth { home } => {
                 let member = seats[home].provider_name.clone();
-                tracing::debug!(
-                    state_key = %routectl_core::sanitize_for_log(&seats[home].state_key_for(nickname)),
-                    member = %member,
-                    "sticky least-loaded birth pick: pinned session to seat"
-                );
-                self.sticky_pins.put(
-                    key,
-                    crate::seat_pool::SeatPin {
-                        member,
-                        repinned: false,
-                    },
-                );
+                let pin = SeatPin {
+                    member: member.clone(),
+                };
+                let claimed = match expected_member {
+                    None => self.sticky_pins.claim_if_absent(key, pin).map_err(Some),
+                    Some(stale) => self.sticky_pins.repin_if(key, stale, pin),
+                };
+                match claimed {
+                    Ok(()) => {
+                        tracing::debug!(
+                            state_key = %routectl_core::sanitize_for_log(&seats[home].state_key_for(nickname)),
+                            member = %member,
+                            "sticky least-loaded birth pick: pinned session to seat"
+                        );
+                        PinWrite::Born { home }
+                    }
+                    Err(winner) => adopt(winner),
+                }
             }
-            crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
+            SelectionOutcome::Repin { home, trigger } => {
+                let Some(expected) = expected_member else {
+                    return PinWrite::None;
+                };
                 let member = seats[home].provider_name.clone();
-                tracing::debug!(
-                    state_key = %routectl_core::sanitize_for_log(&seats[home].state_key_for(nickname)),
-                    member = %member,
-                    "sticky least-loaded overflow-repin: migrated session to healthy sibling"
-                );
-                self.sticky_pins.put(
+                match self.sticky_pins.repin_if(
                     key,
-                    crate::seat_pool::SeatPin {
-                        member,
-                        repinned: true,
+                    expected,
+                    SeatPin {
+                        member: member.clone(),
                     },
-                );
+                ) {
+                    Ok(()) => {
+                        tracing::debug!(
+                            state_key = %routectl_core::sanitize_for_log(&seats[home].state_key_for(nickname)),
+                            member = %member,
+                            trigger = trigger.as_str(),
+                            "sticky least-loaded repin: moved session off a seat with a lasting outage"
+                        );
+                        PinWrite::Moved { home, trigger }
+                    }
+                    Err(winner) => adopt(winner),
+                }
             }
-            crate::seat_pool::SelectionOutcome::Stay { .. }
-            | crate::seat_pool::SelectionOutcome::DeferNoHealthy => {}
+            SelectionOutcome::Stay { .. } | SelectionOutcome::DeferNoHealthy => PinWrite::None,
         }
     }
+}
+
+/// Which pin write one sticky selection made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PinWrite {
+    /// Nothing to write: the home kept the conversation, or no seat could
+    /// take a new one.
+    None,
+    /// This turn's birth claim won; the conversation is pinned to `home`.
+    Born { home: usize },
+    /// This turn's move won: the pin left its home for `trigger` and now
+    /// names `home`.
+    Moved {
+        home: usize,
+        trigger: routectl_core::EligibilityReason,
+    },
+    /// A concurrent turn of the same conversation wrote first; this turn
+    /// walks from that pin's seat, `None` when the pin names no seat here
+    /// (it was evicted, or names a member this pool no longer serves).
+    Adopted { home: Option<usize> },
 }

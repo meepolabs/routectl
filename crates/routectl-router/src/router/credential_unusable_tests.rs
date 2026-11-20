@@ -558,7 +558,6 @@ async fn a_session_pinned_to_an_unusable_seat_moves_and_stays_after_recovery() {
         &super::super::chain::sticky_pin_key("S", "the-pool"),
         SeatPin {
             member: "seat-a".into(),
-            repinned: false,
         },
     );
     assert!(router.mark_credential_unusable_for_tests("pooled#seat-a", UnusableCause::Revoked));
