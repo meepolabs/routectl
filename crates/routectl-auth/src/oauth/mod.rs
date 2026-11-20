@@ -126,12 +126,14 @@ pub enum OAuthError {
     #[error("{0}")]
     Degraded(String),
 
-    /// The OAuth flow did not complete before its deadline.
-    #[error("oauth flow timed out; re-run `routectl login {0}`")]
+    /// The OAuth flow did not complete before its deadline. Names no
+    /// rerun: only the caller knows the flags the flow was started with.
+    #[error("oauth flow for `{0}` timed out")]
     LoginTimeout(String),
 
-    /// The callback CSRF state token did not match.
-    #[error("oauth state mismatch (CSRF token did not match); re-run `routectl login {0}`")]
+    /// The callback CSRF state token did not match. Names no rerun, for
+    /// the same reason as [`Self::LoginTimeout`].
+    #[error("oauth state mismatch for `{0}` (CSRF token did not match)")]
     StateMismatch(String),
 
     /// The token endpoint returned an error response.

@@ -55,14 +55,21 @@ impl PendingSecret {
 /// Perform the deferred secret side effect (a managed-store `put` or an
 /// oauth login) AFTER the confirmation. The advisory config lock is not
 /// held here -- the config write happens in a later, separate step.
-pub(super) async fn execute_pending(pending: PendingSecret, io: &dyn AddIo) -> Result<()> {
+/// `rerun` is how a login that must be repeated says to repeat this command.
+pub(super) async fn execute_pending(
+    pending: PendingSecret,
+    io: &dyn AddIo,
+    rerun: &str,
+) -> Result<()> {
     match pending {
         PendingSecret::None => Ok(()),
         PendingSecret::File { store, name, value } => {
             store.put(&name, &value)?;
             Ok(())
         }
-        PendingSecret::OAuth { provider, label } => io.login(&provider, label.as_deref()).await,
+        PendingSecret::OAuth { provider, label } => {
+            io.login(&provider, label.as_deref(), Some(rerun)).await
+        }
     }
 }
 

@@ -195,8 +195,10 @@ impl AddIo for RealInitIo {
     fn prompt_hidden(&self, provider_name: &str) -> Result<String> {
         RealAddIo.prompt_hidden(provider_name)
     }
-    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
-        RealAddIo.login(provider, label).await
+    async fn login(&self, provider: &str, label: Option<&str>, _rerun: Option<&str>) -> Result<()> {
+        // `init`'s own recovery error names the `init` rerun; a nested
+        // `provider add` command line beside it would name a second one.
+        RealAddIo.login(provider, label, None).await
     }
 }
 

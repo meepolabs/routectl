@@ -73,7 +73,12 @@ impl AddIo for NoTty {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         Ok(String::new())
     }
-    async fn login(&self, _provider: &str, _label: Option<&str>) -> Result<()> {
+    async fn login(
+        &self,
+        _provider: &str,
+        _label: Option<&str>,
+        _rerun: Option<&str>,
+    ) -> Result<()> {
         panic!("no carrier row runs a login")
     }
 }
@@ -330,7 +335,12 @@ impl AddIo for OfferTty {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         Err(routectl_core::Error::Config("prompted".into()))
     }
-    async fn login(&self, _provider: &str, _label: Option<&str>) -> Result<()> {
+    async fn login(
+        &self,
+        _provider: &str,
+        _label: Option<&str>,
+        _rerun: Option<&str>,
+    ) -> Result<()> {
         panic!("no carrier row runs a login")
     }
 }

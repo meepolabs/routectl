@@ -153,8 +153,9 @@ pub trait AddIo: Send + Sync {
     /// Prompt for the API key without echoing it (interactive path).
     fn prompt_hidden(&self, provider_name: &str) -> Result<String>;
     /// Run the oauth login flow for `provider` into the seat `label` names
-    /// (`None` is the default seat), persisting its tokens.
-    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()>;
+    /// (`None` is the default seat), persisting its tokens. `rerun` is how a
+    /// login that must be repeated says to repeat this command.
+    async fn login(&self, provider: &str, label: Option<&str>, rerun: Option<&str>) -> Result<()>;
 }
 
 /// Production [`AddIo`]: std stdin + `rpassword` for the hidden prompt +
@@ -194,7 +195,7 @@ impl AddIo for RealAddIo {
             .map_err(|e| Error::Config(format!("failed to read the API key prompt: {e}")))
     }
 
-    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
+    async fn login(&self, provider: &str, label: Option<&str>, rerun: Option<&str>) -> Result<()> {
         // `ConfigSurface::Skip` is load-bearing, not a default: this call
         // sits BETWEEN this command's byte snapshot and its commit, so a
         // config-writing login would invalidate the snapshot and make every
@@ -205,7 +206,7 @@ impl AddIo for RealAddIo {
             false,
             None,
             label,
-            super::login::ConfigSurface::Skip,
+            super::login::ConfigSurface::Skip { rerun },
         )
         .await
     }
@@ -248,14 +249,20 @@ fn post_side_effect_error(config_path: &Path, args: &ProviderAddArgs, cause: &Er
              persists -- re-run `provider add` to complete the wiring"
         ));
     }
-    let rerun = instruction(
-        login_rerun_command(chosen_config_path(config_path), args),
-        "routectl provider add",
-    );
+    let rerun = login_rerun_instruction(config_path, args);
     Error::Config(format!(
         "the login succeeded, but the config was NOT changed ({cause}). config.toml is \
          unchanged; the login persists -- {rerun} to complete the wiring"
     ))
+}
+
+/// How a message says to repeat this `provider add --login`: the exact
+/// command when one can be printed, else the same command again.
+fn login_rerun_instruction(config_path: &Path, args: &ProviderAddArgs) -> String {
+    instruction(
+        login_rerun_command(chosen_config_path(config_path), args),
+        "routectl provider add",
+    )
 }
 
 /// The `provider add --login` command line these args came from, against
@@ -404,7 +411,8 @@ pub async fn run_with_io(
     // Only NOW -- after the confirm -- does any secret file get written or
     // any login run. A declined confirm above returns before this point.
     let did_side_effect = pending.is_side_effect();
-    execute_pending(pending, io).await?;
+    let rerun = login_rerun_instruction(config_path, &args);
+    execute_pending(pending, io, &rerun).await?;
 
     let outcome = match commit(config_path, &snapshot, &snapshot_text, &candidate) {
         Ok(outcome) => outcome,

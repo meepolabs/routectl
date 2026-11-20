@@ -10,6 +10,7 @@ use super::build::resolve_secret;
 #[cfg(unix)]
 use super::capture::{capture_value, execute_pending};
 use super::toml_edit::{commit, provider_table};
+use crate::commands::login::{ConfigSurface, LoginInvocation, login_error};
 use crate::commands::provider_env::env_var_for_kind;
 use routectl_testkit::ScopedEnv;
 
@@ -709,6 +710,9 @@ struct FakeIo {
     /// for whatever the real login flow does to the filesystem.
     login_hook: Option<Box<dyn Fn() + Send + Sync>>,
     login_calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    /// An OAuth failure the stub login ends in, mapped by the production
+    /// login error mapping with the rerun phrase this command handed it.
+    oauth_failure: Option<fn(String) -> routectl_auth::OAuthError>,
     stdin_reads: std::sync::Mutex<u32>,
     prompt_calls: std::sync::Mutex<u32>,
 }
@@ -724,6 +728,7 @@ impl Default for FakeIo {
             login_ok: true,
             login_hook: None,
             login_calls: std::sync::Mutex::new(Vec::new()),
+            oauth_failure: None,
             stdin_reads: std::sync::Mutex::new(0),
             prompt_calls: std::sync::Mutex::new(0),
         }
@@ -749,13 +754,26 @@ impl AddIo for FakeIo {
         *self.prompt_calls.lock().unwrap() += 1;
         Ok(self.prompt_value.clone())
     }
-    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
+    async fn login(&self, provider: &str, label: Option<&str>, rerun: Option<&str>) -> Result<()> {
         self.login_calls
             .lock()
             .unwrap()
             .push((provider.to_string(), label.map(str::to_string)));
         if let Some(hook) = &self.login_hook {
             hook();
+        }
+        if let Some(failure) = self.oauth_failure {
+            let invocation = LoginInvocation {
+                provider,
+                label,
+                print_url: false,
+                callback_port: None,
+            };
+            return Err(login_error(
+                failure(provider.to_string()),
+                &invocation,
+                ConfigSurface::Skip { rerun },
+            ));
         }
         if self.login_ok {
             Ok(())
@@ -1255,6 +1273,111 @@ async fn a_conflict_with_a_control_character_value_prints_no_literal_rerun() {
     }
 }
 
+/// A login that times out or meets a mismatched callback state names the
+/// whole `provider add` invocation as its rerun, `--config`, `--label` and
+/// the command's own flags included, and keeps the cause.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_login_that_must_be_repeated_names_the_exact_provider_add_rerun() {
+    type Failure = fn(String) -> routectl_auth::OAuthError;
+    let rows: [(&str, Failure, &str); 2] = [
+        (
+            "timeout",
+            routectl_auth::OAuthError::LoginTimeout,
+            "timed out",
+        ),
+        (
+            "state mismatch",
+            routectl_auth::OAuthError::StateMismatch,
+            "state mismatch",
+        ),
+    ];
+    for (row, failure, cause) in rows {
+        // Arrange: a chosen file in a folder the shell would split.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path().join("default"));
+        let _env = ScopedEnv::unset("ROUTECTL_CONFIG");
+        let folder = dir.path().join("my configs");
+        std::fs::create_dir(&folder).unwrap();
+        let path = write_config(&folder, &current_base());
+        let before = std::fs::read(&path).unwrap();
+        let io = FakeIo {
+            oauth_failure: Some(failure),
+            ..Default::default()
+        };
+        let mut a = login_args("anthropic", "claude-work");
+        a.label = Some("work".to_string());
+        a.pool = Some("team".to_string());
+        a.overwrite = true;
+
+        // Act
+        let msg = run_with_io(&path, a, &io)
+            .await
+            .expect_err("a failed login is an error")
+            .to_string();
+
+        // Assert
+        let expected = format!(
+            "re-run `routectl --config '{}' provider add --login anthropic --label work \
+             --pool team --name claude-work --overwrite --yes`",
+            path.display()
+        );
+        assert!(msg.contains(cause), "row `{row}`: {msg}");
+        assert!(msg.contains(&expected), "row `{row}`: {msg}");
+        assert!(
+            !msg.contains("routectl login"),
+            "row `{row}`: names a different command: {msg}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "row `{row}`");
+    }
+}
+
+/// A login rerun over a value with no exact printable form names no
+/// literal command and still says what failed. The printable row is the
+/// positive control.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_login_that_must_be_repeated_with_a_control_character_value_prints_no_literal_rerun() {
+    let rows = [
+        ("printable", "work", "my configs", true),
+        ("escape in label", "wo\u{1b}[2Jrk", "my configs", false),
+        ("bell in config folder", "work", "my\u{7}configs", false),
+    ];
+    for (row, label, folder, is_literal) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path().join("default"));
+        let _env = ScopedEnv::unset("ROUTECTL_CONFIG");
+        let folder = dir.path().join(folder);
+        std::fs::create_dir(&folder).unwrap();
+        let path = write_config(&folder, &current_base());
+        let io = FakeIo {
+            oauth_failure: Some(routectl_auth::OAuthError::LoginTimeout),
+            ..Default::default()
+        };
+        let mut a = login_args("anthropic", "claude-work");
+        a.label = Some(label.to_string());
+
+        // Act
+        let msg = run_with_io(&path, a, &io)
+            .await
+            .expect_err("a failed login is an error")
+            .to_string();
+
+        // Assert
+        assert!(msg.contains("timed out"), "row `{row}`: {msg}");
+        let same = "re-run the same `routectl provider add` command";
+        assert_eq!(msg.contains(same), !is_literal, "row `{row}`: {msg}");
+        for word in ["--label", "--name", "--config"] {
+            assert_eq!(
+                msg.contains(word),
+                is_literal,
+                "row `{row}` `{word}`: {msg}"
+            );
+        }
+    }
+}
+
 /// Every operator-written word of the rerun command is one shell word
 /// holding exactly the value given: a plain value is bare, any other is
 /// single-quoted, and a value with a control character (or a path that is
@@ -1535,7 +1658,7 @@ async fn symlinked_ancestor_swap_between_phases_lands_at_original_base() {
 
     // Act (execute phase): the put reuses the store canonicalized at
     // capture time, not the freshly-swapped symlink target.
-    execute_pending(pending, &FakeIo::default())
+    execute_pending(pending, &FakeIo::default(), "re-run")
         .await
         .expect("put");
 

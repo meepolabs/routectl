@@ -111,7 +111,12 @@ impl AddIo for StubIo {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         Ok(self.prompt_value.clone())
     }
-    async fn login(&self, provider: &str, _label: Option<&str>) -> Result<()> {
+    async fn login(
+        &self,
+        provider: &str,
+        _label: Option<&str>,
+        _rerun: Option<&str>,
+    ) -> Result<()> {
         provision_login_token(provider);
         Ok(())
     }

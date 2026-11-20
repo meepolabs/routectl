@@ -56,7 +56,7 @@ async fn login_unknown_provider_errors_clearly() {
         false,
         None,
         None,
-        commands::login::ConfigSurface::Skip,
+        commands::login::ConfigSurface::Skip { rerun: None },
     )
     .await
     {
@@ -536,7 +536,7 @@ async fn login_codex_print_url_is_refused_with_browser_only_message() {
         /* print_url */ true,
         None,
         None,
-        commands::login::ConfigSurface::Skip,
+        commands::login::ConfigSurface::Skip { rerun: None },
     )
     .await
     .expect_err("codex --print-url must be refused");

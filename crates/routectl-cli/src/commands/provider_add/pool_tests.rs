@@ -34,7 +34,7 @@ impl AddIo for LoginIo {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         panic!("a login add never prompts for a key")
     }
-    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
+    async fn login(&self, provider: &str, label: Option<&str>, _rerun: Option<&str>) -> Result<()> {
         self.logins
             .lock()
             .unwrap()

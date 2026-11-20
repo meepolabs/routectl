@@ -103,7 +103,7 @@ impl AddIo for LoginIo {
     fn prompt_hidden(&self, _provider_name: &str) -> Result<String> {
         Ok(String::new())
     }
-    async fn login(&self, provider: &str, label: Option<&str>) -> Result<()> {
+    async fn login(&self, provider: &str, label: Option<&str>, _rerun: Option<&str>) -> Result<()> {
         self.logins
             .lock()
             .unwrap()
