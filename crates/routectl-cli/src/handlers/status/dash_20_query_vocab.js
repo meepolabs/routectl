@@ -129,7 +129,8 @@
     'account', 'provider_entry', 'login_label', 'report', 'windows', 'last_accepted', 'poll',
     'pools', 'subscription', 'credential',
     'class', 'length_secs', 'scope', 'used', 'remaining', 'reset_at_ms', 'started', 'source',
-    'observed_at_ms', 'age_ms', 'stale',
+    'observed_at_ms', 'age_ms', 'stale', 'kept',
+    'placement', 'pool', 'model', 'seats', 'rank', 'reason',
     'applicability', 'vendor', 'last_attempt_ms', 'last_result', 'next_due_ms', 'failure_since_ms',
     'state', 'cause', 'since_ms', 'until_ms', 'fix'
   ];

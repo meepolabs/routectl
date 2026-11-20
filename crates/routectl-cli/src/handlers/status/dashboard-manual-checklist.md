@@ -256,7 +256,16 @@ banner, no retry signal -- silently mislabeled data.
   and red with `at limit` at 100%. Stop the usage poll (block its vendor
   endpoint) and wait 7 minutes: the window dims, reads `room unknown` and
   carries a `stale` mark, and its age keeps advancing. A seat with no
-  reading yet says `no reading yet`, never a meter at zero.
+  reading yet says `no reading yet`, never a meter at zero. A window the
+  vendor's latest complete report left out while it still binds keeps its
+  meter and reads `kept from an earlier report` in the same neutral mark as
+  `stale`, never amber or red.
+- Each pool seat shows a `placement` line per pool and upstream model that
+  ranks it: `rank <n> of <m> in <pool> for <model>` and the reason in plain
+  words (`ranked on usage pace`), the raw token in the reason's tooltip. Log
+  one pool seat out: within one poll its line reads `not ranked in <pool>
+  for <model> - its login is not usable`, with no number. An API-key or
+  cloud entry no pool ranks shows no placement line at all, never `rank 0`.
 - Send a few requests through one pool seat. On Accounts the heading above
   the pools reads `Traffic today - requests and cost per account`, and that
   seat's `traffic` line shows its request count and `~$<n> At API prices`

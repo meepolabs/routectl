@@ -429,6 +429,92 @@
     });
   });
 
+  // ---- placement rank and kept windows ------------------------------------
+
+  function placeSeen(id) {
+    var node = byId(id);
+    return {
+      entries: texts(node, '.acct-place-entry'),
+      titles: Array.prototype.map.call(node.querySelectorAll('.acct-place-reason'), function (n) {
+        return n.title;
+      })
+    };
+  }
+
+  // The fixture ranks the labeled seat in one pool for two models: first,
+  // then unavailable. This adds the Codex login second to the first ranking
+  // with a reason this build has no words for, and a third ranking whose
+  // seats are a key that differs from the labeled seat's only in case, the
+  // labeled seat's provider entry name and a member that forwards the
+  // client's credential: none of them a configured account. The labeled
+  // seat's 5 h window is kept.
+  d.scenario('accounts-placement', function () {
+    rewriteAccounts(function (data) {
+      var pools = data.placement.pools;
+      pools[1].seats.push(
+        { account: 'codex', rank: 2, tier: 'roomy', score: 2.5, reason: 'not_yet_named' }
+      );
+      pools.push({
+        pool: 'claude-pool',
+        model: 'claude-haiku-4-5',
+        seats: [
+          { account: 'ANTHROPIC#a', rank: 1, tier: 'roomy', score: 0.5, reason: 'pace' },
+          { account: 'claude-seat', rank: 2, tier: 'roomy', score: 0.7, reason: 'pace' },
+          { account: null, rank: 3, tier: 'roomy', score: 0.9, reason: 'pace' }
+        ]
+      });
+      row(data, 'anthropic#a').windows[0].kept = true;
+    });
+    return settled().then(function () {
+      var kept = byId(POLLED_WINDOW);
+      var plain = byId(STALE_WINDOW);
+      var keptMark = kept.querySelector('.acct-kept');
+      return {
+        seat: placeSeen(SEAT_ROW),
+        seat_in_backup: placeSeen(SEAT_ROW_IN_BACKUP),
+        codex: placeSeen(CODEX_ROW),
+        api_key_places: byId(API_KEY_ROW).querySelectorAll('.acct-place').length,
+        api_key_text: byId(API_KEY_ROW).textContent,
+        kept: {
+          mark: textIn(kept, '.acct-kept'),
+          meter: !!kept.querySelector('.sharebar-fill'),
+          used: textIn(kept, '.acct-win-used'),
+          mark_color: keptMark ? color(keptMark, 'color') : null,
+          mark_border: keptMark ? color(keptMark, 'borderTopColor') : null,
+          stale_color: color(plain.querySelector('.acct-stale'), 'color'),
+          stale_border: color(plain.querySelector('.acct-stale'), 'borderTopColor')
+        },
+        plain_mark: textIn(plain, '.acct-kept'),
+        plain_meter: !!plain.querySelector('.sharebar-fill'),
+        reason_colors: Array.prototype.map.call(
+          byId(SEAT_ROW).querySelectorAll('.acct-place-reason'),
+          function (n) { return color(n, 'color'); }
+        ).concat([color(byId(CODEX_ROW).querySelector('.acct-place-reason'), 'color')])
+      };
+    });
+  });
+
+  // A panel from a daemon that sends no ranking, then one whose ranking is
+  // not a list of pools.
+  d.scenario('accounts-placement-shapes', function () {
+    rewriteAccounts(function (data, n) {
+      if (n === 0) { delete data.placement; } else { data.placement = { pools: 'not a list' }; }
+    });
+    function seen() {
+      var body = byId(BODY);
+      return {
+        places: body.querySelectorAll('.acct-place').length,
+        rows: body.querySelectorAll('.acct-row').length,
+        error_cards: body.querySelectorAll('.unavailable-msg, .incompatible-msg').length
+      };
+    }
+    return settled().then(function () {
+      return d.acrossRounds('/status', 1, seen);
+    }).then(function (out) {
+      return { absent: out.baseline, malformed: out.rounds[0] };
+    });
+  });
+
   // ---- drivers -------------------------------------------------------------
 
   function driverSeen(key) {

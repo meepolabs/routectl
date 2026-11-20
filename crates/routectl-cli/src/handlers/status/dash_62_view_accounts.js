@@ -3,13 +3,14 @@
   // Every configured credential from /status/accounts, grouped by the pools
   // that dispatch on it, plus the two background drivers that keep the
   // logins fresh and read their usage. Read as the daemon sent it: the
-  // login cause and fix, each window's length, room, reset, age and stale
-  // flag are the panel's; the page adds only how far an instant is from the
-  // panel's own as_of. A pool header's usable count comes from the health
-  // panel, read through acctPoolCounts so a dark health source costs that
-  // count alone. Each row's traffic over the selected range comes from the
-  // seat-grouped QUERY, read through acctSeatTraffic on the same terms; it is
-  // the only part of a row the range picker moves.
+  // login cause and fix, each window's length, room, reset, age, stale and
+  // kept flags, and each seat's placement rank and reason are the panel's;
+  // the page adds only how far an instant is from the panel's own as_of and
+  // how many seats a ranking holds. A pool header's usable count comes from
+  // the health panel, read through acctPoolCounts so a dark health source
+  // costs that count alone. Each row's traffic over the selected range comes
+  // from the seat-grouped QUERY, read through acctSeatTraffic on the same
+  // terms; it is the only part of a row the range picker moves.
 
   // A window this full reads amber, and red once at or over its limit. The
   // same line the needs-attention list draws for a nearly used window.
@@ -40,6 +41,24 @@
   var ACCT_SOURCE_WORDS = {
     poll: 'from the usage poll',
     response: 'from a response'
+  };
+
+  // Why a seat stands where it does in a placement ranking, in words: the
+  // standing reasons first, then the refusals that leave a seat unranked. A
+  // token this build does not know is shown as sent, neutrally; the token
+  // itself rides in the title for copying.
+  var ACCT_REASON_WORDS = {
+    overage: 'billing beyond its included usage',
+    no_cap: 'reports no usage limits',
+    no_reading: 'no usage reading yet',
+    stale_reading: 'its usage reading is stale',
+    low_room: 'little room left in a usage window',
+    pace: 'ranked on usage pace',
+    unstarted: 'its usage windows have not started',
+    credential_unusable: 'its login is not usable',
+    account_parked: 'parked after an upstream refusal',
+    breaker_open: 'breaker open after repeated failures',
+    rate_limited: 'rate limited'
   };
 
   // ---- drivers -----------------------------------------------------------
@@ -120,7 +139,8 @@
     wrap.appendChild(head);
     var ctx = {
       nowMs: panelNowMs(rec),
-      traffic: acctSeatTraffic(SOURCES[QUERY_SEATS_SOURCE])
+      traffic: acctSeatTraffic(SOURCES[QUERY_SEATS_SOURCE]),
+      places: acctPlacementIndex(rec.data.placement)
     };
     var counts = acctPoolCounts(SOURCES.health);
     acctPoolNames(rows).forEach(function (pool) {
@@ -226,6 +246,8 @@
     if (cause) { rowEl.appendChild(acctText('div', 'acct-cause', cause)); }
     if (cred.fix) { rowEl.appendChild(acctFix(cred.fix)); }
     rowEl.appendChild(acctWindows(row, id, ctx.nowMs));
+    var places = ctx.places[row.account];
+    if (places) { rowEl.appendChild(acctPlacement(places)); }
     rowEl.appendChild(acctTrafficLine(row, ctx.traffic, id + '-traffic'));
     rowEl.appendChild(acctPollLine(row.poll, ctx.nowMs));
     return rowEl;
@@ -388,6 +410,7 @@
       : 'from ' + w.source);
     meta.appendChild(document.createTextNode(parts.join(' - ')));
     if (w.stale === true) { meta.appendChild(acctText('span', 'acct-stale', 'stale')); }
+    if (w.kept === true) { meta.appendChild(acctText('span', 'acct-kept', 'kept from an earlier report')); }
     return meta;
   }
 
@@ -397,6 +420,66 @@
     if (!isFinite(nowMs)) { return 'resets at ' + fmtTs(Number(w.reset_at_ms)); }
     var left = Number(w.reset_at_ms) - nowMs;
     return left <= 0 ? 'reset time passed' : 'resets in ' + acctSpanText(left);
+  }
+
+  // ---- placement rank ------------------------------------------------------
+
+  // Each account's entries in the placement ranking, by its exact account
+  // key: one per pool and upstream model that ranks it, in the panel's
+  // order, each the seat beside the ranking it stands in. A member that
+  // forwards the client's credential names no account and lands on no row.
+  // A panel without a ranking ranks nothing.
+  function acctPlacementIndex(placement) {
+    var byAccount = Object.create(null);
+    if (placement === undefined || placement === null) { return byAccount; }
+    if (!isPlainObject(placement) || !Array.isArray(placement.pools)) {
+      throw new Error('accounts payload carries a malformed placement');
+    }
+    placement.pools.forEach(function (entry) {
+      if (!isPlainObject(entry) || !Array.isArray(entry.seats)) {
+        throw new Error('accounts payload carries a malformed placement');
+      }
+      entry.seats.forEach(function (seat) {
+        if (!isPlainObject(seat) || typeof seat.account !== 'string') { return; }
+        var list = byAccount[seat.account] || (byAccount[seat.account] = []);
+        list.push({ ranking: entry, seat: seat });
+      });
+    });
+    return byAccount;
+  }
+
+  function acctPlacement(places) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acct-place';
+    wrap.appendChild(acctText('span', 'acct-label', 'placement'));
+    var list = document.createElement('div');
+    list.className = 'acct-place-list';
+    places.forEach(function (place) { list.appendChild(acctPlaceEntry(place)); });
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  // "rank N of M in <pool> for <model> - <reason>"; an unranked seat says
+  // so with its reason and no number.
+  function acctPlaceEntry(place) {
+    var ranking = place.ranking;
+    var seat = place.seat;
+    var line = document.createElement('div');
+    line.className = 'acct-place-entry';
+    line.appendChild(acctText('span', 'acct-place-rank', acctHasNumber(seat.rank)
+      ? 'rank ' + Number(seat.rank) + ' of ' + ranking.seats.length
+      : 'not ranked'));
+    line.appendChild(document.createTextNode(' in '));
+    line.appendChild(acctText('span', 'acct-place-key', ranking.pool));
+    line.appendChild(document.createTextNode(' for '));
+    line.appendChild(acctText('span', 'acct-place-key', ranking.model));
+    line.appendChild(document.createTextNode(' - '));
+    var token = String(seat.reason);
+    var reason = acctText('span', 'acct-place-reason',
+      Object.prototype.hasOwnProperty.call(ACCT_REASON_WORDS, token) ? ACCT_REASON_WORDS[token] : token);
+    reason.title = token;
+    line.appendChild(reason);
+    return line;
   }
 
   // ---- traffic in the selected range --------------------------------------

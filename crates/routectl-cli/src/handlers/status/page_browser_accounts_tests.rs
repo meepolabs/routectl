@@ -1,9 +1,10 @@
 // The Accounts view in a real headless Chrome: one row per configured
 // account under each pool that dispatches on it, the login state with the
 // daemon's cause and a focusable fix, every window labelled from its length
-// with room, reset, age, source and stale mark, the traffic over the
-// selected range, the poll state, and the two background drivers. `include!`d into a child module of `page::tests`; the
-// scenarios live in page_browser_accounts_driver.js.
+// with room, reset, age, source and stale or kept mark, each seat's
+// placement rank and reason, the traffic over the selected range, the poll
+// state, and the two background drivers. `include!`d into a child module of
+// `page::tests`; the scenarios live in page_browser_accounts_driver.js.
 
 use serde_json::Value;
 
@@ -552,4 +553,117 @@ fn no_page_code_reads_the_usage_quota() {
     ] {
         assert!(!code.contains(retired), "`{retired}` remains in the script");
     }
+}
+
+/// Each pool and model ranking a seat reads "rank N of M in <pool> for
+/// <model>" with its reason in plain words and the token in the title; an
+/// unavailable seat reads "not ranked" with its reason and no number; the
+/// same seat under two pool groups shows the same entries under each; a
+/// reason this build has no words for is shown as sent, in the same color.
+///
+/// Mutation check: print `seat.rank` unguarded in acctPlaceEntry -> red
+/// (the unavailable entry reads `rank null of 1`).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_seat_shows_its_rank_and_reason_per_pool_and_model() {
+    let out = accounts_scenario("accounts-placement");
+
+    let seat_entries = serde_json::json!([
+        "not ranked in claude-pool for claude-opus-4-7 - breaker open after repeated failures",
+        "rank 1 of 2 in claude-pool for claude-sonnet-4-5 - ranked on usage pace"
+    ]);
+    assert_eq!(out["seat"]["entries"], seat_entries, "{out:#}");
+    assert_eq!(
+        out["seat"]["titles"],
+        serde_json::json!(["breaker_open", "pace"]),
+        "{out:#}"
+    );
+    assert_eq!(out["seat_in_backup"]["entries"], seat_entries, "{out:#}");
+    assert_eq!(
+        out["codex"]["entries"],
+        serde_json::json!(["rank 2 of 2 in claude-pool for claude-sonnet-4-5 - not_yet_named"]),
+        "{out:#}"
+    );
+    let colors = out["reason_colors"].as_array().expect("reason colors");
+    assert_eq!(colors.len(), 3, "{out:#}");
+    assert!(colors.iter().all(|c| *c == colors[0]), "{out:#}");
+}
+
+/// The rank joins on the exact account key: a ranking whose seats are the
+/// labeled seat's key in another case, its provider entry name and a
+/// forwarding member adds no entry to any row, and a row no ranking names
+/// shows no placement and no rank text at all.
+///
+/// Mutation check: key the join on `seat.account.toLowerCase()` in
+/// acctPlacementIndex -> red (the seat gains a `claude-haiku-4-5` entry).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_rank_joins_on_the_exact_account_key() {
+    let out = accounts_scenario("accounts-placement");
+
+    let seat_entries = out["seat"]["entries"].as_array().expect("seat entries");
+    assert!(
+        seat_entries
+            .iter()
+            .all(|e| !text(e, "an entry").contains("claude-haiku-4-5")),
+        "{out:#}"
+    );
+    assert_eq!(
+        seat_entries.len(),
+        2,
+        "positive control: the seat's own rankings are drawn: {out:#}"
+    );
+    assert_eq!(out["api_key_places"], 0, "{out:#}");
+    let api_key = text(&out["api_key_text"], "the API-key row");
+    assert!(
+        !api_key.contains("rank") && !api_key.contains("placement"),
+        "{out:#}"
+    );
+}
+
+/// A window a complete report omitted reads "kept from an earlier report"
+/// beside its meter, in the stale mark's neutral color; a window not kept
+/// carries no such label.
+///
+/// Mutation check: drop the kept label in acctWindowMeta -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_kept_window_is_labelled_and_keeps_its_meter() {
+    let out = accounts_scenario("accounts-placement");
+    let kept = &out["kept"];
+
+    assert_eq!(kept["mark"], "kept from an earlier report", "{out:#}");
+    assert_eq!(kept["meter"], true, "{out:#}");
+    assert_eq!(kept["used"], "42% used", "{out:#}");
+    assert_eq!(kept["mark_color"], kept["stale_color"], "{out:#}");
+    assert_eq!(kept["mark_border"], kept["stale_border"], "{out:#}");
+    assert_eq!(out["plain_mark"], Value::Null, "{out:#}");
+    assert_eq!(
+        out["plain_meter"], true,
+        "positive control: the plain window is drawn: {out:#}"
+    );
+}
+
+/// A panel that carries no ranking draws every row with no placement line
+/// and no error; a ranking that is not a list of pools is a malformed
+/// payload, shown as the section's error card rather than as rows without
+/// rank.
+///
+/// Mutation check: return the empty index for any non-object placement in
+/// acctPlacementIndex -> red (the malformed ranking draws rows).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_absent_ranking_draws_no_rank_and_a_malformed_one_errors() {
+    let out = accounts_scenario("accounts-placement-shapes");
+    let (absent, malformed) = (&out["absent"], &out["malformed"]);
+
+    assert_eq!(absent["places"], 0, "{out:#}");
+    assert_eq!(absent["error_cards"], 0, "{out:#}");
+    assert!(
+        absent["rows"].as_u64().is_some_and(|n| n > 0),
+        "positive control: the rows are drawn: {out:#}"
+    );
+    assert_eq!(malformed["rows"], 0, "{out:#}");
+    assert_eq!(malformed["places"], 0, "{out:#}");
+    assert_eq!(malformed["error_cards"], 1, "{out:#}");
 }
