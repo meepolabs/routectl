@@ -22,8 +22,8 @@ use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
     AccountIdentities, AccountReadings, EffectiveView, FidelitySnapshot, FieldRepairCounters,
-    LaneBudgetExhaustions, LaneLossyRepairs, ObservationStamp, PoolEligibility, Router,
-    derive_effective_view, shipped_beta_seed_scope,
+    LaneBudgetExhaustions, LaneLossyRepairs, ObservationStamp, PlacementStatus, PoolEligibility,
+    Router, derive_effective_view, shipped_beta_seed_scope,
 };
 use routectl_usage::{AggRow, RowCost};
 
@@ -142,6 +142,13 @@ impl StatusRouterView {
     /// rule applied, plus the meter's refusal totals. A pure read.
     pub fn account_readings(&self, now: &ObservationStamp) -> AccountReadings {
         self.router.account_readings(now)
+    }
+
+    /// The pace rule's counters and its per-pool, per-model seat ranking as
+    /// of `now`. Read-only: no rotation, pin, RPM token, probe slot or
+    /// counter moves.
+    pub fn placement_status(&self, now: &ObservationStamp) -> PlacementStatus {
+        self.router.placement_status(now)
     }
 
     /// Every credential account the served config names, with the display

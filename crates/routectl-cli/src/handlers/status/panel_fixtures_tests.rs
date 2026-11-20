@@ -255,6 +255,8 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.accounts[].windows[].age_ms",
                 "data.accounts[].poll.vendor",
                 "data.accounts[].poll.last_result",
+                "data.placement.pools[].seats[].rank",
+                "data.placement.pools[].seats[].score",
             ],
         ),
         (

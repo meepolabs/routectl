@@ -125,7 +125,8 @@ use routectl_core::capability::FailurePhase;
 use routectl_core::capability::SignalTier;
 use runtime_gate::{LearnedProbeGuard, ProbeAdmission};
 pub use status::{
-    AccountIdentities, AccountIdentity, PolledUsageRejection, PoolEligibility, RouteTargetStatus,
+    AccountIdentities, AccountIdentity, PlacementBirths, PlacementMoves, PlacementStatus,
+    PolledUsageRejection, PoolEligibility, PoolPlacement, RouteTargetStatus, SeatPlacement,
 };
 pub use stream_evidence::StreamEvidence;
 pub use wire_response::ResponseCheck;

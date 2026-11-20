@@ -414,6 +414,17 @@ impl StickyPins {
         self.pins.lock().len()
     }
 
+    /// Every pinned session key, most recently used first, read without
+    /// touching recency. Test read surface only.
+    #[cfg(test)]
+    pub(crate) fn recency_order(&self) -> Vec<String> {
+        self.pins
+            .lock()
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
     /// True when no session holds a pin. Test read surface only, paired
     /// with [`StickyPins::len`].
     #[cfg(test)]
@@ -507,7 +518,7 @@ pub enum SelectionOutcome {
 /// lead with a half-open probe over a healthy sibling purely because the probe
 /// had more budget left, handing traffic to a breaker still recovering.
 /// Empty when nothing is dispatchable.
-fn eligible_candidates(candidates: &[usize], snapshots: &[CapacitySnapshot]) -> Vec<usize> {
+pub fn eligible_candidates(candidates: &[usize], snapshots: &[CapacitySnapshot]) -> Vec<usize> {
     let dispatchable: Vec<usize> = candidates
         .iter()
         .copied()

@@ -115,7 +115,7 @@ pub(super) fn state_key(member: &str) -> String {
     format!("m#{member}")
 }
 
-fn slot(router: &Router, member: &str) -> Arc<Mutex<ProviderState>> {
+pub(super) fn slot(router: &Router, member: &str) -> Arc<Mutex<ProviderState>> {
     router.state[&state_key(member)].clone()
 }
 
@@ -207,7 +207,7 @@ pub(super) fn open_baseline(router: &Router, member: &str) {
     }
 }
 
-fn open_lapsed(router: &Router, member: &str) {
+pub(super) fn open_lapsed(router: &Router, member: &str) {
     let opened = Instant::now()
         .checked_sub(Duration::from_mins(2))
         .expect("a clock two minutes past its origin");

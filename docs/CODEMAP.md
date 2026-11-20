@@ -7090,6 +7090,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/doctor/fixture.rs` -- `cfg(test)` `populated_doctor()`: a
   no-network report in the router's DTOs (never gathered: the gather probes the
   credential store) beside the panel's reachability mapper and live lane counters
+- `src/handlers/status/accounts/placement.rs` -- the accounts panel's
+  top-level `placement` wire object (rule, counters since start, per pool and
+  upstream model seat rank / tier / score / reason), mapped from
+  `Router::placement_status`
 - `src/handlers/status/accounts/fixture.rs` -- `cfg(test)`
   `populated_accounts()`: every account the fixture config names with fresh,
   stale and absent readings, poll states, a vendor pause and nonzero counters,

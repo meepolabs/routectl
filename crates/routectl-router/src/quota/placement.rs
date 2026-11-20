@@ -78,6 +78,22 @@ pub enum Reason {
     Unstarted,
 }
 
+impl Reason {
+    /// The stable snake_case token for this reason, as the status surface
+    /// names it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Overage => "overage",
+            Self::NoCap => "no_cap",
+            Self::NoReading => "no_reading",
+            Self::StaleReading => "stale_reading",
+            Self::LowRoom => "low_room",
+            Self::Pace => "pace",
+            Self::Unstarted => "unstarted",
+        }
+    }
+}
+
 /// One seat's standing for a birth placement.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Standing {
@@ -87,6 +103,14 @@ pub struct Standing {
     pub score: Option<f64>,
     /// What decided the tier and score.
     pub reason: Reason,
+}
+
+impl Standing {
+    /// The score as [`best_bucket`] ranks it, rounded to the near-tie
+    /// precision, or `None` for an unread seat.
+    pub fn ranked_score(&self) -> Option<f64> {
+        self.score.map(rounded)
+    }
 }
 
 /// The used fraction past which a window leaves too little room to rank

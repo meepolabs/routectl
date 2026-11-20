@@ -1,10 +1,12 @@
 //! `/status/accounts` panel: every configured credential account with its
 //! display identity, its account-meter readings under the stale rule and its
-//! background usage poll state, plus the meter's refusal totals, the reading
-//! history counters and the usage poll driver's health.
+//! background usage poll state, plus the meter's refusal and correction
+//! totals, the reading history counters, the usage poll driver's health and
+//! the pace placement rule's counters and seat ranking.
 //!
 //! Built from memory only: one router snapshot (account identities, meter
-//! readings), one poll-state snapshot and two counter reads. No usage
+//! readings, placement ranking, the last two at one instant), one poll-state
+//! snapshot and two counter reads. No usage
 //! ledger, no vendor I/O. Every wire type is owned here and mapped from the
 //! internal read shapes, so a router-side rename never changes the wire.
 //!
@@ -25,8 +27,8 @@ use serde::Serialize;
 
 use routectl_router::{
     AccountIdentities, AccountIdentity, AccountReading, AccountReadings, AccountWindow,
-    LastReading, LengthClass, ObservationStamp, ReadingSource, RejectionTotals, ReportState,
-    Started, UsageVendor,
+    LastReading, LengthClass, ObservationStamp, PlacementStatus, ReadingSource, RejectionTotals,
+    ReportState, Started, UsageVendor,
 };
 
 use super::router_view::StatusRouterView;
@@ -52,10 +54,14 @@ pub(super) struct AccountsPanel {
     rejections: Rejections,
     /// Meter writes refused because their account is not configured.
     refused_by_admission: u64,
+    /// Lower readings the meter accepted after enough agreeing repeats.
+    corrections_confirmed: u64,
     /// The reading history writer's running counters.
     history: AccountReadingHistory,
     /// The background usage poll driver's health.
     poll_driver: PollDriverRow,
+    /// The pace rule's counters and its per-pool, per-model seat ranking.
+    placement: placement::PlacementRow,
 }
 
 /// One configured account. `account` is the key other panels join on;
@@ -171,6 +177,8 @@ pub(super) struct AccountSources {
     pub(super) poll: Option<PollStateSnapshot>,
     pub(super) history: AccountReadingHistory,
     pub(super) poll_driver: SeatDriverHealthSnapshot,
+    /// Read at the same instant as `readings`.
+    pub(super) placement: PlacementStatus,
 }
 
 pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
@@ -180,6 +188,7 @@ pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
         poll,
         history,
         poll_driver,
+        placement,
     } = sources;
     let mut by_account: BTreeMap<String, AccountReading> = readings
         .accounts
@@ -211,8 +220,10 @@ pub(super) fn build_from_sources(sources: AccountSources) -> AccountsPanel {
             .unwrap_or_default(),
         rejections: map_rejections(readings.rejections),
         refused_by_admission: readings.refused_by_admission,
+        corrections_confirmed: readings.corrections_confirmed,
         history,
         poll_driver: map_poll_driver(poll_driver),
+        placement: placement::map_placement(placement),
     }
 }
 
@@ -363,19 +374,22 @@ fn duration_ms(duration: Duration) -> i64 {
     i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Read every source from one router snapshot and the poll state.
+/// Read every source from one router snapshot and the poll state, the
+/// readings and the placement ranking at one instant.
 fn read_sources(
     view: &StatusRouterView,
     poll_state: Option<&UsagePollState>,
     history: AccountReadingHistory,
     poll_driver: SeatDriverHealthSnapshot,
 ) -> AccountSources {
+    let now = ObservationStamp::now();
     AccountSources {
         identities: view.account_identities(),
-        readings: view.account_readings(&ObservationStamp::now()),
+        readings: view.account_readings(&now),
         poll: poll_state.map(|state| view.usage_poll_snapshot(state)),
         history,
         poll_driver,
+        placement: view.placement_status(&now),
     }
 }
 
@@ -403,6 +417,8 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
     Json(build(&state).await)
 }
 
+mod placement;
+
 #[cfg(test)]
 pub(super) mod fixture;
 
@@ -417,3 +433,7 @@ mod unbuilt_tests;
 #[cfg(test)]
 #[path = "accounts_poll_off_tests.rs"]
 mod poll_off_tests;
+
+#[cfg(test)]
+#[path = "accounts_placement_tests.rs"]
+mod placement_tests;

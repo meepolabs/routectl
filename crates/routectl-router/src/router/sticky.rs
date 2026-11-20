@@ -39,25 +39,15 @@ impl Router {
         seats: &[crate::seat_pool::SeatTarget],
         model: &str,
     ) -> Vec<Standing> {
-        let keys: Vec<Option<crate::quota::key::SeatKey>> = seats
-            .iter()
-            .map(|seat| crate::quota::key::seat_key_for_secret_ref(seat.auth_secret_ref.as_ref()))
-            .collect();
-        if keys.iter().all(Option::is_none) {
+        let has_readable_account = seats.iter().any(|seat| {
+            crate::quota::key::seat_key_for_secret_ref(seat.auth_secret_ref.as_ref()).is_some()
+        });
+        if !has_readable_account {
             return Vec::new();
         }
         let now = crate::quota::freshness::ObservationStamp::now();
         let readings = self.quota_store.readings(&now).accounts;
-        keys.iter()
-            .map(|key| {
-                let reading = key.as_ref().and_then(|key| {
-                    readings
-                        .iter()
-                        .find(|reading| reading.account == key.as_str())
-                });
-                crate::quota::placement::standing(reading, model, &now)
-            })
-            .collect()
+        seat_standings(seats, model, &readings, &now)
     }
 
     /// The walk order for a KEYLESS request on a multi-seat sticky pool, and
@@ -325,6 +315,29 @@ impl Router {
             SelectionOutcome::Stay { .. } | SelectionOutcome::DeferNoHealthy => PinWrite::None,
         }
     }
+}
+
+/// Each seat's standing for a conversation on upstream model `model`, read
+/// from `readings` at `now`, index-aligned with `seats`. A seat whose account
+/// the meter cannot key, or holds no reading for, stands unread.
+pub(super) fn seat_standings(
+    seats: &[crate::seat_pool::SeatTarget],
+    model: &str,
+    readings: &[crate::quota::view::AccountReading],
+    now: &crate::quota::freshness::ObservationStamp,
+) -> Vec<Standing> {
+    seats
+        .iter()
+        .map(|seat| {
+            let key = crate::quota::key::seat_key_for_secret_ref(seat.auth_secret_ref.as_ref());
+            let reading = key.as_ref().and_then(|key| {
+                readings
+                    .iter()
+                    .find(|reading| reading.account == key.as_str())
+            });
+            crate::quota::placement::standing(reading, model, now)
+        })
+        .collect()
 }
 
 /// Which pin write one sticky selection made.

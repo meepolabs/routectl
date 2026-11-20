@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use routectl_router::{
     AccountIdentities, AccountReading, AccountReadings, AccountWindow, Billing, LastReading,
-    LengthClass, ReadingSource, ReadingWindow, RejectionTotals, ReportState, Started, UsageVendor,
+    LengthClass, PlacementBirths, PlacementMoves, PlacementStatus, PoolPlacement, ReadingSource,
+    ReadingWindow, RejectionTotals, ReportState, SeatPlacement, Started, UsageVendor,
 };
 use serde_json::Value;
 
@@ -23,7 +24,8 @@ pub fn populated_accounts() -> Value {
 /// Every account the fixture config names: the labeled Anthropic seat with a
 /// fresh polled window and a stale response window, the unlabeled Codex login
 /// with no windows, and the API-key entries with no reading; a paused vendor,
-/// nonzero refusal and history counters, and a running poll driver.
+/// nonzero refusal, correction and history counters, a running poll driver,
+/// and a placement ranking with a ranked and an unavailable seat.
 pub fn populated_accounts_panel() -> Panel<AccountsPanel> {
     let sources = AccountSources {
         identities: AccountIdentities::from_config(&fixture_config()),
@@ -44,6 +46,7 @@ pub fn populated_accounts_panel() -> Panel<AccountsPanel> {
             transient: 2,
             definitive: 1,
         },
+        placement: placement(),
     };
     Panel::available(SCHEMA_VERSION, fixture_as_of(), build_from_sources(sources))
 }
@@ -115,7 +118,50 @@ fn readings() -> AccountReadings {
             malformed_body: 3,
         },
         refused_by_admission: 2,
-        corrections_confirmed: 0,
+        corrections_confirmed: 3,
+    }
+}
+
+/// One pool ranked for two upstream models: the labeled Anthropic seat is
+/// ranked first for one and breaker-open for the other, whose stale scoped
+/// weekly leaves it unread.
+fn placement() -> PlacementStatus {
+    PlacementStatus {
+        births: PlacementBirths {
+            roomy: 12,
+            low_room: 2,
+            unread: 4,
+        },
+        moves: PlacementMoves {
+            credential_unusable: 1,
+            account_parked: 2,
+            breaker_open: 3,
+        },
+        cap_forced_moves: 1,
+        pools: vec![
+            PoolPlacement {
+                pool: "claude-pool".to_string(),
+                model: "claude-opus-4-7".to_string(),
+                seats: vec![SeatPlacement {
+                    account: Some("anthropic#a".to_string()),
+                    rank: None,
+                    tier: "unread",
+                    score: None,
+                    reason: "breaker_open",
+                }],
+            },
+            PoolPlacement {
+                pool: "claude-pool".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                seats: vec![SeatPlacement {
+                    account: Some("anthropic#a".to_string()),
+                    rank: Some(1),
+                    tier: "roomy",
+                    score: Some(1.38),
+                    reason: "pace",
+                }],
+            },
+        ],
     }
 }
 

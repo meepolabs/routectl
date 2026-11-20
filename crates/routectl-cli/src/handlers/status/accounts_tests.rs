@@ -14,8 +14,8 @@ use routectl_auth::{OAuthStore, SecretRef};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
 use routectl_router::{
     AccountReading, AccountReadings, AccountWindow, CURRENT_CONFIG_VERSION, Config, LastReading,
-    LengthClass, ReadingSource, ReadingWindow, RejectionTotals, ReportState, ResolvedModel, Router,
-    Started, UsageVendor,
+    LengthClass, PlacementBirths, PlacementMoves, PlacementStatus, ReadingSource, ReadingWindow,
+    RejectionTotals, ReportState, ResolvedModel, Router, Started, UsageVendor,
 };
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -468,6 +468,16 @@ fn sources(
         poll,
         history: AccountReadingHistory::default(),
         poll_driver: SeatDriverHealth::default().snapshot(),
+        placement: no_placement(),
+    }
+}
+
+fn no_placement() -> PlacementStatus {
+    PlacementStatus {
+        births: PlacementBirths::default(),
+        moves: PlacementMoves::default(),
+        cap_forced_moves: 0,
+        pools: Vec::new(),
     }
 }
 
@@ -615,7 +625,8 @@ fn poll_state_maps_per_account_and_vendor_pauses_are_listed() {
 }
 
 /// The top-level counters come from their sources: the meter's refusal
-/// totals and admission refusals, the history writer counters and the poll
+/// totals, admission refusals and confirmed corrections, the history writer
+/// counters and the poll
 /// driver's health. Each source has its own distinct value so a swapped or
 /// dropped field shows.
 #[test]
@@ -634,7 +645,7 @@ fn top_level_counters_come_from_their_own_sources() {
             malformed_body: 8,
         },
         refused_by_admission: 9,
-        corrections_confirmed: 0,
+        corrections_confirmed: 10,
     };
     let mut sources = sources(AccountIdentities::default(), readings, None);
     sources.history = AccountReadingHistory {
@@ -658,6 +669,7 @@ fn top_level_counters_come_from_their_own_sources() {
         })
     );
     assert_eq!(json["refused_by_admission"], 9);
+    assert_eq!(json["corrections_confirmed"], 10);
     assert_eq!(
         json["history"],
         serde_json::json!({

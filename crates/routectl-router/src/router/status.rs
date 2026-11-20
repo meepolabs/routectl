@@ -8,15 +8,17 @@ use routectl_core::EligibilityReason;
 
 use super::Router;
 use super::learned_lanes::egress_entries;
-use crate::config::Config;
+use super::placement_record::PlacementTotals;
+use crate::config::{Config, SeatSelection};
 use crate::quota::freshness::ObservationStamp;
 use crate::quota::key::seat_key_for_served_identity;
+use crate::quota::placement::{Standing, Tier};
 use crate::quota::reduce::RejectionReason;
 use crate::quota::store::ObserveRefusal;
 use crate::quota::usage_body::{BodyError, UsageVendor};
-use crate::quota::view::{AcceptedReading, AccountReadings};
+use crate::quota::view::{AcceptedReading, AccountReading, AccountReadings};
 use crate::resolved::ResolvedModel;
-use crate::runtime_state::{CircuitPhase, ProviderGateStatus};
+use crate::runtime_state::{CapacitySnapshot, CircuitPhase, ProviderGateStatus};
 use crate::seat_pool::{SeatTarget, credential_account, seat_identity};
 use crate::state_key::StateKey;
 
@@ -266,6 +268,91 @@ impl Router {
         self.quota_store.readings(now)
     }
 
+    /// The pace rule's counters since start and, for every pool it places on
+    /// and each upstream model routed at that pool, how it would rank each
+    /// seat for the next new conversation, all as of `now`.
+    ///
+    /// Ranked by the same scorer, readings and eligibility filter a birth
+    /// uses, so the rank-1 seats are exactly the set a birth draws from
+    /// before its headroom pick and rotation. Read-only: no tiebreak
+    /// advance, no pin read, no RPM token, no half-open slot, no counter.
+    ///
+    /// A pool the rule places on is a `sticky-least-loaded` pool of more than
+    /// one seat. A pool whose seats have no account the meter reads is listed
+    /// too, every seat unread, as a birth there ranks on headroom alone.
+    /// When several models route one upstream model at a pool, a seat counts
+    /// as available when any of them could dispatch to it, as
+    /// [`Self::pool_eligibility`] counts it.
+    #[must_use]
+    pub fn placement_status(&self, now: &ObservationStamp) -> PlacementStatus {
+        let readings = self.quota_store.readings(now).accounts;
+        let totals = self.metrics.placement.totals();
+        let mut placing: BTreeMap<(&str, &str), Vec<&ResolvedModel>> = BTreeMap::new();
+        for model in self.resolved_models.values() {
+            let places = model.seats.as_ref().is_some_and(|seats| seats.len() > 1)
+                && self.config.seat_selection_for(&model.provider_name)
+                    == SeatSelection::StickyLeastLoaded;
+            if places {
+                placing
+                    .entry((model.provider_name.as_str(), model.upstream.as_str()))
+                    .or_default()
+                    .push(model);
+            }
+        }
+        PlacementStatus {
+            births: PlacementBirths::of(&totals),
+            moves: PlacementMoves::of(&totals),
+            cap_forced_moves: totals.cap_forced_moves,
+            pools: placing
+                .into_iter()
+                .map(|((pool, upstream), models)| PoolPlacement {
+                    pool: pool.to_string(),
+                    model: upstream.to_string(),
+                    seats: self.seat_placements(&models, &readings, now),
+                })
+                .collect(),
+        }
+    }
+
+    /// Each seat of the pool `models` route at, ranked for their shared
+    /// upstream model. `models` is non-empty and every one names the pool.
+    fn seat_placements(
+        &self,
+        models: &[&ResolvedModel],
+        readings: &[AccountReading],
+        now: &ObservationStamp,
+    ) -> Vec<SeatPlacement> {
+        let Some(seats) = models.first().and_then(|model| model.seats.as_deref()) else {
+            return Vec::new();
+        };
+        let snapshots: Vec<CapacitySnapshot> = models
+            .iter()
+            .map(|model| self.gather_capacity_snapshots(seats, &model.nickname, now.monotonic()))
+            .reduce(|kept, next| {
+                kept.into_iter()
+                    .zip(next)
+                    .map(|(kept, next)| most_available(kept, next))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let standings = super::sticky::seat_standings(seats, &models[0].upstream, readings, now);
+        let ranks = dense_ranks(&snapshots, &standings);
+        seats
+            .iter()
+            .zip(standings)
+            .zip(snapshots.iter().zip(ranks))
+            .map(|((seat, standing), (snapshot, rank))| SeatPlacement {
+                account: seat.account().map(str::to_string),
+                rank,
+                tier: standing.tier.as_str(),
+                score: standing.ranked_score().filter(|score| score.is_finite()),
+                reason: snapshot
+                    .reason()
+                    .map_or(standing.reason.as_str(), EligibilityReason::as_str),
+            })
+            .collect()
+    }
+
     /// Live seat counts for every pool a model routes at, in
     /// pool-name order, read from the same side-effect-free capacity
     /// snapshot sticky placement reads: no RPM token is charged and no
@@ -331,6 +418,65 @@ impl Router {
         }
         highest
     }
+}
+
+/// Of one seat's snapshots under two models, the one a birth could use
+/// first: dispatchable and closed, then dispatchable, then the refusal of
+/// higher priority.
+fn most_available(kept: CapacitySnapshot, next: CapacitySnapshot) -> CapacitySnapshot {
+    let availability = |snapshot: &CapacitySnapshot| match snapshot.reason() {
+        None if snapshot.circuit == CircuitPhase::Closed => (2, 0),
+        None => (1, 0),
+        Some(reason) => (0, reason.priority()),
+    };
+    if availability(&next) > availability(&kept) {
+        next
+    } else {
+        kept
+    }
+}
+
+/// Each seat's dense rank, `None` for a seat no birth could take now.
+///
+/// Ranked on what a birth's pick ranks on, in its order: the
+/// closed-over-half-open preference, then the tier, then the score rounded
+/// to the near-tie precision. Seats equal on all three share a rank. A
+/// half-open seat set aside for a closed one keeps a rank, below every
+/// closed seat.
+fn dense_ranks(snapshots: &[CapacitySnapshot], standings: &[Standing]) -> Vec<Option<usize>> {
+    let all: Vec<usize> = (0..snapshots.len()).collect();
+    let preferred = crate::seat_pool::eligible_candidates(&all, snapshots);
+    let key = |idx: usize| -> (bool, Tier, f64) {
+        let standing = standings[idx];
+        (
+            preferred.contains(&idx),
+            standing.tier,
+            standing.ranked_score().unwrap_or(f64::NEG_INFINITY),
+        )
+    };
+    let descending = |a: &(bool, Tier, f64), b: &(bool, Tier, f64)| {
+        b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.total_cmp(&a.2))
+    };
+    let available: Vec<usize> = all
+        .iter()
+        .copied()
+        .filter(|&idx| snapshots[idx].is_dispatchable())
+        .collect();
+    let mut levels: Vec<(bool, Tier, f64)> = available.iter().map(|&idx| key(idx)).collect();
+    levels.sort_by(descending);
+    levels.dedup_by(|a, b| descending(a, b).is_eq());
+    all.iter()
+        .map(|&idx| {
+            if !available.contains(&idx) {
+                return None;
+            }
+            let own = key(idx);
+            levels
+                .iter()
+                .position(|level| descending(level, &own).is_eq())
+                .map(|level| level + 1)
+        })
+        .collect()
 }
 
 /// The credential reference a target of `model` dispatching through
@@ -504,6 +650,94 @@ impl PoolEligibility {
     }
 }
 
+/// The pace rule's view for the status surface: its counters since the
+/// process started and its ranking of every pool it places on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementStatus {
+    /// Won births, keyless placements included, by the placed seat's tier.
+    pub births: PlacementBirths,
+    /// Won moves by the trigger that moved the conversation.
+    pub moves: PlacementMoves,
+    /// `breaker_open` moves whose old seat stood `low_room` at the move.
+    pub cap_forced_moves: u64,
+    /// One entry per pool and upstream model, in pool then model order.
+    pub pools: Vec<PoolPlacement>,
+}
+
+/// Won births by the placed seat's tier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlacementBirths {
+    /// Births on a `roomy` seat.
+    pub roomy: u64,
+    /// Births on a `low_room` seat.
+    pub low_room: u64,
+    /// Births on an `unread` seat.
+    pub unread: u64,
+}
+
+impl PlacementBirths {
+    fn of(totals: &PlacementTotals) -> Self {
+        Self {
+            roomy: totals.births_of(Tier::Roomy),
+            low_room: totals.births_of(Tier::LowRoom),
+            unread: totals.births_of(Tier::Unread),
+        }
+    }
+}
+
+/// Won moves by trigger: the three refusals a move leaves a seat for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlacementMoves {
+    /// Moves off a seat whose credential is unusable.
+    pub credential_unusable: u64,
+    /// Moves off a parked account.
+    pub account_parked: u64,
+    /// Moves off an open breaker.
+    pub breaker_open: u64,
+}
+
+impl PlacementMoves {
+    fn of(totals: &PlacementTotals) -> Self {
+        Self {
+            credential_unusable: totals.moves_of(EligibilityReason::CredentialUnusable),
+            account_parked: totals.moves_of(EligibilityReason::AccountParked),
+            breaker_open: totals.moves_of(EligibilityReason::BreakerOpen),
+        }
+    }
+}
+
+/// How the pace rule ranks one pool's seats for one upstream model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolPlacement {
+    /// The `[pools]` table key.
+    pub pool: String,
+    /// The upstream model id the ranking is for.
+    pub model: String,
+    /// One entry per seat, in the pool's member order.
+    pub seats: Vec<SeatPlacement>,
+}
+
+/// One seat's place in its pool's ranking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeatPlacement {
+    /// The seat's credential account key; `None` only for a member that
+    /// forwards the client's credential.
+    pub account: Option<String>,
+    /// Dense rank from 1 (best), shared by tied seats; `None` while no
+    /// request could be dispatched to the seat.
+    pub rank: Option<usize>,
+    /// Tier token: `roomy`, `low_room` or `unread`.
+    pub tier: &'static str,
+    /// The score the rank uses, rounded to two decimals; `None` for an
+    /// unread seat.
+    pub score: Option<f64>,
+    /// What decided the seat's place: the eligibility reason token while it
+    /// is unavailable, else the standing's reason token (`overage`,
+    /// `no_cap`, `no_reading`, `stale_reading`, `low_room`, `pace`,
+    /// `unstarted`).
+    pub reason: &'static str,
+}
+
 /// Seat counts summed over every pool, for the metrics snapshot line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct PoolSeatTotals {
@@ -542,3 +776,7 @@ mod account_readings_tests;
 #[cfg(test)]
 #[path = "account_identity_tests.rs"]
 mod account_identity_tests;
+
+#[cfg(test)]
+#[path = "placement_status_tests.rs"]
+mod placement_status_tests;

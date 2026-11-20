@@ -160,7 +160,7 @@ fn a_keyless_fill_first_fallback_with_nothing_read_records_nothing() {
 }
 
 /// A sticky pool whose seats carry no login, so the meter can read none.
-fn dormant_router() -> Router {
+pub(super) fn dormant_router() -> Router {
     let mut seats: Vec<SeatTarget> = Vec::new();
     let mut providers = BTreeMap::new();
     for (member, _) in MEMBERS {

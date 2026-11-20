@@ -2499,6 +2499,10 @@ Placement always applies; no config key turns it off, and there are no
 tuning knobs. A pool that should not place by usage sets
 `seat_selection = "fill-first"`.
 
+`/status/accounts` shows the ranking a birth would use right now, per pool
+and upstream model, and the placement counts since start (`placement`, see
+[Account readings on `/status/accounts`](#account-readings-on-statusaccounts)).
+
 The per-request seat-selection decision vocabulary (`birth_pick` /
 `sticky_stay` / ... , see
 [credential pools](#credential-pools-multiple-accounts-per-provider)) is
@@ -5660,6 +5664,41 @@ always present; times are epoch ms and durations ms.
   `contradictory`, `unknown_length`, `invalid_started`, `malformed_body`),
   and `refused_by_admission`, readings refused because their account is not
   configured.
+- `corrections_confirmed`: lower readings the meter accepted after three
+  agreeing readings in a row, replacing a higher stored value.
+- `placement`: the pace placement rule (see
+  [Pace placement on seat pools](#pace-placement-on-seat-pools)), top level
+  because one account can rank differently in each pool and model:
+  - `rule`: `pace_v1`, the id the usage ledger's `extra.placement` record
+    carries; `since_start`: `true`, every count below runs from the daemon's
+    start.
+  - `births`: won placements of a new conversation (a request with no
+    session key included) by the placed seat's tier: `roomy`, `low_room`,
+    `unread`. `moves`: pinned conversations re-placed, by the reason they
+    left their seat: `credential_unusable`, `account_parked`,
+    `breaker_open`. `cap_forced_moves`: the `breaker_open` moves whose old
+    seat stood `low_room` at the move. These are the `rc_placement_*`
+    metrics totals.
+  - `pools`: one entry per `sticky-least-loaded` pool of two or more seats
+    and per upstream model routed at it (two models on one upstream share
+    an entry), in pool then model order, each with `pool`, `model` (the
+    upstream model id) and `seats`, one per member in member order:
+    `account` (the `accounts[].account` key; null only for a member that
+    forwards the client's credential), `rank`, `tier` (`roomy`, `low_room`
+    or `unread`), `score` (the pace rounded to two decimals; null for an
+    `unread` seat) and `reason`. `rank` counts from 1 and is dense: seats
+    that tie share a rank, and the rank-1 seats are exactly the seats the
+    next new conversation on that model picks among (by RPM headroom, then
+    rotation). A half-open seat ranks below every closed seat. `rank` is
+    null while no request could go to the seat, and `reason` is then the
+    refusal: `credential_unusable`, `account_parked`, `breaker_open` or
+    `rate_limited`. Otherwise `reason` is what decided its standing:
+    `overage`, `no_cap`, `no_reading`, `stale_reading`, `low_room`, `pace`
+    or `unstarted`. When several models route one upstream model at a pool,
+    a seat counts as available when any of them could use it. A pool none
+    of whose seats has a login is listed with every seat `unread`; a birth
+    there ranks on headroom and rotation alone. Reading the panel never
+    changes a ranking, pin, rotation, rate limit, breaker probe or count.
 - `history`: the `account_readings` history writer's counts of accepted
   readings, `enqueued`, `dropped_full`, `dropped_closed`, `persisted` and
   `write_errors`.
