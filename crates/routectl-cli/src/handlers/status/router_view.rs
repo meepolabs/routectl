@@ -11,9 +11,10 @@
 //! name the private field, so it can never obtain a `&Router`, call
 //! `.complete`/`.stream`, or touch `.config`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use routectl_core::EligibilityReason;
@@ -31,11 +32,11 @@ use crate::commands::doctor::{
     ParkedSeat, ResidentLearned, SeatFix, ServedInputs, ServedPrices, UnusableSeat,
     unusable_seat_fix,
 };
-use crate::commands::pricing::PriceSnapshot;
+use crate::commands::pricing::{PriceSnapshot, is_subscription};
 use crate::commands::usage::cost_for_row;
 use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedEntry, resolve_entries};
 use crate::server::capability_rebuild::WarmReport;
-use crate::server::seat_driver::accounts_awaiting_login;
+use crate::server::seat_driver::{accounts_awaiting_login, managed_seats};
 use crate::server::usage_poll::{PollStateSnapshot, UsagePollState};
 
 /// Owns the live-router read handle for the status surface. Loads a fresh
@@ -176,6 +177,109 @@ impl StatusRouterView {
     /// and `oauth://` provider and label only, never a ref's value.
     pub fn seat_fix(&self, entry: &str) -> SeatFix {
         SeatFix::of(&self.router.config, entry)
+    }
+
+    /// The `[pools]` keys whose members resolve to each configured account,
+    /// sorted. An account several entries name lists every pool any of those
+    /// entries belongs to; an account in no pool lists none. A member resolves
+    /// to the account its dispatch target carries, the same account parks and
+    /// unusable marks are scoped to.
+    pub fn account_pools(&self) -> BTreeMap<String, Vec<String>> {
+        let entry_accounts: BTreeMap<String, String> = self
+            .router
+            .status_targets(Instant::now())
+            .into_iter()
+            .filter_map(|target| Some((target.provider_name, target.account?)))
+            .collect();
+        let mut pools: BTreeMap<String, BTreeSet<String>> = self
+            .account_identities()
+            .iter()
+            .map(|(account, _)| (account.to_string(), BTreeSet::new()))
+            .collect();
+        for (pool, entry) in &self.router.config.pools {
+            for member in &entry.members {
+                let Some(account) = entry_accounts.get(member) else {
+                    continue;
+                };
+                if let Some(held) = pools.get_mut(account) {
+                    held.insert(pool.clone());
+                }
+            }
+        }
+        pools
+            .into_iter()
+            .map(|(account, held)| (account, held.into_iter().collect()))
+            .collect()
+    }
+
+    /// The credential state of every account a dispatch target names, at
+    /// `now` (a monotonic instant and its epoch-ms anchor). An unusable mark
+    /// outranks a live park, as it does in eligibility. An unusable account
+    /// carries its cause, the epoch-ms it was first marked and the fix the
+    /// health panel shows ([`Self::seat_fix`]); a parked one carries the park
+    /// reason and the epoch-ms the park lapses. A park whose deadline has
+    /// passed is a re-test, not a refusal, and reads usable. An account no
+    /// built target names is absent.
+    pub fn account_credentials(&self, now: (Instant, i64)) -> BTreeMap<String, AccountCredential> {
+        let (now, now_ms) = now;
+        let identities = self.account_identities();
+        let mut out = BTreeMap::new();
+        for target in self.router.status_targets(now) {
+            let Some(account) = target.account else {
+                continue;
+            };
+            if out.contains_key(&account) {
+                continue;
+            }
+            let entry = identities
+                .get(&account)
+                .map_or(target.provider_name.as_str(), |identity| {
+                    identity.provider_entry.as_str()
+                });
+            let credential = match (target.gate.credential_unusable, target.gate.credential_park) {
+                (Some(mark), _) => AccountCredential {
+                    state: CredentialState::Unusable,
+                    cause: Some(mark.cause.as_str()),
+                    since_ms: Some(epoch_ms_before(now_ms, mark.since_elapsed)),
+                    until_ms: None,
+                    fix: Some(self.seat_fix(entry).command()),
+                },
+                (None, Some(park)) if !park.remaining.is_zero() => AccountCredential {
+                    state: CredentialState::Parked,
+                    cause: Some(park.reason.as_str()),
+                    since_ms: None,
+                    until_ms: Some(epoch_ms_after(now_ms, park.remaining)),
+                    fix: None,
+                },
+                _ => AccountCredential::usable(),
+            };
+            out.insert(account, credential);
+        }
+        out
+    }
+
+    /// The accounts of the served config's managed logins: the seats the
+    /// background refresh and usage poll drivers work on.
+    pub fn managed_accounts(&self) -> BTreeSet<String> {
+        managed_seats(&self.router.config)
+            .into_iter()
+            .map(|seat| seat.account)
+            .collect()
+    }
+
+    /// Whether each configured account bills as a managed-OAuth
+    /// subscription, by the one predicate every cost surface uses, applied to
+    /// the entry the account is reported under.
+    pub fn account_subscriptions(&self) -> BTreeMap<String, bool> {
+        self.account_identities()
+            .iter()
+            .map(|(account, identity)| {
+                (
+                    account.to_string(),
+                    is_subscription(&self.router.config, &identity.provider_entry),
+                )
+            })
+            .collect()
     }
 
     /// Every resident learned-capability entry for the health panel, each with
@@ -341,6 +445,67 @@ impl StatusRouterView {
         (parked, unusable)
     }
 }
+
+/// Whether an account's credential can be dispatched on right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialState {
+    /// No unusable mark and no live park.
+    Usable,
+    /// Marked unusable; only a fixed credential readmits it.
+    Unusable,
+    /// Parked by an upstream rejection until a deadline.
+    Parked,
+}
+
+impl CredentialState {
+    /// The stable snake_case token for this state.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Usable => "usable",
+            Self::Unusable => "unusable",
+            Self::Parked => "parked",
+        }
+    }
+}
+
+/// One account's credential state with the facts that explain it. Every
+/// field but `state` is `None` for a usable account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountCredential {
+    pub state: CredentialState,
+    /// The unusable cause token, or the park reason token.
+    pub cause: Option<&'static str>,
+    /// Epoch-ms the unusable mark was first set.
+    pub since_ms: Option<i64>,
+    /// Epoch-ms the park lapses into a re-test.
+    pub until_ms: Option<i64>,
+    /// What readmits an unusable account.
+    pub fix: Option<String>,
+}
+
+impl AccountCredential {
+    const fn usable() -> Self {
+        Self {
+            state: CredentialState::Usable,
+            cause: None,
+            since_ms: None,
+            until_ms: None,
+            fix: None,
+        }
+    }
+}
+
+fn epoch_ms_before(now_ms: i64, elapsed: Duration) -> i64 {
+    now_ms.saturating_sub(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+}
+
+fn epoch_ms_after(now_ms: i64, remaining: Duration) -> i64 {
+    now_ms.saturating_add(i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+#[path = "router_view_account_tests.rs"]
+mod account_tests;
 
 #[cfg(test)]
 mod tests {

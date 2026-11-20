@@ -86,7 +86,7 @@ impl PriceSnapshot {
 /// its per-token rates would have been is not a fact about the bill, and a
 /// surface that resolved rates anyway would render a figure the other
 /// surfaces correctly refuse to.
-pub(super) fn is_subscription(config: &Config, target: &str) -> bool {
+pub(crate) fn is_subscription(config: &Config, target: &str) -> bool {
     if let Some(entry) = config.providers.get(target) {
         return entry
             .api_key_ref()
