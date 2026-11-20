@@ -81,10 +81,13 @@ pub struct AccountWindow {
     pub age: Option<Duration>,
     /// Whether the reading is stale (see the module rule).
     pub stale: bool,
+    /// Whether this is the running five-hour window a complete report
+    /// omitted, which still binds until its reset.
+    pub kept: bool,
 }
 
 impl AccountWindow {
-    fn of(stored: &StoredWindow, now: &ObservationStamp) -> Self {
+    fn of(stored: &StoredWindow, now: &ObservationStamp, kept: bool) -> Self {
         let observed = stored.observed();
         let reading = stored.reading();
         let reset_passed = reading.started() != Started::No
@@ -97,6 +100,7 @@ impl AccountWindow {
             observed_at: observed.wall(),
             age: age(observed, now),
             stale: reset_passed || !within_stale_after(observed, now),
+            kept,
         }
     }
 
@@ -136,7 +140,8 @@ pub struct AccountReading {
     pub account: String,
     /// What the account has reported.
     pub report: ReportState,
-    /// Every stored window, ordered by length then scope.
+    /// Every stored window, plus a kept five-hour window still in effect,
+    /// ordered by length then scope.
     pub windows: Vec<AccountWindow>,
     /// The latest accepted reading, if any.
     pub last_accepted: Option<LastReading>,
@@ -163,7 +168,8 @@ impl AccountReading {
         };
         let mut windows: Vec<AccountWindow> = meter
             .windows()
-            .map(|stored| AccountWindow::of(stored, now))
+            .map(|stored| AccountWindow::of(stored, now, false))
+            .chain(kept_window(meter, now))
             .collect();
         windows.sort_by(|a, b| {
             (a.window.length_secs, &a.window.scope).cmp(&(b.window.length_secs, &b.window.scope))
@@ -179,6 +185,17 @@ impl AccountReading {
                 && within_stale_after(billing_observed, now),
         }
     }
+}
+
+/// The five-hour window `meter` keeps aside after a complete report omitted
+/// it, while it is still in effect at `now`. It ages on its own stamp like
+/// any window, so it binds placement while fresh and reads stale after that;
+/// either way it never reads as room.
+fn kept_window(meter: &AccountMeter, now: &ObservationStamp) -> Option<AccountWindow> {
+    meter
+        .kept_fast()
+        .filter(|kept| kept.is_effective(now))
+        .map(|kept| AccountWindow::of(kept, now, true))
 }
 
 /// Every configured account's readings, plus the meter's refusal totals.

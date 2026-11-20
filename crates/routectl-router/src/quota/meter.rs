@@ -142,7 +142,7 @@ impl StoredWindow {
     /// Whether this window is running and inside both freshness bounds at
     /// `now`. An unstarted window is never effective: its reset is where it
     /// would end if it began, not an expiry.
-    fn is_effective(&self, now: &ObservationStamp) -> bool {
+    pub(super) fn is_effective(&self, now: &ObservationStamp) -> bool {
         self.reading.started() != Started::No
             && self
                 .reading
@@ -213,9 +213,6 @@ enum Verdict {
 /// the only way to change one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountMeter {
-    /// Stamp of the most recent observation merged, whatever it carried.
-    /// Orders nothing; reported as the projection's observation instant.
-    latest: ObservationStamp,
     windows: HashMap<WindowKey, StoredWindow>,
     /// Stamp of the newest accepted complete report; partial windows observed
     /// at or before it are not taken.
@@ -240,7 +237,6 @@ impl AccountMeter {
     /// An account first seen at `observed`, holding nothing yet.
     pub(super) fn new(observed: ObservationStamp) -> Self {
         Self {
-            latest: observed,
             windows: HashMap::new(),
             complete_floor: None,
             unknown_marks: HashMap::new(),
@@ -278,6 +274,13 @@ impl AccountMeter {
         self.windows.values()
     }
 
+    /// The account-wide five-hour window a complete report dropped while it
+    /// was in effect, if still held. It may have left effect since: the
+    /// reader applies its own clock.
+    pub(super) const fn kept_fast(&self) -> Option<&StoredWindow> {
+        self.dropped_fast.as_ref()
+    }
+
     /// The stored window for `key`.
     #[cfg(test)]
     pub fn window(&self, key: &WindowKey) -> Option<&StoredWindow> {
@@ -290,7 +293,6 @@ impl AccountMeter {
         let observed = *observation.observed();
         let source = observation.source();
         let mut next = self.clone();
-        next.latest = newer(self.latest, observed);
         next.dropped_fast.take_if(|kept| {
             kept.observed.monotonic() <= observed.monotonic() && !kept.is_effective(&observed)
         });
@@ -515,14 +517,10 @@ impl AccountMeter {
             corrections,
         } = match header_observation(snapshot)? {
             Some(observation) => self.merged(&observation)?,
-            None => {
-                let mut next = self.clone();
-                next.latest = newer(self.latest, snapshot.observed);
-                Merged {
-                    meter: next,
-                    corrections: Vec::new(),
-                }
-            }
+            None => Merged {
+                meter: self.clone(),
+                corrections: Vec::new(),
+            },
         };
         for key in self.unknown_header_keys(snapshot) {
             let mark = next

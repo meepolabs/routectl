@@ -1,5 +1,5 @@
 //! Tests for the account meter's merge rule, through the store's two entry
-//! points, and for the projection placement reads.
+//! points, and for the placement-safe view placement reads.
 
 use std::time::{Instant, SystemTime};
 

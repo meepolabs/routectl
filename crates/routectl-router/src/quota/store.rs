@@ -401,7 +401,7 @@ impl QuotaStore {
         self.corrections_confirmed.fetch_add(1, Ordering::Relaxed);
         tracing::info!(
             event = "quota_correction_confirmed",
-            seat = %key.as_str(),
+            seat = %routectl_core::sanitize_for_log(key.as_str()),
             window_secs = correction.key.length_secs(),
             scope = correction.key.scope().map_or("", |scope| scope.as_str()),
             old_used = correction.old_used,
@@ -459,7 +459,7 @@ impl QuotaStore {
         let totals = self.rejections.totals();
         tracing::warn!(
             event = "quota_observation_rejected",
-            seat = %key.as_str(),
+            seat = %routectl_core::sanitize_for_log(key.as_str()),
             reason = ?reason,
             invalid_utilization_total = totals.invalid_utilization,
             expired_reset_total = totals.expired_reset,
@@ -512,3 +512,7 @@ impl QuotaStore {
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod store_tests;
+
+#[cfg(test)]
+#[path = "store_log_tests.rs"]
+mod store_log_tests;

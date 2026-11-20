@@ -503,6 +503,7 @@ fn window_tokens_and_stale_room_map_one_to_one() {
         observed_at: at_ms(1_000),
         age: None,
         stale: true,
+        kept: true,
     };
     let unstarted = AccountWindow {
         window: ReadingWindow {
@@ -517,6 +518,7 @@ fn window_tokens_and_stale_room_map_one_to_one() {
         observed_at: at_ms(2_000),
         age: Some(Duration::from_millis(1_500)),
         stale: false,
+        kept: false,
     };
 
     // Act
@@ -530,6 +532,7 @@ fn window_tokens_and_stale_room_map_one_to_one() {
             "class": "long", "length_secs": 604_800, "scope": "opus", "used": 0.9,
             "remaining": null, "reset_at_ms": 9_000, "started": "unknown",
             "source": "response", "observed_at_ms": 1_000, "age_ms": null, "stale": true,
+            "kept": true,
         })
     );
     assert_eq!(
@@ -538,6 +541,7 @@ fn window_tokens_and_stale_room_map_one_to_one() {
             "class": "short", "length_secs": 18_000, "scope": null, "used": 0.0,
             "remaining": 1.0, "reset_at_ms": null, "started": "no",
             "source": "poll", "observed_at_ms": 2_000, "age_ms": 1_500, "stale": false,
+            "kept": false,
         })
     );
 }

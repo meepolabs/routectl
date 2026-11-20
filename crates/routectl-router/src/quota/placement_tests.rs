@@ -848,3 +848,9 @@ fn scores_round_half_to_even_as_python_rounds_them() {
         assert_eq!(rounded(score), expected, "round({score}, 2)");
     }
 }
+
+#[path = "placement_kept_tests.rs"]
+mod placement_kept_tests;
+
+#[path = "placement_order_tests.rs"]
+mod placement_order_tests;

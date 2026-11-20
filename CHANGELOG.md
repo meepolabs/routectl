@@ -952,6 +952,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A five-hour window a usage report stops reporting still binds pace placement.** When a complete usage poll omits a running five-hour window (Anthropic `"five_hour": null`, or a Codex body without `primary_window`), the seat is ranked on that window's last reading until its reset, instead of standing `roomy` as `no_cap` or on its weekly window alone. `/status/accounts` lists the window with a new `kept: true` field on its window row (additive, schema stays 1).
+
 - **`/status/query` groups and totals no longer change when a series is requested.** With a `bucket` series, each group used to be priced bucket by bucket and summed, so a group holding a cache write of unknown lifetime could show a partial cost where the whole window has none, and its cache-hit share could differ from the same query without a series. Groups and totals are now priced over the whole window either way, and each bucket over its own requests. The buckets' counts still sum to the totals; their costs and cache-hit shares need not. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 - **`config check` no longer writes the ChatGPT cookie jar.** Building a Codex pool member could leave `cookies/chatgpt.json` (and its folder) under the config folder when the check exited. The check now reads an existing jar and never writes one; `serve` and hot reload still save the jar when their providers are dropped. **Internal:** `OpenAiResponsesConfig` gains `persist_cookie_jar` (default `true`) and `BuildOptions` gains `persist_cookie_jar` with `with_persist_cookie_jar` (default `true`).

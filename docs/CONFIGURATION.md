@@ -2442,13 +2442,21 @@ this order:
 1. `low_room`, score 0, when the account's billing reported overage within
    the last 7 minutes.
 2. `roomy`, score 1.0, when the account's latest usage report, no older
-   than 7 minutes, says it has no usage windows.
+   than 7 minutes, says it has no usage windows and no window it stopped
+   reporting still binds (below).
 3. `unread` when no relevant window is held, or when any relevant window's
    reading is stale: older than 7 minutes, or a running window past its
    reset (the same stale rule `/status/accounts` shows).
 4. `low_room` when a relevant window has less than 10% room left (exactly
    10% is roomy).
 5. `roomy` otherwise.
+
+A running five-hour window that a later usage report stops reporting is
+not taken as gone: it still binds placement until its reset, scored on
+its last reading and aging from that reading under the same 7-minute
+rule. A usage report that drops a nearly exhausted five-hour window
+therefore never makes the seat look roomy; once the window's reset
+passes, it no longer counts.
 
 A birth takes the best tier (`roomy` over `low_room` over `unread`), then
 the highest score rounded to two decimals (half to even), so seats whose
@@ -5630,9 +5638,12 @@ always present; times are epoch ms and durations ms.
     where it would end if it began at the reading), `started` (`yes`, `no`
     or `unknown`), `source` (`response` for a response header, `poll` for
     the usage poll), `observed_at_ms`, `age_ms` (null when the clocks cannot
-    order it) and `stale`. A reading is stale once it is more than 7 minutes
-    old, once a running window's reset has passed, or when its age cannot be
-    read.
+    order it), `stale` and `kept`. A reading is stale once it is more than 7
+    minutes old, once a running window's reset has passed, or when its age
+    cannot be read. `kept` is true for a running five-hour window the latest
+    complete poll no longer reported, which still binds placement until its
+    reset (see [Pace placement on seat pools](#pace-placement-on-seat-pools));
+    such a row can appear while `report` reads `no_windows`.
   - `last_accepted`: `observed_at_ms` and `source` of the latest accepted
     reading, or null.
   - `poll`: `applicability`, one of a closed set: `polled` for a managed

@@ -439,44 +439,29 @@ fn most_available(kept: CapacitySnapshot, next: CapacitySnapshot) -> CapacitySna
 /// Each seat's dense rank, `None` for a seat no birth could take now.
 ///
 /// Ranked on what a birth's pick ranks on, in its order: the
-/// closed-over-half-open preference, then the tier, then the score rounded
-/// to the near-tie precision. Seats equal on all three share a rank. A
-/// half-open seat set aside for a closed one keeps a rank, below every
-/// closed seat.
+/// closed-over-half-open preference, then the pace rule's buckets. Seats in
+/// one bucket share a rank. A half-open seat set aside for a closed one
+/// keeps a rank, below every closed seat.
 fn dense_ranks(snapshots: &[CapacitySnapshot], standings: &[Standing]) -> Vec<Option<usize>> {
     let all: Vec<usize> = (0..snapshots.len()).collect();
     let preferred = crate::seat_pool::eligible_candidates(&all, snapshots);
-    let key = |idx: usize| -> (bool, Tier, f64) {
-        let standing = standings[idx];
-        (
-            preferred.contains(&idx),
-            standing.tier,
-            standing.ranked_score().unwrap_or(f64::NEG_INFINITY),
-        )
-    };
-    let descending = |a: &(bool, Tier, f64), b: &(bool, Tier, f64)| {
-        b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.total_cmp(&a.2))
-    };
-    let available: Vec<usize> = all
+    let set_aside: Vec<usize> = all
         .iter()
         .copied()
-        .filter(|&idx| snapshots[idx].is_dispatchable())
+        .filter(|&idx| snapshots[idx].is_dispatchable() && !preferred.contains(&idx))
         .collect();
-    let mut levels: Vec<(bool, Tier, f64)> = available.iter().map(|&idx| key(idx)).collect();
-    levels.sort_by(descending);
-    levels.dedup_by(|a, b| descending(a, b).is_eq());
-    all.iter()
-        .map(|&idx| {
-            if !available.contains(&idx) {
-                return None;
-            }
-            let own = key(idx);
-            levels
-                .iter()
-                .position(|level| descending(level, &own).is_eq())
-                .map(|level| level + 1)
-        })
-        .collect()
+    let mut ranks = vec![None; snapshots.len()];
+    let buckets = crate::quota::placement::ordered_buckets(standings, &preferred)
+        .into_iter()
+        .chain(crate::quota::placement::ordered_buckets(
+            standings, &set_aside,
+        ));
+    for (level, (_, members)) in buckets.enumerate() {
+        for idx in members {
+            ranks[idx] = Some(level + 1);
+        }
+    }
+    ranks
 }
 
 /// The credential reference a target of `model` dispatching through

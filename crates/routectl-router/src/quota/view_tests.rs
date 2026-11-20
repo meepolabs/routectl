@@ -428,7 +428,7 @@ fn an_unstarted_window_ages_out_but_its_provisional_reset_never_expires_it() {
     assert!(aged.stale);
 }
 
-// ---- The placement projection of an unstarted window ----
+// ---- The pace standing of an unstarted window ----
 
 #[test]
 fn a_fresh_unstarted_window_ranks_until_stale_after_and_then_goes_unread() {

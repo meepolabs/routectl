@@ -64,7 +64,8 @@ impl Tier {
 pub enum Reason {
     /// The account is billing beyond its included budget.
     Overage,
-    /// The account reported that it has no usage windows.
+    /// The account reported that it has no usage windows, and no window it
+    /// stopped reporting still binds.
     NoCap,
     /// No relevant window is held.
     NoReading,
@@ -139,6 +140,7 @@ pub fn standing(reading: Option<&AccountReading>, model: &str, now: &Observation
         };
     }
     if reading.report == ReportState::NoWindows
+        && reading.windows.is_empty()
         && reading.last_accepted.is_some_and(|last| last.fresh)
     {
         return Standing {
@@ -238,22 +240,31 @@ fn bucket_score(standing: &Standing) -> f64 {
 /// rounded score, or `None` when `candidates` is empty. `standings` is
 /// index-aligned with the pool; a candidate past its end reads as unread.
 pub fn best_bucket(standings: &[Standing], candidates: &[usize]) -> Option<(Tier, Vec<usize>)> {
+    ordered_buckets(standings, candidates).into_iter().next()
+}
+
+/// `candidates` grouped by tier and rounded score, best bucket first, each
+/// bucket keeping the candidates' own order. Read as [`best_bucket`].
+pub fn ordered_buckets(standings: &[Standing], candidates: &[usize]) -> Vec<(Tier, Vec<usize>)> {
     let missing = unread(Reason::NoReading);
-    let of = |idx: usize| standings.get(idx).copied().unwrap_or(missing);
     let key = |idx: usize| {
-        let standing = of(idx);
+        let standing = standings.get(idx).copied().unwrap_or(missing);
         (standing.tier, bucket_score(&standing))
     };
-    let best = candidates
-        .iter()
-        .map(|&idx| key(idx))
-        .max_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))?;
-    let tied = candidates
-        .iter()
-        .copied()
-        .filter(|&idx| key(idx) == best)
-        .collect();
-    Some((best.0, tied))
+    let mut keyed: Vec<((Tier, f64), usize)> =
+        candidates.iter().map(|&idx| (key(idx), idx)).collect();
+    keyed.sort_by(|(a, _), (b, _)| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
+    let mut buckets: Vec<((Tier, f64), Vec<usize>)> = Vec::new();
+    for (key, idx) in keyed {
+        match buckets.last_mut() {
+            Some((last, members)) if *last == key => members.push(idx),
+            _ => buckets.push((key, vec![idx])),
+        }
+    }
+    buckets
+        .into_iter()
+        .map(|((tier, _), members)| (tier, members))
+        .collect()
 }
 
 /// The shortest outage worth moving a warm conversation for: the shortest

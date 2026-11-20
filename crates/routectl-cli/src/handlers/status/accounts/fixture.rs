@@ -69,6 +69,7 @@ fn readings() -> AccountReadings {
         observed_at: at_ms(FIXTURE_NOW_MS - 60_000),
         age: Some(Duration::from_mins(1)),
         stale: false,
+        kept: false,
     };
     let stale = AccountWindow {
         window: ReadingWindow {
@@ -83,6 +84,7 @@ fn readings() -> AccountReadings {
         observed_at: at_ms(FIXTURE_NOW_MS - 3_600_000),
         age: None,
         stale: true,
+        kept: false,
     };
     AccountReadings {
         accounts: vec![

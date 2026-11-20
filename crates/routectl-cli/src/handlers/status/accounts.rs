@@ -108,6 +108,9 @@ struct WindowRow {
     /// stamp cannot be ordered against the read instant.
     age_ms: Option<i64>,
     stale: bool,
+    /// True for a running five-hour window the latest complete poll omitted:
+    /// it still binds placement until its reset.
+    kept: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -261,6 +264,7 @@ fn map_window(window: &AccountWindow) -> WindowRow {
         observed_at_ms: epoch_ms(window.observed_at),
         age_ms: window.age.map(duration_ms),
         stale: window.stale,
+        kept: window.kept,
     }
 }
 
