@@ -40,12 +40,16 @@
       <span class="verdict-stats" id="verdict-stats"></span>
     </div>
     <div class="verdict-side">
-      <div class="windowsel" id="windowsel" role="group" aria-label="Aggregation window" data-windowless="false">
+      <div class="windowsel" id="windowsel" role="group" aria-label="Aggregation window"
+        aria-describedby="window-covers" data-windowless="false">
         <button type="button" data-window="today" aria-pressed="true">Today</button>
+        <button type="button" data-window="last24h" aria-pressed="false">24h</button>
         <button type="button" data-window="week" aria-pressed="false">Week</button>
+        <button type="button" data-window="last7d" aria-pressed="false">7d</button>
         <button type="button" data-window="month" aria-pressed="false">Month</button>
         <button type="button" data-window="all" aria-pressed="false">All</button>
       </div>
+      <span class="card-hint" id="window-covers"></span>
       <button type="button" class="refresh" id="refresh" title="Refresh now">Refresh</button>
       <div class="poll" id="poll" aria-hidden="true">
         <span class="poll-dot"></span>

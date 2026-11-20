@@ -161,6 +161,76 @@
     });
   });
 
+  function rangeButton(range) {
+    var node = document.querySelector('#windowsel [data-window="' + range + '"]');
+    if (!node) { throw new Error('no picker button for ' + range); }
+    return node;
+  }
+
+  function coversReport() {
+    var covers = document.getElementById('window-covers');
+    var rect = covers.getBoundingClientRect();
+    return {
+      range: document.querySelector('#windowsel [aria-pressed="true"]').getAttribute('data-window'),
+      text: covers.textContent,
+      shown: !covers.hidden && rect.width > 0 && rect.height > 0,
+      beside_picker: covers.parentNode === document.getElementById('windowsel').parentNode
+    };
+  }
+
+  // Each range in `routectlUrlRows` is clicked in turn; for each, the QUERY
+  // bodies sent after the click once its answer applied, and the strip's
+  // req/span line drawn from that answer.
+  d.scenario('url-range-pick', function () {
+    var rows = window.routectlUrlRows || [];
+    var out = [];
+    var chain = waitSettled();
+    rows.forEach(function (range) {
+      chain = chain.then(function () {
+        var from = sent.length;
+        var answered = answers.length;
+        rangeButton(range).click();
+        return d.waitUntil('the ' + range + ' answer', function () {
+          return settled() && answers.slice(answered).some(function (a) {
+            return a.body.window === range;
+          });
+        }).then(function () {
+          out.push({
+            range: range,
+            hash: location.hash,
+            view: activeView(),
+            queries: sent.slice(from),
+            stats: document.getElementById('verdict-stats').textContent
+          });
+        });
+      });
+    });
+    return chain.then(function () { return out; });
+  });
+
+  // The covers line for each range in `routectlUrlRows`, clicked in turn,
+  // then on a view the picker does not apply to.
+  d.scenario('url-range-covers', function () {
+    var rows = window.routectlUrlRows || [];
+    var out = { ranges: [] };
+    var chain = waitSettled();
+    rows.forEach(function (range) {
+      chain = chain.then(function () {
+        rangeButton(range).click();
+        return waitSettled();
+      }).then(function () {
+        out.ranges.push(coversReport());
+      });
+    });
+    return chain.then(function () {
+      click('tab-accounts');
+      return waitSettled();
+    }).then(function () {
+      out.windowless = coversReport();
+      return out;
+    });
+  });
+
   // Every user control that changes the selection pushes one entry; a
   // control that changes nothing in the selection pushes none.
   d.scenario('url-controls-history', function () {

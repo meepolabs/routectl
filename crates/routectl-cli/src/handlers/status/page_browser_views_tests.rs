@@ -120,7 +120,7 @@ fn assert_picker(case: &ViewCase, report: &Value) {
     let id = case.id;
     let picker = &report["picker"];
     let disabled = picker["disabled"].as_array().expect("picker buttons");
-    assert_eq!(disabled.len(), 4, "the picker has its four windows");
+    assert_eq!(disabled.len(), 6, "the picker has its six windows");
     if case.windowed {
         assert_eq!(picker["windowless"], "false", "`{id}` dims the picker");
         assert!(

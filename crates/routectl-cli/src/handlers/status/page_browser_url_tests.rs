@@ -110,6 +110,11 @@ fn page_browser_an_address_is_rewritten_canonical() {
         ("now?range=%77eek", "#now?range=week"),
         ("now?range=week%", "#now"),
         ("now?range=today", "#now"),
+        ("now?range=last30d", "#now"),
+        ("now?range=Last7d", "#now"),
+        ("now?range=last7d", "#now?range=last7d"),
+        ("now?range=last24h", "#now?range=last24h"),
+        ("usage/last24h", "#traffic?range=last24h"),
         ("now??range=week", "#now?range=week"),
         ("nowhere?range=week", "#now?range=week"),
         ("usage/week", "#traffic?range=week"),
@@ -395,6 +400,140 @@ fn page_browser_a_range_click_is_one_history_entry_and_back_restores_it() {
         back["figure"], out["week"]["figure"],
         "the figures never moved"
     );
+}
+
+/// The QUERY_SHAPES row the page must send for a window, grouping and series
+/// mode, read from the script's own declaration.
+fn declared_shape(window: &str, group_by: &str, bucketed: bool) -> Value {
+    let shapes: Vec<Value> = json_object_literals(&literal_body("QUERY_SHAPES", '[', ']'))
+        .iter()
+        .map(|shape| serde_json::from_str(shape).expect("a shape is JSON"))
+        .filter(|shape: &Value| {
+            shape["window"] == window
+                && shape["group_by"] == group_by
+                && shape.get("bucket").is_some() == bucketed
+        })
+        .collect();
+    assert_eq!(
+        shapes.len(),
+        1,
+        "one `{window}`/`{group_by}` shape (series: {bucketed})"
+    );
+    shapes[0].clone()
+}
+
+/// The trailing ranges, each with what the verdict strip says it spans.
+const TRAILING_RANGES: &[(&str, &str)] = &[
+    ("last24h", "in the last 24 hours"),
+    ("last7d", "in the last 7 days"),
+];
+
+/// Picking a trailing range on `view` sends exactly the declared shape for
+/// it, the address carries it, and the strip's count reads its span.
+fn assert_trailing_ranges_query(view: &'static str, group_by: &str, bucketed: bool) {
+    let rows: Vec<String> = TRAILING_RANGES
+        .iter()
+        .map(|(range, _)| (*range).to_owned())
+        .collect();
+
+    let run = browser::run_scenario(&url_rows_scenario("url-range-pick", view, &rows));
+
+    let picks = run.result.as_array().expect("one report per range");
+    assert_eq!(picks.len(), TRAILING_RANGES.len());
+    for (pick, (range, span)) in picks.iter().zip(TRAILING_RANGES) {
+        let at = format!("{view} {range}");
+        assert_eq!(pick["view"], view, "{at}: {pick:#}");
+        assert_eq!(pick["hash"], format!("#{view}?range={range}"), "{at}");
+        let bodies = queries(pick);
+        assert!(!bodies.is_empty(), "{at}: no QUERY after the click");
+        let want = declared_shape(range, group_by, bucketed);
+        for body in bodies {
+            assert_eq!(body, &want, "{at}: the body is not the declared shape");
+        }
+        let stats = pick["stats"].as_str().expect("the strip's req/span text");
+        assert!(
+            stats.ends_with(&format!(" req {span}")),
+            "{at}: the strip reads `{stats}`"
+        );
+    }
+}
+
+/// On Now, the trailing ranges ask for the provider series at the declared
+/// bucket, and the strip names the span.
+///
+/// Mutation check: give the last7d body a `day` bucket in bodyFromShape ->
+/// red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_sends_the_declared_series_shape_for_each_trailing_range() {
+    assert_trailing_ranges_query("now", "provider", true);
+}
+
+/// On Traffic, the trailing ranges ask for the grouping in view without a
+/// series, and the strip names the span.
+///
+/// Mutation check: map `last24h` to `today` in WINDOW_SPAN -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_sends_the_declared_grouped_shape_for_each_trailing_range() {
+    assert_trailing_ranges_query("traffic", "model", false);
+}
+
+/// A trailing range in the address survives a reload: the picker shows it
+/// pressed and the QUERY asks for it.
+///
+/// Mutation check: drop `last7d` from WINDOWS -> red (here and in the
+/// canonical-address rows).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_reload_keeps_a_trailing_range_selected() {
+    let run = browser::run_scenario(&url_scenario("url-reload", "now?range=last7d"));
+
+    for side in ["before", "after"] {
+        let report = &run.result[side];
+        assert_eq!(report["hash"], "#now?range=last7d", "{side}: {report:#}");
+        assert_eq!(report["range"], "7d", "{side}");
+        let last = queries(report).last().expect("a QUERY was issued");
+        assert_eq!(last["window"], "last7d", "{side}: {last}");
+    }
+}
+
+/// What each range covers, as the line beside the picker shows it.
+const COVERS: &[(&str, &str)] = &[
+    ("last24h", "Last 24 hours: the 24 hours up to now"),
+    ("week", "Week: since Monday 00:00 local time"),
+    ("last7d", "Last 7 days: the 168 hours up to now"),
+    ("month", "Month: since the 1st at 00:00 local time"),
+    ("all", "All: every request on record"),
+    ("today", "Today: since 00:00 local time"),
+];
+
+/// Each of the six ranges, once picked, shows its own covers line beside the
+/// picker; on a view the picker does not apply to the line is gone, which is
+/// the control that the check sees it hidden.
+///
+/// Mutation check: return early from syncWindowCovers -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_each_range_says_what_it_covers_beside_the_picker() {
+    let rows: Vec<String> = COVERS
+        .iter()
+        .map(|(range, _)| (*range).to_owned())
+        .collect();
+
+    let out = browser::run_scenario(&url_rows_scenario("url-range-covers", "now", &rows)).result;
+
+    let seen = out["ranges"].as_array().expect("one report per range");
+    assert_eq!(seen.len(), COVERS.len());
+    for (report, (range, text)) in seen.iter().zip(COVERS) {
+        assert_eq!(report["range"], *range, "{report:#}");
+        assert_eq!(report["text"], *text, "`{range}`");
+        assert_eq!(report["shown"], true, "`{range}`: {report:#}");
+        assert_eq!(report["beside_picker"], true, "`{range}`");
+    }
+    let windowless = &out["windowless"];
+    assert_eq!(windowless["shown"], false, "{windowless:#}");
+    assert_eq!(windowless["text"], "", "{windowless:#}");
 }
 
 /// Range, scope, view and group each push one entry; a control that leaves

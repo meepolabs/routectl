@@ -307,6 +307,15 @@
       b.disabled = terminal || windowless;
     });
     syncWindowlessLabel(group, windowless ? spanLabel(span) : null);
+    syncWindowCovers(windowless ? null : WINDOW_COVERS[selectedWindow]);
+  }
+
+  // The line beside a live picker saying what the selected range covers. A
+  // dimmed picker filters nothing, so it says nothing there.
+  function syncWindowCovers(text) {
+    var covers = el('window-covers');
+    covers.hidden = !text;
+    covers.textContent = text || '';
   }
 
   // The label lives beside the picker, created on demand and hidden when the

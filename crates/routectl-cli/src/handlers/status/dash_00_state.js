@@ -47,7 +47,9 @@
     return EXPECTED[SOURCE_PANEL[name] || name];
   }
 
-  var WINDOWS = ['today', 'week', 'month', 'all'];
+  // The first entry is the default range, the one an address without `range`
+  // selects.
+  var WINDOWS = ['today', 'last24h', 'week', 'last7d', 'month', 'all'];
 
   var BASE_MS = 5000;              // steady GET cadence
   // The one backoff ladder, 30s cap. GET and QUERY keep SEPARATE indexes and

@@ -73,9 +73,23 @@
   // The window's plain-language span, for the verdict strip's req/span pair.
   var WINDOW_SPAN = {
     today: 'today',
+    last24h: 'in the last 24 hours',
     week: 'this week',
+    last7d: 'in the last 7 days',
     month: 'this month',
     all: 'all time'
+  };
+
+  // What each range covers, shown beside the picker. The calendar ranges
+  // start at a local midnight; the trailing ranges are exact durations ending
+  // now and never read the time zone.
+  var WINDOW_COVERS = {
+    today: 'Today: since 00:00 local time',
+    last24h: 'Last 24 hours: the 24 hours up to now',
+    week: 'Week: since Monday 00:00 local time',
+    last7d: 'Last 7 days: the 168 hours up to now',
+    month: 'Month: since the 1st at 00:00 local time',
+    all: 'All: every request on record'
   };
 
   // ---- label maps ------------------------------------------------------
