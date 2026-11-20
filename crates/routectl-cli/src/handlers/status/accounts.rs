@@ -109,8 +109,11 @@ struct CredentialRow {
     since_ms: Option<i64>,
     /// Epoch ms a park lapses into a re-test.
     until_ms: Option<i64>,
-    /// The line that readmits an unusable account.
+    /// The bare command that readmits an unusable account, copyable as is.
     fix: Option<String>,
+    /// What readmits an unusable account in plain words when no bare
+    /// command does.
+    remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -320,6 +323,7 @@ fn map_credential(credential: Option<&AccountCredential>, now_ms: i64) -> Creden
             since_ms: None,
             until_ms: None,
             fix: None,
+            remediation: None,
         },
         |credential| CredentialRow {
             state: credential.state().as_str(),
@@ -327,6 +331,7 @@ fn map_credential(credential: Option<&AccountCredential>, now_ms: i64) -> Creden
             since_ms: credential.since_ms(),
             until_ms: credential.until_ms(),
             fix: credential.fix.clone(),
+            remediation: credential.remediation.clone(),
         },
     )
 }

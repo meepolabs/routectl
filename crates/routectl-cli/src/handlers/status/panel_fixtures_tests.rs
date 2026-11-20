@@ -284,6 +284,7 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.accounts[].credential.since_ms",
                 "data.accounts[].credential.until_ms",
                 "data.accounts[].credential.fix",
+                "data.accounts[].credential.remediation",
             ],
         ),
         (

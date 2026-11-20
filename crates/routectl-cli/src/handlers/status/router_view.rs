@@ -17,9 +17,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use routectl_core::EligibilityReason;
+use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::prices::{PriceBook, PriceTable};
 use routectl_router::router::RouteTargetStatus;
+use routectl_router::runtime_state::UnusableCause;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
     AccountIdentities, AccountReadings, EffectiveView, FidelitySnapshot, FieldRepairCounters,
@@ -219,8 +220,9 @@ impl StatusRouterView {
     /// The credential state of every account a dispatch target names, at
     /// `now` (a monotonic instant and its epoch-ms anchor). An unusable mark
     /// outranks a live park, as it does in eligibility. An unusable account
-    /// carries its cause, the epoch-ms it was first marked and the fix the
-    /// health panel shows ([`Self::seat_fix`]); a parked one carries the park
+    /// carries its cause, the epoch-ms it was first marked and what readmits
+    /// it ([`Self::seat_fix`]): a bare command as `fix`, else a correction as
+    /// `remediation`; a parked one carries the park
     /// reason and the epoch-ms the park lapses. A park whose deadline has
     /// passed is a re-test, not a refusal, and reads usable. An account no
     /// built target names is absent.
@@ -241,20 +243,14 @@ impl StatusRouterView {
                     identity.provider_entry.as_str()
                 });
             let credential = match (target.gate.credential_unusable, target.gate.credential_park) {
-                (Some(mark), _) => AccountCredential {
-                    condition: CredentialCondition::Unusable {
-                        cause: mark.cause,
-                        since_ms: epoch_ms_before(now_ms, mark.since_elapsed),
-                    },
-                    fix: Some(self.seat_fix(entry).command()),
-                },
-                (None, Some(park)) if !park.remaining.is_zero() => AccountCredential {
-                    condition: CredentialCondition::Parked {
-                        reason: park.reason,
-                        until_ms: epoch_ms_after(now_ms, park.remaining),
-                    },
-                    fix: None,
-                },
+                (Some(mark), _) => AccountCredential::unusable(
+                    mark.cause,
+                    epoch_ms_before(now_ms, mark.since_elapsed),
+                    &self.seat_fix(entry),
+                ),
+                (None, Some(park)) if !park.remaining.is_zero() => {
+                    AccountCredential::parked(park.reason, epoch_ms_after(now_ms, park.remaining))
+                }
                 _ => AccountCredential::usable(),
             };
             out.insert(account, credential);
@@ -480,8 +476,12 @@ impl CredentialState {
 pub struct AccountCredential {
     /// The state, with its cause and times.
     pub condition: CredentialCondition,
-    /// What readmits an unusable account; `None` otherwise.
+    /// The bare command that readmits an unusable account, copyable as is;
+    /// `None` when no command does or the account is not unusable.
     pub fix: Option<String>,
+    /// What readmits an unusable account in plain words when no bare
+    /// command does; `None` otherwise.
+    pub remediation: Option<String>,
 }
 
 impl AccountCredential {
@@ -489,6 +489,26 @@ impl AccountCredential {
         Self {
             condition: CredentialCondition::Usable,
             fix: None,
+            remediation: None,
+        }
+    }
+
+    /// An account marked unusable for `cause` since `since_ms`, readmitted
+    /// by `fix`: its bare command, else its correction.
+    pub fn unusable(cause: UnusableCause, since_ms: i64, fix: &SeatFix) -> Self {
+        Self {
+            condition: CredentialCondition::Unusable { cause, since_ms },
+            fix: fix.bare_command(),
+            remediation: fix.correction(),
+        }
+    }
+
+    /// An account parked for `reason` until `until_ms`; nothing to run.
+    pub const fn parked(reason: UpstreamReason, until_ms: i64) -> Self {
+        Self {
+            condition: CredentialCondition::Parked { reason, until_ms },
+            fix: None,
+            remediation: None,
         }
     }
 

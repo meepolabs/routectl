@@ -88,6 +88,11 @@
         cloud_nowin: textIn(byId(CLOUD_ROW), '.acct-nowin'),
         cloud_cause: textIn(byId(CLOUD_ROW), '.acct-cause'),
         compat_poll: textIn(byId(COMPAT_ROW), '.acct-poll'),
+        compat_cause: textIn(byId(COMPAT_ROW), '.acct-cause'),
+        compat_fix_codes: byId(COMPAT_ROW).querySelectorAll('.acct-fix-code').length,
+        compat_codes: byId(COMPAT_ROW).querySelectorAll('code').length,
+        compat_remediation: textIn(byId(COMPAT_ROW), '.acct-remediation-text'),
+        seat_remediation: textIn(seat, '.acct-remediation-text'),
         cloud_poll: textIn(byId(CLOUD_ROW), '.acct-poll'),
         poll_colors: [COMPAT_ROW, CLOUD_ROW, API_KEY_ROW].map(function (id) {
           return color(byId(id).querySelector('.acct-poll'), 'color');
@@ -447,7 +452,7 @@
   // seats are a key that differs from the labeled seat's only in case, the
   // labeled seat's provider entry name and a member that forwards the
   // client's credential: none of them a configured account. The labeled
-  // seat's 5 h window is kept.
+  // seat's 5 h window is kept and stale at once.
   d.scenario('accounts-placement', function () {
     rewriteAccounts(function (data) {
       var pools = data.placement.pools;
@@ -463,7 +468,10 @@
           { account: null, rank: 3, tier: 'roomy', score: 0.9, reason: 'pace' }
         ]
       });
-      row(data, 'anthropic#a').windows[0].kept = true;
+      var keptWindow = row(data, 'anthropic#a').windows[0];
+      keptWindow.kept = true;
+      keptWindow.stale = true;
+      keptWindow.remaining = null;
     });
     return settled().then(function () {
       var kept = byId(POLLED_WINDOW);
@@ -477,6 +485,7 @@
         api_key_text: byId(API_KEY_ROW).textContent,
         kept: {
           mark: textIn(kept, '.acct-kept'),
+          stale: textIn(kept, '.acct-stale'),
           meter: !!kept.querySelector('.sharebar-fill'),
           used: textIn(kept, '.acct-win-used'),
           mark_color: keptMark ? color(keptMark, 'color') : null,
@@ -494,11 +503,16 @@
     });
   });
 
-  // A panel from a daemon that sends no ranking, then one whose ranking is
-  // not a list of pools.
+  // A panel from a daemon that sends no ranking, then three malformed ones:
+  // a ranking that is not a list of pools, a pool and model ranking with no
+  // seats, and one that names the same account twice.
   d.scenario('accounts-placement-shapes', function () {
     rewriteAccounts(function (data, n) {
-      if (n === 0) { delete data.placement; } else { data.placement = { pools: 'not a list' }; }
+      if (n === 0) { delete data.placement; return; }
+      if (n === 1) { data.placement = { pools: 'not a list' }; return; }
+      var seats = data.placement.pools[1].seats;
+      if (n === 2) { data.placement.pools[1].seats = []; return; }
+      seats.push(JSON.parse(JSON.stringify(seats[0])));
     });
     function seen() {
       var body = byId(BODY);
@@ -509,9 +523,14 @@
       };
     }
     return settled().then(function () {
-      return d.acrossRounds('/status', 1, seen);
+      return d.acrossRounds('/status', 3, seen);
     }).then(function (out) {
-      return { absent: out.baseline, malformed: out.rounds[0] };
+      return {
+        absent: out.baseline,
+        malformed: out.rounds[0],
+        no_seats: out.rounds[1],
+        repeated: out.rounds[2]
+      };
     });
   });
 

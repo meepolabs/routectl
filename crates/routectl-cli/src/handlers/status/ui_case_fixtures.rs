@@ -34,7 +34,6 @@ use super::router_view::AccountCredential;
 use super::usage_health::{AccountReadingHistory, LedgerHealth};
 use super::{AggregatePanels, Panel, StatusAggregate, utc_rfc3339};
 use crate::commands::doctor::SeatFix;
-use crate::commands::doctor::attention::CredentialState as CredentialCondition;
 use crate::commands::pricing::is_subscription;
 use crate::commands::usage::WindowFlag;
 use crate::server::seat_driver::{SeatDriverHealthSnapshot, managed_seats};
@@ -391,7 +390,9 @@ impl CaseSource {
                 state
                     .targets
                     .push(target(model, entry, None, &account, closed(false)));
-                state.credentials.insert(account, usable());
+                state
+                    .credentials
+                    .insert(account, AccountCredential::usable());
             }
         }
         state
@@ -418,16 +419,15 @@ impl CaseSource {
             &account,
             gate,
         ));
-        let credential = seat.logged_out_min.map_or_else(usable, |minutes| {
-            let since_ms = now_ms - minutes * MIN_MS;
-            AccountCredential {
-                fix: Some(SeatFix::of(&self.config, seat.entry).command()),
-                condition: CredentialCondition::Unusable {
-                    cause: UnusableCause::NotLoggedIn,
-                    since_ms,
-                },
-            }
-        });
+        let credential = seat
+            .logged_out_min
+            .map_or_else(AccountCredential::usable, |minutes| {
+                AccountCredential::unusable(
+                    UnusableCause::NotLoggedIn,
+                    now_ms - minutes * MIN_MS,
+                    &SeatFix::of(&self.config, seat.entry),
+                )
+            });
         state.credentials.insert(account.clone(), credential);
         if let Some(pool) = self.layout.pool {
             state
@@ -554,13 +554,6 @@ fn closed(served: bool) -> ProviderGateStatus {
         last_outcome_elapsed: served.then_some(Duration::from_mins(1)),
         credential_park: None,
         credential_unusable: None,
-    }
-}
-
-const fn usable() -> AccountCredential {
-    AccountCredential {
-        fix: None,
-        condition: CredentialCondition::Usable,
     }
 }
 

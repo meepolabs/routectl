@@ -277,7 +277,7 @@ fn account_pools_lists_every_account_with_none_when_no_pool_is_configured() {
 }
 
 /// A logged-out seat reads unusable with its cause token, the epoch-ms it was
-/// first marked, and exactly the fix line the health panel shows for it.
+/// first marked, and the shared fix split: a bare command or a correction.
 #[test]
 fn a_logged_out_seat_reads_unusable_with_cause_since_and_the_shared_fix() {
     // Arrange
@@ -305,16 +305,20 @@ fn a_logged_out_seat_reads_unusable_with_cause_since_and_the_shared_fix() {
             (before_ms..=after_ms).contains(&since),
             "{account}: {before_ms} <= {since} <= {after_ms}"
         );
-        assert_eq!(
-            credential.fix.as_deref(),
-            Some(view.seat_fix(entry).command().as_str()),
-            "{account}"
-        );
+        let fix = view.seat_fix(entry);
+        assert_eq!(credential.fix, fix.bare_command(), "{account}");
+        assert_eq!(credential.remediation, fix.correction(), "{account}");
     }
     assert_eq!(
         credentials["anthropic#work"].fix.as_deref(),
         Some("routectl login anthropic --label work"),
         "the shared fix is the exact login command"
+    );
+    assert_eq!(credentials["anthropic#work"].remediation, None);
+    assert_eq!(credentials["#gamma"].fix, None, "a key has no command");
+    assert!(
+        credentials["#gamma"].remediation.is_some(),
+        "a key carries its correction"
     );
     assert_eq!(credentials["codex"], AccountCredential::usable());
 }
@@ -349,6 +353,7 @@ fn a_parked_account_reads_parked_with_until_and_a_usable_one_reads_bare() {
     assert_eq!(cause_token(parked), Some("credential-invalid"));
     assert_eq!(parked.since_ms(), None);
     assert_eq!(parked.fix, None);
+    assert_eq!(parked.remediation, None);
     let until = parked.until_ms().expect("a park has a deadline");
     assert!(
         (before_ms + 590_000..=after_ms + 600_000).contains(&until),

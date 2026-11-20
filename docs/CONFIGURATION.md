@@ -5691,11 +5691,15 @@ always present; times are epoch ms and durations ms.
     subscription (an `oauth://` credential, the same rule the cost figures
     use), else `false`.
   - `credential`: whether the account can be dispatched on now, with
-    `state`, `cause`, `since_ms`, `until_ms` and `fix`. `state` is one of a
-    closed set: `usable`; `unusable` (marked not logged in, unreadable,
-    expired or revoked; only a fixed credential readmits it), with `since_ms`
-    when it was first marked and `fix`, the exact line that readmits it (for
-    a login, the bare `routectl login` command); `parked` (the provider
+    `state`, `cause`, `since_ms`, `until_ms`, `fix` and `remediation`.
+    `state` is one of a closed set: `usable`; `unusable` (marked not logged
+    in, unreadable, expired or revoked; only a fixed credential readmits
+    it), with `since_ms` when it was first marked and what readmits it:
+    `fix`, the bare command copyable as is (the `routectl login` command
+    for a login), or, for an API-key, cloud or other account no single
+    command readmits, a null `fix` and `remediation`, the correction in
+    plain words (the provider entry and credential scheme to fix before a
+    config reload); `parked` (the provider
     refused the credential; the park lapses into a re-test on its own), with
     `until_ms` when it lapses and no `fix`; or `not_built` for an account
     whose provider failed to build, about which the daemon knows nothing
@@ -5703,7 +5707,8 @@ always present; times are epoch ms and durations ms.
     with its age ("Not logged in, for 2 h", "Credential refused by the
     provider, retried in 8 min"), worded by the same function as the
     daemon's needs-attention item for the same account. It, `since_ms`,
-    `until_ms` and `fix` are null where the state gives none.
+    `until_ms`, `fix` and `remediation` are null where the state gives
+    none; `fix` and `remediation` are never both set.
 - `vendor_pauses`: each vendor whose polling is paused after a 429, with
   `vendor` and `paused_until_ms`.
 - `rejections`: the meter's running refusal counts by reason

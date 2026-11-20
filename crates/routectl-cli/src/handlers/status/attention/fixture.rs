@@ -22,7 +22,6 @@ use super::super::router_view::AccountCredential;
 use super::super::usage_health::LedgerHealth;
 use super::{AttentionPanel, AttentionSources, AttentionState, DriverReads, Panel, SCHEMA_VERSION};
 use crate::commands::doctor::SeatFix;
-use crate::commands::doctor::attention::CredentialState as CredentialCondition;
 use crate::server::seat_driver::{RefreshFailure, SeatDriverHealthSnapshot};
 use crate::server::usage_poll::{PollStateSnapshot, SeatPollSnapshot};
 
@@ -159,26 +158,14 @@ fn doctor_findings() -> Vec<Finding> {
 /// The seat logged out for 2 hours, Codex parked for 10 more minutes, the
 /// API-key entries usable.
 fn credentials() -> BTreeMap<String, AccountCredential> {
-    let since_ms = FIXTURE_NOW_MS - 7_200_000;
-    let until_ms = FIXTURE_NOW_MS + 600_000;
-    let logged_out = AccountCredential {
-        fix: Some(SeatFix::of(&fixture_config(), "claude-seat").command()),
-        condition: CredentialCondition::Unusable {
-            cause: UnusableCause::NotLoggedIn,
-            since_ms,
-        },
-    };
-    let parked = AccountCredential {
-        fix: None,
-        condition: CredentialCondition::Parked {
-            reason: UpstreamReason::CredentialInvalid,
-            until_ms,
-        },
-    };
-    let usable = AccountCredential {
-        fix: None,
-        condition: CredentialCondition::Usable,
-    };
+    let logged_out = AccountCredential::unusable(
+        UnusableCause::NotLoggedIn,
+        FIXTURE_NOW_MS - 7_200_000,
+        &SeatFix::of(&fixture_config(), "claude-seat"),
+    );
+    let parked =
+        AccountCredential::parked(UpstreamReason::CredentialInvalid, FIXTURE_NOW_MS + 600_000);
+    let usable = AccountCredential::usable();
     [
         ("anthropic#a", logged_out),
         ("codex", parked),

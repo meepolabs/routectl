@@ -136,6 +136,7 @@ async fn pools_subscription_and_credential_serialize_for_each_credential_kind() 
 
     let usable = json!({
         "state": "usable", "cause": null, "since_ms": null, "until_ms": null, "fix": null,
+        "remediation": null,
     });
     for account in ["#gamma", "#bedrock-west"] {
         let entry = row(&json, account);
@@ -151,6 +152,56 @@ async fn pools_subscription_and_credential_serialize_for_each_credential_kind() 
         .filter(|row| row.get("placement").is_some())
         .collect();
     assert!(with_placement.is_empty(), "{with_placement:?}");
+}
+
+/// An unusable account's credential carries a bare command as `fix` only
+/// when one readmits it: a login seat serializes its `routectl login` line
+/// with a null `remediation`; an API-key, a file-key and a cloud account,
+/// which no command readmits, serialize a null `fix` and their correction
+/// sentence as `remediation`, the same sentence the shared fix gives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unusable_account_carries_a_bare_fix_or_a_remediation_never_both() {
+    // Arrange
+    let swap = Arc::new(ArcSwap::from_pointee(router_of(&every_kind())));
+    let router = swap.load();
+    for model in ["m-b", "m-env", "m-file", "m-cloud"] {
+        assert!(
+            router.mark_credential_unusable_for_tests(model, UnusableCause::Unreadable),
+            "{model}"
+        );
+    }
+    let view = StatusRouterHandle::new(Arc::clone(&swap)).view();
+    let state = state_over(Arc::clone(&swap), DaemonMeta::for_test());
+
+    // Act
+    let json = read_accounts(&state).await;
+
+    // Assert
+    let seat = &row(&json, "anthropic#work")["credential"];
+    assert_eq!(seat["state"], "unusable", "{seat}");
+    assert_eq!(
+        seat["fix"], "routectl login anthropic --label work",
+        "{seat}"
+    );
+    assert!(seat["remediation"].is_null(), "{seat}");
+    for (account, entry) in [
+        ("#gamma", "gamma"),
+        ("#delta", "delta"),
+        ("#bedrock-west", "bedrock-west"),
+    ] {
+        let credential = &row(&json, account)["credential"];
+        assert_eq!(credential["state"], "unusable", "{account}: {credential}");
+        assert!(credential["fix"].is_null(), "{account}: {credential}");
+        let correction = view
+            .seat_fix(entry)
+            .correction()
+            .expect("a non-login entry has a correction");
+        assert_eq!(credential["remediation"], correction, "{account}");
+    }
+    assert_eq!(
+        row(&json, "#gamma")["credential"]["remediation"],
+        "provide a readable env:// credential for provider entry `gamma`, then reload the config"
+    );
 }
 
 /// The refresh driver row and the poll driver row are read from their own

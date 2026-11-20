@@ -245,6 +245,7 @@
     var cause = acctCauseText(cred);
     if (cause) { rowEl.appendChild(acctText('div', 'acct-cause', cause)); }
     if (cred.fix) { rowEl.appendChild(acctFix(cred.fix)); }
+    if (cred.remediation) { rowEl.appendChild(acctRemediation(cred.remediation)); }
     rowEl.appendChild(acctWindows(row, id, ctx.nowMs));
     var places = ctx.places[row.account];
     if (places) { rowEl.appendChild(acctPlacement(places)); }
@@ -304,6 +305,16 @@
     code.tabIndex = 0;
     code.textContent = String(fix);
     wrap.appendChild(code);
+    return wrap;
+  }
+
+  // A correction no single command makes is an instruction in words, so it
+  // is plain text, never a code element offered for copying.
+  function acctRemediation(text) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acct-fix acct-remediation';
+    wrap.appendChild(acctText('span', 'acct-label', 'fix'));
+    wrap.appendChild(acctText('span', 'acct-remediation-text', String(text)));
     return wrap;
   }
 
@@ -428,7 +439,9 @@
   // key: one per pool and upstream model that ranks it, in the panel's
   // order, each the seat beside the ranking it stands in. A member that
   // forwards the client's credential names no account and lands on no row.
-  // A panel without a ranking ranks nothing.
+  // A panel without a ranking ranks nothing. A ranking with no seats, or
+  // naming one account twice, has no "rank N of M" that reads true, so it
+  // is a malformed payload rather than a line drawn twice or not at all.
   function acctPlacementIndex(placement) {
     var byAccount = Object.create(null);
     if (placement === undefined || placement === null) { return byAccount; }
@@ -436,11 +449,16 @@
       throw new Error('accounts payload carries a malformed placement');
     }
     placement.pools.forEach(function (entry) {
-      if (!isPlainObject(entry) || !Array.isArray(entry.seats)) {
+      if (!isPlainObject(entry) || !Array.isArray(entry.seats) || !entry.seats.length) {
         throw new Error('accounts payload carries a malformed placement');
       }
+      var ranked = Object.create(null);
       entry.seats.forEach(function (seat) {
         if (!isPlainObject(seat) || typeof seat.account !== 'string') { return; }
+        if (ranked[seat.account]) {
+          throw new Error('accounts payload ranks one account twice in a placement');
+        }
+        ranked[seat.account] = true;
         var list = byAccount[seat.account] || (byAccount[seat.account] = []);
         list.push({ ranking: entry, seat: seat });
       });

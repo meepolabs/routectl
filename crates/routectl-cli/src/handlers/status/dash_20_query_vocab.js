@@ -132,7 +132,7 @@
     'observed_at_ms', 'age_ms', 'stale', 'kept',
     'placement', 'pool', 'model', 'seats', 'rank', 'reason',
     'applicability', 'vendor', 'last_attempt_ms', 'last_result', 'next_due_ms', 'failure_since_ms',
-    'state', 'cause', 'since_ms', 'until_ms', 'fix'
+    'state', 'cause', 'since_ms', 'until_ms', 'fix', 'remediation'
   ];
 
   // The COMPLETE set of request bodies this page can issue: every selectable

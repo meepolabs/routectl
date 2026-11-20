@@ -220,6 +220,7 @@ async fn a_login_whose_provider_did_not_build_reads_credential_not_built() {
         codex["credential"],
         serde_json::json!({
             "state": "not_built", "cause": null, "since_ms": null, "until_ms": null, "fix": null,
+            "remediation": null,
         }),
         "{codex}"
     );

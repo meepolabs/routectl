@@ -1,9 +1,9 @@
 // The Accounts view in a real headless Chrome: one row per configured
 // account under each pool that dispatches on it, the login state with the
-// daemon's cause and a focusable fix, every window labelled from its length
-// with room, reset, age, source and stale or kept mark, each seat's
-// placement rank and reason, the traffic over the selected range, the poll
-// state, and the two background drivers. `include!`d into a child module of
+// daemon's cause and a focusable fix (or a correction in plain words),
+// every window labelled from its length with room, reset, age, source and
+// stale or kept mark, each seat's placement rank and reason, the traffic
+// over the selected range, the poll state, and the two background drivers. `include!`d into a child module of
 // `page::tests`; the scenarios live in page_browser_accounts_driver.js.
 
 use serde_json::Value;
@@ -113,6 +113,39 @@ fn page_browser_accounts_row_shows_the_login_cause_and_a_focusable_fix() {
         out["cloud_cause"], "its provider did not build, so the router has no state for it",
         "{out:#}"
     );
+}
+
+/// An unusable API-key row, which no single command readmits, shows the
+/// daemon's correction as plain text and no fix code element; the
+/// logged-out seat beside it keeps its login command as fix code and draws
+/// no remediation (positive control).
+///
+/// Mutation check: draw `cred.remediation` through acctFix in acctRow ->
+/// red (the key row has a fix code element and no remediation text).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_a_correction_is_plain_text_not_a_fix_command() {
+    let compat = fixture_row("#compat");
+    let seat = fixture_row("anthropic#a");
+
+    let out = accounts_scenario("accounts-rows");
+
+    assert_eq!(compat["credential"]["state"], "unusable", "{compat:#}");
+    assert!(compat["credential"]["fix"].is_null(), "{compat:#}");
+    let remediation = text(
+        &compat["credential"]["remediation"],
+        "the served remediation",
+    );
+    assert_eq!(out["compat_remediation"], remediation, "{out:#}");
+    assert_eq!(out["compat_fix_codes"], 0, "{out:#}");
+    assert_eq!(out["compat_codes"], 0, "{out:#}");
+    assert!(seat["credential"]["remediation"].is_null(), "{seat:#}");
+    assert_eq!(out["seat_fix"]["tag"], "code", "{out:#}");
+    assert_eq!(
+        out["seat_fix"]["text"], seat["credential"]["fix"],
+        "{out:#}"
+    );
+    assert!(out["seat_remediation"].is_null(), "{out:#}");
 }
 
 /// An API-key and a cloud row say the provider reports no usage windows; a
@@ -623,9 +656,11 @@ fn page_browser_accounts_rank_joins_on_the_exact_account_key() {
 
 /// A window a complete report omitted reads "kept from an earlier report"
 /// beside its meter, in the stale mark's neutral color; a window not kept
-/// carries no such label.
+/// carries no such label. A window both kept and stale shows both marks.
 ///
-/// Mutation check: drop the kept label in acctWindowMeta -> red.
+/// Mutation checks: drop the kept label in acctWindowMeta -> red; draw the
+/// kept label only when the window is not stale -> red (`stale` and `mark`
+/// do not both appear).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_accounts_kept_window_is_labelled_and_keeps_its_meter() {
@@ -633,6 +668,7 @@ fn page_browser_accounts_kept_window_is_labelled_and_keeps_its_meter() {
     let kept = &out["kept"];
 
     assert_eq!(kept["mark"], "kept from an earlier report", "{out:#}");
+    assert_eq!(kept["stale"], "stale", "{out:#}");
     assert_eq!(kept["meter"], true, "{out:#}");
     assert_eq!(kept["used"], "42% used", "{out:#}");
     assert_eq!(kept["mark_color"], kept["stale_color"], "{out:#}");
@@ -645,17 +681,22 @@ fn page_browser_accounts_kept_window_is_labelled_and_keeps_its_meter() {
 }
 
 /// A panel that carries no ranking draws every row with no placement line
-/// and no error; a ranking that is not a list of pools is a malformed
-/// payload, shown as the section's error card rather than as rows without
-/// rank.
+/// and no error. A ranking that is not a list of pools, a pool and model
+/// ranking with no seats, and one naming the same account twice are each a
+/// malformed payload, shown as the section's error card rather than as rows
+/// with a rank line missing, drawn twice or counted against the wrong
+/// total. The accounts-placement scenario is the control that a ranking of
+/// distinct accounts draws.
 ///
-/// Mutation check: return the empty index for any non-object placement in
-/// acctPlacementIndex -> red (the malformed ranking draws rows).
+/// Mutation checks, in acctPlacementIndex: return the empty index for any
+/// non-object placement -> red (`malformed` draws rows); drop the empty-seats
+/// test -> red (`no_seats`); drop the repeated-account test -> red
+/// (`repeated`).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_accounts_absent_ranking_draws_no_rank_and_a_malformed_one_errors() {
     let out = accounts_scenario("accounts-placement-shapes");
-    let (absent, malformed) = (&out["absent"], &out["malformed"]);
+    let absent = &out["absent"];
 
     assert_eq!(absent["places"], 0, "{out:#}");
     assert_eq!(absent["error_cards"], 0, "{out:#}");
@@ -663,7 +704,10 @@ fn page_browser_accounts_absent_ranking_draws_no_rank_and_a_malformed_one_errors
         absent["rows"].as_u64().is_some_and(|n| n > 0),
         "positive control: the rows are drawn: {out:#}"
     );
-    assert_eq!(malformed["rows"], 0, "{out:#}");
-    assert_eq!(malformed["places"], 0, "{out:#}");
-    assert_eq!(malformed["error_cards"], 1, "{out:#}");
+    for case in ["malformed", "no_seats", "repeated"] {
+        let seen = &out[case];
+        assert_eq!(seen["rows"], 0, "{case}: {out:#}");
+        assert_eq!(seen["places"], 0, "{case}: {out:#}");
+        assert_eq!(seen["error_cards"], 1, "{case}: {out:#}");
+    }
 }
