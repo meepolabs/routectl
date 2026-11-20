@@ -708,9 +708,9 @@ td.num .unit, th.num .unit {
   overflow-wrap: anywhere;
   min-width: 0;
 }
-/* A click selects the whole command or token, ready to copy. */
-.attn-fix-code,
-.attn-raw-code { user-select: all; }
+/* A click selects the whole command, ready to run. A raw token stays
+   selectable in part; Ctrl+A on it when focused still takes all of it. */
+.attn-fix-code { user-select: all; }
 .attn-fix-code:focus-visible,
 .attn-raw-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .attn-item--recovered { background: transparent; }

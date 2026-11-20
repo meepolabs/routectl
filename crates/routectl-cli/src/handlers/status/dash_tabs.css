@@ -371,7 +371,6 @@
   overflow-wrap: anywhere;
   max-width: 100%;
 }
-.helig-fix:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hchips {
   display: flex;
   flex-wrap: wrap;

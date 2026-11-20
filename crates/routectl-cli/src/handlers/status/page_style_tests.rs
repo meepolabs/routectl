@@ -546,16 +546,29 @@ fn the_contrast_formula_matches_the_wcag_reference_points() {
     assert!((relative_luminance(srgba("oklch(1 0 0)")) - 1.0).abs() < 1e-3);
 }
 
-/// The classes that mark a reading as old. Text inside them is dimmed by
-/// color, never by opacity, and an opacity is allowed only on a meter fill.
+/// The classes that mark a reading or a verdict as old: the stale meters
+/// and traffic figures, the last known verdict kept through an outage and a
+/// tab badge whose source is not current. Text inside them is dimmed by
+/// color, never by opacity; an opacity is allowed only on a mark (a meter
+/// fill, the verdict dot).
 const STALE_READING_CLASSES: &[&str] = &[
     ".glance-meter--stale",
     ".acct-win--stale",
     ".acct-traffic--stale",
+    ".verdict--stale",
+    ".tab-badge--dimmed",
 ];
 
 /// The backgrounds a reading's text is drawn on.
 const TEXT_BACKGROUNDS: &[&str] = &["--bg", "--surface", "--surface-2"];
+
+/// A tab badge's tone and the pill background it draws its text on. The
+/// pill is translucent and the tab bar under it is `--surface`.
+const BADGE_PILLS: &[(&str, &str)] = &[
+    (".tab-badge--warn", "--pill-warn-bg"),
+    (".tab-badge--error", "--pill-err-bg"),
+    (".tab-badge--muted", "--pill-neutral-bg"),
+];
 
 /// Every `(selector, prop, value)` declared at top level whose selector names
 /// `class`, one entry per selector of a selector list.
@@ -577,14 +590,31 @@ fn decls_naming(css: &str, class: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// The opaque backgrounds the text `sel` colors is drawn on in one theme:
+/// its pill over the tab bar for a badge of a known tone, else every reading
+/// background.
+fn text_backgrounds(sel: &str, tokens: &BTreeMap<String, String>) -> Vec<(String, [f64; 4])> {
+    if let Some((_, pill)) = BADGE_PILLS.iter().find(|(tone, _)| sel.contains(tone)) {
+        let bar = srgba(resolve(tokens, "--surface"));
+        return vec![(
+            format!("{pill} over --surface"),
+            over(srgba(resolve(tokens, pill)), bar),
+        )];
+    }
+    TEXT_BACKGROUNDS
+        .iter()
+        .map(|bg| ((*bg).to_string(), srgba(resolve(tokens, bg))))
+        .collect()
+}
+
 /// What breaks the stale-reading text rule in `css`: an opacity on anything
-/// but a fill, or a text color under 4.5:1 on a reading's background in
-/// either theme. Empty when the rule holds.
+/// but a mark, or a text color under 4.5:1 on its background in either
+/// theme. Empty when the rule holds.
 fn stale_text_faults(css: &str) -> Vec<String> {
     let mut faults = Vec::new();
     for class in STALE_READING_CLASSES {
         for (sel, prop, value) in decls_naming(css, class) {
-            if prop == "opacity" && !sel.ends_with("-fill") {
+            if prop == "opacity" && !sel.ends_with("-fill") && !sel.ends_with("-dot") {
                 faults.push(format!("{sel} dims text with opacity {value}"));
             }
             if prop != "color" {
@@ -597,8 +627,8 @@ fn stale_text_faults(css: &str) -> Vec<String> {
             for light in [false, true] {
                 let tokens = theme_tokens(css, light);
                 let text = srgba(resolve(&tokens, token));
-                for bg in TEXT_BACKGROUNDS {
-                    let ratio = contrast(text, srgba(resolve(&tokens, bg)));
+                for (bg, behind) in text_backgrounds(&sel, &tokens) {
+                    let ratio = contrast(text, behind);
                     if ratio < 4.5 {
                         faults.push(format!("{sel} on {bg} is {ratio:.2}:1 (light: {light})"));
                     }
@@ -609,11 +639,15 @@ fn stale_text_faults(css: &str) -> Vec<String> {
     faults
 }
 
-/// A stale reading's text keeps 4.5:1 in both themes: no rule dims it with
-/// opacity, and every color a stale rule gives it passes on each reading
-/// background. Positive control: each stale class recolors some text.
+/// Old text keeps 4.5:1 in both themes: no rule dims a stale reading, the
+/// verdict kept through an outage or a dimmed tab badge with opacity, and
+/// every color a stale rule gives text passes on its background (a badge on
+/// its own pill). Positive control: each stale class recolors some text,
+/// and both badge tones that carry a number are recolored when dimmed.
 ///
-/// Mutation check: restore `.acct-win--stale { opacity: 0.6; }` -> red.
+/// Mutation checks: restore `.acct-win--stale { opacity: 0.6; }` -> red;
+/// restore `.verdict--stale .verdict-text { opacity: 0.55; }` -> red;
+/// restore `.tab-badge--dimmed { opacity: 0.55; }` -> red.
 #[test]
 fn stale_reading_text_keeps_four_and_a_half_to_one_in_both_themes() {
     let css = style();
@@ -625,6 +659,15 @@ fn stale_reading_text_keeps_four_and_a_half_to_one_in_both_themes() {
             "{class} recolors no text; the scan is not seeing it"
         );
     }
+    let badge_colors = decls_naming(&css, ".tab-badge--dimmed");
+    for tone in [".tab-badge--warn", ".tab-badge--error"] {
+        assert!(
+            badge_colors
+                .iter()
+                .any(|(sel, prop, _)| prop == "color" && sel.contains(tone)),
+            "a dimmed {tone} badge keeps its full-strength text"
+        );
+    }
 
     assert_eq!(stale_text_faults(&css), Vec::<String>::new());
 }
@@ -633,12 +676,24 @@ fn stale_reading_text_keeps_four_and_a_half_to_one_in_both_themes() {
 fn the_stale_text_scan_reports_opacity_and_a_low_contrast_color() {
     let css = style();
     let dimmed = format!("{css}\n.acct-win--stale {{ opacity: 0.6; }}\n");
+    let faded_verdict = format!("{css}\n.verdict--stale .verdict-text {{ opacity: 0.55; }}\n");
+    let faded_badge = format!("{css}\n.tab-badge--dimmed {{ opacity: 0.55; }}\n");
     let faint_fill = format!("{css}\n.glance-meter--stale .glance-bar-fill {{ opacity: 0.5; }}\n");
     let low = format!("{css}\n.acct-traffic--stale .x {{ color: var(--border-strong); }}\n");
+    let low_badge =
+        format!("{css}\n.tab-badge--dimmed.tab-badge--warn {{ color: var(--faint); }}\n");
 
     assert_eq!(
         stale_text_faults(&dimmed),
         vec![".acct-win--stale dims text with opacity 0.6"]
+    );
+    assert_eq!(
+        stale_text_faults(&faded_verdict),
+        vec![".verdict--stale .verdict-text dims text with opacity 0.55"]
+    );
+    assert_eq!(
+        stale_text_faults(&faded_badge),
+        vec![".tab-badge--dimmed dims text with opacity 0.55"]
     );
     assert!(stale_text_faults(&faint_fill).is_empty());
     assert!(
@@ -647,6 +702,15 @@ fn the_stale_text_scan_reports_opacity_and_a_low_contrast_color() {
             .any(|f| f.starts_with(".acct-traffic--stale .x on --bg")),
         "{:?}",
         stale_text_faults(&low)
+    );
+    assert_eq!(
+        stale_text_faults(&low_badge),
+        vec![
+            ".tab-badge--dimmed.tab-badge--warn on --pill-warn-bg over --surface is 4.18:1 \
+             (light: false)",
+            ".tab-badge--dimmed.tab-badge--warn on --pill-warn-bg over --surface is 4.47:1 \
+             (light: true)"
+        ]
     );
 }
 
@@ -700,4 +764,31 @@ fn the_glance_link_keeps_four_and_a_half_to_one() {
             assert!(ratio >= 4.5, "on {bg}: {ratio:.2}:1 (light: {light})");
         }
     }
+}
+
+/// A click selects a whole value only on a command the operator runs as
+/// is: the Now and Accounts fixes and the Health eligibility fix. A raw
+/// token or an inline value stays selectable in part (Ctrl+A on it when
+/// focused still takes all of it). Positive control: the fix commands are
+/// found, so the scan sees `user-select` declarations.
+///
+/// Mutation check: add `user-select: all;` to `.attn-raw-code` -> red.
+#[test]
+fn only_fix_commands_select_whole_on_click() {
+    let css = style();
+    let mut whole: Vec<String> = css_decls(&css)
+        .into_iter()
+        .filter(|d| d.prop == "user-select" && d.value == "all")
+        .flat_map(|d| {
+            d.context.last().map_or_else(Vec::new, |sel| {
+                sel.split(',').map(|s| s.trim().to_string()).collect()
+            })
+        })
+        .collect();
+    whole.sort();
+
+    assert_eq!(
+        whole,
+        vec![".acct-fix-code", ".attn-fix-code", ".helig-fix"]
+    );
 }

@@ -238,9 +238,10 @@ body {
   min-width: 0;
 }
 /* A last known verdict, shown while no current one is: dimmed, with the
-   note saying when it was current and why it is not now. */
-.verdict--stale .verdict-dot,
-.verdict--stale .verdict-text { opacity: 0.55; }
+   note saying when it was current and why it is not now. Its sentence is
+   dimmed by color, never by opacity, so it keeps 4.5:1. */
+.verdict--stale .verdict-dot { opacity: 0.55; }
+.verdict--stale .verdict-text { color: var(--muted); }
 .verdict-note {
   font-size: var(--fs-sm);
   color: var(--muted);
@@ -396,8 +397,11 @@ body {
 .tab-badge--warn { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
 .tab-badge--error { background: var(--pill-err-bg); color: var(--pill-err-fg); }
 .tab-badge--muted { background: var(--pill-neutral-bg); color: var(--faint); }
-/* A badge whose source is not current keeps its number and hue, dimmed. */
-.tab-badge--dimmed { opacity: 0.55; }
+/* A badge whose source is not current keeps its number and its tinted
+   pill, and its text drops to the muted color: dimmed by color, never by
+   opacity, so it keeps 4.5:1 on its pill. */
+.tab-badge--dimmed.tab-badge--warn,
+.tab-badge--dimmed.tab-badge--error { color: var(--muted); }
 
 /* ---- banner ---- */
 .banner {
@@ -519,7 +523,6 @@ main { display: block; }
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   padding: 1px 6px;
-  user-select: all;
 }
 
 .unavailable-msg {
