@@ -2418,6 +2418,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   nothing advanced. `merged_header` adapts a header snapshot onto a partial of
   the curated keys; `projection` gives placement's two-role snapshot (FAST =
   account-wide window of the curated five-hour length)
+- `src/quota/kept.rs` -- `KeptWindows`: the running windows a complete
+  report dropped while in effect. Each binds the placement-safe view and is
+  the contradiction baseline for its key until a reading for it is accepted
+  or it leaves effect; a window other than the account-wide five-hour one
+  also leaves after `OMISSION_CONFIRMATIONS` consecutive omitting reports
 - `src/quota/view.rs` -- the placement-safe read view of the meter and
   `STALE_AFTER` (7 min). A window is stale past `STALE_AFTER` on either clock,
   past a running window's reset, or on an unorderable stamp; a stale window

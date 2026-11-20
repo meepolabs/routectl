@@ -108,8 +108,8 @@ struct WindowRow {
     /// stamp cannot be ordered against the read instant.
     age_ms: Option<i64>,
     stale: bool,
-    /// True for a running five-hour window the latest complete poll omitted:
-    /// it still binds placement until its reset.
+    /// True for a running window a complete poll omitted that the meter
+    /// still keeps; it binds placement for as long as the meter keeps it.
     kept: bool,
 }
 

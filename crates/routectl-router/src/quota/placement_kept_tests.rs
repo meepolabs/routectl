@@ -1,8 +1,9 @@
 //! A running window that a complete usage report omits still binds
 //! placement: the meter keeps it aside, the placement-safe view lists it, and
-//! the pace rule scores it. The five-hour window is kept until its reset;
-//! any other until its reset, a reading for its key, or the third
-//! consecutive complete report that omits it.
+//! the pace rule scores it. Each is kept until its reset or an accepted
+//! reading for its key (a lower one only after the correction run); any
+//! window but the five-hour also until the third consecutive complete
+//! report that omits it.
 
 use super::*;
 
@@ -358,11 +359,10 @@ fn three_consecutive_complete_reports_omitting_a_kept_weekly_let_it_go() {
     assert!(reading.windows.iter().all(|w| !w.kept), "{reading:?}");
 }
 
-/// A kept window other than the five-hour is no contradiction baseline: a
-/// reading for its key is never refused against it and simply replaces it,
-/// even when lower and on a different reset.
+/// A higher reading for a kept weekly is no contradiction: it is taken at
+/// once and the kept window is let go.
 #[test]
-fn a_weekly_reported_again_replaces_the_kept_one() {
+fn a_higher_weekly_reported_again_replaces_the_kept_one() {
     // Arrange
     let clock = Clock::new();
     let store = store();
@@ -375,6 +375,7 @@ fn a_weekly_reported_again_replaces_the_kept_one() {
         t1,
         &anthropic_body(Some(&window(10, Some(hours(4.0)))), None, &[]),
     );
+    let kept_before = store.account(&key).expect("an entry").kept().count();
     let t2 = clock.at(Duration::from_mins(2));
 
     // Act: `poll_anthropic` asserts the poll is accepted.
@@ -384,13 +385,15 @@ fn a_weekly_reported_again_replaces_the_kept_one() {
         t2,
         &anthropic_body(
             Some(&window(10, Some(hours(4.0)))),
-            Some(&window(30, Some(days(5.0)))),
+            Some(&window(97, Some(days(3.0)))),
             &[],
         ),
     );
 
     // Assert
+    assert_eq!(kept_before, 1, "the control: the weekly is kept");
     assert_eq!(store.rejection_totals().contradictory, 0);
+    assert_eq!(store.account(&key).expect("an entry").kept().count(), 0);
     let reading = reading_of(&store, &key, &t2);
     let weekly: Vec<&AccountWindow> = reading
         .windows
@@ -401,8 +404,8 @@ fn a_weekly_reported_again_replaces_the_kept_one() {
         panic!("one weekly window: {reading:?}");
     };
     assert!(!weekly.kept, "{weekly:?}");
-    assert!((weekly.window.used - 0.30).abs() < 1e-9, "{weekly:?}");
-    assert_eq!(standing_of(&store, &key, OPUS, &t2).tier, Tier::Roomy);
+    assert!((weekly.window.used - 0.97).abs() < 1e-9, "{weekly:?}");
+    assert_eq!(standing_of(&store, &key, OPUS, &t2).tier, Tier::LowRoom);
 }
 
 #[test]
@@ -473,3 +476,6 @@ fn a_kept_five_hour_window_stands_beside_a_fresh_shorter_codex_window() {
         "the kept five-hour decides",
     );
 }
+
+#[path = "placement_kept_baseline_tests.rs"]
+mod placement_kept_baseline_tests;

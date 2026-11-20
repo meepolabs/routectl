@@ -144,6 +144,7 @@ fn bound(clock: &Clock, binding: Binding, scope: Option<&str>) -> QuotaStore {
             store
                 .account(&seat("a"))
                 .expect("an entry")
+                .kept_windows
                 .dropped_fast
                 .is_some(),
             "the control: the dropped window is kept"
@@ -558,34 +559,133 @@ fn a_streak_clears_once_its_stored_window_leaves_effect() {
     );
 }
 
-/// A refusal changes only the refused key's streak: every accepted field,
-/// billing and ordering mark included, stays exactly as it was.
-#[test]
-fn a_refusal_leaves_everything_but_the_refused_keys_streak_unchanged() {
-    // Arrange
-    let clock = Clock::new();
-    let store = seeded(&clock, 180);
-    let t1 = clock.at(mins(1));
+/// A seeded store, the kept windows' omission counts it holds, and the
+/// refused feed that follows it.
+type RefusalRow = (
+    &'static str,
+    &'static [u32],
+    fn(&Clock) -> QuotaStore,
+    fn(&QuotaStore, &Clock) -> Result<(), ObserveRefusal>,
+);
+
+/// The seeded five-hour window plus an overage header at minute 1.
+fn seeded_with_overage(clock: &Clock) -> QuotaStore {
+    let store = seeded(clock, 180);
     let overage = QuotaSnapshot {
         billing: Billing::Overage,
-        ..header(t1, 0.91, mins(180))
+        ..header(clock.at(mins(1)), 0.91, mins(180))
     };
     assert!(store.observe(&seat("a"), overage));
-    let before = store.account(&seat("a")).expect("an entry");
+    store
+}
 
-    // Act
-    let outcome = feed(&store, clock.at(mins(2)), Next::Poll(0.30, 180));
+/// A five-hour window at 0.90 beside a running weekly, then a complete
+/// report at minute 1 that omits the weekly, so it is kept with one
+/// omission counted.
+fn seeded_with_omitted_weekly(clock: &Clock) -> QuotaStore {
+    let store = store();
+    let (t0, t1) = (clock.at(mins(0)), clock.at(mins(1)));
+    let five = |at: &ObservationStamp| running(key(FIVE_HOURS, None), 0.90, mins(180), at);
+    let complete = |at, windows| {
+        observation(
+            ReadingSource::Poll,
+            at,
+            ObservationReport::Complete(WindowSet::new(windows).expect("a set")),
+        )
+    };
+    store
+        .observe_account(
+            &seat("a"),
+            &complete(
+                t0,
+                vec![
+                    five(&t0),
+                    running(key(SEVEN_DAYS, None), 0.95, mins(4_320), &t0),
+                ],
+            ),
+        )
+        .expect("the seed is accepted");
+    store
+        .observe_account(&seat("a"), &complete(t1, vec![five(&t1)]))
+        .expect("the omitting report is accepted");
+    store
+}
 
-    // Assert
-    assert_eq!(outcome, REFUSED);
-    let after = store.account(&seat("a")).expect("an entry");
-    assert_eq!(
-        after.streaks.keys().collect::<Vec<_>>(),
-        [&key(FIVE_HOURS, None)]
-    );
-    let mut without_streaks = after.clone();
-    without_streaks.streaks.clear();
-    assert_eq!(without_streaks, before);
+fn refusal_rows() -> [RefusalRow; 2] {
+    [
+        (
+            "a partial poll after an overage header",
+            &[],
+            seeded_with_overage,
+            |store, clock| feed(store, clock.at(mins(2)), Next::Poll(0.30, 180)),
+        ),
+        (
+            "a complete poll beside a kept weekly it omits again",
+            &[1],
+            seeded_with_omitted_weekly,
+            |store, clock| {
+                let t2 = clock.at(mins(2));
+                store.observe_account(
+                    &seat("a"),
+                    &observation(
+                        ReadingSource::Poll,
+                        t2,
+                        ObservationReport::Complete(
+                            WindowSet::new(vec![running(
+                                key(FIVE_HOURS, None),
+                                0.30,
+                                mins(180),
+                                &t2,
+                            )])
+                            .expect("a set"),
+                        ),
+                    ),
+                )
+            },
+        ),
+    ]
+}
+
+/// A refusal changes only the refused key's streak: every accepted field,
+/// billing, ordering marks and kept windows' omission counts included, stays
+/// exactly as it was.
+#[test]
+fn a_refusal_leaves_everything_but_the_refused_keys_streak_unchanged() {
+    for (name, kept_omissions, seed, refused_feed) in refusal_rows() {
+        // Arrange
+        let clock = Clock::new();
+        let store = seed(&clock);
+        let before = store.account(&seat("a")).expect("an entry");
+        let omissions = |meter: &AccountMeter| -> Vec<u32> {
+            meter
+                .kept_windows
+                .omitted
+                .values()
+                .map(|kept| kept.omissions)
+                .collect()
+        };
+
+        // Act
+        let outcome = refused_feed(&store, &clock);
+
+        // Assert
+        assert_eq!(outcome, REFUSED, "row: {name}");
+        let after = store.account(&seat("a")).expect("an entry");
+        assert_eq!(
+            after.streaks.keys().collect::<Vec<_>>(),
+            [&key(FIVE_HOURS, None)],
+            "row: {name}"
+        );
+        assert_eq!(omissions(&after), omissions(&before), "row: {name}");
+        assert_eq!(
+            omissions(&before),
+            kept_omissions,
+            "row: {name}: the control"
+        );
+        let mut without_streaks = after.clone();
+        without_streaks.streaks.clear();
+        assert_eq!(without_streaks, before, "row: {name}");
+    }
 }
 
 #[test]

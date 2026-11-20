@@ -1,8 +1,7 @@
 //! A complete report that drops a running window still in effect: later
-//! readings for the account-wide five-hour key reconcile against the dropped
-//! window until one is accepted or the window stops being in effect; any
-//! other dropped window is kept for the view only, until a reading for its
-//! key, its reset, or enough consecutive omissions.
+//! readings for its key reconcile against the dropped window until one is
+//! accepted or the window stops being in effect; a window other than the
+//! five-hour is also let go after enough consecutive omissions.
 
 use super::*;
 
@@ -182,7 +181,7 @@ fn a_reading_after_a_complete_report_dropped_a_running_five_hour_window() {
         };
         assert_eq!(result, Ok(()), "row: {name}");
         assert!(
-            meter.dropped_fast.is_none(),
+            meter.kept_windows.dropped_fast.is_none(),
             "row: {name}: the kept window clears"
         );
         assert_eq!(store.rejection_totals().contradictory, 0, "row: {name}");
@@ -194,17 +193,17 @@ fn a_reading_after_a_complete_report_dropped_a_running_five_hour_window() {
     }
 }
 
-/// Only the five-hour window is kept as a baseline: a dropped running weekly
-/// window is kept for the view alone, so a later unstarted weekly reading
-/// replaces it and does not hold up the account's five-hour updates.
+/// A dropped running weekly window is the baseline for its key while kept:
+/// an unstarted weekly reading is refused until three agree, and the
+/// account's five-hour updates that do not name the weekly still go through.
 #[test]
-fn a_dropped_weekly_window_is_no_contradiction_baseline() {
+fn a_dropped_weekly_window_is_a_contradiction_baseline_while_kept() {
     // Arrange
     let clock = Clock::new();
     let store = store();
     let five = key(FIVE_HOURS, None);
     let seven = key(SEVEN_DAYS, None);
-    let (t0, t1, t2) = (clock.at(mins(0)), clock.at(mins(1)), clock.at(mins(2)));
+    let t = |minute| clock.at(mins(minute));
     let complete = |at: ObservationStamp, windows: Vec<WindowReading>| {
         observation(
             ReadingSource::Poll,
@@ -212,14 +211,21 @@ fn a_dropped_weekly_window_is_no_contradiction_baseline() {
             ObservationReport::Complete(WindowSet::new(windows).expect("a set")),
         )
     };
+    let idle_week = |at: ObservationStamp| {
+        partial(
+            ReadingSource::Poll,
+            at,
+            vec![unstarted(seven.clone(), None, &at)],
+        )
+    };
     store
         .observe_account(
             &seat("a"),
             &complete(
-                t0,
+                t(0),
                 vec![
-                    running(seven.clone(), 0.50, mins(6 * 1_440), &t0),
-                    unstarted(five.clone(), None, &t0),
+                    running(seven.clone(), 0.50, mins(6 * 1_440), &t(0)),
+                    unstarted(five.clone(), None, &t(0)),
                 ],
             ),
         )
@@ -227,39 +233,43 @@ fn a_dropped_weekly_window_is_no_contradiction_baseline() {
     store
         .observe_account(
             &seat("a"),
-            &complete(t1, vec![unstarted(five.clone(), None, &t1)]),
+            &complete(t(1), vec![unstarted(five.clone(), None, &t(1))]),
         )
         .expect("the report dropping the weekly window is accepted");
-    let kept_before: Vec<WindowKey> = store
+
+    // Act
+    let first = store.observe_account(&seat("a"), &idle_week(t(2)));
+    let five_only = store.observe_account(
+        &seat("a"),
+        &partial(
+            ReadingSource::Poll,
+            t(3),
+            vec![running(five.clone(), 0.20, mins(240), &t(3))],
+        ),
+    );
+    let second = store.observe_account(&seat("a"), &idle_week(t(4)));
+    let kept_before_third: Vec<WindowKey> = store
         .account(&seat("a"))
         .expect("an entry")
         .kept()
         .map(|kept| kept.reading().key().clone())
         .collect();
-
-    // Act
-    let result = store.observe_account(
-        &seat("a"),
-        &complete(
-            t2,
-            vec![
-                unstarted(seven.clone(), None, &t2),
-                unstarted(five, None, &t2),
-            ],
-        ),
-    );
+    let third = store.observe_account(&seat("a"), &idle_week(t(5)));
 
     // Assert
-    assert_eq!(kept_before, vec![seven], "the control: the weekly is kept");
-    assert_eq!(result, Ok(()));
-    assert_eq!(store.rejection_totals().contradictory, 0);
+    let refused = Err(ObserveRefusal::Rejected(RejectionReason::Contradictory));
+    assert_eq!((&first, &second), (&refused, &refused));
+    assert_eq!(five_only, Ok(()), "a five-hour update is not held up");
+    assert_eq!(kept_before_third, vec![seven.clone()], "kept while refused");
+    assert_eq!(third, Ok(()), "the third agreeing reading is taken");
+    assert_eq!(store.rejection_totals().contradictory, 2);
     let meter = store.account(&seat("a")).expect("an entry");
-    assert_eq!(meter.kept().count(), 0, "the reading replaces the kept one");
     assert_eq!(
-        used_of(&store, &key(FIVE_HOURS, None)),
-        Some(0.0),
-        "the idle five-hour window is held"
+        meter.kept().count(),
+        0,
+        "the taken reading replaces the kept one"
     );
+    assert_eq!(used_of(&store, &seven), Some(0.0));
 }
 
 /// An unstarted window's reset is provisional, not an expiry: dropping one
@@ -287,7 +297,11 @@ fn a_dropped_unstarted_window_with_a_provisional_reset_is_not_kept() {
             &observation(ReadingSource::Poll, t1, ObservationReport::NoWindows),
         )
         .expect("the dropping report is accepted");
-    let kept = store.account(&seat("a")).expect("an entry").dropped_fast;
+    let kept = store
+        .account(&seat("a"))
+        .expect("an entry")
+        .kept_windows
+        .dropped_fast;
 
     // Act
     let result = store.observe_account(
@@ -344,7 +358,10 @@ fn a_kept_window_stops_binding_past_the_monotonic_ceiling() {
     assert_eq!(result, Ok(()));
     assert_eq!(store.rejection_totals().contradictory, 0);
     let meter = store.account(&seat("a")).expect("an entry");
-    assert!(meter.dropped_fast.is_none(), "the kept window clears");
+    assert!(
+        meter.kept_windows.dropped_fast.is_none(),
+        "the kept window clears"
+    );
 }
 
 /// A kept window is let go once it is no longer in effect, even when no
@@ -361,7 +378,11 @@ fn a_kept_window_clears_at_its_reset_without_a_reading_for_its_key() {
     store
         .observe_account(&seat("a"), &no_windows(t1))
         .expect("the dropping report is accepted");
-    let kept_before = store.account(&seat("a")).expect("an entry").dropped_fast;
+    let kept_before = store
+        .account(&seat("a"))
+        .expect("an entry")
+        .kept_windows
+        .dropped_fast;
 
     // Act
     store
@@ -371,7 +392,10 @@ fn a_kept_window_clears_at_its_reset_without_a_reading_for_its_key() {
     // Assert
     assert!(kept_before.is_some(), "the running window is kept at first");
     let meter = store.account(&seat("a")).expect("an entry");
-    assert!(meter.dropped_fast.is_none(), "the kept window clears");
+    assert!(
+        meter.kept_windows.dropped_fast.is_none(),
+        "the kept window clears"
+    );
 }
 
 /// A complete report that lists a kept weekly window restarts its omission

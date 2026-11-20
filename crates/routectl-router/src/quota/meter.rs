@@ -49,23 +49,19 @@
 //!   fractions floor, the poll endpoint rounds) and is accepted at the stored
 //!   fraction. A multi-window observation is taken only when every lower
 //!   window in it has confirmed.
-//! - A complete report that drops the account-wide five-hour window while it
-//!   is running and in effect keeps that window
-//!   aside, and a later reading for the key is reconciled against it exactly
-//!   as against a stored window, until a reading for the key is accepted or
-//!   the kept window stops being in effect. Otherwise a report omitting the
-//!   window would clear the way for an unstarted or emptied one.
-//! - Any other window a complete report drops while it is running and in
-//!   effect is kept for the placement-safe view only: it binds placement but
-//!   is never a contradiction baseline (as one, a weekly window would refuse
-//!   the account's polls for up to a week), so a reading for its key simply
-//!   replaces it. It is let go when such a reading is accepted, when it
-//!   stops being in effect, or once [`OMISSION_CONFIRMATIONS`] consecutive
-//!   complete reports (the dropping one included, each newer than the last
-//!   counted) have omitted it; a complete report listing the key restarts
-//!   the count. One body omitting a nearly exhausted window never makes the
-//!   account look roomy, and a window the vendor really removed stops
-//!   binding within a few polls.
+//! - A complete report that drops a window while it is running and in effect
+//!   keeps that window aside: it binds the placement-safe view, and a later
+//!   reading for its key is reconciled against it exactly as against a
+//!   stored window, so a lower or unstarted one needs the same
+//!   [`CORRECTION_CONFIRMATIONS`] agreeing readings. It is let go when a
+//!   reading for the key is accepted or when it stops being in effect; a
+//!   window other than the account-wide five-hour one is also let go once
+//!   [`OMISSION_CONFIRMATIONS`] consecutive complete reports (the dropping
+//!   one included, each newer than the last counted) have omitted it, and a
+//!   complete report listing the key restarts that count. Otherwise one body
+//!   omitting a nearly exhausted window, followed by one low reading, would
+//!   make the account look roomy; a window the vendor really removed still
+//!   stops binding within a few polls.
 //!
 //! # Why the window map is bounded
 //!
@@ -74,19 +70,21 @@
 //! names, each keyed by its reported length and limit), and a poll is
 //! complete, so each poll replaces the window set it reported last time. A key
 //! only a Codex response named stays until a poll omits it; its read-time
-//! expiry still applies. A dropped window kept for the view leaves at the
+//! expiry still applies. A kept window other than the five-hour leaves at the
 //! latest on the [`OMISSION_CONFIRMATIONS`]th consecutive complete report
 //! omitting it, the dropping report included, so the kept windows are at
 //! most what the window map held across that many reports, plus one kept
 //! five-hour window.
 //!
 //! [`MAX_WINDOWS_PER_OBSERVATION`]: super::reading::MAX_WINDOWS_PER_OBSERVATION
+//! [`OMISSION_CONFIRMATIONS`]: super::kept::OMISSION_CONFIRMATIONS
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use super::curation::{ANTHROPIC_PROVIDER_KIND, RESET_TOLERANCE, row_for};
 use super::freshness::{ObservationStamp, is_fresh};
+use super::kept::KeptWindows;
 use super::reading::{
     AccountObservation, ObservationReport, ReadingSource, Started, WindowKey, WindowReading,
     WindowSet,
@@ -102,10 +100,6 @@ pub const CONTRADICTION_SLACK: f64 = 0.02;
 /// How many consecutive agreeing lower readings replace a stored window still
 /// in effect.
 pub const CORRECTION_CONFIRMATIONS: u32 = 3;
-
-/// How many consecutive complete reports must omit a dropped window, other
-/// than the five-hour, before it stops binding placement.
-pub const OMISSION_CONFIRMATIONS: u32 = 3;
 
 /// Absorbs the binary representation of two decimal fractions, so a drop of
 /// exactly [`CONTRADICTION_SLACK`] (`0.47` to `0.45`) is not refused for the
@@ -166,15 +160,6 @@ impl StoredWindow {
                 .reset()
                 .is_some_and(|reset| is_fresh(reset.at(), &self.observed, now, MAX_OBSERVATION_AGE))
     }
-}
-
-/// A dropped window other than the five-hour, kept for the view, with its
-/// consecutive omissions and the stamp of the last one counted.
-#[derive(Debug, Clone, PartialEq)]
-struct OmittedWindow {
-    stored: StoredWindow,
-    omissions: u32,
-    last_omitted: ObservationStamp,
 }
 
 /// The consecutive lower readings seen for one key: the latest of them, its
@@ -247,15 +232,12 @@ pub struct AccountMeter {
     /// not in effect; readings observed before it are not taken. Holds at most
     /// the curated header keys.
     unknown_marks: HashMap<WindowKey, ObservationStamp>,
-    /// The account-wide five-hour window a complete report dropped while it
-    /// was running and in effect; readings for its key reconcile against it
-    /// while it stays in effect and nothing is stored for the key.
-    dropped_fast: Option<StoredWindow>,
-    /// Per key, every other running window a complete report dropped while
-    /// it was in effect; binds the view only, never a reading.
-    omitted: HashMap<WindowKey, OmittedWindow>,
+    /// The running windows a complete report dropped while they were in
+    /// effect; readings for each key reconcile against its kept window while
+    /// it stays in effect and nothing is stored for the key.
+    kept_windows: KeptWindows,
     /// Per key, the lower readings refused so far; holds at most the keys
-    /// with a stored window or the kept five-hour window.
+    /// with a stored or kept window.
     streaks: HashMap<WindowKey, Streak>,
     last_accepted: Option<LastAccepted>,
     billing: Billing,
@@ -269,8 +251,7 @@ impl AccountMeter {
             windows: HashMap::new(),
             complete_floor: None,
             unknown_marks: HashMap::new(),
-            dropped_fast: None,
-            omitted: HashMap::new(),
+            kept_windows: KeptWindows::default(),
             streaks: HashMap::new(),
             last_accepted: None,
             billing: Billing::Unknown,
@@ -305,13 +286,10 @@ impl AccountMeter {
     }
 
     /// Every running window a complete report dropped while it was in
-    /// effect and that still binds placement: the kept five-hour window and
-    /// the kept others, in no particular order. One may have left effect
-    /// since: the reader applies its own clock.
+    /// effect and that still binds placement, in no particular order. One
+    /// may have left effect since: the reader applies its own clock.
     pub(super) fn kept(&self) -> impl Iterator<Item = &StoredWindow> {
-        self.dropped_fast
-            .iter()
-            .chain(self.omitted.values().map(|kept| &kept.stored))
+        self.kept_windows.iter()
     }
 
     /// The stored window for `key`.
@@ -326,10 +304,7 @@ impl AccountMeter {
         let observed = *observation.observed();
         let source = observation.source();
         let mut next = self.clone();
-        next.dropped_fast
-            .take_if(|kept| has_lapsed(kept, &observed));
-        next.omitted
-            .retain(|_, kept| !has_lapsed(&kept.stored, &observed));
+        next.kept_windows.lapse(&observed);
         let (incoming, is_complete) = match observation.report() {
             ObservationReport::Partial(set) => (set.as_slice(), false),
             ObservationReport::Complete(set) => {
@@ -372,9 +347,7 @@ impl AccountMeter {
                 }
             };
             next.unknown_marks.remove(reading.key());
-            next.dropped_fast
-                .take_if(|kept| kept.reading.key() == reading.key());
-            next.omitted.remove(reading.key());
+            next.kept_windows.release(reading.key());
             next.streaks.remove(reading.key());
             next.windows.insert(reading.key().clone(), stored);
         }
@@ -445,23 +418,18 @@ impl AccountMeter {
     }
 
     /// The window that binds `key` at `observed`: the stored one, or the kept
-    /// dropped five-hour window, when it is in effect.
+    /// one, when it is in effect.
     fn in_effect(&self, key: &WindowKey, observed: &ObservationStamp) -> Option<&StoredWindow> {
         self.windows
             .get(key)
-            .or_else(|| {
-                self.dropped_fast
-                    .as_ref()
-                    .filter(|kept| kept.reading.key() == key)
-            })
+            .or_else(|| self.kept_windows.baseline(key, observed))
             .filter(|stored| stored.is_effective(observed))
     }
 
     /// Drop every window a complete report at `observed` omits and is not
-    /// older than, keep each dropped window that is in effect at `observed`
-    /// (the account-wide five-hour one as a baseline, the others for the
-    /// view), count the omission against the windows kept before, and raise
-    /// the floor to `observed`.
+    /// older than, keep each dropped window that is in effect at `observed`,
+    /// count the omission against the windows kept before, and raise the
+    /// floor to `observed`.
     fn apply_complete(&mut self, observed: &ObservationStamp, reported: &[WindowReading]) {
         if self
             .complete_floor
@@ -469,7 +437,7 @@ impl AccountMeter {
         {
             return;
         }
-        self.count_omissions(observed, reported);
+        self.kept_windows.count_omissions(observed, reported);
         let dropped: Vec<WindowKey> = self
             .windows
             .iter()
@@ -488,40 +456,10 @@ impl AccountMeter {
             if !stored.is_effective(observed) {
                 continue;
             }
-            if fast.as_ref() == Some(&key) {
-                self.dropped_fast = Some(stored);
-            } else {
-                self.omitted.insert(
-                    key,
-                    OmittedWindow {
-                        stored,
-                        omissions: 1,
-                        last_omitted: *observed,
-                    },
-                );
-            }
+            self.kept_windows
+                .keep(stored, observed, fast.as_ref() == Some(&key));
         }
         self.complete_floor = Some(*observed);
-    }
-
-    /// Count a complete report at `observed` against each window kept for
-    /// the view: one listing its key restarts the count, one omitting it
-    /// and newer than the last counted adds one, and the window is let go
-    /// at [`OMISSION_CONFIRMATIONS`]. A repeat of a counted stamp counts
-    /// nothing, so one report delivered twice is one omission.
-    fn count_omissions(&mut self, observed: &ObservationStamp, reported: &[WindowReading]) {
-        self.omitted.retain(|key, kept| {
-            if reported.iter().any(|w| w.key() == key) {
-                kept.omissions = 0;
-                return true;
-            }
-            if observed.monotonic() <= kept.last_omitted.monotonic() {
-                return true;
-            }
-            kept.omissions = kept.omissions.saturating_add(1);
-            kept.last_omitted = *observed;
-            kept.omissions < OMISSION_CONFIRMATIONS
-        });
     }
 
     /// What to do with `reading`: keep what is stored, store a window, or
@@ -543,11 +481,10 @@ impl AccountMeter {
             .unknown_marks
             .get(reading.key())
             .is_some_and(|mark| observed.monotonic() < mark.monotonic());
-        let stored = self.windows.get(reading.key()).or_else(|| {
-            self.dropped_fast
-                .as_ref()
-                .filter(|kept| kept.reading.key() == reading.key() && kept.is_effective(observed))
-        });
+        let stored = self
+            .windows
+            .get(reading.key())
+            .or_else(|| self.kept_windows.baseline(reading.key(), observed));
         if below_floor
             || below_mark
             || stored.is_some_and(|s| observed.monotonic() < s.observed.monotonic())
@@ -759,12 +696,6 @@ fn header_observation(
         ObservationReport::Partial(WindowSet::new(windows)?),
     )
     .map(Some)
-}
-
-/// Whether `kept`, observed no later than `now`, is no longer in effect at
-/// it. A kept window stamped after `now` is judged by a later merge.
-fn has_lapsed(kept: &StoredWindow, now: &ObservationStamp) -> bool {
-    kept.observed.monotonic() <= now.monotonic() && !kept.is_effective(now)
 }
 
 /// The later of two stamps on the monotonic clock.

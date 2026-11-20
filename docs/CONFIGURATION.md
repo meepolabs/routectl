@@ -2457,9 +2457,13 @@ from that reading under the same 7-minute rule, so a usage report that
 drops a nearly exhausted window (Anthropic `"seven_day": null`, a Codex
 body without `secondary_window`, a missing `seven_day_opus`) never makes
 the seat look roomy. A per-model window still counts only for its model
-family. The five-hour window binds until its reset. Any other window
-binds until its reset, until a reading for that window arrives (which
-replaces it as reported), or until three usage reports in a row have
+family. Such a window binds until its reset or until a reading for it is
+accepted. A higher reading, or one within 2 percentage points on the
+same reset, is accepted at once; a lower or unstarted one is refused as
+`contradictory` until three consecutive readings agree, exactly as for a
+window still reported, so one report that drops a window followed by
+one low reading never makes the seat look roomy. Any window other than
+the five-hour also stops binding once three usage reports in a row have
 omitted it, so a window the vendor really removed stops counting after
 about three polls.
 

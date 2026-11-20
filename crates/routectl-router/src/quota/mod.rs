@@ -52,6 +52,7 @@ pub mod codex_headers;
 pub mod curation;
 pub mod feed;
 pub mod freshness;
+pub mod kept;
 pub mod key;
 pub mod meter;
 pub mod model_scope;
