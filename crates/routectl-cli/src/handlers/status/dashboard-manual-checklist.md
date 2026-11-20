@@ -30,7 +30,9 @@ has not verified the failure that matters most.
 - **Focus, selection and open state across a refresh** (`dash_40_render.js`,
   `dash_50_dom.js`): `page_browser_tests.rs`, `page_browser_locks_tests.rs`
   and `page_browser_sort_tests.rs` keep the focused node, a text selection,
-  an open row and disclosure, the seat dialog, and page and table scroll.
+  an open row and disclosure, and page and table scroll;
+  `page_browser_now_tests.rs` and `page_browser_accounts_tests.rs` keep a
+  selected fix command and each attention item and account row.
 - **The changed-value mark and reduced motion** (`dash_40_render.js`,
   `dash_50_dom.js`, `dash_90_chrome.js`): `page_browser_motion_tests.rs`.
 - **The Accounts rows** (`dash_62_view_accounts.js`):
@@ -135,9 +137,9 @@ banner, no retry signal -- silently mislabeled data.
 - A **sparse series draws gaps as BREAKS, never bridged**: produce traffic
   with an idle stretch in the middle of the window and confirm the sparkline
   and segment charts leave a hole instead of interpolating across it.
-- Watch two healthy rounds on Accounts: a quota figure that moved flashes
-  and fades back within half a second, a meter slides to its new width, and
-  a figure that held does not flash. Switching views flashes nothing.
+- Watch two healthy rounds on Accounts: a window's used figure that moved
+  flashes and fades back within half a second, a meter slides to its new
+  width, and a figure that held does not flash. Switching views flashes nothing.
 - Enable the OS reduced-motion preference and reload. Pane transitions, the
   changed-value flash and the meter slide must be suppressed.
 - Config's routing-provider table must distinguish all three rate-limit
@@ -314,15 +316,16 @@ banner, no retry signal -- silently mislabeled data.
 - At 800 px wide, the eligibility cell spans the whole card row and each fix
   command sits on one line; a command wider than the card scrolls inside its
   own box instead of wrapping at a hyphen.
-- Provider-card seat dots follow the current config. Serve a config whose
-  provider entry name differs from its login's vendor (for example entry
-  `work` with `credential = "oauth://anthropic#a"`) against a ledger copy
-  holding quota rows for that seat and for a seat the config no longer names.
-  On Now the `work` card shows one seat dot (`1 seat`) and its modal
-  lists that seat alone; no card, dot or Accounts seat quota tile shows the
-  retired seat. Drop the entry from the config and reload: within one poll the
-  dot, the modal and the Accounts tile for it are gone, and the Traffic figures
-  are unchanged.
+- The Now glance and Accounts follow the current config. Serve a config
+  whose provider entry name differs from its login's vendor (for example
+  entry `work` with `credential = "oauth://anthropic#a"` in pool `main`)
+  against a ledger copy holding traffic for that seat and for a seat the
+  config no longer names. On Now the Accounts glance shows `pool main` with
+  one seat, `work (a)`, its login state and a meter per window; on Accounts
+  the same seat is the one row under `main`. No glance seat and no Accounts
+  row names the retired seat. Drop the entry from the config and reload:
+  within one poll the seat is gone from both, and the Traffic figures are
+  unchanged.
 - Zero counts render faint: `0` in `eligible 0 of 2` and the seat driver's
   zero failure counts, never full brightness and never red.
 - In the light theme, faint text (hints, labels, zeros) stays readable on
