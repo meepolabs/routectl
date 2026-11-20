@@ -36,6 +36,7 @@ fn priced_groups(db: &mut routectl_usage::UsageDb) -> usize {
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: Default::default(),
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
     routectl_usage::query(

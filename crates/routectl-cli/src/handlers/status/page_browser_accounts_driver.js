@@ -241,23 +241,27 @@
     return g ? g.metrics.requests : null;
   }
 
-  // The seat answer gains a decoy group keyed `CODEX` (configured: `codex`),
-  // a priced group for the API-key entry and a partial one for the compat
-  // entry; the labeled seat's group is subscription traffic with an
-  // API-price equivalent. The retired login's group stays as served.
+  function setMetrics(data, account, metrics) {
+    var m = group(data, account).metrics;
+    Object.keys(metrics).forEach(function (k) { m[k] = metrics[k]; });
+  }
+
+  // The seat answer gains a decoy group keyed `CODEX` (configured: `codex`);
+  // the served API-key group is priced and the compat one partial; the
+  // labeled seat's group is subscription traffic with an API-price
+  // equivalent. The retired login's group stays as served.
   d.scenario('accounts-traffic', function () {
     rewriteSeatAnswers(function (data) {
-      var seat = group(data, 'anthropic#a').metrics;
-      seat.cost_status = 'subscription';
-      seat.cost_usd = null;
-      seat.equivalent_cost_usd = 1.234;
+      setMetrics(data, 'anthropic#a', {
+        cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 1.234
+      });
       data.groups.push(seatGroup(data, 'CODEX', { requests: 777 }));
-      data.groups.push(seatGroup(data, '#anthropic', {
+      setMetrics(data, '#anthropic', {
         cost_status: 'priced', cost_usd: 0.5, equivalent_cost_usd: null
-      }));
-      data.groups.push(seatGroup(data, '#compat', {
+      });
+      setMetrics(data, '#compat', {
         cost_status: 'partial', cost_usd: 0.25, equivalent_cost_usd: null
-      }));
+      });
     });
     return trafficSettled(SEAT_TRAFFIC).then(function () {
       var answer = lastSeatAnswer();
@@ -277,6 +281,28 @@
         compat: trafficSeen(COMPAT_ROW + '-traffic'),
         cloud: trafficSeen(CLOUD_ROW + '-traffic'),
         range_head: byId('accounts-traffic-range').textContent
+      };
+    });
+  });
+
+  // The seat answer as the endpoint serves it, less the compat entry's
+  // group: the API-key entry's own group lands on its row, and an API-key
+  // entry and a cloud entry with no group in range are idle.
+  d.scenario('accounts-traffic-entry', function () {
+    var served = null;
+    rewriteSeatAnswers(function (data) {
+      if (!served) { served = data.groups.map(function (g) { return g.account; }); }
+      data.groups = data.groups.filter(function (g) { return g.account !== '#compat'; });
+    });
+    return trafficSettled(API_KEY_ROW + '-traffic').then(function () {
+      var answer = lastSeatAnswer();
+      return {
+        served_accounts: served,
+        answered_api_key_requests: requestsOf(answer, '#anthropic'),
+        api_key: trafficSeen(API_KEY_ROW + '-traffic'),
+        compat: trafficSeen(COMPAT_ROW + '-traffic'),
+        cloud: trafficSeen(CLOUD_ROW + '-traffic'),
+        page_text: byId(BODY).textContent
       };
     });
   });

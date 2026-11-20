@@ -437,7 +437,7 @@ async fn seat_groups_carry_the_account_identity_of_the_served_config() {
 
     // Assert
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["schema_version"], 4, "an additive change: {json}");
+    assert_eq!(json["schema_version"], 5, "{json}");
     let rows: [(&str, Value, Value, Value); 4] = [
         (
             "anthropic#work",
@@ -468,6 +468,59 @@ async fn seat_groups_carry_the_account_identity_of_the_served_config() {
         assert_eq!(group["login_label"], login, "{label}");
         assert_eq!(group["metrics"]["requests"], 1, "{label}");
     }
+}
+
+/// A row with no recorded seat served by an entry whose account is its own
+/// API key groups under that `#<entry>` account, named like any other
+/// configured account: the entry, and no login label.
+#[tokio::test]
+async fn an_unseated_row_on_an_api_key_entry_groups_under_its_account() {
+    // Arrange: every seeded row is served by entry `p`, configured here with
+    // an `env://` key beside the `anthropic#work` login.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("usage.db");
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+    seed_seated_ledger(&path, now, &[Some("anthropic#work"), None, None]);
+    let router = router_of(&[
+        (
+            "a-model",
+            "alpha",
+            anthropic_block(),
+            "oauth://anthropic#work".into(),
+        ),
+        (
+            "k-model",
+            "p",
+            anthropic_block(),
+            "env://ROUTECTL_QUERY_TEST_KEY".into(),
+        ),
+    ]);
+    let state = state_over_router(path, router);
+
+    // Act
+    let (status, json) = send(state, QUERY_METHOD, r#"{"window":"all","group_by":"seat"}"#).await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["schema_version"], 5, "{json}");
+    let labels: Vec<&str> = json["data"]["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .filter_map(|g| g["label"].as_str())
+        .collect();
+    assert_eq!(labels, ["#p", "anthropic#work"], "{json}");
+    let keyed = group_by_label(&json, "#p");
+    assert_eq!(keyed["account"], "#p", "{json}");
+    assert_eq!(keyed["provider_entry"], "p", "{json}");
+    assert!(
+        keyed
+            .as_object()
+            .expect("group")
+            .contains_key("login_label")
+    );
+    assert_eq!(keyed["login_label"], Value::Null, "{json}");
+    assert_eq!(keyed["metrics"]["requests"], 2, "{json}");
 }
 
 /// Groups of every other grouping keep exactly their label and metrics: no

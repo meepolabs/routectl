@@ -326,8 +326,7 @@ fn page_browser_accounts_traffic_joins_seat_groups_on_the_exact_account_key() {
 }
 
 /// A configured account with no seat group reads as having no traffic in
-/// the range, in words, never as 0; a credential the ledger never attributes
-/// per account says that instead of claiming no traffic.
+/// the range, in words, never as 0, whatever its credential kind.
 ///
 /// Mutation check: make acctNoTrafficText answer `0 req` -> red.
 #[test]
@@ -338,13 +337,46 @@ fn page_browser_accounts_an_account_with_no_seat_group_shows_no_traffic_not_zero
     let codex = text(&out["codex"]["text"], "the Codex traffic line");
     assert_eq!(codex, "trafficno traffic today", "{out:#}");
     assert!(!codex.contains('0'), "{out:#}");
-    assert_eq!(
-        out["cloud"]["note"], "not recorded per account for this credential",
-        "{out:#}"
-    );
+    assert_eq!(out["cloud"]["note"], "no traffic today", "{out:#}");
     assert!(
         out["seat"]["req"].is_string(),
         "positive control: a row with a group shows its count: {out:#}"
+    );
+}
+
+/// The seat answer the endpoint serves carries a group for the API-key
+/// entry's own account, and its row shows that group's requests and cost;
+/// an API-key row and a cloud row with no group read "no traffic", and no
+/// row says its traffic is not recorded.
+///
+/// Mutation check: restore the non-subscription branch of acctNoTrafficText
+/// -> red (the idle rows read "not recorded per account ...").
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_an_api_key_row_shows_its_own_traffic() {
+    let out = accounts_scenario("accounts-traffic-entry");
+
+    let served: Vec<&str> = out["served_accounts"]
+        .as_array()
+        .expect("the served accounts")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        served.contains(&"#anthropic") && served.contains(&"#compat"),
+        "positive control: the endpoint fixture serves the API-key groups: {out:#}"
+    );
+    assert_eq!(
+        out["api_key"]["req"],
+        req_text(&out["answered_api_key_requests"]).as_str(),
+        "{out:#}"
+    );
+    assert!(out["api_key"]["cost"].is_string(), "{out:#}");
+    assert_eq!(out["compat"]["note"], "no traffic today", "{out:#}");
+    assert_eq!(out["cloud"]["note"], "no traffic today", "{out:#}");
+    assert!(
+        !text(&out["page_text"], "the Accounts body").contains("not recorded per account"),
+        "{out:#}"
     );
 }
 

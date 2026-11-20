@@ -441,7 +441,7 @@
     line.appendChild(acctText('span', 'acct-label', 'traffic'));
     var m = traffic.byAccount ? traffic.byAccount[row.account] : null;
     if (!m) {
-      line.appendChild(acctText('span', 'acct-traffic-note', traffic.note || acctNoTrafficText(row)));
+      line.appendChild(acctText('span', 'acct-traffic-note', traffic.note || acctNoTrafficText()));
       return line;
     }
     var req = document.createElement('span');
@@ -455,11 +455,8 @@
   }
 
   // A configured account with no seat group carried nothing in the range,
-  // which is said in words. The ledger attributes a request to an account
-  // only for a subscription login, so an API-key or cloud credential never
-  // has a group: its traffic is not known per account, which is not zero.
-  function acctNoTrafficText(row) {
-    if (row.subscription !== true) { return 'not recorded per account for this credential'; }
+  // which is said in words, never as a zero count.
+  function acctNoTrafficText() {
     var through = selectedProvider ? ' through ' + selectedProvider : '';
     return 'no traffic' + through + ' ' + WINDOW_SPAN[selectedWindow];
   }

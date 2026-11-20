@@ -58,6 +58,7 @@ pub fn populated_query_panel(
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: Default::default(),
     };
     let router = StatusRouterHandle::new(Arc::new(ArcSwap::from_pointee(fixture_router())));
     let book = Arc::new(PriceBook::new(dir.path().join("prices.json")));

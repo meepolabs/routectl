@@ -4495,8 +4495,13 @@ month / all time) as separate blocks. The only trailing windows are
 
 **Breakdown.** `--by model|alias|provider|seat` rolls the rows up to
 that dimension; omit `--by` to group by model. Every report ends with a
-`total` row. `seat` is the credential seat recorded with each request;
-requests with no recorded seat group as `(unattributed)`. The report reads
+`total` row. `seat` is the credential account each request was served
+under: the seat recorded with it, or, for a request with none recorded,
+`#<entry>` when the `[providers]` entry that served it uses its own API key
+or cloud credential (not a login, not forwarded). Everything else groups
+as `(unattributed)`. That account is read from the current config, so an
+entry that changed from forwarded to its own credential claims its earlier
+rows too. The report reads
 the same grouped query as `/status/query`, so for the same window and
 grouping its groups and figures match the dashboard's. `--detail` adds
 extra columns: cost, `ctx_peak` and `ctx_avg` (the largest and the mean
@@ -4874,7 +4879,7 @@ loaded.
 
 The running server's `/status/query` endpoint answers a grouped, windowed
 aggregate over the local usage ledger. Like `--json` above, its payload
-carries a `schema_version` (currently `4`) and its shape is UNSTABLE before
+carries a `schema_version` (currently `5`) and its shape is UNSTABLE before
 1.0 -- metric names may be added and the envelope may be restructured. The
 `schema_version` bumps on any semantic change or removal; purely additive
 changes (a new metric, a new grouping or window token) do not bump it.
@@ -4895,14 +4900,15 @@ QUERY /status/query
 request, the rest local calendar windows, as for `routectl usage`; a series
 on a trailing window starts its buckets at the window's start); `group_by` is one of
 `model`, `alias`, `provider`, `seat` (`seat` groups by the credential
-identity each request was served under; a request with none recorded reads
-as `(unattributed)`); optional `alias` and `provider` keys narrow
+account each request was served under, by the same rule as `routectl usage
+--by seat`: the recorded seat, else `#<entry>` for an entry with its own API
+key or cloud credential, else `(unattributed)`); optional `alias` and `provider` keys narrow
 the result to one routing alias or served provider.
 
 Each group carries its `label` and `metrics`. A `seat` group also carries
 three identity fields, resolved from the served config the same way
-`/status/accounts` resolves them: `account` (the recorded seat, the key
-`/status/accounts` lists it under), `provider_entry` (the `[providers]` entry
+`/status/accounts` resolves them: `account` (the recorded seat or
+`#<entry>` account, the key `/status/accounts` lists it under), `provider_entry` (the `[providers]` entry
 it is reported under) and `login_label` (the `<label>` of an
 `oauth://<provider>#<label>` login, null for an unlabeled one). A recorded
 seat the config no longer names keeps its `account` with null

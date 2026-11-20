@@ -144,7 +144,7 @@ fn wire_shape_pins_every_metric_token() {
         "missing_price_dimensions": ["cache write 30m"],
     });
     let expected = serde_json::json!({
-        "schema_version": 4,
+        "schema_version": 5,
         "as_of": "2026-08-02T00:00:00Z",
         "unavailable": null,
         "data": {
@@ -387,7 +387,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "missing_price_dimensions": ["cache write 30m"],
     });
     let expected = serde_json::json!({
-        "schema_version": 4,
+        "schema_version": 5,
         "as_of": "2026-08-02T00:00:00Z",
         "unavailable": null,
         "data": {

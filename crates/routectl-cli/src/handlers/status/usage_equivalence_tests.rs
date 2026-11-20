@@ -427,6 +427,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: Default::default(),
     };
     let result = query(
         &mut db,

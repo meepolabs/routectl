@@ -261,8 +261,10 @@ banner, no retry signal -- silently mislabeled data.
   the pools reads `Traffic today - requests and cost per account`, and that
   seat's `traffic` line shows its request count and `~$<n> At API prices`
   (never a bare dollar figure for subscription traffic). A configured seat
-  that carried nothing reads `no traffic today`, never `0 req`; an API-key
-  or cloud entry reads `not recorded per account for this credential`.
+  that carried nothing reads `no traffic today`, never `0 req`. Send a
+  request through an API-key entry: its row shows its own request count and
+  cost; an API-key or cloud entry that carried nothing reads `no traffic
+  today`.
   Pick Week: the heading and the counts move to this week, while every
   login state, window, reset time and poll line stays exactly as it was.
   Remove a seat from the config and reload: its traffic does not appear as

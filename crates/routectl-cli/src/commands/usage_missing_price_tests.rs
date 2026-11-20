@@ -23,6 +23,7 @@ fn priced_query(
         alias_filter: None,
         provider_filter: None,
         bucket,
+        entry_accounts: Default::default(),
     };
     let deadline = Instant::now() + Duration::from_mins(10);
     query(

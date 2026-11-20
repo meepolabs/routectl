@@ -6,7 +6,7 @@
   // containment for a cached page / mixed assets / a bad build, not version
   // negotiation. `query` sits alongside the GET panels because the QUERY
   // aggregate is a source of its own (see SOURCES below).
-  var EXPECTED = { usage: 8, health: 9, config: 6, doctor: 32, query: 4, accounts: 1, attention: 1 };
+  var EXPECTED = { usage: 8, health: 9, config: 6, doctor: 32, query: 5, accounts: 1, attention: 1 };
 
   // The panels of the aggregate round, each with its own envelope +
   // freshness. NOT the same list as the views (VIEWS in dash_80_views.js): a

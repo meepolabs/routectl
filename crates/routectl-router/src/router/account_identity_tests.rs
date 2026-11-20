@@ -8,7 +8,7 @@ use routectl_auth::{SecretRef, SecretStore};
 use routectl_providers::anthropic_api::AuthKind;
 
 use super::{AccountIdentities, AccountIdentity, Router};
-use crate::config::{Auth, Config, ModelEntry, PoolEntry, ProviderEntry};
+use crate::config::{Auth, Config, Format, ModelEntry, PoolEntry, ProviderEntry};
 use crate::factory::{BuildOptions, build_resolved_models};
 
 /// Resolves every reference to a fixed token, so no test reads an
@@ -184,4 +184,47 @@ fn lookups_answer_for_listed_accounts_only() {
         "a forwarded entry names no account"
     );
     assert_eq!(identities.get("anthropic#gone"), None);
+}
+
+/// A ledger row with no seat belongs to an account only where the account
+/// is its entry's own: an `env://` key and a cloud credential with no key
+/// reference map their entry to `#<entry>`; an `oauth://` entry, a
+/// forwarded entry and an entry no model dispatches on map nothing.
+#[test]
+fn entry_accounts_map_each_own_credential_entry_to_its_account() {
+    // Arrange
+    let mut config = mixed_config(["a-direct", "b-pooled", "c-plain", "d-keyed"]);
+    config.providers.insert(
+        "cloud".into(),
+        ProviderEntry::cloud_aws(
+            Format::BedrockInvoke,
+            "us-east-1",
+            "aws://chain",
+            Auth::AwsSigv4,
+        ),
+    );
+    config.models.insert(
+        "e-cloud".into(),
+        ModelEntry::new("cloud", "claude-opus-4-7"),
+    );
+    config.providers.insert(
+        "idle".into(),
+        ProviderEntry::anthropic_api("env://ROUTECTL_ACCOUNT_IDENTITY_IDLE_KEY"),
+    );
+    let identities = AccountIdentities::from_config(&config);
+    assert!(
+        identities.contains("anthropic#work") && identities.contains("anthropic"),
+        "positive control: the OAuth logins are listed accounts"
+    );
+
+    // Act
+    let entries = identities.entry_accounts();
+
+    // Assert
+    let expected: std::collections::BTreeMap<String, String> = [
+        ("cloud".to_string(), "#cloud".to_string()),
+        ("keyed".to_string(), "#keyed".to_string()),
+    ]
+    .into();
+    assert_eq!(entries, expected);
 }

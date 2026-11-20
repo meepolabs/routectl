@@ -15,7 +15,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use clap::Parser;
 use routectl_router::prices::PriceBook;
-use routectl_router::{Config, ModelEntry, PricingConfig, ProviderEntry, Router};
+use routectl_router::{Auth, Config, ModelEntry, PricingConfig, ProviderEntry, Router};
 use routectl_usage::{GroupDim, QueryMetrics, QueryResult, UsageDb, open};
 use tempfile::TempDir;
 use time::{Date, Month, PrimitiveDateTime, Time};
@@ -116,10 +116,11 @@ struct Shape {
 
 /// Every row shape the ledger repeats at each instant: two models on a priced
 /// API-key provider, one on a subscription seat pool, one on a provider no
-/// source prices; two named seats and a NULL seat; a classified and an
-/// unclassified error; and a 30-minute cache write the priced model has no
-/// rate for.
-const SHAPES: [Shape; 6] = [
+/// source prices; two named seats and a NULL seat; a NULL-seat row on the
+/// priced API-key entry (its own account) and one on a forwarded entry (no
+/// account); a classified and an unclassified error; and a 30-minute cache
+/// write the priced model has no rate for.
+const SHAPES: [Shape; 8] = [
     Shape {
         model: "opus",
         alias: "fast",
@@ -201,6 +202,38 @@ const SHAPES: [Shape; 6] = [
         lifetimes: None,
     },
     Shape {
+        model: "opus",
+        alias: "fast",
+        provider: "paid",
+        upstream: "up-opus",
+        seat: None,
+        stream: true,
+        outcome: "ok",
+        error_class: None,
+        ttfb_ms: Some(700),
+        input: Some(400),
+        output: Some(40),
+        cache_read: Some(0),
+        cache_write: None,
+        lifetimes: None,
+    },
+    Shape {
+        model: "relayed",
+        alias: "cheap",
+        provider: "relay",
+        upstream: "up-relayed",
+        seat: None,
+        stream: true,
+        outcome: "ok",
+        error_class: None,
+        ttfb_ms: Some(900),
+        input: Some(70),
+        output: Some(7),
+        cache_read: None,
+        cache_write: None,
+        lifetimes: None,
+    },
+    Shape {
         model: "haiku",
         alias: "cheap",
         provider: "other",
@@ -272,8 +305,9 @@ fn add_model(
     config.models.insert(nickname.to_string(), entry);
 }
 
-/// A priced API-key provider, a subscription provider and an unpriced
-/// API-key provider. Neither priced model has a 30-minute write rate.
+/// A priced API-key provider, a subscription provider, an unpriced API-key
+/// provider and a forwarded provider. Neither priced model has a 30-minute
+/// write rate.
 fn parity_config() -> Config {
     let mut config = Config::default();
     for (name, credential) in [
@@ -295,6 +329,13 @@ fn parity_config() -> Config {
     add_model(&mut config, "opus", "paid", "up-opus", Some(rates.clone()));
     add_model(&mut config, "sonnet", "sub", "up-sonnet", Some(rates));
     add_model(&mut config, "haiku", "other", "up-haiku", None);
+    config.providers.insert(
+        "relay".to_string(),
+        ProviderEntry::anthropic_api("forwarded")
+            .with_credential("forwarded")
+            .with_auth(Auth::Bearer),
+    );
+    add_model(&mut config, "relayed", "relay", "up-relayed", None);
     config
 }
 
@@ -351,13 +392,18 @@ fn endpoint_result(fx: &Fixture, window: &str, group_by: &str) -> QueryResult {
 /// The `routectl usage` report for `flag` x `by`, built from the CLI's own
 /// flag parse and report builder over the fixture.
 fn cli_report(fx: &Fixture, flag: &str, by: Option<GroupDim>) -> WindowReport {
+    cli_report_with(fx, flag, by, false)
+}
+
+/// [`cli_report`], with `--detail` when `detail` is set.
+fn cli_report_with(fx: &Fixture, flag: &str, by: Option<GroupDim>, detail: bool) -> WindowReport {
     let flags = WindowFlags::try_parse_from(["usage", flag]).expect("window flag parses");
     let args = UsageArgs {
         window: flags.window.selected(),
         since: None,
         until: None,
         by,
-        detail: false,
+        detail,
         db: None,
         k_calibration: false,
     };
@@ -463,7 +509,21 @@ fn the_parity_fixture_gives_every_window_its_own_figures() {
 
     let all = endpoint_result(&fx, "all", "seat");
     let seats: Vec<&str> = all.groups.iter().map(|g| g.label.as_str()).collect();
-    assert_eq!(seats, ["(unattributed)", "home", "work"]);
+    assert_eq!(seats, ["#paid", "(unattributed)", "home", "work"]);
+    let seat = |label: &str| {
+        all.groups
+            .iter()
+            .find(|g| g.label == label)
+            .unwrap_or_else(|| panic!("seat {label}"))
+            .metrics
+            .requests
+    };
+    assert_eq!(seat("#paid"), 6, "one unseated API-key row per instant");
+    assert_eq!(
+        seat("(unattributed)"),
+        18,
+        "the OAuth entry's two unseated rows and the forwarded row, per instant"
+    );
     let by_model = endpoint_result(&fx, "all", "model");
     let status = |label: &str| {
         by_model
@@ -488,5 +548,36 @@ fn the_parity_fixture_gives_every_window_its_own_figures() {
             ("http-5xx".to_string(), 6),
             ("unclassified".to_string(), 6),
         ])
+    );
+}
+
+/// Under `--detail` each group's TTFT percentiles come from the samples
+/// labelled the way its rows are: the API-key entry's unseated stream lands
+/// on its account's row, and the forwarded entry's on `(unattributed)`.
+#[test]
+fn detail_ttft_follows_the_seat_label_of_each_group() {
+    // Arrange
+    let fx = fixture();
+
+    // Act
+    let report = cli_report_with(&fx, "--all", Some(GroupDim::Seat), true);
+
+    // Assert
+    let ttft = |label: &str| {
+        report
+            .groups
+            .iter()
+            .find(|row| row.label == label)
+            .map_or_else(
+                || panic!("seat row {label}"),
+                |row| (row.ttft_p50_ms, row.ttft_p95_ms),
+            )
+    };
+    assert_eq!(ttft("#paid"), (Some(700), Some(700)));
+    assert_eq!(ttft("(unattributed)"), (Some(500), Some(900)));
+    assert_eq!(
+        ttft("work"),
+        (Some(120), Some(300)),
+        "control: a persisted seat keeps its own samples"
     );
 }

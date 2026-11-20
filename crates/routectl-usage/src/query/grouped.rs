@@ -96,6 +96,34 @@ pub struct QuerySpec {
     /// asks for no series at all, and reads the ledger exactly as it would
     /// without this field.
     pub bucket: Option<BucketSpec>,
+    /// Provider entry -> credential account, for the entries whose account is
+    /// the entry itself (an API key or a cloud credential). Read only by the
+    /// seat grouping, and only for a row with no persisted seat; empty leaves
+    /// every such row `(unattributed)`.
+    pub entry_accounts: BTreeMap<String, String>,
+}
+
+impl QuerySpec {
+    /// The label a fine row rolls up under for this spec's grouping: the one
+    /// rule every reader of a grouped result labels its rows by.
+    ///
+    /// Under the seat grouping a persisted seat always wins; a row with none
+    /// takes the account its served provider entry maps to in
+    /// [`Self::entry_accounts`]; anything else reads as `(unattributed)`.
+    /// Every other grouping reads its own column and ignores the map.
+    #[must_use]
+    pub fn group_label(&self, key: &GroupKey) -> String {
+        if self.group_by == GroupDim::Seat
+            && key.seat.is_none()
+            && let Some(account) = key
+                .provider
+                .as_ref()
+                .and_then(|entry| self.entry_accounts.get(entry))
+        {
+            return account.clone();
+        }
+        self.group_by.label(key)
+    }
 }
 
 /// The dimension a result set is grouped by: the one list of groupings every
@@ -112,8 +140,9 @@ pub enum GroupDim {
     Alias,
     /// Served provider name.
     Provider,
-    /// The credential identity the row was served under, read from the
-    /// persisted `seat` column.
+    /// The credential account the row was served under: the persisted
+    /// `seat` column, or for a row without one, the account of its served
+    /// provider entry (see [`QuerySpec::group_label`]).
     Seat,
 }
 
@@ -136,9 +165,9 @@ impl GroupDim {
         Self::ALL.into_iter().find(|dim| dim.as_str() == token)
     }
 
-    /// The label a fine row rolls up under for this grouping; a NULL grouping
-    /// column reads as `(unattributed)`.
-    pub fn label(self, key: &GroupKey) -> String {
+    /// The grouping column of `key`, or `(unattributed)` when it is NULL.
+    /// Readers label rows through [`QuerySpec::group_label`].
+    pub(crate) fn label(self, key: &GroupKey) -> String {
         let column = match self {
             Self::Model => key.model.as_deref(),
             Self::Alias => Some(key.alias.as_str()),
@@ -502,7 +531,7 @@ fn fold(
         limit.check()?;
         let cost = price(&fine.agg);
         groups
-            .entry(spec.group_by.label(&fine.agg.key))
+            .entry(spec.group_label(&fine.agg.key))
             .or_default()
             .add(&fine, &cost, &row_classes);
     }

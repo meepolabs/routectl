@@ -19,7 +19,7 @@ use crate::quota::usage_body::{BodyError, UsageVendor};
 use crate::quota::view::{AcceptedReading, AccountReading, AccountReadings};
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::{CapacitySnapshot, CircuitPhase, ProviderGateStatus};
-use crate::seat_pool::{SeatTarget, credential_account, seat_identity};
+use crate::seat_pool::{SeatTarget, credential_account, is_entry_account, seat_identity};
 use crate::state_key::StateKey;
 
 /// One dispatch target's read-only health for the status surface: a
@@ -570,6 +570,21 @@ impl AccountIdentities {
         self.0
             .iter()
             .map(|(account, identity)| (account.as_str(), identity))
+    }
+
+    /// Provider entry -> account for every listed account that names its
+    /// entry rather than an OAuth login (an API key or a cloud credential).
+    /// Such an account is its entry's alone, so a ledger row that carries no
+    /// seat but was served by the entry belongs to it. OAuth and forwarded
+    /// entries are absent: a login can sit behind several entries, and a
+    /// forwarded entry names no account.
+    #[must_use]
+    pub fn entry_accounts(&self) -> BTreeMap<String, String> {
+        self.0
+            .iter()
+            .filter(|(account, _)| is_entry_account(account))
+            .map(|(account, identity)| (identity.provider_entry.clone(), account.clone()))
+            .collect()
     }
 }
 

@@ -59,6 +59,7 @@ fn query_cache_hit_share_equals_the_report_footer_rule() {
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: Default::default(),
     };
     let deadline = Instant::now() + std::time::Duration::from_mins(10);
     let result =

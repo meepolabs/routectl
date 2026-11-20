@@ -908,12 +908,15 @@ pub fn build_window_report(
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: AccountIdentities::from_config(config).entry_accounts(),
     };
     let subscription_labels = RefCell::new(BTreeSet::new());
     let price = |row: &AggRow| {
         let cost = cost_for_row(config, prices, row);
         if matches!(cost, RowCost::Subscription(..)) {
-            subscription_labels.borrow_mut().insert(dim.label(&row.key));
+            subscription_labels
+                .borrow_mut()
+                .insert(spec.group_label(&row.key));
         }
         cost
     };
@@ -921,7 +924,7 @@ pub fn build_window_report(
     let subscription_labels = subscription_labels.into_inner();
 
     let ttft = if detail {
-        compute_ttft(db, bounds, dim)?
+        compute_ttft(db, bounds, &spec)?
     } else {
         TtftPercentiles::default()
     };
@@ -1035,17 +1038,17 @@ fn ttft_pair(mut values: Vec<i64>) -> TtftPair {
 
 /// Per-group and window-wide TTFT p50/p95 via nearest-rank over the in-window
 /// streaming time-to-first-byte samples, each sample labelled the way the
-/// shared query labels its row. Only computed for `--detail`.
+/// shared query labels its row under `spec`. Only computed for `--detail`.
 fn compute_ttft(
     db: &UsageDb,
     bounds: WindowBounds,
-    by: GroupDim,
+    spec: &QuerySpec,
 ) -> Result<TtftPercentiles, UsageError> {
     let raw = ttfbs(db, bounds.from_ms, bounds.to_ms)?;
     let mut buckets: BTreeMap<String, Vec<i64>> = BTreeMap::new();
     let mut total = Vec::with_capacity(raw.len());
     for (key, ms) in raw {
-        buckets.entry(by.label(&key)).or_default().push(ms);
+        buckets.entry(spec.group_label(&key)).or_default().push(ms);
         total.push(ms);
     }
     Ok(TtftPercentiles {

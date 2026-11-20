@@ -569,9 +569,9 @@ fn round_figures_change_and_untouched_keys_stay() {
     assert_eq!(at_round(&payload, 0), payload);
 }
 
-/// The seat-grouped answer names a configured account, one the served
-/// config no longer names and the unattributed rows, so a view reading it
-/// can tell all three apart.
+/// The seat-grouped answer names a configured login, the API-key entries'
+/// own accounts, a login the served config no longer names and the
+/// unattributed rows, so a view reading it can tell them apart.
 #[test]
 fn the_harness_answers_a_seat_grouped_query_from_the_seat_fixture() {
     let payloads = Payloads::populated();
@@ -590,8 +590,12 @@ fn the_harness_answers_a_seat_grouped_query_from_the_seat_fixture() {
     assert_eq!(account("anthropic#a")["provider_entry"], "claude-seat");
     assert_eq!(account("anthropic#retired")["account"], "anthropic#retired");
     assert_eq!(account("anthropic#retired")["provider_entry"], Value::Null);
+    assert_eq!(account("#anthropic")["account"], "#anthropic");
+    assert_eq!(account("#anthropic")["provider_entry"], "anthropic");
+    assert_eq!(account("#anthropic")["login_label"], Value::Null);
+    assert_eq!(account("#compat")["provider_entry"], "compat");
     assert_eq!(account("(unattributed)")["account"], Value::Null);
-    assert_eq!(groups.len(), 3, "{groups:#?}");
+    assert_eq!(groups.len(), 5, "{groups:#?}");
     assert!(
         payloads
             .query_for(&serde_json::json!({"window": "today", "group_by": "model"}))

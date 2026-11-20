@@ -138,3 +138,211 @@ fn seat_grouping_holds_on_the_series_path() {
     assert_eq!(series.buckets[0].metrics.requests, 1);
     assert_eq!(series.buckets[1].metrics.requests, 1);
 }
+
+/// Entry -> account for two own-credential entries, as the caller derives it
+/// from config. `sub` (an OAuth entry), `relay` (forwarded) and `gone`
+/// (unconfigured) are deliberately absent.
+fn entry_accounts() -> BTreeMap<String, String> {
+    [("keyed", "#keyed"), ("cloud", "#cloud")]
+        .into_iter()
+        .map(|(entry, account)| (entry.to_string(), account.to_string()))
+        .collect()
+}
+
+fn mapped_spec(group_by: GroupDim) -> QuerySpec {
+    QuerySpec {
+        entry_accounts: entry_accounts(),
+        ..spec(group_by)
+    }
+}
+
+/// `(case, group_by, seat, provider, expected label)`.
+type LabelRow = (
+    &'static str,
+    GroupDim,
+    Option<&'static str>,
+    Option<&'static str>,
+    &'static str,
+);
+
+#[test]
+fn group_label_takes_a_persisted_seat_then_the_entry_account_then_unattributed() {
+    let rows: [LabelRow; 10] = [
+        (
+            "persisted seat wins over a mapped provider",
+            GroupDim::Seat,
+            Some("anthropic#work"),
+            Some("keyed"),
+            "anthropic#work",
+        ),
+        (
+            "null seat on an api-key entry",
+            GroupDim::Seat,
+            None,
+            Some("keyed"),
+            "#keyed",
+        ),
+        (
+            "null seat on a cloud entry",
+            GroupDim::Seat,
+            None,
+            Some("cloud"),
+            "#cloud",
+        ),
+        (
+            "null seat on an oauth entry",
+            GroupDim::Seat,
+            None,
+            Some("sub"),
+            UNATTRIBUTED,
+        ),
+        (
+            "null seat on a forwarded entry",
+            GroupDim::Seat,
+            None,
+            Some("relay"),
+            UNATTRIBUTED,
+        ),
+        (
+            "null seat on an unconfigured entry",
+            GroupDim::Seat,
+            None,
+            Some("gone"),
+            UNATTRIBUTED,
+        ),
+        ("null provider", GroupDim::Seat, None, None, UNATTRIBUTED),
+        ("model grouping", GroupDim::Model, None, Some("keyed"), "m1"),
+        ("alias grouping", GroupDim::Alias, None, Some("keyed"), "al"),
+        (
+            "provider grouping",
+            GroupDim::Provider,
+            None,
+            Some("keyed"),
+            "keyed",
+        ),
+    ];
+    for (case, group_by, seat, provider, expected) in rows {
+        // Arrange
+        let key = GroupKey {
+            model: Some("m1".into()),
+            provider: provider.map(str::to_string),
+            alias: "al".into(),
+            seat: seat.map(str::to_string),
+            ..GroupKey::default()
+        };
+
+        // Act
+        let label = mapped_spec(group_by).group_label(&key);
+
+        // Assert
+        assert_eq!(label, expected, "{case}");
+    }
+}
+
+#[test]
+fn seat_grouping_splits_unseated_rows_by_their_entry_account() {
+    // Arrange: two own-credential entries, an OAuth entry's pre-seat row, a
+    // forwarded entry and a seated row, each with its own input count.
+    let (_dir, mut db) = open_db();
+    let rows = [
+        ("k1", Some("keyed"), None, 1),
+        ("k2", Some("keyed"), None, 2),
+        ("c1", Some("cloud"), None, 40),
+        ("o1", Some("sub"), None, 300),
+        ("f1", Some("relay"), None, 5_000),
+        ("s1", Some("keyed"), Some("anthropic#work"), 60_000),
+    ];
+    for (request_id, provider, seat, input) in rows {
+        insert(
+            &db,
+            &Fixture {
+                request_id,
+                provider,
+                seat,
+                input_tokens: Some(input),
+                ..Fixture::default()
+            },
+        );
+    }
+
+    // Act
+    let mapped = query(
+        &mut db,
+        &mapped_spec(GroupDim::Seat),
+        unpriced,
+        no_deadline(),
+    )
+    .expect("query");
+    let unmapped = query(&mut db, &spec(GroupDim::Seat), unpriced, no_deadline()).expect("query");
+
+    // Assert
+    let labels: Vec<&str> = mapped.groups.iter().map(|g| g.label.as_str()).collect();
+    assert_eq!(labels, ["#cloud", "#keyed", UNATTRIBUTED, "anthropic#work"]);
+    assert_eq!(group(&mapped, "#keyed").metrics.requests, 2);
+    assert_eq!(group(&mapped, "#keyed").metrics.input_tokens, 3);
+    assert_eq!(group(&mapped, "#cloud").metrics.input_tokens, 40);
+    assert_eq!(group(&mapped, UNATTRIBUTED).metrics.input_tokens, 5_300);
+    assert_eq!(
+        group(&mapped, "anthropic#work").metrics.input_tokens,
+        60_000
+    );
+    assert_eq!(mapped.totals, unmapped.totals);
+    let unmapped_labels: Vec<&str> = unmapped.groups.iter().map(|g| g.label.as_str()).collect();
+    assert_eq!(
+        unmapped_labels,
+        [UNATTRIBUTED, "anthropic#work"],
+        "control: without the map every unseated row is unattributed"
+    );
+}
+
+#[test]
+fn the_entry_map_leaves_other_groupings_and_the_series_unchanged() {
+    // Arrange: unseated rows on a mapped and an unmapped entry, two buckets.
+    let (_dir, mut db) = open_db();
+    for (request_id, ts_start, provider) in [("a", 100, "keyed"), ("b", 1_100, "sub")] {
+        insert(
+            &db,
+            &Fixture {
+                request_id,
+                ts_start,
+                provider: Some(provider),
+                ..Fixture::default()
+            },
+        );
+    }
+    let bucket = Some(BucketSpec {
+        width_ms: 1_000,
+        count: 3,
+    });
+    for group_by in [
+        GroupDim::Model,
+        GroupDim::Alias,
+        GroupDim::Provider,
+        GroupDim::Seat,
+    ] {
+        let plain = QuerySpec {
+            bucket,
+            ..spec(group_by)
+        };
+        let with_map = QuerySpec {
+            entry_accounts: entry_accounts(),
+            ..plain.clone()
+        };
+
+        // Act
+        let without = query(&mut db, &plain, unpriced, no_deadline()).expect("query");
+        let with = query(&mut db, &with_map, unpriced, no_deadline()).expect("query");
+
+        // Assert
+        assert_eq!(with.series, without.series, "{}", group_by.as_str());
+        assert_eq!(with.totals, without.totals, "{}", group_by.as_str());
+        if group_by == GroupDim::Seat {
+            assert_ne!(
+                with.groups, without.groups,
+                "positive control: the map does relabel the seat grouping"
+            );
+        } else {
+            assert_eq!(with.groups, without.groups, "{}", group_by.as_str());
+        }
+    }
+}

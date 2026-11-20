@@ -444,6 +444,7 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
             width_ms: 86_400_000,
             count: 401,
         }),
+        entry_accounts: Default::default(),
     };
     let budget = Duration::from_millis(QUERY_BUDGET_MS);
     // Warm the page cache so the first reference scan is not the one paying for

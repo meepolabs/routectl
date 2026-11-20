@@ -120,6 +120,7 @@ fn spec(group_by: GroupDim) -> QuerySpec {
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: Default::default(),
     }
 }
 

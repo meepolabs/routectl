@@ -32,6 +32,7 @@
 //! result price against different rate tables. A `seat` grouping names each
 //! group's account from that same snapshot.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -82,7 +83,12 @@ use super::{Panel, StatusState, now_utc_rfc3339, run_blocking_panel};
 /// `cache_read_present`, `server_tool_present` and
 /// `client_disconnect_pre_dispatch`, and on every seat group `account`,
 /// `provider_entry` and `login_label`.
-pub const SCHEMA_VERSION: u32 = 4;
+///
+/// At 5 the `seat` grouping changed meaning: a row with no recorded seat that
+/// was served by an entry whose account is the entry itself (an API key or a
+/// cloud credential) groups under that `#<entry>` account, as the served
+/// config names it, rather than under `(unattributed)`.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The one method this route answers. Not expressible as an axum
 /// `MethodFilter`, hence the manual guard.
@@ -385,6 +391,7 @@ impl ParsedQuery {
             alias_filter: self.alias_filter,
             provider_filter: self.provider_filter,
             bucket: None,
+            entry_accounts: BTreeMap::new(),
         };
         (spec, self.bucket)
     }
@@ -569,6 +576,9 @@ fn stall_until_stopped(limit: &ReadLimit) {
 /// the outcome to a panel. Runs on a blocking worker (SQLite is synchronous);
 /// the connection is opened and dropped within this call.
 ///
+/// The seat grouping's entry accounts are taken from `pricer`, so a row's
+/// label and its price read one config snapshot.
+///
 /// A limit that has already stopped the read (its request was dropped while
 /// this waited for a worker, or the budget ran out in the queue) answers
 /// `query_timeout` before the ledger is opened.
@@ -597,6 +607,7 @@ pub(super) fn build_panel(
     if read_stopped(limit) {
         return Panel::unavailable(SCHEMA_VERSION, codes::QUERY_TIMEOUT);
     }
+    spec.entry_accounts = pricer.entry_accounts();
     let mut db = match open_readonly_fastfail(db_path) {
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),

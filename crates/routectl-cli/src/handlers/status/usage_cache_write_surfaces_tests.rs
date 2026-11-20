@@ -87,6 +87,7 @@ fn three_surfaces(db: &mut UsageDb) -> (String, UsagePanel, QueryResult) {
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: Default::default(),
     };
     let result = query(db, &spec, |_| RowCost::Unpriced(Vec::new()), deadline).expect("query");
     (report, panel, result)

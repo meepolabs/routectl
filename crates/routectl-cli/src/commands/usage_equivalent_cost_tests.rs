@@ -546,6 +546,7 @@ fn a_non_finite_equivalent_total_degrades_to_absent() {
         alias_filter: None,
         provider_filter: None,
         bucket: None,
+        entry_accounts: Default::default(),
     };
     let fold = |db: &mut UsageDb, usd: f64| {
         let deadline = Instant::now() + std::time::Duration::from_mins(10);

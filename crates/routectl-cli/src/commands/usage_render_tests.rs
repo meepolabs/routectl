@@ -451,8 +451,9 @@ fn detail_ctx_columns_read_dash_when_no_request_reported_a_prompt() {
 
 #[test]
 fn by_seat_groups_by_the_recorded_seat_under_a_seat_header() {
-    // Arrange: one model and provider, three seat values (one NULL), so only a
-    // seat grouping splits the rows.
+    // Arrange: one model on the API-key entry `paid`, three seat values (one
+    // NULL), so only a seat grouping splits the rows; the unseated row is the
+    // entry's own account.
     let (_dir, _path, mut db) = temp_db();
     for (id, seat) in [
         ("s1", Some("work")),
@@ -480,12 +481,7 @@ fn by_seat_groups_by_the_recorded_seat_under_a_seat_header() {
         .collect();
     assert_eq!(
         labels,
-        [
-            ("(unattributed)", 1),
-            ("home", 1),
-            ("work", 2),
-            ("total", 4)
-        ]
+        [("#paid", 1), ("home", 1), ("work", 2), ("total", 4)]
     );
     let header = out.lines().nth(1).expect("header line present");
     assert_eq!(header.split_whitespace().next(), Some("seat"));

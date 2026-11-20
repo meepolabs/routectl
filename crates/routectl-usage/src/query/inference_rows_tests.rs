@@ -78,6 +78,7 @@ fn grouped_spec(bucket: Option<BucketSpec>) -> QuerySpec {
         alias_filter: None,
         provider_filter: None,
         bucket,
+        entry_accounts: Default::default(),
     }
 }
 

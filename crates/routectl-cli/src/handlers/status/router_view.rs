@@ -120,6 +120,13 @@ impl QueryPricer {
     pub fn price(&self, row: &AggRow) -> RowCost {
         cost_for_row(&self.router.config, &self.prices, row)
     }
+
+    /// Provider entry -> account for the pinned snapshot's own-credential
+    /// entries, so a seat grouping labels its rows from the config that
+    /// prices them.
+    pub fn entry_accounts(&self) -> BTreeMap<String, String> {
+        AccountIdentities::from_config(&self.router.config).entry_accounts()
+    }
 }
 
 /// A read-only view over one pinned router snapshot. The `router` field is
