@@ -907,6 +907,36 @@ impl ProviderState {
             rpm_available,
             circuit,
             credential,
+            outage_remaining: self.outage_remaining(now, credential, circuit, park),
+        }
+    }
+
+    /// Time left in the outage behind the snapshot's refusal, by the same
+    /// priority as [`CapacitySnapshot::reason`]: a live park, else an open
+    /// breaker still inside its window. `None` whenever the end is unknown
+    /// (an unusable credential, a re-test or probe in flight whose outcome
+    /// decides it) or nothing timed refuses.
+    fn outage_remaining(
+        &self,
+        now: Instant,
+        credential: CredentialState,
+        circuit: CircuitPhase,
+        park: Option<CredentialPark>,
+    ) -> Option<Duration> {
+        if self.half_open_in_flight {
+            return None;
+        }
+        match credential {
+            CredentialState::Unusable => None,
+            CredentialState::Parked => park.map(|park| park.until.saturating_duration_since(now)),
+            CredentialState::Usable if circuit == CircuitPhase::Open => {
+                let opened_at = self.circuit_opened_at?;
+                Some(
+                    self.active_cooldown()
+                        .saturating_sub(now.duration_since(opened_at)),
+                )
+            }
+            CredentialState::Usable => None,
         }
     }
 
@@ -1065,6 +1095,10 @@ pub struct CapacitySnapshot {
     pub circuit: CircuitPhase,
     /// Whether the account's credential would refuse the dispatch, and why.
     pub credential: CredentialState,
+    /// Time left in the outage [`Self::reason`] names when it is a live
+    /// park or an open breaker inside its window; `None` for every other
+    /// state, including a re-test or probe in flight.
+    pub(crate) outage_remaining: Option<Duration>,
 }
 
 impl CapacitySnapshot {
@@ -1110,6 +1144,10 @@ mod default_breaker_tests;
 #[cfg(test)]
 #[path = "runtime_state_epoch_tests.rs"]
 mod epoch_tests;
+
+#[cfg(test)]
+#[path = "runtime_state_outage_tests.rs"]
+mod outage_tests;
 
 #[cfg(test)]
 #[path = "runtime_state_retry_in_tests.rs"]

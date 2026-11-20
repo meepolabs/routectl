@@ -1009,6 +1009,7 @@ mod tests {
             rpm_available: None,
             circuit: CircuitPhase::Closed,
             credential: crate::runtime_state::CredentialState::Usable,
+            outage_remaining: None,
         }
     }
 
@@ -1017,6 +1018,7 @@ mod tests {
             rpm_available: Some(rpm),
             circuit: CircuitPhase::Closed,
             credential: crate::runtime_state::CredentialState::Usable,
+            outage_remaining: None,
         }
     }
 
@@ -1026,6 +1028,7 @@ mod tests {
             rpm_available: None,
             circuit: CircuitPhase::Open,
             credential: crate::runtime_state::CredentialState::Usable,
+            outage_remaining: None,
         }
     }
 
@@ -1125,6 +1128,7 @@ mod tests {
                 rpm_available: Some(100.0),
                 circuit: CircuitPhase::HalfOpenReady,
                 credential: crate::runtime_state::CredentialState::Usable,
+                outage_remaining: None,
             },
             closed_with(3.0),
         ];
@@ -1293,6 +1297,7 @@ mod tests {
                 rpm_available: Some(100.0),
                 circuit: CircuitPhase::HalfOpenReady,
                 credential: crate::runtime_state::CredentialState::Usable,
+                outage_remaining: None,
             },
             closed_with(100.0),
         ];
@@ -1342,6 +1347,7 @@ mod tests {
                 rpm_available: Some(100.0),
                 circuit: CircuitPhase::HalfOpenReady,
                 credential: crate::runtime_state::CredentialState::Usable,
+                outage_remaining: None,
             },
             closed_with(3.0),
         ];

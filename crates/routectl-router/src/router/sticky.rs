@@ -264,6 +264,7 @@ impl Router {
                             rpm_available: Some(0.0),
                             circuit: crate::runtime_state::CircuitPhase::Open,
                             credential: crate::runtime_state::CredentialState::Usable,
+                            outage_remaining: None,
                         },
                     )
             })
