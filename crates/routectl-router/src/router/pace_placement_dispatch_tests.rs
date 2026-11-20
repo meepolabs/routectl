@@ -60,6 +60,7 @@ impl Provider for SeatStub {
 #[derive(Clone, Copy)]
 enum Family {
     Anthropic,
+    #[cfg(feature = "openai-responses")]
     Codex,
 }
 
@@ -67,6 +68,7 @@ impl Family {
     const fn provider(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
+            #[cfg(feature = "openai-responses")]
             Self::Codex => "codex",
         }
     }
@@ -74,6 +76,7 @@ impl Family {
     const fn vendor(self) -> UsageVendor {
         match self {
             Self::Anthropic => UsageVendor::Anthropic,
+            #[cfg(feature = "openai-responses")]
             Self::Codex => UsageVendor::Codex,
         }
     }
@@ -81,6 +84,7 @@ impl Family {
     fn entry(self, credential: String) -> ProviderEntry {
         match self {
             Self::Anthropic => ProviderEntry::anthropic_api(credential),
+            #[cfg(feature = "openai-responses")]
             Self::Codex => ProviderEntry::openai_responses(credential),
         }
     }
@@ -183,6 +187,7 @@ fn anthropic_body(
 
 /// A Codex usage body: a five-hour primary at `primary` with an hour left and
 /// a weekly secondary at `secondary` with two days left.
+#[cfg(feature = "openai-responses")]
 fn codex_body(primary: u32, secondary: u32) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -266,6 +271,7 @@ fn a_keyed_and_a_keyless_birth_both_land_on_the_best_standing() {
     }
 }
 
+#[cfg(feature = "openai-responses")]
 #[test]
 fn a_codex_pool_places_keyed_and_keyless_births_on_the_best_standing() {
     let rows: [(&str, Option<&str>); 2] = [("keyed", Some("S")), ("keyless", None)];
