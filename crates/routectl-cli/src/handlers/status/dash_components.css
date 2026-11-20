@@ -688,6 +688,143 @@ td.num .unit, th.num .unit {
   font-size: var(--fs-sm);
 }
 
+/* ---- now: needs attention ----
+   One card per item, read top to bottom: severity and subject, the cause in
+   plain words, the fix with the item's emphasis, then the raw token for grep
+   and copy. Only the dot and the severity word carry the state hue; a
+   recovered item turns grey whole. */
+.attn-counts {
+  display: inline-flex;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.attn-count {
+  padding: 0.05em 0.55em;
+  border-radius: var(--r-pill);
+}
+.attn-count--broken { background: var(--pill-err-bg); color: var(--pill-err-fg); }
+.attn-count--degraded { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+.attn-clear {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.attn-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.attn-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  animation: attnenter 280ms var(--ease) both;
+}
+@keyframes attnenter {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.attn-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.attn-dot {
+  flex: none;
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  align-self: center;
+  background: var(--faint);
+}
+.attn-sev {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.attn-item--broken .attn-dot { background: var(--neg); }
+.attn-item--broken .attn-sev { color: var(--neg); }
+.attn-item--degraded .attn-dot { background: var(--warn); }
+.attn-item--degraded .attn-sev { color: var(--warn); }
+.attn-subject {
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.attn-target {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+}
+.attn-target:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.attn-cause {
+  font-size: var(--fs-md);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.attn-recovered {
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+.attn-fix,
+.attn-raw {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.attn-label {
+  flex: none;
+  min-width: 2.5rem;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+}
+/* The fix is the line to run: the item's emphasis, kept verbatim, wrapping
+   inside its own box rather than scrolling. */
+.attn-fix-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.attn-raw-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.attn-fix-code:focus-visible,
+.attn-raw-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.attn-item--recovered { background: transparent; }
+.attn-item--recovered .attn-subject,
+.attn-item--recovered .attn-cause,
+.attn-item--recovered .attn-fix-code,
+.attn-item--recovered .attn-raw-code { color: var(--faint); }
+.attn-item--recovered .attn-fix-code { font-weight: 400; border-color: var(--border); }
+@media (prefers-reduced-motion: reduce) {
+  .attn-item { animation: none; }
+}
+
 /* ---- usage: group-by picker + group cards ---- */
 .gbstrip {
   display: flex;

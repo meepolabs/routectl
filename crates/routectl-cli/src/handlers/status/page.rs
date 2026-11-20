@@ -1034,7 +1034,7 @@ mod tests {
     /// the round was issued for rather than to a hardcoded one). Two records
     /// with one of them unreachable is the same bug at one remove.
     ///
-    /// Mutation check: point Now's first VIEWS source at `QUERY_SOURCE`
+    /// Mutation check: point Now's QUERY source in VIEWS at `QUERY_SOURCE`
     /// -> red.
     #[test]
     fn dashboard_query_shapes_have_their_own_source_records() {
@@ -1096,18 +1096,19 @@ mod tests {
              resolves an unmapped source to itself); rename it and it needs its own entry"
         );
 
-        // Each query-backed view's PRIMARY source (its first `sources` entry)
-        // is the read that view actually issues, and the two must not be the
-        // same record. VIEWS names the CONSTANTS, so this reads the identifiers.
+        // Each query-backed view's QUERY source (the first QUERY read in its
+        // `sources`) is the read that view actually issues, and the two must
+        // not be the same record. VIEWS names the CONSTANTS, so this reads the
+        // identifiers.
         assert_eq!(
-            view_primary("now"),
-            "QUERY_SERIES_SOURCE",
+            view_query_source("now").as_deref(),
+            Some("QUERY_SERIES_SOURCE"),
             "Now must read the bucketed QUERY source; it is the only one whose payload \
              carries the series its sparklines are drawn from"
         );
         assert_eq!(
-            view_primary("traffic"),
-            "QUERY_SOURCE",
+            view_query_source("traffic").as_deref(),
+            Some("QUERY_SOURCE"),
             "Traffic must read the series-less QUERY source, the shape its usage cards request"
         );
 
@@ -1189,7 +1190,7 @@ mod tests {
     /// unrelated deterministic refusals, so recording one must never
     /// suppress retries of the other.
     ///
-    /// Mutation check: point Now's first VIEWS source at `QUERY_SOURCE`
+    /// Mutation check: point Now's QUERY source in VIEWS at `QUERY_SOURCE`
     /// -> red (two views would share one marker).
     #[test]
     fn dashboard_query_rejection_marker_is_keyed_per_source() {
@@ -1240,17 +1241,22 @@ mod tests {
         // view issues its OWN source: two views registering one query source
         // would share one marker, so a refusal of one view's shape would
         // suppress the other's retries.
-        let mut query_primaries: Vec<String> = views::view_entries(&script)
+        let mut issued: Vec<String> = views::view_entries(&script)
             .into_iter()
-            .filter_map(|view| view.sources.into_iter().next())
-            .filter(|primary| primary == "QUERY_SOURCE" || primary == "QUERY_SERIES_SOURCE")
+            .filter_map(|view| first_query_source(&view.sources))
             .collect();
-        query_primaries.sort();
+        issued.sort();
+        let mut distinct = issued.clone();
+        distinct.dedup();
         assert_eq!(
-            query_primaries,
-            vec!["QUERY_SERIES_SOURCE", "QUERY_SOURCE"],
-            "each QUERY source must be the primary of exactly one view, or two views share \
-             one rejection marker"
+            issued, distinct,
+            "each QUERY source must be issued by at most one view, or two views share one \
+             rejection marker"
+        );
+        assert!(
+            issued.contains(&"QUERY_SERIES_SOURCE".to_string())
+                && issued.contains(&"QUERY_SOURCE".to_string()),
+            "positive control: Now and Traffic each issue a QUERY: {issued:?}"
         );
 
         // DRIFT GUARD: the reset path that clears a stale marker must derive
@@ -1324,14 +1330,22 @@ mod tests {
         panic!("`{name}` body is not closed");
     }
 
-    /// The first `sources` entry of a registered view, as the identifier it is
+    /// The QUERY source identifiers VIEWS may name.
+    const QUERY_SOURCE_IDENTS: &[&str] =
+        &["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"];
+
+    /// The first QUERY source in `sources`, as viewQuerySource picks it.
+    fn first_query_source(sources: &[String]) -> Option<String> {
+        sources
+            .iter()
+            .find(|source| QUERY_SOURCE_IDENTS.contains(&source.as_str()))
+            .cloned()
+    }
+
+    /// The QUERY source a registered view issues, as the identifier it is
     /// written as in the script.
-    fn view_primary(id: &str) -> String {
-        views::view_entry(id)
-            .sources
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| panic!("view `{id}` names at least one source"))
+    fn view_query_source(id: &str) -> Option<String> {
+        first_query_source(&views::view_entry(id).sources)
     }
 
     /// Drift guard on the QUERY retry contract: which codes back off, and the
@@ -2053,6 +2067,11 @@ mod tests {
     mod browser_sources {
         use super::*;
         include!("page_browser_sources_tests.rs");
+    }
+
+    mod browser_now {
+        use super::*;
+        include!("page_browser_now_tests.rs");
     }
 
     mod payload_keys {

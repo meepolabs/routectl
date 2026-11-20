@@ -25,7 +25,7 @@
     {
       id: 'now',
       label: 'Now',
-      sources: [QUERY_SERIES_SOURCE, 'usage'],
+      sources: ['attention', 'accounts', QUERY_SERIES_SOURCE, 'config'],
       span: null,
       build: buildNow
     },
@@ -81,16 +81,18 @@
   // pending marks. Controls over the page selection sit beside the sections,
   // so a section showing a state card never takes them with it.
 
-  // Where traffic is going: the windowed QUERY's provider cards and tiles,
-  // with the seat quota on them read from the usage ledger and guarded inside.
-  // The scope reset line stands in for the provider cards when a scoped
-  // query has nothing renderable.
-  function buildNow(rec) {
-    var section = viewSection(QUERY_SERIES_SOURCE, buildOverview);
-    if (!selectedProvider || !stateCard(rec)) { return section; }
+  // What needs attention, from the daemon's list, then where traffic is
+  // going: the windowed QUERY's provider cards and tiles, with the seat quota
+  // on them read from the usage ledger and guarded inside. The scope reset
+  // line stands in for the provider cards when a scoped query has nothing
+  // renderable.
+  function buildNow() {
     var stack = tabStack();
-    stack.appendChild(scopeRecovery());
-    stack.appendChild(section);
+    stack.appendChild(viewSection('attention', attentionSection, 'Needs attention'));
+    if (selectedProvider && stateCard(SOURCES[QUERY_SERIES_SOURCE])) {
+      stack.appendChild(scopeRecovery());
+    }
+    stack.appendChild(viewSection(QUERY_SERIES_SOURCE, buildOverview));
     return stack;
   }
 
