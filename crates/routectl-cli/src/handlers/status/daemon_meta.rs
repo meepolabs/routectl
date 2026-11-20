@@ -10,20 +10,25 @@
 //! stamp sits the last REJECTED reload (its redacted class and instant), which
 //! the doctor panel reads while no later load has superseded it, the health
 //! of each background seat driver (the refresh and the usage poll), which the
-//! health panel reads, and the usage poll's read-only state.
+//! health panel reads, the refresh driver's current per-account failures,
+//! and the usage poll's read-only state.
 //!
 //! Same enforcement shape as [`super::router_view`]: the `Arc<DaemonMeta>`
 //! is PRIVATE to [`DaemonMetaHandle`], so a panel module holding a handle can
 //! call only its read methods -- it can never name the inner field and so can
-//! never reach the stamp writer or the driver's health writer.
+//! never reach the stamp writer, the driver's health writer or the refresh
+//! failure record's writer.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
 use crate::server::reload_failure::{ReloadFailure, ReloadFailureSnapshot};
-use crate::server::seat_driver::{SeatDriverHealth, SeatDriverHealthSnapshot};
+use crate::server::seat_driver::{
+    RefreshFailure, RefreshFailures, SeatDriverHealth, SeatDriverHealthSnapshot,
+};
 use crate::server::usage_poll::UsagePollState;
 
 /// Epoch-ms sentinel for "no config load has been stamped yet". Never
@@ -40,6 +45,8 @@ pub struct DaemonMeta {
     last_reload_failure: Mutex<Option<(ReloadFailure, i64)>>,
     /// The background refresh driver's health, written by the driver task.
     seat_driver: Arc<SeatDriverHealth>,
+    /// The refresh driver's current per-account failures, written by its job.
+    refresh_failures: Arc<RefreshFailures>,
     /// The background usage poll driver's health, written by its task.
     usage_poll_driver: Arc<SeatDriverHealth>,
     /// The usage poll's state, installed when the poll is spawned; unset on
@@ -56,6 +63,7 @@ impl DaemonMeta {
             config_loaded_at_ms: AtomicI64::new(UNSTAMPED),
             last_reload_failure: Mutex::new(None),
             seat_driver: Arc::default(),
+            refresh_failures: Arc::default(),
             usage_poll_driver: Arc::default(),
             usage_poll_state: OnceLock::new(),
         }
@@ -64,6 +72,11 @@ impl DaemonMeta {
     /// The background refresh driver's health, shared with the driver task.
     pub fn seat_driver_health(&self) -> Arc<SeatDriverHealth> {
         Arc::clone(&self.seat_driver)
+    }
+
+    /// The refresh driver's failure record, shared with its job.
+    pub(crate) fn refresh_failures(&self) -> Arc<RefreshFailures> {
+        Arc::clone(&self.refresh_failures)
     }
 
     /// The background usage poll driver's health, shared with its task.
@@ -136,6 +149,12 @@ impl DaemonMetaHandle {
     /// One read of the background usage poll driver's health.
     pub fn usage_poll_driver(&self) -> SeatDriverHealthSnapshot {
         self.inner.usage_poll_driver.snapshot()
+    }
+
+    /// One read of the refresh driver's current failures, keyed by
+    /// credential account. Empty on a daemon that runs no refresh driver.
+    pub fn refresh_failures(&self) -> BTreeMap<String, RefreshFailure> {
+        self.inner.refresh_failures.snapshot()
     }
 
     /// The usage poll's read-only state, or `None` on a daemon that runs no
@@ -283,6 +302,23 @@ mod tests {
                 age_ms: 7_000,
             })
         );
+    }
+
+    #[test]
+    fn the_handle_reads_the_refresh_failures_the_job_records() {
+        let meta = Arc::new(DaemonMeta::new("127.0.0.1:9000".to_string()));
+        let handle = DaemonMetaHandle::new(meta.clone());
+        assert!(handle.refresh_failures().is_empty());
+
+        meta.refresh_failures()
+            .record_failure_for_tests("anthropic#a", 0, "transient");
+
+        let failures = handle.refresh_failures();
+        assert_eq!(
+            failures.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["anthropic#a"]
+        );
+        assert_eq!(failures["anthropic#a"].token, "transient");
     }
 
     #[test]

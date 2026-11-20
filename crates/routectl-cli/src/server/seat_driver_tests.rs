@@ -105,6 +105,7 @@ struct Rig {
     config: Arc<Config>,
     swap: Arc<ArcSwap<Router>>,
     health: SeatDriverHealth,
+    failures: Arc<RefreshFailures>,
     _usage_dir: tempfile::TempDir,
     _xdg: ScopedEnv,
     _dir: tempfile::TempDir,
@@ -136,6 +137,7 @@ impl Rig {
             config,
             swap: Arc::new(ArcSwap::from_pointee(router)),
             health: SeatDriverHealth::default(),
+            failures: Arc::default(),
             _usage_dir: usage_dir,
             _xdg: xdg,
             _dir: dir,
@@ -143,7 +145,7 @@ impl Rig {
     }
 
     fn job(&self) -> RefreshJob {
-        RefreshJob::new(self.store.clone())
+        RefreshJob::new(self.store.clone(), self.failures.clone())
     }
 
     async fn sweep_with(&self, job: &impl SeatJob) {
@@ -636,6 +638,283 @@ async fn a_refresh_clears_an_expired_mark_only_under_the_generation_it_started_i
         assert_eq!(rig.flow.post_count(), 1, "{name}: premise, refreshed");
         assert_eq!(rig.seat_a_marks(), [expected, expected], "{name}");
     }
+}
+
+impl Rig {
+    fn failures(&self) -> BTreeMap<String, RefreshFailure> {
+        self.failures.snapshot()
+    }
+
+    fn seat_a_failure(&self) -> Option<RefreshFailure> {
+        self.failures().get(SEAT_A).copied()
+    }
+
+    fn plant_seat_a_failure(&self) {
+        let generation = self.swap.load().acquire_credential_generation(SEAT_A);
+        self.failures
+            .record_failure_for_tests(SEAT_A, generation, "transient");
+        assert!(self.seat_a_failure().is_some(), "premise: planted");
+    }
+
+    async fn swap_config(&self, text: &str) {
+        let mut config = routectl_router::parse_config(text).expect("fixture parses");
+        let _usage_dir = isolate_usage_db(&mut config);
+        let secrets: Arc<dyn SecretStore> = self.store.clone();
+        let mut next = build_router_from_config(Arc::new(config), secrets)
+            .await
+            .expect("router builds");
+        next.carry_over_runtime_state_from(&self.swap.load());
+        self.swap.store(Arc::new(next));
+    }
+}
+
+/// [`rig_config_text`] without seat a: only the xAI login is left.
+fn config_without_seat_a() -> String {
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
+         [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+         [providers.grok]\n\
+         format = \"openai-chat\"\n\
+         base_url = \"https://api.x.ai/v1\"\n\
+         credential = \"oauth://xai\"\n\
+         auth = \"bearer\"\n\n\
+         [models.grok]\nprovider = \"grok\"\nupstream = \"grok-4\"\n"
+    )
+}
+
+/// One stored credential: `(seat key, access token, expires_at_unix)`.
+type StoredSeat<'a> = (&'a str, &'a str, u64);
+
+#[tokio::test]
+#[serial_test::serial]
+async fn each_failing_refresh_result_records_its_token_for_the_account() {
+    let rows: [(&str, &[StoredSeat], ScriptedRefresh, &str); 4] = [
+        (
+            "endpoint down, token still valid",
+            &[(SEAT_A, "tok-a", due_soon())],
+            ScriptedRefresh::TokenEndpoint(503),
+            "transient",
+        ),
+        (
+            "endpoint down, token expired",
+            &[(SEAT_A, "tok-a", expired())],
+            ScriptedRefresh::Transient,
+            "transient_access_expired",
+        ),
+        (
+            "refresh token refused",
+            &[(SEAT_A, "tok-a", due_soon())],
+            ScriptedRefresh::RefreshExpired,
+            "revoked",
+        ),
+        (
+            "no stored login",
+            &[],
+            ScriptedRefresh::Mint("unused".into()),
+            "not_logged_in",
+        ),
+    ];
+    for (name, seats, script, token) in rows {
+        // Arrange
+        let rig = Rig::new(seats, script).await;
+        let before = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+
+        // Act
+        rig.sweep().await;
+
+        // Assert
+        let after = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+        let failure = rig
+            .seat_a_failure()
+            .unwrap_or_else(|| panic!("{name}: recorded"));
+        assert_eq!(failure.token, token, "{name}");
+        assert!(
+            (before..=after).contains(&failure.first_failure_ms),
+            "{name}: first failure stamped during the sweep"
+        );
+        assert_eq!(rig.failures().len(), 1, "{name}: only the managed seat");
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failure_that_persists_across_sweeps_keeps_its_first_failure_time() {
+    // Arrange: one failing sweep, then the clock moves on.
+    let rig = Rig::new(
+        &[(SEAT_A, "tok-a", due_soon())],
+        ScriptedRefresh::TokenEndpoint(503),
+    )
+    .await;
+    rig.sweep().await;
+    let first = rig.seat_a_failure().expect("the first failure is recorded");
+    std::thread::sleep(Duration::from_millis(5));
+
+    // Act: a second failing sweep, inside the cooldown the first armed.
+    rig.sweep().await;
+
+    // Assert
+    assert_eq!(rig.health.snapshot().transient, 2, "premise: failed again");
+    let second = rig.seat_a_failure().expect("still failing");
+    assert_eq!(second.first_failure_ms, first.first_failure_ms);
+    assert_eq!(second.token, "transient");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_quiet_refresh_result_clears_the_accounts_failure() {
+    let rows: [(&str, u64, ScriptedRefresh, bool); 3] = [
+        (
+            "refreshed",
+            due_soon(),
+            ScriptedRefresh::Mint("tok-a2".into()),
+            false,
+        ),
+        (
+            "not due",
+            far_off(),
+            ScriptedRefresh::TokenEndpoint(503),
+            false,
+        ),
+        (
+            "failing again",
+            due_soon(),
+            ScriptedRefresh::TokenEndpoint(503),
+            true,
+        ),
+    ];
+    for (name, expires_at, script, still_failing) in rows {
+        // Arrange: seat a carries a failure under its current credential.
+        let rig = Rig::new(&[(SEAT_A, "tok-a", expires_at)], script).await;
+        rig.plant_seat_a_failure();
+
+        // Act
+        rig.sweep().await;
+
+        // Assert
+        assert_eq!(rig.seat_a_failure().is_some(), still_failing, "{name}");
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_relogin_between_sweeps_clears_the_accounts_failure() {
+    let rows: [(&str, bool, bool); 2] = [
+        ("credential replaced", true, false),
+        ("credential kept", false, true),
+    ];
+    for (name, relogin, still_failing) in rows {
+        // Arrange: seat a failing to refresh.
+        let rig = Rig::new(
+            &[(SEAT_A, "tok-a", due_soon())],
+            ScriptedRefresh::TokenEndpoint(503),
+        )
+        .await;
+        rig.sweep().await;
+        assert!(rig.seat_a_failure().is_some(), "{name}: premise, failing");
+        if relogin {
+            write_credentials(&rig.creds, &[(SEAT_A, "tok-relogin", due_soon())]);
+            rig.reload_credentials().await;
+        }
+
+        // Act: the next sweep starts by listing its due seats.
+        let _ = rig.job().due(&rig.swap.load());
+
+        // Assert
+        assert_eq!(rig.seat_a_failure().is_some(), still_failing, "{name}");
+    }
+}
+
+/// Resets the seat's account while the wrapped job's refresh is in flight.
+struct ReloginDuringRefresh {
+    inner: RefreshJob,
+    router: Arc<Router>,
+}
+
+impl SeatJob for ReloginDuringRefresh {
+    const KIND: &'static str = RefreshJob::KIND;
+
+    type Outcome = RefreshOutcome;
+
+    fn due(&self, router: &Router) -> Vec<ManagedSeat> {
+        self.inner.due(router)
+    }
+
+    fn run(&self, seat: &ManagedSeat) -> impl Future<Output = RefreshOutcome> + Send {
+        self.router
+            .lift_oauth_credential_parks([seat.account.as_str()]);
+        self.inner.run(seat)
+    }
+
+    fn apply(
+        &self,
+        router: &Router,
+        seat: &ManagedSeat,
+        generation: u64,
+        outcome: RefreshOutcome,
+    ) -> SeatVerdict {
+        self.inner.apply(router, seat, generation, outcome)
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failure_observed_under_a_replaced_credential_is_not_recorded() {
+    // Arrange: seat a already failing, its refresh about to fail again.
+    let rig = Rig::new(
+        &[(SEAT_A, "tok-a", due_soon())],
+        ScriptedRefresh::TokenEndpoint(503),
+    )
+    .await;
+    rig.plant_seat_a_failure();
+    let job = ReloginDuringRefresh {
+        inner: rig.job(),
+        router: rig.swap.load_full(),
+    };
+
+    // Act
+    rig.sweep_with(&job).await;
+
+    // Assert
+    assert_eq!(rig.health.snapshot().transient, 1, "premise: it failed");
+    assert_eq!(rig.seat_a_failure(), None);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn each_sweep_prunes_failures_to_the_configured_managed_seats() {
+    // Arrange: seat a failing, plus failures for accounts no entry names.
+    let rig = Rig::new(
+        &[(SEAT_A, "tok-a", due_soon())],
+        ScriptedRefresh::TokenEndpoint(503),
+    )
+    .await;
+    rig.sweep().await;
+    rig.failures
+        .record_failure_for_tests("anthropic#gone", 0, "transient");
+    rig.failures
+        .record_failure_for_tests("codex#old", 0, "revoked");
+    assert_eq!(rig.failures().len(), 3, "premise: planted");
+
+    // Act
+    rig.sweep().await;
+
+    // Assert: only the configured seat is left.
+    assert_eq!(
+        rig.failures()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [SEAT_A]
+    );
+    assert!(rig.failures().len() <= managed_seats(&rig.swap.load().config).len());
+
+    // Act: a config reload drops seat a.
+    rig.swap_config(&config_without_seat_a()).await;
+    rig.sweep().await;
+
+    // Assert
+    assert!(managed_seats(&rig.swap.load().config).is_empty(), "premise");
+    assert_eq!(rig.failures(), BTreeMap::new());
 }
 
 /// A job that counts its sweeps and has nothing due.

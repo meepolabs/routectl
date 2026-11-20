@@ -10,7 +10,7 @@
 //! runs, and its outcome applies only under that generation, so a re-login or
 //! another refresh that lands while the job is in flight wins over it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use routectl_auth::{DefinitiveCause, OAuthStore, RefreshOutcome, SecretRef};
 use routectl_core::sanitize_for_log;
 use routectl_router::runtime_state::{MarkOutcome, UnusableCause};
@@ -117,11 +118,12 @@ pub(super) trait SeatJob: Send + Sync {
 /// inside the store's refresh lead window.
 pub(super) struct RefreshJob {
     store: Arc<OAuthStore>,
+    failures: Arc<RefreshFailures>,
 }
 
 impl RefreshJob {
-    pub(super) const fn new(store: Arc<OAuthStore>) -> Self {
-        Self { store }
+    pub(super) const fn new(store: Arc<OAuthStore>, failures: Arc<RefreshFailures>) -> Self {
+        Self { store, failures }
     }
 }
 
@@ -135,9 +137,15 @@ impl SeatJob for RefreshJob {
     /// again, so re-posting it each sweep is a retest with a known answer.
     /// The reload that sees the login resets the mark, which makes the seat
     /// due again.
+    ///
+    /// Each sweep starts here, so this is also where the failure record
+    /// drops accounts the config no longer manages and accounts whose
+    /// credential was replaced since their failure was recorded.
     fn due(&self, router: &Router) -> Vec<ManagedSeat> {
+        let seats = managed_seats(&router.config);
+        self.failures.prune(router, &seats);
         let dead = accounts_awaiting_login(router);
-        managed_seats(&router.config)
+        seats
             .into_iter()
             .filter(|seat| !dead.contains(&seat.account))
             .collect()
@@ -160,6 +168,7 @@ impl SeatJob for RefreshJob {
         generation: u64,
         outcome: RefreshOutcome,
     ) -> SeatVerdict {
+        self.failures.record(router, seat, generation, outcome);
         match outcome {
             RefreshOutcome::NotDue => SeatVerdict::Quiet,
             RefreshOutcome::Refreshed => {
@@ -177,6 +186,119 @@ impl SeatJob for RefreshJob {
                 SeatVerdict::Definitive
             }
         }
+    }
+}
+
+/// One account's current refresh failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshFailure {
+    /// When the first failing result of the current run of failures was
+    /// recorded (epoch ms).
+    pub first_failure_ms: i64,
+    /// The latest failing result: `transient`, `transient_access_expired`,
+    /// `revoked` or `not_logged_in`.
+    pub token: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FailureEntry {
+    failure: RefreshFailure,
+    /// The credential generation the failing results were observed under.
+    generation: u64,
+}
+
+/// The refresh driver's current failure per configured account.
+/// Memory-only; a restart starts it empty. Written only by the refresh job:
+/// an entry starts at the first failing result, keeps that first time across
+/// later failing results, and goes on a quiet result, on a credential
+/// replacement, or when the config stops managing the account. Every key is
+/// a seat of the config in effect at the last sweep, so the record never
+/// holds more entries than that config has managed seats.
+#[derive(Debug, Default)]
+pub struct RefreshFailures {
+    entries: Mutex<BTreeMap<String, FailureEntry>>,
+}
+
+impl RefreshFailures {
+    /// Every current failure, keyed by credential account.
+    pub fn snapshot(&self) -> BTreeMap<String, RefreshFailure> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|(account, entry)| (account.clone(), entry.failure))
+            .collect()
+    }
+
+    /// Record one failing `token` for `account` under `generation`. Test
+    /// seam for readers of the record that cannot run the job.
+    #[cfg(test)]
+    pub(crate) fn record_failure_for_tests(
+        &self,
+        account: &str,
+        generation: u64,
+        token: &'static str,
+    ) {
+        self.record_failure(account, generation, token);
+    }
+
+    fn record(
+        &self,
+        router: &Router,
+        seat: &ManagedSeat,
+        generation: u64,
+        outcome: RefreshOutcome,
+    ) {
+        let replaced = router.acquire_credential_generation(&seat.account) != generation;
+        match failure_token(outcome) {
+            Some(token) if !replaced => self.record_failure(&seat.account, generation, token),
+            // A credential replaced while the refresh was in flight makes the
+            // result evidence about the old credential only.
+            Some(_) | None => {
+                self.entries.lock().remove(&seat.account);
+            }
+        }
+    }
+
+    fn record_failure(&self, account: &str, generation: u64, token: &'static str) {
+        let now_ms = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+        let mut entries = self.entries.lock();
+        let first_failure_ms = entries
+            .get(account)
+            .filter(|entry| entry.generation == generation)
+            .map_or(now_ms, |entry| entry.failure.first_failure_ms);
+        entries.insert(
+            account.to_string(),
+            FailureEntry {
+                failure: RefreshFailure {
+                    first_failure_ms,
+                    token,
+                },
+                generation,
+            },
+        );
+    }
+
+    fn prune(&self, router: &Router, seats: &[ManagedSeat]) {
+        let managed: BTreeSet<&str> = seats.iter().map(|seat| seat.account.as_str()).collect();
+        self.entries.lock().retain(|account, entry| {
+            managed.contains(account.as_str())
+                && router.acquire_credential_generation(account) == entry.generation
+        });
+    }
+}
+
+/// The record's token for a failing refresh result, `None` for a quiet one.
+const fn failure_token(outcome: RefreshOutcome) -> Option<&'static str> {
+    match outcome {
+        RefreshOutcome::NotDue | RefreshOutcome::Refreshed => None,
+        RefreshOutcome::Transient {
+            access_expired: false,
+        } => Some("transient"),
+        RefreshOutcome::Transient {
+            access_expired: true,
+        } => Some("transient_access_expired"),
+        RefreshOutcome::Definitive(DefinitiveCause::Revoked) => Some("revoked"),
+        RefreshOutcome::Definitive(DefinitiveCause::NotLoggedIn) => Some("not_logged_in"),
     }
 }
 

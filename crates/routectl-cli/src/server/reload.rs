@@ -95,7 +95,7 @@ pub(super) fn spawn_reload_pipeline(
     // the whole process.
     if let Some(store) = oauth_store.as_ref() {
         handles.push(tokio::spawn(run_seat_driver(
-            RefreshJob::new(store.clone()),
+            RefreshJob::new(store.clone(), daemon_meta.refresh_failures()),
             router_swap.clone(),
             shutdown_rx.clone(),
             daemon_meta.seat_driver_health(),
