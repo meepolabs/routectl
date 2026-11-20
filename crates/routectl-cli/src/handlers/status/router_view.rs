@@ -190,26 +190,22 @@ impl StatusRouterView {
     /// The `[pools]` keys whose members resolve to each configured account,
     /// sorted. An account several entries name lists every pool any of those
     /// entries belongs to; an account in no pool lists none. A member resolves
-    /// to the account its dispatch target carries, the same account parks and
-    /// unusable marks are scoped to.
+    /// to its account by the served config's identity rule, the same account
+    /// parks and unusable marks are scoped to, so a member whose provider did
+    /// not build still places its account in the pool.
     pub fn account_pools(&self) -> BTreeMap<String, Vec<String>> {
-        let entry_accounts: BTreeMap<String, String> = self
-            .router
-            .status_targets(Instant::now())
-            .into_iter()
-            .filter_map(|target| Some((target.provider_name, target.account?)))
-            .collect();
+        let config = &self.router.config;
         let mut pools: BTreeMap<String, BTreeSet<String>> = self
             .account_identities()
             .iter()
             .map(|(account, _)| (account.to_string(), BTreeSet::new()))
             .collect();
-        for (pool, entry) in &self.router.config.pools {
+        for (pool, entry) in &config.pools {
             for member in &entry.members {
-                let Some(account) = entry_accounts.get(member) else {
+                let Some(account) = AccountIdentities::account_of_entry(config, member) else {
                     continue;
                 };
-                if let Some(held) = pools.get_mut(account) {
+                if let Some(held) = pools.get_mut(&account) {
                     held.insert(pool.clone());
                 }
             }
@@ -245,34 +241,20 @@ impl StatusRouterView {
                     identity.provider_entry.as_str()
                 });
             let credential = match (target.gate.credential_unusable, target.gate.credential_park) {
-                (Some(mark), _) => {
-                    let since_ms = epoch_ms_before(now_ms, mark.since_elapsed);
-                    AccountCredential {
-                        state: CredentialState::Unusable,
-                        cause: Some(mark.cause.as_str()),
-                        since_ms: Some(since_ms),
-                        until_ms: None,
-                        fix: Some(self.seat_fix(entry).command()),
-                        condition: CredentialCondition::Unusable {
-                            cause: mark.cause,
-                            since_ms,
-                        },
-                    }
-                }
-                (None, Some(park)) if !park.remaining.is_zero() => {
-                    let until_ms = epoch_ms_after(now_ms, park.remaining);
-                    AccountCredential {
-                        state: CredentialState::Parked,
-                        cause: Some(park.reason.as_str()),
-                        since_ms: None,
-                        until_ms: Some(until_ms),
-                        fix: None,
-                        condition: CredentialCondition::Parked {
-                            reason: park.reason,
-                            until_ms,
-                        },
-                    }
-                }
+                (Some(mark), _) => AccountCredential {
+                    condition: CredentialCondition::Unusable {
+                        cause: mark.cause,
+                        since_ms: epoch_ms_before(now_ms, mark.since_elapsed),
+                    },
+                    fix: Some(self.seat_fix(entry).command()),
+                },
+                (None, Some(park)) if !park.remaining.is_zero() => AccountCredential {
+                    condition: CredentialCondition::Parked {
+                        reason: park.reason,
+                        until_ms: epoch_ms_after(now_ms, park.remaining),
+                    },
+                    fix: None,
+                },
                 _ => AccountCredential::usable(),
             };
             out.insert(account, credential);
@@ -490,33 +472,48 @@ impl CredentialState {
     }
 }
 
-/// One account's credential state with the facts that explain it. Every
-/// field but `state` is `None` for a usable account.
+/// One account's credential state with what readmits it. The state is held
+/// once, in the needs-attention builder's typed form, so every surface words
+/// it through that builder's one function; the wire token and times derive
+/// from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountCredential {
-    pub state: CredentialState,
-    /// The unusable cause token, or the park reason token.
-    pub cause: Option<&'static str>,
-    /// Epoch-ms the unusable mark was first set.
-    pub since_ms: Option<i64>,
-    /// Epoch-ms the park lapses into a re-test.
-    pub until_ms: Option<i64>,
-    /// What readmits an unusable account.
-    pub fix: Option<String>,
-    /// The same state in the needs-attention builder's typed form, so every
-    /// surface words it through that builder's one function.
+    /// The state, with its cause and times.
     pub condition: CredentialCondition,
+    /// What readmits an unusable account; `None` otherwise.
+    pub fix: Option<String>,
 }
 
 impl AccountCredential {
-    const fn usable() -> Self {
+    pub(super) const fn usable() -> Self {
         Self {
-            state: CredentialState::Usable,
-            cause: None,
-            since_ms: None,
-            until_ms: None,
-            fix: None,
             condition: CredentialCondition::Usable,
+            fix: None,
+        }
+    }
+
+    /// The state's wire token.
+    pub const fn state(&self) -> CredentialState {
+        match self.condition {
+            CredentialCondition::Usable => CredentialState::Usable,
+            CredentialCondition::Unusable { .. } => CredentialState::Unusable,
+            CredentialCondition::Parked { .. } => CredentialState::Parked,
+        }
+    }
+
+    /// Epoch-ms the unusable mark was first set; `None` unless unusable.
+    pub const fn since_ms(&self) -> Option<i64> {
+        match self.condition {
+            CredentialCondition::Unusable { since_ms, .. } => Some(since_ms),
+            CredentialCondition::Usable | CredentialCondition::Parked { .. } => None,
+        }
+    }
+
+    /// Epoch-ms the park lapses into a re-test; `None` unless parked.
+    pub const fn until_ms(&self) -> Option<i64> {
+        match self.condition {
+            CredentialCondition::Parked { until_ms, .. } => Some(until_ms),
+            CredentialCondition::Usable | CredentialCondition::Unusable { .. } => None,
         }
     }
 }

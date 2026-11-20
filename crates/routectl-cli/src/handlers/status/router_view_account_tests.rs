@@ -15,7 +15,9 @@ use routectl_router::{CURRENT_CONFIG_VERSION, Config, ResolvedModel, Router};
 use routectl_testkit::ScopedEnv;
 use serde_json::Value;
 
-use super::{AccountCredential, CredentialState, StatusRouterHandle, StatusRouterView};
+use super::{
+    AccountCredential, CredentialCondition, CredentialState, StatusRouterHandle, StatusRouterView,
+};
 use crate::commands::pricing::is_subscription;
 use crate::server::seat_driver::managed_seats;
 
@@ -121,6 +123,15 @@ fn now() -> (Instant, i64) {
     )
 }
 
+/// The unusable cause token, or the park reason token.
+const fn cause_token(credential: &AccountCredential) -> Option<&'static str> {
+    match credential.condition {
+        CredentialCondition::Usable => None,
+        CredentialCondition::Unusable { cause, .. } => Some(cause.as_str()),
+        CredentialCondition::Parked { reason, .. } => Some(reason.as_str()),
+    }
+}
+
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_string()).collect()
 }
@@ -217,6 +228,35 @@ async fn account_pools_lists_every_pool_naming_the_account_sorted() {
     assert_eq!(pools, expected);
 }
 
+/// A pool member whose provider did not build still places its account in
+/// the pool: membership follows the served config's identity rule, not the
+/// built targets. The router here built no target at all.
+#[test]
+fn account_pools_places_an_account_whose_provider_did_not_build() {
+    // Arrange
+    let config: Config = toml::from_str(&pooled_config_text()).expect("fixture config parses");
+    let router = Router::new(Arc::new(config));
+    assert!(
+        router.status_targets(Instant::now()).is_empty(),
+        "premise: no provider built"
+    );
+    let view = view_of(router);
+
+    // Act
+    let pools = view.account_pools();
+
+    // Assert
+    let expected: BTreeMap<String, Vec<String>> = [
+        ("anthropic#shared", strings(&["alpha", "beta"])),
+        ("anthropic#b", strings(&["alpha"])),
+        ("anthropic#solo", Vec::new()),
+    ]
+    .into_iter()
+    .map(|(account, pools)| (account.to_string(), pools))
+    .collect();
+    assert_eq!(pools, expected);
+}
+
 /// A direct-model router with no `[pools]` lists every configured account,
 /// each with no pool, including the cloud and API-key accounts.
 #[test]
@@ -257,10 +297,10 @@ fn a_logged_out_seat_reads_unusable_with_cause_since_and_the_shared_fix() {
         ("#gamma", "gamma", "unreadable"),
     ] {
         let credential = &credentials[account];
-        assert_eq!(credential.state, CredentialState::Unusable, "{account}");
-        assert_eq!(credential.cause, Some(cause), "{account}");
-        assert_eq!(credential.until_ms, None, "{account}");
-        let since = credential.since_ms.expect("an unusable mark has a since");
+        assert_eq!(credential.state(), CredentialState::Unusable, "{account}");
+        assert_eq!(cause_token(credential), Some(cause), "{account}");
+        assert_eq!(credential.until_ms(), None, "{account}");
+        let since = credential.since_ms().expect("an unusable mark has a since");
         assert!(
             (before_ms..=after_ms).contains(&since),
             "{account}: {before_ms} <= {since} <= {after_ms}"
@@ -305,19 +345,19 @@ fn a_parked_account_reads_parked_with_until_and_a_usable_one_reads_bare() {
 
     // Assert
     let parked = &credentials["codex"];
-    assert_eq!(parked.state, CredentialState::Parked);
-    assert_eq!(parked.cause, Some("credential-invalid"));
-    assert_eq!(parked.since_ms, None);
+    assert_eq!(parked.state(), CredentialState::Parked);
+    assert_eq!(cause_token(parked), Some("credential-invalid"));
+    assert_eq!(parked.since_ms(), None);
     assert_eq!(parked.fix, None);
-    let until = parked.until_ms.expect("a park has a deadline");
+    let until = parked.until_ms().expect("a park has a deadline");
     assert!(
         (before_ms + 590_000..=after_ms + 600_000).contains(&until),
         "{until} is about ten minutes out"
     );
     assert_eq!(credentials["#gamma"], AccountCredential::usable(), "lapsed");
     assert_eq!(credentials["anthropic#work"], AccountCredential::usable());
-    assert_eq!(credentials["anthropic#work"].state.as_str(), "usable");
-    assert_eq!(parked.state.as_str(), "parked");
+    assert_eq!(credentials["anthropic#work"].state().as_str(), "usable");
+    assert_eq!(parked.state().as_str(), "parked");
     assert_eq!(CredentialState::Unusable.as_str(), "unusable");
 }
 
@@ -340,9 +380,9 @@ fn an_unusable_mark_outranks_a_live_park() {
 
     // Assert
     let credential = credential.expect("codex is listed");
-    assert_eq!(credential.state, CredentialState::Unusable);
-    assert_eq!(credential.cause, Some("revoked"));
-    assert_eq!(credential.until_ms, None);
+    assert_eq!(credential.state(), CredentialState::Unusable);
+    assert_eq!(cause_token(&credential), Some("revoked"));
+    assert_eq!(credential.until_ms(), None);
 }
 
 /// The subscription flag is true for an `oauth://` account and false for the

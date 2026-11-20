@@ -14,7 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use parking_lot::Mutex;
 
 use crate::commands::doctor::attention::{
-    Attention, AttentionInputs, AttentionItem, AttentionKind, RecordLoss, active_items,
+    Attention, AttentionInputs, AttentionItem, AttentionKind, RecordLoss,
+    active_items_with_subsumed,
 };
 
 /// How long a recovered item stays on the list after its first observed
@@ -117,11 +118,14 @@ impl Store {
     ) -> Vec<AttentionItem> {
         let now = inputs.now_ms;
         inputs.record_loss = self.loss.observe(inputs.record_loss, now);
-        let active: Vec<AttentionItem> = active_items(&inputs)
+        let built = active_items_with_subsumed(&inputs);
+        let active: Vec<AttentionItem> = built
+            .items
             .into_iter()
             .map(|item| self.remember_active(item, now))
             .collect();
         let current: BTreeSet<String> = active.iter().map(|item| item.key.clone()).collect();
+        self.forget_subsumed(&built.subsumed);
         self.settle_absent(&current, coverage, now);
         self.evict_past_bound(&current);
         let mut items = active;
@@ -157,6 +161,13 @@ impl Store {
             },
         );
         item
+    }
+
+    /// Forgets the items this read left out because a worse item names them.
+    /// Their condition still holds, so they are never marked recovered; the
+    /// worse item carries them until it clears.
+    fn forget_subsumed(&mut self, subsumed: &BTreeSet<String>) {
+        self.entries.retain(|key, _| !subsumed.contains(key));
     }
 
     /// Marks stored items missing from this read as recovered, holds doctor

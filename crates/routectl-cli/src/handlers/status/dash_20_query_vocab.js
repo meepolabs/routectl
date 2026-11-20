@@ -120,7 +120,7 @@
     'broken', 'degraded', 'recovered', 'doctor_fail',
     'doctor',
     'key', 'kind', 'state', 'subject', 'account', 'cause', 'raw_token',
-    'since_ms', 'until_ms', 'recovered_at_ms', 'fix'
+    'since_ms', 'until_ms', 'recovered_at_ms', 'fix', 'remediation'
   ];
 
   var ACCOUNTS_FIELDS = [

@@ -9,7 +9,7 @@ use routectl_core::EligibilityReason;
 use super::Router;
 use super::learned_lanes::egress_entries;
 use super::placement_record::PlacementTotals;
-use crate::config::{Config, SeatSelection};
+use crate::config::{Config, ProviderEntry, SeatSelection};
 use crate::quota::freshness::ObservationStamp;
 use crate::quota::key::seat_key_for_served_identity;
 use crate::quota::placement::{Standing, Tier};
@@ -478,6 +478,19 @@ fn target_secret_ref<'m>(model: &'m ResolvedModel, provider_name: &str) -> Optio
     }
 }
 
+fn entry_account_of(
+    entry: &ProviderEntry,
+    entry_name: &str,
+    secret_ref: Option<&SecretRef>,
+) -> Option<String> {
+    let seat = seat_identity(secret_ref);
+    credential_account(
+        seat.as_deref(),
+        entry_name,
+        entry.forwarded_base_url().is_some(),
+    )
+}
+
 fn oauth_login_label(secret_ref: Option<&SecretRef>) -> Option<String> {
     match secret_ref {
         Some(SecretRef::OAuth { label, .. }) => label.clone(),
@@ -521,14 +534,25 @@ impl AccountIdentities {
                 let secret_ref = entry
                     .api_key_ref()
                     .and_then(|uri| SecretRef::parse(uri).ok());
-                let seat = seat_identity(secret_ref.as_ref());
-                let forwarded = entry.forwarded_base_url().is_some();
-                if let Some(account) = credential_account(seat.as_deref(), entry_name, forwarded) {
+                if let Some(account) = entry_account_of(entry, entry_name, secret_ref.as_ref()) {
                     identities.add(&account, entry_name, oauth_login_label(secret_ref.as_ref()));
                 }
             }
         }
         identities
+    }
+
+    /// The credential account `config`'s `[providers]` entry `entry` reads,
+    /// by the rule [`Self::from_config`] lists accounts under, whether or
+    /// not the entry's provider built. `None` for an unknown or forwarded
+    /// entry.
+    #[must_use]
+    pub fn account_of_entry(config: &Config, entry: &str) -> Option<String> {
+        let provider = config.providers.get(entry)?;
+        let secret_ref = provider
+            .api_key_ref()
+            .and_then(|uri| SecretRef::parse(uri).ok());
+        entry_account_of(provider, entry, secret_ref.as_ref())
     }
 
     fn add(&mut self, account: &str, entry: &str, login_label: Option<String>) {

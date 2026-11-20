@@ -182,6 +182,9 @@ pub(super) fn section_version(ctx: &DoctorContext) -> Vec<Finding> {
     vec![finding]
 }
 
+/// The section every seat-pool finding is filed under.
+pub(super) const POOLS_SECTION: &str = "pools";
+
 /// One remediation string for every validator advisory. The warning texts
 /// carry their own fix instructions, so a per-warning remediation would
 /// duplicate them; this points at the advisory itself instead.
@@ -535,7 +538,7 @@ pub(super) fn section_seat_pools(ctx: &DoctorContext) -> Vec<Finding> {
             .iter()
             .filter(|row| row.pool.is_none())
             .map(|row| Finding {
-                section: "pools",
+                section: POOLS_SECTION,
                 name: row.entry.clone(),
                 status: Status::Pass,
                 detail: describe_row(row),
@@ -570,7 +573,7 @@ fn pool_finding(row: &PoolRow) -> Finding {
         ),
     };
     Finding {
-        section: "pools",
+        section: POOLS_SECTION,
         name: row.pool.clone(),
         status,
         detail: describe_pool(row),

@@ -121,6 +121,7 @@
       row.appendChild(attentionText('div', 'attn-recovered', recoveredText(item.recovered_at_ms, nowMs)));
     }
     if (item.fix) { row.appendChild(attentionFix(item.fix)); }
+    if (item.remediation) { row.appendChild(attentionRemediation(item.remediation)); }
     row.appendChild(attentionRaw(item.raw_token));
     return row;
   }
@@ -146,6 +147,16 @@
     wrap.className = 'attn-fix';
     wrap.appendChild(attentionText('span', 'attn-label', 'fix'));
     wrap.appendChild(attentionCode('attn-fix-code', fix));
+    return wrap;
+  }
+
+  // A remediation is an instruction in words, not a line to run, so it is
+  // drawn as plain text rather than as a copyable code element.
+  function attentionRemediation(text) {
+    var wrap = document.createElement('div');
+    wrap.className = 'attn-fix attn-remediation';
+    wrap.appendChild(attentionText('span', 'attn-label', 'fix'));
+    wrap.appendChild(attentionText('span', 'attn-remediation-text', text));
     return wrap;
   }
 

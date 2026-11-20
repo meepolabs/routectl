@@ -127,6 +127,8 @@
       recovered: textIn(row, '.attn-recovered'),
       raw: textIn(row, '.attn-raw-code'),
       fix: textIn(row, '.attn-fix-code'),
+      remediation: textIn(row, '.attn-remediation-text'),
+      code_in_remediation: row.querySelectorAll('.attn-remediation code').length,
       href: link ? link.getAttribute('href') : null,
       link_text: link ? link.textContent : null,
       cause_color: getComputedStyle(row.querySelector('.attn-cause')).color

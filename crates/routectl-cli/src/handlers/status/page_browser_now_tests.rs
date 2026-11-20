@@ -138,6 +138,40 @@ fn page_browser_now_each_fixture_cause_renders_once_with_its_token_fix_and_link(
     );
 }
 
+/// A doctor failure's remediation is drawn as plain text under the item,
+/// with no fix code element: it is an instruction in words, not a line to
+/// copy. An account item beside it keeps its fix as a code element
+/// (positive control).
+///
+/// Mutation check: draw the remediation through attentionFix in
+/// attentionItem -> red (the remediation is a fix code element and no
+/// remediation text is drawn).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_now_a_doctor_failure_shows_its_remediation_as_text() {
+    let items = fixture_items();
+    let result = now_scenario("now-attention-list");
+    let rows = drawn_rows(&result);
+    let (doctor, row) = items
+        .iter()
+        .zip(rows)
+        .find(|(item, _)| item["kind"] == "doctor_failure")
+        .expect("the fixture lists a doctor failure");
+
+    let remediation = str_of(&doctor["remediation"], "the served remediation");
+    assert!(doctor["fix"].is_null(), "{doctor:#}");
+    assert_eq!(row["remediation"], remediation, "{row:#}");
+    assert!(row["fix"].is_null(), "no fix code: {row:#}");
+    assert_eq!(row["code_in_remediation"], 0, "{row:#}");
+    let (fixed, fixed_row) = items
+        .iter()
+        .zip(rows)
+        .find(|(item, _)| item["fix"].is_string())
+        .expect("positive control: an item with a fix");
+    assert_eq!(fixed_row["fix"], fixed["fix"], "{fixed_row:#}");
+    assert!(fixed_row["remediation"].is_null(), "{fixed_row:#}");
+}
+
 /// The recovered item renders grey with "recovered N min ago" read against
 /// the panel's as_of, and the section counts are the daemon's active counts:
 /// the recovered broken pool is not among them although an active broken

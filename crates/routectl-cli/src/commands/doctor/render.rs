@@ -5,6 +5,7 @@ use routectl_router::{DoctorReport, Finding, Status};
 use crate::commands::doctor_panels::{render_capability_matrix_panel, render_would_trim_panel};
 
 use super::SECTIONS;
+use super::sections::POOLS_SECTION;
 
 pub(super) fn render_human(report: &DoctorReport) -> Vec<String> {
     let mut out = vec!["routectl doctor".to_string(), String::new()];
@@ -71,7 +72,7 @@ fn section_title(key: &str) -> &'static str {
         "version" => "Config schema version",
         "config" => "Config validation",
         "auth" => "OAuth credentials",
-        "pools" => "OAuth seat pools",
+        POOLS_SECTION => "OAuth seat pools",
         "seats" => "OAuth seats",
         "secrets" => "Managed secrets",
         "probe" => "Provider reachability",

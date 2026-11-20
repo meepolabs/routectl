@@ -5801,9 +5801,12 @@ should read `panels.attention` from it rather than also polling
   `severity`, `state` (`active` or `recovered`), `subject` (display form),
   `account` (the credential account, or null), `cause` (plain words with the
   age where one is known), `raw_token` (the machine form, for grep and
-  copy), `since_ms`, `until_ms`, `recovered_at_ms`, `fix` (the line that
-  fixes it, or null) and `target` (`accounts`, `models`, `traffic` or
-  `doctor`). Times are epoch ms; a key a kind does not use is null.
+  copy), `since_ms`, `until_ms`, `recovered_at_ms`, `fix` (the bare command
+  that fixes it, copyable as is, or null), `remediation` (what fixes it in
+  plain words when no bare command does, or null) and `target` (`accounts`,
+  `models`, `traffic` or `doctor`). A `doctor_failure` item carries the
+  finding's remediation there and a null `fix`. Times are epoch ms; a key a
+  kind does not use is null.
 
 The kinds form a closed set: `pool_empty` (a pool with seats configured and
 none usable; the only `broken` kind), `route_circuit_open`,
@@ -5814,13 +5817,18 @@ managed logins exist), `account_near_limit` (a non-stale window more than
 included plan within the last 7 minutes; an older claim raises nothing),
 `usage_poll_failing` (a run of failed usage polls at least 15 minutes old),
 `records_dropped` (a request-row loss counter rose in the last 5 minutes)
-and `doctor_failure` (a doctor Fail finding outside the `pools`
-section, which `pool_empty` covers). A route blocked by its account's
-credential is named once, by the account item. Every kind but `pool_empty`
+and `doctor_failure` (a doctor Fail finding; a `pools` section Fail about a
+pool the list reads seat counts for is left to `pool_empty`). A route
+blocked by its account's credential is named once, by the account item,
+and a failing token refresh on an account whose credential item is listed
+is named in that item's `raw_token`. Every kind but `pool_empty`
 is `degraded`.
 
 A condition that clears stays listed as `recovered` for 60 minutes after the
-first read that saw it gone, and is listed `active` again if it returns.
+first read that saw it gone, and is listed `active` again if it returns. A
+condition named by a worse item, as above, has not cleared: it is not
+listed as `recovered`, and is listed `active` again if the worse item
+clears while it still holds.
 This memory lives in the daemon process only and is reconciled on reads, so
 a restart forgets it and a condition that comes and goes between two reads
 is never listed.

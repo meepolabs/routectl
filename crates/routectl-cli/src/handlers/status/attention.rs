@@ -30,6 +30,7 @@ use super::router_view::{AccountCredential, StatusRouterView};
 use super::usage_health::LedgerHealth;
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, utc_rfc3339};
+use crate::commands::doctor::SeatFix;
 use crate::commands::doctor::attention::{
     AccountSnapshot, AttentionInputs, AttentionItem, Counts, CredentialState, DriverSnapshot,
     PollFailure, PoolSnapshot, RecordLoss, RouteSnapshot, Verdict, WindowSnapshot,
@@ -121,8 +122,8 @@ pub(super) struct AttentionSources {
     pub(super) identities: AccountIdentities,
     /// The credential state of each account a built target names.
     pub(super) credentials: BTreeMap<String, AccountCredential>,
-    /// The line that readmits each configured account's credential.
-    pub(super) fixes: BTreeMap<String, String>,
+    /// What readmits each configured account's credential.
+    pub(super) fixes: BTreeMap<String, SeatFix>,
     pub(super) readings: AccountReadings,
     /// `None` on a daemon running no usage poll.
     pub(super) poll: Option<PollStateSnapshot>,
@@ -169,11 +170,13 @@ fn inputs_from(sources: AttentionSources) -> AttentionInputs {
         .iter()
         .map(|(account, identity)| {
             let (windows, billing, billing_fresh) = reading_parts(by_account.remove(account));
+            let fix = fixes.get(account);
             AccountSnapshot {
                 account: account.to_string(),
                 display: display_of(identity),
                 credential: credential_state(credentials.get(account)),
-                fix: fixes.get(account).cloned(),
+                fix: fix.and_then(SeatFix::bare_command),
+                remediation: fix.and_then(SeatFix::correction),
                 refresh_failure: refresh_failures.get(account).copied(),
                 poll_failure: poll_failure(poll.as_ref(), account),
                 windows,
@@ -341,12 +344,7 @@ fn read_sources(
     let identities = view.account_identities();
     let fixes = identities
         .iter()
-        .map(|(account, identity)| {
-            (
-                account.to_string(),
-                view.seat_fix(&identity.provider_entry).command(),
-            )
-        })
+        .map(|(account, identity)| (account.to_string(), view.seat_fix(&identity.provider_entry)))
         .collect();
     AttentionSources {
         now_ms,

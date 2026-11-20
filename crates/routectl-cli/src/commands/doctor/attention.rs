@@ -10,11 +10,14 @@
 //! ([`Attention::from_items`]), so a caller that adds recovered items to the
 //! active ones folds the merged list and gets a consistent summary.
 
+use std::collections::BTreeSet;
+
 use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{Billing, Finding, Status};
 use serde::{Serialize, Serializer};
 
+use super::sections::POOLS_SECTION;
 pub use crate::server::seat_driver::RefreshFailure;
 
 #[cfg(test)]
@@ -30,9 +33,6 @@ pub const RECORDS_DROPPED_HOLD_MS: i64 = 5 * MS_PER_MIN;
 /// A non-stale window used past this fraction puts its account on the list.
 pub const NEAR_LIMIT_USED: f64 = 0.90;
 
-/// The doctor section whose failures `pool_empty` already names.
-const POOLS_SECTION: &str = "pools";
-
 /// The longest scope tag shown in plain words.
 const MAX_PLAIN_SCOPE_LEN: usize = 16;
 
@@ -44,6 +44,15 @@ const SECS_PER_HOUR: u64 = 3_600;
 const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
 
 /// Every input of one build, copied out of the daemon by the caller.
+///
+/// Two inputs carry a precondition the builder cannot check:
+/// - `pools` must name every configured pool. A doctor Fail in the pools
+///   section is left to `pool_empty` only for a pool named here; a Fail for a
+///   pool missing from `pools` is listed as a doctor item.
+/// - `record_loss.last_rise_ms` is when a loss counter last rose, which only a
+///   caller comparing successive reads knows (the status panel's attention
+///   memory fills it). A bare total says nothing about a rise, so with `None`
+///   no `records_dropped` item is raised.
 #[derive(Debug, Clone, Default)]
 pub struct AttentionInputs {
     /// The instant the build describes, in epoch ms.
@@ -97,8 +106,12 @@ pub struct AccountSnapshot {
     pub display: String,
     /// The account's credential state.
     pub credential: CredentialState,
-    /// The line that readmits the account's credential, when one exists.
+    /// The bare command that readmits the account's credential, when one
+    /// exists.
     pub fix: Option<String>,
+    /// What readmits the account's credential in plain words, when no bare
+    /// command does.
+    pub remediation: Option<String>,
     /// The refresh driver's current failure run for the account.
     pub refresh_failure: Option<RefreshFailure>,
     /// The usage poll's current failure run for the account.
@@ -406,8 +419,10 @@ pub struct AttentionItem {
     pub until_ms: Option<i64>,
     /// When the condition was first seen cleared, in epoch ms.
     pub recovered_at_ms: Option<i64>,
-    /// The line that fixes it, when one exists.
+    /// The bare command that fixes it, copyable as is, when one exists.
     pub fix: Option<String>,
+    /// What fixes it in plain words, when no bare command does.
+    pub remediation: Option<String>,
     /// The view that shows its detail.
     pub target: Option<ViewTarget>,
 }
@@ -539,26 +554,67 @@ pub fn build(inputs: &AttentionInputs) -> Attention {
     Attention::from_items(active_items(inputs))
 }
 
+/// One build's active items and the keys of the conditions it left out
+/// because a worse item names them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveItems {
+    /// Every condition that holds, one item per cause, in list order.
+    pub items: Vec<AttentionItem>,
+    /// The keys of conditions that hold but are named by another item in
+    /// `items`: a refresh failing on an account whose credential item is
+    /// listed, an open route whose account is unusable or parked, and a
+    /// pools-section doctor Fail for a pool `pool_empty` reads. None of them
+    /// has cleared.
+    pub subsumed: BTreeSet<String>,
+}
+
 /// Every condition that holds at `inputs.now_ms`, one item per cause, in
 /// list order. A route blocked by its account's credential is named by the
 /// account item, not once per route.
 pub fn active_items(inputs: &AttentionInputs) -> Vec<AttentionItem> {
+    active_items_with_subsumed(inputs).items
+}
+
+/// [`active_items`], with the keys it left out because another item names
+/// them.
+pub fn active_items_with_subsumed(inputs: &AttentionInputs) -> ActiveItems {
     let now = inputs.now_ms;
-    let mut items: Vec<AttentionItem> = inputs.pools.iter().filter_map(pool_item).collect();
-    items.extend(
-        inputs
-            .routes
-            .iter()
-            .filter(|route| !account_blocked(inputs, route.account.as_deref()))
-            .filter_map(|route| route_item(route, now)),
-    );
-    for account in &inputs.accounts {
-        items.extend(account_items(account, now));
+    let mut out = ActiveItems {
+        items: inputs.pools.iter().filter_map(pool_item).collect(),
+        subsumed: BTreeSet::new(),
+    };
+    for route in &inputs.routes {
+        let Some(item) = route_item(route, now) else {
+            continue;
+        };
+        if account_blocked(inputs, route.account.as_deref()) {
+            out.subsumed.insert(item.key);
+        } else {
+            out.items.push(item);
+        }
     }
-    items.extend(driver_items(inputs));
-    items.extend(records_item(&inputs.record_loss, now));
-    items.extend(inputs.doctor_findings.iter().filter_map(doctor_item));
-    items
+    for account in &inputs.accounts {
+        account_items(account, now, &mut out);
+    }
+    out.items.extend(driver_items(inputs));
+    out.items.extend(records_item(&inputs.record_loss, now));
+    for finding in &inputs.doctor_findings {
+        let Some(item) = doctor_item(finding) else {
+            continue;
+        };
+        if pool_reads_it(inputs, finding) {
+            out.subsumed.insert(item.key);
+        } else {
+            out.items.push(item);
+        }
+    }
+    out
+}
+
+/// Whether `finding` is a pools-section finding about a pool whose live seat
+/// counts `inputs` carries, so `pool_empty` reads that pool.
+fn pool_reads_it(inputs: &AttentionInputs, finding: &Finding) -> bool {
+    finding.section == POOLS_SECTION && inputs.pools.iter().any(|pool| pool.pool == finding.name)
 }
 
 /// The plain-words cause of a credential state with its age, or `None` for
@@ -609,6 +665,7 @@ struct Draft {
     since_ms: Option<i64>,
     until_ms: Option<i64>,
     fix: Option<String>,
+    remediation: Option<String>,
 }
 
 impl Draft {
@@ -626,6 +683,7 @@ impl Draft {
             until_ms: self.until_ms,
             recovered_at_ms: None,
             fix: self.fix,
+            remediation: self.remediation,
             target: Some(self.kind.target()),
         }
     }
@@ -648,6 +706,7 @@ impl Draft {
             since_ms: None,
             until_ms: None,
             fix: None,
+            remediation: None,
         }
     }
 }
@@ -694,22 +753,27 @@ fn route_item(route: &RouteSnapshot, now: i64) -> Option<AttentionItem> {
     })
 }
 
-fn account_items(account: &AccountSnapshot, now: i64) -> Vec<AttentionItem> {
+fn account_items(account: &AccountSnapshot, now: i64, out: &mut ActiveItems) {
     let credential = credential_item(account, now);
-    let refresh = match credential {
-        Some(_) => None,
-        None => refresh_item(account, now),
+    let refresh = refresh_item(account, now);
+    let refresh = match (&credential, refresh) {
+        (Some(_), Some(hidden)) => {
+            out.subsumed.insert(hidden.key);
+            None
+        }
+        (_, refresh) => refresh,
     };
-    [
-        credential,
-        refresh,
-        near_limit_item(account, now),
-        overage_item(account),
-        poll_item(account, now),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+    out.items.extend(
+        [
+            credential,
+            refresh,
+            near_limit_item(account, now),
+            overage_item(account),
+            poll_item(account, now),
+        ]
+        .into_iter()
+        .flatten(),
+    );
 }
 
 fn credential_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem> {
@@ -748,6 +812,7 @@ fn credential_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem>
         Draft {
             cause,
             fix: account.fix.clone(),
+            remediation: account.remediation.clone(),
             ..draft
         }
         .finish(),
@@ -779,6 +844,7 @@ fn refresh_item(account: &AccountSnapshot, now: i64) -> Option<AttentionItem> {
             raw_token: refresh_token(failure),
             since_ms: Some(failure.first_failure_ms),
             fix: account.fix.clone(),
+            remediation: account.remediation.clone(),
             ..Draft::for_account(AttentionKind::AccountRefreshFailing, account)
         }
         .finish(),
@@ -939,8 +1005,10 @@ fn records_item(loss: &RecordLoss, now: i64) -> Option<AttentionItem> {
     )
 }
 
+/// A doctor remediation is an instruction in prose, often quoting a command
+/// among other words, so it is never the bare `fix`.
 fn doctor_item(finding: &Finding) -> Option<AttentionItem> {
-    if finding.status != Status::Fail || finding.section == POOLS_SECTION {
+    if finding.status != Status::Fail {
         return None;
     }
     let path = format!("{}/{}", finding.section, finding.name);
@@ -948,7 +1016,7 @@ fn doctor_item(finding: &Finding) -> Option<AttentionItem> {
         Draft {
             cause: finding.detail.clone(),
             raw_token: format!("doctor_fail ({path})"),
-            fix: finding.remediation.clone(),
+            remediation: finding.remediation.clone(),
             ..Draft::for_subject(AttentionKind::DoctorFailure, &path, &finding.name)
         }
         .finish(),

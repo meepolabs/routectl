@@ -15,7 +15,7 @@ use routectl_router::{
 use serde_json::Value;
 
 use super::super::panel_fixtures::{FIXTURE_NOW_MS, fixture_as_of, fixture_config};
-use super::super::router_view::{AccountCredential, CredentialState};
+use super::super::router_view::AccountCredential;
 use super::super::usage_health::AccountReadingHistory;
 use super::{AccountSources, AccountsPanel, Panel, SCHEMA_VERSION, build_from_sources};
 use crate::commands::doctor::SeatFix;
@@ -94,10 +94,6 @@ fn credentials() -> BTreeMap<String, AccountCredential> {
     let since_ms = FIXTURE_NOW_MS - 7_200_000;
     let until_ms = FIXTURE_NOW_MS + 600_000;
     let logged_out = AccountCredential {
-        state: CredentialState::Unusable,
-        cause: Some(UnusableCause::NotLoggedIn.as_str()),
-        since_ms: Some(since_ms),
-        until_ms: None,
         fix: Some(SeatFix::of(&fixture_config(), "claude-seat").command()),
         condition: CredentialCondition::Unusable {
             cause: UnusableCause::NotLoggedIn,
@@ -105,10 +101,6 @@ fn credentials() -> BTreeMap<String, AccountCredential> {
         },
     };
     let parked = AccountCredential {
-        state: CredentialState::Parked,
-        cause: Some(UpstreamReason::CredentialInvalid.as_str()),
-        since_ms: None,
-        until_ms: Some(until_ms),
         fix: None,
         condition: CredentialCondition::Parked {
             reason: UpstreamReason::CredentialInvalid,
@@ -116,10 +108,6 @@ fn credentials() -> BTreeMap<String, AccountCredential> {
         },
     };
     let usable = AccountCredential {
-        state: CredentialState::Usable,
-        cause: None,
-        since_ms: None,
-        until_ms: None,
         fix: None,
         condition: CredentialCondition::Usable,
     };

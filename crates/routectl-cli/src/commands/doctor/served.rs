@@ -185,6 +185,26 @@ impl SeatFix {
         }
     }
 
+    /// The bare command that readmits the seat, copyable as is: the login
+    /// command for a login fix, `None` for a correction.
+    pub fn bare_command(&self) -> Option<String> {
+        match self {
+            Self::Login { provider, label } => {
+                Some(oauth_login_command(provider, label.as_deref()))
+            }
+            Self::UnknownProvider { .. } | Self::Credential { .. } => None,
+        }
+    }
+
+    /// The correction sentence for a fix no bare command makes, `None` for a
+    /// login fix.
+    pub fn correction(&self) -> Option<String> {
+        match self {
+            Self::Login { .. } => None,
+            Self::UnknownProvider { .. } | Self::Credential { .. } => Some(self.command()),
+        }
+    }
+
     /// The line as a doctor remediation: the login command wrapped as an
     /// instruction to run it, else the credential sentence.
     pub fn remediation(&self) -> String {

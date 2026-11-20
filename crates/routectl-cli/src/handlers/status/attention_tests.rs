@@ -218,6 +218,7 @@ async fn get_serves_the_v1_shape_and_post_is_refused() {
             "until_ms",
             "recovered_at_ms",
             "fix",
+            "remediation",
             "target",
         ])
     );
@@ -523,6 +524,42 @@ async fn a_parked_account_is_listed_with_its_deadline() {
         .find(|item| item["key"] == "account_parked:#gamma")
         .unwrap_or_else(|| panic!("listed: {json}"));
     assert!(parked["until_ms"].as_i64().is_some(), "{parked}");
+}
+
+/// `fix` is a bare command or null: the login account's unusable item
+/// carries the login command and no remediation, and the API-key account,
+/// which no command readmits, carries its correction sentence as
+/// `remediation` and a null `fix`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unusable_key_account_carries_its_correction_as_remediation_not_fix() {
+    // Arrange
+    let router = seats_router();
+    assert!(router.mark_credential_unusable_for_tests("m-b", UnusableCause::NotLoggedIn));
+    assert!(router.mark_credential_unusable_for_tests("m-env", UnusableCause::Unreadable));
+    let (state, _app) = state_over(swap_of(router), DaemonMeta::for_test(), None, LONG_UP);
+
+    // Act
+    let json = read(&state).await;
+
+    // Assert
+    let item = |key: &str| {
+        items(&json)
+            .iter()
+            .find(|item| item["key"] == key)
+            .unwrap_or_else(|| panic!("{key} listed: {json}"))
+            .clone()
+    };
+    let key_account = item("account_unusable:#gamma");
+    assert!(key_account["fix"].is_null(), "{key_account}");
+    assert!(
+        key_account["remediation"]
+            .as_str()
+            .is_some_and(|text| text.contains("`gamma`")),
+        "{key_account}"
+    );
+    let login = item("account_unusable:anthropic#work");
+    assert_eq!(login["fix"], "routectl login anthropic --label work");
+    assert!(login["remediation"].is_null(), "{login}");
 }
 
 /// The refresh driver's current failure on a usable account is listed.

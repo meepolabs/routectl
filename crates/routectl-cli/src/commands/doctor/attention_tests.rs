@@ -32,6 +32,7 @@ fn account(name: &str) -> AccountSnapshot {
         display: format!("display of {name}"),
         credential: CredentialState::Usable,
         fix: Some(format!("routectl login {name}")),
+        remediation: None,
         refresh_failure: None,
         poll_failure: None,
         windows: Vec::new(),
@@ -398,9 +399,16 @@ fn records_dropped_is_listed_for_five_minutes_after_a_loss_counter_rise() {
     assert_rows(AttentionKind::RecordsDropped, rows);
 }
 
+/// A pools-section Fail is left to `pool_empty` only when `pools` carries
+/// that pool's live counts; otherwise nothing else names it, so it is listed.
 #[test]
-fn doctor_failure_is_listed_per_fail_finding_outside_the_pools_section() {
+fn doctor_failure_is_listed_per_fail_finding_unless_pool_empty_reads_its_pool() {
     let with_findings = |doctor_findings| AttentionInputs {
+        doctor_findings,
+        ..inputs()
+    };
+    let with_pools = |pools, doctor_findings| AttentionInputs {
+        pools,
         doctor_findings,
         ..inputs()
     };
@@ -421,9 +429,33 @@ fn doctor_failure_is_listed_per_fail_finding_outside_the_pools_section() {
             0,
         ),
         (
-            "fail in pools",
+            "fail in pools, pools empty",
             with_findings(vec![finding("pools", "pool-a", Status::Fail)]),
+            1,
+        ),
+        (
+            "fail in pools, pools names another pool",
+            with_pools(
+                vec![pool("pool-b", 2, 0)],
+                vec![finding("pools", "pool-a", Status::Fail)],
+            ),
+            1,
+        ),
+        (
+            "fail in pools, pools names it",
+            with_pools(
+                vec![pool("pool-a", 2, 0)],
+                vec![finding("pools", "pool-a", Status::Fail)],
+            ),
             0,
+        ),
+        (
+            "fail named like a pool outside the pools section",
+            with_pools(
+                vec![pool("pool-a", 2, 0)],
+                vec![finding("config", "pool-a", Status::Fail)],
+            ),
+            1,
         ),
     ];
 
@@ -441,6 +473,7 @@ struct Expected {
     since_ms: Option<i64>,
     until_ms: Option<i64>,
     fix: Option<&'static str>,
+    remediation: Option<&'static str>,
     target: ViewTarget,
 }
 
@@ -462,6 +495,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: None,
                 until_ms: None,
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -481,6 +515,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: Some(NOW - 2 * MIN),
                 until_ms: None,
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Models,
             },
         ),
@@ -500,6 +535,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: Some(NOW - 2 * MIN),
                 until_ms: None,
                 fix: Some(FIX),
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -522,6 +558,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: None,
                 until_ms: Some(NOW + 40 * MIN),
                 fix: Some(FIX),
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -544,6 +581,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: Some(NOW - 4 * MIN),
                 until_ms: None,
                 fix: Some(FIX),
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -567,6 +605,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: None,
                 until_ms: None,
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -590,6 +629,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: None,
                 until_ms: None,
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -612,6 +652,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: None,
                 until_ms: Some(NOW + 2 * HOUR),
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -632,6 +673,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: None,
                 until_ms: None,
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -654,6 +696,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: Some(NOW - 20 * MIN),
                 until_ms: None,
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Accounts,
             },
         ),
@@ -678,6 +721,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 since_ms: Some(NOW - MIN),
                 until_ms: None,
                 fix: None,
+                remediation: None,
                 target: ViewTarget::Traffic,
             },
         ),
@@ -696,7 +740,8 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 raw_token: "doctor_fail (config/schema)",
                 since_ms: None,
                 until_ms: None,
-                fix: Some("schema remediation"),
+                fix: None,
+                remediation: Some("schema remediation"),
                 target: ViewTarget::Doctor,
             },
         ),
@@ -704,7 +749,7 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
 }
 
 #[test]
-fn each_kind_carries_its_severity_wording_raw_token_fix_and_target() {
+fn each_kind_carries_its_severity_wording_raw_token_fix_remediation_and_target() {
     for (kind, row, want) in field_rows() {
         let items = active_items(&row);
 
@@ -723,6 +768,7 @@ fn each_kind_carries_its_severity_wording_raw_token_fix_and_target() {
         assert_eq!(item.until_ms, want.until_ms, "{name}");
         assert_eq!(item.recovered_at_ms, None, "{name}");
         assert_eq!(item.fix.as_deref(), want.fix, "{name}");
+        assert_eq!(item.remediation.as_deref(), want.remediation, "{name}");
         assert_eq!(item.target, Some(want.target), "{name}");
     }
 }
@@ -1069,6 +1115,7 @@ fn item(kind: AttentionKind, subject: &str) -> AttentionItem {
         until_ms: None,
         recovered_at_ms: None,
         fix: None,
+        remediation: None,
         target: Some(kind.target()),
     }
 }
@@ -1244,6 +1291,7 @@ fn the_built_list_serializes_every_contract_key_with_closed_tokens() {
             "kind",
             "raw_token",
             "recovered_at_ms",
+            "remediation",
             "severity",
             "since_ms",
             "state",
@@ -1258,4 +1306,156 @@ fn the_built_list_serializes_every_contract_key_with_closed_tokens() {
     assert_eq!(json["items"][0]["severity"], "broken");
     assert_eq!(json["items"][0]["state"], "active");
     assert_eq!(json["counts"]["broken"], 1);
+}
+
+/// `fix` is a bare command or null on every item: a credential or refresh
+/// item over an account whose readmission is a correction carries the
+/// correction as `remediation`, never as `fix`, and a login account's items
+/// carry the login command as `fix` and no remediation.
+#[test]
+fn an_account_fix_is_a_bare_command_and_a_correction_is_a_remediation() {
+    let failing = Some(RefreshFailure {
+        first_failure_ms: NOW - 4 * MIN,
+        token: "transient",
+    });
+    let correction = "provide a readable env credential for provider entry `gamma`";
+    let corrected = |credential| AccountSnapshot {
+        credential,
+        fix: None,
+        remediation: Some(correction.to_string()),
+        refresh_failure: failing,
+        ..seat_a()
+    };
+    let login = |credential| AccountSnapshot {
+        credential,
+        refresh_failure: failing,
+        ..seat_a()
+    };
+    let rows = vec![
+        (
+            "unusable, correction",
+            corrected(logged_out(NOW - MIN)),
+            None,
+            Some(correction),
+        ),
+        (
+            "refresh, correction",
+            corrected(CredentialState::Usable),
+            None,
+            Some(correction),
+        ),
+        (
+            "unusable, login",
+            login(logged_out(NOW - MIN)),
+            Some(FIX),
+            None,
+        ),
+        (
+            "refresh, login",
+            login(CredentialState::Usable),
+            Some(FIX),
+            None,
+        ),
+    ];
+
+    for (name, account, fix, remediation) in rows {
+        let items = active_items(&with_account(account));
+
+        assert_eq!(items.len(), 1, "{name}: {items:?}");
+        assert_eq!(items[0].fix.as_deref(), fix, "{name}");
+        assert_eq!(items[0].remediation.as_deref(), remediation, "{name}");
+    }
+}
+
+/// Each condition the builder folds into a worse item is reported as
+/// subsumed, so the memory never reads it as cleared; a condition that
+/// does not hold is not reported, and a listed item is never subsumed.
+#[test]
+fn a_condition_folded_into_a_worse_item_is_reported_as_subsumed() {
+    let failing = Some(RefreshFailure {
+        first_failure_ms: NOW - 4 * MIN,
+        token: "transient",
+    });
+    let parked = CredentialState::Parked {
+        reason: UpstreamReason::CredentialInvalid,
+        until_ms: NOW + HOUR,
+    };
+    let refresh_key = format!("account_refresh_failing:{ACCOUNT}");
+    let route_key = "route_circuit_open:fast".to_string();
+    let pool_fail_key = "doctor_failure:pools/pool-a".to_string();
+    let account_with = |credential, refresh_failure| AccountSnapshot {
+        credential,
+        refresh_failure,
+        ..seat_a()
+    };
+    let routed = |account| AttentionInputs {
+        routes: vec![route("fast", Some(ACCOUNT), true)],
+        ..with_account(account)
+    };
+    let rows: Vec<(&str, AttentionInputs, Vec<String>)> = vec![
+        (
+            "refresh under an unusable credential",
+            with_account(account_with(logged_out(NOW - MIN), failing)),
+            vec![refresh_key.clone()],
+        ),
+        (
+            "refresh under a parked credential",
+            with_account(account_with(parked, failing)),
+            vec![refresh_key.clone()],
+        ),
+        (
+            "open route under an unusable account",
+            routed(account_with(logged_out(NOW - MIN), None)),
+            vec![route_key.clone()],
+        ),
+        (
+            "open route under a parked account",
+            routed(account_with(parked, None)),
+            vec![route_key.clone()],
+        ),
+        (
+            "pools Fail for a pool pool_empty reads",
+            AttentionInputs {
+                pools: vec![pool("pool-a", 2, 0)],
+                doctor_findings: vec![finding("pools", "pool-a", Status::Fail)],
+                ..inputs()
+            },
+            vec![pool_fail_key.clone()],
+        ),
+        (
+            "control: refresh on a usable account is listed",
+            with_account(account_with(CredentialState::Usable, failing)),
+            Vec::new(),
+        ),
+        (
+            "control: closed route under an unusable account",
+            AttentionInputs {
+                routes: vec![route("fast", Some(ACCOUNT), false)],
+                ..with_account(account_with(logged_out(NOW - MIN), None))
+            },
+            Vec::new(),
+        ),
+        (
+            "control: pools Fail with no pool counts is listed",
+            AttentionInputs {
+                doctor_findings: vec![finding("pools", "pool-a", Status::Fail)],
+                ..inputs()
+            },
+            Vec::new(),
+        ),
+    ];
+
+    for (name, row, expected) in rows {
+        let built = active_items_with_subsumed(&row);
+
+        let subsumed: Vec<String> = built.subsumed.iter().cloned().collect();
+        assert_eq!(subsumed, expected, "{name}");
+        for key in &subsumed {
+            assert!(
+                !built.items.iter().any(|item| &item.key == key),
+                "{name}: {key} is both listed and subsumed"
+            );
+        }
+        assert_eq!(built.items, active_items(&row), "{name}");
+    }
 }

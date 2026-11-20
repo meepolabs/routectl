@@ -228,3 +228,47 @@ fn entry_accounts_map_each_own_credential_entry_to_its_account() {
     .into();
     assert_eq!(entries, expected);
 }
+
+/// Each entry resolves to the account a built target on it carries, by the
+/// same rule the config walk lists accounts under, without a build: a login
+/// entry to its seat, a key entry to `#<entry>`, and a forwarded or unknown
+/// entry to none.
+#[tokio::test]
+async fn account_of_entry_names_the_account_a_built_target_on_it_carries() {
+    // Arrange
+    let config = mixed_config(["a-direct", "b-pooled", "c-plain", "d-keyed"]);
+    let router = built_router(config.clone()).await;
+    let built: std::collections::BTreeMap<String, Option<String>> = router
+        .status_targets(std::time::Instant::now())
+        .into_iter()
+        .map(|target| (target.provider_name, target.account))
+        .collect();
+    assert!(
+        built.len() >= 5,
+        "positive control: every entry built a target: {built:?}"
+    );
+
+    // Act
+    let resolved: std::collections::BTreeMap<String, Option<String>> = built
+        .keys()
+        .map(|entry| {
+            (
+                entry.clone(),
+                AccountIdentities::account_of_entry(&config, entry),
+            )
+        })
+        .collect();
+
+    // Assert
+    assert_eq!(resolved, built);
+    assert_eq!(
+        resolved["relay"], None,
+        "a forwarded entry names no account"
+    );
+    assert_eq!(
+        resolved["alpha"].as_deref(),
+        Some("anthropic#work"),
+        "a pooled login entry"
+    );
+    assert_eq!(AccountIdentities::account_of_entry(&config, "gone"), None);
+}

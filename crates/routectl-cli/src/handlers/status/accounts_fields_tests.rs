@@ -48,6 +48,7 @@ async fn a_logged_out_seats_credential_fix_and_cause_equal_its_attention_item() 
             display: "seat-b (work)".to_string(),
             credential: credential.condition,
             fix: credential.fix.clone(),
+            remediation: None,
             refresh_failure: None,
             poll_failure: None,
             windows: Vec::new(),

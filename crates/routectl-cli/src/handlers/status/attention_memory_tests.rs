@@ -8,8 +8,12 @@ use std::thread;
 use routectl_router::{Finding, Status};
 
 use super::*;
+use routectl_router::Billing;
+use routectl_router::runtime_state::UnusableCause;
+
 use crate::commands::doctor::attention::{
-    AttentionItem, ItemState, PoolSnapshot, RECORDS_DROPPED_HOLD_MS, RouteSnapshot,
+    AccountSnapshot, AttentionItem, CredentialState, ItemState, PoolSnapshot,
+    RECORDS_DROPPED_HOLD_MS, RefreshFailure, RouteSnapshot,
 };
 
 const START: i64 = 1_800_000_000_000;
@@ -274,6 +278,176 @@ fn a_lower_total_from_an_older_read_is_not_a_rise() {
     let items = read(&memory, with_loss(quiet + 2 * READ_EVERY, 5, 0, 0));
 
     assert_eq!(expect_item(&items, RECORDS_KEY).state, ItemState::Recovered);
+}
+
+const ACCOUNT: &str = "anthropic#a";
+
+fn seat(credential: CredentialState, refresh_failing: bool) -> AccountSnapshot {
+    AccountSnapshot {
+        account: ACCOUNT.to_string(),
+        display: "claude-a (a)".to_string(),
+        credential,
+        fix: Some("routectl login anthropic --label a".to_string()),
+        remediation: None,
+        refresh_failure: refresh_failing.then_some(RefreshFailure {
+            first_failure_ms: START - 10 * MIN,
+            token: "transient",
+        }),
+        poll_failure: None,
+        windows: Vec::new(),
+        billing: Billing::Unknown,
+        billing_fresh: false,
+    }
+}
+
+const fn expired(since_ms: i64) -> CredentialState {
+    CredentialState::Unusable {
+        cause: UnusableCause::Expired,
+        since_ms,
+    }
+}
+
+const fn parked() -> CredentialState {
+    CredentialState::Parked {
+        reason: routectl_core::UpstreamReason::CredentialInvalid,
+        until_ms: START + 30 * MIN,
+    }
+}
+
+fn with_seat(now_ms: i64, account: AccountSnapshot, route_open: bool) -> AttentionInputs {
+    AttentionInputs {
+        accounts: vec![account],
+        routes: vec![RouteSnapshot {
+            state_key: "fast".to_string(),
+            account: Some(ACCOUNT.to_string()),
+            circuit_open: route_open,
+            open_since_ms: route_open.then_some(START - MIN),
+        }],
+        ..at(now_ms)
+    }
+}
+
+fn with_pool_failure(now_ms: i64, pool_counted: bool) -> AttentionInputs {
+    AttentionInputs {
+        pools: if pool_counted {
+            vec![empty_pool(POOL, 2)]
+        } else {
+            Vec::new()
+        },
+        doctor_findings: vec![Finding {
+            section: "pools",
+            name: POOL.to_string(),
+            status: Status::Fail,
+            detail: "no member has a credential".to_string(),
+            remediation: None,
+        }],
+        ..at(now_ms)
+    }
+}
+
+/// An item the builder stops listing because a worse item now names the same
+/// problem has not cleared, so it is never shown recovered: a refresh still
+/// failing once the token expires, a route still open once its account is
+/// marked unusable or parked, a pools Fail once the pool's live counts are
+/// read. Each row's `cleared` read is the positive control: the same key,
+/// really gone, is recovered.
+#[test]
+fn an_item_folded_into_a_worse_one_is_never_stamped_recovered() {
+    let refresh_key = format!("account_refresh_failing:{ACCOUNT}");
+    let route_key = "route_circuit_open:fast".to_string();
+    type Read = fn(i64) -> AttentionInputs;
+    let rows: Vec<(&str, String, Read, Read, Read)> = vec![
+        (
+            "refresh under an expired credential",
+            refresh_key.clone(),
+            |t| with_seat(t, seat(CredentialState::Usable, true), false),
+            |t| with_seat(t, seat(expired(START), true), false),
+            |t| with_seat(t, seat(CredentialState::Usable, false), false),
+        ),
+        (
+            "refresh under a parked credential",
+            refresh_key,
+            |t| with_seat(t, seat(CredentialState::Usable, true), false),
+            |t| with_seat(t, seat(parked(), true), false),
+            |t| with_seat(t, seat(CredentialState::Usable, false), false),
+        ),
+        (
+            "open route under an unusable account",
+            route_key.clone(),
+            |t| with_seat(t, seat(CredentialState::Usable, false), true),
+            |t| with_seat(t, seat(expired(START), false), true),
+            |t| with_seat(t, seat(CredentialState::Usable, false), false),
+        ),
+        (
+            "open route under a parked account",
+            route_key,
+            |t| with_seat(t, seat(CredentialState::Usable, false), true),
+            |t| with_seat(t, seat(parked(), false), true),
+            |t| with_seat(t, seat(CredentialState::Usable, false), false),
+        ),
+        (
+            "pools Fail under pool_empty",
+            "doctor_failure:pools/claude-pool".to_string(),
+            |t| with_pool_failure(t, false),
+            |t| with_pool_failure(t, true),
+            at,
+        ),
+    ];
+
+    for (name, key, listed, folded, cleared) in rows {
+        let memory = AttentionMemory::new();
+        let first = read(&memory, listed(START));
+        let during = read(&memory, folded(START + READ_EVERY));
+
+        assert_eq!(
+            expect_item(&first, &key).state,
+            ItemState::Active,
+            "{name}: premise, listed on its own"
+        );
+        assert!(
+            find(&during, &key).is_none(),
+            "{name}: folded, not recovered: {during:#?}"
+        );
+
+        let control = AttentionMemory::new();
+        read(&control, listed(START));
+        let gone = read(&control, cleared(START + READ_EVERY));
+        assert_eq!(
+            expect_item(&gone, &key).state,
+            ItemState::Recovered,
+            "{name}: control, a cleared condition is recovered"
+        );
+    }
+}
+
+/// Once the worse item clears while the folded condition still holds, the
+/// folded item is listed active again with its own start, never recovered in
+/// between.
+#[test]
+fn a_folded_refresh_is_active_again_when_the_credential_item_clears() {
+    let memory = AttentionMemory::new();
+    let key = format!("account_refresh_failing:{ACCOUNT}");
+    read(
+        &memory,
+        with_seat(START, seat(CredentialState::Usable, true), false),
+    );
+    read(
+        &memory,
+        with_seat(START + READ_EVERY, seat(expired(START), true), false),
+    );
+
+    let after = read(
+        &memory,
+        with_seat(
+            START + 2 * READ_EVERY,
+            seat(CredentialState::Usable, true),
+            false,
+        ),
+    );
+
+    let item = expect_item(&after, &key);
+    assert_eq!(item.state, ItemState::Active);
+    assert_eq!(item.since_ms, Some(START - 10 * MIN));
 }
 
 #[test]

@@ -322,10 +322,10 @@ fn map_credential(credential: Option<&AccountCredential>, now_ms: i64) -> Creden
             fix: None,
         },
         |credential| CredentialRow {
-            state: credential.state.as_str(),
+            state: credential.state().as_str(),
             cause: credential_cause(&credential.condition, now_ms),
-            since_ms: credential.since_ms,
-            until_ms: credential.until_ms,
+            since_ms: credential.since_ms(),
+            until_ms: credential.until_ms(),
             fix: credential.fix.clone(),
         },
     )
