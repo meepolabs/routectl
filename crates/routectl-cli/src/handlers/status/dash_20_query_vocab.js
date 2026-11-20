@@ -115,6 +115,27 @@
     'first_seen_ms', 'last_seen_ms', 'expires_at_ms', 'value'
   ];
 
+  var ATTENTION_FIELDS = [
+    'schema_version', 'unavailable', 'as_of', 'data',
+    'verdict', 'counts', 'coverage', 'items',
+    'severity', 'text', 'target',
+    'broken', 'degraded', 'recovered', 'doctor_fail',
+    'doctor',
+    'key', 'kind', 'state', 'subject', 'account', 'cause', 'raw_token',
+    'since_ms', 'until_ms', 'recovered_at_ms', 'fix'
+  ];
+
+  var ACCOUNTS_FIELDS = [
+    'schema_version', 'unavailable', 'as_of', 'data',
+    'accounts', 'refresh_driver', 'poll_driver', 'running',
+    'account', 'provider_entry', 'login_label', 'report', 'windows', 'last_accepted', 'poll',
+    'pools', 'subscription', 'credential',
+    'class', 'length_secs', 'scope', 'used', 'remaining', 'reset_at_ms', 'started', 'source',
+    'observed_at_ms', 'age_ms', 'stale',
+    'applicability', 'vendor', 'last_attempt_ms', 'last_result', 'next_due_ms', 'failure_since_ms',
+    'state', 'cause', 'since_ms', 'until_ms', 'fix'
+  ];
+
   // The COMPLETE set of request bodies this page can issue: every selectable
   // window crossed with every group-by the views use, in both the series read
   // path (Overview) and the non-series one (Usage and the per-seat read), each

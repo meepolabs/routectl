@@ -551,6 +551,10 @@ mod tests {
                 "accounts".to_string(),
                 crate::handlers::status::accounts::SCHEMA_VERSION,
             ),
+            (
+                "attention".to_string(),
+                crate::handlers::status::attention::SCHEMA_VERSION,
+            ),
         ]
         .into_iter()
         .collect();
@@ -2044,6 +2048,11 @@ mod tests {
     mod browser_tiles {
         use super::*;
         include!("page_browser_tiles_tests.rs");
+    }
+
+    mod browser_sources {
+        use super::*;
+        include!("page_browser_sources_tests.rs");
     }
 
     mod payload_keys {

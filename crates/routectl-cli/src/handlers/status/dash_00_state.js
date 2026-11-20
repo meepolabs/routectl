@@ -4,16 +4,14 @@
   // co-versioning note in the document head: same-binary, so a mismatch
   // should never occur in practice; the runtime check is recovery
   // containment for a cached page / mixed assets / a bad build, not version
-  // negotiation. `query` sits alongside the four GET panels because the
-  // QUERY aggregate is a source of its own (see SOURCES below).
-  // `accounts` is on the aggregate, but the Accounts view does not read the
-  // `accounts` panel yet, so it is pinned here and not in GET_SOURCES.
-  var EXPECTED = { usage: 7, health: 9, config: 6, doctor: 32, query: 4, accounts: 1 };
+  // negotiation. `query` sits alongside the GET panels because the QUERY
+  // aggregate is a source of its own (see SOURCES below).
+  var EXPECTED = { usage: 7, health: 9, config: 6, doctor: 32, query: 4, accounts: 1, attention: 1 };
 
-  // The four panels of the aggregate round, each with its own envelope +
+  // The panels of the aggregate round, each with its own envelope +
   // freshness. NOT the same list as the views (VIEWS in dash_80_views.js): a
   // view is what a tab shows, a source is a fetch.
-  var GET_SOURCES = ['usage', 'health', 'config', 'doctor'];
+  var GET_SOURCES = ['usage', 'health', 'config', 'doctor', 'attention', 'accounts'];
   // The two QUERY reads, each its OWN source. Both speak `/status/query`, but
   // Usage asks for a series-less roll-up and Overview asks for a bucketed one,
   // and the two payloads are not interchangeable: Overview cannot draw a

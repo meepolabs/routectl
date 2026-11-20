@@ -448,7 +448,7 @@
     tick();
   }
 
-  // One aggregate round. The four GET panels always render from it; the
+  // One aggregate round. The GET panels always render from it; the
   // QUERY aggregate is scheduled separately (its own cadence, its own
   // backoff), and is only nudged here so a healthy page keeps the visible
   // query-backed tab in step with the 5s poll. Its controller is
@@ -470,7 +470,7 @@
       }
       // Each panel renders under its OWN error boundary: one malformed
       // same-version payload marks THAT source invalid_payload and leaves the
-      // other three -- and the round's 5s cadence -- untouched. Without this,
+      // others -- and the round's 5s cadence -- untouched. Without this,
       // a single bad panel would reject the round and back off every source.
       GET_SOURCES.forEach(function (name) {
         renderPanelGuarded(name, getPanel(agg.json, name));
