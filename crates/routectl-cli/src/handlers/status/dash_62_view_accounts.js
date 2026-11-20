@@ -1,0 +1,450 @@
+  // ---- view:accounts ---------------------------------------------------
+
+  // Every configured credential from /status/accounts, grouped by the pools
+  // that dispatch on it, plus the two background drivers that keep the
+  // logins fresh and read their usage. Read as the daemon sent it: the
+  // login cause and fix, each window's length, room, reset, age and stale
+  // flag are the panel's; the page adds only how far an instant is from the
+  // panel's own as_of. A pool header's usable count comes from the health
+  // panel, read through acctPoolCounts so a dark health source costs that
+  // count alone.
+
+  // A window this full reads amber, and red once at or over its limit. The
+  // same line the needs-attention list draws for a nearly used window.
+  var ACCT_NEAR_LIMIT = 0.9;
+
+  var ACCT_SECOND_MS = 1000;
+  var ACCT_MINUTE_MS = 60000;
+  var ACCT_HOUR_MS = 3600000;
+  var ACCT_DAY_MS = 86400000;
+
+  // The words for each credential state; a token this build does not know
+  // is shown as sent, neutrally.
+  var ACCT_LOGIN_WORDS = {
+    usable: 'usable',
+    unusable: 'unusable',
+    parked: 'parked',
+    not_built: 'not built'
+  };
+
+  // The usage poll's applicability, in words. Every one is neutral: the
+  // needs-attention list, not this line, says when a poll is a problem.
+  var ACCT_POLL_WORDS = {
+    awaiting_login: 'usage poll waits for a fresh login',
+    not_polled: 'not read by the usage poll',
+    off: 'usage poll off'
+  };
+
+  var ACCT_SOURCE_WORDS = {
+    poll: 'from the usage poll',
+    response: 'from a response'
+  };
+
+  // ---- drivers -----------------------------------------------------------
+
+  function accountsDriverSection(rec) {
+    var data = rec.data;
+    if (!isPlainObject(data.refresh_driver) || !isPlainObject(data.poll_driver)) {
+      throw new Error('accounts payload carries no driver health');
+    }
+    var nowMs = panelNowMs(rec);
+    var wrap = markRefreshUnit(document.createElement('div'), 'accounts-drivers');
+    wrap.className = 'ovsection';
+    wrap.appendChild(sectionHead('Background seat drivers',
+      'memory only - a restart starts them from zero'));
+    var list = document.createElement('div');
+    list.className = 'acct-drivers';
+    list.appendChild(acctDriverCard('refresh', 'Credential refresh', data.refresh_driver, nowMs));
+    list.appendChild(acctDriverCard('poll', 'Usage poll', data.poll_driver, nowMs));
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  // A stopped driver reads amber: nothing keeps its seats' logins or
+  // readings fresh while it is down.
+  function acctDriverCard(key, name, driver, nowMs) {
+    var running = driver.running === true;
+    var cardEl = document.createElement('div');
+    cardEl.id = 'accounts-driver-' + key;
+    cardEl.className = 'acct-driver acct-driver--' + (running ? 'running' : 'stopped');
+    var head = document.createElement('div');
+    head.className = 'acct-driver-head';
+    head.appendChild(acctText('span', 'acct-driver-name', name));
+    head.appendChild(acctText('span', 'acct-driver-state', running ? 'running' : 'stopped'));
+    cardEl.appendChild(head);
+    cardEl.appendChild(buildDefList([
+      ['last sweep', acctStamp(driver.last_sweep_ms, nowMs)],
+      ['last clean sweep', acctStamp(driver.last_good_sweep_ms, nowMs)],
+      ['sweeps', acctCountNode(driver.sweeps)],
+      ['transient failures', acctCountNode(driver.transient)],
+      ['definitive failures', acctCountNode(driver.definitive)]
+    ]));
+    return cardEl;
+  }
+
+  function acctStamp(ms, nowMs) {
+    var ago = acctAgo(ms, nowMs);
+    return ago === null ? faintFigure('never') : document.createTextNode(ago);
+  }
+
+  // A count as text; an absent one is a dash, never a zero.
+  function acctCountText(v) {
+    return (v === null || v === undefined || !isFinite(Number(v))) ? '-' : String(Number(v));
+  }
+
+  function acctCountNode(v) {
+    var text = acctCountText(v);
+    return text === '0' ? faintFigure('0') : figure(text, null, null);
+  }
+
+  // ---- accounts by pool --------------------------------------------------
+
+  function accountsPoolSection(rec) {
+    var rows = rec.data.accounts;
+    if (!Array.isArray(rows)) { throw new Error('accounts payload carries no account list'); }
+    rows.forEach(acctCheckRow);
+    var wrap = markRefreshUnit(document.createElement('div'), 'accounts-pools');
+    wrap.className = 'ovsection';
+    wrap.appendChild(sectionHead('Accounts by pool',
+      'every configured credential - an account in several pools is listed under each'));
+    if (!rows.length) {
+      wrap.appendChild(emptyCard('No credential configured',
+        'Every account a provider entry names appears here with its login state and ' +
+        'its usage windows.', ['current state']));
+      return wrap;
+    }
+    var nowMs = panelNowMs(rec);
+    var counts = acctPoolCounts(SOURCES.health);
+    acctPoolNames(rows).forEach(function (pool) {
+      var members = rows.filter(function (row) { return row.pools.indexOf(pool) >= 0; });
+      wrap.appendChild(acctPoolGroup(pool, members, counts, nowMs));
+    });
+    var loose = rows.filter(function (row) { return !row.pools.length; });
+    if (loose.length) { wrap.appendChild(acctLooseGroup(loose, nowMs)); }
+    return wrap;
+  }
+
+  // The shape every row must have before any of it is drawn: a row missing
+  // its key, its window list or its standing is a malformed payload.
+  function acctCheckRow(row) {
+    if (!isPlainObject(row) || typeof row.account !== 'string' ||
+        typeof row.provider_entry !== 'string' || !Array.isArray(row.windows) ||
+        !Array.isArray(row.pools) || !isPlainObject(row.credential) ||
+        !isPlainObject(row.poll)) {
+      throw new Error('accounts payload carries a malformed account row');
+    }
+  }
+
+  // Every pool any row names, sorted, so the groups keep their order across
+  // refreshes whatever order the rows arrive in.
+  function acctPoolNames(rows) {
+    var seen = Object.create(null);
+    var names = [];
+    rows.forEach(function (row) {
+      row.pools.forEach(function (pool) {
+        if (seen[pool]) { return; }
+        seen[pool] = true;
+        names.push(String(pool));
+      });
+    });
+    return names.sort();
+  }
+
+  // Each pool's usable and configured seat counts from the health panel, or
+  // null when that source carries nothing renderable. Guarded as safeSection
+  // guards a section: a throw is recorded against health, and the headers
+  // say the count is not available while the rows keep rendering.
+  function acctPoolCounts(rec) {
+    if (stateCard(rec)) { return null; }
+    try {
+      var pools = rec.data.pools;
+      if (!Array.isArray(pools)) { throw new Error('health payload carries no pools'); }
+      var byPool = Object.create(null);
+      pools.forEach(function (p) { byPool[String(p.pool)] = p; });
+      markRenderAttempt(rec.name);
+      return byPool;
+    } catch (e) {
+      recordRenderFault(rec.name);
+      return null;
+    }
+  }
+
+  function acctUsableText(pool, counts) {
+    if (!counts) { return 'usable count not available'; }
+    var p = counts[pool];
+    if (!p) { return 'usable count not reported'; }
+    return acctCountText(p.eligible) + ' of ' + acctCountText(p.configured) + ' usable';
+  }
+
+  function acctPoolGroup(pool, members, counts, nowMs) {
+    var group = document.createElement('div');
+    group.id = 'accounts-pool-' + idKey(pool);
+    group.className = 'acct-pool';
+    group.appendChild(sectionHead(pool, acctUsableText(pool, counts)));
+    var list = document.createElement('div');
+    list.className = 'acct-list';
+    members.forEach(function (row) {
+      list.appendChild(acctRow(row, 'accounts-row-' + idKey(pool) + '-' + idKey(row.account), nowMs));
+    });
+    group.appendChild(list);
+    return group;
+  }
+
+  function acctLooseGroup(rows, nowMs) {
+    var group = document.createElement('div');
+    group.id = 'accounts-nopool';
+    group.className = 'acct-pool';
+    group.appendChild(sectionHead('Not in a pool', null));
+    var list = document.createElement('div');
+    list.className = 'acct-list';
+    rows.forEach(function (row) {
+      list.appendChild(acctRow(row, 'accounts-row-' + idKey(row.account), nowMs));
+    });
+    group.appendChild(list);
+    return group;
+  }
+
+  // ---- one account ---------------------------------------------------------
+
+  // One account, its own refresh unit: a selection inside its fix holds this
+  // row alone while the rest of the list keeps updating.
+  function acctRow(row, id, nowMs) {
+    var cred = row.credential;
+    var rowEl = markRefreshUnit(document.createElement('div'), id);
+    rowEl.id = id;
+    rowEl.className = 'acct-row acct-row--' + acctLoginKind(cred.state);
+    rowEl.appendChild(acctHead(row));
+    var cause = acctCauseText(cred);
+    if (cause) { rowEl.appendChild(acctText('div', 'acct-cause', cause)); }
+    if (cred.fix) { rowEl.appendChild(acctFix(cred.fix)); }
+    rowEl.appendChild(acctWindows(row, id, nowMs));
+    rowEl.appendChild(acctPollLine(row.poll, nowMs));
+    return rowEl;
+  }
+
+  // "provider_entry (login_label)", or the entry alone for an unlabeled
+  // credential. The account key other panels join on rides in the title.
+  function acctHead(row) {
+    var head = document.createElement('div');
+    head.className = 'acct-head';
+    var name = acctText('span', 'acct-name', row.login_label
+      ? row.provider_entry + ' (' + row.login_label + ')'
+      : row.provider_entry);
+    name.title = row.account;
+    head.appendChild(name);
+    head.appendChild(acctText('span', 'acct-login acct-login--' + acctLoginKind(row.credential.state),
+      acctLoginWord(row.credential.state, row.subscription === true)));
+    return head;
+  }
+
+  function acctLoginKind(state) {
+    if (state === 'usable') { return 'usable'; }
+    return Object.prototype.hasOwnProperty.call(ACCT_LOGIN_WORDS, state) ? 'blocked' : 'other';
+  }
+
+  function acctLoginWord(state, subscription) {
+    if (state === 'usable' && subscription) { return 'logged in'; }
+    return Object.prototype.hasOwnProperty.call(ACCT_LOGIN_WORDS, state)
+      ? ACCT_LOGIN_WORDS[state]
+      : String(state);
+  }
+
+  // The daemon's plain-words cause (a park's already says when it is tried
+  // again), then when it began. An unbuilt account has no router state
+  // at all, which is said rather than left blank.
+  function acctCauseText(cred) {
+    if (cred.state === 'not_built') {
+      return 'its provider did not build, so the router has no state for it';
+    }
+    var parts = [];
+    if (cred.cause) { parts.push(String(cred.cause)); }
+    if (acctHasNumber(cred.since_ms)) { parts.push('since ' + fmtTs(Number(cred.since_ms))); }
+    return parts.join(' - ');
+  }
+
+  // The fix is the line to run, so it carries the row's emphasis and is a
+  // focusable code element: Tab reaches it and Ctrl+A / Ctrl+C copy it.
+  function acctFix(fix) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acct-fix';
+    wrap.appendChild(acctText('span', 'acct-label', 'fix'));
+    var code = document.createElement('code');
+    code.className = 'acct-fix-code';
+    code.tabIndex = 0;
+    code.textContent = String(fix);
+    wrap.appendChild(code);
+    return wrap;
+  }
+
+  // ---- windows -------------------------------------------------------------
+
+  // Every window the account's reading holds, or the reason there is none:
+  // a provider that reports no usage windows says so, and a subscription seat
+  // with no reading says that, never a meter at zero.
+  function acctWindows(row, rowId, nowMs) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acct-wins';
+    if (row.windows.length) {
+      row.windows.forEach(function (w) {
+        var key = String(w.length_secs) + ':' + (w.scope === null || w.scope === undefined ? '' : w.scope);
+        wrap.appendChild(acctWindow(w, rowId + '-win-' + idKey(key), nowMs));
+      });
+      return wrap;
+    }
+    wrap.appendChild(acctText('div', 'acct-nowin', acctNoWindowText(row)));
+    return wrap;
+  }
+
+  function acctNoWindowText(row) {
+    if (row.subscription !== true) { return 'this provider reports no usage windows'; }
+    if (row.report === 'no_windows') { return 'its last reading carried no usage windows'; }
+    return 'no reading yet';
+  }
+
+  function acctWindow(w, id, nowMs) {
+    var used = acctHasNumber(w.used) ? Number(w.used) : NaN;
+    var level = acctLevel(used);
+    var winEl = document.createElement('div');
+    winEl.id = id;
+    winEl.className = 'acct-win acct-win--' + level + (w.stale === true ? ' acct-win--stale' : '');
+    winEl.appendChild(acctText('span', 'acct-win-label', acctWindowLabel(w)));
+    winEl.appendChild(acctUsedFigure(used));
+    winEl.appendChild(acctRoom(w.remaining));
+    if (level !== 'calm') {
+      winEl.appendChild(acctText('span', 'acct-win-level', level === 'full' ? 'at limit' : 'nearly used'));
+    }
+    if (isFinite(used)) { winEl.appendChild(shareBar(used * 100)); }
+    winEl.appendChild(acctWindowMeta(w, nowMs));
+    return winEl;
+  }
+
+  function acctLevel(used) {
+    if (!isFinite(used)) { return 'calm'; }
+    if (used >= 1) { return 'full'; }
+    return used > ACCT_NEAR_LIMIT ? 'near' : 'calm';
+  }
+
+  // The window named by its reported length, never by its provider: the
+  // same vendor's windows differ by plan.
+  function acctWindowLabel(w) {
+    var label = acctLengthText(Number(w.length_secs));
+    return (w.scope === null || w.scope === undefined) ? label : label + ' - ' + w.scope;
+  }
+
+  function acctLengthText(secs) {
+    if (!isFinite(secs) || secs <= 0) { return 'window of unknown length'; }
+    var ms = secs * ACCT_SECOND_MS;
+    if (ms % ACCT_DAY_MS === 0) { return acctUnits(ms / ACCT_DAY_MS, ' day', ' days'); }
+    if (ms % ACCT_HOUR_MS === 0) { return (ms / ACCT_HOUR_MS) + ' h'; }
+    if (ms % ACCT_MINUTE_MS === 0) { return (ms / ACCT_MINUTE_MS) + ' min'; }
+    return secs + ' s';
+  }
+
+  function acctUnits(n, one, many) { return n + (n === 1 ? one : many); }
+
+  function acctUsedFigure(used) {
+    var wrap = document.createElement('span');
+    wrap.className = 'acct-win-used';
+    wrap.appendChild(isFinite(used)
+      ? figure(String(Math.round(used * 100)), '%', null)
+      : faintFigure('-'));
+    wrap.appendChild(document.createTextNode(' used'));
+    return wrap;
+  }
+
+  // A stale reading gives no room: the panel sends null, and it reads as
+  // unknown rather than as the room an old reading had.
+  function acctRoom(remaining) {
+    var wrap = document.createElement('span');
+    wrap.className = 'acct-win-room';
+    if (!acctHasNumber(remaining)) {
+      wrap.appendChild(faintFigure('room unknown'));
+      return wrap;
+    }
+    wrap.appendChild(figure(String(Math.round(Number(remaining) * 100)), '%', null));
+    wrap.appendChild(document.createTextNode(' left'));
+    return wrap;
+  }
+
+  // When the window resets, how old the reading is and where it came from,
+  // then the stale mark. The age is the panel's own; a reading whose age the
+  // daemon could not order says so.
+  function acctWindowMeta(w, nowMs) {
+    var meta = document.createElement('div');
+    meta.className = 'acct-win-meta';
+    var parts = [acctResetText(w, nowMs)];
+    parts.push(acctHasNumber(w.age_ms) ? 'read ' + acctSpanText(Number(w.age_ms)) + ' ago' : 'age unknown');
+    parts.push(Object.prototype.hasOwnProperty.call(ACCT_SOURCE_WORDS, w.source)
+      ? ACCT_SOURCE_WORDS[w.source]
+      : 'from ' + w.source);
+    meta.appendChild(document.createTextNode(parts.join(' - ')));
+    if (w.stale === true) { meta.appendChild(acctText('span', 'acct-stale', 'stale')); }
+    return meta;
+  }
+
+  function acctResetText(w, nowMs) {
+    if (w.started === 'no') { return 'not started'; }
+    if (!acctHasNumber(w.reset_at_ms)) { return 'reset time not reported'; }
+    if (!isFinite(nowMs)) { return 'resets at ' + fmtTs(Number(w.reset_at_ms)); }
+    var left = Number(w.reset_at_ms) - nowMs;
+    return left <= 0 ? 'reset time passed' : 'resets in ' + acctSpanText(left);
+  }
+
+  // ---- usage poll ----------------------------------------------------------
+
+  function acctPollLine(poll, nowMs) {
+    var line = document.createElement('div');
+    line.className = 'acct-poll';
+    line.textContent = acctPollText(poll, nowMs);
+    return line;
+  }
+
+  function acctPollText(poll, nowMs) {
+    var token = poll.applicability;
+    if (token !== 'polled') {
+      return Object.prototype.hasOwnProperty.call(ACCT_POLL_WORDS, token)
+        ? ACCT_POLL_WORDS[token]
+        : 'usage poll: ' + token;
+    }
+    var parts = [];
+    var last = acctAgo(poll.last_attempt_ms, nowMs);
+    parts.push(last === null
+      ? 'usage poll: not attempted yet'
+      : 'usage poll: last ' + (poll.last_result || 'attempt') + ' ' + last);
+    var failing = acctAgo(poll.failure_since_ms, nowMs);
+    if (failing !== null) { parts.push('failing since ' + failing); }
+    if (acctHasNumber(poll.next_due_ms) && isFinite(nowMs)) {
+      var due = Number(poll.next_due_ms) - nowMs;
+      parts.push(due <= 0 ? 'due now' : 'next in ' + acctSpanText(due));
+    }
+    return parts.join(' - ');
+  }
+
+  // ---- shared --------------------------------------------------------------
+
+  function acctHasNumber(v) {
+    return v !== null && v !== undefined && isFinite(Number(v));
+  }
+
+  // "<span> ago" against the panel's clock, or null with no instant to read.
+  function acctAgo(ms, nowMs) {
+    if (!acctHasNumber(ms) || !isFinite(nowMs)) { return null; }
+    return acctSpanText(Math.max(0, nowMs - Number(ms))) + ' ago';
+  }
+
+  // A coarse length of time, worded as the daemon words its causes: under a
+  // minute, whole minutes, whole hours, then whole days.
+  function acctSpanText(ms) {
+    if (ms < ACCT_MINUTE_MS) { return 'under 1 min'; }
+    if (ms < ACCT_HOUR_MS) { return Math.floor(ms / ACCT_MINUTE_MS) + ' min'; }
+    if (ms < ACCT_DAY_MS) { return Math.floor(ms / ACCT_HOUR_MS) + ' h'; }
+    return acctUnits(Math.floor(ms / ACCT_DAY_MS), ' day', ' days');
+  }
+
+  function acctText(tag, cls, value) {
+    var node = document.createElement(tag);
+    node.className = cls;
+    node.textContent = (value === null || value === undefined) ? '' : String(value);
+    return node;
+  }
+  // ---- end view:accounts -----------------------------------------------

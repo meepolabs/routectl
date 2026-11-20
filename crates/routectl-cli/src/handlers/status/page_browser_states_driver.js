@@ -224,11 +224,12 @@
 
   // ---- missing data reads as unavailable, never as a zero ---------------
 
+  // The accounts panel answers without its usage-poll driver's sweep count;
+  // health without the first pool's usable count, and its pool list absent
+  // altogether once `noPools` is set.
   function withoutData(json) {
-    var health = json.panels.health.data;
-    delete json.panels.usage;
-    delete health.seat_driver.sweeps;
-    delete health.pools[0].eligible;
+    delete json.panels.accounts.data.poll_driver.sweeps;
+    delete json.panels.health.data.pools[0].eligible;
     return json;
   }
 
@@ -240,16 +241,21 @@
     return null;
   }
 
+  function poolHint(pool) {
+    var group = document.getElementById('accounts-pool-' + pool);
+    var hint = group ? group.querySelector('.card-hint') : null;
+    return hint ? hint.textContent : null;
+  }
+
   function accountsReading() {
     var body = document.getElementById('body-accounts');
-    var driver = body.querySelector('[data-unit="Background seat driver"]');
-    var pools = body.querySelector('[data-unit="Pool seats"]');
-    var quota = body.querySelector('[data-source="usage"]');
+    var seat = document.getElementById('accounts-row-kseats-kanthropic_23_a');
     return {
-      sweeps: definition(driver, 'sweeps'),
-      first_pool_eligible: definition(pools, 'eligible'),
-      quota_card: quota ? textOf('#body-accounts [data-source="usage"] .unavailable-msg') : null,
-      quota_zero_figures: quota ? quota.querySelectorAll('.mag-zero').length : null
+      sweeps: definition(document.getElementById('accounts-driver-poll'), 'sweeps'),
+      seats_pool: poolHint('kseats'),
+      backup_pool: poolHint('kbackup'),
+      seat_window: seat ? seat.querySelector('.acct-win-used').textContent : null,
+      error_cards: errorCards(body)
     };
   }
 
@@ -268,6 +274,19 @@
     }).then(function () {
       out.missing = accountsReading();
       return out;
+    });
+  });
+
+  // The health panel answers with no pool list: the pool headers say their
+  // count is not available while every account row keeps rendering.
+  d.scenario('states-pool-counts-unavailable', function () {
+    rules.push(function (entry) {
+      return isAggregate(entry) ? {
+        rewrite: function (json) { delete json.panels.health.data.pools; return json; }
+      } : null;
+    });
+    return settledView('accounts').then(function () {
+      return accountsReading();
     });
   });
 

@@ -24,6 +24,10 @@ pub(super) const NAMED_PARTS: &[(&str, &str)] = &[
     ),
     ("dash_61_tab_usage.js", include_str!("dash_61_tab_usage.js")),
     (
+        "dash_62_view_accounts.js",
+        include_str!("dash_62_view_accounts.js"),
+    ),
+    (
         "dash_70_tab_routing.js",
         include_str!("dash_70_tab_routing.js"),
     ),

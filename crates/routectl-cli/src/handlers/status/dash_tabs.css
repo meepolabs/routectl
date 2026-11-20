@@ -389,95 +389,6 @@
   flex: none;
 }
 
-.qlist {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-quota)), 1fr));
-  gap: var(--sp-2);
-  min-width: 0;
-}
-.qtile {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: var(--sp-3) var(--sp-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-.qtile-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-  min-width: 0;
-}
-.qseat {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  color: var(--fg);
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.qkind {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--faint);
-  white-space: nowrap;
-}
-.qfresh {
-  font-size: var(--fs-xs);
-  letter-spacing: 0.05em;
-  white-space: nowrap;
-  flex: none;
-}
-.qfresh--stale {
-  font-family: var(--font-mono);
-  padding: 1px var(--sp-2);
-  border-radius: var(--r-pill);
-  background: var(--pill-warn-bg);
-  color: var(--pill-warn-fg);
-}
-.qlines {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-.qline {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: baseline;
-  gap: var(--sp-1) var(--sp-3);
-  min-width: 0;
-}
-.qline-label {
-  font-size: var(--fs-xs);
-  color: var(--faint);
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.qline-value {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--fs-md);
-  color: var(--fg);
-  text-align: right;
-  white-space: nowrap;
-}
-.qline-value .unit { font-size: 0.7em; color: var(--faint); }
-/* The bar spans the row under the figure it belongs to. A line with no
-   measured utilization renders no bar at all. */
-.qline > .sharebar { grid-column: 1 / -1; }
-.qline--missing { grid-template-columns: minmax(0, 1fr); }
-/* The window separator is drawn by CSS: this script carries no
-   slash-leading string literal (see the mutation-channel scan in page.rs). */
-.qsep { color: var(--faint); padding: 0 2px; }
-.qsep::before { content: "/"; }
-.qmeta { padding-top: var(--sp-1); }
-
 /* ---- config: source strip (lowest visual energy on the page) ----
    One card, hairline-free: the facts are facets of ONE reading (which config
    is in effect), so they carry no per-fact border and no color at all. Every
@@ -721,8 +632,184 @@
   .skeleton span,
   .poll-dot { animation: none; }
   .pane,
-  .modal-backdrop,
   .changed { animation: none; }
 }
 
-
+/* ---- Accounts: every configured credential by pool ----
+   A row is a separate object (its own fix to run), so rows are cards; the
+   windows inside one are facets of one reading, so they share a hairline.
+   A usage meter is calm (accent) until the window is nearly used (amber)
+   and red at its limit, always beside its number and a word. An old
+   reading is dimmed, never recolored. */
+.acct-pool {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.acct-pool + .acct-pool { margin-top: var(--sp-4); }
+.acct-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-quota)), 1fr));
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.acct-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.acct-row--blocked { border-color: var(--warn); }
+.acct-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.acct-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  color: var(--fg);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.acct-login {
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--pill-neutral-bg);
+  color: var(--pill-neutral-fg);
+  white-space: nowrap;
+  flex: none;
+}
+.acct-login--usable { background: var(--pill-ok-bg); color: var(--pill-ok-fg); }
+.acct-login--blocked { background: var(--pill-warn-bg); color: var(--pill-warn-fg); }
+.acct-cause {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.acct-fix {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.acct-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+  flex: none;
+}
+.acct-fix-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 2px var(--sp-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.acct-fix-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.acct-wins {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.acct-nowin { font-size: var(--fs-sm); color: var(--faint); }
+.acct-win {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+}
+.acct-win--stale { opacity: 0.6; }
+.acct-win-label {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.acct-win-used,
+.acct-win-room {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  white-space: nowrap;
+}
+.acct-win-room { color: var(--muted); }
+.acct-win-used .unit,
+.acct-win-room .unit { font-size: 0.8em; color: var(--faint); }
+.acct-win-level { font-size: var(--fs-xs); white-space: nowrap; }
+.acct-win--near .acct-win-level { color: var(--warn); }
+.acct-win--full .acct-win-level { color: var(--neg); }
+.acct-win > .sharebar { flex: 1 1 100%; }
+.acct-win .sharebar-fill { background: var(--meter); }
+.acct-win--near .sharebar-fill { background: var(--meter-warn); }
+.acct-win--full .sharebar-fill { background: var(--meter-full); }
+.acct-win-meta {
+  flex: 1 1 100%;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+.acct-stale {
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--muted);
+}
+.acct-poll { font-size: var(--fs-xs); color: var(--faint); overflow-wrap: anywhere; }
+.acct-drivers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-quota)), 1fr));
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.acct-driver {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.acct-driver--stopped { border-color: var(--warn); }
+.acct-driver-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.acct-driver-name { font-size: var(--fs-md); color: var(--fg); flex: 1 1 auto; }
+.acct-driver-state {
+  font-size: var(--fs-xs);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--pill-ok-bg);
+  color: var(--pill-ok-fg);
+}
+.acct-driver--stopped .acct-driver-state {
+  background: var(--pill-warn-bg);
+  color: var(--pill-warn-fg);
+}

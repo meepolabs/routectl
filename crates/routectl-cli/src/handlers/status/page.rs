@@ -55,6 +55,7 @@ const SCRIPT_PARTS: &[&str] = &[
     include_str!("dash_50_dom.js"),
     include_str!("dash_60_tab_overview.js"),
     include_str!("dash_61_tab_usage.js"),
+    include_str!("dash_62_view_accounts.js"),
     include_str!("dash_70_tab_routing.js"),
     include_str!("dash_71_tab_health.js"),
     include_str!("dash_72_tab_config.js"),
@@ -1470,6 +1471,10 @@ mod tests {
             include_str!("page_browser_states_tests.rs"),
         ),
         (
+            "page_browser_accounts_tests.rs",
+            include_str!("page_browser_accounts_tests.rs"),
+        ),
+        (
             "page_browser_verdict_tests.rs",
             include_str!("page_browser_verdict_tests.rs"),
         ),
@@ -2050,6 +2055,11 @@ mod tests {
     mod browser_now {
         use super::*;
         include!("page_browser_now_tests.rs");
+    }
+
+    mod browser_accounts {
+        use super::*;
+        include!("page_browser_accounts_tests.rs");
     }
 
     mod payload_keys {

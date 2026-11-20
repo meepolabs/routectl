@@ -88,7 +88,7 @@ fn source_rows() -> Vec<SourceRow> {
         card,
     };
     let doctor_card = "#body-doctor [data-source=\"doctor\"] .unavailable-msg";
-    let usage_card = "#body-accounts [data-source=\"usage\"] .unavailable-msg";
+    let accounts_card = "#body-accounts [data-source=\"accounts\"] .unavailable-msg";
     let query_card = "#body-traffic [data-source=\"query\"] .unavailable-msg";
     vec![
         row(
@@ -108,20 +108,20 @@ fn source_rows() -> Vec<SourceRow> {
             doctor_card,
         ),
         row(
-            "usage unavailable",
+            "accounts unavailable",
             "/status",
-            Some("usage"),
+            Some("accounts"),
             "unavailable",
             "accounts",
-            usage_card,
+            accounts_card,
         ),
         row(
-            "usage invalid",
+            "accounts invalid",
             "/status",
-            Some("usage"),
+            Some("accounts"),
             "invalid",
             "accounts",
-            usage_card,
+            accounts_card,
         ),
         row(
             "query unavailable",
@@ -142,7 +142,7 @@ fn source_rows() -> Vec<SourceRow> {
     ]
 }
 
-/// A doctor, usage or QUERY answer that is refused or contradicts itself
+/// A doctor, accounts or QUERY answer that is refused or contradicts itself
 /// costs only its own sections: the verdict text and the favicon stay as the
 /// attention verdict left them. Positive control per row: the source's error
 /// card was absent before the break and present after it, so the row really

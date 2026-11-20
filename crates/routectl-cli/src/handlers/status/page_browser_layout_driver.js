@@ -21,7 +21,7 @@
   // What each checked view shows once its slowest sources have answered.
   var SETTLED_MARKER = {
     now: ['.kpigrid', '.glance-meter'],
-    accounts: ['.qtile'],
+    accounts: ['.acct-row'],
     traffic: ['.ucard-stats'],
     models: ['.hgrid'],
     config: ['.cfgstrip'],

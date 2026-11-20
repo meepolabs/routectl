@@ -33,6 +33,10 @@ has not verified the failure that matters most.
   an open row and disclosure, the seat dialog, and page and table scroll.
 - **The changed-value mark and reduced motion** (`dash_40_render.js`,
   `dash_50_dom.js`, `dash_90_chrome.js`): `page_browser_motion_tests.rs`.
+- **The Accounts rows** (`dash_62_view_accounts.js`):
+  `page_browser_accounts_tests.rs` (grouping and names, the login cause and
+  focusable fix, windows named from their length with level, reset, age and
+  stale mark, the poll line, the drivers, and a row kept across a refresh).
 - **The address and the views** (`dash_90_chrome.js`):
   `page_browser_url_tests.rs` and `page_browser_views_tests.rs`.
 - **Figures read in full at each text size** (`dash_*.css`):
@@ -225,7 +229,7 @@ banner, no retry signal -- silently mislabeled data.
   `verified` row whose class is missing or unrecognized, so a row seeded
   without one never reaches the registry and the check passes vacuously.
 
-## 7. Models and Accounts tabs: eligibility, pool seats and the seat driver
+## 7. Models and Accounts tabs: eligibility, accounts by pool and the seat drivers
 
 - Serve a config with a pool of two `oauth://anthropic#<label>` members,
   one logged in and one never logged in, against a throwaway credentials
@@ -235,16 +239,28 @@ banner, no retry signal -- silently mislabeled data.
   `credential_unusable (not_logged_in)`, how long ago it was marked, and the
   exact `routectl login anthropic --label <label>` command, selectable as one
   unit. A logged-in seat's eligibility cell reads `eligible`.
-- The "Pool seats" section shows the pool with `eligible 1 of 2` and a
-  `credential_unusable 1` line. Log the seat in (against the same throwaway
-  file); within one poll the count reads `2 of 2` and the reason line is
-  gone, with no restart.
-- A pool whose every seat is eligible renders as a healthy card; a config
-  with no pool reads "No pool configured."
-- The "Background seat driver" section reads `running yes` on a daemon with
-  a credential store, `never` for the sweep stamps before the first sweep,
-  and `0` (not `-`) for zero counts. After a minute the last sweep
-  age appears and `sweeps` reads `1`.
+- On Accounts the pool is listed with `1 of 2 usable` beside its name, and
+  each member is a row named `<provider entry> (<label>)`. The never-logged-in
+  seat reads `unusable` with the daemon's sentence (`Not logged in, for
+  <age>`), when it began, and its `routectl login anthropic --label <label>`
+  fix in a code box Tab reaches. Log the seat in (against the same throwaway
+  file); within one poll the header reads `2 of 2 usable`, the row reads
+  `logged in` and the fix is gone, with no restart. A seat named by two pools
+  is listed under each; an API-key or cloud entry is listed under "Not in a
+  pool" and reads `this provider reports no usage windows`.
+- Each window of a polled seat is named from its reported length (`5 h`,
+  `7 days`; a Codex five-hour window reads `5 h`, never `weekly`), with
+  `<n>% used`, `<n>% left`, `resets in <time>`, `read <age> ago` and its
+  source. The meter is the accent color, amber with `nearly used` past 90%
+  and red with `at limit` at 100%. Stop the usage poll (block its vendor
+  endpoint) and wait 7 minutes: the window dims, reads `room unknown` and
+  carries a `stale` mark, and its age keeps advancing. A seat with no
+  reading yet says `no reading yet`, never a meter at zero.
+- The "Background seat drivers" section shows the credential refresh and
+  usage poll drivers, each `running` on a daemon with a credential store,
+  `never` for the sweep stamps before the first sweep, and `0` (not `-`) for
+  zero counts. After a minute the last sweep age appears and `sweeps` reads
+  `1`. On a daemon with no credential store both read `stopped` in amber.
 - With both pool seats logged out, the status line at the top reads the
   daemon's sentence naming the empty pool in red, with a `see Accounts`
   link, and the tab icon is red. With one of two seats out it reads the
@@ -261,10 +277,9 @@ banner, no retry signal -- silently mislabeled data.
   daemon cannot be reached`; the icon stays red for a broken verdict. It
   never returns to `Checking routing state`. Start the daemon again: within
   a poll the current sentence replaces it and the dimming clears.
-- The Accounts and Models tab badges each count every target with an
-  eligibility reason or a non-closed breaker once: two logged-out seats badge `2`, and a seat that is
-  both logged out and breaker-open still counts once. The favicon turns amber
-  with it.
+- The Models tab badge counts every target with an eligibility reason or a
+  non-closed breaker once: two logged-out seats badge `2`, and a seat that is
+  both logged out and breaker-open still counts once.
 - The Traffic "Live target state" row for the same target shows a red dot,
   a non-green pill (`no seat` when every seat is out, otherwise the reason),
   and `<n> of <m> not eligible`; never `unknown - nothing dispatched to it

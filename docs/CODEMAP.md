@@ -7700,6 +7700,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `queryInputChanged`) outside the section boundary, then one two-line card per
   query group ranked by requests, with zero-traffic groups omitted and their
   count reported in the header
+- `src/handlers/status/dash_62_view_accounts.js` -- dashboard SCRIPT part: the
+  Accounts view sections, MULTI-SOURCE (`accounts`, plus `health` for each
+  pool header's usable count, guarded in `acctPoolCounts` so a dark health
+  source costs the counts alone). `accountsPoolSection` lists every
+  configured credential from `/status/accounts` under each pool naming it
+  (sorted; an account in several pools under each, then "Not in a pool"),
+  named "provider_entry (login_label)", with the daemon's credential cause
+  and its fix in a focusable `<code>`, every window labelled from
+  `length_secs` with used and room, a meter calm / amber past 0.9 / red at
+  1 beside its word, "resets in", the reading's age and source and a stale
+  mark (dimmed), and the usage-poll line (every applicability token
+  neutral). API-key and cloud rows say "this provider reports no usage
+  windows". `accountsDriverSection` shows the refresh and poll drivers,
+  stopped reading amber
 - `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 10 of
   15: the Routing sections, built under the Usage sections in the Traffic
   view, MULTI-SOURCE (built around `config`, plus `usage_all` and `health`);

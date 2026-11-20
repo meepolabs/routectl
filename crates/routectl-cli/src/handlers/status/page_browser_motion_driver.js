@@ -9,6 +9,22 @@
   'use strict';
 
   var CHANGED = 'changed';
+
+  // Each /status answer moves every account window's used fraction (and so
+  // its room and meter) by the answer's round, and nothing else on Accounts:
+  // the driver counts and ages hold, so a round has both moved and held
+  // figures.
+  d.rewrite(function (url, text, n) {
+    if (url.pathname !== '/status') { return text; }
+    var agg = JSON.parse(text);
+    agg.panels.accounts.data.accounts.forEach(function (row) {
+      row.windows.forEach(function (w) {
+        w.used = Math.min(1, w.used + n / 100);
+        if (w.remaining !== null) { w.remaining = 1 - w.used; }
+      });
+    });
+    return JSON.stringify(agg);
+  });
   var FADE = 'changefade';
 
   // The view the address opens. The driver starts before the page's load

@@ -49,8 +49,8 @@ fn seen<'a>(round: &'a Value, side: &str) -> &'a Vec<Value> {
     round[side].as_array().expect("a list of kept figures")
 }
 
-/// On Accounts, a refresh moves the quota figures and meters while the rest
-/// hold: every kept figure whose value moved is marked and starts the fade,
+/// On Accounts, a refresh moves the account windows' figures and meters (the
+/// driver rewrites each round's used fraction) while the rest hold: every kept figure whose value moved is marked and starts the fade,
 /// and no kept figure whose value held is marked. Positive controls: both
 /// sides are non-empty, and a meter is among the moved, kept nodes, so its
 /// `--pct` width transitions on the same node.

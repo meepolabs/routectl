@@ -118,7 +118,11 @@ fn page_browser_an_invalid_health_payload_errors_only_its_own_sections() {
             .filter(|s| s["source"] == "health")
             .count()
     };
-    assert_eq!(health_sections("accounts"), 2, "pool seats and the driver");
+    assert_eq!(
+        health_sections("accounts"),
+        0,
+        "Accounts reads health inside"
+    );
     assert_eq!(health_sections("models"), 1);
     assert_eq!(health_sections("now"), 0);
 
@@ -209,28 +213,54 @@ fn page_browser_a_superseded_range_ends_pending_on_the_newer_answer() {
     assert!(applied["figures"].is_string(), "{applied:#}");
 }
 
-/// A panel absent from the answer shows its unavailable card, and a figure
-/// absent from a payload reads as a dash; neither becomes a zero.
+/// A figure absent from a payload reads as a dash, never a zero: the poll
+/// driver's sweep count and a pool's usable count, while the rest of the
+/// view keeps rendering.
 ///
-/// Mutation check: make seatCountText answer `0` for an absent count -> red.
+/// Mutation check: make acctCountText answer `0` for an absent count -> red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_missing_data_reads_as_unavailable_never_zero() {
     let result = states_scenario("states-missing-data", "accounts", 30_000);
     let (present, missing) = (&result["present"], &result["missing"]);
 
-    assert_eq!(present["sweeps"], "12", "positive control: {present:#}");
-    assert_eq!(present["first_pool_eligible"], "1 of 3", "{present:#}");
-    assert_eq!(present["quota_card"], Value::Null, "{present:#}");
+    assert_eq!(present["sweeps"], "7", "positive control: {present:#}");
+    assert_eq!(present["seats_pool"], "1 of 3 usable", "{present:#}");
 
     assert_eq!(missing["sweeps"], "-", "{missing:#}");
-    assert_eq!(missing["first_pool_eligible"], "- of 3", "{missing:#}");
+    assert_eq!(missing["seats_pool"], "- of 3 usable", "{missing:#}");
+    assert_eq!(missing["backup_pool"], "1 of 2 usable", "{missing:#}");
     assert_eq!(
-        missing["quota_card"],
-        "unavailable: missing_panel (this source is not answering right now)",
+        missing["seat_window"], present["seat_window"],
         "{missing:#}"
     );
-    assert_eq!(missing["quota_zero_figures"], 0, "{missing:#}");
+    assert_eq!(missing["error_cards"], 0, "{missing:#}");
+}
+
+/// A health answer with no pool list costs the pool headers' usable counts
+/// alone: they say the count is not available, and every account row and
+/// window still renders with no error card.
+///
+/// Mutation check: drop the try/catch in acctPoolCounts so its throw reaches
+/// the section -> red (the whole section is an error card).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_unavailable_pool_counts_leave_the_account_rows() {
+    let result = states_scenario("states-pool-counts-unavailable", "accounts", 30_000);
+
+    assert_eq!(
+        result["seats_pool"], "usable count not available",
+        "{result:#}"
+    );
+    assert_eq!(
+        result["backup_pool"], "usable count not available",
+        "{result:#}"
+    );
+    assert!(
+        result["seat_window"].is_string(),
+        "positive control: the seat row still renders its window: {result:#}"
+    );
+    assert_eq!(result["error_cards"], 0, "{result:#}");
 }
 
 /// A grouping changed by the address while Accounts is showing resets the

@@ -32,7 +32,7 @@
     {
       id: 'accounts',
       label: 'Accounts',
-      sources: ['health', 'usage'],
+      sources: ['accounts', 'health'],
       span: 'current state',
       build: buildAccounts
     },
@@ -96,14 +96,13 @@
     return stack;
   }
 
-  // Seats and quota: the pools a request can dispatch to, the driver keeping
-  // their logins fresh, and the latest quota snapshot per seat. The quota
-  // section reads the usage ledger, so a dark ledger costs the tiles alone.
+  // Every configured credential by pool, from the accounts panel, with the
+  // pool headers' usable counts read from health inside it; then the two
+  // background drivers that keep the logins and readings fresh.
   function buildAccounts() {
     var stack = tabStack();
-    stack.appendChild(viewSection('health', healthPoolSection, 'Pool seats'));
-    stack.appendChild(viewSection('health', healthDriverSection, 'Background seat driver'));
-    stack.appendChild(viewSection('usage', healthQuotaSection, 'Seat quota'));
+    stack.appendChild(viewSection('accounts', accountsPoolSection, 'Accounts by pool'));
+    stack.appendChild(viewSection('accounts', accountsDriverSection, 'Background seat drivers'));
     return stack;
   }
 
