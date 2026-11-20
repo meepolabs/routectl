@@ -215,7 +215,7 @@ fn pid_is_live(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn pid_is_live(_pid: u32) -> bool {
+const fn pid_is_live(_pid: u32) -> bool {
     true
 }
 

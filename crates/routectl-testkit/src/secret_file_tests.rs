@@ -1,7 +1,11 @@
 use std::path::Path;
+#[cfg(unix)]
 use std::time::Duration;
 
-use super::{secret_file_ref, write_owner_only};
+use super::secret_file_ref;
+#[cfg(unix)]
+use super::write_owner_only;
+#[cfg(unix)]
 use crate::temp_reaper::{create_secret_dir, reap_in};
 
 fn path_of(uri: &str) -> &Path {

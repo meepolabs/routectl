@@ -140,6 +140,7 @@ fn midnight_dst_zone() -> LocalZone {
 }
 
 /// 2026-11-01 15:00 local (UTC-2) in [`midnight_dst_zone`].
+#[cfg(unix)]
 const MIDNIGHT_DST_NOW_MS: i64 = 1_793_552_400_000;
 
 #[cfg(unix)]

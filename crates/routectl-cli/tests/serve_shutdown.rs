@@ -21,12 +21,18 @@
 //! CHILD ONLY, so the config, the usage ledger, and the catalog state all
 //! resolve inside it and never touch the developer's real `~/.config/routectl`.
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use routectl_router::CURRENT_CONFIG_VERSION as CURRENT;
 
 /// The real `routectl` binary under test, resolved by cargo for this crate.
@@ -39,6 +45,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_routectl");
 /// for completes in milliseconds. A regression that drains before releasing the
 /// Router pays that full 5s, so at 4s this discriminates -- it is not a
 /// generous no-hang backstop but the assertion itself.
+#[cfg(unix)]
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(4);
 
 /// How long the parent waits for the child to exit before giving up, killing
@@ -47,15 +54,19 @@ const SHUTDOWN_BUDGET: Duration = Duration::from_secs(4);
 /// Deliberately above [`SHUTDOWN_BUDGET`]: a child that exceeds the budget but
 /// still exits produces the precise "took too long" diagnosis, while this only
 /// catches a child that never reacts at all.
+#[cfg(unix)]
 const EXIT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the parent waits for the daemon to begin serving.
+#[cfg(unix)]
 const READY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the parent waits for the daemon to log a delivered SIGHUP.
+#[cfg(unix)]
 const SIGHUP_LOG_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The line the daemon logs at info level for every SIGHUP it receives.
+#[cfg(unix)]
 const SIGHUP_LOG_LINE: &str = "SIGHUP received; triggering full config + credentials rescan";
 
 /// A child `routectl serve` that is killed and reaped if the test leaves early.
@@ -64,6 +75,7 @@ const SIGHUP_LOG_LINE: &str = "SIGHUP received; triggering full config + credent
 /// assertion is the case that matters: without it a failing run leaks a live
 /// daemon holding a port for the rest of the suite. Both steps are required --
 /// `kill` alone leaves a zombie, so the wait is what actually reaps it.
+#[cfg(unix)]
 struct ServeChild {
     child: Option<Child>,
 }
@@ -87,6 +99,7 @@ fn serve_command(home: &Path, config: &Path) -> Command {
     command
 }
 
+#[cfg(unix)]
 impl ServeChild {
     fn spawn(home: &Path, config: &Path, port: u16) -> Self {
         let child = serve_command(home, config)
@@ -152,6 +165,7 @@ impl ServeChild {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ServeChild {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -164,6 +178,7 @@ impl Drop for ServeChild {
 }
 
 /// A hermetic config directory with a serve config on `port`.
+#[cfg(unix)]
 fn hermetic_home(port: u16) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_dir = dir.path().join(".config").join("routectl");
@@ -187,6 +202,7 @@ fn hermetic_home(port: u16) -> (tempfile::TempDir, std::path::PathBuf) {
 /// Bound and released to learn the number: the child binds it itself, so this
 /// is inherently a window rather than a reservation -- which is why a failure
 /// to serve is reported as such rather than silently retried.
+#[cfg(unix)]
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     listener.local_addr().expect("bound address").port()
@@ -199,6 +215,7 @@ fn free_port() -> u16 {
 /// whole graph to read nine bytes of status line would be a heavier dependency
 /// change than this test warrants. Only the status line is parsed, which is all
 /// readiness turns on.
+#[cfg(unix)]
 fn health_is_serving(port: u16) -> bool {
     use std::io::Write;
 
@@ -227,6 +244,7 @@ fn health_is_serving(port: u16) -> bool {
 /// A readiness PROBE, not a sleep: it answers only once the whole boot sequence
 /// has finished (writer started, Router published), which is the state the shutdown measurement needs. A child that
 /// died during boot is detected here rather than mistaken for a slow start.
+#[cfg(unix)]
 fn await_serving(child: &mut ServeChild, port: u16) {
     let until = Instant::now() + READY_DEADLINE;
     while Instant::now() < until {
@@ -364,12 +382,15 @@ fn a_serving_daemon_logs_the_reload_trigger_on_sighup() {
 }
 
 /// The shipped example config, verbatim.
+#[cfg(unix)]
 const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.toml");
 
 /// The example's Bedrock provider, which uses the AWS default credential chain.
+#[cfg(unix)]
 const EXAMPLE_BEDROCK_PROVIDER: &str = "bedrock";
 
 /// The example's catch-all alias that routes to a Bedrock-backed model.
+#[cfg(unix)]
 const EXAMPLE_BEDROCK_ALIAS: &str = "claude-sonnet-*";
 
 /// The example config with every `oauth://` provider removed, plus everything
@@ -382,6 +403,7 @@ const EXAMPLE_BEDROCK_ALIAS: &str = "claude-sonnet-*";
 /// Bedrock default-chain provider and the aliases reaching it stay exactly as
 /// shipped, which is the startup path under test. Derived from the shipped
 /// file rather than copied so a change to the example reaches this test.
+#[cfg(unix)]
 fn example_config_without_oauth(port: u16) -> String {
     let mut doc: toml_edit::DocumentMut = EXAMPLE_CONFIG.parse().expect("example config parses");
     doc["server"]["port"] = toml_edit::value(i64::from(port));
@@ -434,6 +456,7 @@ fn example_config_without_oauth(port: u16) -> String {
 }
 
 /// Names of the entries in `table` whose body satisfies `pred`.
+#[cfg(unix)]
 fn keys_where(table: &toml_edit::Table, pred: impl Fn(&toml_edit::Item) -> bool) -> Vec<String> {
     table
         .iter()
@@ -443,6 +466,7 @@ fn keys_where(table: &toml_edit::Table, pred: impl Fn(&toml_edit::Item) -> bool)
 }
 
 /// Every `env://VAR` name the config text references.
+#[cfg(unix)]
 fn env_ref_names(config: &str) -> Vec<String> {
     let mut names: Vec<String> = config
         .split("\"env://")
@@ -460,6 +484,7 @@ fn env_ref_names(config: &str) -> Vec<String> {
 /// redirect startup. Every `env://` ref gets a synthetic value and the AWS
 /// default chain is satisfied by synthetic environment credentials, so router
 /// build completes without any provider request.
+#[cfg(unix)]
 fn hermetic_serve_command(home: &Path, config: &Path, env_refs: &[String]) -> Command {
     let mut command = Command::new(BIN);
     command

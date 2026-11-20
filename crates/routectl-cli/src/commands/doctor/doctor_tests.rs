@@ -407,7 +407,7 @@ async fn one_credential_state_agrees_across_report_surfaces() {
     let mut file = CredentialsFile::empty();
     file.upsert("anthropic", rec.clone());
     std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
-    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    set_mode(&path, 0o600);
     let store = OAuthStore::open(&path).await.unwrap();
     let probe = store.probe_local("anthropic").await;
     assert_eq!(
@@ -984,6 +984,17 @@ fn would_trim_panel_serializes_under_panels_in_json() {
     assert_eq!(panel["would_trim_tokens"], serde_json::json!(42_000));
 }
 
+/// Narrow `path` to `mode`: the credential and secret loaders refuse a
+/// group- or world-readable file on unix. Elsewhere there is no mode to set.
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(not(unix))]
+const fn set_mode(_path: &Path, _mode: u32) {}
+
 fn snapshot_dir(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -1006,8 +1017,6 @@ fn snapshot_dir(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 #[tokio::test]
 #[serial_test::serial]
 async fn full_run_leaves_config_dir_byte_identical() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let cfg_dir = tmp.path().join("routectl");
@@ -1020,7 +1029,7 @@ async fn full_run_leaves_config_dir_byte_identical() {
     // leave it byte-identical.
     let creds_path = cfg_dir.join("credentials.json");
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
-    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&creds_path, 0o600);
 
     let before = snapshot_dir(tmp.path());
     let code = run(&config_path, &[], false).await;
@@ -1674,16 +1683,14 @@ fn config_findings_never_leak_secret_material() {
 #[test]
 #[serial_test::serial]
 fn orphan_managed_secret_warns_and_is_not_deleted() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let secret_dir = tmp.path().join("routectl").join("secrets");
     std::fs::create_dir_all(&secret_dir).unwrap();
-    std::fs::set_permissions(&secret_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    set_mode(&secret_dir, 0o700);
     let orphan = secret_dir.join("stranded-key");
     std::fs::write(&orphan, b"secret-bytes").unwrap();
-    std::fs::set_permissions(&orphan, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&orphan, 0o600);
 
     let orphans = gather_orphan_secrets(&Config::default());
     assert_eq!(orphans, vec!["stranded-key".to_string()]);
@@ -1709,16 +1716,14 @@ fn orphan_managed_secret_warns_and_is_not_deleted() {
 #[test]
 #[serial_test::serial]
 fn referenced_managed_secret_is_not_an_orphan() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let secret_dir = tmp.path().join("routectl").join("secrets");
     std::fs::create_dir_all(&secret_dir).unwrap();
-    std::fs::set_permissions(&secret_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    set_mode(&secret_dir, 0o700);
     let used = secret_dir.join("used-key");
     std::fs::write(&used, b"secret-bytes").unwrap();
-    std::fs::set_permissions(&used, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&used, 0o600);
 
     let mut cfg = Config::default();
     cfg.providers.insert(
@@ -2349,8 +2354,6 @@ fn pools_section_is_in_both_section_lists_and_renders_its_title() {
 #[tokio::test]
 #[serial_test::serial]
 async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let cfg_dir = tmp.path().join("routectl");
@@ -2380,7 +2383,7 @@ async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
         }}"#,
     )
     .unwrap();
-    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&creds_path, 0o600);
 
     let before = snapshot_dir(tmp.path());
     let context = gather_context_no_network(
@@ -2418,8 +2421,6 @@ async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
 #[tokio::test]
 #[serial_test::serial]
 async fn full_run_leaves_secret_dir_byte_identical() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let cfg_dir = tmp.path().join("routectl");
@@ -2438,14 +2439,14 @@ async fn full_run_leaves_secret_dir_byte_identical() {
 
     let creds_path = cfg_dir.join("credentials.json");
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
-    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&creds_path, 0o600);
 
     let secret_dir = cfg_dir.join("secrets");
     std::fs::create_dir_all(&secret_dir).unwrap();
-    std::fs::set_permissions(&secret_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    set_mode(&secret_dir, 0o700);
     let orphan = secret_dir.join("stranded-key");
     std::fs::write(&orphan, b"secret-bytes").unwrap();
-    std::fs::set_permissions(&orphan, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&orphan, 0o600);
 
     let before = snapshot_dir(tmp.path());
     let context = gather_context(&config_path, &[], &crate::local_time::LocalZone::utc()).await;
@@ -2694,8 +2695,6 @@ fn battery_table_documents_every_section_in_render_order() {
 #[tokio::test]
 #[serial_test::serial]
 async fn gather_context_no_network_yields_no_probe_results() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let cfg_dir = tmp.path().join("routectl");
@@ -2713,7 +2712,7 @@ async fn gather_context_no_network_yields_no_probe_results() {
     .unwrap();
     let creds_path = cfg_dir.join("credentials.json");
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
-    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&creds_path, 0o600);
 
     let context = gather_context_no_network(
         &config_path,
@@ -2788,8 +2787,6 @@ fn build_report_no_network_matches_network_minus_probe() {
 #[tokio::test]
 #[serial_test::serial]
 async fn network_and_no_network_gather_agree_outside_probe() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
     let cfg_dir = tmp.path().join("routectl");
@@ -2798,7 +2795,7 @@ async fn network_and_no_network_gather_agree_outside_probe() {
     std::fs::write(&config_path, current_version_stamp().as_bytes()).unwrap();
     let creds_path = cfg_dir.join("credentials.json");
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
-    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(&creds_path, 0o600);
 
     let network = gather_context(&config_path, &[], &crate::local_time::LocalZone::utc()).await;
     let no_network = gather_context_no_network(

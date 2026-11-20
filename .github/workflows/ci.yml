@@ -150,6 +150,49 @@ jobs:
       - name: cargo test -- ${{ matrix.name }}
         run: cargo test ${{ matrix.args }}
 
+  # The Windows release target, checked on every PR and push rather than only
+  # when release.yml builds it at tag time: cfg(windows) code paths and
+  # unix-gated tests are invisible to the Linux jobs above. The atomic-writer
+  # tests run here because their Strict-policy writes into a real directory
+  # are the only evidence that the parent-directory sync is skipped
+  # correctly on Windows; the step fails unless the named tests ran.
+  windows:
+    name: windows target (check + clippy + atomic writer tests)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: AWS-LC build environment preflight
+        run: bash scripts/assert-aws-lc-env.sh
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: cargo check (x86_64-pc-windows-msvc)
+        run: cargo check --workspace --all-targets --all-features --target x86_64-pc-windows-msvc
+
+      - name: cargo clippy (x86_64-pc-windows-msvc)
+        run: cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: atomic writer unit tests (x86_64-pc-windows-msvc)
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/atomic-write-tests.log"
+          cargo test -p routectl-auth --all-features --lib --target x86_64-pc-windows-msvc \
+            atomic_write 2>&1 | tee "$log"
+          for name in writes_bytes_to_target parent_sync_is_skipped_off_unix_without_calling_sync; do
+            grep -qE "^test atomic_write::tests::$name \.\.\. ok" "$log" || {
+              echo "atomic writer: $name did not run and pass on this target" >&2
+              exit 1
+            }
+          done
+
   msrv:
     name: msrv check (1.95.0)
     runs-on: ubuntu-22.04
@@ -731,6 +774,7 @@ jobs:
     needs:
       - check
       - debug-lanes
+      - windows
       - msrv
       - test
       - release-build

@@ -2,10 +2,12 @@
 
 use super::*;
 
+#[cfg(unix)]
 use routectl_auth::SecretRef;
 use routectl_router::{CURRENT_CONFIG_VERSION, Format, ProviderEntry};
 
 use super::build::resolve_secret;
+#[cfg(unix)]
 use super::capture::{capture_value, execute_pending};
 use super::toml_edit::{commit, provider_table};
 use crate::commands::provider_env::env_var_for_kind;

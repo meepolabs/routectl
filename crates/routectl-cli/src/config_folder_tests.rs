@@ -17,6 +17,7 @@ fn home_with_blocked_legacy_folder() -> tempfile::TempDir {
     home
 }
 
+#[cfg(unix)]
 fn appdata_dir(path: &str) -> LegacyConfigDir {
     LegacyConfigDir {
         path: PathBuf::from(path),
@@ -24,6 +25,7 @@ fn appdata_dir(path: &str) -> LegacyConfigDir {
     }
 }
 
+#[cfg(unix)]
 fn library_dir(path: &str) -> LegacyConfigDir {
     LegacyConfigDir {
         path: PathBuf::from(path),
@@ -32,6 +34,7 @@ fn library_dir(path: &str) -> LegacyConfigDir {
 }
 
 /// One row: name, `APPDATA`, `HOME`, expected old folders in order.
+#[cfg(unix)]
 type LegacyRow = (
     &'static str,
     Option<&'static str>,

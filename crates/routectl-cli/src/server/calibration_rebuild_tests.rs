@@ -4,7 +4,6 @@
 
 use crate::server::test_support::drain_usage_writer_strict;
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use routectl_auth::{MemoryStore, SecretStore};
@@ -31,8 +30,12 @@ async fn router_with_one_lane(tmp: &TempDir) -> Router {
     let key_path = tmp.path().join("api-key");
     std::fs::write(&key_path, b"test-key").expect("write key file");
     // The auth layer refuses a group- or world-readable secret file.
-    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
-        .expect("restrict key file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict key file");
+    }
     let mut providers = BTreeMap::new();
     providers.insert(
         "p1".to_string(),

@@ -185,7 +185,7 @@ fn precreate_restricted(path: &Path) -> Result<(), OpenError> {
 }
 
 #[cfg(not(unix))]
-fn precreate_restricted(_path: &Path) -> Result<(), OpenError> {
+const fn precreate_restricted(_path: &Path) -> Result<(), OpenError> {
     Ok(())
 }
 
@@ -226,7 +226,7 @@ fn restrict_permissions(path: &Path) -> Result<(), OpenError> {
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<(), OpenError> {
+const fn restrict_permissions(_path: &Path) -> Result<(), OpenError> {
     Ok(())
 }
 

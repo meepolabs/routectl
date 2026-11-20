@@ -99,7 +99,7 @@ impl LocalZone {
 
     #[cfg(windows)]
     #[allow(clippy::unnecessary_wraps)]
-    fn try_load() -> Result<Self, &'static str> {
+    const fn try_load() -> Result<Self, &'static str> {
         Ok(Self { rules: Rules::Os })
     }
 
@@ -214,9 +214,9 @@ impl LocalZone {
     /// POSIX rule unless the jump is the later of the rule's two transitions
     /// in the calendar year (a southern-hemisphere rule), where it is
     /// skipped.
+    #[cfg(unix)]
     fn keeps_gap_start(&self, civil: PrimitiveDateTime, unix_s: i64) -> bool {
         match &self.rules {
-            #[cfg(unix)]
             Rules::Tz(rules) => {
                 let table = rules.as_ref().transitions();
                 let from_rule = table
@@ -231,6 +231,13 @@ impl LocalZone {
             }
             _ => true,
         }
+    }
+
+    /// Without a transition table every gap start is kept: the OS zone
+    /// reports offsets only, so there is no rule-derived transition to skip.
+    #[cfg(not(unix))]
+    const fn keeps_gap_start(&self, _civil: PrimitiveDateTime, _unix_s: i64) -> bool {
+        true
     }
 }
 
