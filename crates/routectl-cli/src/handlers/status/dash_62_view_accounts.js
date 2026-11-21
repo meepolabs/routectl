@@ -593,7 +593,7 @@
       alt.className = 'acct-traffic-alt';
       alt.appendChild(figure(money(m.equivalent_cost_usd), null, '~$'));
       alt.appendChild(acctText('span', 'acct-traffic-qual', 'At API prices'));
-      alt.title = 'what this traffic would cost on pay-as-you-go API pricing';
+      alt.title = API_PRICE_NOTE;
       nodes.push(alt);
     }
     if (!nodes.length) { nodes.push(faintFigure(labelFor('cost', m.cost_status).label)); }

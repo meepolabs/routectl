@@ -20,6 +20,13 @@
   // every figure that is one, so no partial dollar amount reads as the total.
   var PARTIAL_COST_NOTE = 'priced subtotal only';
 
+  // What an "At API prices" figure is, said once wherever one is drawn.
+  var API_PRICE_NOTE = 'what this traffic would cost on pay-as-you-go API pricing';
+
+  // A partial group with no priced row at all mixes subscription and
+  // unpriced rows: there is no subtotal to show.
+  var PARTIAL_UNPRICED_TITLE = 'mixed cost kinds with no priced row: no dollar cost to show';
+
   // Whether the overflow list under the provider row is open. View state only:
   // it survives the per-poll rebuild and reaches no fetch.
   var providerOverflowOpen = false;
@@ -607,7 +614,7 @@
     cost.className = 'provcard-cost';
     cost.appendChild(costFigure(m));
     btn.appendChild(cost);
-    if (m.cost_status === 'partial') {
+    if (isPricedSubtotal(m)) {
       var qual = document.createElement('span');
       qual.className = 'provcard-qual';
       qual.textContent = PARTIAL_COST_NOTE;
@@ -864,7 +871,7 @@
     var spark = tile.lastChild;
     var alt = apiPriceBlock(t.equivalent_cost_usd);
     if (alt) { tile.insertBefore(alt, tile.querySelector('.kpi-sub')); }
-    if (t.cost_status === 'partial') { tile.insertBefore(costSparkCaption(), spark); }
+    if (isPricedSubtotal(t)) { tile.insertBefore(costSparkCaption(), spark); }
     return tile;
   }
 
@@ -885,7 +892,7 @@
     head.appendChild(value);
     var note = document.createElement('div');
     note.className = 'kpi-alt-note';
-    note.textContent = 'what this traffic would cost on pay-as-you-go API pricing';
+    note.textContent = API_PRICE_NOTE;
     block.appendChild(head);
     block.appendChild(note);
     return block;
@@ -901,16 +908,30 @@
     return caption;
   }
 
-  // The honest cost read: a dollar figure ONLY where the rows were priced. An
-  // unpriced or managed-subscription window has no dollar cost to show, so it
-  // says which of the two it is rather than claiming a zero; a real zero
-  // renders faint, never as a failure.
+  // The honest cost read: a dollar figure ONLY where rows were priced. An
+  // unpriced, managed-subscription or never-priced partial window has no
+  // dollar cost to show, so it says which it is rather than claiming a zero;
+  // a real zero renders faint, never as a failure.
   function costFigure(m) {
     var lab = labelFor('cost', m.cost_status);
-    var priced = m.cost_status === 'priced' || m.cost_status === 'partial';
-    var span = priced ? figure(money(m.cost_usd), null, '$') : faintFigure(lab.label);
-    if (lab.title) { span.title = lab.title; }
+    var amount = pricedCost(m);
+    var span = amount === null ? faintFigure(lab.label) : figure(money(amount), null, '$');
+    var title = m.cost_status === 'partial' && amount === null ? PARTIAL_UNPRICED_TITLE : lab.title;
+    if (title) { span.title = title; }
     return span;
+  }
+
+  // The dollar figure of a metric set: present only where rows were priced
+  // and the server sent a number, so an unpriced, subscription or
+  // never-priced partial set reads (and sorts) as absent.
+  function pricedCost(m) {
+    var priced = m.cost_status === 'priced' || m.cost_status === 'partial';
+    return priced && isFiniteNumber(m.cost_usd) ? m.cost_usd : null;
+  }
+
+  // A partial set whose figure is the subtotal of its priced rows.
+  function isPricedSubtotal(m) {
+    return m.cost_status === 'partial' && pricedCost(m) !== null;
   }
 
   function costNote(t) {
@@ -918,7 +939,8 @@
     if (t.cost_status === 'priced') {
       return req > 0 ? '$' + (num0(t.cost_usd) / req).toFixed(3) + ' avg/req' : 'priced';
     }
-    if (t.cost_status === 'partial') { return PARTIAL_COST_NOTE + ' - some rows have no price'; }
+    if (isPricedSubtotal(t)) { return PARTIAL_COST_NOTE + ' - some rows have no price'; }
+    if (t.cost_status === 'partial') { return 'no row priced - subscription and unpriced rows only'; }
     if (t.cost_status === 'subscription') { return 'managed subscription - no per-token cost'; }
     if (t.cost_status === 'unpriced') { return 'no price resolved - configure pricing'; }
     return labelFor('cost', t.cost_status).label;

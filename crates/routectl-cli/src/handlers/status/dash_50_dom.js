@@ -774,11 +774,12 @@
   }
 
   // A dollar amount at a precision that cannot hide a real cost: cents at a
-  // dollar and above, tenths of a cent below it.
+  // dollar and above, tenths of a cent below it. An amount that is not a
+  // number is unknown, and reads as absent, never as a zero.
   function money(v) {
-    var x = Number(v);
-    if (!isFinite(x) || x === 0) { return '0.00'; }
-    return Math.abs(x) >= 1 ? x.toFixed(2) : x.toFixed(3);
+    if (!isFiniteNumber(v)) { return '-'; }
+    if (v === 0) { return '0.00'; }
+    return Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(3);
   }
 
   // A faint one-line note under a tile's figure, carrying the error color only

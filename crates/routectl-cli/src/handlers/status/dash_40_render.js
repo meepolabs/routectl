@@ -408,8 +408,8 @@
   }
 
   // safeSection's node, and whether it is a card drawn in the builder's place.
-  function guardedContent(rec, build) {
-    var pending = stateCard(rec);
+  function guardedContent(rec, build, failedText) {
+    var pending = stateCard(rec, failedText);
     if (pending) { return { node: pending, isCard: true }; }
     try {
       var node = build(rec);
@@ -438,16 +438,18 @@
   // A section that titles itself passes its `title`, so every card the host
   // draws in its place (a state card or a builder fault) still says which
   // reading is missing; a successful build draws its own head instead.
+  // A section that passes `failedText` leads its failed-read card with that
+  // plain sentence, the technical code under it.
   var SECTION_SOURCE_ATTR = 'data-source';
 
-  function viewSection(name, build, title) {
+  function viewSection(name, build, title, failedText) {
     var rec = SOURCES[name];
     var wrap = document.createElement('div');
     wrap.className = 'view-section';
     wrap.setAttribute(SECTION_SOURCE_ATTR, name);
     if (rec.state === 'stale') { wrap.classList.add('section--stale'); }
     if (PENDING_SOURCES[name]) { wrap.classList.add('section--pending'); }
-    var content = guardedContent(rec, build);
+    var content = guardedContent(rec, build, failedText);
     if (title && content.isCard) { wrap.appendChild(sectionHead(title, null)); }
     wrap.appendChild(content.node);
     return wrap;
@@ -493,19 +495,39 @@
 
   // The state a builder must render instead of content, or null when the
   // source is live. Every buildX starts by consulting this, so no tab has to
-  // reinvent its loading / empty / failure shapes.
-  function stateCard(rec) {
+  // reinvent its loading / empty / failure shapes. `failedText`, when given,
+  // leads the card of a read that failed.
+  function stateCard(rec, failedText) {
     var state = rec.state;
     if (state === 'loading') { return skeletonCard(); }
     if (state === 'unavailable') {
-      return errorCard(rec.code, 'this source is not answering right now');
+      return failedReadCard(failedText, rec, rec.code, 'this source is not answering right now');
     }
     if (state === 'incompatible') { return incompatibleCard(rec.code); }
     if (state === 'invalid_payload') {
       return errorCard('invalid_payload', 'the payload did not match its declared shape');
     }
-    if (state === 'dead') { return errorCard('transport failure', null); }
+    if (state === 'dead') { return failedReadCard(failedText, rec, 'transport failure', null); }
     return null;
+  }
+
+  // The plain sentence, what happens next, and the time of the source's last
+  // good read when it had one, above the technical code, which stays as a
+  // faint second line. A failing read backs off rather than keeping the 5 s
+  // cadence, so the card promises a retry, not its interval; a page that
+  // stopped polling promises none.
+  function failedReadCard(failedText, rec, code, extra) {
+    if (!failedText) { return errorCard(code, extra); }
+    var lead = failedText + (terminal ? '; polling has stopped' : '; retrying automatically');
+    if (rec.liveAt) { lead += ' - last good read at ' + rec.liveAt.toLocaleTimeString(); }
+    var codeLine = document.createElement('span');
+    codeLine.className = 'unavailable-code';
+    codeLine.textContent = unavailableText(code, extra);
+    var div = document.createElement('div');
+    div.className = 'unavailable-msg';
+    div.appendChild(document.createTextNode(lead));
+    div.appendChild(codeLine);
+    return div;
   }
 
   function skeletonCard() {
@@ -526,8 +548,12 @@
   function errorCard(code, extra) {
     var div = document.createElement('div');
     div.className = 'unavailable-msg';
-    div.textContent = 'unavailable: ' + code + (extra ? ' (' + extra + ')' : '');
+    div.textContent = unavailableText(code, extra);
     return div;
+  }
+
+  function unavailableText(code, extra) {
+    return 'unavailable: ' + code + (extra ? ' (' + extra + ')' : '');
   }
 
   // A version mismatch is a build / cached-asset fault, not a broken

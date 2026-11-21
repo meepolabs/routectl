@@ -244,6 +244,20 @@
     ]);
   });
 
+  // A partial window and partial provider whose mix holds no priced row: the
+  // server sends no dollar figure for either.
+  d.scenario('tiles-cost-partial-unpriced', function () {
+    return costAcrossRounds([
+      {
+        totals: { cost_status: 'partial', cost_usd: null, equivalent_cost_usd: null },
+        groups: [
+          { cost_status: 'partial', cost_usd: null },
+          { cost_status: 'priced', cost_usd: 3.46 }
+        ]
+      }
+    ]);
+  });
+
   // The series answer reports no request in the window, and the ledger's
   // first request at `earliestMs` (null: the ledger holds none).
   function emptyWindow(earliestMs) {

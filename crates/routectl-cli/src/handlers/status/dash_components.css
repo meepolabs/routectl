@@ -282,6 +282,15 @@ td.num .unit, th.num .unit {
   margin-left: 0.08em;
 }
 .mag-zero { color: var(--faint); }
+/* A cost that is a subtotal of the priced rows says so beside its figure,
+   in words, not only in a hover title. */
+.cost-mark {
+  margin-left: var(--sp-1);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--faint);
+}
 
 /* ---- loading skeleton ---- */
 .skeleton { display: flex; flex-direction: column; gap: var(--sp-2); }

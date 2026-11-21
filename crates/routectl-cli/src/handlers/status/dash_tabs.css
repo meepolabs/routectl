@@ -1,14 +1,67 @@
 /* ---- traffic: one sortable table of groups ----
 
    Every group is a row of one reading, so twelve or more compare in a glance
-   without scrolling card by card. The expanded row's step shares line up as
-   count then share, each in its own faint unit slot. */
+   without scrolling card by card. An error rate colors only past the
+   degraded and broken thresholds. An expanded row puts its alias chain and
+   its missing prices in blocks of their own under the pairs, one line each,
+   so a chain reads top to bottom in step order. */
+/* A failed read's technical code, a faint line under its plain sentence. */
+.unavailable-code {
+  display: block;
+  margin-top: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  opacity: 0.85;
+}
+.traffic-rate--degraded { color: var(--warn); }
+.traffic-rate--broken { color: var(--neg); }
+.traffic-notes {
+  margin-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.traffic-note {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+.traffic-block {
+  margin-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  white-space: normal;
+}
+/* Capped at the scroller's visible width, as the pairs above are. */
+.tablewrap .traffic-block { max-width: calc(100cqi - 2 * var(--sp-4) - 2px); }
+.traffic-blockhead {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.traffic-line {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
 .traffic-step {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   column-gap: var(--sp-3);
-  min-width: 0;
+}
+.traffic-steplabel {
+  min-width: 7rem;
+  color: var(--faint);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 .traffic-stepname {
   font-family: var(--font-mono);

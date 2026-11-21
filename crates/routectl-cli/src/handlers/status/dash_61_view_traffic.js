@@ -12,12 +12,26 @@
   // and drops what sits under it. Zero until a table has been drawn.
   var trafficSectionPx = 0;
 
+  // An error rate colors only once it marks a state: degraded from this share
+  // of a group's requests, broken from the next. Below both it is plain text,
+  // and a zero is faint.
+  var ERROR_RATE_DEGRADED_PCT = 5;
+  var ERROR_RATE_BROKEN_PCT = 50;
+
+  // The two timing columns are read over different requests, so a failing
+  // group's latency can sit under its time to first token.
+  var TTFT_POPULATION = 'over streamed successes';
+  var LATENCY_POPULATION = 'over every request, failures included';
+
+  var TRAFFIC_READ_FAILED = "Couldn't read traffic from routectl";
+
   // What was served in the selected range: the scope strip and the grouping
   // picker, then one sortable table with a row per group.
   function buildTraffic() {
     var stack = tabStack();
     stack.appendChild(trafficControls());
-    var section = viewSection(QUERY_SOURCE, buildTrafficGroups, GROUP_BY_TITLES[selectedGroupBy]);
+    var section = viewSection(QUERY_SOURCE, buildTrafficGroups, GROUP_BY_TITLES[selectedGroupBy],
+      TRAFFIC_READ_FAILED);
     reserveTrafficHeight(section);
     stack.appendChild(section);
     return stack;
@@ -30,10 +44,17 @@
   function trafficControls() {
     var controls = document.createDocumentFragment();
     if (hasQueryScope()) {
-      controls.appendChild(scopeStrip('usage', 'every figure below is this provider only'));
+      controls.appendChild(scopeStrip('usage', trafficScopeHint()));
     }
     controls.appendChild(groupByStrip());
     return controls;
+  }
+
+  function trafficScopeHint() {
+    if (selectedModel && selectedProvider) {
+      return 'every figure below is this model on this provider only';
+    }
+    return selectedModel ? 'every figure below is this model only' : 'every figure below is this provider only';
   }
 
   // Measured on the section the page shows now, before the rebuild replaces
@@ -65,9 +86,29 @@
     var ranked = live.slice().sort(function (a, b) {
       return num0(b.metrics.requests) - num0(a.metrics.requests);
     });
+    var body = document.createDocumentFragment();
+    body.appendChild(tableScroll(trafficTable(ranked)));
+    body.appendChild(trafficNotes());
     return card(GROUP_BY_TITLES[selectedGroupBy],
       trafficHint(ranked.length, view.groups.length - live.length),
-      tableScroll(trafficTable(ranked)));
+      body);
+  }
+
+  // What the columns whose meaning is not in their label measure, on the
+  // card itself rather than only in a hover title.
+  function trafficNotes() {
+    var notes = document.createElement('div');
+    notes.className = 'traffic-notes';
+    [
+      'At API prices: ' + API_PRICE_NOTE,
+      'Latency ' + LATENCY_POPULATION + '; time to first token ' + TTFT_POPULATION
+    ].forEach(function (text) {
+      var line = document.createElement('p');
+      line.className = 'traffic-note';
+      line.textContent = text;
+      notes.appendChild(line);
+    });
+    return notes;
   }
 
   function trafficTable(groups) {
@@ -75,14 +116,22 @@
       sortBy(R('group'), 'group', function (g) { return g.label; }),
       sortBy(N('requests'), 'requests', function (g) { return num0(g.metrics.requests); }),
       sortBy(N('error rate'), 'errors', function (g) { return errorRate(g.metrics); }),
-      sortBy(N('TTFT p50'), 'ttft', function (g) { return g.metrics.ttft_p50_ms; }),
-      sortBy(N('latency p50'), 'latency', function (g) { return g.metrics.latency_p50_ms; }),
+      sortBy(titled(N('TTFT p50'), 'median time to first token ' + TTFT_POPULATION), 'ttft',
+        function (g) { return g.metrics.ttft_p50_ms; }),
+      sortBy(titled(N('latency p50'), 'median latency ' + LATENCY_POPULATION), 'latency',
+        function (g) { return g.metrics.latency_p50_ms; }),
       sortBy(N('cost'), 'cost', function (g) { return pricedCost(g.metrics); }),
-      sortBy(N('At API prices'), 'equivalent', function (g) { return g.metrics.equivalent_cost_usd; }),
+      sortBy(titled(N('At API prices'), API_PRICE_NOTE), 'equivalent',
+        function (g) { return g.metrics.equivalent_cost_usd; }),
       sortBy(N('cache hit'), 'cache', function (g) { return g.metrics.cache_hit_pct; })
     ], { expandable: true, sortable: true, rowKey: function (g) { return g.label; } });
     fillRows(tbl, groups, function (g, key) { trafficRow(tbl, g, key); });
     return tbl;
+  }
+
+  function titled(col, title) {
+    col.title = title;
+    return col;
   }
 
   function trafficRow(tbl, g, key) {
@@ -93,10 +142,11 @@
       errorRateFigure(m),
       msFigure(m.ttft_p50_ms),
       msFigure(m.latency_p50_ms),
-      costFigure(m),
+      trafficCostFigure(m),
       equivalentFigure(m.equivalent_cost_usd),
       cacheHitFigure(m.cache_hit_pct)
-    ], trafficDetail(g));
+    ], trafficTimingPairs(m));
+    appendDetailBlocks(tbl, [aliasChainBlock(g), missingPriceBlock(m.missing_prices)]);
   }
 
   function trafficHint(shown, omitted) {
@@ -128,8 +178,14 @@
     if (rate === null) { return figure('-', null, null); }
     var text = rate > 0 && rate < 0.05 ? '<0.1' : rate.toFixed(1);
     var fig = figure(rate === 0 ? '0' : text, '%', null);
-    if (rate > 0) { fig.classList.add('neg'); }
+    var state = errorRateState(rate);
+    if (state) { fig.classList.add('traffic-rate--' + state); }
     return fig;
+  }
+
+  function errorRateState(rate) {
+    if (rate >= ERROR_RATE_BROKEN_PCT) { return 'broken'; }
+    return rate >= ERROR_RATE_DEGRADED_PCT ? 'degraded' : null;
   }
 
   function msFigure(ms) {
@@ -137,11 +193,18 @@
     return figure(p.v, p.u || null, null);
   }
 
-  // The dollar figure a cost column sorts by: present only where rows were
-  // priced, so an unpriced or subscription group sorts with the absent.
-  function pricedCost(m) {
-    var priced = m.cost_status === 'priced' || m.cost_status === 'partial';
-    return priced ? m.cost_usd : null;
+  // A subtotal of the priced rows carries its mark in the cell, so it never
+  // reads as the group's whole cost.
+  function trafficCostFigure(m) {
+    var fig = costFigure(m);
+    if (isPricedSubtotal(m)) {
+      var mark = document.createElement('span');
+      mark.className = 'cost-mark';
+      mark.textContent = labelFor('cost', 'partial').label;
+      mark.title = PARTIAL_COST_NOTE;
+      fig.appendChild(mark);
+    }
+    return fig;
   }
 
   // An equivalent is what subscription traffic would have cost at API
@@ -158,17 +221,33 @@
 
   // ---- traffic: the expanded row ---------------------------------------
 
-  // The tail percentiles, then what went wrong, what the cache-write figure
-  // covers, what could not be priced and, for an alias, how its chain
-  // carried the group.
-  function trafficDetail(g) {
-    var m = g.metrics;
+  // The tail percentiles, each naming the requests it is read over, then what
+  // went wrong and what the cache-write figure covers.
+  function trafficTimingPairs(m) {
     return [
-      ['TTFT p90, p99', msText(m.ttft_p90_ms) + ', ' + msText(m.ttft_p99_ms)],
-      ['latency p90, p99', msText(m.latency_p90_ms) + ', ' + msText(m.latency_p99_ms)],
+      ['TTFT p90, p99 ' + TTFT_POPULATION, msText(m.ttft_p90_ms) + ', ' + msText(m.ttft_p99_ms)],
+      ['latency p90, p99 ' + LATENCY_POPULATION,
+        msText(m.latency_p90_ms) + ', ' + msText(m.latency_p99_ms)],
       ['error classes', errorClassText(m)],
       ['cache write', cacheWriteStatement(m)]
-    ].concat(missingPricePairs(m.missing_prices), aliasStepPairs(g));
+    ];
+  }
+
+  // The blocks that read as lists rather than label:value pairs sit under the
+  // pairs, each a block of its own. xrow appends a row's detail row last.
+  function appendDetailBlocks(tbl, blocks) {
+    var cell = tbl.tb.lastChild.firstChild;
+    blocks.forEach(function (block) { if (block) { cell.appendChild(block); } });
+  }
+
+  function detailBlock(className, title) {
+    var block = document.createElement('div');
+    block.className = 'traffic-block ' + className;
+    var head = document.createElement('h3');
+    head.className = 'traffic-blockhead';
+    head.textContent = title;
+    block.appendChild(head);
+    return block;
   }
 
   // Most frequent class first, ties by token, each in its humanized words.
@@ -192,59 +271,108 @@
     var unknown = num0(m.cache_write_unknown_tokens);
     var covers = humanCount(written) + ' tokens, every lifetime and both ledger eras, already in input';
     if (unknown <= 0) { return covers + '; none of unknown lifetime'; }
-    var share = written > 0 ? ' (' + Math.round(unknown / written * 100) + '%)' : '';
+    var share = written > 0 ? ' (' + shareText(unknown, written) + '%)' : '';
     return covers + '; ' + humanCount(unknown) + share + ' of unknown lifetime';
   }
 
-  // One pair per (model, dimension) with no rate. The configuration key is
-  // the server's text, shown as it arrived.
-  function missingPricePairs(prices) {
-    return prices.map(function (p) {
-      var value = document.createElement('span');
-      value.appendChild(document.createTextNode(p.model + ' ' + p.dimension + ' - '));
-      if (p.config_key === null) {
-        value.appendChild(document.createTextNode('no configuration key prices it'));
-      } else {
-        value.appendChild(document.createTextNode('set '));
+  // A whole-percent share; a part above zero that rounds to nothing reads
+  // "<1", never a zero beside its own count.
+  function shareText(part, whole) {
+    var pct = num0(part) / whole * 100;
+    return pct > 0 && Math.round(pct) === 0 ? '<1' : String(Math.round(pct));
+  }
+
+  // One line per model with no rate for some dimension, in the server's
+  // order: the dimensions, then each configuration key that would price one,
+  // as the server's text.
+  function missingPriceBlock(prices) {
+    if (!prices.length) { return null; }
+    var block = detailBlock('traffic-prices', 'No price');
+    missingPricesByModel(prices).forEach(function (entry) {
+      block.appendChild(missingPriceLine(entry.model, entry.prices));
+    });
+    return block;
+  }
+
+  function missingPricesByModel(prices) {
+    var byModel = [];
+    var at = Object.create(null);
+    prices.forEach(function (p) {
+      if (!(p.model in at)) {
+        at[p.model] = byModel.length;
+        byModel.push({ model: p.model, prices: [] });
+      }
+      byModel[at[p.model]].prices.push(p);
+    });
+    return byModel;
+  }
+
+  function missingPriceLine(model, prices) {
+    var line = document.createElement('p');
+    line.className = 'traffic-line traffic-priceline';
+    var name = document.createElement('span');
+    name.className = 'traffic-stepname';
+    name.textContent = model;
+    line.appendChild(name);
+    line.appendChild(document.createTextNode(': ' + prices.map(function (p) {
+      return p.dimension;
+    }).join(', ')));
+    var keyed = prices.filter(function (p) { return p.config_key !== null; });
+    if (keyed.length) {
+      line.appendChild(document.createTextNode(' - set'));
+      keyed.forEach(function (p) {
+        line.appendChild(document.createTextNode(' '));
         var key = document.createElement('code');
         key.className = 'traffic-key';
         key.textContent = p.config_key;
-        value.appendChild(key);
-      }
-      return ['no price', value];
-    });
-  }
-
-  // Each top-level chain step's share of the group, then the requests served
-  // off the chain and the ones never dispatched: together they are the
-  // group's requests. A step that names another alias reads as that alias.
-  function aliasStepPairs(g) {
-    if (!g.steps) { return []; }
-    var total = num0(g.metrics.requests);
-    if (!g.steps.length) {
-      return [['chain', 'this name resolves to no configured chain']].concat(remainderPairs(g, total));
+        line.appendChild(key);
+      });
     }
-    return g.steps.map(function (s, i) {
-      return ['step ' + (i + 1), stepShare(s, total)];
-    }).concat(remainderPairs(g, total));
+    var unkeyed = prices.filter(function (p) { return p.config_key === null; });
+    if (unkeyed.length) {
+      line.appendChild(document.createTextNode(' - no configuration key prices ' +
+        unkeyed.map(function (p) { return p.dimension; }).join(', ')));
+    }
+    return line;
   }
 
-  function remainderPairs(g, total) {
-    return [
-      ['off chain', countShare(g.off_chain, total)],
-      ['not dispatched', countShare(g.not_dispatched, total)]
-    ];
+  // An alias group's chain in order, one line per top-level step with its
+  // share of the group, then the requests served off the chain and the ones
+  // never dispatched: together they are the group's requests. A step that
+  // names another alias reads as that alias.
+  function aliasChainBlock(g) {
+    if (!g.steps) { return null; }
+    var total = num0(g.metrics.requests);
+    var block = detailBlock('traffic-chain', 'Alias chain');
+    if (!g.steps.length) {
+      block.appendChild(chainLine(null, 'this name resolves to no configured chain', null, total));
+    }
+    g.steps.forEach(function (s, i) {
+      var name = s.kind === ALIAS_STEP_KIND ? 'via alias ' + s.step : s.step;
+      block.appendChild(chainLine('Step ' + (i + 1), name, s.requests, total));
+    });
+    block.appendChild(chainLine('off chain', null, g.off_chain, total));
+    block.appendChild(chainLine('not dispatched', null, g.not_dispatched, total));
+    return block;
   }
 
-  function stepShare(s, total) {
-    var span = document.createElement('span');
-    span.className = 'traffic-step';
-    var name = document.createElement('span');
-    name.className = 'traffic-stepname';
-    name.textContent = s.kind === ALIAS_STEP_KIND ? 'via alias ' + s.step : s.step;
-    span.appendChild(name);
-    span.appendChild(countShare(s.requests, total));
-    return span;
+  function chainLine(label, name, count, total) {
+    var line = document.createElement('p');
+    line.className = 'traffic-line traffic-step';
+    if (label !== null) {
+      var term = document.createElement('span');
+      term.className = 'traffic-steplabel';
+      term.textContent = label;
+      line.appendChild(term);
+    }
+    if (name !== null) {
+      var nameEl = document.createElement('span');
+      nameEl.className = 'traffic-stepname';
+      nameEl.textContent = name;
+      line.appendChild(nameEl);
+    }
+    if (count !== null) { line.appendChild(countShare(count, total)); }
+    return line;
   }
 
   // An exact count, so the step lines add up to the group on screen, and its
@@ -256,7 +384,7 @@
     count.classList.add('traffic-req');
     span.appendChild(count);
     if (total > 0) {
-      span.appendChild(figure(String(Math.round(num0(n) / total * 100)), '%', null));
+      span.appendChild(figure(shareText(n, total), '%', null));
     }
     return span;
   }

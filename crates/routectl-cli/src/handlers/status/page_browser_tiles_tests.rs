@@ -316,3 +316,37 @@ fn page_browser_tiles_cache_hit_tile_shows_each_row_of_the_shared_table() {
         assert_eq!(reading["text"], row["text"], "cache_hit_pct {}", row["pct"]);
     }
 }
+
+/// A partial window, and a partial provider card, with no priced row at all
+/// (the server sends `cost_usd` null) read the word `partial`, never a
+/// dollar figure, and carry no "priced subtotal only" note, since there is
+/// no subtotal; the sparkline caption about subtotals is absent too. The
+/// priced card beside them keeps its figure.
+///
+/// Mutation checks: costFigure handing `cost_usd` to money() for any partial
+/// set, with money(null) reading '0.00' -> red; the card qualifier keyed on
+/// `cost_status` alone -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_a_partial_cost_with_no_priced_row_is_never_a_figure() {
+    let rounds = run("tiles-cost-partial-unpriced");
+    let obs = &rounds[0];
+
+    assert_eq!(text(obs, "value"), Some("partial"), "{obs:#}");
+    let sub = text(obs, "sub").expect("a sub line");
+    assert!(!sub.contains(PARTIAL_QUALIFIER), "{obs:#}");
+    assert!(obs["caption"].is_null(), "{obs:#}");
+    let cards = obs["cards"].as_array().expect("cards");
+    let partial: Vec<&Value> = cards.iter().filter(|c| c["status"] == "partial").collect();
+    assert!(!partial.is_empty(), "a partial card is drawn: {obs:#}");
+    for card in &partial {
+        assert_eq!(text(card, "cost"), Some("partial"), "{card:#}");
+        assert!(card["qual"].is_null(), "{card:#}");
+    }
+    assert!(
+        cards
+            .iter()
+            .any(|c| c["status"] == "priced" && text(c, "cost") == Some("$3.46")),
+        "positive control: the priced card keeps its figure: {obs:#}"
+    );
+}

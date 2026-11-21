@@ -174,10 +174,11 @@ banner, no retry signal -- silently mislabeled data.
   has no row for, never `0`. No provider id or host from the table appears.
 - The cache write figure keeps an unreported write apart from a zero. In a
   ledger copy, give one model only rows whose provider sent no write field
-  (`cache_write_tokens` NULL) and another a row that reported `0`. On Traffic,
-  CACHE READ / WRITE reads a faint `-` on the write side for the first and
-  `0` for the second; scoped to a provider with no reported write, the
-  Now WRITE tile reads `-` and its note says no cache write was reported.
+  (`cache_write_tokens` NULL) and another a row that reported `0`. On Traffic
+  by model, the first row's expanded CACHE WRITE reads `no cache write
+  reported` and the second's `0 tokens, ...`; scoped to a provider with no
+  reported write, the Now WRITE tile reads `-` and its note says no cache
+  write was reported.
 - Check the next item at 720, 1024 and 1440 px wide and at 1440 px with
   200% text, in both the dark and the light theme, and once more with the
   OS reduced-motion preference on (no value animates, nothing is lost).

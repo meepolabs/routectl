@@ -3,7 +3,10 @@
 // Test-only snippet injected after page_browser_driver.js. A scenario that
 // needs a QUERY answer the populated fixtures do not hold reads it from
 // `window.routectlTrafficAnswers`, keyed by `group_by`, as the server built
-// it; every other answer is the harness's own.
+// it; every other answer is the harness's own. `window.routectlTrafficFail`
+// fails the Traffic QUERY: `network` fails every one the way an unreachable
+// daemon does, `unavailable-after-first` answers every one after the first
+// with the ledger's `db_unavailable`.
 (function (d) {
   'use strict';
 
@@ -11,6 +14,8 @@
   var SECTION = '#body-traffic [data-source="query"]';
 
   var served = window.routectlTrafficAnswers || {};
+  var failMode = window.routectlTrafficFail || null;
+  var trafficAnswers = 0;
   var inner = window.fetch;
   window.fetch = function (input, init) {
     var url = new URL(String(input), location.href);
@@ -19,14 +24,27 @@
         return resp;
       }
       var body = JSON.parse(init.body);
-      var answer = body.bucket ? null : served[body.group_by];
-      if (!answer) { return resp; }
-      return new Response(JSON.stringify(answer), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      if (body.bucket) { return resp; }
+      trafficAnswers += 1;
+      if (failMode === 'network') { throw new TypeError('Failed to fetch'); }
+      var answer = served[body.group_by];
+      if (failMode === 'unavailable-after-first' && trafficAnswers > 1) {
+        return resp.json().then(function (json) {
+          return jsonResponse({
+            schema_version: json.schema_version, as_of: null, data: null, unavailable: 'db_unavailable'
+          });
+        });
+      }
+      return answer ? jsonResponse(answer) : resp;
     });
   };
+
+  function jsonResponse(value) {
+    return new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
 
   function byId(id) {
     var node = document.getElementById(id);
@@ -54,22 +72,54 @@
     });
   }
 
-  // The dt -> dd text of one row's opened detail, in order, with the step
-  // and remainder counts it shows.
+  function textIn(node, selector) {
+    var found = node.querySelector(selector);
+    return found ? found.textContent : null;
+  }
+
+  function keysIn(node) {
+    return Array.prototype.map.call(node.querySelectorAll('.traffic-key'), function (k) {
+      return k.textContent;
+    });
+  }
+
+  // One line of a detail block: its label, name, count and share as drawn,
+  // its whole text, the keys it shows, and its top offset.
+  function blockLine(line) {
+    var count = line.querySelector('.traffic-count');
+    var figures = count ? count.children : [];
+    return {
+      label: textIn(line, '.traffic-steplabel'),
+      name: textIn(line, '.traffic-stepname'),
+      req: count ? parseInt(figures[0].textContent, 10) : null,
+      share: figures.length > 1 ? figures[1].textContent : null,
+      text: line.textContent,
+      keys: keysIn(line),
+      top: line.getBoundingClientRect().top
+    };
+  }
+
+  function blockLines(detail, selector) {
+    var block = detail.querySelector(selector);
+    if (!block) { return null; }
+    return {
+      head: textIn(block, '.traffic-blockhead'),
+      in_grid: !!block.closest('.deflist'),
+      lines: Array.prototype.map.call(block.querySelectorAll('.traffic-line'), blockLine)
+    };
+  }
+
+  // One row's opened detail: the dt -> dd pairs in order, then the alias
+  // chain and the missing prices, each a block of lines.
   function detailOf(rowId) {
     var detail = byId(rowId + '-detail');
-    return Array.prototype.map.call(detail.querySelectorAll('.def'), function (def) {
-      var reqs = def.querySelectorAll('.traffic-req');
-      return {
-        term: def.querySelector('dt').textContent,
-        text: def.querySelector('dd').textContent,
-        stepname: (def.querySelector('.traffic-stepname') || {}).textContent || null,
-        req: reqs.length ? parseInt(reqs[0].textContent, 10) : null,
-        keys: Array.prototype.map.call(def.querySelectorAll('.traffic-key'), function (k) {
-          return k.textContent;
-        })
-      };
-    });
+    return {
+      pairs: Array.prototype.map.call(detail.querySelectorAll('.def'), function (def) {
+        return { term: def.querySelector('dt').textContent, text: def.querySelector('dd').textContent };
+      }),
+      chain: blockLines(detail, '.traffic-chain'),
+      prices: blockLines(detail, '.traffic-prices')
+    };
   }
 
   function openRow(rowId) {
@@ -199,6 +249,83 @@
         requests: parseInt(row.querySelector('td.num').textContent, 10),
         detail: detailOf(rowId)
       };
+    });
+  });
+
+  // ---- what each cell and note says ------------------------------------------
+
+  function cellObservation(tr) {
+    var cells = tr.querySelectorAll('td.num');
+    var rate = cells[1].firstElementChild;
+    var cost = cells[4];
+    return {
+      label: rowLabel(tr),
+      rate: rate ? rate.textContent : cells[1].textContent,
+      rate_class: rate ? Array.prototype.filter.call(rate.classList, function (c) {
+        return c.indexOf('traffic-rate--') === 0;
+      }) : [],
+      rate_color: rate ? getComputedStyle(rate).color : null,
+      cost: cost.textContent,
+      cost_mark: textIn(cost, '.cost-mark')
+    };
+  }
+
+  // Every row's cells, the column titles, the card's notes, the scope
+  // strip's subline, and the opened detail of each row in
+  // `window.routectlTrafficOpen` (row keys).
+  d.scenario('traffic-observe', function () {
+    var open = window.routectlTrafficOpen || [];
+    return tableShown().then(function () {
+      return open.reduce(function (step, key) {
+        return step.then(function () { return openRow(TABLE + '-' + key); });
+      }, Promise.resolve());
+    }).then(function () {
+      var details = {};
+      open.forEach(function (key) { details[key] = detailOf(TABLE + '-' + key); });
+      var strip = document.querySelector('#body-traffic .ovsection .card-hint');
+      return {
+        rows: rows().map(cellObservation),
+        titles: Array.prototype.map.call(
+          document.querySelectorAll('#' + TABLE + ' thead th'), function (th) {
+            return [th.textContent, th.title || null];
+          }),
+        notes: Array.prototype.map.call(
+          document.querySelectorAll('#body-traffic .traffic-note'), function (n) {
+            return n.textContent;
+          }),
+        scope_hint: strip ? strip.textContent : null,
+        colors: { fg: colorOf('--fg'), warn: colorOf('--warn'), neg: colorOf('--neg') },
+        details: details
+      };
+    });
+  });
+
+  // A custom property resolved to the color a node painted in it computes.
+  function colorOf(prop) {
+    var probe = document.createElement('span');
+    probe.style.color = 'var(' + prop + ')';
+    document.body.appendChild(probe);
+    var color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }
+
+  // ---- a failed read -----------------------------------------------------
+
+  function failureCard() {
+    var card = document.querySelector(SECTION + ' .unavailable-msg');
+    if (!card) { return null; }
+    var code = card.querySelector('.unavailable-code');
+    return {
+      text: card.textContent,
+      lead: card.firstChild.nodeType === 3 ? card.firstChild.textContent : null,
+      code: code ? code.textContent : null
+    };
+  }
+
+  d.scenario('traffic-read-failed', function () {
+    return d.waitUntil('the failed-read card', failureCard, 40000).then(function () {
+      return { card: failureCard(), table: !!document.getElementById(TABLE) };
     });
   });
 
