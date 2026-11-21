@@ -406,7 +406,7 @@
       providerRowWindow = selectedWindow;
     }
     if (num0(view.totals.requests) <= 0) {
-      return ledgerIsEmpty() ? firstRunEmpty() : overviewEmpty();
+      return ledgerIsEmpty(view) ? firstRunEmpty() : overviewEmpty();
     }
     var row = providerRowWindow === selectedWindow ? providerRowView : null;
     var stack = tabStack();
@@ -425,18 +425,13 @@
   }
 
   // Whether the ledger holds no request at all, as opposed to none in the
-  // selected window or scope. An unscoped all-time window answers it
-  // directly; a provider scope never does. Otherwise the all-history usage
-  // read answers it, and while that read has no live answer the question
-  // stays open and the window's own empty state is shown. That read is not a
-  // source of this view, so a late answer from it shows here on the view's
-  // next render (within one 5 s round).
-  function ledgerIsEmpty() {
+  // selected window or scope: the series answer's `earliest_ms` names the
+  // ledger's first request whatever the window, and is null only for an
+  // empty ledger. A scoped view keeps the scope's own empty state, so its
+  // reset stays the one way out.
+  function ledgerIsEmpty(view) {
     if (hasQueryScope()) { return false; }
-    if (selectedWindow === 'all') { return true; }
-    var rec = SOURCES[USAGE_ALL_SOURCE];
-    if (rec.state !== 'live' || !rec.data || !rec.data.totals) { return false; }
-    return num0(rec.data.totals.requests) <= 0;
+    return view.earliest_ms === null;
   }
 
   // First run: nothing has ever been routed, so the one useful fact is where

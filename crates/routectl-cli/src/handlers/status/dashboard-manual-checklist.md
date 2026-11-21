@@ -292,9 +292,9 @@ banner, no retry signal -- silently mislabeled data.
   sentence naming that seat in amber, with an amber icon; with both logged
   in it reads `All routes healthy` with no link. Clicking `see Accounts`
   opens Accounts and keeps the selected range in the address.
-- With a seat still unusable, block `/status/usage?window=all` in the
-  browser devtools (request blocking; it is the one source fetched on its
-  own) and wait two polls. The status line still reads the seat sentence:
+- With a seat still unusable, block `/status/query` in the browser
+  devtools (request blocking; it is fetched apart from the aggregate) and
+  wait two polls. The status line still reads the seat sentence:
   only the attention panel moves it, and the blocked source shows its
   failure only on its own sections.
 - With a seat logged out, stop the daemon and wait two polls. The status

@@ -244,21 +244,17 @@
     ]);
   });
 
-  // The series answer reports no request in the window; the all-history
-  // usage read reports `ledgerRequests`.
-  function emptyWindow(ledgerRequests) {
+  // The series answer reports no request in the window, and the ledger's
+  // first request at `earliestMs` (null: the ledger holds none).
+  function emptyWindow(earliestMs) {
     d.rewrite(function (url, text) {
+      if (url.pathname !== '/status/query') { return text; }
       var panel = JSON.parse(text);
-      if (url.pathname === '/status/query' && panel.data && panel.data.series) {
-        panel.data.totals.requests = 0;
-        panel.data.groups = [];
-        return JSON.stringify(panel);
-      }
-      if (url.pathname === '/status/usage' && panel.data && ledgerRequests !== null) {
-        panel.data.totals.requests = ledgerRequests;
-        return JSON.stringify(panel);
-      }
-      return text;
+      if (!panel.data || !panel.data.series) { return text; }
+      panel.data.totals.requests = 0;
+      panel.data.groups = [];
+      panel.data.earliest_ms = earliestMs;
+      return JSON.stringify(panel);
     });
   }
 
@@ -274,22 +270,22 @@
     };
   }
 
-  // Observe once the all-history read and a series answer after it have both
-  // landed, so the empty state is the one drawn with the ledger known.
-  function emptyAfterLedgerRead() {
-    return d.waitFor('/status/usage', 1)
-      .then(function () { return d.waitFor('/status/query', 1); })
+  function emptyAfterSeriesAnswer() {
+    return d.waitFor('/status/query', 1)
       .then(function () { return d.waitUntil('the empty state', emptyObservation); });
   }
 
   d.scenario('tiles-first-run', function () {
-    emptyWindow(0);
-    return emptyAfterLedgerRead();
+    emptyWindow(null);
+    return emptyAfterSeriesAnswer();
   });
 
+  // A first request well before any window the page offers.
+  var EARLIEST_MS = 86400000;
+
   d.scenario('tiles-empty-window', function () {
-    emptyWindow(null);
-    return emptyAfterLedgerRead();
+    emptyWindow(EARLIEST_MS);
+    return emptyAfterSeriesAnswer();
   });
 })(window.routectlDriver);
 

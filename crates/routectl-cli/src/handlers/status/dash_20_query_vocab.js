@@ -139,12 +139,6 @@
   // read anywhere in the script must be declared here, be a key of an object
   // literal the script builds, or be a JS/DOM built-in. A field the page starts
   // reading goes into its panel's list here.
-  var USAGE_FIELDS = [
-    'schema_version', 'unavailable', 'as_of', 'data',
-    'window', 'groups', 'totals',
-    'alias', 'model', 'requests', 'errors'
-  ];
-
   var HEALTH_FIELDS = [
     'schema_version', 'unavailable', 'as_of', 'data',
     'targets', 'pools', 'seat_driver', 'learned_negatives',

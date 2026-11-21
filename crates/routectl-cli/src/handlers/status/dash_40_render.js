@@ -548,7 +548,6 @@
     terminal = true;
     clearTimeout(timer);
     clearTimeout(queryTimer);
-    clearTimeout(usageAllTimer);
     clearInterval(ageTimer);
     invalidateEveryFetch();
     setBanner('terminal',
@@ -726,16 +725,12 @@
   // ---- tab badges ------------------------------------------------------
 
   // The badge for a source, computed ONLY from a fresh successful render.
-  // Counts a genuine problem: usage errors, health targets with a non-closed
+  // Counts a genuine problem: health targets with a non-closed
   // circuit or an eligibility reason (once each), the daemon's active
   // attention items (broken + degraded; recovered ones never count). Config
   // carries no error concept, so it never badges. A zero count returns null
   // so a clean source shows nothing.
   function sourceBadge(name, data) {
-    if (name === 'usage') {
-      var errs = num0((data.totals || {}).errors);
-      return errs > 0 ? { label: humanCount(errs), kind: 'error' } : null;
-    }
     if (name === 'health') {
       var open = (data.targets || []).filter(function (t) {
         return (t.circuit && t.circuit !== 'closed') || !!(t.eligibility && t.eligibility.reason);

@@ -76,12 +76,9 @@ fn the_empty_case_has_no_traffic_and_no_subscription() {
         .collect();
     assert_eq!(names, ["#anthropic", "#bed", "#compat"]);
     assert!(rows.iter().all(|r| r["subscription"] == false), "{rows:#?}");
-    assert_eq!(
-        source.usage_all(FIXTURE_NOW_MS)["data"]["totals"]["requests"],
-        0
-    );
     assert_eq!(panel(&agg, "usage")["totals"]["requests"], 0);
     assert_eq!(seat_query(&source)["data"]["totals"]["requests"], 0);
+    assert!(seat_query(&source)["data"]["earliest_ms"].is_null());
     assert!(item_kinds(&agg).is_empty(), "{:?}", item_kinds(&agg));
     assert_eq!(panel(&agg, "config")["source"]["listen_addr"], LISTEN);
 }

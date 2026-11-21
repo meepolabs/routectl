@@ -528,10 +528,6 @@ mod tests {
 
         let expected: std::collections::BTreeMap<String, u32> = [
             (
-                "usage".to_string(),
-                crate::handlers::status::usage::SCHEMA_VERSION,
-            ),
-            (
                 "health".to_string(),
                 crate::handlers::status::health::SCHEMA_VERSION,
             ),
@@ -1277,11 +1273,11 @@ mod tests {
             ),
             (
                 "FETCH_SOURCES",
-                "varfetch_sources=[aggregate_fetch,usage_all_source].concat(query_sources);",
+                "varfetch_sources=[aggregate_fetch].concat(query_sources);",
             ),
             (
                 "ALL_SOURCES",
-                "varall_sources=get_sources.concat(query_sources,[usage_all_source]);",
+                "varall_sources=get_sources.concat(query_sources);",
             ),
         ] {
             assert!(

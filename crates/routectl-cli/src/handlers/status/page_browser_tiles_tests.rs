@@ -234,8 +234,9 @@ fn page_browser_tiles_a_partial_cost_is_qualified_on_the_tile_and_its_cards() {
     );
 }
 
-/// With nothing ever routed, Now says "No requests yet" and names the
-/// configured listener as the base URL, in a focusable code element.
+/// With nothing ever routed (the series answer's `earliest_ms` null), Now
+/// says "No requests yet" and names the configured listener as the base URL,
+/// in a focusable code element.
 ///
 /// Mutation checks: ledgerIsEmpty returning false -> red (the window's empty
 /// state is drawn); clientBaseAddress reading another field -> red.
@@ -255,8 +256,11 @@ fn page_browser_tiles_an_empty_ledger_names_the_base_url() {
     assert_eq!(obs["base_url_focusable"], true, "{obs:#}");
 }
 
-/// The control: a window with no traffic over a ledger that has some keeps
-/// the window's own empty state and names no base URL.
+/// The control: a window with no traffic over a ledger that has some (the
+/// series answer's `earliest_ms` set) keeps the window's own empty state and
+/// names no base URL.
+///
+/// Mutation check: ledgerIsEmpty returning true -> red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_tiles_an_empty_window_over_a_used_ledger_is_not_first_run() {

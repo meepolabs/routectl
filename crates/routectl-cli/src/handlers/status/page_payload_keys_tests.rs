@@ -13,7 +13,6 @@ const VENDORED_PART: &str = "dash_05_idiomorph.js";
 /// Each GET panel's declared field list, by the `/status` aggregate key that
 /// carries the panel.
 const PANEL_FIELD_LISTS: &[(&str, &str)] = &[
-    ("usage", "USAGE_FIELDS"),
     ("health", "HEALTH_FIELDS"),
     ("config", "CONFIG_FIELDS"),
     ("doctor", "DOCTOR_FIELDS"),
@@ -311,16 +310,16 @@ fn each_declared_panel_field_is_a_key_its_dto_serializes() {
     }
 }
 
-/// A key only health serializes, declared for usage, is refused: the check is
-/// per panel, not against the union of every panel's keys.
+/// A key only health serializes, declared for config, is refused: the check
+/// is per panel, not against the union of every panel's keys.
 #[test]
 fn a_field_from_another_panel_is_refused() {
     let health_only = "half_open_probe_in_flight";
     assert!(panel_keys("health").contains(health_only));
-    let mut usage_fields = string_array("USAGE_FIELDS");
-    usage_fields.push(health_only.to_string());
+    let mut config_fields = string_array("CONFIG_FIELDS");
+    config_fields.push(health_only.to_string());
 
-    let missing = fields_missing_from(&usage_fields, &panel_keys("usage"));
+    let missing = fields_missing_from(&config_fields, &panel_keys("config"));
 
     assert_eq!(missing, vec![health_only.to_string()]);
 }

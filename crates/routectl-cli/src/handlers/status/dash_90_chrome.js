@@ -607,6 +607,5 @@
     window.addEventListener('pageshow', updateFavicon);
     document.addEventListener('animationend', clearChangedValue);
     tick();
-    usageAllRound();
   });
 })();

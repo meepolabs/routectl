@@ -6,7 +6,7 @@
 // binary FAILS it rather than skipping. `run_scenario` serves the assembled
 // `PAGE` from a loopback test server, with the test-only driver
 // (page_browser_driver.js) and any scenario snippets injected before
-// `</body>`, answers /status, /status/usage and QUERY /status/query (every
+// `</body>`, answers /status and QUERY /status/query (every
 // grouping the page asks for, seat included) from the populated panel
 // fixtures with figures that change every round, or from one review case
 // (`run_case_scenario`) as its builders make it, loads the page in Chrome
@@ -86,7 +86,6 @@ impl CaseServed {
 /// The fixture payloads served, by route, before the per-round change.
 struct Populated {
     aggregate: Value,
-    usage_all: Value,
     query_model: Value,
     query_alias: Value,
     query_provider: Value,
@@ -105,7 +104,6 @@ impl Populated {
         };
         Self {
             aggregate: crate::handlers::status::panel_fixtures::aggregate_json(),
-            usage_all: crate::handlers::status::usage::fixture::populated_usage(),
             query_model: query(GroupDim::Model, None),
             query_alias: query(GroupDim::Alias, None),
             query_provider: query(GroupDim::Provider, None),
@@ -133,7 +131,6 @@ impl Populated {
 #[derive(Default)]
 struct Rounds {
     aggregate: AtomicU64,
-    usage_all: AtomicU64,
     query: AtomicU64,
 }
 
@@ -193,16 +190,6 @@ async fn serve_aggregate(State(h): State<Arc<Harness>>) -> axum::response::Respo
     }
 }
 
-async fn serve_usage_all(State(h): State<Arc<Harness>>) -> axum::response::Response {
-    match &h.payloads {
-        Payloads::Populated(p) => {
-            let round = h.rounds.usage_all.fetch_add(1, Ordering::SeqCst);
-            json_response(at_round(&p.usage_all, round))
-        }
-        Payloads::Case(c) => json_response(c.source.usage_all(c.now_ms())),
-    }
-}
-
 async fn serve_query(
     State(h): State<Arc<Harness>>,
     method: Method,
@@ -249,7 +236,6 @@ fn harness_router(harness: Arc<Harness>) -> axum::Router {
     axum::Router::new()
         .route("/", axum::routing::get(serve_test_page))
         .route("/status", axum::routing::get(serve_aggregate))
-        .route("/status/usage", axum::routing::get(serve_usage_all))
         .route("/status/query", axum::routing::any(serve_query))
         .with_state(harness)
 }

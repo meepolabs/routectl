@@ -108,3 +108,64 @@ fn page_browser_the_aggregate_round_applies_attention_and_accounts() {
     );
     assert_eq!(refused["accounts"]["state"], "live", "{refused:#}");
 }
+
+/// The path of every request in `requests`, as the driver logged it.
+fn request_paths(requests: &[Value]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|req| {
+            let url = req["url"].as_str().expect("a request url");
+            let path_at = url
+                .find("/status")
+                .unwrap_or_else(|| panic!("a status request: {url}"));
+            url[path_at..]
+                .split(['?', '#'])
+                .next()
+                .expect("a path")
+                .to_string()
+        })
+        .collect()
+}
+
+/// A full cycle through every view in the tab bar reads only the `/status`
+/// aggregate and `/status/query`: no request goes to `/status/usage`, at any
+/// window. Positive control: the same log holds the aggregate rounds and the
+/// QUERY reads, so a request to another route would have been seen.
+///
+/// Mutation check: put the all-history `/status/usage?window=all` fetch back
+/// on the boot path -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_full_cycle_through_every_view_never_reads_status_usage() {
+    let report = browser::run_scenario(&browser::Scenario {
+        name: "sources-full-cycle",
+        hash: "now",
+        snippets: &[SOURCES_DRIVER],
+        budget_ms: 90_000,
+    });
+    let paths = request_paths(&report.requests);
+
+    assert_eq!(
+        report.result["visited"],
+        serde_json::json!(["now", "accounts", "traffic", "models", "config", "doctor"]),
+        "{:#}",
+        report.result
+    );
+    assert!(paths.iter().any(|p| p == "/status"), "{paths:?}");
+    assert!(
+        report.requests.iter().any(|req| req["method"] == "QUERY"
+            && req["url"]
+                .as_str()
+                .is_some_and(|u| u.contains("/status/query"))),
+        "{paths:?}"
+    );
+    let usage: Vec<&String> = paths
+        .iter()
+        .filter(|p| p.starts_with("/status/usage"))
+        .collect();
+    assert!(usage.is_empty(), "the page read /status/usage: {usage:?}");
+    assert!(
+        paths.iter().all(|p| p == "/status" || p == "/status/query"),
+        "{paths:?}"
+    );
+}

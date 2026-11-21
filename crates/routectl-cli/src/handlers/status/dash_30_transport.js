@@ -49,7 +49,7 @@
   // superseded request is only an optimization: an answer already on its way,
   // or a fetch that never honours the signal, is stopped here.
   var AGGREGATE_FETCH = 'aggregate';
-  var FETCH_SOURCES = [AGGREGATE_FETCH, USAGE_ALL_SOURCE].concat(QUERY_SOURCES);
+  var FETCH_SOURCES = [AGGREGATE_FETCH].concat(QUERY_SOURCES);
   var FETCH_EPOCHS = {};
   FETCH_SOURCES.forEach(function (name) { FETCH_EPOCHS[name] = 0; });
 
@@ -77,11 +77,10 @@
   // them is worth waiting for.
   function invalidateEveryFetch() {
     FETCH_SOURCES.forEach(function (name) { FETCH_EPOCHS[name] += 1; });
-    [aggregateCtrl, usageAllCtrl, queryCtrl].forEach(function (ctrl) {
+    [aggregateCtrl, queryCtrl].forEach(function (ctrl) {
       if (ctrl) { ctrl.abort(); }
     });
     aggregateCtrl = null;
-    usageAllCtrl = null;
     queryCtrl = null;
     queryCtrlSource = null;
   }
@@ -521,59 +520,4 @@
     });
   }
 
-  // ---- all-history usage read ------------------------------------------
-
-  // Routing's attribution source: the SAME usage panel at `window=all`,
-  // fetched separately from the aggregate so the aggregate's today-scoped
-  // panel keeps serving its own readers untouched. Its own controller, its own
-  // backoff index, its own timer -- a failing all-history read never slows the
-  // aggregate's 5s cadence, and vice versa.
-  var usageAllBackoffIndex = -1;
-  var usageAllTimer = null;
-  var usageAllInFlight = false;
-  var usageAllCtrl = null;         // in-flight controller, aborted on terminal
-
-  function usageAllRound() {
-    if (terminal || usageAllInFlight) { return Promise.resolve(); }
-    usageAllInFlight = true;
-    var ctrl = new AbortController();
-    usageAllCtrl = ctrl;
-    var ticket = issueFetchTicket(USAGE_ALL_SOURCE, USAGE_ALL_SOURCE);
-    // A response that lands after the page went terminal describes a page
-    // state the operator has left: dropping it is what keeps a live Routing
-    // repaint from appearing under the terminal banner.
-    function settled() {
-      if (usageAllCtrl === ctrl) { usageAllCtrl = null; }
-      usageAllInFlight = false;
-      return fetchTicketIsCurrent(ticket);
-    }
-    return fetchStatus(USAGE_ALL_URL, ctrl).then(function (out) {
-      if (!settled()) { return; }
-      scheduleNextUsageAll(applyUsageAllOutcome(out));
-    }).catch(function () {
-      if (!settled()) { return; }
-      scheduleNextUsageAll(false);
-    });
-  }
-
-  // Same outcome vocabulary as the aggregate round, applied to one source.
-  // A 400/405 cannot happen for a fixed URL with no body, so it is classified
-  // with the other non-retryable refusals rather than given a special arm.
-  function applyUsageAllOutcome(out) {
-    if (out.kind === 'forbidden') { enterTerminal(); return false; }
-    if (out.kind !== 'ok') {
-      markSourceTransport(USAGE_ALL_SOURCE);
-      return false;
-    }
-    renderPanelGuarded(USAGE_ALL_SOURCE, out.json);
-    return true;
-  }
-
-  function scheduleNextUsageAll(ok) {
-    clearTimeout(usageAllTimer);
-    if (terminal) { return; }
-    usageAllBackoffIndex = ok ? -1 : Math.min(usageAllBackoffIndex + 1, BACKOFF_STEPS_MS.length - 1);
-    var delay = usageAllBackoffIndex < 0 ? BASE_MS : BACKOFF_STEPS_MS[usageAllBackoffIndex];
-    usageAllTimer = setTimeout(usageAllRound, delay);
-  }
 

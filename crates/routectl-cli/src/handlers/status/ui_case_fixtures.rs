@@ -1,7 +1,6 @@
 //! Test-only review cases for the Now and Accounts views: each case is a
 //! small config, a seeded ledger and the daemon state a reviewer needs to
-//! see, served as the `/status` aggregate, the all-history usage read and
-//! the QUERY answers. Every payload is built by the panels' own builders
+//! see, served as the `/status` aggregate and the QUERY answers. Every payload is built by the panels' own builders
 //! (`build_from_sources`, the attention list through its recovery memory,
 //! the usage and query reads over the seeded ledger), never written as JSON.
 //!
@@ -351,12 +350,6 @@ impl CaseSource {
             },
         };
         serde_json::to_value(aggregate).expect("the aggregate serializes")
-    }
-
-    /// `/status/usage?window=all` at `now_ms`.
-    pub fn usage_all(&self, now_ms: i64) -> Value {
-        let panel = super::usage::fixture::usage_panel_over(&self.db_path, WindowFlag::All, now_ms);
-        serde_json::to_value(panel).expect("the usage panel serializes")
     }
 
     /// The route's answer to a QUERY `body` at `now_ms` (windows in UTC), or

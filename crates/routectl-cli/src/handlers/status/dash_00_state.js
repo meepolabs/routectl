@@ -6,19 +6,18 @@
   // containment for a cached page / mixed assets / a bad build, not version
   // negotiation. `query` sits alongside the GET panels because the QUERY
   // aggregate is a source of its own (see SOURCES below).
-  var EXPECTED = { usage: 8, health: 9, config: 6, doctor: 32, query: 6, accounts: 1, attention: 1, models: 1 };
+  var EXPECTED = { health: 9, config: 6, doctor: 32, query: 6, accounts: 1, attention: 1, models: 1 };
 
   // The panels of the aggregate round, each with its own envelope +
   // freshness. NOT the same list as the views (VIEWS in dash_80_views.js): a
   // view is what a tab shows, a source is a fetch.
-  var GET_SOURCES = ['usage', 'health', 'config', 'doctor', 'attention', 'accounts', 'models'];
+  var GET_SOURCES = ['health', 'config', 'doctor', 'attention', 'accounts', 'models'];
   // The QUERY reads, each its OWN source. All speak `/status/query`, but
   // Traffic asks for a series-less roll-up and Now for a bucketed one, and the
   // payloads are not interchangeable: Now cannot draw a sparkline from a
   // payload whose `series` is null. Sharing one record made whichever view
   // polled last define what another rendered from, so a view switch painted
-  // one view out of the other's payload. Two shapes are two sources -- the
-  // same rule that splits usage from usage_all below.
+  // one view out of the other's payload. Two shapes are two sources.
   var QUERY_SOURCE = 'query';
   var QUERY_SERIES_SOURCE = 'query_series';
   var QUERY_SEATS_SOURCE = 'query_seats';
@@ -49,21 +48,12 @@
     }
   ];
   var QUERY_SOURCES = QUERY_SOURCE_DEFS.map(function (def) { return def.name; });
-  // The all-history usage read: its OWN fetch, its OWN backoff, its OWN
-  // as_of. Routing attributes over ALL HISTORY, so it must never read the
-  // aggregate's today-scoped usage panel -- and the aggregate panel must stay
-  // today-scoped for the readers that want today. Two windows of one panel are
-  // two sources.
-  var USAGE_ALL_SOURCE = 'usage_all';
-  var USAGE_ALL_URL = '/status/usage?window=all';
-  var ALL_SOURCES = GET_SOURCES.concat(QUERY_SOURCES, [USAGE_ALL_SOURCE]);
+  var ALL_SOURCES = GET_SOURCES.concat(QUERY_SOURCES);
 
-  // The panel a source's envelope belongs to, where the two differ. The
-  // all-history read is the usage PANEL at another window, so it validates
-  // against the usage wire version rather than one of its own; every QUERY
-  // read is the query PANEL at some request shape, so it validates against the
-  // query wire version.
-  var SOURCE_PANEL = { usage_all: 'usage' };
+  // The panel a source's envelope belongs to, where the two differ: every
+  // QUERY read is the query PANEL at some request shape, so it validates
+  // against the query wire version.
+  var SOURCE_PANEL = {};
   QUERY_SOURCES.forEach(function (name) { SOURCE_PANEL[name] = 'query'; });
 
   function expectedVersion(name) {
@@ -79,12 +69,11 @@
   // timers (a failing QUERY must not slow healthy GET polling) but share these
   // steps, so the two schedules cannot drift apart.
   var BACKOFF_STEPS_MS = [10000, 20000, 30000];
-  // Per-GET AbortController budget, covering both the /status aggregate and
-  // the all-history /status/usage read. Sized so the server's own usage panel
-  // budget, plus a reserve for the cheap panels (health, config, doctor,
-  // attention, accounts, models) and the response write, lands inside it: the
-  // server then sheds a slow ledger read as an unavailable panel instead of
-  // the browser aborting the whole round. Still
+  // Per-GET AbortController budget for the /status aggregate. Sized so the
+  // server's own usage panel budget, plus a reserve for the cheap panels
+  // (health, config, doctor, attention, accounts, models) and the response
+  // write, lands inside it: the server then sheds a slow ledger read as an
+  // unavailable panel instead of the browser aborting the whole round. Still
   // under the 5s cadence, so a slow round cannot overlap its next attempt.
   var TIMEOUT_MS = 3500;
   // Per-QUERY AbortController budget. Like TIMEOUT_MS this is ONE abort timer
