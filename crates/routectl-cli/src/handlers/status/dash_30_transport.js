@@ -83,6 +83,7 @@
     aggregateCtrl = null;
     usageAllCtrl = null;
     queryCtrl = null;
+    queryCtrlSource = null;
   }
 
   // ---- QUERY transport -------------------------------------------------
@@ -94,6 +95,7 @@
   var queryBackoffIndex = -1;      // -1 = follow the GET cadence; 0..n = index
   var queryTimer = null;
   var queryCtrl = null;            // in-flight controller, for single-flight
+  var queryCtrlSource = null;      // the query source queryCtrl was issued for
   // The body key a 400/405 refused, PER QUERY SOURCE. Overview and Usage
   // request different shapes against the same endpoint, so a refusal of one
   // shape says nothing about the other; keying by source keeps a rejected
@@ -107,12 +109,19 @@
   // this interval is not fetched again the instant its round lands.
   var queryLastAttemptKey = null;
   var queryLastAttemptAtMs = 0;
-  // Set when the page aborts its own in-flight QUERY, cleared once a later
-  // QUERY gets an answer it renders. The server holds its one read permit until
-  // the aborted read notices the cancel, so the QUERY that superseded it can
-  // meet `db_busy` from the page's own abandoned read: that answer is retried
-  // on the short schedule below, never rendered as an outage.
-  var queryOwnAbortPending = false;
+  // The server holds its one read permit until an aborted read notices the
+  // cancel, so the QUERY that superseded the page's own aborted read can meet
+  // `db_busy` from that abandoned read: that answer is retried on the short
+  // schedule below, never rendered as an outage. Provenance is tracked by
+  // selection revision: every selection change (queryInputChanged) moves
+  // querySelectionRevision, an abort records the revision it happened at, and
+  // only a round issued at that same revision can have been superseded by it.
+  // A view switch away from a query view aborts with no successor, and the
+  // switch back moves the revision, so a busy answer met then is the ledger's
+  // own and takes the backoff ladder. Reset to -1 once a later QUERY gets an
+  // answer it renders.
+  var querySelectionRevision = 0;
+  var queryOwnAbortRevision = -1;
   var queryBusyRetryIndex = -1;    // -1 = no short busy retry armed
   var SUPERSEDED_BUSY_RETRY_MS = [150, 300, 600];
 
@@ -144,20 +153,13 @@
     return body;
   }
 
-  // The request shape each query source stands for. The bucketed source asks
-  // for a series; the series-less one deliberately does not (no chart, and a
-  // byte-identical non-series read path), and its grain follows the group-by
-  // toggle. The per-seat source is series-less at seat grain whatever the
-  // toggle says.
+  // The request shape a query source stands for under the live selection, as
+  // its QUERY_SOURCE_DEFS entry resolves it; null for any other source.
   function shapeFor(source) {
-    if (source === QUERY_SERIES_SOURCE) {
-      return findShape(selectedWindow, 'provider', true);
-    }
-    if (source === QUERY_SOURCE) {
-      return findShape(selectedWindow, selectedGroupBy, false);
-    }
-    if (source === QUERY_SEATS_SOURCE) {
-      return findShape(selectedWindow, 'seat', false);
+    for (var i = 0; i < QUERY_SOURCE_DEFS.length; i++) {
+      if (QUERY_SOURCE_DEFS[i].name === source) {
+        return QUERY_SOURCE_DEFS[i].shape({ window: selectedWindow, groupBy: selectedGroupBy });
+      }
     }
     return null;
   }
@@ -196,17 +198,18 @@
   // rather than rendered). Never reuses a consumed Request; the body is
   // stringified per logical key.
   function queryStatus(source, body) {
-    if (queryCtrl) { queryCtrl.abort(); queryOwnAbortPending = true; }
+    if (queryCtrl) { queryCtrl.abort(); queryOwnAbortRevision = querySelectionRevision; }
     var ticket = issueFetchTicket(source, queryBodyKey(body));
     var ctrl = new AbortController();
     queryCtrl = ctrl;
+    queryCtrlSource = source;
     var init = {
       method: 'QUERY',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     };
     return safeRequest('/status/query', init, ctrl, QUERY_TIMEOUT_MS).then(function (out) {
-      if (queryCtrl === ctrl) { queryCtrl = null; }
+      if (queryCtrl === ctrl) { queryCtrl = null; queryCtrlSource = null; }
       // A newer request for this source was issued, or the operator has left
       // the selection (or the view) this response describes.
       if (!fetchTicketIsCurrent(ticket)) { return { stale: true }; }
@@ -235,10 +238,11 @@
     }
     queryLastAttemptKey = key;
     queryLastAttemptAtMs = Date.now();
+    var revision = querySelectionRevision;
     return queryStatus(source, body).then(function (out) {
       if (!out || out.stale) { return; }
-      if (retrySupersededBusy(out)) { return; }
-      queryOwnAbortPending = false;
+      if (retrySupersededBusy(out, revision)) { return; }
+      queryOwnAbortRevision = -1;
       queryBusyRetryIndex = -1;
       scheduleNextQuery(applyQueryOutcome(source, out, key));
     }).catch(function () {
@@ -254,13 +258,21 @@
     return queryCtrl !== null || queryBusyRetryIndex >= 0;
   }
 
-  // A `db_busy` answer to a QUERY sent after the page aborted its own previous
-  // read. The panel stays in its loading state and the same round is retried
-  // on SUPERSEDED_BUSY_RETRY_MS, outside the backoff ladder. Returns false,
-  // leaving the answer to the normal path, for any other outcome, for a busy
-  // gate the page did not cause, and once the short schedule is spent.
-  function retrySupersededBusy(out) {
-    if (!queryOwnAbortPending || out.kind !== 'ok' || !out.json) { return false; }
+  // Whether `source`'s own request is out: issued and not yet answered, or
+  // waiting on a short busy retry for the active view's round.
+  function queryInFlightFor(source) {
+    if (queryCtrl !== null) { return queryCtrlSource === source; }
+    return queryBusyRetryIndex >= 0 && querySourceFor(activeTab) === source;
+  }
+
+  // A `db_busy` answer to a QUERY issued at the selection revision the page
+  // aborted its own previous read at. The panel stays in its loading state and
+  // the same round is retried on SUPERSEDED_BUSY_RETRY_MS, outside the backoff
+  // ladder. Returns false, leaving the answer to the normal path, for any
+  // other outcome, for a busy gate the page did not cause, and once the short
+  // schedule is spent.
+  function retrySupersededBusy(out, revision) {
+    if (queryOwnAbortRevision !== revision || out.kind !== 'ok' || !out.json) { return false; }
     if (out.json.unavailable !== 'db_busy') { return false; }
     if (queryBusyRetryIndex + 1 >= SUPERSEDED_BUSY_RETRY_MS.length) { return false; }
     queryBusyRetryIndex += 1;
@@ -333,13 +345,15 @@
   // asked for yet is left loading: nothing of it failed, and only its own
   // view's round would clear a mark. A source no request will answer (no
   // body for the selection, or a body the daemon refused) is left as it is,
-  // since no recovery would clear the mark. The first good round's nudge
-  // refetches.
+  // since no recovery would clear the mark. A source whose own request is
+  // still out is left to that request: its answer, or its own failure, is
+  // the verdict on it. The first good round's nudge refetches.
   function markQuerySourcesTransport() {
     var issued = querySourceFor(activeTab);
     QUERY_SOURCES.forEach(function (name) {
       var body = queryBodyForSource(name);
       if (!body || queryRejectedKeyBySource[name] === queryBodyKey(body)) { return; }
+      if (queryInFlightFor(name)) { return; }
       if (name !== issued && SOURCES[name].data === null) { return; }
       markSourceTransport(name);
     });
@@ -379,6 +393,7 @@
   // source whose key did not move still holds the answer for this same
   // request, so a failed refresh of it reads as stale, not as a first failure.
   function queryInputChanged() {
+    querySelectionRevision += 1;
     var body = queryBodyFor(activeTab);
     if (!body) {
       clearTimeout(queryTimer);
@@ -387,7 +402,8 @@
       if (queryCtrl) {
         queryCtrl.abort();
         queryCtrl = null;
-        queryOwnAbortPending = true;
+        queryCtrlSource = null;
+        queryOwnAbortRevision = querySelectionRevision;
       }
       queryBusyRetryIndex = -1;
       return;

@@ -427,3 +427,90 @@ fn page_browser_an_unreachable_daemon_marks_the_query_section_stale() {
         "positive control: the recovered query brings fresh figures: {recovered:#}"
     );
 }
+
+/// Now answered at the all-time range, then Traffic opened there with its
+/// QUERY held while the aggregate fails: the held query is left to its own
+/// answer (no error card, no stale mark, never an `offline` record), and that
+/// answer draws Traffic. After the aggregate recovers, Now, which sat the
+/// outage out holding its answer, reopens with its next answer held and reads
+/// stale until that answer lands.
+///
+/// Mutation checks: drop the in-flight skip in markQuerySourcesTransport ->
+/// red (Traffic shows the transport error card during the outage); skip every
+/// inactive query source there (`name !== issued` alone) -> red (Now reopens
+/// current).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_an_outage_while_a_query_is_held_leaves_it_to_its_answer() {
+    let result = states_scenario("states-outage-while-query-held", "now?range=all", 90_000);
+    let (held, during, answered) = (&result["held"], &result["during"], &result["answered"]);
+
+    assert_eq!(
+        held["figures"],
+        Value::Null,
+        "the query is still out: {held:#}"
+    );
+    assert_eq!(
+        during["banner_shown"], true,
+        "positive control: the aggregate failed while the query was out: {during:#}"
+    );
+    assert_eq!(
+        result["traffic_answers_during"], 1,
+        "only Now's answer had landed when the aggregate failed: {result:#}"
+    );
+    assert_eq!(during["error_cards"], 0, "{during:#}");
+    assert_eq!(during["section_stale"], false, "{during:#}");
+    assert_eq!(during["figures"], Value::Null, "{during:#}");
+
+    assert!(answered["figures"].is_string(), "{answered:#}");
+    assert_eq!(answered["error_cards"], 0, "{answered:#}");
+    assert_eq!(answered["section_stale"], false, "{answered:#}");
+
+    let (reopened, live) = (&result["now_reopened"], &result["now_live"]);
+    assert_eq!(result["now_answered"]["section_stale"], false, "{result:#}");
+    assert_eq!(reopened["present"], true, "{reopened:#}");
+    assert_eq!(reopened["section_stale"], true, "{reopened:#}");
+    assert_eq!(reopened["error_cards"], 0, "{reopened:#}");
+    assert_eq!(live["section_stale"], false, "{live:#}");
+    assert_ne!(
+        live["figure"], reopened["figure"],
+        "positive control: Now's own answer brings fresh figures: {result:#}"
+    );
+}
+
+/// A Traffic QUERY is held, the operator goes to Config and back, and the
+/// ledger answers the round sent on return with `db_busy`. That round
+/// superseded nothing (the held read was abandoned by a switch to a view that
+/// sends no QUERY), so the busy answer is the ledger's own: it is shown and
+/// backed off on the ladder, and no short superseded-busy retry is sent.
+///
+/// Mutation check: record the abort in queryInputChanged's no-body arm at the
+/// revision the return will carry (or drop the revision check in
+/// retrySupersededBusy) -> red (three short retries follow within 1.05 s).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_busy_ledger_after_switching_away_backs_off() {
+    let result = states_scenario("states-busy-after-switch-away", "traffic", 60_000);
+
+    assert_eq!(
+        result["queries_after"], 0,
+        "a genuine busy answer takes the backoff ladder: {result:#}"
+    );
+    let card = text(&result["card"], "the Traffic unavailable card");
+    assert!(!card.is_empty(), "{result:#}");
+    assert_eq!(result["traffic"]["busy"], Value::Null, "{result:#}");
+}
+
+/// The control for the case above: Month supersedes the held Week QUERY, so a
+/// busy answer to Month is the page's own abandoned read still holding the
+/// ledger, and it is retried on the short schedule.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_busy_ledger_after_superseding_retries_briefly() {
+    let result = states_scenario("states-busy-after-superseding", "traffic", 60_000);
+
+    assert_eq!(
+        result["queries_after"], 3,
+        "the short superseded-busy schedule runs out: {result:#}"
+    );
+}

@@ -24,7 +24,7 @@ impl ViewEntry {
 
 /// The index just past the bracket that closes the one opened at
 /// `chars[open]`, skipping string literals.
-fn balanced_end(chars: &[char], open: usize) -> usize {
+pub(super) fn balanced_end(chars: &[char], open: usize) -> usize {
     let mut depth = 0i32;
     let mut i = open;
     while i < chars.len() {
@@ -48,7 +48,7 @@ fn balanced_end(chars: &[char], open: usize) -> usize {
 }
 
 /// The top-level `{...}` objects of an array body, each as its own text.
-fn top_level_objects(body: &[char]) -> Vec<String> {
+pub(super) fn top_level_objects(body: &[char]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < body.len() {
@@ -67,7 +67,7 @@ fn top_level_objects(body: &[char]) -> Vec<String> {
 
 /// The text after `key:` in an object literal, up to the next top-level comma
 /// or the object's end.
-fn field_text(object: &str, key: &str) -> Option<String> {
+pub(super) fn field_text(object: &str, key: &str) -> Option<String> {
     let at = object.find(&format!("{key}:"))? + key.len() + 1;
     let chars: Vec<char> = object[at..].chars().collect();
     let mut i = 0;
@@ -89,7 +89,7 @@ fn field_text(object: &str, key: &str) -> Option<String> {
     Some(chars[..i].iter().collect::<String>().trim().to_string())
 }
 
-fn unquote(text: &str) -> String {
+pub(super) fn unquote(text: &str) -> String {
     text.trim()
         .trim_matches(|c| c == '\'' || c == '"')
         .to_string()

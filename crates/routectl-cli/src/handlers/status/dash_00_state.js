@@ -12,20 +12,43 @@
   // freshness. NOT the same list as the views (VIEWS in dash_80_views.js): a
   // view is what a tab shows, a source is a fetch.
   var GET_SOURCES = ['usage', 'health', 'config', 'doctor', 'attention', 'accounts'];
-  // The two QUERY reads, each its OWN source. Both speak `/status/query`, but
-  // Usage asks for a series-less roll-up and Overview asks for a bucketed one,
-  // and the two payloads are not interchangeable: Overview cannot draw a
-  // sparkline from a payload whose `series` is null. Sharing one record made
-  // whichever tab polled last define what the other tab rendered from, so a tab
-  // switch painted one tab out of the other's payload. Two shapes are two
-  // sources -- the same rule that splits usage from usage_all below.
+  // The QUERY reads, each its OWN source. All speak `/status/query`, but
+  // Traffic asks for a series-less roll-up and Now for a bucketed one, and the
+  // payloads are not interchangeable: Now cannot draw a sparkline from a
+  // payload whose `series` is null. Sharing one record made whichever view
+  // polled last define what another rendered from, so a view switch painted
+  // one view out of the other's payload. Two shapes are two sources -- the
+  // same rule that splits usage from usage_all below.
   var QUERY_SOURCE = 'query';
   var QUERY_SERIES_SOURCE = 'query_series';
-  // The per-seat roll-up: the same series-less read grouped by seat, for the
-  // traffic each account carried in the selected range. A third shape, so a
-  // third source.
   var QUERY_SEATS_SOURCE = 'query_seats';
-  var QUERY_SOURCES = [QUERY_SOURCE, QUERY_SERIES_SOURCE, QUERY_SEATS_SOURCE];
+  var QUERY_MODELS_SOURCE = 'query_models';
+  // The one registration of the QUERY reads: each source's name and the
+  // QUERY_SHAPES entry it asks for under a selection `{ window, groupBy }`.
+  // QUERY_SOURCES, SOURCE_PANEL, FETCH_SOURCES and shapeFor are derived from
+  // it, so a new read is one entry here. The series-less read follows the
+  // group-by toggle; the per-seat read is that read at seat grain whatever the
+  // toggle says; the per-model read is the last seven days by model whatever
+  // the range says.
+  var QUERY_SOURCE_DEFS = [
+    {
+      name: QUERY_SOURCE,
+      shape: function (sel) { return findShape(sel.window, sel.groupBy, false); }
+    },
+    {
+      name: QUERY_SERIES_SOURCE,
+      shape: function (sel) { return findShape(sel.window, 'provider', true); }
+    },
+    {
+      name: QUERY_SEATS_SOURCE,
+      shape: function (sel) { return findShape(sel.window, 'seat', false); }
+    },
+    {
+      name: QUERY_MODELS_SOURCE,
+      shape: function () { return findShape('last7d', 'model', false); }
+    }
+  ];
+  var QUERY_SOURCES = QUERY_SOURCE_DEFS.map(function (def) { return def.name; });
   // The all-history usage read: its OWN fetch, its OWN backoff, its OWN
   // as_of. Routing attributes over ALL HISTORY, so it must never read the
   // aggregate's today-scoped usage panel -- and the aggregate panel must stay
@@ -37,10 +60,11 @@
 
   // The panel a source's envelope belongs to, where the two differ. The
   // all-history read is the usage PANEL at another window, so it validates
-  // against the usage wire version rather than one of its own; the bucketed
-  // and per-seat QUERY reads are the query PANEL at other request shapes, so
-  // they validate against the query wire version.
-  var SOURCE_PANEL = { usage_all: 'usage', query_series: 'query', query_seats: 'query' };
+  // against the usage wire version rather than one of its own; every QUERY
+  // read is the query PANEL at some request shape, so it validates against the
+  // query wire version.
+  var SOURCE_PANEL = { usage_all: 'usage' };
+  QUERY_SOURCES.forEach(function (name) { SOURCE_PANEL[name] = 'query'; });
 
   function expectedVersion(name) {
     return EXPECTED[SOURCE_PANEL[name] || name];

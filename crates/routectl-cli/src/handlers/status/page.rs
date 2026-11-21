@@ -1103,87 +1103,205 @@ mod tests {
         }
     }
 
-    /// Drift guard on the per-shape QUERY source split.
+    /// One registered QUERY read as written in `QUERY_SOURCE_DEFS`: the
+    /// identifier its `name` is written as, the source key that identifier is
+    /// declared to, and the compacted body of its `shape` function.
+    struct QuerySourceDef {
+        ident: String,
+        key: String,
+        shape: String,
+    }
+
+    /// The `QUERY_SOURCE_DEFS` registry, in order, each name resolved through
+    /// its own `var <IDENT> = '<key>'` declaration.
+    fn query_source_defs() -> Vec<QuerySourceDef> {
+        let script = script();
+        let code = strip_js_comments(&script);
+        let at = code
+            .find("var QUERY_SOURCE_DEFS = [")
+            .expect("the dashboard script declares `var QUERY_SOURCE_DEFS = [`");
+        let chars: Vec<char> = code[at..].chars().collect();
+        let open = chars
+            .iter()
+            .position(|c| *c == '[')
+            .expect("QUERY_SOURCE_DEFS body");
+        let end = views::balanced_end(&chars, open);
+        views::top_level_objects(&chars[open + 1..end - 1])
+            .iter()
+            .map(|object| {
+                let ident = views::field_text(object, "name")
+                    .expect("every query source declares a `name`");
+                let shape = views::field_text(object, "shape")
+                    .expect("every query source declares a `shape`");
+                let needle = format!("var {ident} =");
+                let decl = script
+                    .find(&needle)
+                    .unwrap_or_else(|| panic!("dashboard JS declares `{needle}`"));
+                let key = views::unquote(
+                    script[decl + needle.len()..]
+                        .split(';')
+                        .next()
+                        .expect("declaration is terminated"),
+                );
+                QuerySourceDef {
+                    ident,
+                    key,
+                    shape: compact(&shape),
+                }
+            })
+            .collect()
+    }
+
+    /// The registry entry whose name is written as `ident`.
+    fn query_source_def(ident: &str) -> QuerySourceDef {
+        query_source_defs()
+            .into_iter()
+            .find(|def| def.ident == ident)
+            .unwrap_or_else(|| panic!("QUERY_SOURCE_DEFS registers `{ident}`"))
+    }
+
+    /// Drift guard on the per-shape QUERY source split and its one registry.
     ///
-    /// Now reads `/status/query` bucketed, Traffic reads it series-less and
-    /// the per-seat read groups it by seat; the payloads are not
-    /// interchangeable, since Now's sparklines cannot be drawn from a payload
-    /// whose `series` is null. They therefore get their OWN source records, and
-    /// this pins both halves of the split: the records EXIST (each declared, distinct, and validated against the
-    /// server's `query` wire version through SOURCE_PANEL -- an unmapped source
-    /// would compare against `undefined` and degrade a live source to the
-    /// client's incompatible fallback), and the transport is WIRED to them (each
-    /// view routed to its own record through its registered query source, each
-    /// record asking for its own shape, and the outcome written to the record
-    /// the round was issued for rather than to a hardcoded one). Two records
-    /// with one of them unreachable is the same bug at one remove.
+    /// Now reads `/status/query` bucketed, Traffic reads it series-less, the
+    /// per-seat read groups it by seat and the per-model read asks for the
+    /// last seven days by model; the payloads are not interchangeable, since
+    /// Now's sparklines cannot be drawn from a payload whose `series` is null.
+    /// They therefore get their OWN source records, all registered in
+    /// `QUERY_SOURCE_DEFS`, and this pins both halves of the split: the
+    /// records EXIST (each declared, distinct, and every membership list --
+    /// QUERY_SOURCES, SOURCE_PANEL, FETCH_SOURCES, shapeFor -- derived from the
+    /// registry rather than written by hand), and the transport is WIRED to
+    /// them (each view routed to its own record through its registered query
+    /// source, each record asking for its own shape, and the outcome written
+    /// to the record the round was issued for rather than to a hardcoded
+    /// one).
     ///
     /// Mutation check: point Now's QUERY source in VIEWS at `QUERY_SOURCE`
     /// -> red.
     #[test]
     fn dashboard_query_shapes_have_their_own_source_records() {
         let script = script();
+        let code = compact(&strip_js_comments(&script));
         let sources = string_array("GET_SOURCES");
-        let panel_map = literal_body("SOURCE_PANEL", '{', '}');
+        let defs = query_source_defs();
 
-        // The two source keys, read from their own declarations so a rename
-        // moves this test with them rather than pinning a spelling twice.
-        let mut keys = Vec::new();
-        for decl in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"] {
-            let needle = format!("var {decl} =");
-            let at = script
-                .find(&needle)
-                .unwrap_or_else(|| panic!("dashboard JS declares `{needle}`"));
-            let value = script[at + needle.len()..]
-                .split(';')
-                .next()
-                .expect("declaration is terminated")
-                .trim()
-                .trim_matches(|c| c == '\'' || c == '"')
-                .to_string();
+        let idents: Vec<&str> = defs.iter().map(|def| def.ident.as_str()).collect();
+        assert_eq!(
+            idents,
+            [
+                "QUERY_SOURCE",
+                "QUERY_SERIES_SOURCE",
+                "QUERY_SEATS_SOURCE",
+                "QUERY_MODELS_SOURCE"
+            ],
+            "QUERY_SOURCE_DEFS registers every QUERY read the views name"
+        );
+        for def in &defs {
             assert!(
-                !sources.contains(&value),
-                "`{decl}` names `{value}`, which is already a GET source; a QUERY read \
-                 sharing a GET panel's record would let each overwrite the other"
+                !sources.contains(&def.key),
+                "`{}` names `{}`, which is already a GET source; a QUERY read sharing a GET \
+                 panel's record would let each overwrite the other",
+                def.ident,
+                def.key
             );
-            keys.push(value);
         }
-        let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
+        let keys: std::collections::BTreeSet<&String> = defs.iter().map(|def| &def.key).collect();
         assert_eq!(
-            distinct.len(),
             keys.len(),
+            defs.len(),
             "the QUERY reads must name DIFFERENT source records, or whichever view polled \
-             last defines what another renders from: {keys:?}"
+             last defines what another renders from"
+        );
+        assert_eq!(
+            defs[0].key, "query",
+            "the series-less QUERY source must BE the query panel's own name"
         );
 
-        // The bucketed read is the query PANEL at another request shape, so its
-        // SOURCE_PANEL entry must name `query` specifically: an entry pointing
-        // anywhere else validates a live query envelope against another panel's
-        // version, which degrades it to the incompatible fallback.
-        for key in &keys[1..] {
-            assert_eq!(
-                object_entry(&panel_map, key).as_deref(),
-                Some("query"),
-                "SOURCE_PANEL must map the QUERY source `{key}` to the `query` panel, or its \
-                 envelope is validated against the wrong wire version"
+        // DERIVED: every membership list comes from the registry, so a read
+        // registered once is a record, an epoch and a query-panel envelope,
+        // and no hand-written list can leave one out.
+        for (what, derivation) in [
+            (
+                "QUERY_SOURCES",
+                "varquery_sources=query_source_defs.map(function(def){returndef.name;});",
+            ),
+            (
+                "SOURCE_PANEL",
+                "query_sources.foreach(function(name){source_panel[name]='query';});",
+            ),
+            (
+                "FETCH_SOURCES",
+                "varfetch_sources=[aggregate_fetch,usage_all_source].concat(query_sources);",
+            ),
+            (
+                "ALL_SOURCES",
+                "varall_sources=get_sources.concat(query_sources,[usage_all_source]);",
+            ),
+        ] {
+            assert!(
+                code.contains(derivation),
+                "{what} must be derived from QUERY_SOURCE_DEFS as `{derivation}`"
             );
         }
-        assert_eq!(
-            string_array("QUERY_SOURCES"),
-            ["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"],
-            "QUERY_SOURCES must list every QUERY read: it is the set the transport, the \
-             epochs and viewQuerySource treat as QUERY-backed"
+        let panel_map = literal_body("SOURCE_PANEL", '{', '}');
+        for def in &defs {
+            assert_eq!(
+                object_entry(&panel_map, &def.key),
+                None,
+                "SOURCE_PANEL lists `{}` by hand; the registry maps every QUERY read",
+                def.key
+            );
+        }
+        let shape_for = compact(&function_body("shapeFor"));
+        assert!(
+            shape_for.contains("query_source_defs[i].name===source")
+                && shape_for.contains(
+                    "returnquery_source_defs[i].shape({window:selectedwindow,groupby:selectedgroupby});"
+                )
+                && shape_for.ends_with("returnnull;"),
+            "shapeFor must resolve a source through its registry entry, and null otherwise"
         );
-        assert_eq!(
-            keys[0], "query",
-            "the series-less QUERY source must BE the query panel's own name (SOURCE_PANEL \
-             resolves an unmapped source to itself); rename it and it needs its own entry"
+        assert!(
+            !code.contains("query_source,query_series_source"),
+            "a hand-written QUERY source membership list is back"
+        );
+
+        // Each record asks for ITS OWN shape: the bucketed record a series at
+        // provider grain, the series-less one none, at the group-by grain, the
+        // per-seat one at seat grain and the per-model one the last seven days
+        // by model, whatever the range says.
+        for (ident, shape) in [
+            (
+                "QUERY_SERIES_SOURCE",
+                "returnfindshape(sel.window,'provider',true);",
+            ),
+            (
+                "QUERY_SOURCE",
+                "returnfindshape(sel.window,sel.groupby,false);",
+            ),
+            (
+                "QUERY_SEATS_SOURCE",
+                "returnfindshape(sel.window,'seat',false);",
+            ),
+            (
+                "QUERY_MODELS_SOURCE",
+                "returnfindshape('last7d','model',false);",
+            ),
+        ] {
+            let def = query_source_def(ident);
+            assert!(
+                def.shape.contains(shape),
+                "`{ident}` must ask for `{shape}`: {}",
+                def.shape
+            );
+        }
+        assert!(
+            compact(&function_body("queryBodyFor")).contains("shapefor(querysourcefor(tab))"),
+            "queryBodyFor must build the body from the view's own query source"
         );
 
         // Each query-backed view's QUERY source (the first QUERY read in its
-        // `sources`) is the read that view actually issues, and the two must
-        // not be the same record. VIEWS names the CONSTANTS, so this reads the
-        // identifiers.
+        // `sources`) is the read that view actually issues.
         assert_eq!(
             view_query_source("now").as_deref(),
             Some("QUERY_SERIES_SOURCE"),
@@ -1198,9 +1316,7 @@ mod tests {
 
         // WIRING. `querySourceFor` is what actually routes a round's response:
         // it must resolve the view's registered query source, and that must be
-        // the first QUERY read the view lists, primary or not -- a separate
-        // per-view arm could drift from VIEWS and leave every record declared
-        // with two views rendering from one shape.
+        // the first QUERY read the view lists, primary or not.
         let routing = compact(&function_body("querySourceFor"));
         assert!(
             routing.contains("viewfor(tab)") && routing.contains("viewquerysource(view)"),
@@ -1217,32 +1333,6 @@ mod tests {
              and null when it lists none"
         );
 
-        // Each record asks for ITS OWN shape: the bucketed record a series at
-        // provider grain, the series-less one none, at the group-by grain.
-        let shape = compact(&function_body("shapeFor"));
-        assert!(
-            shape.contains(
-                "if(source===query_series_source){returnfindshape(selectedwindow,'provider',true);}"
-            ),
-            "shapeFor must ask for a series for the bucketed QUERY source"
-        );
-        assert!(
-            shape.contains(
-                "if(source===query_source){returnfindshape(selectedwindow,selectedgroupby,false);}"
-            ),
-            "shapeFor must ask for no series, at the group-by grain, for the series-less source"
-        );
-        assert!(
-            shape.contains(
-                "if(source===query_seats_source){returnfindshape(selectedwindow,'seat',false);}"
-            ),
-            "shapeFor must ask for no series, at seat grain, for the per-seat source"
-        );
-        assert!(
-            compact(&function_body("queryBodyFor")).contains("shapefor(querysourcefor(tab))"),
-            "queryBodyFor must build the body from the view's own query source"
-        );
-
         // The round must ASK which record it is writing, and hand it on.
         let round = function_body("queryRound");
         assert!(
@@ -1252,20 +1342,92 @@ mod tests {
         );
 
         // And the outcome must land on the record it was PASSED, never on a
-        // constant: a hardcoded record here writes one tab's response into the
-        // other tab's state no matter how correctly the round was routed.
+        // constant.
         let outcome = function_body("applyQueryOutcome");
         assert!(
             outcome.contains("renderPanelGuarded(source,") && outcome.contains("SOURCES[source]"),
             "applyQueryOutcome must render and read through its `source` parameter"
         );
-        for constant in ["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"] {
+        for def in &defs {
             assert!(
-                !outcome.contains(constant),
-                "applyQueryOutcome names `{constant}` directly; it must write only the record it \
-                 was passed, or one tab's outcome lands on the other tab's source"
+                !outcome.contains(&def.ident),
+                "applyQueryOutcome names `{}` directly; it must write only the record it was \
+                 passed, or one view's outcome lands on another view's source",
+                def.ident
             );
         }
+    }
+
+    /// Every request a registered QUERY read can resolve to is a declared
+    /// `QUERY_SHAPES` body: each `findShape` argument the registry writes is
+    /// either a literal or the live selection, and every value the selection
+    /// can take (WINDOWS, GROUP_BYS) has its shape declared, so the parser
+    /// drift test above has validated every body any read can send. The
+    /// per-model read's fixed `last7d`/`model` body is one of them.
+    ///
+    /// Mutation check: change the per-model read to
+    /// `findShape('last7d', 'model', true)` -> red (no such shape).
+    #[test]
+    fn every_registered_query_read_resolves_to_a_declared_shape() {
+        let declared: Vec<serde_json::Map<String, serde_json::Value>> =
+            json_object_literals(&literal_body("QUERY_SHAPES", '[', ']'))
+                .iter()
+                .map(|shape| serde_json::from_str(shape).expect("QUERY_SHAPES entry is JSON"))
+                .collect();
+        let windows = string_array("WINDOWS");
+        let groups = group_by_tokens();
+        let mut checked = 0;
+        for def in query_source_defs() {
+            let call = def
+                .shape
+                .split("findshape(")
+                .nth(1)
+                .and_then(|rest| rest.split(')').next())
+                .unwrap_or_else(|| panic!("`{}` resolves through findShape", def.ident));
+            let args: Vec<&str> = call.split(',').collect();
+            let [window, group, bucketed] = args.as_slice() else {
+                panic!(
+                    "`{}` calls findShape with three arguments: {call}",
+                    def.ident
+                );
+            };
+            let pick = |arg: &str, live: &str, all: &[String]| -> Vec<String> {
+                if arg == live {
+                    all.to_vec()
+                } else {
+                    vec![arg.trim_matches('\'').to_string()]
+                }
+            };
+            let bucketed = *bucketed == "true";
+            for w in pick(window, "sel.window", &windows) {
+                for g in pick(group, "sel.groupby", &groups) {
+                    assert!(
+                        declared.iter().any(|shape| {
+                            shape.get("window").and_then(|v| v.as_str()) == Some(w.as_str())
+                                && shape.get("group_by").and_then(|v| v.as_str())
+                                    == Some(g.as_str())
+                                && shape.contains_key("bucket") == bucketed
+                        }),
+                        "`{}` can ask for {w}/{g} (series: {bucketed}), which QUERY_SHAPES \
+                         does not declare",
+                        def.ident
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        let models = query_source_def("QUERY_MODELS_SOURCE");
+        assert!(
+            models
+                .shape
+                .contains("returnfindshape('last7d','model',false);"),
+            "positive control: the per-model read is fixed at last7d by model: {}",
+            models.shape
+        );
+        assert!(
+            checked > windows.len(),
+            "the registry resolved {checked} bodies"
+        );
     }
 
     /// The deterministic-refusal marker (`queryRejectedKeyBySource`) must be
@@ -1414,15 +1576,16 @@ mod tests {
         panic!("`{name}` body is not closed");
     }
 
-    /// The QUERY source identifiers VIEWS may name.
-    const QUERY_SOURCE_IDENTS: &[&str] =
-        &["QUERY_SOURCE", "QUERY_SERIES_SOURCE", "QUERY_SEATS_SOURCE"];
-
-    /// The first QUERY source in `sources`, as viewQuerySource picks it.
+    /// The first QUERY source in `sources`, as viewQuerySource picks it: an
+    /// identifier QUERY_SOURCE_DEFS registers.
     fn first_query_source(sources: &[String]) -> Option<String> {
+        let idents: Vec<String> = query_source_defs()
+            .into_iter()
+            .map(|def| def.ident)
+            .collect();
         sources
             .iter()
-            .find(|source| QUERY_SOURCE_IDENTS.contains(&source.as_str()))
+            .find(|source| idents.contains(source))
             .cloned()
     }
 
@@ -1960,7 +2123,7 @@ mod tests {
             |body: String| -> String { body.chars().filter(|c| !c.is_whitespace()).collect() };
         let round = compact_code(function_body("queryRound"));
         let diverted = round
-            .find("if(retrySupersededBusy(out)){return;}")
+            .find("if(retrySupersededBusy(out,revision)){return;}")
             .expect("queryRound must return early when retrySupersededBusy takes the answer");
         let rendered = round
             .find("applyQueryOutcome(")
@@ -1984,16 +2147,27 @@ mod tests {
             );
         }
         assert!(
-            retry.contains("queryOwnAbortPending")
+            retry.contains("queryOwnAbortRevision!==revision")
                 && retry.contains(&format!("'{}'", codes::DB_BUSY)),
-            "retrySupersededBusy must be gated on the page's own abort AND the server's \
-             `{}` code; any other failure keeps the error and backoff path",
+            "retrySupersededBusy must be gated on a page abort at the round's own selection \
+             revision AND the server's `{}` code; any other failure keeps the error and \
+             backoff path",
             codes::DB_BUSY
         );
         let status = compact_code(function_body("queryStatus"));
         assert!(
-            status.contains("queryCtrl.abort();queryOwnAbortPending=true;"),
-            "queryStatus must record that it aborted its own in-flight read"
+            status.contains("queryCtrl.abort();queryOwnAbortRevision=querySelectionRevision;"),
+            "queryStatus must record the selection revision it aborted its own read at"
+        );
+        assert!(
+            round.contains("varrevision=querySelectionRevision;")
+                && round.contains("retrySupersededBusy(out,revision)"),
+            "queryRound must hand retrySupersededBusy the revision the round was issued at"
+        );
+        assert!(
+            compact_code(function_body("queryInputChanged"))
+                .starts_with("querySelectionRevision+=1;"),
+            "every selection change must move the selection revision first"
         );
 
         let schedule: Vec<u64> = literal_body("SUPERSEDED_BUSY_RETRY_MS", '[', ']')

@@ -11,6 +11,7 @@
   var inner = window.fetch;
   var rules = [];
   var answered = {};
+  var issued = {};
 
   function abortError() {
     return new DOMException('The operation was aborted.', 'AbortError');
@@ -51,6 +52,7 @@
       method: (init && init.method) || 'GET',
       body: (init && typeof init.body === 'string') ? JSON.parse(init.body) : null
     };
+    issued[entry.path] = (issued[entry.path] || 0) + 1;
     var rule = ruleFor(entry);
     // A deaf rule delivers the answer even after the page aborted the
     // request, as a fetch that ignores its signal would.
@@ -75,6 +77,8 @@
   var SERIES_ANSWERS = 'series query';
 
   function answers(path) { return answered[path] || 0; }
+
+  function requestsIssued(path) { return issued[path] || 0; }
 
   function nextAnswer(path, limitMs) {
     var target = answers(path) + 1;
@@ -605,5 +609,179 @@
         out.recovered = trafficOutageObservation(figures);
         return out;
       });
+  });
+
+  // ---- an outage while a query is held leaves that query to its answer ---
+
+  var NOW_SECTION = '#body-now [data-source="query_series"]';
+
+  function isAllTrafficQuery(entry) {
+    return entry.method === 'QUERY' && !!entry.body && entry.body.window === 'all' &&
+      !entry.body.bucket;
+  }
+
+  function heldTrafficObservation() {
+    var section = query(TRAFFIC_SECTION);
+    return {
+      busy: paneBusy('traffic'),
+      section_stale: !!section && section.classList.contains('section--stale'),
+      figures: textOf(TRAFFIC_FIGURES),
+      status: textOf('#status-traffic'),
+      error_cards: errorCards(document.getElementById('body-traffic')),
+      banner_shown: document.getElementById('banner').hidden === false
+    };
+  }
+
+  function nowSectionObservation() {
+    var section = query(NOW_SECTION);
+    var tile = nowRequestsTile();
+    return {
+      present: !!section,
+      section_stale: !!section && section.classList.contains('section--stale'),
+      figure: tile ? tile.textContent : null,
+      error_cards: errorCards(document.getElementById('body-now'))
+    };
+  }
+
+  // Now answered at the all-time range, then Traffic opened at that range with
+  // its QUERY held. The aggregate fails while it is held, and the held answer
+  // lands before the aggregate recovers. After recovery Now is reopened with
+  // its own next answer held: it reads stale until that answer lands.
+  d.scenario('states-outage-while-query-held', function () {
+    var out = {};
+    var aggregateDown = false;
+    var holdTraffic = false;
+    var holdSeries = false;
+    rules.push(function (entry) {
+      return (aggregateDown && isAggregate(entry)) ? { fail: true } : null;
+    });
+    rules.push(function (entry) {
+      return (holdTraffic && isAllTrafficQuery(entry)) ? { ms: 9000 } : null;
+    });
+    rules.push(function (entry) {
+      return (holdSeries && isSeriesQuery(entry)) ? { ms: 3000 } : null;
+    });
+    return d.waitUntil('the Now requests figure', nowRequestsTile)
+      .then(function () {
+        out.now_answered = nowSectionObservation();
+        holdTraffic = true;
+        out.traffic_queries_at_open = requestsIssued('/status/query');
+        document.getElementById('tab-traffic').click();
+        return d.sleep(100);
+      })
+      .then(function () {
+        out.held = heldTrafficObservation();
+        aggregateDown = true;
+        return d.waitUntil('the aggregate to fail', function () {
+          return document.getElementById('banner').hidden === false;
+        }, 15000);
+      })
+      .then(function () { return d.sleep(300); })
+      .then(function () {
+        out.during = heldTrafficObservation();
+        out.traffic_answers_during = answers('/status/query');
+        return d.waitUntil('the held Traffic answer', function () {
+          return query(TRAFFIC_FIGURES);
+        }, 15000);
+      })
+      .then(function () {
+        out.answered = heldTrafficObservation();
+        out.traffic_queries_answered = requestsIssued('/status/query');
+        aggregateDown = false;
+        return d.waitUntil('the aggregate to recover', function () {
+          return document.getElementById('banner').hidden === true;
+        }, 40000);
+      })
+      .then(function () {
+        holdSeries = true;
+        document.getElementById('tab-now').click();
+        return d.sleep(100);
+      })
+      .then(function () {
+        out.now_reopened = nowSectionObservation();
+        return d.waitUntil('Now to be current again', function () {
+          var seen = nowSectionObservation();
+          return seen.present && !seen.section_stale;
+        }, 15000);
+      })
+      .then(function () {
+        out.now_live = nowSectionObservation();
+        return out;
+      });
+  });
+
+  // ---- a busy ledger after a switch away is not the page's own abort ------
+
+  function busyEnvelope(json) {
+    return { schema_version: json.schema_version, as_of: null, data: null, unavailable: 'db_busy' };
+  }
+
+  function isTrafficQuery(entry) {
+    return entry.method === 'QUERY' && !!entry.body && !entry.body.bucket &&
+      entry.body.group_by !== 'seat';
+  }
+
+  // From a held Traffic QUERY, `leave` moves the selection while the QUERY is
+  // still out; every QUERY answered after it is a busy ledger. Reports how
+  // many QUERYs the page sent in the 2.5 s after the first busy answer, and
+  // what Traffic shows then.
+  function busyAfterScenario(name, leave) {
+    d.scenario(name, function () {
+      var out = {};
+      var holding = false;
+      var busy = false;
+      rules.push(function (entry) {
+        return (holding && isTrafficQuery(entry)) ? { ms: 2000 } : null;
+      });
+      rules.push(function (entry) {
+        return (busy && isTrafficQuery(entry)) ? { rewrite: busyEnvelope } : null;
+      });
+      return d.waitUntil('traffic figures', function () { return query(TRAFFIC_FIGURES); })
+        .then(function () {
+          holding = true;
+          windowButton('week').click();
+          return d.sleep(200);
+        })
+        .then(function () {
+          out.week_held = requestsIssued('/status/query');
+          holding = false;
+          busy = true;
+          return leave();
+        })
+        .then(function () {
+          out.answers_before_busy = answers('/status/query');
+          return d.waitUntil('the first busy answer', function () {
+            return answers('/status/query') > out.answers_before_busy;
+          }, 15000);
+        })
+        .then(function () {
+          out.queries_at_busy = requestsIssued('/status/query');
+          return d.sleep(2500);
+        })
+        .then(function () {
+          out.queries_after = requestsIssued('/status/query') - out.queries_at_busy;
+          out.traffic = heldTrafficObservation();
+          out.card = textOf('#body-traffic [data-source="query"] .unavailable-msg');
+          return out;
+        });
+    });
+  }
+
+  // Away to Config (no QUERY), then back to Traffic: the round sent on return
+  // supersedes nothing.
+  busyAfterScenario('states-busy-after-switch-away', function () {
+    document.getElementById('tab-config').click();
+    return settledView('config').then(function () {
+      return d.sleep(300);
+    }).then(function () {
+      document.getElementById('tab-traffic').click();
+    });
+  });
+
+  // The control: Month supersedes the held Week QUERY, so a busy answer to
+  // Month is the page's own abandoned read still holding the ledger.
+  busyAfterScenario('states-busy-after-superseding', function () {
+    windowButton('month').click();
+    return Promise.resolve();
   });
 })(window.routectlDriver);
