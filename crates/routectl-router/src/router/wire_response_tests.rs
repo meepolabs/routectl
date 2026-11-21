@@ -20,7 +20,7 @@ use super::ResponseCheck;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
-use crate::wire_check_state::{CheckOutcome, WireCheckParams, WireCheckSnapshot};
+use crate::wire_check_state::{CheckOutcome, TransitLane, WireCheckParams, WireCheckSnapshot};
 
 const ALIAS: &str = "a";
 const UPSTREAM_BODY: &str = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
@@ -216,6 +216,84 @@ async fn a_dropped_upstream_key_is_counted_on_the_response_leg_named_by_path() {
     let finding = snapshot.findings.first().expect("one finding");
     assert_eq!(finding.leg, Leg::Response);
     assert_eq!(finding.path.as_str(), "/stop_reason");
+}
+
+/// One learned lane's transit row: lane key, checked, changed, and each
+/// named path with its count.
+type TransitCounts = (String, u64, u64, Vec<(String, u64)>);
+
+/// The response leg counts on the target's learned lane (`p0#upstream`):
+/// `clean` and `loss` with their paths, never `incomplete` or `budget`. The
+/// request leg's own check never reaches the transit tally.
+#[tokio::test]
+async fn the_response_leg_counts_transit_on_the_targets_learned_lane() {
+    type Row = (&'static str, Option<&'static str>, bool, Option<(u64, u64)>);
+    let rows: [Row; 4] = [
+        ("clean", None, false, Some((1, 0))),
+        ("dropped key", Some("stop_reason"), false, Some((1, 1))),
+        ("unparseable client body", None, true, None),
+        ("oversize client body", Some(""), true, None),
+    ];
+    for (name, dropped, unreadable, expected) in rows {
+        let router = router("anthropic-api", CHECK_EVERY);
+        let dispatched = Box::pin(router.complete_with_options(
+            request(IngressDialect::Anthropic, false),
+            RouterOptions::default(),
+        ))
+        .await;
+        let check = dispatched.meta.response_check.expect("carried");
+        let client = match (dropped, unreadable) {
+            (Some(""), true) => vec![b'x'; super::MAX_INLINE_COMPARE_BYTES + 1],
+            (_, true) => b"not json".to_vec(),
+            (dropped, false) => {
+                let mut body = client_body();
+                if let Some(key) = dropped {
+                    body.as_object_mut().expect("object").remove(key);
+                }
+                serde_json::to_vec(&body).expect("json")
+            }
+        };
+
+        check.compare_body(&client, &[]);
+
+        let transit = router.wire_transit_snapshot();
+        let counted: Vec<TransitCounts> = transit
+            .lanes
+            .iter()
+            .map(|row| {
+                let TransitLane::Lane(lane) = &row.lane else {
+                    panic!("{name}: counted under other");
+                };
+                let paths = row
+                    .paths
+                    .iter()
+                    .map(|(p, c)| (p.as_str().to_string(), *c))
+                    .collect();
+                (
+                    lane.as_lane_key().to_string(),
+                    row.checked,
+                    row.changed,
+                    paths,
+                )
+            })
+            .collect();
+        let want: Vec<TransitCounts> = expected
+            .map(|(checked, changed)| {
+                let paths = dropped
+                    .filter(|key| !key.is_empty())
+                    .map(|key| (format!("/{key}"), 1))
+                    .into_iter()
+                    .collect();
+                ("p0#upstream".to_string(), checked, changed, paths)
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(counted, want, "{name}");
+        assert!(
+            !router.wire_check_snapshot().checks.is_empty(),
+            "{name}: control: the dialect-lane counters still count"
+        );
+    }
 }
 
 #[tokio::test]

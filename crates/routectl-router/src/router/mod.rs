@@ -3125,6 +3125,13 @@ impl Router {
         self.wire_check.snapshot(&self.wire_check_params)
     }
 
+    /// The per learned-lane response-leg transit counts and the wire-check
+    /// state's start stamp, which a reload carries, so it is the daemon
+    /// start. Reads only: no counter moves and the sampler is not advanced.
+    pub fn wire_transit_snapshot(&self) -> crate::wire_check_state::WireTransitSnapshot {
+        self.wire_check.transit_snapshot()
+    }
+
     /// The live wire-check state itself, so a test outside this crate can
     /// seed counters and findings through the state's own recording API.
     #[cfg(any(test, feature = "test-utils"))]

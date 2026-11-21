@@ -20,6 +20,13 @@
 //! - the newest [`FINDINGS_RING_CAPACITY`] findings of each kind (loss and
 //!   rejection), each naming a lane, leg, sanitized path and closed labels --
 //!   never a body value.
+//! - the per learned-lane transit tally of the response leg: comparisons
+//!   that finished (`checked`), those with at least one finding (`changed`),
+//!   and the finding count per sanitized path. Learned lanes are operator
+//!   configuration that a reload can rename, so the lanes are bounded by
+//!   [`TRANSIT_LANE_CAP`] and each lane's paths by [`TRANSIT_PATH_CAP`], with
+//!   one overflow bucket each; `started_ms` stamps when the state was built,
+//!   which is the daemon start because the state is carried across reloads.
 //!
 //! A loss WARNs once per (lane, path, class) and an unrepaired rejection once
 //! per (lane, path), each kind through its own [`CappedWarnSet`]; the
@@ -29,10 +36,12 @@
 //! WARN. Locks are held only for the map or ring update and never
 //! across a `tracing` call or an await.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::state_key::StateKey;
 
 use routectl_core::warn_dedup::{CappedWarnSet, WarnDecision};
 use routectl_core::wire_check::{Lane, Leg, PathClass, RejectionProvenance, WirePath};
@@ -44,6 +53,15 @@ pub const MAX_TRACKED_VERSIONS_PER_LANE: usize = 8;
 /// Most findings of each kind retained; the oldest of that kind is dropped
 /// first.
 pub const FINDINGS_RING_CAPACITY: usize = 128;
+
+/// Most learned lanes the transit tally names individually. A lane first seen
+/// once this many are named counts under [`TransitLane::Other`]. A code
+/// constant, never a config knob.
+pub const TRANSIT_LANE_CAP: usize = 256;
+
+/// Most paths one lane's transit tally names individually. A path first seen
+/// on a lane once this many are named counts in that lane's `other_paths`.
+pub const TRANSIT_PATH_CAP: usize = 16;
 
 /// Distinct WARN keys each kind's dedup set remembers before it stops
 /// recording. Paths are client-influenced, so the set needs a bound;
@@ -256,12 +274,50 @@ pub struct WireCheckSnapshot {
     pub findings: Vec<WireFinding>,
 }
 
+/// Which learned-lane bucket a transit row counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransitLane {
+    /// One learned lane named individually.
+    Lane(StateKey),
+    /// Every lane first seen once [`TRANSIT_LANE_CAP`] lanes were named.
+    Other,
+}
+
+/// The response-leg transit counts of one learned-lane bucket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LaneTransitRow {
+    /// The bucket counted.
+    pub lane: TransitLane,
+    /// Response comparisons that finished, clean or with findings.
+    pub checked: u64,
+    /// The subset of `checked` with at least one finding.
+    pub changed: u64,
+    /// Findings per named path, most findings first, then by path.
+    pub paths: Vec<(WirePath, u64)>,
+    /// Findings on paths first seen once [`TRANSIT_PATH_CAP`] were named.
+    pub other_paths: u64,
+}
+
+/// A point-in-time copy of the transit tally: named lanes in lane-key
+/// order, then the overflow bucket when it has counted anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WireTransitSnapshot {
+    /// Unix milliseconds when the state was built.
+    pub started_ms: u64,
+    /// One row per counted bucket.
+    pub lanes: Vec<LaneTransitRow>,
+}
+
 /// Sampler, counters, findings ring and WARN dedup for the live wire check.
 /// Share one instance by `Arc`; every method takes `&self`.
 #[derive(Debug)]
 pub struct WireCheckState {
     sampler: [Mutex<LaneSampler>; Lane::COUNT],
     registry: Mutex<Registry>,
+    transit: Mutex<TransitTally>,
+    started_ms: u64,
     loss_warned: CappedWarnSet<(Lane, WirePath, PathClass)>,
     rejection_warned: CappedWarnSet<(Lane, WirePath)>,
 }
@@ -271,8 +327,75 @@ impl Default for WireCheckState {
         Self {
             sampler: std::array::from_fn(|_| Mutex::default()),
             registry: Mutex::default(),
+            transit: Mutex::default(),
+            started_ms: unix_now_ms(),
             loss_warned: CappedWarnSet::new(WARN_DEDUP_CAP),
             rejection_warned: CappedWarnSet::new(WARN_DEDUP_CAP),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct TransitTally {
+    by_lane: HashMap<StateKey, LaneTransit>,
+    other: LaneTransit,
+}
+
+#[derive(Debug, Default)]
+struct LaneTransit {
+    checked: u64,
+    changed: u64,
+    paths: BTreeMap<WirePath, u64>,
+    other_paths: u64,
+}
+
+impl TransitTally {
+    /// The bucket `lane` counts in, naming it while there is room.
+    fn bucket(&mut self, lane: &StateKey) -> &mut LaneTransit {
+        if !self.by_lane.contains_key(lane) && self.by_lane.len() >= TRANSIT_LANE_CAP {
+            return &mut self.other;
+        }
+        self.by_lane.entry(lane.clone()).or_default()
+    }
+
+    fn rows(&self) -> Vec<LaneTransitRow> {
+        let mut named: Vec<(&StateKey, &LaneTransit)> = self.by_lane.iter().collect();
+        named.sort_by(|(a, _), (b, _)| a.as_lane_key().cmp(b.as_lane_key()));
+        let mut rows: Vec<LaneTransitRow> = named
+            .into_iter()
+            .map(|(lane, counts)| counts.row(TransitLane::Lane(lane.clone())))
+            .collect();
+        if self.other.checked > 0 {
+            rows.push(self.other.row(TransitLane::Other));
+        }
+        rows
+    }
+}
+
+impl LaneTransit {
+    fn count_path(&mut self, path: &WirePath) {
+        if let Some(count) = self.paths.get_mut(path) {
+            *count = count.saturating_add(1);
+        } else if self.paths.len() < TRANSIT_PATH_CAP {
+            self.paths.insert(path.clone(), 1);
+        } else {
+            self.other_paths = self.other_paths.saturating_add(1);
+        }
+    }
+
+    fn row(&self, lane: TransitLane) -> LaneTransitRow {
+        let mut paths: Vec<(WirePath, u64)> = self
+            .paths
+            .iter()
+            .map(|(path, &count)| (path.clone(), count))
+            .collect();
+        paths.sort_by(|(pa, ca), (pb, cb)| cb.cmp(ca).then_with(|| pa.cmp(pb)));
+        LaneTransitRow {
+            lane,
+            checked: self.checked,
+            changed: self.changed,
+            paths,
+            other_paths: self.other_paths,
         }
     }
 }
@@ -361,6 +484,12 @@ fn unix_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// One admit decision against a running count of prior sightings: the
@@ -525,6 +654,50 @@ impl WireCheckState {
                 path_class = class.label(),
                 "wire check found an unexplained difference"
             );
+        }
+    }
+
+    test_utils_pub! {
+        /// Count one response-leg comparison that ended as `outcome` on the
+        /// learned lane `learned_lane`, with `paths` its findings. `clean`
+        /// bumps `checked`; `loss` bumps `checked`, `changed` and each
+        /// finding's path, once per finding; `budget` and `incomplete` count
+        /// nothing, since neither finished a comparison. A target with no
+        /// learned lane counts nowhere.
+        fn record_transit<'p, I>(
+            &self,
+            learned_lane: Option<&StateKey>,
+            outcome: CheckOutcome,
+            paths: I,
+        ) where
+            I: IntoIterator<Item = &'p WirePath>,
+        {
+            let Some(learned_lane) = learned_lane else {
+                return;
+            };
+            let changed = match outcome {
+                CheckOutcome::Clean => false,
+                CheckOutcome::Loss => true,
+                CheckOutcome::Budget | CheckOutcome::Incomplete => return,
+            };
+            let mut tally = lock(&self.transit);
+            let bucket = tally.bucket(learned_lane);
+            bucket.checked = bucket.checked.saturating_add(1);
+            if changed {
+                bucket.changed = bucket.changed.saturating_add(1);
+                for path in paths {
+                    bucket.count_path(path);
+                }
+            }
+        }
+    }
+
+    /// Copy the transit tally and the state's start stamp. Reads only.
+    pub fn transit_snapshot(&self) -> WireTransitSnapshot {
+        let lanes = lock(&self.transit).rows();
+        WireTransitSnapshot {
+            started_ms: self.started_ms,
+            lanes,
         }
     }
 
@@ -703,3 +876,7 @@ impl WireCheckSnapshot {
 #[cfg(test)]
 #[path = "wire_check_state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "wire_check_transit_tests.rs"]
+mod transit_tests;

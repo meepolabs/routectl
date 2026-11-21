@@ -2020,7 +2020,20 @@ fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
     before
         .wire_check
         .record_local_refusal(lane, routectl_core::RefusalReason::CloakRelocation);
+    let learned = crate::state_key::StateKey::fixture("p0");
+    before.wire_check.record_transit(
+        Some(&learned),
+        crate::wire_check_state::CheckOutcome::Loss,
+        [&lost],
+    );
+    let started_ms = before.wire_transit_snapshot().started_ms;
+    std::thread::sleep(std::time::Duration::from_millis(2));
     let mut after = Router::new(config.clone());
+    assert_ne!(
+        after.wire_transit_snapshot().started_ms,
+        started_ms,
+        "control: a fresh router stamps its own start"
+    );
 
     after.carry_over_metrics_from(&before);
 
@@ -2030,6 +2043,23 @@ fn wire_check_counters_and_sampler_survive_carry_over_metrics_from() {
     assert_eq!(snapshot.checks.len(), 1);
     assert_eq!(snapshot.local_refusals.len(), 1);
     assert_eq!(snapshot.findings.len(), 1);
+    let transit = after.wire_transit_snapshot();
+    assert_eq!(
+        transit.started_ms, started_ms,
+        "the start survives the reload"
+    );
+    assert_eq!(transit.lanes.len(), 1);
+    assert_eq!((transit.lanes[0].checked, transit.lanes[0].changed), (1, 1));
+    assert_eq!(
+        after.wire_transit_snapshot(),
+        transit,
+        "a read moves no count"
+    );
+    assert_eq!(
+        after.wire_check_snapshot(),
+        snapshot,
+        "a read moves no counter"
+    );
     assert!(
         after.wire_check.admit(lane, None, &params),
         "the second success continues the carried first-N window"

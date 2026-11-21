@@ -27,6 +27,7 @@ use routectl_core::wire_check::{
 use routectl_core::{ChatRequest, RequestObservation};
 use serde_json::Value;
 
+use crate::state_key::StateKey;
 use crate::wire_check_state::WireCheckState;
 
 use super::wire_check::{attempt_lane, count_wire_losses};
@@ -42,12 +43,13 @@ const LOG_TARGET: &str = "routectl_router::wire_check";
 const MAX_INLINE_COMPARE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The response-direction check of the attempt that answered the client.
-/// Opaque: it holds the attempt's tap, its lane, the router's wire-check
-/// state and the request's observation slot, and exposes only the
-/// comparison.
+/// Opaque: it holds the attempt's tap, its lane and its target's learned
+/// lane, the router's wire-check state and the request's observation slot,
+/// and exposes only the comparison.
 #[derive(Clone)]
 pub struct ResponseCheck {
     lane: Lane,
+    learned_lane: Option<StateKey>,
     tap: WireTap,
     state: Arc<WireCheckState>,
     provider_id: Option<Arc<str>>,
@@ -231,11 +233,16 @@ impl ResponseCheck {
             .cloned()
             .collect();
         let outcome = diff(&upstream, &client, LaneClass::Fidelity, &edits);
-        self.state.record_compared(
+        let checked = self.state.record_compared(
             self.lane,
             Leg::Response,
             outcome.findings.iter().map(|f| (&f.path, f.class)),
             outcome.truncated,
+        );
+        self.state.record_transit(
+            self.learned_lane.as_ref(),
+            checked,
+            outcome.findings.iter().map(|f| &f.path),
         );
         count_wire_losses(self.observation.as_ref(), &outcome);
     }
@@ -298,6 +305,7 @@ impl Router {
             .zip(attempt_lane(target, attempt_req))
             .map(|(tap, lane)| ResponseCheck {
                 lane,
+                learned_lane: target.learned_lane.clone(),
                 tap: tap.clone(),
                 state: Arc::clone(&self.wire_check),
                 provider_id: target.provider.as_ref().map(|p| Arc::from(p.id())),
