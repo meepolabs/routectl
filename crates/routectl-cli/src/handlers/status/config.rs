@@ -20,11 +20,12 @@ use axum::extract::State;
 use serde::Serialize;
 
 use routectl_router::class_policy::ConfigFailureClass;
+use routectl_router::config::SeatSelection;
 use routectl_router::prices::{PriceSource, shipped_table};
 use routectl_router::{
     ActivationEntry, ActivationState, ActivationStatus, AliasChain, ClassPolicyCell,
-    ClassPolicySource, EffectiveView, ModelCell, OverrideRow, OverrideVerdict, PriceTableDates,
-    ProviderCell, class_debits,
+    ClassPolicySource, EffectiveView, ModelCell, OverrideRow, OverrideVerdict, PoolCell,
+    PoolMemberCell, PriceTableDates, ProviderCell, class_debits,
 };
 
 use super::daemon_meta::DaemonMetaSnapshot;
@@ -36,7 +37,8 @@ use super::{Panel, StatusState, guard_panel, utc_rfc3339};
 /// At 4 each model dropped `economics` and gained `context_window`, `fill`
 /// and `prices`. At 5 each model dropped `source` and `verified_at`. At 6
 /// `prices` gained one `cache_write_per_mtok.<duration>` row per priced
-/// cache-write lifetime other than 5m and 1h.
+/// cache-write lifetime other than 5m and 1h. `pools` was added within 6: an
+/// added field does not bump; a removed field or a changed meaning does.
 pub const SCHEMA_VERSION: u32 = 6;
 
 /// The provenance-annotated effective view plus the activation inventory. Every
@@ -54,6 +56,8 @@ pub(super) struct ConfigPanel {
     aliases: Vec<AliasChainWire>,
     /// One entry per `[providers.X]` entry: the routing-shape facts only.
     providers: Vec<ProviderWire>,
+    /// One entry per `[pools.X]` block, in pool-key order.
+    pools: Vec<PoolWire>,
     /// Provenance of the config in effect plus the daemon serving it.
     source: SourceWire,
     /// Auto-activation inventory: one entry per routectl-owned OAuth provider.
@@ -114,6 +118,32 @@ struct ProviderWire {
     rpm_limit: Option<u32>,
 }
 
+/// One `[pools.X]` block: its strategy and every configured member, whether
+/// or not the member's provider built.
+#[derive(Debug, Clone, Serialize)]
+struct PoolWire {
+    /// The `[pools]` table key.
+    pool: String,
+    /// The block's `seat_selection`, in its config spelling.
+    seat_selection: SeatSelection,
+    /// One entry per member, in the order the block lists them.
+    members: Vec<PoolMemberWire>,
+}
+
+/// One pool member, named by its provider entry plus the account and login
+/// label every other seat-naming payload carries, as separate fields.
+#[derive(Debug, Clone, Serialize)]
+struct PoolMemberWire {
+    /// The member's `[providers]` table key.
+    entry: String,
+    /// The credential account key; `null` for an entry that names none.
+    account: Option<String>,
+    /// The `<label>` of an `oauth://<provider>#<label>` login; `null` for
+    /// an unlabeled login, any other credential, and an account no model
+    /// dispatches on.
+    login_label: Option<String>,
+}
+
 /// Where the effective config came from and which daemon is serving it.
 ///
 /// `config_path` is the ONE deliberate filesystem path on this wire: the
@@ -149,7 +179,7 @@ struct ModelCellWire {
     context_window: Option<u32>,
     /// The output fill and its source; `null` when none applies.
     fill: Option<FillWire>,
-    /// One entry per price field, in a fixed order.
+    /// One entry per price field, cache writes in duration order.
     prices: Vec<PriceWire>,
 }
 
@@ -166,8 +196,9 @@ struct FillWire {
 #[derive(Debug, Clone, Serialize)]
 struct PriceWire {
     /// The `[models.X.pricing]` key: `input_per_mtok`, `output_per_mtok`,
-    /// `cache_read_per_mtok`, `cache_write_5m_per_mtok`,
-    /// `cache_write_1h_per_mtok`, then `cache_write_per_mtok.<duration>`
+    /// `cache_read_per_mtok`, then one cache-write row per lifetime in
+    /// duration order: `cache_write_5m_per_mtok` and
+    /// `cache_write_1h_per_mtok` always, and `cache_write_per_mtok.<duration>`
     /// (`cache_write_per_mtok.30m`) for each other priced lifetime.
     field: Cow<'static, str>,
     /// USD per million tokens; `null` when unknown.
@@ -325,6 +356,22 @@ fn map_provider(cell: ProviderCell) -> ProviderWire {
     }
 }
 
+fn map_pool(cell: PoolCell) -> PoolWire {
+    PoolWire {
+        pool: cell.pool,
+        seat_selection: cell.seat_selection,
+        members: cell.members.into_iter().map(map_pool_member).collect(),
+    }
+}
+
+fn map_pool_member(cell: PoolMemberCell) -> PoolMemberWire {
+    PoolMemberWire {
+        entry: cell.entry,
+        account: cell.account,
+        login_label: cell.login_label,
+    }
+}
+
 fn map_capability(row: OverrideRow) -> CapabilityCellWire {
     CapabilityCellWire {
         target_spec: row.target_spec,
@@ -397,6 +444,7 @@ fn build_panel(
             .collect(),
         aliases: effective.aliases.into_iter().map(map_alias).collect(),
         providers: effective.providers.into_iter().map(map_provider).collect(),
+        pools: effective.pools.into_iter().map(map_pool).collect(),
         source,
         activation: activation.iter().map(map_activation).collect(),
     }
@@ -459,6 +507,9 @@ pub(super) async fn handler(State(state): State<Arc<StatusState>>) -> Json<Panel
 
 #[cfg(test)]
 pub(super) mod fixture;
+#[cfg(test)]
+#[path = "config_pools_tests.rs"]
+mod pools_tests;
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;

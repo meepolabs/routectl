@@ -311,6 +311,7 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.providers[].endpoint_origin",
                 "data.providers[].cloud",
                 "data.providers[].rpm_limit",
+                "data.pools[].members[].login_label",
                 "data.activation[].reason",
             ],
         ),

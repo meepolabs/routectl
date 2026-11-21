@@ -13,9 +13,9 @@ use serde::Serialize;
 /// code; an unavailable panel carries only the code and never `data`/`as_of`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Panel<T> {
-    /// Wire-shape version for this panel's `data` DTO. Bumped by the owning
-    /// panel on any payload change, an added field included; `/status/query`
-    /// instead keeps it across additive changes (see its `SCHEMA_VERSION`).
+    /// Wire-shape version for this panel's `data` DTO, one rule for every
+    /// panel: an added field or token does not bump it; a removed field or a
+    /// changed meaning does. Readers tolerate fields they do not know.
     pub schema_version: u32,
     /// RFC3339-UTC instant the underlying data was read. `None` on an
     /// unavailable panel.

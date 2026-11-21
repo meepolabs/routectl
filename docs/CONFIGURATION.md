@@ -3464,12 +3464,15 @@ Five sections are printed:
   under **model facts**).
 - **model facts** -- a header naming the refreshed and shipped table
   dates (`none` when that table is absent), then one row per
-  `[models.X]` entry with `context_window`, `fill` and the five price
-  fields (`input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`,
-  `cache_write_5m_per_mtok`, `cache_write_1h_per_mtok`), then one
-  `cache_write_per_mtok.<duration>` field (`cache_write_per_mtok.30m`)
-  per other cache-write lifetime a source prices, shortest first, as
-  `key=value(source)`. The `/status/config` panel (schema 6) carries the
+  `[models.X]` entry with `context_window`, `fill` and its price fields
+  as `key=value(source)`: `input_per_mtok`, `output_per_mtok` and
+  `cache_read_per_mtok`, then one cache-write field per lifetime, shortest
+  first. `cache_write_5m_per_mtok` and `cache_write_1h_per_mtok` are always
+  shown; any other lifetime a source prices shows as
+  `cache_write_per_mtok.<duration>` in its place by duration, so a model
+  priced at 5m, 30m and 1h reads `cache_write_5m_per_mtok`,
+  `cache_write_per_mtok.30m`, `cache_write_1h_per_mtok`. The
+  `/status/config` panel (schema 6) carries the
   same fields, in the same order, as each model's `prices` rows (`field`,
   `per_mtok`, `source`, `table_date`):
   - `context_window` comes only from `[models.X] context_window`
@@ -3518,6 +3521,20 @@ Five sections are printed:
   lowercase (`beta:Foo-Bar` shows as `beta:foo-bar`, the form overrides
   match on), a Bedrock request-bag key prints as its capability leaf,
   and rows are sorted by target, then by that normalized key.
+
+The `/status/config` panel also lists each `[pools.<name>]` block under
+`pools`, in pool-key order: `pool` (the block's key), `seat_selection`
+(`fill-first` or `sticky-least-loaded`, as written in config) and
+`members`, one per configured member in the order the block lists them,
+each with `entry` (the `[providers]` key), `account` (the credential
+account key, `null` for an entry that names none) and `login_label` (the
+`<label>` of an `oauth://<provider>#<label>` login; `null` for an
+unlabeled login, any other credential, or an account no model
+dispatches on), the
+same identity fields `/status/accounts` carries. The list comes from the
+config, so a member whose provider failed to build is still listed. Like
+every `/status` panel, an added field does not bump `schema_version`; a
+removed field or a changed meaning does.
 
 ```sh
 routectl config show --effective
