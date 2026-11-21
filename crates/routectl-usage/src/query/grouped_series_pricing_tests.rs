@@ -160,6 +160,7 @@ fn three_day_spec(group_by: GroupDim, bucket: Option<BucketSpec>) -> QuerySpec {
         group_by,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket,
         entry_accounts: Default::default(),
     }

@@ -35,6 +35,7 @@ fn priced_groups(db: &mut routectl_usage::UsageDb) -> usize {
         group_by: routectl_usage::GroupDim::Model,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket: None,
         entry_accounts: Default::default(),
     };

@@ -614,14 +614,16 @@ fn absent_filters_match_everything_and_present_ones_bind() {
     let unfiltered = parse_spec(br#"{"window":"all","group_by":"model"}"#, now).unwrap();
     assert!(unfiltered.alias_filter.is_none());
     assert!(unfiltered.provider_filter.is_none());
+    assert!(unfiltered.model_filter.is_none());
 
     let filtered = parse_spec(
-        br#"{"window":"all","group_by":"model","alias":"fast","provider":"anthropic"}"#,
+        br#"{"window":"all","group_by":"model","alias":"fast","provider":"anthropic","model":"m1"}"#,
         now,
     )
     .unwrap();
     assert_eq!(filtered.alias_filter.as_deref(), Some("fast"));
     assert_eq!(filtered.provider_filter.as_deref(), Some("anthropic"));
+    assert_eq!(filtered.model_filter.as_deref(), Some("m1"));
 }
 
 #[tokio::test]
@@ -655,4 +657,5 @@ async fn an_expired_deadline_sheds_query_timeout_end_to_end() {
 include!("query_wire_tests.rs");
 include!("query_series_tests.rs");
 include!("query_price_pickup_tests.rs");
+include!("query_model_filter_tests.rs");
 include!("query_gate_tests.rs");

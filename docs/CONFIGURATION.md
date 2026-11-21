@@ -4902,8 +4902,11 @@ on a trailing window starts its buckets at the window's start); `group_by` is on
 `model`, `alias`, `provider`, `seat` (`seat` groups by the credential
 account each request was served under, by the same rule as `routectl usage
 --by seat`: the recorded seat, else `#<entry>` for an entry with its own API
-key or cloud credential, else `(unattributed)`); optional `alias` and `provider` keys narrow
-the result to one routing alias or served provider.
+key or cloud credential, else `(unattributed)`); optional `alias`, `provider` and `model` keys narrow
+the result to one routing alias, served provider or model. `model` matches the
+model label the `model` grouping shows: the served model, or the requested model
+for a request that was never dispatched. A blank filter value, or any other key,
+is refused with the 400.
 
 Each group carries its `label` and `metrics`. A `seat` group also carries
 three identity fields, resolved from the served config the same way
@@ -4956,7 +4959,7 @@ dashboard's cache-write figures read `cache_write_tokens`.
 
 Every metric set also carries `errors_by_class`, an object mapping each
 failure class to its count of error requests. Its counts sum exactly to
-that set's `errors`, under the same `alias` / `provider` narrowing and in
+that set's `errors`, under the same `alias` / `provider` / `model` narrowing and in
 each series bucket. An error request with no recorded class counts under
 `unclassified`, and a class token this build does not know keeps its own
 key. A set with no errors carries `{}`. The class is a measure, never a

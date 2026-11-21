@@ -78,7 +78,7 @@ pub struct SeriesBucket {
 
 /// What to read, how to group it, and how to narrow it.
 ///
-/// The window is half-open: `[from_ms, to_ms)`. Both filters are matched as
+/// The window is half-open: `[from_ms, to_ms)`. Every filter is matched as
 /// BIND VALUES against a fixed statement -- no identifier or predicate is ever
 /// interpolated into SQL.
 #[derive(Debug, Clone)]
@@ -93,6 +93,9 @@ pub struct QuerySpec {
     pub alias_filter: Option<String>,
     /// Restrict to one served provider. `None` matches every provider.
     pub provider_filter: Option<String>,
+    /// Restrict to one fine model label: the served model, or the requested
+    /// model on a row never dispatched. `None` matches every model.
+    pub model_filter: Option<String>,
     /// Also fold the same rows into a time series over this bucket grid. `None`
     /// asks for no series at all, and reads the ledger exactly as it would
     /// without this field.

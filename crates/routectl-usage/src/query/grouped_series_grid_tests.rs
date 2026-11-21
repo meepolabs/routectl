@@ -236,6 +236,7 @@ fn the_series_statement_searches_the_covering_aggregate_index() {
                 None::<&str>,
                 None::<&str>,
                 i64::MAX,
+                None::<&str>,
                 1000_i64,
                 0_i64
             ],

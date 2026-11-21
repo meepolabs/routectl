@@ -77,6 +77,7 @@ fn grouped_spec(bucket: Option<BucketSpec>) -> QuerySpec {
         group_by: GroupDim::Model,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket,
         entry_accounts: Default::default(),
     }

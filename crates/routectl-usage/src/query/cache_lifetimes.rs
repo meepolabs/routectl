@@ -89,8 +89,8 @@ macro_rules! cache_lifetimes_sql {
 pub(super) const CACHE_LIFETIMES_SQL: &str = cache_lifetimes_sql!("0");
 
 /// [`CACHE_LIFETIMES_SQL`] split further by the same bucket index the series
-/// aggregate groups on (`?6` is the bucket width, `?7` its anchor).
-pub(super) const CACHE_LIFETIMES_BUCKETED_SQL: &str = cache_lifetimes_sql!("(ts_start - ?7) / ?6");
+/// aggregate groups on (`?7` is the bucket width, `?8` its anchor).
+pub(super) const CACHE_LIFETIMES_BUCKETED_SQL: &str = cache_lifetimes_sql!("(ts_start - ?8) / ?7");
 
 /// Per-lifetime cache writes of the rows carrying a write total, keyed by fine
 /// group and bucket index. The unbucketed read puts every row in bucket 0.
@@ -110,13 +110,7 @@ pub(super) fn read_lifetimes(
     match bucket_width_ms {
         None => {
             let mut stmt = tx.prepare(CACHE_LIFETIMES_SQL)?;
-            let mut rows = stmt.query(rusqlite::params![
-                window.from_ms,
-                window.to_ms,
-                window.alias_filter,
-                window.provider_filter,
-                window.watermark,
-            ])?;
+            let mut rows = stmt.query(window.params())?;
             while let Some(row) = rows.next()? {
                 limit.check()?;
                 fold_row(row, &mut out)?;
@@ -124,15 +118,7 @@ pub(super) fn read_lifetimes(
         }
         Some(width_ms) => {
             let mut stmt = tx.prepare(CACHE_LIFETIMES_BUCKETED_SQL)?;
-            let mut rows = stmt.query(rusqlite::params![
-                window.from_ms,
-                window.to_ms,
-                window.alias_filter,
-                window.provider_filter,
-                window.watermark,
-                width_ms,
-                window.anchor_ms,
-            ])?;
+            let mut rows = stmt.query(window.bucketed_params(&width_ms))?;
             while let Some(row) = rows.next()? {
                 limit.check()?;
                 fold_row(row, &mut out)?;
@@ -353,6 +339,7 @@ pub fn aggregate_with_cache_lifetimes(
         to_ms,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         watermark: i64::MAX,
         anchor_ms: from_ms,
     };

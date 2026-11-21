@@ -545,6 +545,7 @@ fn a_non_finite_equivalent_total_degrades_to_absent() {
         group_by: GroupDim::Model,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket: None,
         entry_accounts: Default::default(),
     };

@@ -22,6 +22,7 @@ fn priced_query(
         group_by: dim,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket,
         entry_accounts: Default::default(),
     };

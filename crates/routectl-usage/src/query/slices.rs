@@ -290,6 +290,7 @@ impl SliceJob<'_> {
             to_ms,
             alias_filter: self.spec.alias_filter.as_deref(),
             provider_filter: self.spec.provider_filter.as_deref(),
+            model_filter: self.spec.model_filter.as_deref(),
             watermark: self.watermark,
             anchor_ms: self.spec.from_ms,
         };

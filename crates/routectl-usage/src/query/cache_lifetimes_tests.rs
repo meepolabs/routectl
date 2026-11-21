@@ -95,6 +95,7 @@ fn spec(bucket: Option<BucketSpec>) -> QuerySpec {
         group_by: GroupDim::Provider,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket,
         entry_accounts: Default::default(),
     }
@@ -703,7 +704,7 @@ fn lifetime_statements_read_through_the_write_total_index() {
         (
             "unbucketed",
             CACHE_LIFETIMES_SQL,
-            vec![&0_i64, &10_000_i64, &none, &none, &i64::MAX],
+            vec![&0_i64, &10_000_i64, &none, &none, &i64::MAX, &none],
         ),
         (
             "bucketed",
@@ -714,6 +715,7 @@ fn lifetime_statements_read_through_the_write_total_index() {
                 &none,
                 &none,
                 &i64::MAX,
+                &none,
                 &1_000_i64,
                 &0_i64,
             ],

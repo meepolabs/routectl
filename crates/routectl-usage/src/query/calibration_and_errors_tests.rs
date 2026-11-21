@@ -350,8 +350,9 @@ fn errors_by_class_searches_the_error_rows_index() {
             Box::new(None::<String>),
             Box::new(None::<String>),
             Box::new(i64::MAX),
+            Box::new(None::<String>),
         ];
-        if stmt.parameter_count() == 7 {
+        if stmt.parameter_count() == 8 {
             binds.push(Box::new(100_i64));
             binds.push(Box::new(0_i64));
         }

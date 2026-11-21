@@ -44,12 +44,12 @@ WHERE ",
 }
 
 /// The bucket expression of the series read: the same global grid index the
-/// series aggregate groups on (`?6` the width, `?7` the anchor).
+/// series aggregate groups on (`?7` the width, `?8` the anchor).
 macro_rules! timings_sql_pair {
     ($label:literal) => {
         (
             timings_sql!($label, "0"),
-            timings_sql!($label, "(ts_start - ?7) / ?6"),
+            timings_sql!($label, "(ts_start - ?8) / ?7"),
         )
     };
 }
@@ -216,25 +216,11 @@ pub(super) fn read_timings(
     let mut rows = match bucket_width_ms {
         None => {
             stmt = tx.prepare(unbucketed)?;
-            stmt.query(rusqlite::params![
-                window.from_ms,
-                window.to_ms,
-                window.alias_filter,
-                window.provider_filter,
-                window.watermark,
-            ])?
+            stmt.query(window.params())?
         }
         Some(width_ms) => {
             stmt = tx.prepare(bucketed)?;
-            stmt.query(rusqlite::params![
-                window.from_ms,
-                window.to_ms,
-                window.alias_filter,
-                window.provider_filter,
-                window.watermark,
-                width_ms,
-                window.anchor_ms,
-            ])?
+            stmt.query(window.bucketed_params(&width_ms))?
         }
     };
     let series = bucket_width_ms.is_some();

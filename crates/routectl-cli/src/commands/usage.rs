@@ -907,6 +907,7 @@ pub fn build_window_report(
         group_by: dim,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket: None,
         entry_accounts: AccountIdentities::from_config(config).entry_accounts(),
     };

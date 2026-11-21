@@ -33,10 +33,13 @@ macro_rules! below_watermark {
 
 /// The row predicate every statement of the grouped read shares: the window
 /// (`?1` inclusive, `?2` exclusive), inference rows only, the optional alias
-/// (`?3`) and provider (`?4`) filters as bind params, and the watermark
-/// (`?5`). The aggregate and its side reads (error classes, cache-write
-/// lifetimes, timings) all take it from here, so a filter can never apply to
-/// one statement and not another; a weld test pins every statement to it.
+/// (`?3`), provider (`?4`) and model (`?6`) filters as bind params, and the
+/// watermark (`?5`). The model filter matches the fine model label, the served
+/// model or, on a row never dispatched, the requested one. A bucketed
+/// statement binds its bucket width and anchor after these (`?7`, `?8`). The
+/// aggregate and its side reads (error classes, cache-write lifetimes,
+/// timings) all take it from here, so a filter can never apply to one
+/// statement and not another; a weld test pins every statement to it.
 ///
 /// The leading SQL comment marks the expansion, so the weld test tells a
 /// statement that takes this macro from one that spells the same text by hand.
@@ -49,6 +52,7 @@ macro_rules! read_filters {
             "
   AND (?3 IS NULL OR alias = ?3)
   AND (?4 IS NULL OR provider = ?4)
+  AND (?6 IS NULL OR COALESCE(model, requested_model) = ?6)
   AND ",
             below_watermark!()
         )

@@ -440,6 +440,7 @@ fn a_day_series_over_a_hundred_thousand_rows_stays_inside_the_query_budget() {
         group_by: GroupDim::Model,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket: Some(BucketSpec {
             width_ms: 86_400_000,
             count: 401,

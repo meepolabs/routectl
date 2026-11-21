@@ -200,6 +200,10 @@ struct QueryRequest {
     /// Restrict to one served provider. Absent matches every provider.
     #[serde(default)]
     provider: Option<String>,
+    /// Restrict to one fine model label: the served model, or the requested
+    /// model on a request never dispatched. Absent matches every model.
+    #[serde(default)]
+    model: Option<String>,
     /// Also return a time series at this granularity. ABSENT means no series at
     /// all -- the ledger is read exactly as it would be without this field.
     #[serde(default)]
@@ -264,6 +268,7 @@ pub(super) struct ParsedQuery {
     group_by: GroupDim,
     alias_filter: Option<String>,
     provider_filter: Option<String>,
+    model_filter: Option<String>,
     bucket: Option<BucketUnit>,
 }
 
@@ -367,6 +372,7 @@ pub(super) fn parse_body(body: &[u8]) -> Result<ParsedQuery, ()> {
         group_by: request.group_by,
         alias_filter: filter_value(request.alias)?,
         provider_filter: filter_value(request.provider)?,
+        model_filter: filter_value(request.model)?,
         bucket: request.bucket.map(QueryBucket::unit),
     })
 }
@@ -390,6 +396,7 @@ impl ParsedQuery {
             group_by: self.group_by,
             alias_filter: self.alias_filter,
             provider_filter: self.provider_filter,
+            model_filter: self.model_filter,
             bucket: None,
             entry_accounts: BTreeMap::new(),
         };

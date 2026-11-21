@@ -79,7 +79,7 @@ fn columns_read(sql: &str, columns: &BTreeSet<String>) -> BTreeSet<String> {
 }
 
 /// The `EXPLAIN QUERY PLAN` detail lines of `sql`, every parameter bound to a
-/// small integer (the two filters to NULL, which is how an unfiltered read
+/// small integer (the three filters to NULL, which is how an unfiltered read
 /// binds them).
 fn plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut stmt = conn
@@ -89,7 +89,7 @@ fn plan(conn: &Connection, sql: &str) -> Vec<String> {
         .map(|i| match i {
             1 => Some(0),
             2 => Some(10_000),
-            3 | 4 => None,
+            3 | 4 | 6 => None,
             _ => Some(1_000),
         })
         .collect();

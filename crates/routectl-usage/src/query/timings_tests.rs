@@ -121,6 +121,7 @@ fn spec(group_by: GroupDim, bucket: Option<BucketSpec>) -> QuerySpec {
         group_by,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket,
         entry_accounts: Default::default(),
     }
@@ -277,6 +278,7 @@ fn statement_labels(db: &UsageDb, group_by: GroupDim) -> Vec<String> {
         to_ms: 40_000,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         watermark: i64::MAX,
         anchor_ms: 0,
     };

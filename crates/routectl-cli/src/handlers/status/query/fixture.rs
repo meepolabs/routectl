@@ -85,6 +85,7 @@ pub fn query_panel_over(
         group_by,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         bucket: None,
         entry_accounts: Default::default(),
     };

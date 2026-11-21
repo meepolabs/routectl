@@ -258,6 +258,7 @@ fn an_expired_deadline_interrupts_the_error_class_read() {
         to_ms: 10_000,
         alias_filter: None,
         provider_filter: None,
+        model_filter: None,
         watermark: i64::MAX,
         anchor_ms: 0,
     };

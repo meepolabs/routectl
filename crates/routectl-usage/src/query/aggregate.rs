@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use rusqlite::{Connection, Row, Transaction};
+use rusqlite::{Connection, Row, ToSql, Transaction};
 
 use crate::db::UsageDb;
 
@@ -255,16 +255,16 @@ pub const QUERY_AGG_SQL: &str = concat!(
 /// one further GROUP BY dimension, so one scan feeds both the coarse groups and
 /// the time series.
 ///
-/// `?6` is the bucket WIDTH in milliseconds and `?7` the bucket ANCHOR, bound
+/// `?7` is the bucket WIDTH in milliseconds and `?8` the bucket ANCHOR, bound
 /// apart from the `?1` lower bound so a read over part of the window still
 /// numbers its buckets on the whole window's grid. The numerator
-/// `ts_start - ?7` is never negative, because the anchor is at or below every
-/// lower bound a read binds. A zero `?6` would make every bucket index a silent
+/// `ts_start - ?8` is never negative, because the anchor is at or below every
+/// lower bound a read binds. A zero `?7` would make every bucket index a silent
 /// SQL NULL rather than an error, which is why the caller's `width_ms > 0`
 /// invariant is re-checked before this statement runs.
 pub const SERIES_AGG_SQL: &str = concat!(
     query_agg_select!(),
-    ",\n    (ts_start - ?7) / ?6                                AS bucket",
+    ",\n    (ts_start - ?8) / ?7                                AS bucket",
     query_agg_from_where!(),
     agg_group_by!(),
     ", bucket"
@@ -488,9 +488,9 @@ GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
 pub const ERRORS_BY_CLASS_SQL: &str = errors_by_class_sql!("0", "");
 
 /// [`ERRORS_BY_CLASS_SQL`] split further by the bucket index the series
-/// aggregate groups on (`?6` is the bucket width, `?7` its anchor).
+/// aggregate groups on (`?7` is the bucket width, `?8` its anchor).
 pub const ERRORS_BY_CLASS_BUCKETED_SQL: &str =
-    errors_by_class_sql!("(ts_start - ?7) / ?6", ", bucket");
+    errors_by_class_sql!("(ts_start - ?8) / ?7", ", bucket");
 
 /// The window, filters and watermark a statement of the grouped read binds:
 /// the aggregate and both side reads (error classes, cache-write lifetimes)
@@ -500,10 +500,43 @@ pub(super) struct ReadWindow<'a> {
     pub to_ms: i64,
     pub alias_filter: Option<&'a str>,
     pub provider_filter: Option<&'a str>,
+    /// Restrict to one fine model label (served model, else requested).
+    pub model_filter: Option<&'a str>,
     /// The highest rowid the read counts.
     pub watermark: i64,
     /// The bucket grid's anchor; read only by the bucketed statements.
     pub anchor_ms: i64,
+}
+
+impl ReadWindow<'_> {
+    /// The binds of an unbucketed statement, in the shared predicate's
+    /// placeholder order (`?1` to `?6`).
+    pub(super) fn params(&self) -> [&dyn ToSql; 6] {
+        [
+            &self.from_ms,
+            &self.to_ms,
+            &self.alias_filter,
+            &self.provider_filter,
+            &self.watermark,
+            &self.model_filter,
+        ]
+    }
+
+    /// [`Self::params`] plus a bucketed statement's width (`?7`) and anchor
+    /// (`?8`).
+    pub(super) fn bucketed_params<'p>(&'p self, width_ms: &'p i64) -> [&'p dyn ToSql; 8] {
+        let [from, to, alias, provider, watermark, model] = self.params();
+        [
+            from,
+            to,
+            alias,
+            provider,
+            watermark,
+            model,
+            width_ms,
+            &self.anchor_ms,
+        ]
+    }
 }
 
 /// One fine row of the grouped aggregate and its bucket index (always 0 on
@@ -520,32 +553,17 @@ pub(super) fn read_fine_rows(
     limit: &ReadLimit,
 ) -> Result<Vec<BucketedFineRow>, QueryError> {
     let mut out = Vec::new();
-    let base = rusqlite::params![
-        window.from_ms,
-        window.to_ms,
-        window.alias_filter,
-        window.provider_filter,
-        window.watermark,
-    ];
     match bucket_width_ms {
         None => {
             let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
-            for row in stmt.query_map(base, map_fine_row)? {
+            for row in stmt.query_map(window.params(), map_fine_row)? {
                 limit.check()?;
                 out.push((row?, 0));
             }
         }
         Some(width_ms) => {
             let mut stmt = tx.prepare(SERIES_AGG_SQL)?;
-            let params = rusqlite::params![
-                window.from_ms,
-                window.to_ms,
-                window.alias_filter,
-                window.provider_filter,
-                window.watermark,
-                width_ms,
-                window.anchor_ms,
-            ];
+            let params = window.bucketed_params(&width_ms);
             for row in stmt.query_map(params, map_fine_row_bucketed)? {
                 limit.check()?;
                 out.push(row?);
@@ -580,28 +598,14 @@ pub(super) fn read_error_classes(
     match bucket_width_ms {
         None => {
             let mut stmt = tx.prepare(ERRORS_BY_CLASS_SQL)?;
-            let mut rows = stmt.query(rusqlite::params![
-                window.from_ms,
-                window.to_ms,
-                window.alias_filter,
-                window.provider_filter,
-                window.watermark,
-            ])?;
+            let mut rows = stmt.query(window.params())?;
             while let Some(row) = rows.next()? {
                 fold(row)?;
             }
         }
         Some(width_ms) => {
             let mut stmt = tx.prepare(ERRORS_BY_CLASS_BUCKETED_SQL)?;
-            let mut rows = stmt.query(rusqlite::params![
-                window.from_ms,
-                window.to_ms,
-                window.alias_filter,
-                window.provider_filter,
-                window.watermark,
-                width_ms,
-                window.anchor_ms,
-            ])?;
+            let mut rows = stmt.query(window.bucketed_params(&width_ms))?;
             while let Some(row) = rows.next()? {
                 fold(row)?;
             }
@@ -628,18 +632,24 @@ pub fn errors_by_class(
     from_ms: i64,
     to_ms: i64,
 ) -> Result<Vec<(GroupKey, String, i64)>, QueryError> {
+    let window = ReadWindow {
+        from_ms,
+        to_ms,
+        alias_filter: None,
+        provider_filter: None,
+        model_filter: None,
+        watermark: i64::MAX,
+        anchor_ms: from_ms,
+    };
     let mut stmt = db.conn().prepare(ERRORS_BY_CLASS_SQL)?;
     let rows = stmt
-        .query_map(
-            rusqlite::params![from_ms, to_ms, None::<&str>, None::<&str>, i64::MAX],
-            |row| {
-                Ok((
-                    read_group_key(row)?,
-                    row.get::<_, String>(GROUP_KEY_COLUMNS + 1)?,
-                    row.get::<_, i64>(GROUP_KEY_COLUMNS + 2)?,
-                ))
-            },
-        )?
+        .query_map(window.params(), |row| {
+            Ok((
+                read_group_key(row)?,
+                row.get::<_, String>(GROUP_KEY_COLUMNS + 1)?,
+                row.get::<_, i64>(GROUP_KEY_COLUMNS + 2)?,
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
