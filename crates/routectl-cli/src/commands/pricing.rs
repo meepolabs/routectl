@@ -128,6 +128,36 @@ pub(super) fn dimension_label(dimension: PriceDimension) -> String {
     }
 }
 
+/// The dotted `config.toml` key that prices the dimension a
+/// [`dimension_label`] names on `model`: `models.<model>.pricing.` followed by
+/// [`PriceDimension::config_key`], the one spelling every pricing surface uses.
+///
+/// `None` for a label that names no rate (writes of unknown lifetime,
+/// reasoning of unknown structure, anything [`dimension_label`] does not
+/// produce) and for a nickname that is not a TOML bare key: a dotted path
+/// cannot carry a quoted segment, so no key is offered rather than a wrong one.
+#[cfg_attr(not(test), expect(dead_code, reason = "no production caller yet"))]
+pub(crate) fn price_config_key(model: &str, dimension_label: &str) -> Option<String> {
+    if !routectl_router::is_bare_key(model) {
+        return None;
+    }
+    let field = label_dimension(dimension_label)?.config_key();
+    Some(format!("models.{model}.pricing.{field}"))
+}
+
+/// The dimension whose [`dimension_label`] is exactly `label`.
+fn label_dimension(label: &str) -> Option<PriceDimension> {
+    let dimension = match label {
+        "input" => PriceDimension::Input,
+        "output" => PriceDimension::Output,
+        "cache read" => PriceDimension::CacheRead,
+        _ => PriceDimension::CacheWrite(routectl_core::parse_cache_lifetime(
+            label.strip_prefix("cache write ")?,
+        )?),
+    };
+    (dimension_label(dimension) == label).then_some(dimension)
+}
+
 /// The rate dimensions an API-equivalent value needs priced, in the order a
 /// diagnostic names them: the labels of the ones [`rate_covers`] refuses.
 ///
@@ -243,3 +273,7 @@ pub(super) fn cache_write_spelling_conflicts(
 #[cfg(test)]
 #[path = "pricing_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pricing_config_key_tests.rs"]
+mod config_key_tests;
