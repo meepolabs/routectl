@@ -695,8 +695,11 @@ impl SseState {
                     };
                     // A delta that states its own write total decides the
                     // split: its own non-empty split, else the opener's when
-                    // that sums to the stated total, else none (the whole
-                    // total is unknown lifetime). A delta stating no total
+                    // that sums to at most the stated total, else none. A
+                    // server tool such as web search writes more cache after
+                    // the opener, so the opener's split can cover only part
+                    // of the total; the uncovered rest stays unknown
+                    // lifetime, never assigned one. A delta stating no total
                     // falls back per lifetime through the placeholder rule,
                     // so a partial or empty delta object cannot wholesale-
                     // replace the opener's. An empty object is no split.
@@ -716,7 +719,7 @@ impl SseState {
                             .or_else(|| {
                                 cap_cc.filter(|c| {
                                     cache_creation_input_tokens
-                                        .is_some_and(|total| c.total() == u64::from(total))
+                                        .is_some_and(|total| c.total() <= u64::from(total))
                                 })
                             })
                             .cloned()

@@ -694,14 +694,15 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   The stream merge in `anthropic_api/sse.rs` (`message_delta` arm) decides
   the split in order: the delta's own non-empty split wins; otherwise, when
   the delta states a write total as an input report, the opener's split is
-  kept only if it sums to that total, and otherwise no split is reported
-  (the whole total is unknown lifetime, never guessed); a delta stating no
-  write total merges per lifetime over the opener with the placeholder
-  rule. A turn in which a server tool such as web search adds content
-  partway through hits the no-split case: the opener's split covers only
-  the writes before the tool ran, while the closing delta states the
-  turn's whole write total with no `cache_creation`, so the total is
-  recorded with an unknown lifetime and leaves the row unpriced.
+  kept if it sums to at most that total, and dropped if it sums to more
+  (the whole total is then unknown lifetime); a delta stating no write
+  total merges per lifetime over the opener with the placeholder rule. A
+  turn in which a server tool such as web search adds content partway
+  through keeps a partial split: the opener's split covers only the
+  writes before the tool ran, while the closing delta states the turn's
+  whole write total with no `cache_creation`, so the row records the
+  opener's lifetimes and the rest of the total as unknown lifetime, never
+  guessed, which leaves the row unpriced.
   Lifetimes are parsed from the member names, so
   `ephemeral_30m_input_tokens` reaches the canonical usage and a
   same-format client as 1800 seconds. Pinned by
@@ -922,7 +923,7 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 - **InvokeModel streams share the Anthropic cache-write merge.** The
   eventstream `chunk` frames carry Anthropic SSE events into the same
   `SseState`, so a closing delta that restates the write total keeps the
-  opener's lifetime split exactly when it sums to that total (see the
+  opener's lifetime split when it sums to at most that total (see the
   *Anthropic API surface* entry); pinned by
   `an_invoke_total_only_delta_matching_the_opener_split_keeps_it`.
 

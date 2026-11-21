@@ -209,7 +209,7 @@ type LifetimeCase = (&'static str, Vec<Writes>, Vec<(u32, i64)>, i64, bool);
 #[test]
 fn per_lifetime_sums_single_source_rows() {
     // (name, rows, expected lifetimes, expected unknown, expected invalid)
-    let cases: [LifetimeCase; 7] = [
+    let cases: [LifetimeCase; 8] = [
         (
             "legacy columns merge as 300 and 3600",
             vec![legacy(Some(10), Some(20)), legacy(Some(5), None)],
@@ -236,6 +236,13 @@ fn per_lifetime_sums_single_source_rows() {
             ],
             vec![(300, 70)],
             70,
+            false,
+        ),
+        (
+            "a partial split leaves the uncovered writes unknown",
+            vec![new_era(16017, Some(r#"{"3600":7445}"#))],
+            vec![(3600, 7445)],
+            8572,
             false,
         ),
         (

@@ -521,10 +521,16 @@ struct MergeRow {
 /// Their counts (2 input, 2523 written at 5m, 0 at 1h, 7 output) come from
 /// the committed claude-code capture
 /// `crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01__claude-code__anthropic-api/upstream_response.json`.
+///
+/// The web-search row's closing delta is the `message_delta.usage` a
+/// streamed Opus turn with one web search returned, verbatim: the server
+/// tool's writes raise the total past the opener's 1h split and the delta
+/// carries no split of its own.
 #[test]
 fn message_delta_cache_creation_merge_follows_the_stated_total() {
     const OPENER_2523: &str = r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":2523}}"#;
     const TOTAL_ONLY_2523: &str = r#"{"input_tokens":2,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"output_tokens":7}"#;
+    const WEB_SEARCH_CLOSING: &str = r#"{"cache_creation_input_tokens":16017,"cache_read_input_tokens":7445,"input_tokens":38,"output_tokens":168,"output_tokens_details":{"thinking_tokens":0},"server_tool_use":{"web_fetch_requests":0,"web_search_requests":1}}"#;
     let rows = [
         MergeRow {
             name: "delta split overrides the opener split",
@@ -541,8 +547,22 @@ fn message_delta_cache_creation_merge_follows_the_stated_total() {
             total: Some(2523),
         },
         MergeRow {
-            name: "total-only delta contradicting the opener split drops it",
+            name: "web-search closing total keeps the opener's 1h split as a partial split",
+            opener: r#"{"input_tokens":38,"output_tokens":1,"cache_creation_input_tokens":7445,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":7445}}"#,
+            delta: WEB_SEARCH_CLOSING,
+            split: Some(CacheCreation::from_lifetimes([(3600, 7445)])),
+            total: Some(16017),
+        },
+        MergeRow {
+            name: "total-only delta above the opener split keeps it as a partial split",
             opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2000,"cache_creation":{"ephemeral_5m_input_tokens":2000}}"#,
+            delta: TOTAL_ONLY_2523,
+            split: Some(CacheCreation::from_lifetimes([(300, 2000)])),
+            total: Some(2523),
+        },
+        MergeRow {
+            name: "opener split summing above the stated total is dropped",
+            opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":3000,"cache_creation":{"ephemeral_5m_input_tokens":3000}}"#,
             delta: TOTAL_ONLY_2523,
             split: None,
             total: Some(2523),

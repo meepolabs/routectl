@@ -4593,8 +4593,8 @@ it with priced groups reads `partial`. The tokens still count in
 such as web search adds content partway through the turn produces such
 a row: the closing event reports the turn's whole cache-write total
 with no per-lifetime split, and the split on the opening event covers
-only the writes made before the tool ran, so the row records the total
-with an unknown lifetime.
+only the writes made before the tool ran, so the row records that split
+and leaves the rest of the total with an unknown lifetime.
 
 A footer reports the window's cache-hit-rate
 (`cache_read / (cache_read + input)`) and error count, then one `walk:`
