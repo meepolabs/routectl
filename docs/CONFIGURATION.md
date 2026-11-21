@@ -4541,7 +4541,7 @@ prices](#model-prices-modelsxpricing) gives: `[models.X.pricing]`, the
 refreshed table, the shipped table. The tables are read once per `routectl usage` run and once per
 dashboard query, so a table `routectl prices refresh` writes while the
 daemon runs prices the next query with no restart; a copy that fails
-validation keeps the previous table. The dollar column has three states:
+validation keeps the previous table. The dollar column has four states:
 
 - `$X.XX` -- an API-key provider whose upstream resolved a price for
   every dimension the row used. A dimension with nonzero usage and no
@@ -4561,6 +4561,10 @@ validation keeps the previous table. The dollar column has three states:
   (the tables do not list it, the provider's host is ambiguous, or the
   provider entry is gone and the row carries no persisted provider kind);
   or a priced row that used a dimension with no rate. Never shown as `$0`.
+- `$X.XX partial` -- the priced subtotal only: the group (or the `total`
+  row) also holds requests that are unpriced, subscription, or priced
+  only in part, so the figure leaves their cost out. It reads the same
+  as the dashboard's `partial` mark ("priced subtotal only").
 
 **Subscription-equivalent value.** Where the effective rates cover every
 dimension a subscription row actually used, the cell also reports what
@@ -4574,7 +4578,9 @@ count on the row (input, output, separately-billed reasoning, billed cache
 reads, either cache-write bucket) has no price, the cell falls back to the
 plain `n/a (subscription)` / `+sub` string instead of showing a partial
 figure. The one exception is cache writes with no lifetime (below): they
-are never valued, and the rest of the row is. A known `$0` price counts as a price: that dimension adds nothing
+are never valued, and the rest of the row is, so the `~$` figure is then
+a subtotal and reads `~$X.XX partial` (the dashboard's "At API prices"
+figure carries the same mark). A known `$0` price counts as a price: that dimension adds nothing
 and the figure stays complete. A model no source prices shows no
 equivalent, never `~$0.00`. A group
 whose subscription rows recorded no tokens at all resolves a measured

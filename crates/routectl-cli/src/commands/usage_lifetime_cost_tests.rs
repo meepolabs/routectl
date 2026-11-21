@@ -525,3 +525,181 @@ fn a_bucketed_query_reads_a_covered_split_partial_on_the_group_the_totals_and_it
         assert_eq!(buckets[1].metrics.requests, 0, "{name}: empty bucket");
     }
 }
+
+// --- the partial mark on the rendered report ----------------------------
+//
+// The covered-split ledger row above, and its fully split twin
+// (`{"3600":16017}`), which also prices its 8572 remaining written tokens:
+//
+//   covered       $18.34467                         -> $18.34
+//   fully split   18.30 + 16017 x 6.00 / 1M = $18.396102 -> $18.40
+//   both          $36.740772                        -> $36.74
+
+const FULL_SPLIT: &str = r#"{"3600":16017}"#;
+const MARK_API_KEY: &str = "mark-key";
+const MARK_SUBSCRIPTION: &str = "mark-sub";
+
+/// An API-key and a subscription provider on one upstream, each serving a
+/// `full` and a `part` model at the covered-split rates.
+fn mark_config() -> Config {
+    let mut config = Config::default();
+    for (provider, credential) in [
+        (MARK_API_KEY, "env://MARK_KEY"),
+        (MARK_SUBSCRIPTION, "oauth://anthropic"),
+    ] {
+        config.providers.insert(
+            provider.to_string(),
+            ProviderEntry::anthropic_api(credential),
+        );
+    }
+    price_models(
+        &mut config,
+        &["key-full", "key-part"],
+        MARK_API_KEY,
+        LIFETIME_UPSTREAM,
+        &covered_rates(true),
+    );
+    price_models(
+        &mut config,
+        &["sub-full", "sub-part"],
+        MARK_SUBSCRIPTION,
+        LIFETIME_UPSTREAM,
+        &covered_rates(true),
+    );
+    config
+}
+
+/// One ledger row: its model, its provider and its lifetime split.
+type MarkRow = (&'static str, &'static str, &'static str);
+
+/// One covered-split-shaped row served as `model` by `provider`.
+fn insert_mark_row(db: &UsageDb, model: &str, provider: &str, split: &str) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, provider_kind, \
+             stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
+             fallback_count, input_tokens, output_tokens, cache_read, \
+             cache_write_tokens, cache_write_lifetimes) \
+             VALUES (1000, 1000, ?1, 'anthropic', 'req-model', 'al', ?1, ?2, ?3, \
+             'anthropic-api', 0, 'ok', 10, 0, 0, 1, 0, 1000000, 1000000, 1000000, \
+             ?4, ?5)",
+            rusqlite::params![model, provider, LIFETIME_UPSTREAM, COVERED_TOTAL, split],
+        )
+        .expect("insert mark row");
+}
+
+/// The `--detail --by model` report over a ledger of the named `models`,
+/// each `(model, provider, split)`, rendered.
+fn rendered_mark_report(models: &[MarkRow]) -> String {
+    let (_dir, _path, mut db) = temp_db();
+    for (model, provider, split) in models {
+        insert_mark_row(&db, model, provider, split);
+    }
+    let report = build_window_report(
+        &mut db,
+        &mark_config(),
+        &no_prices(),
+        "t".into(),
+        window_bounds(&zone(), WindowFlag::All, fixed_now()),
+        Some(GroupDim::Model),
+        true,
+    )
+    .expect("window report");
+    render_report(&report, &zone())
+}
+
+/// The rendered cell under `column` on the row labelled `label`. Columns are
+/// separated by at least two spaces and a cell holds at most one in a row,
+/// so a cost cell with words in it stays one cell.
+fn rendered_cell(out: &str, label: &str, column: &str) -> String {
+    let cells = |line: &str| -> Vec<String> {
+        line.split("  ")
+            .map(str::trim)
+            .filter(|cell| !cell.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let mut lines = out.lines().skip(1);
+    let header = cells(lines.next().expect("header"));
+    let index = header
+        .iter()
+        .position(|h| h == column)
+        .unwrap_or_else(|| panic!("header carries {column}: {out}"));
+    let row = lines
+        .map(cells)
+        .find(|row| row.first().map(String::as_str) == Some(label))
+        .unwrap_or_else(|| panic!("row `{label}` present: {out}"));
+    row.get(index)
+        .unwrap_or_else(|| panic!("row `{label}` has a {column} cell: {row:?}"))
+        .clone()
+}
+
+#[test]
+fn the_report_marks_a_subtotal_on_its_group_rows_and_on_the_total_row() {
+    let key_part = ("key-part", MARK_API_KEY, COVERED_SPLIT);
+    let key_full = ("key-full", MARK_API_KEY, FULL_SPLIT);
+    let sub_part = ("sub-part", MARK_SUBSCRIPTION, COVERED_SPLIT);
+    let sub_full = ("sub-full", MARK_SUBSCRIPTION, FULL_SPLIT);
+    // (name, ledger, row label, cost cell)
+    let cases: [(&str, &[MarkRow], &str, &str); 9] = [
+        (
+            "api key group: priced subtotal",
+            &[key_part, key_full],
+            "key-part",
+            "$18.34 partial",
+        ),
+        (
+            "api key group: complete (control)",
+            &[key_part, key_full],
+            "key-full",
+            "$18.40",
+        ),
+        (
+            "api key total: priced subtotal",
+            &[key_part, key_full],
+            "total",
+            "$36.74 partial",
+        ),
+        (
+            "subscription group: equivalent subtotal",
+            &[sub_part, sub_full],
+            "sub-part",
+            "n/a (sub ~$18.34 partial)",
+        ),
+        (
+            "subscription group: complete equivalent (control)",
+            &[sub_part, sub_full],
+            "sub-full",
+            "n/a (sub ~$18.40)",
+        ),
+        (
+            "subscription total: equivalent subtotal",
+            &[sub_part, sub_full],
+            "total",
+            "n/a (sub ~$36.74 partial)",
+        ),
+        (
+            "mixed total: both figures subtotals",
+            &[key_part, sub_part],
+            "total",
+            "$18.34 partial (+sub ~$18.34 partial)",
+        ),
+        (
+            "mixed total: a complete equivalent beside real spend is still partial spend",
+            &[key_full, sub_full],
+            "total",
+            "$18.40 partial (+sub ~$18.40)",
+        ),
+        (
+            "api key total: complete (control)",
+            &[key_full],
+            "total",
+            "$18.40",
+        ),
+    ];
+    for (name, ledger, label, expected) in cases {
+        let out = rendered_mark_report(ledger);
+        assert_eq!(rendered_cell(&out, label, "cost"), expected, "{name}");
+    }
+}

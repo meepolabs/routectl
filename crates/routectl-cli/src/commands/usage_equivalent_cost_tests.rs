@@ -455,10 +455,11 @@ fn a_mixed_group_never_folds_notional_value_into_real_spend() {
         Some(EQUIV_BASE_ONLY_USD / 2.0)
     );
     assert!(row.any_subscription);
+    assert_eq!(row.metrics.equivalent_status, EquivalentStatus::Partial);
     assert_eq!(
         cost_cell(row),
         format!(
-            "${EQUIV_BASE_ONLY_USD:.2} (+sub ~${:.2})",
+            "${EQUIV_BASE_ONLY_USD:.2} partial (+sub ~${:.2} partial)",
             EQUIV_BASE_ONLY_USD / 2.0
         )
     );
@@ -477,25 +478,155 @@ fn cost_row(priced: Option<f64>, any_subscription: bool, equivalent: Option<f64>
     }
 }
 
+/// [`cost_row`] with the two completeness statuses the query folded.
+fn cost_row_with(
+    priced: Option<f64>,
+    any_subscription: bool,
+    equivalent: Option<f64>,
+    cost_status: CostStatus,
+    equivalent_status: EquivalentStatus,
+) -> DisplayRow {
+    let mut row = cost_row(priced, any_subscription, equivalent);
+    row.metrics.cost_status = cost_status;
+    row.metrics.equivalent_status = equivalent_status;
+    row
+}
+
 #[test]
 fn the_cost_cell_labels_the_equivalent_and_leaves_the_old_strings_untouched() {
+    use CostStatus::{Partial, Priced, Subscription, Unpriced};
+    use EquivalentStatus::{Complete, NoSubscription, Partial as EquivPartial};
     // Each cost cell shape is exercised straight from a display row, without
     // a ledger standing between the state and the string it renders.
-    let cell = |priced, any_subscription, equivalent| {
-        cost_cell(&cost_row(priced, any_subscription, equivalent))
-    };
-
-    // Resolvable subscription value: labelled as the approximation it is,
-    // beside rather than inside the real figure.
-    assert_eq!(cell(None, true, Some(12.34)), "n/a (sub ~$12.34)");
-    assert_eq!(cell(Some(5.0), true, Some(12.34)), "$5.00 (+sub ~$12.34)");
-
-    // Unresolvable, and the two subscription-free shapes: byte-identical to
-    // what they rendered before the equivalent existed.
-    assert_eq!(cell(None, true, None), "n/a (subscription)");
-    assert_eq!(cell(Some(5.0), true, None), "$5.00+sub");
-    assert_eq!(cell(Some(5.0), false, None), "$5.00");
-    assert_eq!(cell(None, false, None), "n/a");
+    // (name, cost_usd, any_subscription, equivalent, cost_status, equivalent_status, cell)
+    let cases = [
+        // Resolvable subscription value: labelled as the approximation it
+        // is, beside rather than inside the real figure.
+        (
+            "subscription equivalent",
+            None,
+            true,
+            Some(12.34),
+            Subscription,
+            Complete,
+            "n/a (sub ~$12.34)",
+        ),
+        (
+            "priced beside a subscription equivalent",
+            Some(5.0),
+            true,
+            Some(12.34),
+            Priced,
+            Complete,
+            "$5.00 (+sub ~$12.34)",
+        ),
+        // Unresolvable, and the two subscription-free shapes: byte-identical
+        // to what they rendered before the equivalent existed.
+        (
+            "subscription with no equivalent",
+            None,
+            true,
+            None,
+            Subscription,
+            Complete,
+            "n/a (subscription)",
+        ),
+        (
+            "priced beside a subscription with no equivalent",
+            Some(5.0),
+            true,
+            None,
+            Priced,
+            Complete,
+            "$5.00+sub",
+        ),
+        (
+            "priced only",
+            Some(5.0),
+            false,
+            None,
+            Priced,
+            NoSubscription,
+            "$5.00",
+        ),
+        (
+            "unpriced only",
+            None,
+            false,
+            None,
+            Unpriced,
+            NoSubscription,
+            "n/a",
+        ),
+        // A figure that is a subtotal carries the mark; its complete twin
+        // above does not.
+        (
+            "api key: priced plus unpriced is the priced subtotal",
+            Some(5.0),
+            false,
+            None,
+            Partial,
+            NoSubscription,
+            "$5.00 partial",
+        ),
+        (
+            "subscription: equivalent leaves some usage unpriced",
+            None,
+            true,
+            Some(12.34),
+            Subscription,
+            EquivPartial,
+            "n/a (sub ~$12.34 partial)",
+        ),
+        (
+            "mixed: both figures subtotals",
+            Some(5.0),
+            true,
+            Some(12.34),
+            Partial,
+            EquivPartial,
+            "$5.00 partial (+sub ~$12.34 partial)",
+        ),
+        (
+            "mixed: complete equivalent beside the priced subtotal",
+            Some(5.0),
+            true,
+            Some(12.34),
+            Partial,
+            Complete,
+            "$5.00 partial (+sub ~$12.34)",
+        ),
+        (
+            "mixed: no equivalent beside the priced subtotal",
+            Some(5.0),
+            true,
+            None,
+            Partial,
+            EquivPartial,
+            "$5.00 partial (+sub)",
+        ),
+        (
+            "partial with no priced row has no subtotal to mark",
+            None,
+            false,
+            None,
+            Partial,
+            NoSubscription,
+            "n/a",
+        ),
+    ];
+    for (name, priced, any_subscription, equivalent, cost_status, equivalent_status, expected) in
+        cases
+    {
+        let row = cost_row_with(
+            priced,
+            any_subscription,
+            equivalent,
+            cost_status,
+            equivalent_status,
+        );
+        assert_eq!(cost_cell(&row), expected, "{name}");
+    }
 }
 
 // --- non-finite arithmetic ----------------------------------------------

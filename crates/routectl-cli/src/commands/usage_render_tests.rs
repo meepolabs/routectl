@@ -355,6 +355,24 @@ fn the_legend_names_every_detail_column() {
 }
 
 #[test]
+fn the_legend_says_what_a_partial_figure_and_an_api_price_figure_are() {
+    for phrase in [
+        "partial     = priced subtotal only",
+        "\"~$\"        = At API prices",
+        "unknown-lifetime cache writes (written tokens with no reported lifetime) are never priced",
+    ] {
+        assert!(
+            LEGEND.contains(phrase),
+            "legend omits {phrase:?}:\n{LEGEND}"
+        );
+    }
+    assert!(
+        !LEGEND.contains("absent when the subscription rows' rates are incomplete"),
+        "a part-priced equivalent is shown, marked partial"
+    );
+}
+
+#[test]
 fn render_humanizes_large_cache_read_and_honors_not_reported() {
     // Arrange: the cache_read column across all three presence/value cases --
     // a large reported volume (4_637_884 -> "4.6M"), a NULL (not reported), and a

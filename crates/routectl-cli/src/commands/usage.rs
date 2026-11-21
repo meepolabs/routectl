@@ -27,7 +27,7 @@ use routectl_core::render_operator_text;
 use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_router::{AccountIdentities, Config, PriceDimension};
 use routectl_usage::{
-    AggRow, BucketSpec, CacheDecisionSummary, GroupDim, KCalibration,
+    AggRow, BucketSpec, CacheDecisionSummary, CostStatus, EquivalentStatus, GroupDim, KCalibration,
     NearLosslessAttributionSummary, ObservationTotals, OpenError, QueryError, QueryMetrics,
     QuerySpec, QuotaSnapshot, Rates, ReductionSummary, RowCost, SUPPRESSED_SESSION_CAP,
     ShadowMisfireSummary, SuppressedSessions, UsageDb, WouldTrimSummary, cache_decision_summary,
@@ -1080,21 +1080,52 @@ fn tok_per_s_cell(metrics: &QueryMetrics) -> String {
 /// When the subscription portion resolved an API-equivalent value, that value
 /// is shown as an explicit `~$` approximation ALONGSIDE the real figure, never
 /// summed into it: one cell, two clearly-labelled channels. An unresolvable
-/// subscription portion renders exactly as it did before the equivalent
-/// existed.
+/// subscription portion shows no `~$` figure at all.
+///
+/// A figure that is a subtotal carries [`PARTIAL_MARK`], under the rule the
+/// dashboard applies: the dollar figure whenever `cost_status` is partial,
+/// the `~$` figure whenever `equivalent_status` is.
 fn cost_cell(row: &DisplayRow) -> String {
-    let equivalent = row.metrics.equivalent_cost_usd;
-    match (row.metrics.cost_usd, row.any_subscription) {
-        (Some(usd), true) => match equivalent {
-            Some(sub) => format!("${usd:.2} (+sub ~${sub:.2})"),
-            None => format!("${usd:.2}+sub"),
-        },
-        (Some(usd), false) => format!("${usd:.2}"),
+    let m = &row.metrics;
+    let is_subtotal = m.cost_status == CostStatus::Partial;
+    let equivalent = m
+        .equivalent_cost_usd
+        .map(|sub| equivalent_text(sub, m.equivalent_status));
+    match (m.cost_usd, row.any_subscription) {
+        (Some(usd), true) => {
+            let dollars = dollar_text(usd, is_subtotal);
+            match equivalent {
+                Some(sub) => format!("{dollars} (+sub {sub})"),
+                None if is_subtotal => format!("{dollars} (+sub)"),
+                None => format!("{dollars}+sub"),
+            }
+        }
+        (Some(usd), false) => dollar_text(usd, is_subtotal),
         (None, true) => match equivalent {
-            Some(sub) => format!("n/a (sub ~${sub:.2})"),
+            Some(sub) => format!("n/a (sub {sub})"),
             None => "n/a (subscription)".to_string(),
         },
         (None, false) => "n/a".to_string(),
+    }
+}
+
+/// The word beside a figure that is a subtotal, as the dashboard shows it.
+const PARTIAL_MARK: &str = "partial";
+
+/// A real dollar figure, marked when it is the priced subtotal only.
+fn dollar_text(usd: f64, is_subtotal: bool) -> String {
+    if is_subtotal {
+        format!("${usd:.2} {PARTIAL_MARK}")
+    } else {
+        format!("${usd:.2}")
+    }
+}
+
+/// An API-price figure, marked when it leaves out some subscription usage.
+fn equivalent_text(usd: f64, status: EquivalentStatus) -> String {
+    match status {
+        EquivalentStatus::Partial => format!("~${usd:.2} {PARTIAL_MARK}"),
+        EquivalentStatus::Complete | EquivalentStatus::NoSubscription => format!("~${usd:.2}"),
     }
 }
 
@@ -1570,8 +1601,11 @@ const LEGEND: &str = concat!(
     "  hit%        = token-weighted cache-hit rate: cache_read / cache-inclusive prompt tokens\n",
     "  \"-\"         = metric not reported by that provider\n",
     "  \"n/a (sub)\" = managed subscription (see quota)\n",
-    "  \"~$\"        = notional API-equivalent value of subscription usage; never added to the dollar figure,\n",
-    "                and absent when the subscription rows' rates are incomplete\n",
+    "  partial     = priced subtotal only: some of the usage is subscription or has no price\n",
+    "  \"~$\"        = At API prices: what subscription usage would cost on pay-as-you-go API pricing;\n",
+    "                never added to the dollar figure, absent when no subscription row could be priced,\n",
+    "                and marked partial when some could not\n",
+    "  unknown-lifetime cache writes (written tokens with no reported lifetime) are never priced\n",
     "  --detail    = adds cost, ctx_peak/ctx_avg (largest and mean per-request prompt:\n",
     "                fresh input + cache read + cache write, not a flow),\n",
     "                cache_wr (cache writes of every lifetime, already in input),\n",

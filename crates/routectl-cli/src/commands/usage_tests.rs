@@ -1042,7 +1042,8 @@ fn mixed_priced_and_subscription_group_shows_dollars_plus_sub() {
     let row = find(&report, "shared");
     assert_eq!(row.metrics.cost_usd, Some(18.0));
     assert!(row.any_subscription);
-    assert_eq!(cost_cell(row), "$18.00+sub");
+    assert_eq!(row.metrics.cost_status, CostStatus::Partial);
+    assert_eq!(cost_cell(row), "$18.00 partial (+sub)");
 }
 
 #[test]

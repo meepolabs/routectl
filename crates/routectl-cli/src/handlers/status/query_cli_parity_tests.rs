@@ -119,9 +119,10 @@ struct Shape {
 /// API-key provider, one on a subscription seat pool, one on a provider no
 /// source prices; two named seats and a NULL seat; a NULL-seat row on the
 /// priced API-key entry (its own account) and one on a forwarded entry (no
-/// account); a classified and an unclassified error; and a 30-minute cache
-/// write the priced model has no rate for.
-const SHAPES: [Shape; 8] = [
+/// account); a classified and an unclassified error; a 30-minute cache
+/// write the priced model has no rate for; and a write total only part of
+/// which reports a lifetime, on a model that prices that lifetime.
+const SHAPES: [Shape; 9] = [
     Shape {
         model: "opus",
         alias: "fast",
@@ -258,6 +259,23 @@ const SHAPES: [Shape; 8] = [
         cache_write: None,
         lifetimes: None,
     },
+    Shape {
+        model: "split",
+        alias: "fast",
+        provider: "paid",
+        upstream: "up-split",
+        seat: Some("work"),
+        stream: false,
+        outcome: "ok",
+        error_class: None,
+        latency_ms: 1_500,
+        ttfb_ms: None,
+        input: Some(600),
+        output: Some(60),
+        cache_read: Some(5_000),
+        cache_write: Some(16_017),
+        lifetimes: Some(r#"{"3600":7445}"#),
+    },
 ];
 
 fn insert(db: &UsageDb, request_id: &str, ts: i64, shape: &Shape) {
@@ -316,8 +334,8 @@ fn add_model(
 }
 
 /// A priced API-key provider, a subscription provider, an unpriced API-key
-/// provider and a forwarded provider. Neither priced model has a 30-minute
-/// write rate.
+/// provider and a forwarded provider. No priced model has a 30-minute write
+/// rate; `split` alone has a 1-hour one.
 fn parity_config() -> Config {
     let mut config = Config::default();
     for (name, credential) in [
@@ -337,7 +355,18 @@ fn parity_config() -> Config {
         ..Default::default()
     };
     add_model(&mut config, "opus", "paid", "up-opus", Some(rates.clone()));
-    add_model(&mut config, "sonnet", "sub", "up-sonnet", Some(rates));
+    add_model(
+        &mut config,
+        "sonnet",
+        "sub",
+        "up-sonnet",
+        Some(rates.clone()),
+    );
+    let hour_rates = PricingConfig {
+        cache_write_1h_per_mtok: Some(6.0),
+        ..rates
+    };
+    add_model(&mut config, "split", "paid", "up-split", Some(hour_rates));
     add_model(&mut config, "haiku", "other", "up-haiku", None);
     config.providers.insert(
         "relay".to_string(),
@@ -488,11 +517,18 @@ fn the_cli_report_equals_the_query_endpoint_for_every_window_and_grouping() {
     let fx = fixture();
 
     // Act + Assert: every window x every grouping.
+    let mut executed = Vec::new();
     for (flag, token) in WINDOWS {
         for (by, dim) in groupings() {
             assert_cell_agrees(&fx, flag, token, by, dim);
+            executed.push(by);
         }
     }
+    assert_eq!(executed.len(), WINDOWS.len() * (GroupDim::ALL.len() + 1));
+    assert!(
+        executed.contains(&Some(GroupDim::Seat)),
+        "the seat grouping is one of the cells asserted"
+    );
 }
 
 #[test]
@@ -547,6 +583,11 @@ fn the_parity_fixture_gives_every_window_its_own_figures() {
     assert_eq!(status("opus"), routectl_usage::CostStatus::Partial);
     assert_eq!(status("sonnet"), routectl_usage::CostStatus::Subscription);
     assert_eq!(status("haiku"), routectl_usage::CostStatus::Unpriced);
+    assert_eq!(
+        status("split"),
+        routectl_usage::CostStatus::Partial,
+        "the remainder of a part-split write total is never priced"
+    );
     assert!(by_model.totals.cost_usd.is_some(), "a priced subtotal");
     assert!(
         by_model.totals.equivalent_cost_usd.is_some(),
@@ -559,6 +600,42 @@ fn the_parity_fixture_gives_every_window_its_own_figures() {
             ("unclassified".to_string(), 6),
         ])
     );
+}
+
+#[test]
+fn a_part_split_write_group_reads_partial_on_both_sides() {
+    // Arrange
+    let fx = fixture();
+
+    // Act
+    let endpoint = endpoint_result(&fx, "all", "model");
+    let cli = cli_report_with(&fx, "--all", Some(GroupDim::Model), true);
+
+    // Assert: the endpoint and the CLI fold the group the same, as a priced
+    // subtotal with the remainder counted, and the CLI cell says so.
+    let endpoint_split = &endpoint
+        .groups
+        .iter()
+        .find(|g| g.label == "split")
+        .expect("endpoint split group")
+        .metrics;
+    let cli_split = cli
+        .groups
+        .iter()
+        .find(|row| row.label == "split")
+        .expect("cli split row");
+    assert_eq!(&cli_split.metrics, endpoint_split);
+    for (side, m) in [("endpoint", endpoint_split), ("cli", &cli_split.metrics)] {
+        assert_eq!(m.cost_status, routectl_usage::CostStatus::Partial, "{side}");
+        assert!(m.cost_usd.is_some(), "{side}: a priced subtotal");
+        assert_eq!(m.cache_write_unknown_tokens, 6 * (16_017 - 7_445), "{side}");
+    }
+    let out = render_report(&cli, &zone());
+    let line = out
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some("split"))
+        .expect("rendered split row");
+    assert!(line.contains(" partial"), "{line}");
 }
 
 /// The six timing percentiles of a metric set.
