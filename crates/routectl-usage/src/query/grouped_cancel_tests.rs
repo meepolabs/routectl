@@ -1,6 +1,7 @@
 // The read limit's cancel flag and deadline: the progress handler, the
 // up-front check, and the per-row checks in the Rust loops (fine-row fold,
-// slice merge, fine-row, error-class and cache-write lifetimes reads).
+// totals fold, slice merge, fine-row, error-class, cache-write lifetimes and
+// timing reads).
 // `include!`d into the `tests` module of `grouped_tests.rs` so the fixtures
 // there stay in scope. All imports come from the host file -- do not add `use`
 // lines here.
@@ -179,7 +180,7 @@ fn a_stopped_limit_interrupts_each_read_row_loop() {
     // handler installed, so only its own per-row check can return the
     // interrupt; an expired deadline is seen by nothing else.
     type Read = fn(&rusqlite::Transaction<'_>, &ReadLimit) -> Result<usize, QueryError>;
-    let cases: [(&str, Read); 6] = [
+    let cases: [(&str, Read); 8] = [
         ("fine rows, unbucketed", |tx, limit| {
             read_fine_rows(tx, &whole_window(), None, limit).map(|r| r.len())
         }),
@@ -197,6 +198,20 @@ fn a_stopped_limit_interrupts_each_read_row_loop() {
         }),
         ("cache-write lifetimes, bucketed", |tx, limit| {
             read_lifetimes(tx, &whole_window(), Some(1000), limit).map(|l| l.len())
+        }),
+        ("timings, unbucketed", |tx, limit| {
+            crate::query::timings::read_timings(tx, &whole_window(), GroupDim::Model, None, limit)
+                .map(|t| t.by_label.len())
+        }),
+        ("timings, bucketed", |tx, limit| {
+            crate::query::timings::read_timings(
+                tx,
+                &whole_window(),
+                GroupDim::Model,
+                Some(1000),
+                limit,
+            )
+            .map(|t| t.by_label.len())
         }),
     ];
     let (_dir, db) = open_db();
@@ -224,35 +239,146 @@ fn a_stopped_limit_interrupts_each_read_row_loop() {
     }
 }
 
+/// One slice's raw read of the three-row fixture, every map populated: the
+/// fine rows, the cache-write lifetimes, the error classes and the timing
+/// values by label and by bucket.
+fn populated_slice(db: &UsageDb) -> SliceRows {
+    let tx = db.conn().unchecked_transaction().expect("begin read");
+    let unbounded = ReadLimit::unbounded();
+    let width = Some(1000);
+    SliceRows {
+        fine: read_fine_rows(&tx, &whole_window(), width, &unbounded).expect("read fine rows"),
+        lifetimes: read_lifetimes(&tx, &whole_window(), width, &unbounded).expect("read lifetimes"),
+        classes: read_error_classes(&tx, &whole_window(), width, &unbounded).expect("read classes"),
+        timings: crate::query::timings::read_timings(
+            &tx,
+            &whole_window(),
+            GroupDim::Model,
+            width,
+            &unbounded,
+        )
+        .expect("read timings"),
+    }
+}
+
+/// `slice` with every map emptied but the one `keep` names, so only that
+/// merge loop has an entry to check the limit on.
+fn only(keep: &str, slice: SliceRows) -> SliceRows {
+    let SliceRows {
+        fine,
+        lifetimes,
+        classes,
+        mut timings,
+    } = slice;
+    if keep != "timing labels" {
+        timings.by_label.clear();
+    }
+    if keep != "timing buckets" {
+        timings.by_bucket.clear();
+    }
+    SliceRows {
+        fine: if keep == "fine rows" {
+            fine
+        } else {
+            Vec::new()
+        },
+        lifetimes: if keep == "lifetimes" {
+            lifetimes
+        } else {
+            Default::default()
+        },
+        classes: if keep == "classes" {
+            classes
+        } else {
+            Default::default()
+        },
+        timings,
+    }
+}
+
+/// The entries `merged` holds in the map `keep` names.
+fn merged_entries(keep: &str, merged: &MergedRead) -> usize {
+    match keep {
+        "fine rows" => merged.rows.len(),
+        "lifetimes" => merged.lifetimes.len(),
+        "classes" => merged.classes.len(),
+        "timing labels" => merged.timings.by_label.len(),
+        "timing buckets" => merged.timings.by_bucket.len(),
+        other => panic!("unknown merge loop {other}"),
+    }
+}
+
 #[test]
 fn a_stopped_limit_interrupts_the_slice_merge() {
-    // Arrange: two slices' raw rows, read without a limit.
+    // One row per merge loop: each case's slices hold entries in that loop's
+    // map alone, so only that loop's own check can return the interrupt.
     let (_dir, db) = open_db();
     seed_three_fine_rows(&db);
-    let slice = || {
-        let tx = db.conn().unchecked_transaction().expect("begin read");
-        let fine = read_fine_rows(&tx, &whole_window(), None, &ReadLimit::unbounded())
-            .expect("read fine rows");
-        SliceRows {
-            fine,
-            lifetimes: Default::default(),
-            classes: Default::default(),
+    let cases = [
+        ("fine rows", 3),
+        ("lifetimes", 3),
+        ("classes", 3),
+        ("timing labels", 3),
+        ("timing buckets", 1),
+    ];
+    for (keep, entries) in cases {
+        let slices = || {
+            vec![
+                only(keep, populated_slice(&db)),
+                only(keep, populated_slice(&db)),
+            ]
+        };
+        for (stop, limit) in stopped_limits() {
+            // Act
+            let completed = merge(slices(), &ReadLimit::unbounded());
+            let interrupted = merge(slices(), &limit).map(|m| merged_entries(keep, &m));
+
+            // Assert: the unbounded merge carries the loop's entries (the
+            // control), the stopped one sheds.
+            assert_eq!(
+                merged_entries(keep, &completed.expect("merge")),
+                entries,
+                "{keep}: control"
+            );
+            assert!(
+                matches!(interrupted, Err(QueryError::Interrupted)),
+                "{keep}, {stop}: expected an interrupt, got {interrupted:?}"
+            );
         }
+    }
+}
+
+#[test]
+fn a_flag_set_while_pricing_the_last_row_interrupts_the_totals_fold() {
+    // Arrange: three fine rows in three groups; pricing the last one sets the
+    // flag, after the fold's last per-row check, so only the totals fold's
+    // own check is left to stop the read.
+    let (_dir, mut db) = open_db();
+    seed_three_fine_rows(&db);
+    let flag = CancelFlag::default();
+    let priced = std::cell::Cell::new(0_usize);
+    let cancelling_last = |_row: &AggRow| {
+        priced.set(priced.get() + 1);
+        if priced.get() == 3 {
+            flag.cancel();
+        }
+        RowCost::Unpriced(Vec::new())
     };
 
-    for (stop, limit) in stopped_limits() {
-        // Act
-        let completed =
-            merge(vec![slice(), slice()], &ReadLimit::unbounded()).map(|m| m.rows.len());
-        let interrupted = merge(vec![slice(), slice()], &limit).map(|m| m.rows.len());
+    // Act
+    let interrupted = query(
+        &mut db,
+        &spec(GroupDim::Model),
+        cancelling_last,
+        limit_with(&flag),
+    );
 
-        // Assert
-        assert_eq!(completed.expect("merge"), 3, "{stop}: control");
-        assert!(
-            matches!(interrupted, Err(QueryError::Interrupted)),
-            "{stop}: expected an interrupt, got {interrupted:?}"
-        );
-    }
+    // Assert
+    assert_eq!(priced.get(), 3, "every fine row was priced");
+    assert!(
+        matches!(interrupted, Err(QueryError::Interrupted)),
+        "expected an interrupt, got {interrupted:?}"
+    );
 }
 
 #[test]

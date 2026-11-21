@@ -5902,6 +5902,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   caller's connection), cancels and joins every slice on the first failure, and
   merges the raw fine rows and side maps by `(fine group, bucket)` (`FineRow` /
   `AggRow` destructured in full) for `grouped.rs` to price and fold once
+- `src/query/timings.rs` -- exact nearest-rank p50 / p90 / p99 of TTFT and
+  latency per display group, series bucket and window: one per-row statement
+  per slice beside the aggregate (same transaction, window, filters and
+  watermark), values concatenated across slices, then selected; `grouped.rs`
+  stores the figures on each `QueryMetrics`
 - `src/query/cache_lifetimes.rs` -- per-lifetime cache-write sums for pricing:
   `aggregate_with_cache_lifetimes` (the aggregate plus each fine row's
   `CacheWriteLifetimes`: tokens per lifetime seconds, unknown remainder, invalid

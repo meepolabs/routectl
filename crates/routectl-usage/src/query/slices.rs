@@ -8,7 +8,7 @@
 //! sub-ranges read on their own connections keep several of those reads in
 //! flight at once and split the sort.
 //!
-//! Every slice runs the same three statements over its own sub-range, in its
+//! Every slice runs the same four statements over its own sub-range, in its
 //! own transaction, all bound to one watermark taken before any slice starts.
 //! What that guarantees, given how `requests` changes (rows are appended, a
 //! row is written when its request completes so a late row can carry an old
@@ -26,9 +26,10 @@
 //!   older than the prune's cutoff can differ, and those lie in the oldest
 //!   slices of a window that reaches back past the retention horizon.
 //!
-//! Slices return raw, unpriced fine rows; the merge sums them per
-//! `(fine group, bucket)` and the caller prices and folds the merged rows, so a
-//! figure never depends on how the window was cut.
+//! Slices return raw, unpriced fine rows and raw timing values; the merge
+//! sums the rows per `(fine group, bucket)` and concatenates the timing
+//! values, and the caller prices and folds the merged rows, so a figure never
+//! depends on how the window was cut.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -41,6 +42,7 @@ use super::aggregate::{earliest_ts_start_below, read_fine_rows};
 use super::cache_lifetimes::{LifetimesByRow, merge_lifetimes, read_lifetimes};
 use super::deadline::{CancelFlag, DeadlineGuard, ReadLimit};
 use super::grouped::QuerySpec;
+use super::timings::{TimingSamples, read_timings};
 use super::{AggRow, GroupKey, QueryError};
 
 /// How many slices a long window is read in. Four keeps the 5M-row all-time
@@ -83,6 +85,7 @@ pub(super) struct SliceRows {
     pub fine: Vec<BucketedFineRow>,
     pub lifetimes: LifetimesByRow,
     pub classes: ClassesByRow,
+    pub timings: TimingSamples,
 }
 
 /// The whole window's rows, merged across slices: one fine row per
@@ -92,6 +95,7 @@ pub(super) struct MergedRead {
     pub rows: Vec<BucketedFineRow>,
     pub lifetimes: LifetimesByRow,
     pub classes: ClassesByRow,
+    pub timings: TimingSamples,
 }
 
 /// Read `spec`'s window on `db` (whose read limit is already installed) and on
@@ -276,8 +280,8 @@ impl SliceJob<'_> {
         self.stop_on_error(read())
     }
 
-    /// Read one range on `db`: both side reads and the aggregate, in one
-    /// transaction.
+    /// Read one range on `db`: both side reads, the aggregate and the timing
+    /// values, in one transaction.
     fn read_on(&self, db: &UsageDb, (from_ms, to_ms): (i64, i64)) -> Result<SliceRows, QueryError> {
         let limit = self.limit;
         limit.check()?;
@@ -294,6 +298,7 @@ impl SliceJob<'_> {
         let lifetimes = read_lifetimes(&tx, &window, width, limit)?;
         let classes = read_error_classes(&tx, &window, width, limit)?;
         let fine = read_fine_rows(&tx, &window, width, limit)?;
+        let timings = read_timings(&tx, &window, self.spec.group_by, width, limit)?;
         // A read-only transaction has nothing to commit; finishing releases
         // the snapshot.
         tx.finish()?;
@@ -301,6 +306,7 @@ impl SliceJob<'_> {
             fine,
             lifetimes,
             classes,
+            timings,
         })
     }
 
@@ -384,12 +390,15 @@ fn clone_sqlite_error(err: &rusqlite::Error) -> rusqlite::Error {
 /// Merge the slices by `(fine group, bucket)`, in a fixed order so the
 /// caller's fold sums the same rows in the same order however the window was
 /// cut. A key read by one slice only is taken as read, so a single-slice read
-/// passes through no merge step. Checks `limit` once per fine row.
+/// passes through no merge step. Checks `limit` once per fine row, side-map
+/// entry and timing set.
 pub(super) fn merge(slices: Vec<SliceRows>, limit: &ReadLimit) -> Result<MergedRead, QueryError> {
     let mut fine: HashMap<_, FineRow> = HashMap::new();
     let mut lifetimes = LifetimesByRow::new();
     let mut classes = ClassesByRow::new();
+    let mut timings = TimingSamples::default();
     for slice in slices {
+        timings.merge(slice.timings, limit)?;
         for (row, bucket) in slice.fine {
             limit.check()?;
             match fine.entry((row.agg.key.clone(), bucket)) {
@@ -400,6 +409,7 @@ pub(super) fn merge(slices: Vec<SliceRows>, limit: &ReadLimit) -> Result<MergedR
             }
         }
         for (key, from) in slice.lifetimes {
+            limit.check()?;
             match lifetimes.entry(key) {
                 Entry::Occupied(mut merged) => merge_lifetimes(merged.get_mut(), from),
                 Entry::Vacant(slot) => {
@@ -408,6 +418,7 @@ pub(super) fn merge(slices: Vec<SliceRows>, limit: &ReadLimit) -> Result<MergedR
             }
         }
         for (key, from) in slice.classes {
+            limit.check()?;
             match classes.entry(key) {
                 Entry::Occupied(mut merged) => merge_classes(merged.get_mut(), from),
                 Entry::Vacant(slot) => {
@@ -448,6 +459,7 @@ pub(super) fn merge(slices: Vec<SliceRows>, limit: &ReadLimit) -> Result<MergedR
         rows,
         lifetimes,
         classes,
+        timings,
     })
 }
 

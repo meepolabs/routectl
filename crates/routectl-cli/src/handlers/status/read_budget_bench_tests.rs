@@ -29,7 +29,8 @@ use arc_swap::ArcSwap;
 use routectl_router::prices::PriceBook;
 use routectl_router::{Config, ProviderEntry, Router};
 use routectl_usage::{
-    CHANNEL_CAPACITY, ReadLimit, UsageCounters, UsageRecord, UsageWriter, open, open_readonly,
+    CHANNEL_CAPACITY, QueryResult, ReadLimit, UsageCounters, UsageRecord, UsageWriter, open,
+    open_readonly,
 };
 use tempfile::TempDir;
 use time::OffsetDateTime;
@@ -198,6 +199,12 @@ impl Cell {
 impl Bench<'_> {
     /// One `/status/query` read, from the parsed body to the priced panel.
     fn query_once(&self, body: &str) -> (Duration, i64) {
+        let (elapsed, data) = self.query_result(body);
+        (elapsed, data.totals.requests)
+    }
+
+    /// [`Self::query_once`], returning the whole result.
+    fn query_result(&self, body: &str) -> (Duration, QueryResult) {
         let started = Instant::now();
         let parsed = parse_body(body.as_bytes()).expect("bench body is in the vocabulary");
         let (spec, bucket) = parsed.resolve(&self.zone, self.now);
@@ -217,7 +224,7 @@ impl Bench<'_> {
             .data
             .unwrap_or_else(|| panic!("{body}: unavailable {:?}", panel.unavailable));
         assert_eq!(data.series.is_some(), wants_series, "{body}: series shape");
-        (elapsed, data.totals.requests)
+        (elapsed, data)
     }
 
     /// One `/status/usage` collection over `flag`'s window.
@@ -578,3 +585,5 @@ fn a_real_ledger_copy_answers_every_window_inside_two_seconds() {
         "cells at or over {SNAPSHOT_BUDGET_MS} ms: {over:#?}"
     );
 }
+
+include!("read_budget_percentile_tests.rs");

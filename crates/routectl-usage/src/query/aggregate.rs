@@ -147,17 +147,6 @@ WHERE ts_start >= ?1 AND ts_start < ?2
     agg_group_by!()
 );
 
-/// Row-eligibility predicate for every time-to-first-token figure: a streaming
-/// success that recorded a first-byte time. Shared by the mean's numerator /
-/// denominator AND the MAX so the two can never describe different
-/// populations -- a mid-stream failure stamps a `ttfb_ms` too, and counting it
-/// in one but not the other lets the mean exceed the max.
-macro_rules! ttft_eligible {
-    () => {
-        "stream = 1 AND outcome = 'ok' AND ttfb_ms IS NOT NULL"
-    };
-}
-
 /// One row's context size: fresh input plus cache read plus the cache-write
 /// total (both ledger eras), NULL counters contributing 0. The three are
 /// disjoint prompt dimensions, so their sum is the whole prompt the model saw.

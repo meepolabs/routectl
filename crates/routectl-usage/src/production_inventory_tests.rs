@@ -36,6 +36,7 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "query/session_ref.rs",
     "query/slices.rs",
     "query/stream_extra.rs",
+    "query/timings.rs",
     "query/would_trim.rs",
     "record.rs",
     "retention.rs",

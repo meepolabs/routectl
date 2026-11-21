@@ -31,6 +31,17 @@ macro_rules! below_watermark {
     };
 }
 
+/// Row-eligibility predicate for every time-to-first-token figure: a streaming
+/// success that recorded a first-byte time. Shared by the mean's numerator /
+/// denominator, the MAX and the percentiles so they can never describe
+/// different populations -- a mid-stream failure stamps a `ttfb_ms` too, and
+/// counting it in one but not the other lets the mean exceed the max.
+macro_rules! ttft_eligible {
+    () => {
+        "stream = 1 AND outcome = 'ok' AND ttfb_ms IS NOT NULL"
+    };
+}
+
 /// One row's cache-write total across both ledger eras: `cache_write_tokens`
 /// when the row has it; otherwise NULL when neither legacy per-tier column was
 /// reported; otherwise the legacy 5-minute plus 1-hour columns. The eras never
@@ -80,6 +91,7 @@ mod reduction;
 mod session_ref;
 mod slices;
 mod stream_extra;
+mod timings;
 mod would_trim;
 
 pub use aggregate::{

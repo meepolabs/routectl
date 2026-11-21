@@ -112,14 +112,20 @@ const SHARED: [&str; 17] = [
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 15] = [
+const QUERY_ONLY: [&str; 21] = [
     "fallback_served",
     "server_tool_present",
     "client_disconnect_pre_dispatch",
     "ttft_avg_ms",
     "ttft_max_ms",
+    "ttft_p50_ms",
+    "ttft_p90_ms",
+    "ttft_p99_ms",
     "latency_avg_ms",
     "latency_max_ms",
+    "latency_p50_ms",
+    "latency_p90_ms",
+    "latency_p99_ms",
     "throughput_tok_s",
     "ctx_avg",
     "ctx_peak",

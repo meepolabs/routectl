@@ -26,6 +26,7 @@ use super::aggregate::ClassesByRow;
 use super::cache_lifetimes::attach;
 use super::deadline::{DeadlineGuard, ReadLimit};
 use super::slices::{MergedRead, ReadPlan, WindowRows, read_merged};
+use super::timings::{Percentiles, TimingRanks};
 use super::{AggRow, GroupKey, QueryError};
 
 /// The most buckets a series may carry. The caller resolves the bucket width so
@@ -238,8 +239,10 @@ impl CostStatus {
 /// The additive fields are cross-row sums or counts. The derived fields are
 /// `Option` and are `None` -- never `0` -- when the group holds no row eligible
 /// to contribute to them, so "no data" is always distinguishable from "measured
-/// zero". The `*_avg_ms` figures are request-weighted means and the
-/// `*_max_ms` figures observed maxima; no field is a percentile.
+/// zero". The `*_avg_ms` figures are request-weighted means, the `*_max_ms`
+/// figures observed maxima, and the `*_p50_ms` / `*_p90_ms` / `*_p99_ms`
+/// figures exact nearest-rank percentiles over the same populations as the
+/// mean beside them.
 ///
 /// Every field name here IS the wire vocabulary: an absent `Option` serializes
 /// as an explicit `null` (never skipped) so a reader can tell "no eligible rows"
@@ -299,10 +302,24 @@ pub struct QueryMetrics {
     pub ttft_avg_ms: Option<i64>,
     /// Observed maximum time-to-first-token over streaming successes, ms.
     pub ttft_max_ms: Option<i64>,
+    /// Median time-to-first-token over streaming successes, ms (nearest
+    /// rank). Same population as `ttft_avg_ms`.
+    pub ttft_p50_ms: Option<i64>,
+    /// 90th-percentile time-to-first-token over streaming successes, ms.
+    pub ttft_p90_ms: Option<i64>,
+    /// 99th-percentile time-to-first-token over streaming successes, ms.
+    pub ttft_p99_ms: Option<i64>,
     /// Mean end-to-end latency over every request, ms.
     pub latency_avg_ms: Option<i64>,
     /// Observed maximum end-to-end latency, ms.
     pub latency_max_ms: Option<i64>,
+    /// Median end-to-end latency over every request, ms (nearest rank). Same
+    /// population as `latency_avg_ms`.
+    pub latency_p50_ms: Option<i64>,
+    /// 90th-percentile end-to-end latency over every request, ms.
+    pub latency_p90_ms: Option<i64>,
+    /// 99th-percentile end-to-end latency over every request, ms.
+    pub latency_p99_ms: Option<i64>,
     /// Generation throughput, output tokens/second: the output tokens of
     /// streaming successes over their summed generation time (latency after
     /// the first token). Absent when no generation time was measured.
@@ -452,26 +469,37 @@ fn read_and_fold(
     if let Some(bucket) = spec.bucket {
         check_bucket(bucket, spec.from_ms)?;
     }
-    let read = read_merged(db, spec, limit, plan)?;
+    let mut read = read_merged(db, spec, limit, plan)?;
+    let ranks =
+        std::mem::take(&mut read.timings).finish(spec.bucket.map(|bucket| bucket.count), limit)?;
     let (groups, buckets) = fold(spec, read, &price, limit)?;
 
     let mut totals = GroupAcc::default();
     for acc in groups.values() {
+        limit.check()?;
         totals.merge(acc);
     }
+    let TimingRanks {
+        groups: group_ranks,
+        totals: total_ranks,
+        buckets: bucket_ranks,
+    } = ranks;
     let series = spec
         .bucket
-        .map(|bucket| densify(bucket, spec.from_ms, buckets));
+        .map(|bucket| densify(bucket, spec.from_ms, buckets, &bucket_ranks));
     let groups = groups
         .into_iter()
-        .map(|(label, acc)| QueryGroup {
-            label,
-            metrics: acc.finish(),
+        .map(|(label, acc)| {
+            let ranks = group_ranks.get(&label).copied().unwrap_or_default();
+            QueryGroup {
+                label,
+                metrics: acc.finish(ranks),
+            }
         })
         .collect();
     Ok(QueryResult {
         groups,
-        totals: totals.finish(),
+        totals: totals.finish(total_ranks),
         series,
     })
 }
@@ -504,6 +532,7 @@ fn fold(
         rows,
         mut lifetimes,
         mut classes,
+        timings: _,
     } = read;
     let mut window = WindowRows::default();
     let mut buckets: BTreeMap<i64, GroupAcc> = BTreeMap::new();
@@ -581,6 +610,9 @@ fn debug_assert_classes_attached(classes: &ClassesByRow) {
 /// a zero-traffic bucket reports `requests: 0` with every derived metric absent
 /// rather than a fabricated measurement.
 ///
+/// Each bucket takes its timing percentiles from `ranks`, indexed like the
+/// grid.
+///
 /// A window that matched NO row at all short-circuits that fill and yields an
 /// EMPTY series: it has nothing to plot, and up to a thousand zero buckets would
 /// present an empty ledger as a measured flat line.
@@ -591,6 +623,7 @@ fn densify(
     bucket: BucketSpec,
     anchor_ms: i64,
     mut buckets: BTreeMap<i64, GroupAcc>,
+    ranks: &[Percentiles],
 ) -> QuerySeries {
     let filled = if buckets.is_empty() {
         Vec::new()
@@ -598,7 +631,10 @@ fn densify(
         (0..bucket.count)
             .map(|i| SeriesBucket {
                 start_ms: anchor_ms + i as i64 * bucket.width_ms,
-                metrics: buckets.remove(&(i as i64)).unwrap_or_default().finish(),
+                metrics: buckets
+                    .remove(&(i as i64))
+                    .unwrap_or_default()
+                    .finish(ranks.get(i).copied().unwrap_or_default()),
             })
             .collect()
     };
@@ -780,10 +816,11 @@ impl GroupAcc {
             .extend(other.missing_price_dimensions.iter().cloned());
     }
 
-    /// Resolve the derived metrics and the cost tri-state. Every division is
+    /// Resolve the derived metrics and the cost tri-state, with the set's
+    /// timing percentiles `ranks` read beside the aggregate. Every division is
     /// guarded by its own eligible-row count, so a zero denominator yields
     /// `None` instead of a divide or a misleading zero.
-    fn finish(self) -> QueryMetrics {
+    fn finish(self, ranks: Percentiles) -> QueryMetrics {
         let (cost_usd, cost_status) = self.cost();
         let equivalent_cost_usd = self.equivalent_cost();
         QueryMetrics {
@@ -809,8 +846,14 @@ impl GroupAcc {
             errors_by_class: self.errors_by_class,
             ttft_avg_ms: mean_i64(self.ttft_sum, self.ttft_count),
             ttft_max_ms: self.ttfb_max,
+            ttft_p50_ms: ranks.ttft_p50_ms,
+            ttft_p90_ms: ranks.ttft_p90_ms,
+            ttft_p99_ms: ranks.ttft_p99_ms,
             latency_avg_ms: mean_i64(self.latency_sum, self.requests),
             latency_max_ms: self.latency_max,
+            latency_p50_ms: ranks.latency_p50_ms,
+            latency_p90_ms: ranks.latency_p90_ms,
+            latency_p99_ms: ranks.latency_p99_ms,
             throughput_tok_s: ratio(self.gen_output_tokens as f64 * 1000.0, self.gen_window_ms),
             ctx_avg: mean_i64(self.ctx_sum, self.ctx_count),
             ctx_peak: self.ctx_max,

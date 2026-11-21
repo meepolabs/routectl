@@ -362,6 +362,89 @@ fn raw_marks_for(row: usize, pad: &str) -> Option<String> {
     Some(padded_json("marks", pad, len))
 }
 
+/// The quantile curve of time-to-first-token on a copy of a real ledger
+/// (913,444 streaming successes, measured with sqlite3 by nearest rank):
+/// `(quantile, ms)`, heavy-tailed, so a sort over the fixture's values costs
+/// what one over a real ledger's does.
+const TTFT_QUANTILES_MS: [(f64, f64); 23] = [
+    (0.0, 157.0),
+    (0.001, 505.0),
+    (0.01, 639.0),
+    (0.05, 827.0),
+    (0.1, 1_094.0),
+    (0.2, 1_635.0),
+    (0.3, 2_464.0),
+    (0.4, 3_296.0),
+    (0.5, 3_910.0),
+    (0.6, 4_938.0),
+    (0.7, 6_419.0),
+    (0.8, 9_289.0),
+    (0.85, 12_857.0),
+    (0.9, 21_755.0),
+    (0.93, 35_287.0),
+    (0.95, 51_053.0),
+    (0.97, 75_906.0),
+    (0.98, 96_500.0),
+    (0.99, 135_165.0),
+    (0.995, 175_118.0),
+    (0.999, 294_287.0),
+    (0.9999, 570_190.0),
+    (1.0, 1_026_672.0),
+];
+
+/// The same ledger's end-to-end latency curve over its 941,372 inference
+/// rows.
+const LATENCY_QUANTILES_MS: [(f64, f64); 23] = [
+    (0.0, 1.0),
+    (0.001, 1.0),
+    (0.01, 623.0),
+    (0.05, 1_054.0),
+    (0.1, 1_573.0),
+    (0.2, 2_834.0),
+    (0.3, 3_600.0),
+    (0.4, 4_407.0),
+    (0.5, 5_447.0),
+    (0.6, 6_826.0),
+    (0.7, 9_224.0),
+    (0.8, 14_311.0),
+    (0.85, 19_872.0),
+    (0.9, 31_434.0),
+    (0.93, 45_781.0),
+    (0.95, 60_831.0),
+    (0.97, 86_711.0),
+    (0.98, 109_161.0),
+    (0.99, 151_304.0),
+    (0.995, 194_178.0),
+    (0.999, 318_975.0),
+    (0.9999, 662_888.0),
+    (1.0, 1_195_489.0),
+];
+
+/// The value at quantile `q` of `curve`, interpolated geometrically between
+/// its points.
+fn quantile_ms(curve: &[(f64, f64)], q: f64) -> i64 {
+    let at = curve
+        .windows(2)
+        .position(|pair| q <= pair[1].0)
+        .unwrap_or(curve.len() - 2);
+    let ((q0, v0), (q1, v1)) = (curve[at], curve[at + 1]);
+    let t = ((q - q0) / (q1 - q0)).clamp(0.0, 1.0);
+    (v0 * (v1 / v0).powf(t)).round() as i64
+}
+
+/// A row's `(ttfb_ms, latency_ms)` draw: the TTFT from its curve, the latency
+/// from its own curve at a nearby quantile and never below the TTFT, so the
+/// two are correlated as on disk. The latency quantile moves by up to a tenth
+/// of the distance to the nearer end, so the tails keep their own shape.
+fn timing_for(row: usize) -> (i64, i64) {
+    let q = (draw(row, 30) % 1_000_000) as f64 / 1_000_000.0;
+    let jitter = ((draw(row, 31) % 100_000) as f64 - 50_000.0) / 500_000.0;
+    let ttft = quantile_ms(&TTFT_QUANTILES_MS, q);
+    let latency_q = q + jitter * q.min(1.0 - q);
+    let latency = quantile_ms(&LATENCY_QUANTILES_MS, latency_q);
+    (ttft, latency.max(ttft + (draw(row, 32) % 2_000) as i64))
+}
+
 /// A time-ordered 36-character id, so the unique `request_id` index grows at
 /// its right edge the way a UUIDv7 key does.
 fn ordered_id(ts: i64, row: usize) -> String {
@@ -408,7 +491,7 @@ fn insert_live_mix_row(
     let quota = quota_for(lane, row, ts, pad);
     let ok = outcome == "ok";
     let stream = i64::from(draw(row, 15) % 1_000 >= 13);
-    let latency = 400 + (draw(row, 16) % 30_000) as i64;
+    let (ttft, latency) = timing_for(row);
     let operation = operation_era.then(|| {
         if draw(row, 17).is_multiple_of(90) {
             "count_tokens"
@@ -435,7 +518,7 @@ fn insert_live_mix_row(
         error_class,
         ok.then_some("end_turn"),
         latency,
-        (draw(row, 21) % 100 < 98).then(|| 150 + (draw(row, 22) % 3_000) as i64),
+        (draw(row, 21) % 100 < 98).then_some(ttft),
         (draw(row, 23) % 14_500) as i64,
         (draw(row, 24) % 2_056) as i64,
         (draw(row, 25) % 100 < 43).then(|| (draw(row, 26) % 800) as i64),
@@ -509,6 +592,8 @@ struct FixtureStats {
     quota_bearing: i64,
     table_bytes: i64,
     fine_groups: i64,
+    distinct_ttfb: i64,
+    distinct_latency: i64,
 }
 
 const FIXTURE_STATS_SQL: &str = "SELECT COUNT(*), \
@@ -540,6 +625,13 @@ impl FixtureStats {
         let fine_groups: i64 = conn
             .query_row(FINE_GROUPS_SQL, [], |r| r.get(0))
             .expect("fine groups");
+        let (distinct_ttfb, distinct_latency): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT ttfb_ms), COUNT(DISTINCT latency_ms) FROM requests",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("distinct timings");
         conn.query_row(FIXTURE_STATS_SQL, [], |r| {
             Ok(Self {
                 rows: r.get(0)?,
@@ -555,6 +647,8 @@ impl FixtureStats {
                 quota_bearing: r.get(10)?,
                 table_bytes,
                 fine_groups,
+                distinct_ttfb,
+                distinct_latency,
             })
         })
         .expect("fixture stats")
@@ -589,6 +683,10 @@ impl FixtureStats {
             self.pct(self.error_rows),
             self.pct(self.null_seat),
             self.pct(self.quota_bearing)
+        );
+        println!(
+            "ledger timings: distinct ttfb_ms={} distinct latency_ms={}",
+            self.distinct_ttfb, self.distinct_latency
         );
     }
 
