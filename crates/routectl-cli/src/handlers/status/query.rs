@@ -616,8 +616,9 @@ fn stall_until_stopped(limit: &ReadLimit) {
 }
 
 /// Open the ledger read-only, run the grouped aggregate under `limit`, and map
-/// the outcome to a panel, beside the ledger's earliest inference row. Runs on a blocking worker (SQLite is synchronous);
-/// the connection is opened and dropped within this call.
+/// the outcome to a panel, beside the ledger's earliest inference row. Runs
+/// on a blocking worker (SQLite is synchronous); the connection is opened and
+/// dropped within this call.
 ///
 /// The seat grouping's entry accounts are taken from `pricer`, so a row's
 /// label and its price read one config snapshot.

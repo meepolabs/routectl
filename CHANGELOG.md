@@ -986,7 +986,7 @@ list with more narrative.
 
 ### Fixed
 
-- **A wide status-page table can be scrolled from the keyboard.** Each table that scrolls inside its card (the Config tables, Doctor's capability matrix) is now a focusable region named after its table, so Tab stops on it, the arrow keys scroll it, and a screen reader announces which table it is.
+- **A wide status-page table can be scrolled from the keyboard.** Each table that scrolls inside its card (the Config, Traffic and Models tables) is now a focusable region named after its table, so Tab stops on it, the arrow keys scroll it, and a screen reader announces which table it is.
 
 - **A window a usage report stops reporting still binds pace placement.** When a complete usage poll omits a running window (Anthropic `"five_hour": null` or `"seven_day": null`, a missing `seven_day_opus`, or a Codex body without `primary_window` or `secondary_window`), the seat is ranked on that window's last reading, instead of standing `roomy` as `no_cap` or on its other windows alone. Such a window binds until its reset or until a reading for it is accepted; a lower or unstarted reading for it is refused as `contradictory` until three consecutive readings agree, as for a window still reported, so one omitting poll and one low reading never make the seat look roomy. Any window other than the five-hour also stops binding once three polls in a row have omitted it. `/status/accounts` lists such a window with a new `kept: true` field on its window row (additive, schema stays 1).
 
