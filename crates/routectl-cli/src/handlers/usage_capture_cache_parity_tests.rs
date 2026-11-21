@@ -1,7 +1,8 @@
 //! A request's cache writes are recorded the same whether its response was
 //! complete or streamed. Each row's usage runs through the real Anthropic
 //! complete parser and the real stream parser into a capture, and both
-//! records must carry the same write total, lifetime split and new input.
+//! records must carry the same write total, lifetime split and new input,
+//! except where a row states why a streamed split differs.
 //! The auto-cache outcome and the per-request cache summary read that total.
 
 use std::collections::BTreeMap;
@@ -76,22 +77,35 @@ fn record_from_stream(opener: &str, delta: &str) -> UsageRecord {
     capture.record.clone()
 }
 
+type Split = Option<&'static [(u32, u64)]>;
+
+/// The lifetime split each path must record.
+struct Splits {
+    complete: Split,
+    stream: Split,
+}
+
+const fn same(split: Split) -> Splits {
+    Splits {
+        complete: split,
+        stream: split,
+    }
+}
+
 /// One request's usage as a complete body and as a stream's opener and
-/// closing delta, with the cache-write columns both records must carry.
+/// closing delta, with the cache-write columns each record must carry.
 struct ParityRow {
     name: &'static str,
     complete: &'static str,
     opener: &'static str,
     delta: &'static str,
     total: Option<u64>,
-    split: Option<&'static [(u32, u64)]>,
+    split: Splits,
 }
 
 /// Every way a record's cache-write columns differ from the row, as text.
-fn mismatches(row: &ParityRow, path: &str, record: &UsageRecord) -> Vec<String> {
-    let split = row
-        .split
-        .map(|pairs| pairs.iter().copied().collect::<BTreeMap<_, _>>());
+fn mismatches(row: &ParityRow, path: &str, want: Split, record: &UsageRecord) -> Vec<String> {
+    let split = want.map(|pairs| pairs.iter().copied().collect::<BTreeMap<_, _>>());
     let mut out = Vec::new();
     if record.cache_write_tokens != row.total {
         out.push(format!(
@@ -126,14 +140,14 @@ fn mismatches(row: &ParityRow, path: &str, record: &UsageRecord) -> Vec<String> 
 /// (<https://platform.claude.com/docs/en/build-with-claude/streaming>).
 const TOTAL_ONLY_2523: &str = r#"{"input_tokens":2,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"output_tokens":7}"#;
 
-const PARITY_ROWS: [ParityRow; 8] = [
+const PARITY_ROWS: [ParityRow; 9] = [
     ParityRow {
         name: "split",
         complete: r#"{"input_tokens":2,"output_tokens":7,"cache_creation_input_tokens":10,"cache_read_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6}}"#,
         opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":10,"cache_read_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6}}"#,
         delta: r#"{"input_tokens":2,"output_tokens":7,"cache_creation_input_tokens":10,"cache_read_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6}}"#,
         total: Some(10),
-        split: Some(&[(300, 4), (3600, 6)]),
+        split: same(Some(&[(300, 4), (3600, 6)])),
     },
     ParityRow {
         name: "total only",
@@ -141,7 +155,7 @@ const PARITY_ROWS: [ParityRow; 8] = [
         opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0}"#,
         delta: TOTAL_ONLY_2523,
         total: Some(2523),
-        split: None,
+        split: same(None),
     },
     ParityRow {
         name: "observed zero",
@@ -149,7 +163,7 @@ const PARITY_ROWS: [ParityRow; 8] = [
         opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
         delta: r#"{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":7}"#,
         total: Some(0),
-        split: Some(&[(300, 0), (3600, 0)]),
+        split: same(Some(&[(300, 0), (3600, 0)])),
     },
     ParityRow {
         name: "absent",
@@ -157,7 +171,7 @@ const PARITY_ROWS: [ParityRow; 8] = [
         opener: r#"{"input_tokens":2,"output_tokens":1}"#,
         delta: r#"{"output_tokens":7}"#,
         total: None,
-        split: None,
+        split: same(None),
     },
     ParityRow {
         name: "30m lifetime",
@@ -165,7 +179,7 @@ const PARITY_ROWS: [ParityRow; 8] = [
         opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":640,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_30m_input_tokens":640}}"#,
         delta: r#"{"input_tokens":2,"cache_creation_input_tokens":640,"cache_read_input_tokens":0,"output_tokens":7}"#,
         total: Some(640),
-        split: Some(&[(1800, 640)]),
+        split: same(Some(&[(1800, 640)])),
     },
     ParityRow {
         name: "refused name keeps the total and leaves the split",
@@ -173,7 +187,7 @@ const PARITY_ROWS: [ParityRow; 8] = [
         opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":1000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":600,"ephemeral_input_tokens":400}}"#,
         delta: r#"{"input_tokens":2,"output_tokens":7,"cache_creation_input_tokens":1000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":600,"ephemeral_input_tokens":400}}"#,
         total: Some(1000),
-        split: Some(&[(300, 600)]),
+        split: same(Some(&[(300, 600)])),
     },
     ParityRow {
         name: "opener split with a total-only delta",
@@ -181,15 +195,29 @@ const PARITY_ROWS: [ParityRow; 8] = [
         opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":2523}}"#,
         delta: TOTAL_ONLY_2523,
         total: Some(2523),
-        split: Some(&[(300, 2523)]),
+        split: same(Some(&[(300, 2523)])),
     },
+    // A server tool writes cache after the opener: the stream keeps the
+    // opener's split as a partial split of the larger closing total, while a
+    // complete body that states only the total has no split to record.
     ParityRow {
-        name: "mismatching total",
+        name: "opener split below the closing total is kept only when streamed",
         complete: r#"{"input_tokens":2,"output_tokens":7,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0}"#,
         opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":2000}}"#,
         delta: TOTAL_ONLY_2523,
         total: Some(2523),
-        split: None,
+        split: Splits {
+            complete: None,
+            stream: Some(&[(300, 2000)]),
+        },
+    },
+    ParityRow {
+        name: "opener split above the closing total is dropped",
+        complete: r#"{"input_tokens":2,"output_tokens":7,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0}"#,
+        opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":3000,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":3000}}"#,
+        delta: TOTAL_ONLY_2523,
+        total: Some(2523),
+        split: same(None),
     },
 ];
 
@@ -201,8 +229,8 @@ fn complete_and_streamed_usage_record_the_same_cache_writes() {
         .flat_map(|row| {
             let complete = record_from_complete(row.complete);
             let stream = record_from_stream(row.opener, row.delta);
-            let mut found = mismatches(row, "complete", &complete);
-            found.extend(mismatches(row, "stream", &stream));
+            let mut found = mismatches(row, "complete", row.split.complete, &complete);
+            found.extend(mismatches(row, "stream", row.split.stream, &stream));
             found
         })
         .collect();
