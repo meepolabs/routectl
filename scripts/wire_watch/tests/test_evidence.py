@@ -237,11 +237,13 @@ class IncompleteCellTests(EvidenceTestCase):
         self.assertIncomplete(evidence.read_cell(cell.out), IncompleteReason.SNAPSHOT_SHAPE, "health.json")
 
     def test_unknown_usage_schema_version(self) -> None:
-        body = usage_body()
-        body["schema_version"] = 0
-        cell = make_cell(self.root, usage=body)
+        for name, version in (("zero", 0), ("previous", evidence.USAGE_SCHEMA_VERSION - 1)):
+            with self.subTest(name):
+                body = usage_body()
+                body["schema_version"] = version
+                cell = make_cell(os.path.join(self.root, name), usage=body)
 
-        self.assertIncomplete(evidence.read_cell(cell.out), IncompleteReason.SNAPSHOT_SCHEMA, "usage.json")
+                self.assertIncomplete(evidence.read_cell(cell.out), IncompleteReason.SNAPSHOT_SCHEMA, "usage.json")
 
     def test_missing_client_result(self) -> None:
         cell = make_cell(self.root)

@@ -88,7 +88,7 @@ def usage_text() -> str:
         "complete": True,
     }
     data = {
-        "window": "all", "from_ms": 0, "to_ms": 1, "totals": totals, "groups": [], "quota": [],
+        "window": "all", "from_ms": 0, "to_ms": 1, "totals": totals, "groups": [],
         "observation": observation,
     }
     return json.dumps({
