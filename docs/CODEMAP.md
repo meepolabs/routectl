@@ -3240,6 +3240,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `count_tokens`, and `feature_filter`; the shared leaf keeps
   `feature_filter` from importing out of `dispatch`, so the import edge
   between them is one-way
+- `src/router/alias_resolve.rs` -- config-only alias resolution, exported
+  from the crate root: `resolve_alias_value` (exact key, longest prefix
+  glob, direct nickname, `default`) and `alias_steps` (each top-level chain
+  entry as an `AliasStep {name, kind: Model|Alias, models}`, expanded by
+  `expand_alias_value`'s rules and depth bound, an `Error::Config` past
+  `ALIAS_MAX_RECURSION_DEPTH`). Reads no installed model table and has no
+  dispatch side effects; welded to `dispatch_chain` by its tests
 - `src/router/chain.rs` -- alias/chain resolution and expansion into dispatch
   targets:
   `resolve_v6_alias`/`resolve_default_alias`/`expand_alias_value`/`dispatch_chain`/`dispatch_chain_for_request`,

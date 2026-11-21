@@ -18,9 +18,9 @@ use routectl_core::context_reduction::{ReductionOutcome, apply_json_minify};
 use routectl_core::schema::Role;
 use routectl_core::{ChatRequest, Error, RefusalReason, Result, scan_volatile};
 use routectl_router::{
-    ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CacheRules, Config, GateDecision,
-    KeepReason, PrefixReductionCandidate, SteadyStateTrimParams, break_even_k, cache_rules,
-    collect_config_validation, evaluate, propose_steady_state_trim,
+    CacheRules, Config, GateDecision, KeepReason, PrefixReductionCandidate, SteadyStateTrimParams,
+    alias_steps, break_even_k, cache_rules, collect_config_validation, evaluate,
+    propose_steady_state_trim, resolve_alias_value,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -364,8 +364,7 @@ fn serialized_len<T: serde::Serialize>(value: &T) -> usize {
 /// entry and reads `cache_capability().supports_top_level_cache_control`.
 /// Returns `None` (indeterminate) when any hop cannot be resolved offline.
 fn resolve_supports_top_level(config: &Config, alias: &str) -> Option<bool> {
-    let value = resolve_alias_value(config, alias)?;
-    let nickname = first_nickname(config, value, 0)?;
+    let nickname = first_nickname(config, alias)?;
     let model = config.models.get(&nickname)?;
     let provider = config.providers.get(&model.provider)?;
     Some(provider.cache_capability().supports_top_level_cache_control)
@@ -378,64 +377,22 @@ fn resolve_supports_top_level(config: &Config, alias: &str) -> Option<bool> {
 /// by; `model` is the resolved upstream id. Returns `None` when any hop
 /// cannot be resolved offline.
 fn resolve_target(config: &Config, alias: &str) -> Option<(&'static str, String)> {
-    let value = resolve_alias_value(config, alias)?;
-    let nickname = first_nickname(config, value, 0)?;
+    let nickname = first_nickname(config, alias)?;
     let model = config.models.get(&nickname)?;
     let provider = config.providers.get(&model.provider)?;
     Some((provider.kind_str(), model.upstream.clone()))
 }
 
-/// Resolve an alias key to its `AliasValue` via the router's precedence:
-/// exact key, then longest-prefix glob, then direct-nickname (synthesized as a
-/// single), then the `default` catch-all.
-fn resolve_alias_value(config: &Config, alias: &str) -> Option<AliasValue> {
-    if let Some(v) = config.aliases.get(alias) {
-        return Some(v.clone());
-    }
-    if let Some(v) = longest_glob_match(config, alias) {
-        return Some(v);
-    }
-    if config.models.contains_key(alias) {
-        return Some(AliasValue::Single(alias.to_string()));
-    }
-    config.aliases.get("default").cloned()
-}
-
-/// Longest-prefix glob match over the alias table, mirroring the router's
-/// `PrefixIndex` ordering (longest matching prefix wins). Malformed glob keys
-/// are skipped here; `validate_alias_patterns` rejects them at the guards.
-fn longest_glob_match(config: &Config, alias: &str) -> Option<AliasValue> {
-    config
-        .aliases
-        .iter()
-        .filter_map(|(key, value)| match AliasPattern::parse(key) {
-            Ok(p @ AliasPattern::Prefix(_)) if p.matches(alias) => {
-                Some((p.prefix_len(), value.clone()))
-            }
-            _ => None,
-        })
-        .max_by_key(|(len, _)| *len)
-        .map(|(_, value)| value)
-}
-
-/// First model nickname an alias value expands to, recursing through nested
-/// alias keys exactly as the router's `expand_alias_value` does (alias keys
-/// win over model nicknames). Bounded recursion depth guards against a cycle a
-/// glob hit could re-introduce; the static validator catches cycles earlier.
-fn first_nickname(config: &Config, value: AliasValue, depth: usize) -> Option<String> {
-    if depth > ALIAS_MAX_RECURSION_DEPTH {
-        return None;
-    }
-    for entry in value.nicknames() {
-        if let Some(nested) = config.aliases.get(entry) {
-            if let Some(found) = first_nickname(config, nested.clone(), depth + 1) {
-                return Some(found);
-            }
-        } else if config.models.contains_key(entry) {
-            return Some(entry.to_string());
-        }
-    }
-    None
+/// First model nickname a wire name dispatches to, by the router's own
+/// config-only resolver. `None` when nothing resolves or the chain exceeds
+/// the recursion cap.
+fn first_nickname(config: &Config, alias: &str) -> Option<String> {
+    let value = resolve_alias_value(config, alias)?;
+    alias_steps(config, &value)
+        .ok()?
+        .into_iter()
+        .flat_map(|step| step.models)
+        .next()
 }
 
 pub fn run(
@@ -972,27 +929,6 @@ fast = "sonnet"
 
         // Assert
         assert_eq!(supports, Some(false));
-    }
-
-    #[test]
-    fn first_nickname_returns_none_for_chain_deeper_than_recursion_cap() {
-        // Arrange: a chain of alias keys a0 -> a1 -> ... that never reaches a
-        // model nickname within ALIAS_MAX_RECURSION_DEPTH hops. Each aN points
-        // to a(N+1), which is itself another alias key (never a model).
-        let mut config = Config::default();
-        let chain_len = ALIAS_MAX_RECURSION_DEPTH + 4;
-        for i in 0..chain_len {
-            config
-                .aliases
-                .insert(format!("a{i}"), AliasValue::Single(format!("a{}", i + 1)));
-        }
-
-        // Act: start the walk at the head of the over-deep chain.
-        let head = config.aliases.get("a0").cloned().unwrap();
-        let resolved = first_nickname(&config, head, 0);
-
-        // Assert: the shared cap stops the walk before any nickname resolves.
-        assert_eq!(resolved, None);
     }
 
     #[test]

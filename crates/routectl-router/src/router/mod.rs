@@ -25,6 +25,7 @@ use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::ProviderState;
 
+mod alias_resolve;
 mod beta_report_learn;
 mod beta_withhold;
 mod breaker_transition;
@@ -82,6 +83,7 @@ mod window_gate;
 mod wire_check;
 mod wire_rejection;
 mod wire_response;
+pub use alias_resolve::{AliasStep, AliasStepKind, alias_steps, resolve_alias_value};
 pub use capability_cleared::CapabilityClearedEvent;
 pub use capability_health::CapabilityPersistenceHealth;
 pub use capability_learn::CapabilityLearnEvent;

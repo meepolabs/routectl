@@ -198,6 +198,7 @@ pub use router::{
     ResolvedLearnedLane, ResponseCheck, Router, RouterOptions, SeatPlacement, StreamEvidence,
     acting_field_verdicts, class_debits,
 };
+pub use router::{AliasStep, AliasStepKind, alias_steps, resolve_alias_value};
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{
     FieldVerdictStatusSpec, field_verdict_event_stamps_for_tests, make_field_canary_due_for_tests,
