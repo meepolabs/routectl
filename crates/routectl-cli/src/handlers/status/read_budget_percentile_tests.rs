@@ -259,7 +259,13 @@ fn exact_timing_percentiles_on_a_real_ledger_copy() {
     for path in [ledger.clone(), with_suffix(&ledger, "-wal")] {
         if path.exists() {
             let mut perms = std::fs::metadata(&path).expect("stat copy").permissions();
+            #[cfg(unix)]
             std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o600);
+            // Windows keeps no mode bits; the copy inherits only the
+            // read-only attribute, and clearing it there widens nothing.
+            #[cfg(not(unix))]
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
             std::fs::set_permissions(&path, perms).expect("make the copy writable");
         }
     }
