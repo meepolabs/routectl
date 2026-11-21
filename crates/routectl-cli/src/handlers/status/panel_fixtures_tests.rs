@@ -184,7 +184,7 @@ fn each_fixture_has_no_empty_array_and_no_always_null_key() {
 }
 
 #[test]
-fn the_aggregate_carries_the_six_get_panels_densely_at_their_versions() {
+fn the_aggregate_carries_the_seven_get_panels_densely_at_their_versions() {
     let aggregate = aggregate_json();
     let exceptions = [
         DensityException {
@@ -212,6 +212,18 @@ fn the_aggregate_carries_the_six_get_panels_densely_at_their_versions() {
             ..UNAVAILABLE
         },
         DensityException {
+            path: "panels.models.unavailable",
+            ..UNAVAILABLE
+        },
+        DensityException {
+            path: "panels.models.data.rows[].refusals",
+            ..NO_REFUSALS
+        },
+        DensityException {
+            path: "panels.models.data.rows[].transit.top_paths",
+            ..UNMEASURED
+        },
+        DensityException {
             path: "panels.accounts.data.accounts[].windows",
             ..NO_WINDOWS
         },
@@ -235,6 +247,7 @@ fn the_aggregate_carries_the_six_get_panels_densely_at_their_versions() {
         ("doctor", doctor::DOCTOR_SCHEMA_VERSION),
         ("accounts", accounts::SCHEMA_VERSION),
         ("attention", attention::SCHEMA_VERSION),
+        ("models", models::SCHEMA_VERSION),
     ] {
         assert_eq!(
             aggregate["panels"][panel]["schema_version"],

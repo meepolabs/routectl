@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use routectl_core::UpstreamReason;
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 use routectl_core::wire_check::WirePath;
+use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::wire_check_state::{
     CheckOutcome, TRANSIT_PATH_CAP, WireCheckState, WireTransitSnapshot,
@@ -23,6 +24,7 @@ use super::super::panel_fixtures::{
     FIXTURE_NOW_MS, fixture_as_of, fixture_config, fixture_targets,
 };
 use super::super::router_view::AccountCredential;
+use super::super::utc_rfc3339;
 use super::{ModelInputs, ModelsPanel, Panel, SCHEMA_VERSION, models_panel};
 use crate::commands::doctor::{SeatFix, capability_columns};
 use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedLane, lane_metas, resolve_lanes};
@@ -51,6 +53,27 @@ pub fn populated_models_panel() -> Panel<ModelsPanel> {
         transit: transit(),
     });
     Panel::available(SCHEMA_VERSION, fixture_as_of(), dto)
+}
+
+/// The models panel over `targets` at `now_ms`, built through the panel's
+/// own projection: lane cells resolved over `config` with nothing learned,
+/// and a transit tally that has sampled nothing since `now_ms`.
+pub fn models_panel_of(
+    config: &Config,
+    targets: Vec<RouteTargetStatus>,
+    credentials: BTreeMap<String, AccountCredential>,
+    now_ms: i64,
+) -> Panel<ModelsPanel> {
+    let mut transit = WireCheckState::default().transit_snapshot();
+    transit.started_ms = u64::try_from(now_ms).expect("the fixture instant is after the epoch");
+    let dto = models_panel(ModelInputs {
+        now_ms,
+        targets,
+        credentials,
+        lanes: resolved_lanes(config, &[], Instant::now()),
+        transit,
+    });
+    Panel::available(SCHEMA_VERSION, utc_rfc3339(now_ms), dto)
 }
 
 /// Every routed lane of `config` resolved over `entries`, as the facade

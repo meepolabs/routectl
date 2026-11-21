@@ -5909,7 +5909,8 @@ a field or token, or changing what one means, bumps it.
 
 #### Model rows on `/status/models`
 
-The running daemon's `/status/models` panel (schema 1) has one row per
+The running daemon's `/status/models` panel (schema 1, also under
+`panels.models` on the `/status` aggregate) has one row per
 learned lane the served config dispatches to: a `[providers]` entry and the
 upstream model id it sends, the key the learned capability store and
 `routectl capability purge` use. It is read from memory only: no usage

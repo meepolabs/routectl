@@ -730,3 +730,66 @@ fn the_populated_fixture_carries_every_row_field_and_the_start_stamp() {
         "problem rows first"
     );
 }
+
+// ------------------------------------------------------------- the aggregate
+
+/// The envelope with its read stamp removed: the one field two reads of the
+/// same state may differ in.
+fn without_as_of(mut envelope: Value) -> Value {
+    envelope
+        .as_object_mut()
+        .expect("an envelope object")
+        .remove("as_of");
+    envelope
+}
+
+/// One daemon state read through `panels.models` on `/status` and then
+/// through `/status/models` serializes to the same bytes, read stamp aside:
+/// a parked seat (a problem row with a cause), a sampled lane's transit and
+/// two nicknames on one lane. The state carries no clock-derived field but
+/// `as_of`, so the comparison needs no other tolerance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_aggregate_member_serializes_the_standalone_payload() {
+    // Arrange
+    let config = routectl_router::parse_config(&lanes_config()).expect("fixture parses");
+    let secrets: Arc<dyn routectl_auth::SecretStore> = Arc::new(TestSecrets);
+    let router = crate::server::build_router_from_config(Arc::new(config), secrets)
+        .await
+        .expect("router builds");
+    let seat_a = router
+        .status_targets(Instant::now())
+        .into_iter()
+        .find(|target| target.provider_name == "seat-a")
+        .expect("premise: a seat-a target")
+        .state_key;
+    assert!(router.park_credential_for_tests(
+        &seat_a,
+        routectl_core::UpstreamReason::CredentialInvalid,
+        Instant::now() + std::time::Duration::from_hours(1),
+    ));
+    let shared = StateKey::parse("api#shared").expect("lane key");
+    let path = WirePath::from_segments(["choices"]);
+    router.wire_check_state_for_tests().record_transit(
+        Some(&shared),
+        CheckOutcome::Loss,
+        std::iter::once(&path),
+    );
+    let state = status_state(router);
+
+    // Act
+    let aggregate = get(&state, "/status").await;
+    let standalone = get(&state, "/status/models").await;
+
+    // Assert
+    let member = without_as_of(aggregate["panels"]["models"].clone());
+    let route = without_as_of(standalone);
+    let parked = row(&member, "seat-a#claude-sonnet-4-6");
+    assert_eq!(parked["state"], "account_parked", "{member:#}");
+    assert!(parked["cause_key"].is_string(), "{parked}");
+    assert_eq!(row(&member, "api#shared")["transit"]["changed"], 1);
+    assert_eq!(member["schema_version"], SCHEMA_VERSION);
+    assert_eq!(
+        serde_json::to_string(&member).expect("member serializes"),
+        serde_json::to_string(&route).expect("route serializes"),
+    );
+}

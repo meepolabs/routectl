@@ -19,6 +19,7 @@ const PANEL_FIELD_LISTS: &[(&str, &str)] = &[
     ("doctor", "DOCTOR_FIELDS"),
     ("attention", "ATTENTION_FIELDS"),
     ("accounts", "ACCOUNTS_FIELDS"),
+    ("models", "MODELS_FIELDS"),
 ];
 
 /// The query vocabulary lists, already pinned to `QueryMetrics` by

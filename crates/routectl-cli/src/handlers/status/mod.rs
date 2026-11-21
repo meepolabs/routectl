@@ -91,7 +91,7 @@ use router_view::{StatusRouterHandle, UnpinnedPricer};
 ///
 /// Waiting on it cannot deadlock. Tower admits at most [`STATUS_MAX_INFLIGHT`]
 /// requests, and an admitted request holds at most ONE builder permit at a time
-/// (the `/status` aggregate awaits its six panels sequentially, in
+/// (the `/status` aggregate awaits its seven panels sequentially, in
 /// `status_aggregate`), so there is no hold-and-wait edge to close a cycle
 /// with. In the uncancelled steady state it is therefore never contended; it
 /// blocks only in the case it exists for, a permit still held by a detached
@@ -550,7 +550,7 @@ pub fn status_router() -> AxumRouter<Arc<StatusState>> {
         .route("/status/query", any(query::handler))
 }
 
-/// The `/status` aggregate: composes the six GET panels into one envelope.
+/// The `/status` aggregate: composes the seven GET panels into one envelope.
 ///
 /// Each panel is an INDEPENDENT envelope carrying its own `schema_version`,
 /// `as_of`, and availability -- there is deliberately no outer envelope
@@ -570,16 +570,17 @@ struct AggregatePanels {
     doctor: Panel<doctor::DoctorPanel>,
     accounts: Panel<accounts::AccountsPanel>,
     attention: Panel<attention::AttentionPanel>,
+    models: Panel<models::ModelsPanel>,
 }
 
 async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusAggregate> {
-    // Compose the six guarded builders SEQUENTIALLY: each spawns its own
+    // Compose the seven guarded builders SEQUENTIALLY: each spawns its own
     // `spawn_blocking` job, so awaiting them one at a time keeps a single
     // admitted request to at most ONE in-flight blocking builder. That is what
     // makes `STATUS_MAX_INFLIGHT` name a single unit -- admitted requests and
     // in-flight builders are then numerically identical. A concurrent join
-    // would fan one admitted request into six blocking jobs, so the cap would
-    // admit up to six times as many builders as requests. Each builder still
+    // would fan one admitted request into seven blocking jobs, so the cap would
+    // admit up to seven times as many builders as requests. Each builder still
     // isolates its own source failure / panic through `guard_panel`, and these
     // are the SAME builders the per-panel endpoints call -- no divergent second
     // mapping.
@@ -606,6 +607,7 @@ async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusA
     // reports as doctor coverage `unavailable`.
     let doctor_findings = doctor.data.as_ref().map(doctor::DoctorPanel::fail_findings);
     let attention = attention::build_with_doctor(&state, doctor_findings).await;
+    let models = models::build(&state).await;
     Json(StatusAggregate {
         panels: AggregatePanels {
             usage,
@@ -614,6 +616,7 @@ async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusA
             doctor,
             accounts,
             attention,
+            models,
         },
     })
 }
@@ -1228,7 +1231,14 @@ mod tests {
         assert_eq!(panels["usage"]["schema_version"], 8);
 
         // The siblings are available and untouched.
-        for name in ["health", "config", "doctor", "accounts", "attention"] {
+        for name in [
+            "health",
+            "config",
+            "doctor",
+            "accounts",
+            "attention",
+            "models",
+        ] {
             assert!(
                 panels[name]["unavailable"].is_null(),
                 "{name} panel should be available"
@@ -1245,5 +1255,6 @@ mod tests {
         assert_eq!(panels["doctor"]["schema_version"], 32);
         assert_eq!(panels["accounts"]["schema_version"], 1);
         assert_eq!(panels["attention"]["schema_version"], 1);
+        assert_eq!(panels["models"]["schema_version"], 1);
     }
 }

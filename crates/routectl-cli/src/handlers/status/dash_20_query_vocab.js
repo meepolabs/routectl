@@ -175,6 +175,15 @@
     'state', 'cause', 'since_ms', 'until_ms', 'fix', 'remediation'
   ];
 
+  var MODELS_FIELDS = [
+    'schema_version', 'unavailable', 'as_of', 'data',
+    'started_ms', 'rows',
+    'lane', 'provider', 'upstream', 'nicknames', 'account', 'login_label',
+    'state', 'since_ms', 'cause_key', 'refusals', 'capabilities', 'transit',
+    'capability', 'verdict', 'action', 'value', 'supported', 'source', 'layer',
+    'checked', 'changed', 'top_paths', 'path', 'count'
+  ];
+
   // The COMPLETE set of request bodies this page can issue: every selectable
   // window crossed with every group-by the views use, in both the series read
   // path (Overview) and the non-series one (Usage and the per-seat read), each

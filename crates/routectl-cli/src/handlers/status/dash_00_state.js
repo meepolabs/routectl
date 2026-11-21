@@ -6,12 +6,12 @@
   // containment for a cached page / mixed assets / a bad build, not version
   // negotiation. `query` sits alongside the GET panels because the QUERY
   // aggregate is a source of its own (see SOURCES below).
-  var EXPECTED = { usage: 8, health: 9, config: 6, doctor: 32, query: 6, accounts: 1, attention: 1 };
+  var EXPECTED = { usage: 8, health: 9, config: 6, doctor: 32, query: 6, accounts: 1, attention: 1, models: 1 };
 
   // The panels of the aggregate round, each with its own envelope +
   // freshness. NOT the same list as the views (VIEWS in dash_80_views.js): a
   // view is what a tab shows, a source is a fetch.
-  var GET_SOURCES = ['usage', 'health', 'config', 'doctor', 'attention', 'accounts'];
+  var GET_SOURCES = ['usage', 'health', 'config', 'doctor', 'attention', 'accounts', 'models'];
   // The QUERY reads, each its OWN source. All speak `/status/query`, but
   // Traffic asks for a series-less roll-up and Now for a bucketed one, and the
   // payloads are not interchangeable: Now cannot draw a sparkline from a
@@ -81,9 +81,10 @@
   var BACKOFF_STEPS_MS = [10000, 20000, 30000];
   // Per-GET AbortController budget, covering both the /status aggregate and
   // the all-history /status/usage read. Sized so the server's own usage panel
-  // budget, plus a reserve for the four cheap panels (health, config, doctor,
-  // accounts) and the response write, lands inside it: the server then sheds a slow ledger read as an
-  // unavailable panel instead of the browser aborting the whole round. Still
+  // budget, plus a reserve for the cheap panels (health, config, doctor,
+  // attention, accounts, models) and the response write, lands inside it: the
+  // server then sheds a slow ledger read as an unavailable panel instead of
+  // the browser aborting the whole round. Still
   // under the 5s cadence, so a slow round cannot overlap its next attempt.
   var TIMEOUT_MS = 3500;
   // Per-QUERY AbortController budget. Like TIMEOUT_MS this is ONE abort timer

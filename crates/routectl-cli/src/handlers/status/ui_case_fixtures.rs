@@ -309,6 +309,12 @@ impl CaseSource {
     pub fn aggregate(&self, now_ms: i64) -> Value {
         let state = self.state(now_ms);
         let as_of = utc_rfc3339(now_ms);
+        let models = super::models::fixture::models_panel_of(
+            &self.config,
+            state.targets.clone(),
+            state.credentials.clone(),
+            now_ms,
+        );
         let aggregate = StatusAggregate {
             panels: AggregatePanels {
                 usage: super::usage::fixture::usage_panel_over(
@@ -341,6 +347,7 @@ impl CaseSource {
                 attention: super::attention::fixture::attention_panel_of(
                     self.attention_sources(state, now_ms),
                 ),
+                models,
             },
         };
         serde_json::to_value(aggregate).expect("the aggregate serializes")

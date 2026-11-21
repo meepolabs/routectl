@@ -556,6 +556,10 @@ mod tests {
                 "attention".to_string(),
                 crate::handlers::status::attention::SCHEMA_VERSION,
             ),
+            (
+                "models".to_string(),
+                crate::handlers::status::models::SCHEMA_VERSION,
+            ),
         ]
         .into_iter()
         .collect();
@@ -2027,7 +2031,9 @@ mod tests {
     /// GET routes: the server's usage budget plus the aggregate's reserve must
     /// land inside the browser's per-GET abort, or the browser aborts a round
     /// the server would have answered with a shed `query_timeout` panel. The
-    /// abort must also stay under the poll cadence.
+    /// abort must also stay under the poll cadence. The models panel is a
+    /// share inside the reserve, not a term of its own here; the reserve's
+    /// own identity is pinned in `status_gate`.
     #[test]
     fn the_usage_budget_and_its_reserve_sum_inside_the_browser_get_abort() {
         let timeout_ms = script_ms("TIMEOUT_MS");
