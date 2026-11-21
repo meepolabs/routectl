@@ -365,7 +365,7 @@ fn render_item(item: &WireItem, lines: &mut Vec<String>) {
         safe(&item.raw_token, MAX_RAW_TOKEN_CHARS)
     ));
     if let Some(fix) = &item.fix {
-        lines.push(format!("      fix: {}", safe_fix(fix)));
+        lines.push(fix_line(fix));
     }
     if let Some(remediation) = &item.remediation {
         lines.push(format!(
@@ -398,10 +398,57 @@ fn safe(raw: &str, cap: usize) -> String {
     sanitize_for_log_with_cap(raw, cap)
 }
 
-/// A fix is copied as a bare command, so a backtick the wire carries is
-/// dropped rather than shown.
-fn safe_fix(raw: &str) -> String {
-    safe(raw, MAX_FIX_CHARS).replace('`', "")
+/// The line for an item's fix. A `fix:` line is copied and run as is, so
+/// only text in the closed shape the daemon emits ([`is_login_command`]) is
+/// shown as one; anything else is labeled as not a command.
+fn fix_line(raw: &str) -> String {
+    let fix = safe(raw, MAX_FIX_CHARS);
+    if is_login_command(&fix) {
+        format!("      fix: {fix}")
+    } else {
+        format!("      fix (not a recognized command, not shown as one): {fix}")
+    }
+}
+
+/// Whether `text` is exactly `routectl login <provider>` or
+/// `routectl login <provider> --label <word>`, the only commands the daemon
+/// serves as a fix: the provider is one plain token and the label is one
+/// shell word in the form `shell_word` writes, with nothing after it.
+fn is_login_command(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix("routectl login ") else {
+        return false;
+    };
+    match rest.split_once(' ') {
+        None => is_plain_token(rest),
+        Some((provider, tail)) => {
+            is_plain_token(provider)
+                && tail
+                    .strip_prefix("--label ")
+                    .is_some_and(is_single_shell_word)
+        }
+    }
+}
+
+fn is_plain_token(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// A plain token, or one single-quoted word whose only interior `'` are
+/// inside the exact escape `'\''`.
+fn is_single_shell_word(word: &str) -> bool {
+    if is_plain_token(word) {
+        return true;
+    }
+    let Some(interior) = word
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    else {
+        return false;
+    };
+    interior.split("'\\''").all(|part| !part.contains('\''))
 }
 
 #[cfg(test)]
