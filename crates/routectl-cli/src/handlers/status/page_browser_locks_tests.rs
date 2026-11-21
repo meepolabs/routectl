@@ -220,10 +220,12 @@ fn doctor_item_ids_come_from_the_whole_record() {
 #[test]
 fn section_wrappers_mark_themselves_as_refresh_units() {
     let card = compact(&function_body("card"));
-    let section = compact(&function_body("routingSection"));
 
     assert!(card.contains("markrefreshunit(document.createelement('div'),title)"));
-    assert!(section.contains("markrefreshunit(document.createelement('div'),title)"));
+    assert!(
+        compact(&function_body("modelsSection"))
+            .contains("markrefreshunit(document.createelement('div'),'models-lanes')")
+    );
     for name in [
         "doctorVerdict",
         "doctorFindings",

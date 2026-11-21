@@ -28,7 +28,9 @@
   // it, so a new read is one entry here. The series-less read follows the
   // group-by toggle; the per-seat read is that read at seat grain whatever the
   // toggle says; the per-model read is the last seven days by model whatever
-  // the range says.
+  // the range says. A read marked `scoped: false` ignores the provider and
+  // model scope: the per-model read says which lanes carried any traffic, so
+  // a scope would make every other lane read as unused.
   var QUERY_SOURCE_DEFS = [
     {
       name: QUERY_SOURCE,
@@ -44,6 +46,7 @@
     },
     {
       name: QUERY_MODELS_SOURCE,
+      scoped: false,
       shape: function () { return findShape('last7d', 'model', false); }
     }
   ];

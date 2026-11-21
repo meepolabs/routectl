@@ -24,7 +24,7 @@
     now: ['.kpigrid', '.glance-meter'],
     accounts: ['.acct-row'],
     traffic: ['#traffic-groups'],
-    models: ['.hgrid'],
+    models: ['#models-lanes'],
     config: ['.cfgstrip'],
     doctor: ['.docfix-text']
   };

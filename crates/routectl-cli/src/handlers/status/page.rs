@@ -1339,7 +1339,8 @@ mod tests {
             );
         }
         assert!(
-            compact(&function_body("queryBodyFor")).contains("shapefor(querysourcefor(tab))"),
+            compact(&function_body("queryBodyFor"))
+                .contains("varsource=querysourcefor(tab);returnbodyfromshape(shapefor(source),"),
             "queryBodyFor must build the body from the view's own query source"
         );
 
@@ -1829,8 +1830,8 @@ mod tests {
         );
     }
 
-    /// Both tabs that show a learned row read its `value`: the Health tab's
-    /// learned chip and the Doctor tab's matrix cell, each in its tooltip
+    /// Both tabs that show a learned row read its `value`: the Models tab's
+    /// refusal chip and the Doctor tab's matrix cell, each in its tooltip
     /// builder. A text scan only: that the tooltip renders is on the manual
     /// checklist.
     ///
@@ -1838,7 +1839,7 @@ mod tests {
     #[test]
     fn both_learned_tooltips_read_the_value_field() {
         for (builder, field) in [
-            ("negativeChip", "row.value"),
+            ("modelsRefusalChip", "refusal.value"),
             ("matrixCellTitle", "cell.value"),
         ] {
             assert!(
@@ -1933,25 +1934,6 @@ mod tests {
             reads, 1,
             "the write total is read only inside `cacheWritten`, found {reads} reads"
         );
-    }
-
-    /// The eligibility reasons the shared target-phase rule treats as needing
-    /// attention must be tokens the server emits; a renamed or misspelled
-    /// token would file a dead login back under "not observed yet".
-    #[test]
-    fn unusable_seat_reasons_are_eligibility_tokens() {
-        let reasons = string_array("UNUSABLE_SEAT_REASONS");
-        assert!(
-            !reasons.is_empty(),
-            "UNUSABLE_SEAT_REASONS must name at least one eligibility reason"
-        );
-        for reason in &reasons {
-            assert!(
-                routectl_core::EligibilityReason::from_token(reason).is_some(),
-                "dashboard reason `{reason}` (in UNUSABLE_SEAT_REASONS) is not an \
-                 eligibility token the health panel emits"
-            );
-        }
     }
 
     /// Self-containment guard on the ASSEMBLED page (what the handler serves,
@@ -2363,6 +2345,11 @@ mod tests {
     mod browser_accounts {
         use super::*;
         include!("page_browser_accounts_tests.rs");
+    }
+
+    mod browser_models {
+        use super::*;
+        include!("page_browser_models_tests.rs");
     }
 
     mod browser_traffic {

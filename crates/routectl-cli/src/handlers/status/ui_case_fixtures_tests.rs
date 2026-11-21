@@ -179,3 +179,48 @@ fn the_poll_case_lists_a_failing_usage_poll() {
         "control: a seat polling cleanly lists no poll item"
     );
 }
+
+/// The passthrough-hop case: the three open routes on one entry fold into
+/// one `provider_failing` item, every hop lane carries that item's key and
+/// comes before the healthy lanes, and the models panel lists the busy lane
+/// and both pool seat lanes without a cause.
+#[test]
+fn the_hop_case_names_its_three_lanes_under_one_cause() {
+    let agg = aggregate(UiCase::PassthroughHop);
+
+    let folds: Vec<&Value> = panel(&agg, "attention")["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["kind"] == "provider_failing")
+        .collect();
+    assert_eq!(folds.len(), 1, "{:?}", item_kinds(&agg));
+    assert!(
+        !item_kinds(&agg).contains(&"route_circuit_open"),
+        "the folded routes have no item of their own"
+    );
+    let key = &folds[0]["key"];
+    let rows = panel(&agg, "models")["rows"].as_array().expect("rows");
+    let lanes: Vec<&str> = rows
+        .iter()
+        .map(|r| r["lane"].as_str().expect("lane"))
+        .collect();
+    assert_eq!(
+        lanes,
+        [
+            "passthrough#claude-codex-sol",
+            "passthrough#claude-codex-terra",
+            "passthrough#claude-opus-5-5",
+            "busy#claude-sonnet-4-5",
+            "seat-a#claude-sonnet-4-5",
+            "seat-b#claude-sonnet-4-5",
+        ]
+    );
+    for row in &rows[..3] {
+        assert_eq!(&row["cause_key"], key, "{row}");
+        assert_eq!(row["state"], "breaker_open", "{row}");
+    }
+    for row in &rows[3..] {
+        assert!(row["cause_key"].is_null(), "{row}");
+    }
+}

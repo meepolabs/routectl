@@ -56,15 +56,20 @@ pub enum UiCase {
     LoggedOut,
     /// One seat whose usage poll has failed for 15 minutes.
     PollFailing,
+    /// Three models on one passthrough entry, each its own upstream, all
+    /// open after a server error; a model on another entry that carried
+    /// traffic; and a two-seat pool nothing was sent to.
+    PassthroughHop,
 }
 
 impl UiCase {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Empty,
         Self::OneSeat,
         Self::FiveSeatPool,
         Self::LoggedOut,
         Self::PollFailing,
+        Self::PassthroughHop,
     ];
 
     /// The case's name on the review server's command line.
@@ -75,6 +80,7 @@ impl UiCase {
             Self::FiveSeatPool => "five-seat-pool",
             Self::LoggedOut => "logged-out",
             Self::PollFailing => "poll-failing",
+            Self::PassthroughHop => "passthrough-hop",
         }
     }
 
@@ -88,6 +94,7 @@ impl UiCase {
                 pool: None,
                 seats: Vec::new(),
                 keyed_entries: true,
+                hop: false,
             },
             Self::OneSeat => Layout {
                 pool: Some("main"),
@@ -97,6 +104,7 @@ impl UiCase {
                     ..SeatSpec::new("claude", "main")
                 }],
                 keyed_entries: false,
+                hop: false,
             },
             Self::FiveSeatPool => Layout {
                 pool: Some("seats"),
@@ -122,6 +130,7 @@ impl UiCase {
                     },
                 ],
                 keyed_entries: false,
+                hop: false,
             },
             Self::LoggedOut => Layout {
                 pool: Some("seats"),
@@ -137,6 +146,7 @@ impl UiCase {
                     },
                 ],
                 keyed_entries: false,
+                hop: false,
             },
             Self::PollFailing => Layout {
                 pool: Some("main"),
@@ -147,6 +157,13 @@ impl UiCase {
                     ..SeatSpec::new("claude", "main")
                 }],
                 keyed_entries: false,
+                hop: false,
+            },
+            Self::PassthroughHop => Layout {
+                pool: Some("seats"),
+                seats: vec![SeatSpec::new("seat-a", "a"), SeatSpec::new("seat-b", "b")],
+                keyed_entries: false,
+                hop: true,
             },
         }
     }
@@ -158,6 +175,8 @@ struct Layout {
     pool: Option<&'static str>,
     seats: Vec<SeatSpec>,
     keyed_entries: bool,
+    /// Whether it also has the passthrough hop and the busy entry.
+    hop: bool,
 }
 
 /// One `oauth://anthropic#<label>` seat and the state the daemon holds for
@@ -236,6 +255,9 @@ fn config_text(layout: &Layout) -> String {
             members.join(", ")
         ));
     }
+    if layout.hop {
+        text.push_str(&hop_config_text());
+    }
     if layout.keyed_entries {
         for (entry, model, block) in KEYED_ENTRIES {
             text.push_str(&format!(
@@ -245,6 +267,66 @@ fn config_text(layout: &Layout) -> String {
         }
     }
     text
+}
+
+/// The passthrough hop's entry: `(nickname, upstream)` per model on it.
+const HOP_MODELS: [(&str, &str); 3] = [
+    ("pt-opus", "claude-opus-5-5"),
+    ("pt-codex-sol", "claude-codex-sol"),
+    ("pt-codex-terra", "claude-codex-terra"),
+];
+const HOP_ENTRY: &str = "passthrough";
+/// The entry and model beside the hop that carried traffic.
+const BUSY_ENTRY: &str = "busy";
+const BUSY_MODEL: &str = "busy-model";
+/// How long the hop's circuits have been open.
+const HOP_OPEN_MIN: u64 = 6;
+
+fn hop_config_text() -> String {
+    let mut text = format!(
+        "[providers.{HOP_ENTRY}]\nformat = \"anthropic-messages\"\n\
+         base_url = \"https://hop.example.invalid\"\n\
+         credential = \"env://CASE_HOP_KEY\"\nauth = \"x-api-key\"\n\
+         [providers.{BUSY_ENTRY}]\nformat = \"openai-chat\"\n\
+         base_url = \"https://busy.example.invalid/v1\"\n\
+         credential = \"env://CASE_BUSY_KEY\"\nauth = \"bearer\"\n\
+         [models.{BUSY_MODEL}]\nprovider = \"{BUSY_ENTRY}\"\nupstream = \"{UPSTREAM}\"\n"
+    );
+    for (nickname, upstream) in HOP_MODELS {
+        text.push_str(&format!(
+            "[models.{nickname}]\nprovider = \"{HOP_ENTRY}\"\nupstream = \"{upstream}\"\n"
+        ));
+    }
+    text
+}
+
+/// The hop's three targets open after a server error, and the busy model
+/// closed after an ok request.
+fn hop_targets() -> Vec<RouteTargetStatus> {
+    let open = ProviderGateStatus {
+        reason: Some(EligibilityReason::BreakerOpen),
+        circuit: CircuitPhase::Open,
+        circuit_open_elapsed: Some(Duration::from_mins(HOP_OPEN_MIN)),
+        last_outcome: Some(LastOutcome::Http5xx),
+        last_outcome_elapsed: Some(Duration::from_mins(HOP_OPEN_MIN)),
+        ..closed(true)
+    };
+    let mut targets: Vec<RouteTargetStatus> = HOP_MODELS
+        .iter()
+        .map(|&(nickname, upstream)| RouteTargetStatus {
+            upstream: upstream.to_string(),
+            learned_lane: StateKey::parse(&format!("{HOP_ENTRY}#{upstream}")),
+            ..target(nickname, HOP_ENTRY, None, &format!("#{HOP_ENTRY}"), open)
+        })
+        .collect();
+    targets.push(target(
+        BUSY_MODEL,
+        BUSY_ENTRY,
+        None,
+        &format!("#{BUSY_ENTRY}"),
+        closed(true),
+    ));
+    targets
 }
 
 /// A case with its ledger seeded, ready to answer the page's reads at any
@@ -288,6 +370,20 @@ impl CaseSource {
                     Some(SEAT_MODEL),
                     Some(seat.entry),
                     Some(account.as_str()),
+                    "ok",
+                    None,
+                ));
+            }
+        }
+        if layout.hop {
+            for (id, hours) in [("busy-1", 1), ("busy-2", 30)] {
+                seeds.push((
+                    id,
+                    hours,
+                    BUSY_MODEL,
+                    Some(BUSY_MODEL),
+                    Some(BUSY_ENTRY),
+                    None,
                     "ok",
                     None,
                 ));
@@ -377,6 +473,14 @@ impl CaseSource {
                     vec![(EligibilityReason::CredentialUnusable, out)]
                 },
             });
+        }
+        if self.layout.hop {
+            state.targets.extend(hop_targets());
+            for entry in [HOP_ENTRY, BUSY_ENTRY] {
+                state
+                    .credentials
+                    .insert(format!("#{entry}"), AccountCredential::usable());
+            }
         }
         if self.layout.keyed_entries {
             for (entry, model, _) in KEYED_ENTRIES {

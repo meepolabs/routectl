@@ -138,20 +138,30 @@
   // accepts both against any shape); each is set only from the selection,
   // which an address value reaches only through the codec's closed-set check.
   function queryBodyFor(tab) {
-    return bodyFromShape(shapeFor(querySourceFor(tab)));
+    var source = querySourceFor(tab);
+    return bodyFromShape(shapeFor(source), isScopedSource(source));
   }
 
   function queryBodyForSource(source) {
-    return bodyFromShape(shapeFor(source));
+    return bodyFromShape(shapeFor(source), isScopedSource(source));
   }
 
-  function bodyFromShape(shape) {
+  function bodyFromShape(shape, scoped) {
     if (!shape) { return null; }
     var body = {};
     Object.keys(shape).forEach(function (k) { body[k] = shape[k]; });
-    if (selectedProvider) { body.provider = selectedProvider; }
-    if (selectedModel) { body.model = selectedModel; }
+    if (scoped && selectedProvider) { body.provider = selectedProvider; }
+    if (scoped && selectedModel) { body.model = selectedModel; }
     return body;
+  }
+
+  // Whether a query source's body carries the selection's scope: every one
+  // does but a QUERY_SOURCE_DEFS entry marked `scoped: false`.
+  function isScopedSource(source) {
+    for (var i = 0; i < QUERY_SOURCE_DEFS.length; i++) {
+      if (QUERY_SOURCE_DEFS[i].name === source) { return QUERY_SOURCE_DEFS[i].scoped !== false; }
+    }
+    return true;
   }
 
   // The request shape a query source stands for under the live selection, as

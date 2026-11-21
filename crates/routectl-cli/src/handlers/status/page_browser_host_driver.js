@@ -18,13 +18,13 @@
 
   function observe() {
     var body = document.getElementById('body-models');
-    var section = body.querySelector('[data-source="health"]');
+    var section = body.querySelector('[data-source="models"]');
     return {
       sections: body.querySelectorAll('[data-source]').length,
       skeleton: !!section && !!section.querySelector('.skeleton'),
       cards: section ? section.querySelectorAll('.unavailable-msg, .incompatible-msg').length : null,
       card: textOf('#body-models .unavailable-msg'),
-      head: textOf('#body-models [data-source="health"] .card-title'),
+      head: textOf('#body-models [data-source="models"] .card-title'),
       heads: section ? section.querySelectorAll('.card-title').length : null,
       probe: textOf('#host-probe'),
       calls: probe.calls.slice(),
@@ -32,12 +32,12 @@
     };
   }
 
-  function unavailableHealth(text) {
+  function unavailableModels(text) {
     var agg = JSON.parse(text);
-    var health = agg.panels.health;
-    agg.panels.health = {
-      schema_version: health.schema_version,
-      as_of: health.as_of,
+    var models = agg.panels.models;
+    agg.panels.models = {
+      schema_version: models.schema_version,
+      as_of: models.as_of,
       unavailable: 'probe_down',
       data: null
     };
@@ -45,7 +45,7 @@
   }
 
   // One /status answer per step but the recovery: the first is held so the
-  // loading state can be read, the third reports health unavailable, the
+  // loading state can be read, the third reports the models panel unavailable, the
   // rest are the fixture.
   d.scenario('host-section-states', function () {
     var asked = 0;
@@ -55,7 +55,7 @@
       return asked === 1 ? 3000 : 0;
     });
     d.rewrite(function (url, text, n) {
-      return (url.pathname === '/status' && n === 2) ? unavailableHealth(text) : text;
+      return (url.pathname === '/status' && n === 2) ? unavailableModels(text) : text;
     });
     var out = {};
     function step(name, mode) {
@@ -65,14 +65,14 @@
       };
     }
     return d.waitUntil('the probe section', function () {
-      return document.querySelector('#body-models [data-source="health"]');
+      return document.querySelector('#body-models [data-source="models"]');
     }).then(function () {
       out.loading = observe();
     })
       .then(step('success', 'ok'))
       .then(step('throwing', 'throw'))
       .then(function () {
-        // A repaint with no new health answer, since a landing payload
+        // A repaint with no new models answer, since a landing payload
         // clears a source's fault by itself: only the clean build can.
         probe.mode = 'ok';
         document.getElementById('tab-config').click();

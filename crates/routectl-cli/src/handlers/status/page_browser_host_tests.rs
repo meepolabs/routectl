@@ -10,7 +10,7 @@ const HOST_DRIVER: &str = include_str!("page_browser_host_driver.js");
 
 /// The Models view as the page composes it.
 const MODELS_VIEW: &str = "  function buildModels() {
-    return viewSection('health', healthTargetSection, 'Dispatch targets');
+    return viewSection('models', modelsSection, 'Model lanes');
   }";
 
 /// The Models view composing one probe section through the host helper. The
@@ -19,7 +19,7 @@ const MODELS_VIEW: &str = "  function buildModels() {
 /// state itself.
 const PROBE_VIEW: &str = "  function buildModels() {
     var probe = window.routectlHostProbe;
-    return viewSection('health', function (rec) {
+    return viewSection('models', function (rec) {
       probe.calls.push(rec.state);
       if (probe.mode === 'throw') { throw new Error('probe section fault'); }
       if (probe.mode === 'inner-throw') {
@@ -34,13 +34,27 @@ const PROBE_VIEW: &str = "  function buildModels() {
     }, 'Probe');
   }";
 
+/// The Models entry of VIEWS as the page registers it.
+const MODELS_ENTRY: &str = "      id: 'models',
+      label: 'Models',
+      sources: ['models', 'attention', QUERY_MODELS_SOURCE],";
+
+/// The probe view reads the models panel alone, so no other source's answer
+/// repaints it between steps.
+const PROBE_ENTRY: &str = "      id: 'models',
+      label: 'Models',
+      sources: ['models'],";
+
 fn with_probe_view(page: String) -> String {
-    assert_eq!(
-        page.matches(MODELS_VIEW).count(),
-        1,
-        "the page composes the Models view as this test expects"
-    );
+    for (expected, what) in [(MODELS_VIEW, "composes"), (MODELS_ENTRY, "registers")] {
+        assert_eq!(
+            page.matches(expected).count(),
+            1,
+            "the page {what} the Models view as this test expects"
+        );
+    }
     page.replace(MODELS_VIEW, PROBE_VIEW)
+        .replace(MODELS_ENTRY, PROBE_ENTRY)
 }
 
 fn calls(at: &Value) -> Vec<&str> {
@@ -66,7 +80,7 @@ fn text<'a>(value: &'a Value, what: &str) -> &'a str {
 /// clears the fault in the same pass, and a builder that guards itself as
 /// well still shows ONE card and still faults its source.
 ///
-/// The recovery is a repaint with no new health answer (a view switch away
+/// The recovery is a repaint with no new models answer (a view switch away
 /// and back), since a landing payload clears a source's fault by itself.
 ///
 /// Mutation checks: viewSection calling `build(rec)` directly instead of

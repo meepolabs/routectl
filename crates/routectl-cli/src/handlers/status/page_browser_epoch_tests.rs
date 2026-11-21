@@ -285,7 +285,7 @@ fn page_browser_switching_traffic_to_accounts_never_paints_a_non_seat_payload() 
 /// The Models entry of VIEWS as the page registers it.
 const MODELS_ENTRY: &str = "      id: 'models',
       label: 'Models',
-      sources: ['health'],
+      sources: ['models', 'attention', QUERY_MODELS_SOURCE],
       span: 'current state',
       build: buildModels";
 
@@ -299,14 +299,16 @@ const SEAT_PROBE_ENTRY: &str = "      id: 'models',
 
 /// The Models view as the page composes it.
 const MODELS_VIEW: &str = "  function buildModels() {
-    return viewSection('health', healthTargetSection, 'Dispatch targets');
+    return viewSection('models', modelsSection, 'Model lanes');
   }";
 
 /// The probe composes its GET section and one line per seat group, each
 /// label beside its request count.
 const SEAT_PROBE_VIEW: &str = "  function buildModels() {
     var stack = tabStack();
-    stack.appendChild(viewSection('health', healthTargetSection, 'Dispatch targets'));
+    stack.appendChild(viewSection('health', function (rec) {
+      return sectionHead('Health', rec.data.targets.length + ' targets');
+    }, 'Health'));
     stack.appendChild(viewSection(QUERY_SEATS_SOURCE, function (rec) {
       var line = document.createElement('p');
       line.id = 'seat-probe';

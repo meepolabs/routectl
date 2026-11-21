@@ -442,8 +442,8 @@ fn row_ids_derive_only_from_table_id_and_row_key() {
 /// Items of a list that reorders carry an id from their own identity, so the
 /// morph matches a card to the same record rather than to whatever now sits
 /// at its position: Doctor checks (section, name, detail, remediation), Usage
-/// groups (label, as a sortable table's row key) and Health targets
-/// (nickname).
+/// groups (label, as a sortable table's row key) and the Models cause
+/// lines (their attention item's key).
 ///
 /// Mutation check: drop `cardEl.id = id;` from doctorFinding -> red.
 #[test]
@@ -454,7 +454,6 @@ fn reordering_list_items_carry_an_identity_id() {
     let findings = function_body("doctorFindings");
     let passes = function_body("doctorPasses");
     let traffic = function_body("trafficTable");
-    let health = function_body("targetGroupList");
 
     assert!(finding.contains("cardEl.id = id;"));
     assert!(pass.contains("row.id = id;"));
@@ -467,5 +466,7 @@ fn reordering_list_items_carry_an_identity_id() {
     assert!(findings.contains("doctorFinding(f, doctorItemId('doctor-finding', f, seen))"));
     assert!(passes.contains("doctorPass(p, doctorItemId('doctor-pass', p, seen))"));
     assert!(traffic.contains("rowKey: function (g) { return g.label; }"));
-    assert!(health.contains("card.id = 'health-target-' + idKey(group.nickname);"));
+    assert!(
+        function_body("modelsCauseLine").contains("tr.id = 'models-cause-' + idKey(group.key);")
+    );
 }

@@ -74,10 +74,6 @@ fn page_browser_a_failure_on_the_first_round_shows_the_error_card() {
 /// An invalid health payload puts an error card in every section the host
 /// binds to health, in every view that composes one, and in no other
 /// section; the aggregate keeps its 5 s cadence through it.
-///
-/// Mutation check: return `healthTargetSection(SOURCES.health)` from
-/// buildModels instead of wrapping it in viewSection -> red (the Models
-/// error card sits outside any host section).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_an_invalid_health_payload_errors_only_its_own_sections() {
@@ -123,7 +119,7 @@ fn page_browser_an_invalid_health_payload_errors_only_its_own_sections() {
         0,
         "Accounts reads health inside"
     );
-    assert_eq!(health_sections("models"), 1);
+    assert_eq!(health_sections("models"), 0, "Models reads no health");
     assert_eq!(health_sections("now"), 0);
 
     let before = result["rounds_before"].as_u64().expect("rounds before");

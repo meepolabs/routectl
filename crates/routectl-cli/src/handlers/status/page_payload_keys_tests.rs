@@ -420,7 +420,7 @@ fn a_placement_read_declared_only_by_another_panel_is_reported() {
 #[test]
 fn the_member_scan_reports_an_undeclared_read() {
     let scan = scan_members(&page_script());
-    assert!(scan.reads.contains("half_open_probe_in_flight"));
+    assert!(scan.reads.contains("cause_key"));
     assert!(scan.reads.contains("capability_matrix"));
     let planted = format!(
         "{}\n  var probe = rec.data.not_a_payload_key;\n",

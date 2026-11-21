@@ -7181,8 +7181,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   stale and absent readings, poll states, a vendor pause and nonzero counters,
   through the panel's own `build_from_sources`
 - `src/handlers/status/ui_case_fixtures.rs` -- `cfg(test)` review cases for
-  Now and Accounts (empty, one seat, five-seat pool, logged out, failing
-  poll): a case config, a seeded ledger and daemon state, served as the
+  Now, Accounts and Models (empty, one seat, five-seat pool, logged out,
+  failing poll, passthrough hop): a case config, a seeded ledger and daemon state, served as the
   aggregate, usage and QUERY answers through the panels' own builders at any
   instant; the browser case tests and the loopback review server read them
 - `src/handlers/status/attention/fixture.rs` -- `cfg(test)`
@@ -7798,9 +7798,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   price with the server's `config_key`, and an alias group's chain steps
   ("via alias" for a nested one) with the off-chain and not-dispatched
   remainders. A section waiting on a new selection keeps the height it last
-  drew at. Also holds the shared target-phase rule (`targetPhase`,
-  `targetsByNickname`, `circuitPill`) and `routingSection`, which Models
-  composes
+  drew at
 - `src/handlers/status/dash_62_view_accounts.js` -- dashboard SCRIPT part 10
   of 15: the Accounts view sections, MULTI-SOURCE (`accounts`, plus `health`
   for each pool header's usable count, guarded in `acctPoolCounts` so a dark
@@ -7819,13 +7817,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   windows". `accountsDriverSection` shows the refresh and poll drivers,
   stopped reading amber
 - `src/handlers/status/dash_63_view_models.js` -- dashboard SCRIPT part 11 of
-  15: the Models view (`buildModels`) and its dispatch target section
-  (`healthTargetSection`), single-source (`health`). Per-target
-  cards collapse a pooled model's seats by nickname through the same
-  worst-circuit rule in part 9 and split into needs-attention / healthy /
-  not-observed sections (a target with no settled outcome is `unknown`, never
-  `Healthy`; an unusable or parked seat puts its card in needs-attention, and
-  a card's `eligibility` cell names its blocked seats)
+  15: the Models view (`buildModels`), one section on `models` that also
+  reads `attention` (cause words, recovered ages) and `query_models` (the
+  seven-day per-model read, never scoped), each guarded so its loss costs
+  only its own facts. One expandable `models-lanes` table in server order
+  with one cause line (`models-cause-<key>`) over the lanes an item names;
+  lanes no nickname of which carried a request fold into the
+  `models-unused` disclosure, and nothing folds while that read is not live.
+  Transit reads "N of M responses changed" or "unmeasured"; each nickname
+  links to Traffic scoped to the lane's entry and that model
 - `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 12 of
   15: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
   tab -- the payload is validated in one place before any section is built, so

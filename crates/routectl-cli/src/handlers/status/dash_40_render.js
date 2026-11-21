@@ -673,12 +673,13 @@
   // req/span for the ACTIVE tab. A count is shown only beside the span it
   // covers: a query-backed view's count is its own QUERY's totals, read for
   // the selection the picker shows. Until that answer applies, and on a view
-  // whose span is not a window, the span stands alone; no other read stands
-  // in for it, since none covers the same span and scope.
+  // whose span is not a window (whatever QUERY it reads for its own use), the
+  // span stands alone; no other read stands in for it, since none covers the
+  // same span and scope.
   function verdictStats() {
     var view = viewFor(activeTab);
     var span = view.span || WINDOW_SPAN[selectedWindow];
-    var source = viewQuerySource(view);
+    var source = view.span ? null : viewQuerySource(view);
     var answer = source ? queryViewOf(source) : null;
     return answer ? humanCount(answer.totals.requests) + ' req ' + span : span;
   }
@@ -726,7 +727,8 @@
 
   // The badge for a source, computed ONLY from a fresh successful render.
   // Counts a genuine problem: health targets with a non-closed
-  // circuit or an eligibility reason (once each), the daemon's active
+  // circuit or an eligibility reason (once each), model lanes whose state is
+  // not ok, the daemon's active
   // attention items (broken + degraded; recovered ones never count). Config
   // carries no error concept, so it never badges. A zero count returns null
   // so a clean source shows nothing.
@@ -736,6 +738,10 @@
         return (t.circuit && t.circuit !== 'closed') || !!(t.eligibility && t.eligibility.reason);
       }).length;
       return open > 0 ? { label: String(open), kind: 'warn' } : null;
+    }
+    if (name === 'models') {
+      var lanes = (data.rows || []).filter(function (row) { return row && row.state !== 'ok'; }).length;
+      return lanes > 0 ? { label: String(lanes), kind: 'warn' } : null;
     }
     if (name === 'attention') {
       var counts = attentionTally(data.counts);

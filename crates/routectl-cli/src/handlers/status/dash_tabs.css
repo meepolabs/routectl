@@ -30,143 +30,78 @@
   overflow-wrap: anywhere;
 }
 
-/* ---- health: per-target cards + per-seat quota tiles ----
+/* ---- models: one row per model lane ----
 
-   A target is a separate object an operator acts on, so it gets a card;
-   the facets INSIDE a card (rate limit, last outcome, circuit, learned
-   negatives) sit on a hairline grid because they are readings of one
-   target. The needs-attention / healthy / not-observed split is carried
-   by the section headers, and reinforced on the card border only -- a
-   card never floods with a state color. */
-.hgroup {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
+   Every lane is a row of one reading. A cause line spans the rows it names,
+   on the hairline above them, so one failure reads once. A refusal or a
+   capability is a chip; an unsupported one carries a dashed edge besides its
+   word, never a state color alone. */
+.models-cause-row > th {
+  background: var(--surface-2);
+  border-left: 2px solid var(--neg);
+  font-family: inherit;
+  font-weight: 400;
+  white-space: normal;
 }
-.hlist {
+.models-cause {
   display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-.hcard {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: var(--sp-3) var(--sp-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  min-width: 0;
-}
-.hcard--attention { border-color: var(--neg); }
-.hcard--unknown { border-style: dashed; }
-.hcard-head {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-3);
   flex-wrap: wrap;
-  min-width: 0;
-}
-.hstate { flex: none; }
-.hident {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1 1 240px;
-  min-width: 0;
-}
-.hname {
-  font-family: var(--font-mono);
-  font-size: var(--fs-md);
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.hsub,
-.hreason {
-  font-size: var(--fs-xs);
-  color: var(--faint);
-  overflow-wrap: anywhere;
-}
-.hcard--attention .hreason { color: var(--neg); }
-.hanchors {
-  display: flex;
   align-items: baseline;
-  gap: var(--sp-5);
-  flex: none;
-}
-.hanchor {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  align-items: flex-end;
+  gap: var(--sp-1) var(--sp-3);
   min-width: 0;
 }
-.hanchor-label {
-  font-size: 0.6rem;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
+.models-cause-count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
   color: var(--faint);
 }
-.hanchor-value {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--fs-lg);
-  letter-spacing: -0.02em;
-  color: var(--fg);
-  white-space: nowrap;
-}
-.hgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-hcell)), 1fr));
-  gap: var(--sp-3) var(--sp-4);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--border);
-  min-width: 0;
-}
-.hcell {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-.hcell-label {
-  font-size: 0.6rem;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--faint);
-}
-.hcell-value {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.hcell-value .unit { font-size: 0.8em; color: var(--faint); }
-.hage { color: var(--faint); padding-left: var(--sp-2); }
-.hcell--wide { grid-column: 1 / -1; }
-.helig {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-.helig-row { white-space: normal; }
-.helig-fix {
-  display: block;
+.models-cause-text { color: var(--fg); overflow-wrap: anywhere; }
+.models-cause-fix {
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--muted);
-  user-select: all;
-  white-space: pre-wrap;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 0 var(--sp-1);
   overflow-wrap: anywhere;
-  max-width: 100%;
+  user-select: all;
 }
+.models-cause-fix:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.models-names {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px var(--sp-2);
+}
+.models-link { color: var(--accent-ink); }
+.models-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.models-state {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
+}
+.models-since,
+.models-recovered { font-size: var(--fs-xs); color: var(--faint); }
+.models-transit { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.models-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.models-path {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.models-path-name { color: var(--fg); overflow-wrap: anywhere; }
+.models-path-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.models-refusal { border-style: dashed; }
+.models-unused > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); }
+.models-unused > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.models-unused[open] > summary { margin-bottom: var(--sp-2); }
 .hchips {
   display: flex;
   flex-wrap: wrap;
@@ -417,8 +352,6 @@
   .ucard-head { gap: var(--sp-3); }
   .chain-step { width: var(--w-step-narrow); }
   .attr-step { grid-template-columns: 4.2rem minmax(0, 1fr) 4.4rem 3rem; }
-  .hanchors { gap: var(--sp-4); }
-  .hcard-head { gap: var(--sp-2); }
   .doccounts { gap: var(--sp-4); }
   .docpass-name { flex: 0 0 7rem; }
 }

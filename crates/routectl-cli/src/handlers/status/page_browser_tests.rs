@@ -587,21 +587,6 @@ fn page_browser_doctor_fix_command_selection_survives_rounds() {
     assert_figure_changed_every_round(&obs);
 }
 
-/// Models: a dispatch target card and the rate-limit figure inside it are the
-/// same nodes across two changed rounds, and the figure shows each round's
-/// value. Models has no control to focus or open, so the kept nodes are the
-/// card and the figure the rounds change.
-#[test]
-#[ignore = "drives a system headless Chrome"]
-fn page_browser_models_target_card_and_figure_are_kept_across_rounds() {
-    let report = run_scenario(&scenario("models-target-kept", "models"));
-
-    let obs = observations(&report.result);
-
-    assert_flags(&obs, &["same_card", "same_figure_node", "connected"]);
-    assert_figure_changed_every_round(&obs);
-}
-
 #[test]
 fn the_released_page_carries_no_driver() {
     let served = page_with_driver(&scenario("any", "now"));

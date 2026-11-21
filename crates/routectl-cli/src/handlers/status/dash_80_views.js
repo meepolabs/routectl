@@ -50,7 +50,7 @@
     {
       id: 'models',
       label: 'Models',
-      sources: ['health'],
+      sources: ['models', 'attention', QUERY_MODELS_SOURCE],
       span: 'current state',
       build: buildModels
     },

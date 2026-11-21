@@ -141,12 +141,10 @@
   // reading goes into its panel's list here.
   var HEALTH_FIELDS = [
     'schema_version', 'unavailable', 'as_of', 'data',
-    'targets', 'pools', 'seat_driver', 'learned_negatives',
-    'nickname', 'provider_name', 'upstream', 'seat_label', 'state_key', 'learned_lane',
-    'circuit', 'open_since_ms', 'half_open_probe_in_flight', 'rpm_available',
-    'last_outcome', 'last_outcome_at_ms',
+    'targets', 'pools',
+    'nickname', 'upstream', 'circuit',
     'eligibility', 'reason', 'cause', 'since_ms', 'fix',
-    'pool', 'configured', 'eligible', 'by_reason', 'seats',
+    'pool', 'configured', 'eligible', 'seats',
     'running', 'last_sweep_ms', 'last_good_sweep_ms', 'sweeps', 'transient', 'definitive',
     'capability_key', 'verdict', 'source', 'value', 'last_seen_ms'
   ];

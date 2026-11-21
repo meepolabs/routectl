@@ -1,361 +1,360 @@
   // ---- view:models -----------------------------------------------------
 
-  // The Models view: the dispatch target cards, wrapped in their own
-  // `safeSection` against the health record.
+  // The Models view: one row per model lane from the models panel, in the
+  // panel's order (problems first). Rows the needs-attention list names under
+  // one cause sit under one cause line carrying that item's words; a row
+  // whose problem has cleared shows how long ago, from the list's recovered
+  // item that named it. With the seven-day per-model read live, lanes none of
+  // whose nicknames carried a request collapse to one line. Every string is
+  // set as text.
+  //
+  // The attention list and the seven-day read are each guarded the way
+  // acctPoolCounts guards health: either one missing costs its own facts
+  // (the cause words, the collapse), never the rows and their raw state.
 
   function buildModels() {
-    return viewSection('health', healthTargetSection, 'Dispatch targets');
+    return viewSection('models', modelsSection, 'Model lanes');
   }
 
-  function healthTargetSection(rec) {
-    var wrap = routingSection('Dispatch targets', stateCard(rec)
-      ? 'Health data unavailable - target state is not shown'
-      : 'reported now - current state, not a windowed aggregate');
-    wrap.appendChild(safeSection(rec, buildTargetHealth));
+  // The Model column links each nickname to Traffic narrowed to it on the
+  // lane's own provider entry.
+  var MODELS_COLUMNS = [R('Model'), C('Provider'), C('Upstream'), C('Account'), C('State'),
+    W('Refuses'), C('Changed in transit')];
+
+  function modelsSection(rec) {
+    var rows = rec.data.rows;
+    if (!Array.isArray(rows)) { throw new Error('models payload carries no rows'); }
+    rows.forEach(modelsCheckRow);
+    var wrap = markRefreshUnit(document.createElement('div'), 'models-lanes');
+    wrap.className = 'ovsection';
+    var startText = fmtTs(rec.data.started_ms);
+    wrap.appendChild(sectionHead('Model lanes',
+      'current state - changed-in-transit counts responses since ' + startText));
+    if (!rows.length) {
+      wrap.appendChild(emptyCard('No model lane yet',
+        'Each configured model appears here, one row per provider entry and upstream it ' +
+        'dispatches to, with its state and what it has learned to refuse.', ['current state']));
+      return wrap;
+    }
+    var ctx = {
+      nowMs: panelNowMs(rec),
+      startText: startText,
+      items: modelsAttentionItems(SOURCES.attention),
+      used: modelsUsedNicknames(SOURCES[QUERY_MODELS_SOURCE])
+    };
+    var kept = [];
+    var unused = [];
+    rows.forEach(function (row) {
+      (modelsIsUnused(row, ctx) ? unused : kept).push(row);
+    });
+    wrap.appendChild(modelsTable(mkTable('models-lanes', 'Model lanes', MODELS_COLUMNS,
+      { expandable: true }), kept, ctx));
+    if (unused.length) { wrap.appendChild(modelsUnusedLine(unused, ctx)); }
     return wrap;
   }
 
-  function buildTargetHealth(rec) {
-    if (!rec.data || !Array.isArray(rec.data.targets)) {
-      throw new Error('health payload carries no targets');
+  // The fields every row must carry before any of it is drawn.
+  function modelsCheckRow(row) {
+    if (!isPlainObject(row) || typeof row.lane !== 'string' || typeof row.provider !== 'string' ||
+        !Array.isArray(row.nicknames) || typeof row.state !== 'string' ||
+        !Array.isArray(row.refusals) || !Array.isArray(row.capabilities) ||
+        !isPlainObject(row.transit) || !Array.isArray(row.transit.top_paths)) {
+      throw new Error('models payload carries a malformed row');
     }
-    var groups = collapsedTargets(rec.data.targets);
-    if (!groups.length) {
-      return emptyCard('No dispatch targets configured',
-        'A configured model becomes a dispatch target. Add one and its breaker state, ' +
-        'rate-limit headroom, and last settled outcome appear here.',
-        ['current state']);
-    }
-    var nowMs = panelNowMs(rec);
-    var negatives = learnedByLane(rec.data.learned_negatives);
-    var attention = groups.filter(function (g) { return targetPhase(g) === 'attention'; });
-    var healthy = groups.filter(function (g) { return targetPhase(g) === 'healthy'; });
-    var unknown = groups.filter(function (g) { return targetPhase(g) === 'unknown'; });
-    if (!attention.length && !healthy.length) { return unprobedEmpty(unknown.length); }
-    var stack = tabStack();
-    if (attention.length) {
-      stack.appendChild(targetGroupList('Needs attention',
-        attention.length + phrase(attention.length, ' target', ' targets') + ' not serving normally',
-        attention, negatives, nowMs));
-    }
-    if (healthy.length) {
-      stack.appendChild(targetGroupList('Healthy',
-        healthy.length + phrase(healthy.length, ' target', ' targets') + ' with a closed breaker and an ok last outcome',
-        healthy, negatives, nowMs));
-    }
-    if (unknown.length) {
-      stack.appendChild(targetGroupList('Not observed yet',
-        'configured, nothing dispatched to them yet - unknown, never healthy',
-        unknown, negatives, nowMs));
-    }
-    return stack;
   }
 
   function phrase(n, one, many) { return n === 1 ? one : many; }
 
-  // Every target is configured but none has a settled outcome: a welcoming
-  // state, never a list of cards claiming health nobody has observed.
-  function unprobedEmpty(count) {
-    return emptyCard('No target has been probed yet',
-      count + phrase(count, ' target is', ' targets are') + ' configured and ready. Each one ' +
-      'reports its breaker state and last settled outcome here as soon as a request is ' +
-      'dispatched to it.',
-      [count + phrase(count, ' target configured', ' targets configured'), 'none probed yet']);
+  function modelsIsProblem(row) {
+    return row.state !== 'ok' || typeof row.cause_key === 'string';
   }
 
-  // One card per NICKNAME, collapsing a pooled model's seats through the SAME
-  // worst-circuit rule Traffic's routing chains use (`targetsByNickname`): an open
-  // breaker on one seat is the fact an operator needs, not the closed one
-  // beside it. The seats themselves are kept so a card can name how many it
-  // speaks for and which learned negatives belong to it.
-  function collapsedTargets(targets) {
-    var byNickname = targetsByNickname(targets);
-    var order = [];
-    var seen = Object.create(null);
-    (targets || []).forEach(function (t) {
-      if (!t || !t.nickname || seen[t.nickname]) { return; }
-      seen[t.nickname] = true;
-      var group = byNickname[t.nickname];
-      order.push({
-        nickname: t.nickname,
-        worst: group.worst,
-        count: group.count,
-        members: group.members
-      });
-    });
-    return order;
+  // The attention items by key, or null when the list carries nothing
+  // renderable.
+  function modelsAttentionItems(rec) {
+    if (stateCard(rec)) { return null; }
+    try {
+      if (!Array.isArray(rec.data.items)) { throw new Error('attention payload carries no item list'); }
+      var items = rec.data.items.filter(isPlainObject);
+      markRenderAttempt(rec.name);
+      return items;
+    } catch (e) {
+      recordRenderFault(rec.name);
+      return null;
+    }
   }
 
-  // Learned rows keyed by the lane they were recorded against
-  // (`provider#upstream`). A target joins them through its `learned_lane`,
-  // never its runtime `state_key`: every nickname on one lane shares the
-  // lane's negatives, and a card lists those of ITS OWN seats' lanes and
-  // nothing else. Only `broken` verdicts are negatives -- a `verified`
-  // positive shares the list and must not be read as one.
-  function learnedByLane(rows) {
-    var map = Object.create(null);
-    (rows || []).forEach(function (row) {
-      if (!row || !row.state_key || row.verdict !== 'broken') { return; }
-      if (!map[row.state_key]) { map[row.state_key] = []; }
-      map[row.state_key].push(row);
+  // The nicknames the seven-day per-model read saw a request for, or null
+  // while that read is not live: only a current answer may hide a lane.
+  function modelsUsedNicknames(rec) {
+    if (rec.state !== 'live') { return null; }
+    var view = queryViewOf(rec.name);
+    if (!view) { return null; }
+    var used = Object.create(null);
+    view.groups.forEach(function (g) {
+      if (num0(g.metrics.requests) > 0) { used[g.label] = true; }
     });
-    return map;
+    markRenderAttempt(rec.name);
+    return used;
   }
 
-  function targetGroupList(title, hint, groups, negatives, nowMs) {
-    var wrap = document.createElement('div');
-    wrap.className = 'hgroup';
-    wrap.appendChild(sectionHead(title, hint));
-    var list = document.createElement('div');
-    list.className = 'hlist';
-    groups.forEach(function (group) {
-      var card = targetCard(group, negatives, nowMs);
-      card.id = 'health-target-' + idKey(group.nickname);
-      list.appendChild(card);
+  // A lane collapses when the seven-day read is live and none of its
+  // nicknames carried a request in it. A pooled nickname's seat lanes share
+  // the nickname, so they collapse or stay together. A problem, or a problem
+  // that cleared recently, always stays a row of its own.
+  function modelsIsUnused(row, ctx) {
+    if (!ctx.used || modelsIsProblem(row) || modelsRecovered(row, ctx.items)) { return false; }
+    return !row.nicknames.some(function (n) { return !!ctx.used[n]; });
+  }
+
+  // The runtime state keys a lane's targets can carry: a nickname, or a
+  // pool seat's `nickname#member` (nicknames never contain the separator).
+  function modelsStateKeys(row) {
+    var keys = [];
+    row.nicknames.forEach(function (n) {
+      keys.push(String(n));
+      keys.push(n + '#' + row.provider);
     });
-    wrap.appendChild(list);
+    return keys;
+  }
+
+  // The most recent recovered attention item that named this lane: one whose
+  // `targets` list one of its routes, a route item about one of its routes,
+  // or the credential item of its account. Null when none did, or while the
+  // list is not available.
+  function modelsRecovered(row, items) {
+    if (!items) { return null; }
+    var keys = modelsStateKeys(row);
+    var found = null;
+    items.forEach(function (item) {
+      if (item.state !== 'recovered' || !modelsItemNames(item, row, keys)) { return; }
+      if (!found || num0(item.recovered_at_ms) > num0(found.recovered_at_ms)) { found = item; }
+    });
+    return found;
+  }
+
+  var MODELS_ACCOUNT_KINDS = ['account_unusable', 'account_parked'];
+
+  function modelsItemNames(item, row, keys) {
+    if (Array.isArray(item.targets)) {
+      return item.targets.some(function (t) { return keys.indexOf(t) >= 0; });
+    }
+    if (item.kind === 'route_circuit_open') { return keys.indexOf(item.subject) >= 0; }
+    return MODELS_ACCOUNT_KINDS.indexOf(item.kind) >= 0 && typeof row.account === 'string' &&
+      item.account === row.account;
+  }
+
+  // The active item listed under `key`, or null.
+  function modelsCauseItem(key, items) {
+    if (!items) { return null; }
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].key === key && items[i].state !== 'recovered') { return items[i]; }
+    }
+    return null;
+  }
+
+  // Rows in server order, each cause's rows gathered under its first row's
+  // position: [{ key, rows }] with key null for a row no item names.
+  function modelsCauseGroups(rows) {
+    var groups = [];
+    var byKey = Object.create(null);
+    rows.forEach(function (row) {
+      var key = typeof row.cause_key === 'string' ? row.cause_key : null;
+      if (key === null) { groups.push({ key: null, rows: [row] }); return; }
+      if (!byKey[key]) {
+        byKey[key] = { key: key, rows: [] };
+        groups.push(byKey[key]);
+      }
+      byKey[key].rows.push(row);
+    });
+    return groups;
+  }
+
+  // Fill `tbl` with `rows` and wrap it in its scroller. Two rows on one lane
+  // would share a row id, so that throws and the section draws its card.
+  function modelsTable(tbl, rows, ctx) {
+    checkRowKeys(tbl.id, rows.map(function (row) { return { row: row, key: row.lane }; }));
+    modelsCauseGroups(rows).forEach(function (group) {
+      if (group.key !== null) { tbl.tb.appendChild(modelsCauseLine(group, ctx)); }
+      group.rows.forEach(function (row) { modelsRow(tbl, row, ctx); });
+    });
+    return tableScroll(tbl);
+  }
+
+  // One line over the rows a cause names: the attention item's own words and
+  // the command that fixes it, or the bare key while the list is not
+  // available.
+  function modelsCauseLine(group, ctx) {
+    var tr = document.createElement('tr');
+    tr.id = 'models-cause-' + idKey(group.key);
+    tr.className = 'models-cause-row';
+    var cell = document.createElement('th');
+    cell.scope = 'rowgroup';
+    cell.colSpan = MODELS_COLUMNS.length + 1;
+    var line = document.createElement('div');
+    line.className = 'models-cause';
+    var item = modelsCauseItem(group.key, ctx.items);
+    var count = group.rows.length + phrase(group.rows.length, ' lane', ' lanes');
+    line.appendChild(attentionText('span', 'models-cause-count', count));
+    if (item) {
+      line.appendChild(attentionText('span', 'models-cause-text', item.cause));
+      if (item.fix) { line.appendChild(copyableCode('models-cause-fix', item.fix)); }
+    } else {
+      line.appendChild(attentionText('span', 'models-cause-text',
+        ctx.items ? 'listed under ' + group.key : 'cause not available - ' + group.key));
+    }
+    cell.appendChild(line);
+    tr.appendChild(cell);
+    return tr;
+  }
+
+  function modelsRow(tbl, row, ctx) {
+    xrow(tbl, row.lane, [
+      modelsNicknameLinks(row),
+      row.provider,
+      row.upstream,
+      modelsAccountText(row),
+      modelsStateCell(row, ctx),
+      modelsRefusals(row),
+      modelsTransitCell(row)
+    ], modelsDetail(row, ctx), null);
+  }
+
+  // One link per nickname, each to Traffic narrowed to that nickname on this
+  // lane's provider entry. The address goes through the page's own codec
+  // and, once followed, through its closed-set check like any other link.
+  function modelsNicknameLinks(row) {
+    var wrap = document.createElement('span');
+    wrap.className = 'models-names';
+    row.nicknames.forEach(function (nickname) {
+      var state = currentViewState();
+      state.view = 'traffic';
+      state.scope = row.provider;
+      state.model = String(nickname);
+      var a = document.createElement('a');
+      a.className = 'models-link';
+      a.textContent = String(nickname);
+      a.setAttribute('href', formatViewHash(state));
+      a.title = 'Traffic for ' + nickname + ' on ' + row.provider;
+      wrap.appendChild(a);
+    });
     return wrap;
   }
 
-  function targetCard(group, negatives, nowMs) {
-    var phase = targetPhase(group);
-    var cardEl = document.createElement('div');
-    cardEl.className = 'hcard hcard--' + phase;
-    cardEl.appendChild(targetCardHead(group, phase, nowMs));
-    cardEl.appendChild(targetCardGrid(group, negatives, nowMs));
-    return cardEl;
+  function modelsAccountText(row) {
+    if (typeof row.account !== 'string') { return 'client credential'; }
+    return typeof row.login_label === 'string' ? row.login_label : row.account;
   }
 
-  function targetCardHead(group, phase, nowMs) {
-    var head = document.createElement('div');
-    head.className = 'hcard-head';
-    head.appendChild(statePill(group, phase));
-    head.appendChild(targetIdentity(group, phase, nowMs));
-    head.appendChild(targetAnchors(group, nowMs));
-    return head;
-  }
-
-  // The state pill carries the WORST circuit across the seats, or the neutral
-  // unknown token when nothing has been observed.
-  function statePill(group, phase) {
-    var pill = circuitPill(group, phase);
-    pill.classList.add('hstate');
-    return pill;
-  }
-
-  function targetIdentity(group, phase, nowMs) {
-    var wrap = document.createElement('div');
-    wrap.className = 'hident';
-    var name = document.createElement('span');
-    name.className = 'hname';
-    name.textContent = group.nickname;
-    name.title = group.nickname;
-    wrap.appendChild(name);
-    var sub = document.createElement('span');
-    sub.className = 'hsub';
-    sub.textContent = targetSubText(group);
-    wrap.appendChild(sub);
-    var reason = targetReasonText(group, phase, nowMs);
-    if (reason) {
-      var line = document.createElement('span');
-      line.className = 'hreason';
-      line.textContent = reason;
-      wrap.appendChild(line);
+  // The lane's raw state with how long it has held, and, on a lane whose
+  // problem has cleared, how long ago it did.
+  function modelsStateCell(row, ctx) {
+    var wrap = document.createElement('span');
+    wrap.className = 'models-state';
+    if (row.state === 'ok') {
+      wrap.appendChild(attentionText('span', 'models-ok', 'ok'));
+    } else {
+      wrap.appendChild(tokLabeled('elig', 'elig', row.state));
+      var since = ageSince(row.since_ms, ctx.nowMs);
+      if (since !== '-') { wrap.appendChild(attentionText('span', 'models-since', 'for ' + since)); }
+    }
+    var recovered = modelsIsProblem(row) ? null : modelsRecovered(row, ctx.items);
+    if (recovered) {
+      wrap.appendChild(attentionText('span', 'models-recovered',
+        recoveredText(recovered.recovered_at_ms, ctx.nowMs)));
     }
     return wrap;
   }
 
-  function targetSubText(group) {
-    var target = group.worst;
-    var parts = [target.provider_name, target.upstream].filter(Boolean);
-    if (group.count > 1) {
-      parts.push(group.count + phrase(group.count, ' seat', ' seats'));
-    }
-    return parts.join(' - ');
-  }
-
-  function targetReasonText(group, phase, nowMs) {
-    var blocked = blockedSeats(group);
-    if (blocked.length) {
-      return blocked.length + ' of ' + group.count + phrase(group.count, ' seat', ' seats') +
-        ' not eligible';
-    }
-    if (phase === 'unknown') { return 'nothing dispatched to it yet'; }
-    var target = group.worst;
-    var parts = [];
-    if (target.circuit === 'open' && target.open_since_ms !== null && target.open_since_ms !== undefined) {
-      parts.push('breaker open for ' + ageSince(target.open_since_ms, nowMs));
-    }
-    if (target.half_open_probe_in_flight) { parts.push('recovery probe in flight'); }
-    return parts.join(' - ');
-  }
-
-  // The two anchors of the card. `last ok` is only knowable when the seat's
-  // LAST settled outcome was itself ok -- the health source carries one
-  // outcome per seat, not a history -- so anything else reads unknown rather
-  // than claiming a moment nobody recorded.
-  function targetAnchors(group, nowMs) {
-    var wrap = document.createElement('div');
-    wrap.className = 'hanchors';
-    wrap.appendChild(anchorCell('p50', latencyAnchor()));
-    wrap.appendChild(anchorCell('last ok', lastOkAnchor(group, nowMs)));
+  function modelsRefusals(row) {
+    var wrap = document.createElement('span');
+    wrap.className = 'hchips';
+    row.refusals.forEach(function (refusal) { wrap.appendChild(modelsRefusalChip(refusal)); });
+    if (!wrap.childNodes.length) { wrap.appendChild(faintFigure('none')); }
     return wrap;
   }
 
-  // Neither source behind this tab carries per-target latency: the health
-  // panel reports gate state and the usage panel aggregates by group, not by
-  // target. The anchor says so rather than borrowing another tab's figure.
-  function latencyAnchor() {
-    var span = faintFigure('no data');
-    span.title = 'per-target latency is not reported by the health or usage panel';
+  // The bare capability key, the one to copy into `force_supported`, with
+  // the verdict, routing action and learned value in its tooltip.
+  function modelsRefusalChip(refusal) {
+    var chip = document.createElement('span');
+    chip.className = 'hchip models-refusal';
+    chip.textContent = String(refusal.capability);
+    chip.title = refusal.capability + ' - ' + refusal.verdict + ', ' + refusal.action +
+      ', value ' + (refusal.value || '-');
+    return chip;
+  }
+
+  // Exact counts beside the number of responses checked. A lane nothing was
+  // checked on reads "unmeasured", never zero.
+  function modelsTransitText(transit) {
+    var checked = num0(transit.checked);
+    if (checked <= 0) { return 'unmeasured'; }
+    return String(num0(transit.changed)) + ' of ' + String(checked) + ' responses changed';
+  }
+
+  function modelsTransitCell(row) {
+    var text = modelsTransitText(row.transit);
+    var span = markValue(document.createElement('span'), text);
+    span.className = 'models-transit' + (text === 'unmeasured' ? ' mag-zero' : '');
+    span.textContent = text;
     return span;
   }
 
-  function lastOkAnchor(group, nowMs) {
-    var stamps = group.members
-      .filter(function (t) {
-        return t.last_outcome === 'ok' && t.last_outcome_at_ms !== null && t.last_outcome_at_ms !== undefined;
-      })
-      .map(function (t) { return Number(t.last_outcome_at_ms); });
-    if (!stamps.length) { return faintFigure('unknown'); }
-    return figure(ageSince(Math.max.apply(null, stamps), nowMs), null, null);
+  function modelsDetail(row, ctx) {
+    var transit = modelsTransitText(row.transit);
+    return [
+      ['lane', row.lane],
+      ['changed in transit', transit === 'unmeasured' ? transit : transit + ' since ' + ctx.startText],
+      ['most-changed fields', modelsPaths(row.transit.top_paths)],
+      ['capabilities', modelsCapabilities(row.capabilities)]
+    ];
   }
 
-  function anchorCell(label, valueNode) {
-    var wrap = document.createElement('div');
-    wrap.className = 'hanchor';
-    var l = document.createElement('span');
-    l.className = 'hanchor-label';
-    l.textContent = label;
-    var v = document.createElement('span');
-    v.className = 'hanchor-value';
-    v.appendChild(valueNode);
-    wrap.appendChild(l);
-    wrap.appendChild(v);
-    return wrap;
-  }
-
-  function targetCardGrid(group, negatives, nowMs) {
-    var grid = document.createElement('div');
-    grid.className = 'hgrid';
-    grid.appendChild(gridCell('rate limit', rpmValue(group.worst)));
-    grid.appendChild(gridCell('last outcome', lastOutcomeValue(group.worst, nowMs)));
-    grid.appendChild(gridCell('circuit', circuitValue(group.worst, nowMs)));
-    grid.appendChild(gridCell('learned negatives', negativeChips(group, negatives, nowMs)));
-    var elig = gridCell('eligibility', eligibilityCell(group, nowMs));
-    if (blockedSeats(group).length) { elig.classList.add('hcell--wide'); }
-    grid.appendChild(elig);
-    return grid;
-  }
-
-  // One line per seat that cannot be dispatched to: its reason, the cause
-  // of an unusable credential, how long ago it began, and the fix to run.
-  function eligibilityCell(group, nowMs) {
-    var blocked = blockedSeats(group);
-    if (!blocked.length) { return faintFigure('eligible'); }
+  function modelsPaths(paths) {
     var wrap = document.createElement('span');
-    wrap.className = 'helig';
-    blocked.forEach(function (t) { wrap.appendChild(eligibilityRow(t, group.count > 1, nowMs)); });
-    return wrap;
-  }
-
-  function eligibilityRow(t, named, nowMs) {
-    var e = t.eligibility;
-    var line = document.createElement('span');
-    line.className = 'helig-row neg';
-    var parts = [];
-    if (named) { parts.push(t.seat_label || t.state_key); }
-    parts.push(e.cause ? e.reason + ' (' + e.cause + ')' : e.reason);
-    if (e.since_ms !== null && e.since_ms !== undefined) {
-      var since = ageSince(e.since_ms, nowMs);
-      if (since !== '-') { parts.push('since ' + since + ' ago'); }
-    }
-    line.appendChild(document.createTextNode(parts.join(' - ')));
-    if (e.fix) {
-      var fix = document.createElement('code');
-      fix.className = 'helig-fix';
-      fix.textContent = e.fix;
-      line.appendChild(fix);
-    }
-    return line;
-  }
-
-  function gridCell(label, valueNode) {
-    var wrap = document.createElement('div');
-    wrap.className = 'hcell';
-    var l = document.createElement('span');
-    l.className = 'hcell-label';
-    l.textContent = label;
-    var v = document.createElement('span');
-    v.className = 'hcell-value';
-    v.appendChild(valueNode);
-    wrap.appendChild(l);
-    wrap.appendChild(v);
-    return wrap;
-  }
-
-  // Projected available tokens, with NO bar: the panel reports the level, not
-  // the ceiling, and a bar without a denominator would invent one. An absent
-  // level is the unlimited policy, not a missing reading.
-  function rpmValue(target) {
-    if (target.rpm_available === null || target.rpm_available === undefined) {
-      return faintFigure('unlimited');
-    }
-    return figure(String(Math.floor(num0(target.rpm_available))), 'rpm left', null);
-  }
-
-  function lastOutcomeValue(target, nowMs) {
-    if (!target.last_outcome) { return faintFigure('no settled outcome yet'); }
-    var node = labelCell('outcome', target.last_outcome);
-    var wrap = document.createElement('span');
-    if (node instanceof Node) { wrap.appendChild(node); }
-    else { wrap.appendChild(document.createTextNode(node)); }
-    if (target.last_outcome !== 'ok') { wrap.classList.add('neg'); }
-    if (target.last_outcome_at_ms !== null && target.last_outcome_at_ms !== undefined) {
-      var seen = ageSince(target.last_outcome_at_ms, nowMs);
-      if (seen !== '-') {
-        var age = document.createElement('span');
-        age.className = 'hage';
-        age.textContent = seen + ' ago';
-        wrap.appendChild(age);
-      }
-    }
-    return wrap;
-  }
-
-  function circuitValue(target, nowMs) {
-    if (target.circuit === 'closed') { return faintFigure('closed'); }
-    var parts = [];
-    if (target.open_since_ms !== null && target.open_since_ms !== undefined) {
-      parts.push('open for ' + ageSince(target.open_since_ms, nowMs));
-    }
-    if (target.half_open_probe_in_flight) { parts.push('probe in flight'); }
-    return figure(parts.length ? parts.join(' - ') : labelFor('circuit', target.circuit).label, null, null);
-  }
-
-  function negativeChips(group, negatives, nowMs) {
-    var wrap = document.createElement('span');
-    wrap.className = 'hchips';
-    var seen = Object.create(null);
-    group.members.forEach(function (t) {
-      ((t.learned_lane && negatives[t.learned_lane]) || []).forEach(function (row) {
-        if (seen[row.capability_key]) { return; }
-        seen[row.capability_key] = true;
-        wrap.appendChild(negativeChip(row, nowMs));
-      });
+    wrap.className = 'models-paths';
+    paths.forEach(function (p) {
+      var line = document.createElement('span');
+      line.className = 'models-path';
+      var path = String(p.path);
+      line.appendChild(attentionText('code', 'models-path-name',
+        path === 'other' ? 'other fields' : (path === '' ? '(whole body)' : path)));
+      line.appendChild(attentionText('span', 'models-path-count', String(num0(p.count))));
+      wrap.appendChild(line);
     });
     if (!wrap.childNodes.length) { wrap.appendChild(faintFigure('none')); }
     return wrap;
   }
 
-  function negativeChip(row, nowMs) {
-    var chip = document.createElement('span');
-    chip.className = 'hchip';
-    chip.textContent = row.capability_key;
-    var seen = ageSince(row.last_seen_ms, nowMs);
-    chip.title = row.capability_key + ' - ' + row.source + ' evidence' +
-      (seen === '-' ? '' : ', last seen ' + seen + ' ago') + ', value ' + (row.value || '-');
-    return chip;
+  // Every resolved capability cell: its key and display verdict, the tier
+  // and routing action in its tooltip. A cell resolved as unsupported is
+  // marked; a verdict reads as text, never as a color alone.
+  function modelsCapabilities(cells) {
+    var wrap = document.createElement('span');
+    wrap.className = 'hchips';
+    cells.forEach(function (cell) {
+      var chip = document.createElement('span');
+      chip.className = 'hchip' + (cell.supported === false ? ' models-refusal' : '');
+      chip.textContent = cell.capability + ' ' + cell.verdict;
+      chip.title = cell.capability + ' - ' + cell.verdict + ', ' + cell.action +
+        (cell.layer ? ', decided by ' + cell.layer : '') +
+        (cell.source ? ', ' + cell.source + ' evidence' : '');
+      wrap.appendChild(chip);
+    });
+    if (!wrap.childNodes.length) { wrap.appendChild(faintFigure('none')); }
+    return wrap;
+  }
+
+  // The lanes with no request in the last seven days, as one line that
+  // opens onto their rows.
+  function modelsUnusedLine(rows, ctx) {
+    var summary = rows.length + phrase(rows.length, ' lane', ' lanes') +
+      ' with no request in the last 7 days';
+    var det = buildExpander('models-unused', summary,
+      modelsTable(mkTable('models-unused-lanes', 'Model lanes with no request in the last 7 days',
+        MODELS_COLUMNS, { expandable: true }), rows, ctx));
+    det.className = 'models-unused';
+    return det;
   }
   // ---- end view:models -------------------------------------------------
-

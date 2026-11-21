@@ -48,7 +48,7 @@ const VIEW_CASES: &[ViewCase] = &[
     ViewCase {
         id: "accounts",
         shows: &["Accounts by pool", "Background seat drivers"],
-        omits: &["Dispatch targets", "Fallback chains"],
+        omits: &["Model lanes", "Fallback chains"],
         windowed: true,
     },
     ViewCase {
@@ -56,7 +56,7 @@ const VIEW_CASES: &[ViewCase] = &[
         shows: &["By model"],
         omits: &[
             "Accounts by pool",
-            "Dispatch targets",
+            "Model lanes",
             "Fallback chains",
             "Live target state",
             "Estimated step attribution",
@@ -65,20 +65,20 @@ const VIEW_CASES: &[ViewCase] = &[
     },
     ViewCase {
         id: "models",
-        shows: &["Dispatch targets", "Healthy"],
-        omits: &["Accounts by pool", "Fallback chains"],
+        shows: &["Model lanes"],
+        omits: &["Accounts by pool", "Fallback chains", "Dispatch targets"],
         windowed: false,
     },
     ViewCase {
         id: "config",
         shows: &["Aliases", "Routing providers", "Retry classes"],
-        omits: &["Accounts by pool", "Dispatch targets"],
+        omits: &["Accounts by pool", "Model lanes"],
         windowed: false,
     },
     ViewCase {
         id: "doctor",
         shows: &["Findings", "Capability matrix"],
-        omits: &["Accounts by pool", "Dispatch targets"],
+        omits: &["Accounts by pool", "Model lanes"],
         windowed: false,
     },
 ];

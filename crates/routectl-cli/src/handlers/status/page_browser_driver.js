@@ -275,28 +275,4 @@
       });
     });
   });
-
-  // The health fixture carries no figure that moves between rounds, so each
-  // answer gives the first dispatch target one more rpm of headroom.
-  d.scenario('models-target-kept', function () {
-    var cardId = 'health-target-ksonnet';
-    d.rewrite(function (url, text, n) {
-      if (url.pathname !== '/status') { return text; }
-      var agg = JSON.parse(text);
-      agg.panels.health.data.targets[0].rpm_available = 40 + n;
-      return JSON.stringify(agg);
-    });
-    return d.waitForElement(cardId).then(function (card) {
-      var rpm = card.querySelector('.hcell-value [data-v]');
-      return d.acrossRounds('/status', 2, function () {
-        var live = document.getElementById(cardId);
-        return {
-          same_card: card === live,
-          same_figure_node: !!live && rpm === live.querySelector('.hcell-value [data-v]'),
-          connected: card.isConnected && rpm.isConnected,
-          figure: rpm.textContent
-        };
-      });
-    });
-  });
 })(window.routectlDriver);

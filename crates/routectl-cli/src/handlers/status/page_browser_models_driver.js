@@ -1,0 +1,208 @@
+// ---- scenarios: the Models view ------------------------------------------
+//
+// Test-only snippet for page_browser_models_tests.rs, injected after
+// page_browser_driver.js. Inputs a test supplies arrive as
+// `window.routectlModels`, set by a snippet ahead of this one:
+//   holdLanesQuery    hold the seven-day per-model QUERY past the read
+//   attentionDown     answer the attention panel as unavailable
+//   recoveredLane     `{subject, minutes}`: add a recovered route item for
+//                     that route, cleared that many minutes before as_of
+(function (d) {
+  'use strict';
+
+  var opts = window.routectlModels || {};
+  var HOLD_MS = 60000;
+
+  function isLanesQuery(init) {
+    if (!init || typeof init.body !== 'string') { return false; }
+    var body = JSON.parse(init.body);
+    return body.window === 'last7d' && body.group_by === 'model' && !body.bucket;
+  }
+
+  d.hold(function (url, init) {
+    return (opts.holdLanesQuery && url.pathname === '/status/query' && isLanesQuery(init)) ? HOLD_MS : 0;
+  });
+
+  d.rewrite(function (url, text) {
+    if (url.pathname !== '/status' || !(opts.attentionDown || opts.recoveredLane)) { return text; }
+    var agg = JSON.parse(text);
+    var attention = agg.panels.attention;
+    if (opts.attentionDown) {
+      agg.panels.attention = {
+        schema_version: attention.schema_version,
+        as_of: attention.as_of,
+        unavailable: 'probe_down',
+        data: null
+      };
+    }
+    if (opts.recoveredLane) {
+      var at = Date.parse(agg.panels.models.as_of) - opts.recoveredLane.minutes * 60000;
+      attention.data.items.push({
+        key: 'route_circuit_open:' + opts.recoveredLane.subject,
+        kind: 'route_circuit_open',
+        severity: 'degraded',
+        state: 'recovered',
+        subject: opts.recoveredLane.subject,
+        account: null,
+        cause: 'Circuit open',
+        raw_token: 'breaker_open',
+        since_ms: null,
+        until_ms: null,
+        recovered_at_ms: at,
+        fix: null,
+        remediation: null,
+        target: 'models',
+        targets: null
+      });
+    }
+    return JSON.stringify(agg);
+  });
+
+  function textIn(node, selector) {
+    var found = node.querySelector(selector);
+    return found ? found.textContent : null;
+  }
+
+  // Every lane row and cause line of the view, in document order.
+  function rows() {
+    var body = document.getElementById('body-models');
+    var out = [];
+    Array.prototype.forEach.call(body.querySelectorAll('tbody > tr'), function (tr) {
+      var table = tr.closest('table').id;
+      if (tr.classList.contains('models-cause-row')) {
+        out.push({ kind: 'cause', table: table, id: tr.id, text: textIn(tr, '.models-cause-text'),
+          count: textIn(tr, '.models-cause-count'), fix: textIn(tr, '.models-cause-fix') });
+        return;
+      }
+      if (!tr.classList.contains('exp-row')) { return; }
+      var cells = tr.children;
+      out.push({
+        kind: 'lane',
+        table: table,
+        id: tr.id,
+        names: Array.prototype.map.call(tr.querySelectorAll('.models-link'), function (a) {
+          return { text: a.textContent, href: a.getAttribute('href') };
+        }),
+        provider: cells[2].textContent,
+        state: cells[5].textContent,
+        refuses: cells[6].textContent,
+        transit: cells[7].textContent
+      });
+    });
+    return out;
+  }
+
+  function seen() {
+    var body = document.getElementById('body-models');
+    var unused = document.getElementById('models-unused');
+    return {
+      rows: rows(),
+      unused: unused ? textIn(unused, 'summary') : null,
+      error_cards: body.querySelectorAll('.unavailable-msg, .incompatible-msg').length,
+      transit_nodes: Array.prototype.map.call(body.querySelectorAll('.models-transit'), function (n) {
+        return n.textContent;
+      }),
+      detail_transit: Array.prototype.map.call(body.querySelectorAll('.detail-row .def'), function (n) {
+        return n.textContent;
+      }).filter(function (t) { return t.indexOf('changed in transit') === 0; })
+    };
+  }
+
+  function lanesDrawn() {
+    var body = document.getElementById('body-models');
+    return !!document.getElementById('models-lanes') && !body.querySelector('.skeleton');
+  }
+
+  function lanesQueryAnswered() {
+    return d.waitUntil('the per-model QUERY answer', function () {
+      return window.routectlModelsAnswered;
+    });
+  }
+
+  // The page's own fetch marks when an answer to the per-model QUERY has
+  // been handed over, so a scenario reads the view after it applied.
+  var pageFetch = window.fetch;
+  window.fetch = function (input, init) {
+    var lanes = isLanesQuery(init);
+    return pageFetch(input, init).then(function (resp) {
+      if (lanes) { setTimeout(function () { window.routectlModelsAnswered = true; }, 0); }
+      return resp;
+    });
+  };
+
+  d.scenario('models-rows', function () {
+    var ready = d.waitUntil('the lane table', lanesDrawn);
+    var settled = opts.holdLanesQuery
+      ? ready.then(function () { return d.sleep(3000); })
+      : ready.then(lanesQueryAnswered).then(function () { return d.sleep(300); });
+    return settled.then(seen);
+  });
+
+  // A lane row expanded, then two changed rounds of its transit count.
+  d.scenario('models-kept', function () {
+    var lane = 'anthropic#claude-sonnet-4-5';
+    d.rewrite(function (url, text, n) {
+      if (url.pathname !== '/status') { return text; }
+      var agg = JSON.parse(text);
+      agg.panels.models.data.rows.forEach(function (row) {
+        if (row.lane === lane) { row.transit.checked += n; }
+      });
+      return JSON.stringify(agg);
+    });
+    var node = null;
+    return d.waitUntil('the lane table', lanesDrawn).then(function () {
+      node = Array.prototype.filter.call(document.querySelectorAll('#models-lanes tr.exp-row'), function (tr) {
+        return tr.children[3].textContent === 'claude-sonnet-4-5' && tr.children[2].textContent === 'anthropic';
+      })[0];
+      if (!node) { throw new Error('no sonnet lane row'); }
+      document.getElementById(node.id + '-toggle').click();
+      return d.acrossRounds('/status', 2, function () {
+        var live = document.getElementById(node.id);
+        var detail = document.getElementById(node.id + '-detail');
+        return {
+          same_node: live === node,
+          connected: node.isConnected,
+          open: !!detail && !detail.hidden,
+          detail: detail ? detail.textContent : null,
+          figure: live ? live.children[7].textContent : null
+        };
+      });
+    });
+  });
+
+  // Follow a nickname's link and read Traffic once its QUERY answered.
+  d.scenario('models-link', function () {
+    var href = null;
+    return d.waitUntil('the lane table', lanesDrawn).then(function () {
+      var link = Array.prototype.filter.call(document.querySelectorAll('#models-lanes .models-link'), function (a) {
+        return a.textContent === 'sonnet';
+      })[0];
+      if (!link) { throw new Error('no sonnet link'); }
+      href = link.getAttribute('href');
+      link.click();
+      return d.waitUntil('the Traffic table', function () {
+        var tab = document.querySelector('#tabbar [aria-selected="true"]');
+        return tab && tab.getAttribute('data-tab') === 'traffic' &&
+          document.getElementById('traffic-groups');
+      });
+    }).then(function () {
+      return d.sleep(500);
+    }).then(function () {
+      var strip = document.querySelector('#body-traffic .card-title');
+      return { href: href, hash: location.hash, strip: strip ? strip.textContent : null };
+    });
+  });
+
+  // Open Traffic scoped from the address, then switch to Models and read
+  // the address once the per-model QUERY answered.
+  d.scenario('models-scope-then-lanes', function () {
+    return d.waitUntil('the Traffic table', function () {
+      return document.getElementById('traffic-groups');
+    }).then(function () {
+      document.getElementById('tab-models').click();
+      return lanesQueryAnswered();
+    }).then(function () {
+      return { models_hash: location.hash };
+    });
+  });
+})(window.routectlDriver);
