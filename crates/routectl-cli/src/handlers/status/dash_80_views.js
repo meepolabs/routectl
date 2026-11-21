@@ -92,7 +92,7 @@
   // cards when a scoped query has nothing renderable.
   function buildNow() {
     var stack = tabStack();
-    stack.appendChild(viewSection('attention', attentionSection, 'Needs attention'));
+    stack.appendChild(viewSection('attention', nowAttentionSection, 'Needs attention'));
     stack.appendChild(viewSection('accounts', accountsGlanceSection, 'Accounts'));
     if (hasQueryScope() && stateCard(SOURCES[QUERY_SERIES_SOURCE])) {
       stack.appendChild(scopeRecovery());

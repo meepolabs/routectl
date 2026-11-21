@@ -53,6 +53,7 @@ const SCRIPT_PARTS: &[&str] = &[
     include_str!("dash_30_transport.js"),
     include_str!("dash_40_render.js"),
     include_str!("dash_50_dom.js"),
+    include_str!("dash_55_attention.js"),
     include_str!("dash_60_tab_overview.js"),
     include_str!("dash_61_view_traffic.js"),
     include_str!("dash_62_view_accounts.js"),

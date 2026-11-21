@@ -18,6 +18,7 @@ pub(super) const NAMED_PARTS: &[(&str, &str)] = &[
     ("dash_30_transport.js", include_str!("dash_30_transport.js")),
     ("dash_40_render.js", include_str!("dash_40_render.js")),
     ("dash_50_dom.js", include_str!("dash_50_dom.js")),
+    ("dash_55_attention.js", include_str!("dash_55_attention.js")),
     (
         "dash_60_tab_overview.js",
         include_str!("dash_60_tab_overview.js"),
@@ -46,9 +47,10 @@ pub(super) const NAMED_PARTS: &[(&str, &str)] = &[
     ("dash_90_chrome.js", include_str!("dash_90_chrome.js")),
 ];
 
-/// Whether a part builds view DOM: the shared DOM helpers and every view part.
+/// Whether a part builds view DOM: the shared DOM helpers, the shared
+/// section renderers and every view part.
 fn is_builder_part(name: &str) -> bool {
-    name == "dash_50_dom.js" || name.starts_with("dash_6") || name.starts_with("dash_7")
+    name.starts_with("dash_5") || name.starts_with("dash_6") || name.starts_with("dash_7")
 }
 
 fn builder_parts() -> Vec<(&'static str, &'static str)> {
