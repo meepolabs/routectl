@@ -118,29 +118,6 @@
     return stack;
   }
 
-  // What was served in the window, then how the configured chains carried
-  // it: the chains from config, their live state from health and the
-  // estimate from the all-history ledger.
-  function buildTraffic() {
-    var stack = tabStack();
-    stack.appendChild(usageControls());
-    stack.appendChild(viewSection(QUERY_SOURCE, buildUsage));
-    stack.appendChild(viewSection('config', routingChainsSection, 'Fallback chains'));
-    var chains = liveChains(SOURCES.config);
-    if (!chains.length) { return stack; }
-    stack.appendChild(viewSection('health', function (rec) {
-      return targetStateSection(rec, chains);
-    }, 'Live target state'));
-    stack.appendChild(viewSection(USAGE_ALL_SOURCE, function (rec) {
-      return attributionSection(rec, chains);
-    }, 'Estimated step attribution'));
-    return stack;
-  }
-
-  function buildModels() {
-    return viewSection('health', healthTargetSection, 'Dispatch targets');
-  }
-
   function buildConfigView() {
     return viewSection('config', buildConfig);
   }

@@ -22,18 +22,21 @@ pub(super) const NAMED_PARTS: &[(&str, &str)] = &[
         "dash_60_tab_overview.js",
         include_str!("dash_60_tab_overview.js"),
     ),
-    ("dash_61_tab_usage.js", include_str!("dash_61_tab_usage.js")),
+    (
+        "dash_61_view_traffic.js",
+        include_str!("dash_61_view_traffic.js"),
+    ),
     (
         "dash_62_view_accounts.js",
         include_str!("dash_62_view_accounts.js"),
     ),
     (
-        "dash_70_tab_routing.js",
-        include_str!("dash_70_tab_routing.js"),
+        "dash_63_view_models.js",
+        include_str!("dash_63_view_models.js"),
     ),
     (
-        "dash_71_tab_health.js",
-        include_str!("dash_71_tab_health.js"),
+        "dash_70_tab_routing.js",
+        include_str!("dash_70_tab_routing.js"),
     ),
     (
         "dash_72_tab_config.js",

@@ -7787,9 +7787,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   builder is `providerRowSection`, named for the row rather than its subject
   because the script parts share one function scope with Config's provider
   TABLE builder
-- `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 9 of 16:
-  the Usage sections, the head of the Traffic view, single-source (`query`). Renders the group-by picker
-  (model/alias/provider, re-issuing the non-series query through
+- `src/handlers/status/dash_61_view_traffic.js` -- dashboard SCRIPT part 9 of
+  16: the Traffic view (`buildTraffic`: the Usage sections, then the Routing
+  sections from part 12) and its Usage sections, single-source (`query`).
+  Renders the group-by picker (model/alias/provider, re-issuing the non-series query through
   `queryInputChanged`) outside the section boundary, then one two-line card per
   query group ranked by requests, with zero-traffic groups omitted and their
   count reported in the header
@@ -7810,7 +7811,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   neutral). API-key and cloud rows say "this provider reports no usage
   windows". `accountsDriverSection` shows the refresh and poll drivers,
   stopped reading amber
-- `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 11 of
+- `src/handlers/status/dash_63_view_models.js` -- dashboard SCRIPT part 11 of
+  16: the Models view (`buildModels`) and its dispatch target section
+  (`healthTargetSection`), single-source (`health`). Per-target
+  cards collapse a pooled model's seats by nickname through the same
+  worst-circuit rule Routing uses and split into needs-attention / healthy /
+  not-observed sections (a target with no settled outcome is `unknown`, never
+  `Healthy`; an unusable or parked seat puts its card in needs-attention, and
+  a card's `eligibility` cell names its blocked seats)
+- `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 12 of
   16: the Routing sections, built under the Usage sections in the Traffic
   view, MULTI-SOURCE (built around `config`, plus `usage_all` and `health`);
   its figures span ALL HISTORY whatever the picker says, and its header and
@@ -7825,14 +7834,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   can resolve to several health targets (one per seat), collapsed by the
   worst-circuit rule Health shares. Each of the three sources is wrapped in its
   own `safeSection`, so health going dark costs the state list alone
-- `src/handlers/status/dash_71_tab_health.js` -- dashboard SCRIPT part 12 of
-  16: the Models view's dispatch target section (`healthTargetSection`),
-  single-source (`health`), with no view entry point of its own. Per-target
-  cards collapse a pooled model's seats by nickname through the same
-  worst-circuit rule Routing uses and split into needs-attention / healthy /
-  not-observed sections (a target with no settled outcome is `unknown`, never
-  `Healthy`; an unusable or parked seat puts its card in needs-attention, and
-  a card's `eligibility` cell names its blocked seats)
 - `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 13 of
   16: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
   tab -- the payload is validated in one place before any section is built, so
@@ -7873,8 +7874,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   array order = tab order): Now (needs attention, accounts at a glance, then
   the Overview provider and KPI sections), Accounts (accounts by pool and the
   background seat drivers, with a scope strip when an inherited provider scope
-  narrows its seat QUERY), Traffic (Usage then Routing), Models (the health
-  target section), Config and Doctor (badged from `attention`). Each
+  narrows its seat QUERY), Traffic and Models (their builders live in
+  their own view parts), Config and Doctor (badged from `attention`). Each
   composition wraps every section in `viewSection` bound to that section's
   source, and keeps view controls (the scope reset, the group-by strip)
   outside the section boundary. Models, Config and Doctor carry the

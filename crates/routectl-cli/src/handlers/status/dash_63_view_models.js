@@ -1,8 +1,11 @@
-  // ---- tab:health ------------------------------------------------------
+  // ---- view:models -----------------------------------------------------
 
-  // The Models view's dispatch target cards, wrapped in their own
-  // `safeSection` against the health record. The view that composes them is
-  // in dash_80_views.js.
+  // The Models view: the dispatch target cards, wrapped in their own
+  // `safeSection` against the health record.
+
+  function buildModels() {
+    return viewSection('health', healthTargetSection, 'Dispatch targets');
+  }
 
   function healthTargetSection(rec) {
     var wrap = routingSection('Dispatch targets', stateCard(rec)
@@ -354,5 +357,5 @@
       (seen === '-' ? '' : ', last seen ' + seen + ' ago') + ', value ' + (row.value || '-');
     return chip;
   }
-  // ---- end tab:health --------------------------------------------------
+  // ---- end view:models -------------------------------------------------
 

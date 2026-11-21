@@ -1,4 +1,4 @@
-  // ---- tab:usage -------------------------------------------------------
+  // ---- view:traffic ----------------------------------------------------
 
   var GROUP_BY_TITLES = {
     model: 'By model',
@@ -6,6 +6,25 @@
     provider: 'By provider',
     seat: 'By seat'
   };
+
+  // What was served in the window, then how the configured chains carried
+  // it: the chains from config, their live state from health and the
+  // estimate from the all-history ledger.
+  function buildTraffic() {
+    var stack = tabStack();
+    stack.appendChild(usageControls());
+    stack.appendChild(viewSection(QUERY_SOURCE, buildUsage));
+    stack.appendChild(viewSection('config', routingChainsSection, 'Fallback chains'));
+    var chains = liveChains(SOURCES.config);
+    if (!chains.length) { return stack; }
+    stack.appendChild(viewSection('health', function (rec) {
+      return targetStateSection(rec, chains);
+    }, 'Live target state'));
+    stack.appendChild(viewSection(USAGE_ALL_SOURCE, function (rec) {
+      return attributionSection(rec, chains);
+    }, 'Estimated step attribution'));
+    return stack;
+  }
 
   // The group-by picker and the provider-scope strip, composed by the view
   // OUTSIDE the section boundary: a selection whose query comes back
@@ -242,5 +261,5 @@
     wrap.appendChild(v);
     return wrap;
   }
-  // ---- end tab:usage ---------------------------------------------------
+  // ---- end view:traffic ------------------------------------------------
 
