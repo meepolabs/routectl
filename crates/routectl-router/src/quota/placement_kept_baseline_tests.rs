@@ -67,15 +67,29 @@ fn anthropic_low_weekly_header(store: &QuotaStore, key: &SeatKey, at: Observatio
 /// Codex response headers naming only the weekly secondary, at 5% on the
 /// kept reset.
 fn codex_low_weekly_header(store: &QuotaStore, key: &SeatKey, at: ObservationStamp) -> bool {
+    codex_weekly_header(store, key, at, 5, days(3.0))
+}
+
+/// Codex response headers naming only the weekly secondary, at `percent`
+/// and resetting `reset` past the base.
+fn codex_weekly_header(
+    store: &QuotaStore,
+    key: &SeatKey,
+    at: ObservationStamp,
+    percent: u32,
+    reset: Duration,
+) -> bool {
+    let reset_after =
+        reset.saturating_sub(at.wall().duration_since(base_wall()).unwrap_or_default());
     let mut quota = CodexQuota::default();
     quota.extras = [
-        ("secondary-used-percent", "5".to_string()),
+        ("secondary-used-percent", percent.to_string()),
         ("secondary-window-minutes", "10080".to_string()),
         (
             "secondary-reset-after-seconds",
-            days(3.0).as_secs().to_string(),
+            reset_after.as_secs().to_string(),
         ),
-        ("secondary-reset-at", epoch_secs(days(3.0))),
+        ("secondary-reset-at", epoch_secs(reset)),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -188,6 +202,151 @@ fn a_lower_reading_after_an_omission_needs_three_agreeing_readings() {
         assert_eq!(
             standing_of(&store, &key, row.model, &at(4)).tier,
             Tier::Roomy,
+            "row: {name}"
+        );
+    }
+}
+
+/// The reset a near-reset reading names: two minutes past the base, so it
+/// has passed when the low reading arrives at minute 4.
+const NEAR_RESET: Duration = Duration::from_mins(2);
+
+/// An Anthropic usage body with `five` and `seven` as given, true when
+/// accepted.
+fn anthropic_poll(store: &QuotaStore, key: &SeatKey, at: ObservationStamp, body: &str) -> bool {
+    let observation = reduce_anthropic_body(body.as_bytes(), at).expect("a valid usage body");
+    store.observe_account(key, &observation).is_ok()
+}
+
+/// Anthropic response headers with the five-hour at `utilization`
+/// resetting `reset` past the base, plus `extras`, true when accepted.
+fn anthropic_header(
+    store: &QuotaStore,
+    key: &SeatKey,
+    at: ObservationStamp,
+    utilization: &str,
+    reset: Duration,
+    extras: &[(&str, &str)],
+) -> bool {
+    let quota = anthropic_headers(utilization, reset, extras, None);
+    store.observe(key, reduce_anthropic(&quota, &at).snapshot)
+}
+
+fn omit_anthropic_five_hour(store: &QuotaStore, key: &SeatKey, at: ObservationStamp) {
+    poll_anthropic(store, key, at, &anthropic_body(None, None, &[]));
+}
+
+/// One early-reset case: how the capped account is fed and its window then
+/// omitted, the reading that names a near reset at higher used, the low
+/// reading on the real reset that follows once the near reset has passed
+/// (each true when accepted), and the model asked about.
+struct EarlyResetRow {
+    name: &'static str,
+    feed_capped: fn(&QuotaStore, &SeatKey, &Clock),
+    omit: fn(&QuotaStore, &SeatKey, ObservationStamp),
+    near: fn(&QuotaStore, &SeatKey, ObservationStamp) -> bool,
+    low: fn(&QuotaStore, &SeatKey, ObservationStamp) -> bool,
+    model: &'static str,
+}
+
+fn early_reset_rows() -> [EarlyResetRow; 5] {
+    [
+        EarlyResetRow {
+            name: "weekly, anthropic usage bodies",
+            feed_capped: feed_capped_weekly,
+            omit: omit_anthropic_weekly,
+            near: |s, k, t| anthropic_weekly_poll(s, k, t, &window(96, Some(NEAR_RESET))),
+            low: |s, k, t| anthropic_weekly_poll(s, k, t, &window(5, Some(days(3.0)))),
+            model: OPUS,
+        },
+        EarlyResetRow {
+            name: "weekly, anthropic 7d headers",
+            feed_capped: feed_capped_weekly,
+            omit: omit_anthropic_weekly,
+            near: |s, k, t| {
+                let reset = epoch_secs(NEAR_RESET);
+                let extras = [("7d-utilization", "0.96"), ("7d-reset", reset.as_str())];
+                anthropic_header(s, k, t, "0.1", hours(4.0), &extras)
+            },
+            low: anthropic_low_weekly_header,
+            model: OPUS,
+        },
+        EarlyResetRow {
+            name: "weekly, codex secondary headers",
+            feed_capped: codex_capped_weekly,
+            omit: omit_codex_weekly,
+            near: |s, k, t| codex_weekly_header(s, k, t, 96, NEAR_RESET),
+            low: codex_low_weekly_header,
+            model: CODEX,
+        },
+        EarlyResetRow {
+            name: "five-hour, anthropic usage bodies",
+            feed_capped: feed_capped_five_hour,
+            omit: omit_anthropic_five_hour,
+            near: |s, k, t| {
+                anthropic_poll(
+                    s,
+                    k,
+                    t,
+                    &anthropic_body(Some(&window(96, Some(NEAR_RESET))), None, &[]),
+                )
+            },
+            low: |s, k, t| {
+                anthropic_poll(
+                    s,
+                    k,
+                    t,
+                    &anthropic_body(Some(&window(5, Some(hours(4.0)))), None, &[]),
+                )
+            },
+            model: OPUS,
+        },
+        EarlyResetRow {
+            name: "five-hour, anthropic 5h headers",
+            feed_capped: feed_capped_five_hour,
+            omit: omit_anthropic_five_hour,
+            near: |s, k, t| anthropic_header(s, k, t, "0.96", NEAR_RESET, &[]),
+            low: |s, k, t| anthropic_header(s, k, t, "0.05", hours(4.0), &[]),
+            model: OPUS,
+        },
+    ]
+}
+
+/// A kept window cannot end early either: a reading naming a near reset is
+/// refused even at higher used, so the low reading after that reset passes
+/// still meets the kept window and the seat keeps reading low on room.
+#[test]
+fn a_reading_resetting_earlier_than_a_kept_window_is_lower() {
+    for row in early_reset_rows() {
+        // Arrange
+        let clock = Clock::new();
+        let store = store();
+        let key = seat("a");
+        (row.feed_capped)(&store, &key, &clock);
+        (row.omit)(&store, &key, clock.at(Duration::from_mins(1)));
+        let at = |minute| clock.at(Duration::from_mins(minute));
+        let kept_before = store.account(&key).expect("an entry").kept().count();
+
+        // Act
+        let near = (row.near)(&store, &key, clock.at(Duration::from_secs(90)));
+        let low = (row.low)(&store, &key, at(4));
+
+        // Assert
+        let name = row.name;
+        assert_eq!(
+            kept_before, 1,
+            "row: {name}: the control: the window is kept"
+        );
+        assert_eq!([near, low], [false, false], "row: {name}");
+        assert_eq!(store.rejection_totals().contradictory, 2, "row: {name}");
+        assert_eq!(
+            store.account(&key).expect("an entry").kept().count(),
+            1,
+            "row: {name}"
+        );
+        assert_eq!(
+            standing_of(&store, &key, row.model, &at(4)).tier,
+            Tier::LowRoom,
             "row: {name}"
         );
     }

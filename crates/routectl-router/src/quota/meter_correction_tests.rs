@@ -7,7 +7,9 @@ use super::meter_tests::{
 };
 use super::*;
 
+use crate::quota::freshness::accept_reset;
 use crate::quota::store::{ObserveRefusal, QuotaStore};
+use crate::quota::window::Utilization;
 
 const REFUSED: Result<(), ObserveRefusal> =
     Err(ObserveRefusal::Rejected(RejectionReason::Contradictory));
@@ -153,7 +155,7 @@ fn bound(clock: &Clock, binding: Binding, scope: Option<&str>) -> QuotaStore {
     store
 }
 
-fn confirm_rows() -> [ConfirmRow; 7] {
+fn confirm_rows() -> [ConfirmRow; 10] {
     let running = |used, reset_min| ConfirmRow {
         name: "",
         binding: Binding::Stored,
@@ -204,6 +206,23 @@ fn confirm_rows() -> [ConfirmRow; 7] {
             ..running(0.0, 180)
         },
         ConfirmRow {
+            name: "higher used on an earlier reset, from polls",
+            readings: [Next::Poll(0.95, 120); 3],
+            ..running(0.95, 120)
+        },
+        ConfirmRow {
+            name: "higher used on an earlier reset, from headers",
+            readings: [Next::Header(0.95, 120); 3],
+            started: Started::Unknown,
+            ..running(0.95, 120)
+        },
+        ConfirmRow {
+            name: "higher used on an earlier reset over the kept dropped five-hour window",
+            binding: Binding::KeptAfterDrop,
+            readings: [Next::Poll(0.95, 120); 3],
+            ..running(0.95, 120)
+        },
+        ConfirmRow {
             name: "each agreeing with the last, drifting past the slack overall",
             readings: [
                 Next::Poll(0.30, 180),
@@ -250,6 +269,163 @@ fn a_lower_reading_is_refused_twice_and_taken_on_the_third_agreeing_reading() {
             "row: {name}"
         );
         assert_eq!(stored.started(), started, "row: {name}");
+    }
+}
+
+/// Where a reading for the early-reset rows comes from.
+#[derive(Clone, Copy)]
+enum Source {
+    Header,
+    Poll,
+}
+
+/// A running reading for the `length_secs` window at `used`, resetting
+/// `reset_min` minutes past the base, fed from `source`.
+fn feed_window(
+    store: &QuotaStore,
+    at: ObservationStamp,
+    source: Source,
+    length_secs: u64,
+    used: f64,
+    reset_min: u64,
+) -> Result<(), ObserveRefusal> {
+    match source {
+        Source::Header => {
+            let known = QuotaWindow::Known {
+                utilization: Utilization::new(used).expect("a valid fraction"),
+                reset_at: accept_reset(
+                    base_wall() + mins(reset_min),
+                    &at,
+                    Duration::from_secs(length_secs),
+                    RESET_TOLERANCE,
+                )
+                .expect("a plausible reset"),
+            };
+            let (fast, slow) = if length_secs == FIVE_HOURS {
+                (known, QuotaWindow::Unknown)
+            } else {
+                (QuotaWindow::Unknown, known)
+            };
+            let snapshot = QuotaSnapshot {
+                observed: at,
+                fast,
+                slow,
+                billing: Billing::Unknown,
+            };
+            if store.observe(&seat("a"), snapshot) {
+                TAKEN
+            } else {
+                REFUSED
+            }
+        }
+        Source::Poll => store.observe_account(
+            &seat("a"),
+            &partial(
+                ReadingSource::Poll,
+                at,
+                vec![running(key(length_secs, None), used, mins(reset_min), &at)],
+            ),
+        ),
+    }
+}
+
+/// A running window cannot end early: a reading that moves its reset
+/// earlier, even at higher used, is refused, so once that near reset passes
+/// a low reading on the real reset still meets the window it contradicts.
+#[test]
+fn a_reading_resetting_earlier_than_a_running_window_is_lower() {
+    let rows: [(&str, Source, u64, u64); 4] = [
+        ("five-hour, from headers", Source::Header, FIVE_HOURS, 180),
+        ("five-hour, from polls", Source::Poll, FIVE_HOURS, 180),
+        ("weekly, from headers", Source::Header, SEVEN_DAYS, 4_320),
+        ("weekly, from polls", Source::Poll, SEVEN_DAYS, 4_320),
+    ];
+    for (name, source, length_secs, reset_min) in rows {
+        // Arrange
+        let clock = Clock::new();
+        let store = store();
+        let t0 = clock.at(mins(0));
+        store
+            .observe_account(
+                &seat("a"),
+                &partial(
+                    ReadingSource::Poll,
+                    t0,
+                    vec![running(key(length_secs, None), 0.90, mins(reset_min), &t0)],
+                ),
+            )
+            .expect("the seed is accepted");
+
+        // Act
+        let near = feed_window(&store, clock.at(mins(1)), source, length_secs, 0.96, 2);
+        let low = feed_window(
+            &store,
+            clock.at(mins(3)),
+            source,
+            length_secs,
+            0.05,
+            reset_min,
+        );
+
+        // Assert
+        assert_eq!([near, low], [REFUSED, REFUSED], "row: {name}");
+        assert_eq!(store.rejection_totals().contradictory, 2, "row: {name}");
+        let stored = store
+            .account(&seat("a"))
+            .expect("an entry")
+            .window(&key(length_secs, None))
+            .expect("the window is held")
+            .reading()
+            .clone();
+        assert_eq!(stored.used().fraction(), 0.90, "row: {name}");
+        assert_eq!(
+            stored.reset().map(|r| r.at()),
+            Some(base_wall() + mins(reset_min)),
+            "row: {name}"
+        );
+    }
+}
+
+/// A reading on a reset no earlier than the stored one, beyond the tolerance
+/// or later, with equal or higher used is taken as reported at once.
+#[test]
+fn a_reading_on_a_reset_no_earlier_with_no_lower_used_is_taken_at_once() {
+    let rows: [(&str, Next); 4] = [
+        (
+            "a later reset, higher used, from polls",
+            Next::Poll(0.95, 240),
+        ),
+        (
+            "a later reset, higher used, from headers",
+            Next::Header(0.95, 240),
+        ),
+        ("a later reset, equal used", Next::Poll(0.90, 240)),
+        (
+            "an earlier reset within the tolerance",
+            Next::Poll(0.95, 177),
+        ),
+    ];
+    for (name, next) in rows {
+        // Arrange
+        let clock = Clock::new();
+        let store = seeded(&clock, 180);
+        let (Next::Poll(used, reset_min) | Next::Header(used, reset_min)) = next else {
+            unreachable!("every row is running")
+        };
+
+        // Act
+        let outcome = feed(&store, clock.at(mins(1)), next);
+
+        // Assert
+        assert_eq!(outcome, TAKEN, "row: {name}");
+        let stored = stored_five(&store);
+        assert_eq!(stored.used().fraction(), used, "row: {name}");
+        assert_eq!(
+            stored.reset().map(|r| r.at()),
+            Some(base_wall() + mins(reset_min)),
+            "row: {name}"
+        );
+        assert_eq!(store.rejection_totals().contradictory, 0, "row: {name}");
     }
 }
 

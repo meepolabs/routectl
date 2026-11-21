@@ -30,12 +30,16 @@
 //!   Over a window still in effect it is no evidence and leaves no mark.
 //! - Contradiction: while the stored window for a key is running and in
 //!   effect at the incoming stamp, a newer reading is LOWER when it is
-//!   unstarted (a window cannot stop before its reset) or running with a used
-//!   fraction more than [`CONTRADICTION_SLACK`] below the stored one, whatever
-//!   its reset. A lower reading is refused as `Contradictory` until
-//!   [`CORRECTION_CONFIRMATIONS`] consecutive lower readings for the key agree
-//!   (both unstarted, or used within the slack and resets within
-//!   [`RESET_TOLERANCE`]), whichever source each came from; the confirming
+//!   unstarted (a window cannot stop before its reset), running with a reset
+//!   earlier than the stored one by more than [`RESET_TOLERANCE`] (a running
+//!   window cannot end early), or running with a used fraction more than
+//!   [`CONTRADICTION_SLACK`] below the stored one, whatever its reset. A
+//!   running reading on a reset no earlier than the stored one with equal or
+//!   higher used is taken at once. A lower reading is refused as
+//!   `Contradictory` until [`CORRECTION_CONFIRMATIONS`] consecutive lower
+//!   readings for the key agree (both unstarted, or used within the slack
+//!   and resets within [`RESET_TOLERANCE`]), whichever source each came
+//!   from; the confirming
 //!   reading is then taken as reported. A single bogus reading therefore never
 //!   creates room, and a stored reading the vendor has really abandoned does
 //!   not hold the account full until its reset. A streak advances only on a
@@ -617,7 +621,11 @@ fn reconciled(
     };
     let stored_used = stored.reading.used().fraction();
     let drop = stored_used - incoming.used().fraction();
-    if drop > CONTRADICTION_SLACK + SLACK_EPSILON {
+    let ends_early = stored_reset
+        .at()
+        .duration_since(incoming_reset.at())
+        .is_ok_and(|early| early > RESET_TOLERANCE);
+    if drop > CONTRADICTION_SLACK + SLACK_EPSILON || ends_early {
         return Ok(Reconciled::Lower);
     }
     let same_reset = abs_diff(stored_reset.at(), incoming_reset.at()) <= RESET_TOLERANCE;
