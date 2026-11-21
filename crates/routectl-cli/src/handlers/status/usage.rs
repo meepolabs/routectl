@@ -190,12 +190,6 @@ fn parse_window(raw: Option<&str>) -> (WindowFlag, &'static str) {
     }
 }
 
-/// The aggregate composer (`GET /status`) has no window parameter and
-/// reports today's window.
-pub(super) async fn build(state: &StatusState) -> Panel<UsagePanel> {
-    build_window(state, WindowFlag::Today, "today").await
-}
-
 async fn build_window(
     state: &StatusState,
     flag: WindowFlag,
@@ -1446,7 +1440,7 @@ mod tests {
 
         let ((), events) = with_capture(async {
             for _ in 0..5 {
-                let _ = build(&state).await;
+                let _ = build_window(&state, WindowFlag::Today, "today").await;
             }
         })
         .await;
@@ -1488,14 +1482,14 @@ mod tests {
 
         let ((), events) = with_capture(async {
             for _ in 0..3 {
-                let _ = build(&state).await;
+                let _ = build_window(&state, WindowFlag::Today, "today").await;
             }
             seed_ledger(
                 &path,
                 &[crate::local_time::unix_ms(time::OffsetDateTime::now_utc())],
             );
             for _ in 0..3 {
-                let _ = build(&state).await;
+                let _ = build_window(&state, WindowFlag::Today, "today").await;
             }
         })
         .await;

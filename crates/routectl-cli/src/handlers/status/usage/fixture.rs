@@ -4,14 +4,10 @@
 use routectl_usage::{AggRow, GroupKey};
 use serde_json::Value;
 
-use std::path::Path;
-
-use super::super::panel_fixtures::{FIXTURE_NOW_MS, at_epoch_ms, fixture_as_of};
-use super::super::usage_health::{LedgerHealth, WindowObservation};
-use super::super::utc_rfc3339;
-use super::{Panel, SCHEMA_VERSION, UsagePanel, assemble, build_panel};
-use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
-use crate::local_time::LocalZone;
+use super::super::panel_fixtures::{FIXTURE_NOW_MS, fixture_as_of};
+use super::super::usage_health::WindowObservation;
+use super::{Panel, SCHEMA_VERSION, UsagePanel, assemble};
+use crate::commands::usage::WindowBounds;
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -51,26 +47,6 @@ pub fn populated_usage_panel() -> Panel<UsagePanel> {
     ];
     let dto = assemble("today", bounds, rows, breakdown, observation(bounds));
     Panel::available(SCHEMA_VERSION, fixture_as_of(), dto)
-}
-
-/// The `window` envelope (`today` or `all`, UTC) at `now_ms` over the
-/// ledger at `db_path`, read by the panel's own `build_panel` with no
-/// record loss.
-pub fn usage_panel_over(db_path: &Path, window: WindowFlag, now_ms: i64) -> Panel<UsagePanel> {
-    let token = match window {
-        WindowFlag::All => "all",
-        _ => "today",
-    };
-    let bounds = window_bounds(&LocalZone::utc(), window, at_epoch_ms(now_ms));
-    let panel = build_panel(
-        db_path,
-        token,
-        bounds,
-        LedgerHealth::default(),
-        utc_rfc3339(now_ms),
-    );
-    assert!(panel.unavailable.is_none(), "the fixture ledger reads");
-    panel
 }
 
 fn key(

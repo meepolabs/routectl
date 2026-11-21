@@ -5841,7 +5841,7 @@ its own.
 On the aggregate the list is built from the Fail findings of the doctor
 report the `doctor` panel built for the same request, so one `/status` read
 runs the doctor gather once; that is what keeps the aggregate inside its
-fixed reserve beside the usage panel's budget. A client that polls `/status`
+fixed reserve. A client that polls `/status`
 should read `panels.attention` from it rather than also polling
 `/status/attention`, which runs a gather of its own.
 

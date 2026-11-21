@@ -69,12 +69,12 @@
   // timers (a failing QUERY must not slow healthy GET polling) but share these
   // steps, so the two schedules cannot drift apart.
   var BACKOFF_STEPS_MS = [10000, 20000, 30000];
-  // Per-GET AbortController budget for the /status aggregate. Sized so the
-  // server's own usage panel budget, plus a reserve for the cheap panels
-  // (health, config, doctor, attention, accounts, models) and the response
-  // write, lands inside it: the server then sheds a slow ledger read as an
-  // unavailable panel instead of the browser aborting the whole round. Still
-  // under the 5s cadence, so a slow round cannot overlap its next attempt.
+  // Per-GET AbortController budget for the /status aggregate. The server's
+  // budget for that round (a reserve for the six panels, health, config,
+  // doctor, attention, accounts and models, and the response write) lands
+  // inside it, so the server sheds a slow panel as unavailable instead of the
+  // browser aborting the whole round. Still under the 5s cadence, so a slow
+  // round cannot overlap its next attempt.
   var TIMEOUT_MS = 3500;
   // Per-QUERY AbortController budget. Like TIMEOUT_MS this is ONE abort timer
   // covering the whole exchange -- connect, send, server work, and body decode

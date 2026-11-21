@@ -184,13 +184,9 @@ fn each_fixture_has_no_empty_array_and_no_always_null_key() {
 }
 
 #[test]
-fn the_aggregate_carries_the_seven_get_panels_densely_at_their_versions() {
+fn the_aggregate_carries_the_six_get_panels_densely_at_their_versions() {
     let aggregate = aggregate_json();
     let exceptions = [
-        DensityException {
-            path: "panels.usage.unavailable",
-            ..UNAVAILABLE
-        },
         DensityException {
             path: "panels.health.unavailable",
             ..UNAVAILABLE
@@ -241,7 +237,6 @@ fn the_aggregate_carries_the_seven_get_panels_densely_at_their_versions() {
 
     assert!(gaps.is_empty(), "aggregate is sparse: {gaps:#?}");
     for (panel, version) in [
-        ("usage", usage::SCHEMA_VERSION),
         ("health", health::SCHEMA_VERSION),
         ("config", config::SCHEMA_VERSION),
         ("doctor", doctor::DOCTOR_SCHEMA_VERSION),

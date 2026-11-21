@@ -2,7 +2,7 @@
 //! small config, a seeded ledger and the daemon state a reviewer needs to
 //! see, served as the `/status` aggregate and the QUERY answers. Every payload is built by the panels' own builders
 //! (`build_from_sources`, the attention list through its recovery memory,
-//! the usage and query reads over the seeded ledger), never written as JSON.
+//! the query reads over the seeded ledger), never written as JSON.
 //!
 //! A case is built at an explicit instant, so the browser tests read it at
 //! the fixture instant and the review server at the wall clock. Nothing here
@@ -34,7 +34,6 @@ use super::usage_health::{AccountReadingHistory, LedgerHealth};
 use super::{AggregatePanels, Panel, StatusAggregate, utc_rfc3339};
 use crate::commands::doctor::SeatFix;
 use crate::commands::pricing::is_subscription;
-use crate::commands::usage::WindowFlag;
 use crate::server::seat_driver::{SeatDriverHealthSnapshot, managed_seats};
 use crate::server::usage_poll::{PollStateSnapshot, SeatPollSnapshot};
 
@@ -316,11 +315,6 @@ impl CaseSource {
         );
         let aggregate = StatusAggregate {
             panels: AggregatePanels {
-                usage: super::usage::fixture::usage_panel_over(
-                    &self.db_path,
-                    WindowFlag::Today,
-                    now_ms,
-                ),
                 health: super::health::fixture::health_panel_for(
                     &self.config,
                     state.targets.clone(),

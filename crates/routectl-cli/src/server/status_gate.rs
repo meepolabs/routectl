@@ -21,11 +21,12 @@
 //! | ledger-read gate = 1 permit | `handlers::status::query` | concurrent `/status/query` ledger reads; a second one answers `db_busy` without waiting |
 //! | [`QUERY_BUDGET_MS`] = 10000 | this module | one `/status/query` ledger read, from the body parse to the answer |
 //! | [`USAGE_BUDGET_MS`] = 2500 | this module | one whole `/status/usage` panel build |
-//! | [`AGGREGATE_RESERVE_MS`] = 1000 | this module | room the `/status` aggregate leaves after the usage budget for its other panels and the response write |
+//! | [`AGGREGATE_RESERVE_MS`] = 1000 | this module | room the `/status` aggregate holds for its six panels and the response write |
+//! | [`AGGREGATE_BUDGET_MS`] = 1000 | this module | the `/status` aggregate's whole budgeted stretch, the sum of its terms |
 //! | [`MODELS_PANEL_ALLOWANCE_MS`] = 100 | this module | the models panel's share of [`AGGREGATE_RESERVE_MS`] |
 //! | `SERVED_CACHE_READ_BUDGET` = 250ms | `commands::doctor::cache_section` | the doctor panel's cache-ignore ledger read, one share of [`AGGREGATE_RESERVE_MS`] |
 //! | `BODY_READ_TIMEOUT` = 1000ms | `handlers::status::query` | how long that route waits for the client's request body |
-//! | `TIMEOUT_MS` = 3500 / `QUERY_TIMEOUT_MS` = 12000 | `dash_00_state.js` | the browser's own aborts: the GET one covers `/status` and `/status/usage`, the QUERY one covers `/status/query` only |
+//! | `TIMEOUT_MS` = 3500 / `QUERY_TIMEOUT_MS` = 12000 | `dash_00_state.js` | the browser's own aborts: the GET one covers `/status`, the QUERY one covers `/status/query` only |
 //! | `BASE_MS` = 5000 | `dash_00_state.js` | the dashboard's GET poll cadence, which also nudges the visible query |
 //!
 //! **The sum identity.** On `/status/query` the body read and the panel
@@ -103,13 +104,18 @@
 //! On the `/status` aggregate, and ONLY there, the panel budgets are terms
 //! of a sequential sum that must land inside the GET abort.
 //! [`QUERY_BUDGET_MS`] is not one of those terms: `/status/query` is its own
-//! route with its own abort. The usage panel is the one budgeted term; the
-//! health, config, doctor, accounts, attention and models panels and the
-//! response write share a fixed reserve, [`AGGREGATE_RESERVE_MS`]:
+//! route with its own abort. Neither is [`USAGE_BUDGET_MS`]: the aggregate
+//! carries no usage panel. The health, config, doctor, accounts, attention
+//! and models panels and the response write share a fixed reserve,
+//! [`AGGREGATE_RESERVE_MS`], which is then the sum's one term:
 //!
 //! ```text
-//! USAGE_BUDGET_MS + AGGREGATE_RESERVE_MS = 2500 + 1000 = 3500 <= 3500 (TIMEOUT_MS)
+//! AGGREGATE_BUDGET_MS = AGGREGATE_RESERVE_MS = 1000 <= 3500 (TIMEOUT_MS)
 //! ```
+//!
+//! This module's `the_documented_aggregate_sum_matches_its_terms` test holds
+//! that line to [`AGGREGATE_BUDGET_MS`], so a term added to the const and not
+//! to this line, or the reverse, fails it.
 //!
 //! Inside the reserve, two panels hold named shares: the doctor panel's
 //! cache-ignore read (`SERVED_CACHE_READ_BUDGET`, held to at most a quarter of
@@ -129,14 +135,14 @@
 //! of running a second no-network doctor gather. Its standalone route
 //! `/status/attention` runs one gather of its own.
 //!
-//! The same GET abort covers `/status/usage` on its own, where the usage
-//! budget is the whole server-side term. Raising [`USAGE_BUDGET_MS`] means
-//! raising `TIMEOUT_MS` with it, and `TIMEOUT_MS` stays under the dashboard's
-//! 5000ms poll cadence so a slow round cannot overlap its own next one.
-//! `handlers::status::page`'s
-//! `the_usage_budget_and_its_reserve_sum_inside_the_browser_get_abort` test
-//! pins this sum against the served script. Like the query identity it bounds
-//! the budgeted stretch, not the unbudgeted time listed above.
+//! `TIMEOUT_MS` stays under the dashboard's 5000ms poll cadence so a slow
+//! round cannot overlap its own next one. `handlers::status::page`'s
+//! `the_aggregate_budget_fits_inside_the_browser_get_abort` test pins the sum
+//! against the served script. Like the query identity it bounds the budgeted
+//! stretch, not the unbudgeted time listed above.
+//!
+//! The page never requests `/status/usage`, so [`USAGE_BUDGET_MS`] is a term
+//! of no browser identity: that route's readers bring their own timeout.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -158,7 +164,7 @@ use crate::server::request_id::{self, RequestId};
 /// its own one-permit gate instead) -- see this module's own docs for that
 /// equivalence and for the timing numbers it composes with. A concurrent
 /// fan-out inside the aggregate would silently multiply the builder count by
-/// seven while this const stayed at its face value.
+/// six while this const stayed at its face value.
 ///
 /// The builder half of the ceiling holds UNCONDITIONALLY, cancellation
 /// included. This layer's permit lives in the response future, so a client that
@@ -207,23 +213,24 @@ pub const QUERY_BUDGET_MS: u64 = 10_000;
 /// so a 1000ms budget shed it as `query_timeout`. The budget is about twice
 /// the measured cost (about 1.3s of headroom).
 ///
-/// It is also sized against the CLIENT's per-GET abort: the `/status`
-/// aggregate composes its panels sequentially, so this budget is one term of a
-/// sum that must still land inside that abort, leaving room for the six
-/// cheap panels (health, config, doctor, accounts, attention, models) and the
-/// response write. Raising it is not a local decision:
-/// see this module's own docs for the coupled numbers and the occupancy
+/// The `/status` aggregate does not build this panel, so the budget is no
+/// term of [`AGGREGATE_BUDGET_MS`]. It still sets how long a `/status/usage`
+/// build holds a builder permit: see this module's own docs for the occupancy
 /// relationship with [`STATUS_MAX_INFLIGHT`].
 pub const USAGE_BUDGET_MS: u64 = 2500;
 
-/// Room the `/status` aggregate leaves after [`USAGE_BUDGET_MS`],
-/// milliseconds, for the health, config, doctor, accounts, attention and models
-/// panels and the response write. None of them carries a deadline of its own except
+/// Room the `/status` aggregate holds, milliseconds, for the health, config,
+/// doctor, accounts, attention and models panels and the response write. None of them carries a deadline of its own except
 /// the doctor panel's cache-ignore read, which takes a fixed share; the
 /// attention panel reads the doctor panel's report rather than gathering one. It bounds nothing at
-/// runtime: it is the second term of the GET sum identity in this module's own
-/// docs.
+/// runtime: it is the one term of [`AGGREGATE_BUDGET_MS`].
 pub const AGGREGATE_RESERVE_MS: u64 = 1000;
+
+/// The `/status` aggregate's whole budgeted stretch, milliseconds: the sum of
+/// its terms, which must land inside the browser's GET abort (the sum
+/// identity in this module's own docs). A panel with a deadline of its own
+/// added to the aggregate is a new term here.
+pub const AGGREGATE_BUDGET_MS: u64 = AGGREGATE_RESERVE_MS;
 
 /// The models panel's share of [`AGGREGATE_RESERVE_MS`], milliseconds. Like
 /// the reserve it bounds nothing at runtime: the models build reads one router
@@ -644,6 +651,53 @@ mod tests {
             "doctor cache cap {doctor_cache_cap_ms}ms + models share \
              {MODELS_PANEL_ALLOWANCE_MS}ms = {named_shares_ms}ms leaves nothing of the \
              {AGGREGATE_RESERVE_MS}ms reserve for the other panels and the response write"
+        );
+    }
+
+    /// A budget const of this module by name, for reading the documented sums.
+    fn budget_term_ms(name: &str) -> u64 {
+        match name {
+            "AGGREGATE_RESERVE_MS" => AGGREGATE_RESERVE_MS,
+            "USAGE_BUDGET_MS" => USAGE_BUDGET_MS,
+            "QUERY_BUDGET_MS" => QUERY_BUDGET_MS,
+            "MODELS_PANEL_ALLOWANCE_MS" => MODELS_PANEL_ALLOWANCE_MS,
+            other => panic!("the documented sum names `{other}`, not a budget const here"),
+        }
+    }
+
+    /// The aggregate sum identity in this module's docs, read off its
+    /// `AGGREGATE_BUDGET_MS = <terms> = <total> <= ...` line: the named terms
+    /// sum to [`AGGREGATE_BUDGET_MS`], and the printed total is that sum. A
+    /// term added to the const and not to the line, or to the line and not to
+    /// the const, fails here.
+    #[test]
+    fn the_documented_aggregate_sum_matches_its_terms() {
+        let source = include_str!("status_gate.rs");
+        let lines: Vec<&str> = source
+            .lines()
+            .filter_map(|l| l.strip_prefix("//! AGGREGATE_BUDGET_MS = "))
+            .collect();
+        assert_eq!(lines.len(), 1, "the module docs state the sum once");
+        let terms = lines[0]
+            .split(" = ")
+            .next()
+            .expect("the sum names its terms");
+        let total = lines[0]
+            .rsplit(" = ")
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("the sum prints its total");
+
+        let named_ms: u64 = terms.split(" + ").map(str::trim).map(budget_term_ms).sum();
+        let printed_ms: u64 = total.parse().expect("the printed total is an integer");
+
+        assert_eq!(
+            named_ms, AGGREGATE_BUDGET_MS,
+            "the documented terms `{terms}` sum to {named_ms}ms, not AGGREGATE_BUDGET_MS"
+        );
+        assert_eq!(
+            printed_ms, AGGREGATE_BUDGET_MS,
+            "the documented total {printed_ms}ms is not AGGREGATE_BUDGET_MS"
         );
     }
 
@@ -1344,7 +1398,7 @@ mod tests {
     /// The capacity UNIT: `STATUS_MAX_INFLIGHT` bounds admitted requests AND,
     /// because no handler fans one admitted request into several builders, the
     /// concurrent BLOCKING panel builders behind them. The `/status` aggregate
-    /// is the only route that could break that equality -- it builds seven
+    /// is the only route that could break that equality -- it builds six
     /// panels -- so it is the one this pins.
     ///
     /// Same idiom as the shed tests above: park work in-flight, count arrivals,
@@ -1353,9 +1407,9 @@ mod tests {
     /// invisible from the wire -- a fan-out answers 200 on every panel too.
     ///
     /// Far more requests than permits are fired, so the excess sheds and only
-    /// admitted ones can build. With the aggregate awaiting its seven builders
+    /// admitted ones can build. With the aggregate awaiting its six builders
     /// sequentially the plateau is `STATUS_MAX_INFLIGHT`; a concurrent join
-    /// parks `7 * STATUS_MAX_INFLIGHT`.
+    /// parks `6 * STATUS_MAX_INFLIGHT`.
     ///
     /// Every assertion is deferred until AFTER `release`: a parked builder
     /// occupies a blocking worker that no unwind can reclaim, so a panic while
@@ -1381,7 +1435,7 @@ mod tests {
         let router = Router::new(Arc::new(Config::default()));
         let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
-        // all, so all seven panels are genuinely in play.
+        // all, so all six panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         status.usage_db_path = dir.path().join("absent-usage.db");
         let app = apply_overload_layers(status_router().with_state(Arc::new(status)));
@@ -1410,7 +1464,7 @@ mod tests {
         // side the instant a handler decides to hand a builder to
         // `spawn_blocking`, so once the admitted requests have parked their
         // builders, every builder those requests will ever submit is already
-        // counted. A fan-out submits all seven of a request's builders before
+        // counted. A fan-out submits all six of a request's builders before
         // any can be observed to start, so it registers here immediately --
         // no settle window, and nothing for a slow blocking pool to hide.
         let parked = probe.submitted();
@@ -1443,7 +1497,7 @@ mod tests {
         );
     }
 
-    /// Build a status app whose seven panels all reach a real builder, plus the
+    /// Build a status app whose six panels all reach a real builder, plus the
     /// temp dir keeping its config path alive. Shared by the cancellation tests
     /// so they exercise the same wiring the capacity test above does.
     fn cancellation_test_app() -> (axum::Router, tempfile::TempDir) {
@@ -1464,7 +1518,7 @@ mod tests {
         let router = Router::new(Arc::new(Config::default()));
         let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
         // A config path is required for the doctor panel to reach a builder at
-        // all, so all seven panels are genuinely in play.
+        // all, so all six panels are genuinely in play.
         let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
         status.usage_db_path = dir.path().join("absent-usage.db");
         (
@@ -1597,7 +1651,7 @@ mod tests {
 
     /// CANCELLATION, aggregate route: the same property via `GET /status`.
     ///
-    /// Worth its own case because the aggregate is the route that composes seven
+    /// Worth its own case because the aggregate is the route that composes six
     /// builders, so it is the one where a regression to a concurrent fan-out
     /// would break the permit accounting. The `uri` is the only difference from
     /// the single-panel case, which is the point: the permit lives in
@@ -1636,7 +1690,7 @@ mod tests {
         }
         // The aggregate is SEQUENTIAL, so each cancelled request had submitted
         // exactly its first builder -- the count is the saturation plateau, not
-        // seven times it.
+        // six times it.
         let submitted_before = probe.submitted();
 
         let follow_up = {
@@ -1676,15 +1730,15 @@ mod tests {
              capacity: {submitted_while_detached} builders submitted, expected \
              {submitted_before}"
         );
-        // Capacity recovers and the whole aggregate completes -- all seven of its
+        // Capacity recovers and the whole aggregate completes -- all six of its
         // builders ran through the same permit-owning path, which is also the
         // no-deadlock check (a sequential aggregate re-acquiring per panel must
         // not starve itself).
         assert_eq!(served.status(), StatusCode::OK);
         assert_eq!(
             probe.submitted(),
-            submitted_before + 7,
-            "the delayed aggregate must build all seven panels once released"
+            submitted_before + 6,
+            "the delayed aggregate must build all six panels once released"
         );
     }
 

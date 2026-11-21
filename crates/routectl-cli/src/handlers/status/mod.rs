@@ -91,7 +91,7 @@ use router_view::{StatusRouterHandle, UnpinnedPricer};
 ///
 /// Waiting on it cannot deadlock. Tower admits at most [`STATUS_MAX_INFLIGHT`]
 /// requests, and an admitted request holds at most ONE builder permit at a time
-/// (the `/status` aggregate awaits its seven panels sequentially, in
+/// (the `/status` aggregate awaits its six panels sequentially, in
 /// `status_aggregate`), so there is no hold-and-wait edge to close a cycle
 /// with. In the uncancelled steady state it is therefore never contended; it
 /// blocks only in the case it exists for, a permit still held by a detached
@@ -550,7 +550,9 @@ pub fn status_router() -> AxumRouter<Arc<StatusState>> {
         .route("/status/query", any(query::handler))
 }
 
-/// The `/status` aggregate: composes the seven GET panels into one envelope.
+/// The `/status` aggregate: composes six GET panels into one envelope.
+///
+/// The usage panel is not one of them: it is served at `/status/usage` only.
 ///
 /// Each panel is an INDEPENDENT envelope carrying its own `schema_version`,
 /// `as_of`, and availability -- there is deliberately no outer envelope
@@ -564,7 +566,6 @@ struct StatusAggregate {
 
 #[derive(Debug, Serialize)]
 struct AggregatePanels {
-    usage: Panel<usage::UsagePanel>,
     health: Panel<health::HealthPanel>,
     config: Panel<config::ConfigPanel>,
     doctor: Panel<doctor::DoctorPanel>,
@@ -574,17 +575,17 @@ struct AggregatePanels {
 }
 
 async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusAggregate> {
-    // Compose the seven guarded builders SEQUENTIALLY: each spawns its own
+    // Compose the six guarded builders SEQUENTIALLY: each spawns its own
     // `spawn_blocking` job, so awaiting them one at a time keeps a single
     // admitted request to at most ONE in-flight blocking builder. That is what
     // makes `STATUS_MAX_INFLIGHT` name a single unit -- admitted requests and
     // in-flight builders are then numerically identical. A concurrent join
-    // would fan one admitted request into seven blocking jobs, so the cap would
-    // admit up to seven times as many builders as requests. Each builder still
+    // would fan one admitted request into six blocking jobs, so the cap would
+    // admit up to six times as many builders as requests. Each builder still
     // isolates its own source failure / panic through `guard_panel`, and these
     // are the SAME builders the per-panel endpoints call -- no divergent second
     // mapping.
-    let usage = usage::build(&state).await;
+    //
     // The health and doctor panels BOTH carry the fidelity surface, so exactly one
     // of them emits its INFO line for this request: two identical snapshots per poll
     // would make a reader counting lines read double the poll rate, and the two
@@ -610,7 +611,6 @@ async fn status_aggregate(State(state): State<Arc<StatusState>>) -> Json<StatusA
     let models = models::build(&state).await;
     Json(StatusAggregate {
         panels: AggregatePanels {
-            usage,
             health,
             config,
             doctor,
@@ -1177,32 +1177,11 @@ mod tests {
         assert!(a.unavailable.is_none());
     }
 
-    /// PARTIAL FAILURE, plus the no-outer-version contract. The usage
-    /// source is unavailable (absent ledger) while health/config/doctor
-    /// succeed: `GET /status` is HTTP 200, the usage panel is unavailable, the
-    /// other three are available, each panel carries its OWN `schema_version`,
-    /// and there is no outer envelope version field.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn aggregate_partial_failure_isolates_unavailable_usage() {
+    /// `GET /status` over a daemon with a bound config path, as its JSON body.
+    async fn aggregate_body(status: StatusState) -> Value {
         use axum::body::to_bytes;
-        use tempfile::TempDir;
 
-        let dir = TempDir::new().unwrap();
-        let config_path = dir.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
-        )
-        .unwrap();
-
-        let router = Router::new(Arc::new(Config::default()));
-        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
-        let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
-        // Point usage at an absent ledger so ONLY the usage panel sheds.
-        status.usage_db_path = dir.path().join("absent-usage.db");
-        let state = Arc::new(status);
-
-        let app = status_router().with_state(state);
+        let app = status_router().with_state(Arc::new(status));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1215,7 +1194,64 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A status state with a minimal on-disk config, so the doctor panel
+    /// reaches its builder, plus the temp dir keeping that path alive.
+    fn state_with_config_path() -> (StatusState, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+        )
+        .unwrap();
+        let router = Router::new(Arc::new(Config::default()));
+        let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
+        (status, dir)
+    }
+
+    /// The aggregate carries exactly these panels. The usage panel is not
+    /// among them: it is served at `/status/usage` alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_aggregate_carries_exactly_six_panels_and_no_usage() {
+        let (status, _dir) = state_with_config_path();
+
+        let json = aggregate_body(status).await;
+
+        let keys: std::collections::BTreeSet<&str> = json["panels"]
+            .as_object()
+            .expect("the aggregate carries a panel map")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "health",
+            "config",
+            "doctor",
+            "accounts",
+            "attention",
+            "models",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(keys, expected);
+    }
+
+    /// PARTIAL FAILURE, plus the no-outer-version contract. The health
+    /// builder fails while the other panels succeed: `GET /status` is HTTP
+    /// 200, the health panel is unavailable, the others are available, each
+    /// panel carries its OWN `schema_version`, and there is no outer envelope
+    /// version field.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn aggregate_partial_failure_isolates_an_unavailable_panel() {
+        let (status, _dir) = state_with_config_path();
+        let (hooks, _events) = test_hooks::StatusTestHooks::observing_with_failing_health();
+        let status = status.with_test_hooks(hooks);
+
+        let json = aggregate_body(status).await;
 
         // No OUTER envelope version -- only the per-panel map.
         assert!(
@@ -1224,21 +1260,14 @@ mod tests {
         );
         let panels = &json["panels"];
 
-        // Usage sheds to a code-only unavailable panel.
-        assert_eq!(panels["usage"]["unavailable"], "no_data");
-        assert!(panels["usage"]["data"].is_null());
-        assert!(panels["usage"]["as_of"].is_null());
-        assert_eq!(panels["usage"]["schema_version"], 8);
+        // Health sheds to a code-only unavailable panel.
+        assert_eq!(panels["health"]["unavailable"], "db_unavailable");
+        assert!(panels["health"]["data"].is_null());
+        assert!(panels["health"]["as_of"].is_null());
+        assert_eq!(panels["health"]["schema_version"], 9);
 
         // The siblings are available and untouched.
-        for name in [
-            "health",
-            "config",
-            "doctor",
-            "accounts",
-            "attention",
-            "models",
-        ] {
+        for name in ["config", "doctor", "accounts", "attention", "models"] {
             assert!(
                 panels[name]["unavailable"].is_null(),
                 "{name} panel should be available"
@@ -1248,9 +1277,7 @@ mod tests {
                 "{name} panel should carry data"
             );
         }
-        // Each panel carries its OWN schema_version (usage 6, health 9,
-        // doctor 32, config 6).
-        assert_eq!(panels["health"]["schema_version"], 9);
+        // Each panel carries its OWN schema_version.
         assert_eq!(panels["config"]["schema_version"], 6);
         assert_eq!(panels["doctor"]["schema_version"], 32);
         assert_eq!(panels["accounts"]["schema_version"], 1);

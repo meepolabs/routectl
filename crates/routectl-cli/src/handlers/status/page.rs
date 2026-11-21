@@ -2067,23 +2067,20 @@ mod tests {
     }
 
     /// The sum identity in `crate::server::status_gate`'s module docs for the
-    /// GET routes: the server's usage budget plus the aggregate's reserve must
-    /// land inside the browser's per-GET abort, or the browser aborts a round
-    /// the server would have answered with a shed `query_timeout` panel. The
-    /// abort must also stay under the poll cadence. The models panel is a
-    /// share inside the reserve, not a term of its own here; the reserve's
-    /// own identity is pinned in `status_gate`.
+    /// `/status` aggregate: its budgeted stretch must land inside the
+    /// browser's per-GET abort, or the browser aborts a round the server
+    /// would have answered with a shed panel. The abort must also stay under
+    /// the poll cadence. The sum's terms are pinned in `status_gate`.
     #[test]
-    fn the_usage_budget_and_its_reserve_sum_inside_the_browser_get_abort() {
+    fn the_aggregate_budget_fits_inside_the_browser_get_abort() {
         let timeout_ms = script_ms("TIMEOUT_MS");
         let cadence_ms = script_ms("BASE_MS");
 
-        let server_ms = crate::server::status_gate::USAGE_BUDGET_MS
-            + crate::server::status_gate::AGGREGATE_RESERVE_MS;
+        let server_ms = crate::server::status_gate::AGGREGATE_BUDGET_MS;
 
         assert!(
             server_ms <= timeout_ms,
-            "USAGE_BUDGET_MS + reserve = {server_ms}ms exceeds the browser GET abort \
+            "AGGREGATE_BUDGET_MS = {server_ms}ms exceeds the browser GET abort \
              TIMEOUT_MS = {timeout_ms}ms"
         );
         assert!(

@@ -218,7 +218,6 @@ pub fn fixture_targets() -> Vec<RouteTargetStatus> {
 pub fn aggregate_json() -> Value {
     let aggregate = StatusAggregate {
         panels: AggregatePanels {
-            usage: super::usage::fixture::populated_usage_panel(),
             health: super::health::fixture::populated_health_panel(),
             config: super::config::fixture::populated_config_panel(),
             doctor: super::doctor::fixture::populated_doctor_panel(),
