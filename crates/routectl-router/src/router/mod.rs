@@ -25,6 +25,7 @@ use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::ProviderState;
 
+mod alias_match;
 mod alias_resolve;
 mod beta_report_learn;
 mod beta_withhold;
@@ -2055,33 +2056,18 @@ impl Router {
         // `foo*bar`), and other invalid patterns are rejected at
         // index-build time so a typo'd glob fails loudly at startup
         // rather than silently mismatching wire models.
-        let mut alias_glob_index = PrefixIndex::new();
-        for (key, value) in &config.aliases {
-            if !key.contains('*') {
-                continue;
-            }
-            match crate::glob::AliasPattern::parse(key) {
-                Ok(pattern @ crate::glob::AliasPattern::Prefix(_)) => {
-                    alias_glob_index.insert(pattern, value.clone());
-                }
-                Ok(crate::glob::AliasPattern::Exact(_)) => {
-                    // Pattern parsed as Exact even with a `*` -- this
-                    // shouldn't happen, but treat as exact-only.
-                }
-                Err(e) => {
-                    // Both fields carry the operator-written `[aliases]`
-                    // key (the parse error quotes it back), and this
-                    // fires BEFORE `validate_alias_patterns` rejects the
-                    // key -- so a key bearing a newline would forge a
-                    // second startup record through the `%` render.
-                    tracing::warn!(
-                        pattern = %routectl_core::sanitize_for_log(key),
-                        error = %routectl_core::sanitize_for_log(&e),
-                        "rejecting invalid alias glob pattern; entry ignored",
-                    );
-                }
-            }
-        }
+        let alias_glob_index = alias_match::glob_index(&config.aliases, |key, error| {
+            // Both fields carry the operator-written `[aliases]` key (the
+            // parse error quotes it back), and this fires BEFORE
+            // `validate_alias_patterns` rejects the key -- so a key bearing
+            // a newline would forge a second startup record through the
+            // `%` render.
+            tracing::warn!(
+                pattern = %routectl_core::sanitize_for_log(key),
+                error = %routectl_core::sanitize_for_log(error),
+                "rejecting invalid alias glob pattern; entry ignored",
+            );
+        });
 
         let k_session_store = Arc::new(crate::k_estimator::KSessionStore::default());
         let k_estimator: Arc<dyn crate::k_estimator::KEstimator> = Arc::new(

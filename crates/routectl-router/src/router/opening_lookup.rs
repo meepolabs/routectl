@@ -134,15 +134,11 @@ impl Router {
     /// First resolved model of the chain `model` routes to, in dispatch's
     /// resolution order, read off the installed table only.
     fn head_resolved_model(&self, model: &str) -> Option<Arc<ResolvedModel>> {
-        let chain = match self.resolve_v6_alias(model) {
-            Ok(Some(chain)) => chain,
-            Ok(None) => match self.resolve_nickname(model) {
-                Some(direct) => return Some(direct),
-                None => self.resolve_default_alias().ok().flatten()?,
-            },
-            Err(_) => return None,
-        };
-        chain.into_iter().next()
+        self.resolve_route(model, true)
+            .ok()
+            .flatten()?
+            .into_iter()
+            .next()
     }
 
     /// Whether dispatch would authenticate `head` with the client's own

@@ -12,6 +12,7 @@ use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Resul
 use super::*;
 use crate::config::ModelEntry;
 use crate::resolved::ResolvedModel;
+use crate::router::ALIAS_MAX_RECURSION_DEPTH;
 use crate::router::Router;
 
 struct InertProvider;
@@ -112,6 +113,8 @@ fn precedence_config() -> Config {
             ("claude-x-*", chain(&["m-b", "m-c"])),
             ("shadowed", chain(&["m-c", "m-a"])),
             ("glob-shadowed-*", single("m-b")),
+            ("bad*glob-*", single("m-a")),
+            ("mod\u{e8}le-*", chain(&["m-c", "m-a"])),
             ("default", chain(&["m-c", "m-b"])),
         ],
     )
@@ -122,7 +125,7 @@ fn resolve_alias_value_picks_the_chain_dispatch_chain_dispatches() {
     // Arrange
     let config = precedence_config();
     let router = router_for(&config);
-    let rows: [(&str, &str, &[&str]); 7] = [
+    let rows: [(&str, &str, &[&str]); 9] = [
         ("exact key", "fast", &["m-b", "m-a"]),
         ("shorter of two globs", "claude-y", &["m-a"]),
         ("longest of two globs", "claude-x-9", &["m-b", "m-c"]),
@@ -130,6 +133,12 @@ fn resolve_alias_value_picks_the_chain_dispatch_chain_dispatches() {
         ("alias shadows a nickname", "shadowed", &["m-c", "m-a"]),
         ("glob shadows a nickname", "glob-shadowed-1", &["m-b"]),
         ("default only", "no-such-wire", &["m-c", "m-b"]),
+        (
+            "invalid glob key never matches",
+            "bad*glob-1",
+            &["m-c", "m-b"],
+        ),
+        ("non-ASCII glob prefix", "mod\u{e8}le-1", &["m-c", "m-a"]),
     ];
 
     for (case, wire, expected) in rows {
@@ -273,5 +282,66 @@ fn alias_steps_depth_bound_matches_the_router_at_every_length() {
         if let Ok(steps) = steps {
             assert_eq!(steps[0].models, ["model"], "hops = {hops}");
         }
+    }
+}
+
+/// Strips `//` comments and `use` lines so a weld reads code that runs,
+/// not prose about it or an import nothing calls.
+fn code_only(source: &str) -> String {
+    let mut in_use = false;
+    source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
+                in_use = !trimmed.ends_with(';');
+                return false;
+            }
+            if in_use {
+                in_use = !trimmed.ends_with(';');
+                return false;
+            }
+            true
+        })
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn alias_precedence_and_expansion_live_only_in_the_shared_matcher() {
+    // Arrange: the shared matcher, the runtime chain, and this reporting API.
+    let matcher = code_only(include_str!("alias_match.rs"));
+    let callers = [
+        ("chain.rs", code_only(include_str!("chain.rs"))),
+        (
+            "alias_resolve.rs",
+            code_only(include_str!("alias_resolve.rs")),
+        ),
+    ];
+    let restated = [
+        "aliases.get(",
+        "longest_match(",
+        "AliasPattern",
+        "\"default\"",
+        "ALIAS_MAX_RECURSION_DEPTH",
+    ];
+    let shared = ["ROUTE_PRECEDENCE", "route_match("];
+
+    // Assert: positive control, the matcher holds every restated rule.
+    for needle in restated {
+        assert!(matcher.contains(needle), "alias_match.rs lacks `{needle}`");
+    }
+    for (file, source) in &callers {
+        for needle in restated {
+            assert!(!source.contains(needle), "{file} restates `{needle}`");
+        }
+        for needle in shared {
+            assert!(source.contains(needle), "{file} bypasses `{needle}`");
+        }
+        assert!(
+            source.contains("expand_value(") || source.contains("expand_entry("),
+            "{file} expands chains itself"
+        );
     }
 }

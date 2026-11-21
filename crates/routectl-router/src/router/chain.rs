@@ -6,59 +6,85 @@ use std::time::Instant;
 
 use routectl_core::{ChatRequest, EligibilityReason, Error, RequestObservation, Result};
 
-use crate::config::AliasValue;
 use crate::resolved::ResolvedModel;
 
+use super::alias_match::{ROUTE_PRECEDENCE, RouteMatch, RouteStep, expand_value, route_match};
 use super::class_observe::DispatchSurface;
-use super::{ALIAS_MAX_RECURSION_DEPTH, DispatchTarget, ProbeAdmission, Router};
+use super::{DispatchTarget, ProbeAdmission, Router};
 
 impl Router {
-    /// v0.6.0 alias-table lookup. Precedence: exact match -> longest
-    /// prefix glob (no default fallback). Returns the resolved chain
-    /// of `Arc<ResolvedModel>` entries on hit, `None` when neither
-    /// shape matches. The `default` catch-all is consulted later in
-    /// `dispatch_chain` so a wire model that's a known nickname wins
-    /// over the default fallback.
+    /// The alias-key step of dispatch's resolution: the chain of the
+    /// `[aliases]` key matching `wire_model` (exact, else longest prefix
+    /// glob), expanded against the installed model table. `None` when no
+    /// key matches, or when the key matches but none of its targets is
+    /// installed (WARN, then dispatch falls through to the later steps).
     ///
-    /// Chain entries that are themselves alias keys are recursively
-    /// expanded (DFS, preserving operator-stated fallback order).
-    /// `Err(Error::Config)` propagates if the recursion hits the
-    /// runtime depth cap (`ALIAS_MAX_RECURSION_DEPTH`); cycles are
-    /// caught earlier by `validate_alias_chain_targets`, so this is
-    /// only a defensive safety net.
+    /// # Errors
+    /// `Error::Config` when nesting exceeds the alias depth cap.
+    #[cfg(test)]
     pub(super) fn resolve_v6_alias(
         &self,
         wire_model: &str,
     ) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
+        self.resolve_step(wire_model, RouteStep::AliasKey)
+    }
+
+    /// The chain `wire_model` resolves to under [`ROUTE_PRECEDENCE`], read
+    /// off the installed model table: the first step that yields a
+    /// non-empty chain wins. `include_default` false skips the `default`
+    /// catch-all. Never touches pool pins or dispatch metrics.
+    ///
+    /// # Errors
+    /// `Error::Config` when nesting exceeds the alias depth cap.
+    pub(super) fn resolve_route(
+        &self,
+        wire_model: &str,
+        include_default: bool,
+    ) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
+        for step in ROUTE_PRECEDENCE {
+            if step == RouteStep::Default && !include_default {
+                continue;
+            }
+            if let Some(chain) = self.resolve_step(wire_model, step)? {
+                return Ok(Some(chain));
+            }
+        }
+        Ok(None)
+    }
+
+    /// One resolution step for `wire_model`, expanded into installed models.
+    /// An installed-table miss drops the entry; the startup validator
+    /// reports a static one.
+    fn resolve_step(
+        &self,
+        wire_model: &str,
+        step: RouteStep,
+    ) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
         let aliases = &self.config.aliases;
-        let value = match aliases
-            .get(wire_model)
-            .cloned()
-            .or_else(|| self.alias_glob_index.longest_match(wire_model))
-        {
-            Some(v) => v,
+        let lookup = |nickname: &str| self.resolve_nickname(nickname);
+        let chain = match route_match(aliases, &self.alias_glob_index, wire_model, step, &lookup) {
             None => return Ok(None),
+            Some(RouteMatch::Nickname(model)) => vec![model],
+            Some(RouteMatch::Alias(value)) => {
+                let mut chain = Vec::new();
+                expand_value(aliases, &value, 0, &lookup, &mut chain)?;
+                chain
+            }
         };
-        let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
-        self.expand_alias_value(&value, &mut chain, 0)?;
-        if chain.is_empty() {
-            // Alias key matched but every target was disabled or
-            // unresolvable. Without this WARN the request silently
-            // falls through to the `default` catch-all and the
-            // operator gets no breadcrumb back to the misconfigured
-            // alias. (Startup validation in
-            // `validate_alias_chain_targets` catches the static
-            // case; this WARN handles the dynamic case where a
-            // ResolvedModel was dropped after install.)
+        if !chain.is_empty() {
+            return Ok(Some(chain));
+        }
+        if step == RouteStep::AliasKey {
+            // Startup validation catches a statically unknown target; this
+            // is the dynamic case (a model whose provider failed to build),
+            // which would otherwise fall through silently.
             tracing::warn!(
                 wire_model = %wire_model,
                 "alias resolved to empty chain (all targets disabled or unresolvable); \
                  falling through to direct nickname lookup or `default`",
             );
-            Ok(None)
-        } else {
-            Ok(Some(chain))
         }
+        Ok(None)
     }
 
     /// The context window in tokens routectl would report for the wire
@@ -131,96 +157,22 @@ impl Router {
     }
 
     /// First-target resolution behind [`Self::context_window_for`]:
-    /// exact-then-glob alias match, else a direct `[models]` nickname, both
-    /// read off the INSTALLED resolved-model table (never `dispatch_chain`,
-    /// which would perturb pool pins and metrics on a discovery read).
+    /// alias key, else a direct nickname (no `default`), read off the
+    /// INSTALLED resolved-model table (never `dispatch_chain`, which would
+    /// perturb pool pins and metrics on a discovery read).
     fn first_chain_target(&self, model: &str) -> Option<Arc<ResolvedModel>> {
-        match self.resolve_v6_alias(model) {
-            Ok(Some(chain)) => chain.into_iter().next(),
-            Ok(None) => self.resolve_nickname(model),
-            // Alias-recursion-depth config errors are swallowed: discovery
-            // must omit the field, never fail the whole list for one entry.
-            Err(_) => None,
-        }
-    }
-
-    /// Consult the catch-all `default` alias. Returns the resolved
-    /// chain, or `None` if no `default` key is configured. Recurses
-    /// through nested alias keys identically to `resolve_v6_alias`.
-    pub(super) fn resolve_default_alias(&self) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
-        let value = match self.config.aliases.get("default").cloned() {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
-        self.expand_alias_value(&value, &mut chain, 0)?;
-        if chain.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(chain))
-        }
-    }
-
-    /// Recursively expand an `AliasValue` into a flat ordered list of
-    /// `Arc<ResolvedModel>`. Each chain entry is FIRST checked against
-    /// `[aliases]` keys (exact match); if it hits, the nested chain is
-    /// expanded inline DFS-style so the operator's stated fallback
-    /// order is preserved (`A = ["B", "C"]` with `B = ["X", "Y"]` and
-    /// `C` a model nickname yields `[X, Y, C]`). If the entry is not
-    /// an alias key, it is treated as a `[models.X]` nickname and
-    /// looked up in the resolved-model table; misses are silently
-    /// dropped (the static validator surfaces these at startup).
-    ///
-    /// `depth` is the current recursion depth; the recursion errors
-    /// out with `Error::Config` once it exceeds
-    /// `ALIAS_MAX_RECURSION_DEPTH`. This is a defensive safety net
-    /// for the case where a glob hit re-introduces a cycle the static
-    /// DFS missed.
-    fn expand_alias_value(
-        &self,
-        value: &AliasValue,
-        out: &mut Vec<Arc<ResolvedModel>>,
-        depth: usize,
-    ) -> Result<()> {
-        if depth > ALIAS_MAX_RECURSION_DEPTH {
-            return Err(Error::Config(format!(
-                "alias chain recursion exceeded depth {ALIAS_MAX_RECURSION_DEPTH}; \
-                 possible cycle that startup validation missed -- \
-                 run `routectl config check` to surface the offending alias"
-            )));
-        }
-        for entry in value.nicknames() {
-            // Alias keys win over model nicknames by the same shadowing
-            // rule the top-level dispatch uses.
-            //
-            // Glob-pattern entries (e.g. `claude-haiku*`) are matched by
-            // this exact `BTreeMap` lookup because glob keys live in
-            // `config.aliases` keyed on the literal pattern string, in
-            // addition to being indexed in `glob_index` for prefix
-            // matching at dispatch time. If those two are ever
-            // de-coupled (e.g. moving glob keys out of
-            // `config.aliases`), recursive expansion of glob-targeted
-            // chain entries breaks here.
-            if let Some(nested) = self.config.aliases.get(entry) {
-                self.expand_alias_value(nested, out, depth + 1)?;
-            } else if let Some(m) = self.resolve_nickname(entry) {
-                out.push(m);
-            }
-            // Else silently drop -- caught by `validate_alias_chain_targets`
-            // at startup.
-        }
-        Ok(())
+        // Alias-recursion-depth config errors are swallowed: discovery
+        // must omit the field, never fail the whole list for one entry.
+        self.resolve_route(model, false)
+            .ok()
+            .flatten()?
+            .into_iter()
+            .next()
     }
 
     /// Resolve the wire `model` value into a chain of `DispatchTarget`s
-    /// the dispatch loop can walk.
-    ///
-    /// v0.6.0 resolution order:
-    ///   1. Exact alias match in `[aliases]` -- chain of nicknames.
-    ///   2. Longest suffix-glob match in `[aliases]`.
-    ///   3. Direct nickname (the wire `model` IS a `[models]` key).
-    ///   4. `default` key in `[aliases]` -- catch-all chain.
-    ///   5. Otherwise `Error::UnknownAlias`.
+    /// the dispatch loop can walk, by [`ROUTE_PRECEDENCE`]; no step
+    /// yielding a chain is `Error::UnknownAlias`.
     ///
     /// Shadowing rule: when the same string is both an `[aliases]` key
     /// AND a `[models.X]` nickname, the alias wins. This is intentional
@@ -234,20 +186,10 @@ impl Router {
         model: &str,
         session_key: Option<&str>,
     ) -> Result<Vec<DispatchTarget>> {
-        if let Some(chain) = self.resolve_v6_alias(model)? {
-            return self.expand_resolved_chain(chain, session_key);
+        match self.resolve_route(model, true)? {
+            Some(chain) => self.expand_resolved_chain(chain, session_key),
+            None => Err(Error::UnknownAlias(model.to_string())),
         }
-        // Wire model could ALSO be a direct nickname.
-        if let Some(m) = self.resolve_nickname(model) {
-            return self.expand_resolved_chain(vec![m], session_key);
-        }
-        // Catch-all: only consulted after exact alias / glob / direct
-        // nickname all miss. This ordering means a wire model that's
-        // a known nickname always wins over a configured default.
-        if let Some(chain) = self.resolve_default_alias()? {
-            return self.expand_resolved_chain(chain, session_key);
-        }
-        Err(Error::UnknownAlias(model.to_string()))
     }
 
     /// Expand a resolved chain, refusing a chain that expanded to NOTHING.

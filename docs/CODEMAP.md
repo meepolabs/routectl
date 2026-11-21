@@ -3240,6 +3240,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `count_tokens`, and `feature_filter`; the shared leaf keeps
   `feature_filter` from importing out of `dispatch`, so the import edge
   between them is one-way
+- `src/router/alias_match.rs` -- the one owner of alias precedence and
+  chain expansion, pure over the `[aliases]` table: `ROUTE_PRECEDENCE`
+  (alias key, nickname, `default`), `route_match` (exact key, else the
+  longest prefix glob of `glob_index`), and `expand_value`/`expand_entry`
+  (alias key wins over a nickname, unknown entries dropped, `Error::Config`
+  past `ALIAS_MAX_RECURSION_DEPTH`). The caller supplies the nickname
+  lookup: the installed model table in `chain.rs`, `[models]` in
+  `alias_resolve.rs`
 - `src/router/alias_resolve.rs` -- config-only alias resolution, exported
   from the crate root: `resolve_alias_value` (exact key, longest prefix
   glob, direct nickname, `default`) and `alias_steps` (each top-level chain
