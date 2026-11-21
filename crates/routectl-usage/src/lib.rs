@@ -69,7 +69,7 @@ pub use query::{
     earliest_ts_start, errors_by_class, for_each_stream_extra, k_calibration_summary,
     latest_quota_by_seat, latest_tombstone, near_lossless_attribution_summary, query,
     read_calibration_samples_since, read_capability_events_after, read_reuse_samples_since,
-    reduction_summary, shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
+    reduction_summary, shadow_misfire_summary, suppressed_sessions, would_trim_summary,
 };
 pub use query::{
     CACHE_IGNORE_LANE_CAP, CacheIgnoreLane, CacheIgnoreLanes, CacheIgnoreRule, ObservationTotals,

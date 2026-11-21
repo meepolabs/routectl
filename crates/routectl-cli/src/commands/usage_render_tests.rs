@@ -209,7 +209,8 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
         "ctx_avg",
         "cache_wr",
         "ttft_p50",
-        "ttft_p95",
+        "ttft_p90",
+        "ttft_p99",
         "tok/s",
         "srv_tools",
     ] {
@@ -222,7 +223,7 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
     // reasoning is no longer rendered in EITHER view.
     assert!(!detail_header.contains("reasoning"));
     assert!(!plain_header.contains("reasoning"));
-    for dropped in ["max_ms", "wall_ms", "p95_ms"] {
+    for dropped in ["max_ms", "wall_ms", "p95"] {
         assert!(
             !detail_header.contains(dropped),
             "detail header should not contain {dropped}"
@@ -233,6 +234,124 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
     assert!(detail_out.contains("120ms"));
     assert!(detail_out.contains("latency: TTFT"));
     assert!(detail_out.contains("tok/s"));
+    assert!(!plain_out.contains("latency:"));
+}
+
+#[test]
+fn detail_percentile_columns_show_each_rows_p50_p90_p99_in_header_order() {
+    // Arrange: 100 streaming rows, ttfb 1..=100 ms, so the three nearest
+    // ranks are distinct values (50, 90, 99) and a swapped column shows.
+    let (_dir, _path, mut db) = temp_db();
+    for i in 1..=100 {
+        insert_stream_row(
+            &db,
+            &format!("p{i}"),
+            1000 + i,
+            "m",
+            i,
+            1000 + i,
+            Some(1),
+            None,
+            None,
+        );
+    }
+    let report = report_all(&mut db, &cost_config(), None, true);
+
+    // Act
+    let out = render_report(&report, &zone());
+    let header: Vec<&str> = out
+        .lines()
+        .nth(1)
+        .expect("header")
+        .split_whitespace()
+        .collect();
+    let row: Vec<&str> = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("m "))
+        .expect("model row")
+        .split_whitespace()
+        .collect();
+
+    // Assert
+    let cell = |col: &str| {
+        let at = header
+            .iter()
+            .position(|h| *h == col)
+            .unwrap_or_else(|| panic!("{col}"));
+        row[at]
+    };
+    assert_eq!(
+        (cell("ttft_p50"), cell("ttft_p90"), cell("ttft_p99")),
+        ("50ms", "90ms", "99ms")
+    );
+}
+
+#[test]
+fn detail_latency_lines_show_the_window_ttft_and_end_to_end_percentiles() {
+    // Arrange: ttfb 1..=100 ms and latency 0.1..=10 s in 0.1 s steps over
+    // 100 rows: TTFT nearest ranks 50 / 90 / 99 ms, latency 5.0 / 9.0 / 9.9 s.
+    let (_dir, _path, mut db) = temp_db();
+    for i in 1..=100 {
+        insert_stream_row(
+            &db,
+            &format!("p{i}"),
+            1000 + i,
+            "m",
+            i,
+            100 * i,
+            Some(1),
+            None,
+            None,
+        );
+    }
+    let report = report_all(&mut db, &cost_config(), None, true);
+
+    // Act
+    let out = render_report(&report, &zone());
+    let latency_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("latency:")).collect();
+
+    // Assert
+    assert_eq!(latency_lines.len(), 2, "{out}");
+    assert!(
+        latency_lines[0].starts_with("latency: TTFT p50 50ms / p90 90ms / p99 99ms (streaming)"),
+        "{}",
+        latency_lines[0]
+    );
+    assert_eq!(
+        latency_lines[1],
+        "latency: end-to-end p50 5.0s / p90 9.0s / p99 9.9s (every request)"
+    );
+}
+
+#[test]
+fn detail_latency_lines_show_dashes_on_an_empty_window() {
+    // Arrange
+    let (_dir, _path, mut db) = temp_db();
+    let report = report_all(&mut db, &cost_config(), None, true);
+
+    // Act
+    let out = render_report(&report, &zone());
+
+    // Assert
+    assert!(
+        out.contains("latency: TTFT p50 - / p90 - / p99 - (streaming)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("latency: end-to-end p50 - / p90 - / p99 - (every request)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_legend_names_every_detail_column() {
+    let detail = LEGEND
+        .split_once("--detail")
+        .map(|(_, rest)| rest)
+        .expect("legend has a --detail entry");
+    for col in DETAIL_HEADERS {
+        assert!(detail.contains(col), "legend --detail entry omits {col}");
+    }
 }
 
 #[test]
@@ -295,8 +414,8 @@ fn render_detail_latency_summary_uses_window_total_not_alias_named_total() {
     // Arrange: under `--by alias`, an alias literally named "total" must not be
     // mistaken for the injected window-total row. Two streaming rows under that
     // alias (ttfb 100, 300) plus one under another alias (ttfb 500). The window
-    // total p95 (nearest-rank over all three: 100,300,500 -> rank 3 -> 500) must
-    // differ from the "total" alias group's own p95 (100,300 -> rank 2 -> 300).
+    // total p99 (nearest-rank over all three: 100,300,500 -> rank 3 -> 500) must
+    // differ from the "total" alias group's own p99 (100,300 -> rank 2 -> 300).
     let (_dir, _path, mut db) = temp_db();
     let insert_stream_alias = |id: &str, alias: &str, ttfb: i64| {
         db.conn()
@@ -324,11 +443,11 @@ fn render_detail_latency_summary_uses_window_total_not_alias_named_total() {
         .find(|l| l.starts_with("latency: TTFT"))
         .expect("latency summary line present");
 
-    // Assert: the summary's p95 reflects the window-wide value (500ms), not the
-    // "total" alias group's own p95 (300ms) -- the injected window total is
+    // Assert: the summary's p99 reflects the window-wide value (500ms), not the
+    // "total" alias group's own p99 (300ms) -- the injected window total is
     // selected by position, not by the label colliding with the alias name.
     assert!(
-        summary.contains("p95 500ms"),
+        summary.contains("p99 500ms"),
         "summary p95 should be the window total, not the alias named total: {summary:?}"
     );
 }

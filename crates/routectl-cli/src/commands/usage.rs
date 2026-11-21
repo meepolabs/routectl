@@ -33,7 +33,7 @@ use routectl_usage::{
     ShadowMisfireSummary, SuppressedSessions, UsageDb, WouldTrimSummary, cache_decision_summary,
     estimate_cost_tokens, k_calibration_summary, latest_quota_by_seat,
     near_lossless_attribution_summary, observation_totals, open_readonly, query, reduction_summary,
-    shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
+    shadow_misfire_summary, suppressed_sessions, would_trim_summary,
 };
 
 use crate::commands::pricing::{
@@ -483,9 +483,8 @@ fn parse_local_date_end(zone: &LocalZone, s: &str) -> Result<i64, UsageError> {
 // --- rollup + cost ------------------------------------------------------
 
 /// One display row: a group's figures exactly as the shared grouped query
-/// folded them, plus the two things that query does not carry -- whether any
-/// of the group's rows were subscription usage (the `+sub` cost marker) and
-/// the `--detail` time-to-first-token percentiles.
+/// folded them, plus the one thing that query does not carry: whether any of
+/// the group's rows were subscription usage (the `+sub` cost marker).
 #[derive(Debug, Clone)]
 pub struct DisplayRow {
     pub label: String,
@@ -496,10 +495,6 @@ pub struct DisplayRow {
     /// whose mix may be priced plus unpriced rather than priced plus
     /// subscription.
     pub any_subscription: bool,
-    /// Nearest-rank TTFT percentiles over the group's streaming successes;
-    /// populated only under `--detail`.
-    pub ttft_p50_ms: Option<i64>,
-    pub ttft_p95_ms: Option<i64>,
 }
 
 /// The full report for one window: the display rows, the window total, the
@@ -863,24 +858,6 @@ fn uncovered_used_dimensions(resolved: &RowRates, row: &AggRow) -> Vec<String> {
     labels.into_iter().collect()
 }
 
-/// A nearest-rank TTFT p50 and p95 in ms, each `None` without samples.
-type TtftPair = (Option<i64>, Option<i64>);
-
-/// The `--detail` TTFT percentiles: per group label, and over the whole
-/// window. The window figure is kept apart from the labelled ones so a group
-/// labelled "total" cannot share its samples.
-#[derive(Debug, Default)]
-struct TtftPercentiles {
-    by_label: BTreeMap<String, TtftPair>,
-    total: TtftPair,
-}
-
-impl TtftPercentiles {
-    fn for_label(&self, label: &str) -> TtftPair {
-        self.by_label.get(label).copied().unwrap_or((None, None))
-    }
-}
-
 /// How far ahead the report's read deadline sits. The command is attended and
 /// has no latency budget (the operator's interrupt is its limit), but the
 /// shared query always runs under a deadline, so the CLI hands it one no real
@@ -924,32 +901,19 @@ pub fn build_window_report(
     let result = query(db, &spec, price, Instant::now() + REPORT_READ_HORIZON)?;
     let subscription_labels = subscription_labels.into_inner();
 
-    let ttft = if detail {
-        compute_ttft(db, bounds, &spec)?
-    } else {
-        TtftPercentiles::default()
-    };
-
     let groups = result
         .groups
         .into_iter()
-        .map(|group| {
-            let (ttft_p50_ms, ttft_p95_ms) = ttft.for_label(&group.label);
-            DisplayRow {
-                any_subscription: subscription_labels.contains(&group.label),
-                label: group.label,
-                metrics: group.metrics,
-                ttft_p50_ms,
-                ttft_p95_ms,
-            }
+        .map(|group| DisplayRow {
+            any_subscription: subscription_labels.contains(&group.label),
+            label: group.label,
+            metrics: group.metrics,
         })
         .collect();
     let total = DisplayRow {
         label: "total".to_string(),
         metrics: result.totals,
         any_subscription: !subscription_labels.is_empty(),
-        ttft_p50_ms: ttft.total.0,
-        ttft_p95_ms: ttft.total.1,
     };
 
     let diagnostics = if detail {
@@ -1014,50 +978,6 @@ fn detail_diagnostics(db: &UsageDb, bounds: WindowBounds) -> Result<DetailDiagno
         reduction: reduction_summary(db, from_ms, to_ms)?,
         cache_decision: cache_decision_summary(db, from_ms, to_ms)?,
         suppressed_sessions: suppressed_sessions(db, from_ms, to_ms)?,
-    })
-}
-
-/// Nearest-rank percentile of a sorted, non-empty slice. `q` is in `[0,1]`;
-/// rank = ceil(q * n), clamped to at least 1, 1-indexed.
-fn nearest_rank(sorted: &[i64], q: f64) -> i64 {
-    let n = sorted.len();
-    let rank = ((q * n as f64).ceil() as usize).max(1);
-    sorted[rank - 1]
-}
-
-/// The nearest-rank p50 and p95 of `values`, or `(None, None)` when empty.
-fn ttft_pair(mut values: Vec<i64>) -> TtftPair {
-    if values.is_empty() {
-        return (None, None);
-    }
-    values.sort_unstable();
-    (
-        Some(nearest_rank(&values, 0.50)),
-        Some(nearest_rank(&values, 0.95)),
-    )
-}
-
-/// Per-group and window-wide TTFT p50/p95 via nearest-rank over the in-window
-/// streaming time-to-first-byte samples, each sample labelled the way the
-/// shared query labels its row under `spec`. Only computed for `--detail`.
-fn compute_ttft(
-    db: &UsageDb,
-    bounds: WindowBounds,
-    spec: &QuerySpec,
-) -> Result<TtftPercentiles, UsageError> {
-    let raw = ttfbs(db, bounds.from_ms, bounds.to_ms)?;
-    let mut buckets: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-    let mut total = Vec::with_capacity(raw.len());
-    for (key, ms) in raw {
-        buckets.entry(spec.group_label(&key)).or_default().push(ms);
-        total.push(ms);
-    }
-    Ok(TtftPercentiles {
-        by_label: buckets
-            .into_iter()
-            .map(|(label, values)| (label, ttft_pair(values)))
-            .collect(),
-        total: ttft_pair(total),
     })
 }
 
@@ -1127,13 +1047,14 @@ fn normal_headers(key_header: &str) -> Vec<String> {
 }
 
 /// The `--detail` column headers, appended after the normal columns.
-const DETAIL_HEADERS: [&str; 8] = [
+pub const DETAIL_HEADERS: [&str; 9] = [
     "cost",
     "ctx_peak",
     "ctx_avg",
     "cache_wr",
     "ttft_p50",
-    "ttft_p95",
+    "ttft_p90",
+    "ttft_p99",
     "tok/s",
     "srv_tools",
 ];
@@ -1192,14 +1113,15 @@ fn detail_cells(row: &DisplayRow) -> Vec<String> {
         optional_count_cell(m.ctx_peak),
         optional_count_cell(m.ctx_avg),
         metric_cell(m.cache_write_present, m.cache_write_tokens),
-        ttft_cell(row.ttft_p50_ms),
-        ttft_cell(row.ttft_p95_ms),
+        ms_cell(m.ttft_p50_ms),
+        ms_cell(m.ttft_p90_ms),
+        ms_cell(m.ttft_p99_ms),
         tok_per_s_cell(m),
         metric_cell(m.server_tool_present, m.server_tool_calls),
     ]
 }
 
-fn ttft_cell(ms: Option<i64>) -> String {
+fn ms_cell(ms: Option<i64>) -> String {
     ms.map_or_else(|| "-".to_string(), human_ms)
 }
 
@@ -1240,21 +1162,31 @@ pub fn render_report(report: &WindowReport, zone: &LocalZone) -> String {
     out
 }
 
-/// One-line latency / throughput / streaming-share summary, derived from the
-/// window total. Emitted only under `--detail`.
+/// The latency summary lines, derived from the window total: TTFT
+/// percentiles with throughput and streaming share, then end-to-end latency
+/// percentiles. Emitted only under `--detail`.
 fn render_latency_summary(report: &WindowReport) -> String {
-    let total = &report.total;
-    let p50 = ttft_cell(total.ttft_p50_ms);
-    let p95 = ttft_cell(total.ttft_p95_ms);
-    let toks = tok_per_s_cell(&total.metrics);
-    let m = &total.metrics;
+    let m = &report.total.metrics;
+    let ttft = percentile_triple(m.ttft_p50_ms, m.ttft_p90_ms, m.ttft_p99_ms);
+    let latency = percentile_triple(m.latency_p50_ms, m.latency_p90_ms, m.latency_p99_ms);
+    let toks = tok_per_s_cell(m);
     let pct = if m.requests > 0 {
         (100.0 * m.stream_count as f64 / m.requests as f64).round() as i64
     } else {
         0
     };
     format!(
-        "latency: TTFT p50 {p50} / p95 {p95} (streaming)  |  throughput {toks} tok/s  |  {pct}% streaming\n"
+        "latency: TTFT {ttft} (streaming)  |  throughput {toks} tok/s  |  {pct}% streaming\n\
+         latency: end-to-end {latency} (every request)\n"
+    )
+}
+
+fn percentile_triple(p50: Option<i64>, p90: Option<i64>, p99: Option<i64>) -> String {
+    format!(
+        "p50 {} / p90 {} / p99 {}",
+        ms_cell(p50),
+        ms_cell(p90),
+        ms_cell(p99)
     )
 }
 
@@ -1575,8 +1507,10 @@ const LEGEND: &str = concat!(
     "  --detail    = adds cost, ctx_peak/ctx_avg (largest and mean per-request prompt:\n",
     "                fresh input + cache read + cache write, not a flow),\n",
     "                cache_wr (cache writes of every lifetime, already in input),\n",
-    "                ttft_p50/ttft_p95 (nearest-rank time to first token over streamed successes),\n",
-    "                tok/s, server-tools,\n",
+    "                ttft_p50/ttft_p90/ttft_p99 (nearest-rank time to first token over streamed successes),\n",
+    "                tok/s, srv_tools (server-side tool calls),\n",
+    "                a latency line (window TTFT p50/p90/p99, throughput, streaming share),\n",
+    "                an end-to-end latency line (p50/p90/p99 over every request),\n",
     "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied),\n",
     "                a reduction line (lossless-minifier outcomes actually applied; counts, not rates),\n",
     "                and a cache-breakpoint line (per-region injection decisions + prefix-epoch events),\n",

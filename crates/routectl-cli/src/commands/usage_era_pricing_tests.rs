@@ -385,9 +385,11 @@ fn ttft_samples_from_both_eras_land_in_one_display_group() {
     let row = find(&report, SHIFT_PROVIDER);
 
     // Nearest-rank over the four pooled samples [10, 20, 30, 40]:
-    // p50 -> rank ceil(0.5*4) = 2 -> 20; p95 -> rank ceil(0.95*4) = 4 -> 40.
-    assert_eq!(row.ttft_p50_ms, Some(20), "p50 pools both eras' samples");
-    assert_eq!(row.ttft_p95_ms, Some(40), "p95 pools both eras' samples");
+    // p50 -> rank ceil(0.5*4) = 2 -> 20; p90 and p99 -> rank 4 -> 40.
+    let m = &row.metrics;
+    assert_eq!(m.ttft_p50_ms, Some(20), "p50 pools both eras' samples");
+    assert_eq!(m.ttft_p90_ms, Some(40), "p90 pools both eras' samples");
+    assert_eq!(m.ttft_p99_ms, Some(40), "p99 pools both eras' samples");
 }
 
 #[test]

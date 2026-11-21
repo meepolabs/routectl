@@ -257,9 +257,10 @@ enum Cmd {
         /// every report ends with a total row.
         #[arg(long, value_parser = group_by_value_parser())]
         by: Option<GroupDim>,
-        /// Show extra columns (cache-write total of every lifetime, ttft
-        /// p50/p95, tok/s, server-tool counts) plus a per-window latency
-        /// summary line.
+        /// Show extra columns (cost, ctx_peak and ctx_avg, cache_wr: the
+        /// cache-write total of every lifetime, ttft_p50/ttft_p90/ttft_p99,
+        /// tok/s, srv_tools: server-tool counts) plus per-window lines for
+        /// TTFT and end-to-end latency p50/p90/p99.
         #[arg(long)]
         detail: bool,
         /// Override the usage DB path. Defaults to `[usage] db_path`.
@@ -1821,6 +1822,22 @@ mod tests {
             .map(|value| value.get_name().to_string())
             .collect::<Vec<_>>();
         assert_eq!(help, GroupDim::ALL.map(|dim| dim.as_str().to_string()));
+    }
+
+    #[test]
+    fn usage_detail_help_names_every_detail_column() {
+        let help = <Cli as clap::CommandFactory>::command()
+            .find_subcommand("usage")
+            .expect("usage subcommand")
+            .get_arguments()
+            .find(|arg| arg.get_id() == "detail")
+            .and_then(|arg| arg.get_help().map(ToString::to_string))
+            .expect("--detail help");
+        for col in commands::usage::DETAIL_HEADERS {
+            assert!(help.contains(col), "--detail help omits {col}: {help}");
+        }
+        assert!(help.contains("p50/p90/p99"), "{help}");
+        assert!(!help.contains("p95"), "{help}");
     }
 
     /// `--opening-accuracy` is opt-in and exclusive with the other report

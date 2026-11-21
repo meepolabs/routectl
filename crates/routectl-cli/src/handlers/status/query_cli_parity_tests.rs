@@ -106,6 +106,7 @@ struct Shape {
     stream: bool,
     outcome: &'static str,
     error_class: Option<&'static str>,
+    latency_ms: i64,
     ttfb_ms: Option<i64>,
     input: Option<i64>,
     output: Option<i64>,
@@ -130,6 +131,7 @@ const SHAPES: [Shape; 8] = [
         stream: true,
         outcome: "ok",
         error_class: None,
+        latency_ms: 1_200,
         ttfb_ms: Some(120),
         input: Some(1_000),
         output: Some(400),
@@ -146,6 +148,7 @@ const SHAPES: [Shape; 8] = [
         stream: false,
         outcome: "upstream_error",
         error_class: Some("http-5xx"),
+        latency_ms: 400,
         ttfb_ms: None,
         input: None,
         output: None,
@@ -162,6 +165,7 @@ const SHAPES: [Shape; 8] = [
         stream: true,
         outcome: "ok",
         error_class: None,
+        latency_ms: 2_500,
         ttfb_ms: Some(300),
         input: Some(200),
         output: Some(100),
@@ -178,6 +182,7 @@ const SHAPES: [Shape; 8] = [
         stream: true,
         outcome: "ok",
         error_class: None,
+        latency_ms: 3_000,
         ttfb_ms: Some(500),
         input: Some(3_000),
         output: Some(900),
@@ -194,6 +199,7 @@ const SHAPES: [Shape; 8] = [
         stream: false,
         outcome: "timeout",
         error_class: None,
+        latency_ms: 30_000,
         ttfb_ms: None,
         input: None,
         output: None,
@@ -210,6 +216,7 @@ const SHAPES: [Shape; 8] = [
         stream: true,
         outcome: "ok",
         error_class: None,
+        latency_ms: 1_500,
         ttfb_ms: Some(700),
         input: Some(400),
         output: Some(40),
@@ -226,6 +233,7 @@ const SHAPES: [Shape; 8] = [
         stream: true,
         outcome: "ok",
         error_class: None,
+        latency_ms: 6_000,
         ttfb_ms: Some(900),
         input: Some(70),
         output: Some(7),
@@ -242,6 +250,7 @@ const SHAPES: [Shape; 8] = [
         stream: false,
         outcome: "ok",
         error_class: None,
+        latency_ms: 800,
         ttfb_ms: None,
         input: Some(50),
         output: Some(10),
@@ -260,7 +269,7 @@ fn insert(db: &UsageDb, request_id: &str, ts: i64, shape: &Shape) {
              attempt_count, fallback_count, input_tokens, output_tokens, cache_read, \
              cache_write_tokens, cache_write_lifetimes) \
              VALUES (?1, ?1, ?2, 'anthropic', ?3, ?4, ?3, ?5, ?6, 'anthropic-api', ?7, \
-             ?8, ?9, ?10, 900, ?11, 0, 0, 1, 0, ?12, ?13, ?14, ?15, ?16)",
+             ?8, ?9, ?10, ?11, ?12, 0, 0, 1, 0, ?13, ?14, ?15, ?16, ?17)",
             rusqlite::params![
                 ts,
                 request_id,
@@ -272,6 +281,7 @@ fn insert(db: &UsageDb, request_id: &str, ts: i64, shape: &Shape) {
                 shape.stream,
                 shape.outcome,
                 shape.error_class,
+                shape.latency_ms,
                 shape.ttfb_ms,
                 shape.input,
                 shape.output,
@@ -551,8 +561,92 @@ fn the_parity_fixture_gives_every_window_its_own_figures() {
     );
 }
 
-/// Under `--detail` each group's TTFT percentiles come from the samples
-/// labelled the way its rows are: the API-key entry's unseated stream lands
+/// The six timing percentiles of a metric set.
+fn percentiles(m: &QueryMetrics) -> [Option<i64>; 6] {
+    [
+        m.ttft_p50_ms,
+        m.ttft_p90_ms,
+        m.ttft_p99_ms,
+        m.latency_p50_ms,
+        m.latency_p90_ms,
+        m.latency_p99_ms,
+    ]
+}
+
+/// Assert one cell of the window x grouping matrix on the six percentiles
+/// the `--detail` report shows.
+fn assert_detail_percentiles_agree(
+    fx: &Fixture,
+    flag: &str,
+    token: &str,
+    by: Option<GroupDim>,
+    dim: &str,
+) {
+    let case = format!("{flag} --detail --by {by:?} vs window={token} group_by={dim}");
+    let cli = cli_report_with(fx, flag, by, true);
+    let endpoint = endpoint_result(fx, token, dim);
+
+    let cli_groups: Vec<(&str, [Option<i64>; 6])> = cli
+        .groups
+        .iter()
+        .map(|row| (row.label.as_str(), percentiles(&row.metrics)))
+        .collect();
+    let endpoint_groups: Vec<(&str, [Option<i64>; 6])> = endpoint
+        .groups
+        .iter()
+        .map(|group| (group.label.as_str(), percentiles(&group.metrics)))
+        .collect();
+    assert_eq!(cli_groups, endpoint_groups, "group percentiles: {case}");
+    assert_eq!(
+        percentiles(&cli.total.metrics),
+        percentiles(&endpoint.totals),
+        "total percentiles: {case}"
+    );
+}
+
+#[test]
+fn detail_percentiles_equal_the_query_endpoint_for_every_window_and_grouping() {
+    // Arrange
+    let fx = fixture();
+
+    // Act + Assert: every window x every grouping.
+    for (flag, token) in WINDOWS {
+        for (by, dim) in groupings() {
+            assert_detail_percentiles_agree(&fx, flag, token, by, dim);
+        }
+    }
+}
+
+#[test]
+fn the_parity_fixture_yields_every_percentile_in_every_window() {
+    // The control for the test above: equal `None`s on both sides would pass
+    // it, so every window's total must carry all six figures. Six copies of
+    // each shape put rank 44 of 48 (latency p90) in the top block already.
+    let fx = fixture();
+
+    for (_, token) in WINDOWS {
+        let totals = endpoint_result(&fx, token, "model").totals;
+        assert!(
+            percentiles(&totals).iter().all(Option::is_some),
+            "{token}: {totals:?}"
+        );
+    }
+    let all = endpoint_result(&fx, "all", "model").totals;
+    assert_eq!(
+        percentiles(&all),
+        [
+            Some(500),
+            Some(900),
+            Some(900),
+            Some(1_500),
+            Some(30_000),
+            Some(30_000)
+        ]
+    );
+}
+
+/// Under `--detail` each group's TTFT percentiles come from the rows
+/// labelled the way the group is: the API-key entry's unseated stream lands
 /// on its account's row, and the forwarded entry's on `(unattributed)`.
 #[test]
 fn detail_ttft_follows_the_seat_label_of_each_group() {
@@ -570,14 +664,17 @@ fn detail_ttft_follows_the_seat_label_of_each_group() {
             .find(|row| row.label == label)
             .map_or_else(
                 || panic!("seat row {label}"),
-                |row| (row.ttft_p50_ms, row.ttft_p95_ms),
+                |row| {
+                    let m = &row.metrics;
+                    (m.ttft_p50_ms, m.ttft_p90_ms, m.ttft_p99_ms)
+                },
             )
     };
-    assert_eq!(ttft("#paid"), (Some(700), Some(700)));
-    assert_eq!(ttft("(unattributed)"), (Some(500), Some(900)));
+    assert_eq!(ttft("#paid"), (Some(700), Some(700), Some(700)));
+    assert_eq!(ttft("(unattributed)"), (Some(500), Some(900), Some(900)));
     assert_eq!(
         ttft("work"),
-        (Some(120), Some(300)),
+        (Some(120), Some(300), Some(300)),
         "control: a persisted seat keeps its own samples"
     );
 }

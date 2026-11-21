@@ -164,29 +164,13 @@ fn secs(ms: Option<i64>) -> String {
 }
 
 /// The last-7-days provider table: mean, p50, p90, p99 and max of TTFT and
-/// latency per provider and in total, and the `routectl usage` TTFT p50 of
-/// the same window beside the endpoint's.
+/// latency per provider and in total.
 fn print_sanity_table(bench: &Bench<'_>) {
     let body = cell_body("last7d", None, "provider");
     let (_, data) = bench.query_result(&body);
-    let parsed = parse_body(body.as_bytes()).expect("body");
-    let (spec, _) = parsed.resolve(&bench.zone, bench.now);
-    let db = open_readonly(bench.ledger).expect("open");
-    let mut cli: std::collections::BTreeMap<String, Vec<i64>> = std::collections::BTreeMap::new();
-    for (key, ms) in routectl_usage::ttfbs(&db, spec.from_ms, spec.to_ms).expect("ttfbs") {
-        cli.entry(spec.group_label(&key)).or_default().push(ms);
-    }
-    let cli_p50 = |values: Option<&Vec<i64>>| {
-        values.and_then(|values| {
-            let mut sorted = values.clone();
-            sorted.sort_unstable();
-            let rank = (sorted.len() / 2 + sorted.len() % 2).max(1);
-            sorted.get(rank - 1).copied()
-        })
-    };
     println!(
         "sanity last7d by provider (s): label requests | ttft avg p50 p90 p99 max | \
-         latency avg p50 p90 p99 max | cli ttft p50"
+         latency avg p50 p90 p99 max"
     );
     let rows = data
         .groups
@@ -194,13 +178,8 @@ fn print_sanity_table(bench: &Bench<'_>) {
         .map(|g| (g.label.as_str(), &g.metrics))
         .chain(std::iter::once(("TOTAL", &data.totals)));
     for (label, m) in rows {
-        let cli_values = if label == "TOTAL" {
-            None
-        } else {
-            cli.get(label)
-        };
         println!(
-            "sanity {label} {} | {} {} {} {} {} | {} {} {} {} {} | {}",
+            "sanity {label} {} | {} {} {} {} {} | {} {} {} {} {}",
             m.requests,
             secs(m.ttft_avg_ms),
             secs(m.ttft_p50_ms),
@@ -212,7 +191,6 @@ fn print_sanity_table(bench: &Bench<'_>) {
             secs(m.latency_p90_ms),
             secs(m.latency_p99_ms),
             secs(m.latency_max_ms),
-            secs(cli_p50(cli_values)),
         );
     }
 }

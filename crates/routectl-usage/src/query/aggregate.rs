@@ -744,27 +744,3 @@ pub fn latest_quota_by_seat(db: &UsageDb) -> Result<Vec<QuotaSnapshot>, QueryErr
         .collect::<Result<Vec<_>, _>>()?;
     Ok(snapshots)
 }
-
-const TTFBS_SQL: &str = concat!(
-    "\
-SELECT model, provider, upstream, alias, provider_kind, seat, ttfb_ms
-FROM requests
-WHERE ts_start >= ?1 AND ts_start < ?2
-  AND ttfb_ms IS NOT NULL AND stream = 1 AND outcome = 'ok'
-  AND ",
-    inference_rows!()
-);
-
-/// Raw in-window `ttfb_ms` values with their group keys, so the CLI can
-/// compute time-to-first-token percentiles per display group. Restricted to
-/// streaming, successful rows with a recorded TTFB (the only rows where the
-/// figure is meaningful).
-pub fn ttfbs(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<(GroupKey, i64)>, QueryError> {
-    let mut stmt = db.conn().prepare(TTFBS_SQL)?;
-    let rows = stmt
-        .query_map([from_ms, to_ms], |row| {
-            Ok((read_group_key(row)?, row.get::<_, i64>(GROUP_KEY_COLUMNS)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}

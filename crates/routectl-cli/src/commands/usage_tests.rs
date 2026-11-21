@@ -1278,10 +1278,10 @@ fn multi_window_summary_emits_four_blocks() {
 }
 
 #[test]
-fn detail_computes_ttft_percentiles_per_group() {
+fn detail_rows_carry_the_query_ttft_and_latency_percentiles() {
     let (_dir, _path, mut db) = temp_db();
-    // 20 streaming ttfb values 1..=20 in one model group. Nearest-rank p95 is
-    // value at ceil(0.95*20)=19th => 19; p50 at ceil(0.50*20)=10th => 10.
+    // 20 streaming rows, ttfb 1..=20 and latency 101..=120, in one model
+    // group. Nearest rank: p50 is the 10th value, p90 the 18th, p99 the 20th.
     for i in 1..=20 {
         insert_stream_row(
             &db,
@@ -1307,12 +1307,19 @@ fn detail_computes_ttft_percentiles_per_group() {
         true,
     )
     .unwrap();
-    let m = find(&report, "m");
-    assert_eq!(m.ttft_p50_ms, Some(10));
-    assert_eq!(m.ttft_p95_ms, Some(19));
-    // The total row covers the same samples.
-    let t = find(&report, "total");
-    assert_eq!(t.ttft_p95_ms, Some(19));
+    for label in ["m", "total"] {
+        let m = &find(&report, label).metrics;
+        assert_eq!(
+            (m.ttft_p50_ms, m.ttft_p90_ms, m.ttft_p99_ms),
+            (Some(10), Some(18), Some(20)),
+            "{label} ttft"
+        );
+        assert_eq!(
+            (m.latency_p50_ms, m.latency_p90_ms, m.latency_p99_ms),
+            (Some(110), Some(118), Some(120)),
+            "{label} latency"
+        );
+    }
 }
 
 // --- humanizing formatters ---
@@ -1355,22 +1362,10 @@ fn tok_per_s_cell_rounds_the_query_rate_and_marks_an_absent_one() {
 }
 
 #[test]
-fn nearest_rank_matches_known_samples_and_handles_empty() {
-    // Arrange: sorted 1..=20.
-    let sorted: Vec<i64> = (1..=20).collect();
-
-    // Act + Assert
-    assert_eq!(nearest_rank(&sorted, 0.50), 10);
-    assert_eq!(nearest_rank(&sorted, 0.95), 19);
-    // A single-sample group yields that sample at any quantile.
-    assert_eq!(nearest_rank(&[42], 0.95), 42);
-}
-
-#[test]
-fn ttft_cell_renders_dash_for_empty_group() {
+fn ms_cell_renders_dash_for_empty_group() {
     // Arrange + Act + Assert
-    assert_eq!(ttft_cell(None), "-");
-    assert_eq!(ttft_cell(Some(6512)), "6.5s");
+    assert_eq!(ms_cell(None), "-");
+    assert_eq!(ms_cell(Some(6512)), "6.5s");
 }
 
 #[test]

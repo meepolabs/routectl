@@ -474,8 +474,6 @@ fn cost_row(priced: Option<f64>, any_subscription: bool, equivalent: Option<f64>
             ..QueryMetrics::default()
         },
         any_subscription,
-        ttft_p50_ms: None,
-        ttft_p95_ms: None,
     }
 }
 

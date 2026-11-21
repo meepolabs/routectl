@@ -75,8 +75,8 @@ use super::{Panel, StatusState, now_utc_rfc3339, run_blocking_panel};
 /// (was a mean of per-request rates); `ctx_avg` / `ctx_peak` count fresh
 /// input plus cache read plus cache write (were fresh input only);
 /// `cache_hit_pct` is token-weighted over the rows reporting cache reads (was a
-/// mean of per-request shares); `ttft_p50_ms` / `ttft_p95_ms` /
-/// `latency_p50_ms` / `latency_p95_ms`, a mean and a maximum, are now
+/// mean of per-request shares); the TTFT and latency p50 / p95 pairs, a mean
+/// and a maximum, are now
 /// `ttft_avg_ms` / `ttft_max_ms` / `latency_avg_ms` / `latency_max_ms`.
 /// Added alongside, without a bump of their own: the `seat` grouping, the
 /// `last24h` / `last7d` windows, per metric set `errors_by_class`,

@@ -122,44 +122,6 @@ fn aggregate_stream_count_sums_streaming_flag() {
     assert_eq!(rows[0].sum_ttfb_ms, 30);
 }
 
-#[test]
-fn ttfbs_returns_in_window_streaming_ok_values() {
-    // Arrange: two qualifying streaming-ok rows, plus excluded rows.
-    let (_dir, path) = temp_db_path();
-    let db = open(&path).expect("open");
-    insert_full_row(&db, "t1", 100, 1, "ok", Some(11), 50, Some(1), None, None);
-    insert_full_row(&db, "t2", 110, 1, "ok", Some(22), 50, Some(1), None, None);
-    // Non-stream excluded.
-    insert_full_row(&db, "t3", 120, 0, "ok", Some(33), 50, Some(1), None, None);
-    // Error excluded.
-    insert_full_row(
-        &db,
-        "t4",
-        130,
-        1,
-        "timeout",
-        Some(44),
-        50,
-        Some(1),
-        None,
-        None,
-    );
-    // Out of window excluded.
-    insert_full_row(&db, "t5", 5, 1, "ok", Some(55), 50, Some(1), None, None);
-
-    // Act
-    let rows = ttfbs(&db, 100, 1000).expect("ttfbs");
-
-    // Assert
-    let values: Vec<i64> = rows.iter().map(|(_, ms)| *ms).collect();
-    assert_eq!(values.len(), 2);
-    assert!(values.contains(&11));
-    assert!(values.contains(&22));
-    assert!(!values.contains(&33));
-    assert!(!values.contains(&44));
-    assert!(!values.contains(&55));
-}
-
 /// Insert a row exercising the reuse-sample columns: nullable
 /// `session_id`, `provider_kind`, `model`, `cache_read`, and an explicit
 /// `outcome` so the admission-contract filter is exercisable.

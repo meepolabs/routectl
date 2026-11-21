@@ -4507,10 +4507,20 @@ grouping its groups and figures match the dashboard's. `--detail` adds
 extra columns: cost, `ctx_peak` and `ctx_avg` (the largest and the mean
 per-request prompt: fresh input plus cache read plus cache write, over
 requests that reported any of the three; `-` when none did), `cache_wr`
-(cache-write tokens of every lifetime), `ttft_p50` and `ttft_p95`
-(nearest-rank time to first token over streamed successes), `tok/s`
-(output tokens of streamed successes over their summed generation time)
-and server-tool counts.
+(cache-write tokens of every lifetime), `ttft_p50`, `ttft_p90` and
+`ttft_p99` (nearest-rank time to first token over streamed successes),
+`tok/s` (output tokens of streamed successes over their summed generation
+time) and `srv_tools` (server-side tool calls). Under the table it prints
+two `latency:` lines for the window: TTFT p50 / p90 / p99 with the
+throughput and the streaming share, then end-to-end latency p50 / p90 /
+p99 over every request. These are the percentiles `/status/query`
+reports for the same window and grouping.
+
+**Cache-hit format.** The `hit%` column and the footer print a whole
+percent at or below 99% (`98.6` reads `99%`) and one decimal rounded down
+above 99%, so a rate short of 100 never reads as 100 (`99.96` reads
+`99.9%`); exactly 100 reads `100%`. With no cache reads reported the
+column reads `-` and the footer `cache hit n/a`.
 
 **Cache writes.** The `input` column, the `cache_wr` column and the
 cache-hit rate count cache writes from every row: a row written before

@@ -444,7 +444,7 @@ fn insert_seat_row(
 }
 
 #[test]
-fn error_class_and_ttfb_rows_carry_the_seat_of_their_fine_group() {
+fn error_class_rows_carry_the_seat_of_their_fine_group() {
     use std::collections::{BTreeMap, HashMap};
 
     // Arrange: one provider, two seats plus a pre-seat row; each seat has
@@ -475,7 +475,6 @@ fn error_class_and_ttfb_rows_carry_the_seat_of_their_fine_group() {
     // Act
     let agg = aggregate(&db, 0, 1000).expect("aggregate");
     let breakdown = errors_by_class(&db, 0, 1000).expect("errors_by_class");
-    let ttfb_rows = ttfbs(&db, 0, 1000).expect("ttfbs");
 
     // Assert: every class row matches a fine row by key, and per key the
     // classes sum to that fine row's errors.
@@ -494,16 +493,4 @@ fn error_class_and_ttfb_rows_carry_the_seat_of_their_fine_group() {
         );
     }
     assert!(classes.is_empty(), "unmatched class rows: {classes:?}");
-    let by_seat: BTreeMap<Option<String>, i64> = ttfb_rows
-        .into_iter()
-        .map(|(key, ms)| (key.seat, ms))
-        .collect();
-    assert_eq!(
-        by_seat,
-        BTreeMap::from([
-            (None, 33),
-            (Some("pa".to_string()), 11),
-            (Some("pa#two".to_string()), 22),
-        ])
-    );
 }

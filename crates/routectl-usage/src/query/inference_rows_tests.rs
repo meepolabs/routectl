@@ -122,9 +122,6 @@ const INFERENCE_READERS: &[(&str, Reader)] = &[
             errors_by_class(db, WINDOW_FROM, WINDOW_TO).expect("read")
         )
     }),
-    ("ttfbs", |db| {
-        format!("{:?}", ttfbs(db, WINDOW_FROM, WINDOW_TO).expect("read"))
-    }),
     ("would_trim_summary", |db| {
         format!(
             "{:?}",
