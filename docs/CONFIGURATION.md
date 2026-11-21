@@ -5907,6 +5907,50 @@ Schema 1 is additive: a new kind, token or field does not bump
 `schema_version`, so a client must accept kinds it does not know. Removing
 a field or token, or changing what one means, bumps it.
 
+#### Model rows on `/status/models`
+
+The running daemon's `/status/models` panel (schema 1) has one row per
+learned lane the served config dispatches to: a `[providers]` entry and the
+upstream model id it sends, the key the learned capability store and
+`routectl capability purge` use. It is read from memory only: no usage
+database read and no doctor gather.
+
+- `started_ms`: when the daemon started; every `transit` count is since then
+  and resets on restart.
+- `rows`: rows with a problem (a `state` other than `ok`, or a
+  `cause_key`) first, then by `lane`. Each row carries:
+  - `lane` (`provider#upstream`), `provider` and `upstream`. For an entry
+    that uses its own credential, `provider` and `upstream` equal the usage
+    ledger's columns for a request served on the lane. An entry that
+    forwards the client's credential is the exception: the ledger records
+    the client's requested model as `upstream`, while the lane carries the
+    configured one.
+  - `nicknames`: the `[models]` keys that dispatch to the lane, sorted. Two
+    nicknames on one entry and upstream share one row; a pooled model has
+    one row per pool member entry.
+  - `account` (null for a forwarded credential) and `login_label` (null
+    unless the credential is a labeled `oauth://` login).
+  - `state`, closed: `ok`, `credential_unusable`, `account_parked`,
+    `breaker_open` or `rate_limited`, the same tokens as `/status/health`
+    `eligibility.reason`. With several nicknames on the lane it is the worst
+    of their targets. `since_ms` is when it began, where known (an unusable
+    login's first mark, a breaker's opening), else null.
+  - `cause_key`: the `key` of the `/status/attention` item that names the
+    lane's problem, so rows with one cause (for example every route of one
+    failing `provider_failing` entry) share one key; null when no item names
+    it.
+  - `refusals`: the capabilities the lane has learned to refuse, each with
+    `capability`, `verdict`, `action` and `value` (null when the verdict
+    writes none). `capabilities`: every capability cell `routectl doctor`'s
+    matrix shows for the lane, with `verdict`, `supported`, `source`,
+    `layer` and `action`. Both are resolved the way dispatch resolves them,
+    so an override that outranks a learned negative removes it from
+    `refusals`.
+  - `transit`: `checked` (responses the wire check compared), `changed`
+    (those with at least one changed field) and `top_paths` (`path` and
+    `count`, most first, at most 16, then one `other` entry summing the
+    rest). `checked` 0 means unmeasured.
+
 ### Credential pools (multiple accounts per provider)
 
 A single OAuth provider can hold more than one credential ("seat") in

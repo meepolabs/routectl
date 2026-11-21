@@ -21,7 +21,7 @@ use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::prices::{PriceBook, PriceTable};
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::UnusableCause;
-use routectl_router::wire_check_state::WireCheckSnapshot;
+use routectl_router::wire_check_state::{WireCheckSnapshot, WireTransitSnapshot};
 use routectl_router::{
     AccountIdentities, AccountReadings, AliasStep, EffectiveView, FidelitySnapshot,
     FieldRepairCounters, LaneBudgetExhaustions, LaneLossyRepairs, ObservationStamp,
@@ -33,11 +33,14 @@ use routectl_usage::{AggRow, RowCost};
 use crate::commands::doctor::attention::CredentialState as CredentialCondition;
 use crate::commands::doctor::{
     ParkedSeat, ResidentLearned, SeatFix, ServedInputs, ServedPrices, UnusableSeat,
-    unusable_seat_fix,
+    capability_columns, unusable_seat_fix,
 };
 use crate::commands::pricing::{PriceSnapshot, is_subscription};
 use crate::commands::usage::cost_for_row;
-use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedEntry, resolve_entries};
+use crate::lane_cell::{
+    CellSources, LearnedSnapshot, ResolvedEntry, ResolvedLane, lane_metas, resolve_entries,
+    resolve_lanes,
+};
 use crate::server::capability_rebuild::WarmReport;
 use crate::server::seat_driver::{accounts_awaiting_login, managed_seats};
 use crate::server::usage_poll::{PollStateSnapshot, UsagePollState};
@@ -328,6 +331,34 @@ impl StatusRouterView {
         })
     }
 
+    /// Every lane the served config routes, each capability column resolved
+    /// at `now` through the shared lane-cell helper against the same config,
+    /// overrides, resident learned layer and shipped beta seed as
+    /// [`Self::learned_capabilities`].
+    pub fn routed_lanes(&self, now: (Instant, i64)) -> Vec<ResolvedLane> {
+        let entries = self.router.learned_capability_snapshot();
+        let seed_clears = self.router.learned_seed_clear_snapshot();
+        let sources = CellSources {
+            config: &self.router.config,
+            overrides: self.router.override_registry(),
+            learned: LearnedSnapshot {
+                entries: &entries,
+                now: Some(now),
+                seed_clears: &seed_clears,
+            },
+            beta_seed: shipped_beta_seed_scope(),
+        };
+        let metas = lane_metas(sources.config, sources.learned.entries);
+        let columns = capability_columns(sources.beta_seed, &metas, &entries, sources.overrides);
+        resolve_lanes(&metas, &columns, &sources)
+    }
+
+    /// The per learned-lane response transit counts and the daemon start
+    /// stamp. A pure read: no counter moves and the sampler does not advance.
+    pub fn wire_transit_snapshot(&self) -> WireTransitSnapshot {
+        self.router.wire_transit_snapshot()
+    }
+
     /// The live process-lifetime envelope-field repair counters, for the
     /// health panel to log at INFO.
     pub fn field_repair_counters(&self) -> FieldRepairCounters {
@@ -605,6 +636,11 @@ mod tests {
         let _per_request: Vec<u64> = view.repairs_per_request();
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();
+        let _transit: WireTransitSnapshot = view.wire_transit_snapshot();
+        let _lanes: Vec<ResolvedLane> = view.routed_lanes((
+            Instant::now(),
+            crate::local_time::unix_ms(time::OffsetDateTime::now_utc()),
+        ));
         let _readings: AccountReadings = view.account_readings(&ObservationStamp::now());
         let _identities: AccountIdentities = view.account_identities();
         let _effective: EffectiveView = view.effective_view(None, None);

@@ -247,6 +247,53 @@ pub fn resolve_cell<'a>(
     LaneCell { entry, resolved }
 }
 
+/// One `(lane, capability)` cell's lane-wide view, owned, with the resident
+/// learned entry behind it when one exists.
+pub struct ResolvedCell {
+    pub capability: String,
+    /// The signal every nickname shows, or `None` when any two differ.
+    pub shown: Option<Shown>,
+    /// The action every nickname resolves, or `mixed` when any two differ.
+    pub action: &'static str,
+    pub layer: Option<&'static str>,
+    pub entry: Option<LearnedRegistryEntry>,
+}
+
+/// One routed lane's cells, one per column, in column order.
+pub struct ResolvedLane {
+    pub lane: String,
+    pub cells: Vec<ResolvedCell>,
+}
+
+/// Resolve every column on every routed lane of `metas`, as [`resolve_cell`]
+/// does. A lane the config no longer maps is left out.
+pub fn resolve_lanes(
+    metas: &[LaneMeta],
+    columns: &[String],
+    sources: &CellSources,
+) -> Vec<ResolvedLane> {
+    metas
+        .iter()
+        .filter(|meta| meta.routed)
+        .map(|meta| ResolvedLane {
+            lane: meta.lane.clone(),
+            cells: columns
+                .iter()
+                .map(|capability| {
+                    let cell = resolve_cell(meta, capability, sources);
+                    ResolvedCell {
+                        capability: capability.clone(),
+                        shown: cell.shown(),
+                        action: cell.action().unwrap_or(ACTION_MIXED),
+                        layer: cell.layer(),
+                        entry: cell.entry.cloned(),
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// One resident learned entry with the lane-wide view of its own cell.
 pub struct ResolvedEntry {
     pub entry: LearnedRegistryEntry,

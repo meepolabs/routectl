@@ -6,7 +6,7 @@
 use serde_json::{Value, json};
 
 use super::{Allowance, DensityException, aggregate_json, density_gaps, missing_null_states};
-use crate::handlers::status::{accounts, attention, config, doctor, health, query, usage};
+use crate::handlers::status::{accounts, attention, config, doctor, health, models, query, usage};
 
 /// One populated payload under test, with the exceptions its shape forces.
 struct Fixture {
@@ -64,6 +64,18 @@ const NO_POOLS: DensityException = DensityException {
     reason: "an account no pool member dispatches on names no pool",
 };
 
+const NO_REFUSALS: DensityException = DensityException {
+    path: "data.rows[].refusals",
+    allowance: Allowance::MayBeEmpty,
+    reason: "a lane with no learned negative shown refuses nothing",
+};
+
+const UNMEASURED: DensityException = DensityException {
+    path: "data.rows[].transit.top_paths",
+    allowance: Allowance::MayBeEmpty,
+    reason: "a lane the wire check never sampled, or sampled clean, changed no path",
+};
+
 const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "usage",
@@ -106,6 +118,12 @@ const FIXTURES: &[Fixture] = &[
         payload: attention::fixture::populated_attention_doctor_unavailable,
         schema_version: attention::SCHEMA_VERSION,
         exceptions: &[UNAVAILABLE],
+    },
+    Fixture {
+        name: "models",
+        payload: models::fixture::populated_models,
+        schema_version: models::SCHEMA_VERSION,
+        exceptions: &[UNAVAILABLE, NO_REFUSALS, UNMEASURED],
     },
     Fixture {
         name: "query grouped",
@@ -230,7 +248,20 @@ fn the_aggregate_carries_the_six_get_panels_densely_at_their_versions() {
 /// proves a non-null occurrence, this proves a null one.
 #[test]
 fn each_fixture_shows_its_conditional_fields_in_both_states() {
-    let cases: [(&str, Value, &[&str]); 7] = [
+    let cases: [(&str, Value, &[&str]); 8] = [
+        (
+            "models",
+            models::fixture::populated_models(),
+            &[
+                "data.rows[].since_ms",
+                "data.rows[].cause_key",
+                "data.rows[].login_label",
+                "data.rows[].refusals[].value",
+                "data.rows[].capabilities[].supported",
+                "data.rows[].capabilities[].source",
+                "data.rows[].capabilities[].layer",
+            ],
+        ),
         (
             "usage",
             usage::fixture::populated_usage(),

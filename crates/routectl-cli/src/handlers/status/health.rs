@@ -22,7 +22,7 @@ use routectl_core::EligibilityReason;
 use routectl_core::failure_class::LastOutcome;
 use routectl_router::PoolEligibility;
 use routectl_router::router::RouteTargetStatus;
-use routectl_router::runtime_state::CircuitPhase;
+use routectl_router::runtime_state::{CircuitPhase, UnusableCause};
 
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
 use super::router_view::StatusRouterView;
@@ -252,13 +252,21 @@ fn epoch_ms_of(now_ms: i64, elapsed: Duration) -> i64 {
     now_ms - i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// A target's eligibility row from its gate status. `fix` is the line that
-/// readmits the seat, kept only when the reason is an unusable credential.
-fn eligibility_of(
-    target: &RouteTargetStatus,
-    now_ms: i64,
-    fix: Option<String>,
-) -> TargetEligibility {
+/// Why a target cannot be dispatched to right now, typed: the reading every
+/// status panel that shows a target's live state takes from its gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EligibilityReading {
+    /// The target-state refusal, or `None` for a dispatchable target.
+    pub(super) reason: Option<EligibilityReason>,
+    /// The unusable cause, only when `reason` is an unusable credential.
+    pub(super) cause: Option<UnusableCause>,
+    /// Epoch-ms the reason began, where the router knows it: when the
+    /// credential was first marked unusable, or when the breaker opened.
+    pub(super) since_ms: Option<i64>,
+}
+
+/// Read a target's eligibility from its gate status against `now_ms`.
+pub(super) fn eligibility_reading(target: &RouteTargetStatus, now_ms: i64) -> EligibilityReading {
     let gate = &target.gate;
     let unusable = gate
         .credential_unusable
@@ -268,11 +276,26 @@ fn eligibility_of(
         Some(EligibilityReason::BreakerOpen) => gate.circuit_open_elapsed,
         _ => None,
     };
-    TargetEligibility {
-        reason: gate.reason.map(EligibilityReason::as_str),
-        cause: unusable.map(|mark| mark.cause.as_str()),
+    EligibilityReading {
+        reason: gate.reason,
+        cause: unusable.map(|mark| mark.cause),
         since_ms: since.map(|d| epoch_ms_of(now_ms, d)),
-        fix: unusable.and(fix),
+    }
+}
+
+/// A target's eligibility row from its gate status. `fix` is the line that
+/// readmits the seat, kept only when the reason is an unusable credential.
+fn eligibility_of(
+    target: &RouteTargetStatus,
+    now_ms: i64,
+    fix: Option<String>,
+) -> TargetEligibility {
+    let reading = eligibility_reading(target, now_ms);
+    TargetEligibility {
+        reason: reading.reason.map(EligibilityReason::as_str),
+        cause: reading.cause.map(UnusableCause::as_str),
+        since_ms: reading.since_ms,
+        fix: reading.cause.and(fix),
     }
 }
 

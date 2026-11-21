@@ -34,6 +34,7 @@ use crate::commands::doctor::SeatFix;
 use crate::commands::doctor::attention::{
     AccountSnapshot, AttentionInputs, AttentionItem, Counts, CredentialState, DriverSnapshot,
     PollFailure, PoolSnapshot, RecordLoss, RouteSnapshot, Verdict, WindowSnapshot,
+    cause_key_for_route,
 };
 use crate::server::seat_driver::{RefreshFailure, SeatDriverHealthSnapshot};
 use crate::server::usage_poll::{PollStateSnapshot, UsagePollState};
@@ -230,6 +231,54 @@ fn route_snapshot(target: RouteTargetStatus, now_ms: i64) -> RouteSnapshot {
         account: target.account,
         last_outcome: target.gate.last_outcome,
         circuit_open,
+    }
+}
+
+/// The key of the item the list names each of `targets` under, by runtime
+/// state key, given the credential state of each account a target names: the
+/// key [`cause_key_for_route`] reads off the same route and account
+/// snapshots a list read takes. A route nothing names is absent.
+pub(super) fn route_cause_keys(
+    now_ms: i64,
+    targets: &[RouteTargetStatus],
+    credentials: &BTreeMap<String, AccountCredential>,
+) -> BTreeMap<String, String> {
+    let inputs = AttentionInputs {
+        now_ms,
+        routes: targets
+            .iter()
+            .cloned()
+            .map(|target| route_snapshot(target, now_ms))
+            .collect(),
+        accounts: credentials
+            .iter()
+            .map(|(account, credential)| credential_only_snapshot(account, credential))
+            .collect(),
+        ..AttentionInputs::default()
+    };
+    inputs
+        .routes
+        .iter()
+        .filter_map(|route| {
+            cause_key_for_route(&inputs, &route.state_key).map(|key| (route.state_key.clone(), key))
+        })
+        .collect()
+}
+
+/// An account snapshot carrying only its credential state, the one account
+/// fact a route's cause depends on.
+fn credential_only_snapshot(account: &str, credential: &AccountCredential) -> AccountSnapshot {
+    AccountSnapshot {
+        account: account.to_string(),
+        display: String::new(),
+        credential: credential_state(Some(credential)),
+        fix: None,
+        remediation: None,
+        refresh_failure: None,
+        poll_failure: None,
+        windows: Vec::new(),
+        billing: Billing::Unknown,
+        billing_fresh: false,
     }
 }
 

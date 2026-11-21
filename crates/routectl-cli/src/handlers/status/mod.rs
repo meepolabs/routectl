@@ -28,6 +28,7 @@ mod field_verdict_log;
 mod health;
 #[cfg(test)]
 mod learned_seed;
+mod models;
 mod page;
 #[cfg(test)]
 mod panel_fixtures;
@@ -296,6 +297,7 @@ pub struct PanelObservability {
     pub query: PanelCounters,
     pub accounts: PanelCounters,
     pub attention: PanelCounters,
+    pub models: PanelCounters,
     /// The `/status/query` series mode. Tracked apart from `query` because a
     /// series read fails on its own terms (a wider GROUP BY over a larger temp
     /// b-tree), and one shared detector would let a healthy aggregate poll mask
@@ -313,6 +315,7 @@ impl Default for PanelObservability {
             query: PanelCounters::new("status_query"),
             accounts: PanelCounters::new("accounts"),
             attention: PanelCounters::new("attention"),
+            models: PanelCounters::new("models"),
             query_series: PanelCounters::new("status_query_series"),
         }
     }
@@ -543,6 +546,7 @@ pub fn status_router() -> AxumRouter<Arc<StatusState>> {
         .route("/status/doctor", get(doctor::handler))
         .route("/status/accounts", get(accounts::handler))
         .route("/status/attention", get(attention::handler))
+        .route("/status/models", get(models::handler))
         .route("/status/query", any(query::handler))
 }
 
@@ -639,6 +643,7 @@ mod tests {
         "/status/doctor",
         "/status/accounts",
         "/status/attention",
+        "/status/models",
     ];
 
     #[tokio::test]
@@ -751,6 +756,7 @@ mod tests {
                 include_str!("attention.rs"),
                 &panel_forbidden,
             ),
+            ("models.rs", include_str!("models.rs"), &panel_forbidden),
             (
                 "attention_memory.rs",
                 include_str!("attention_memory.rs"),

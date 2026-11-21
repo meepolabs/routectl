@@ -92,6 +92,7 @@ use self::sections::{
 };
 
 pub(crate) use self::gather::gather_context_no_network;
+pub(crate) use self::matrix::capability_columns;
 pub(crate) use self::served::{
     GatherSources, ParkedSeat, ResidentLearned, SeatFix, ServedInputs, ServedPrices, UnusableSeat,
     unusable_seat_fix,

@@ -99,8 +99,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
 
     let overrides = OverrideRegistry::build(&ctx.config);
     let lanes_meta = lane_metas(&ctx.config, learned.entries);
-    let seeded = seeded_columns(ctx.beta_seed, &lanes_meta);
-    let columns = columns_for(learned.entries, &overrides, &seeded);
+    let columns = capability_columns(ctx.beta_seed, &lanes_meta, learned.entries, &overrides);
     let sources = CellSources {
         config: &ctx.config,
         overrides: &overrides,
@@ -133,6 +132,18 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
         replay,
         warm,
     }
+}
+
+/// The capability keys a lane row shows a cell for: the well-known keys,
+/// then every key the learned entries, the overrides and (when any of
+/// `lanes` is of the seed's kind) the shipped seed name, sorted.
+pub fn capability_columns(
+    seed: BetaSeedScope,
+    lanes: &[LaneMeta],
+    entries: &[LearnedRegistryEntry],
+    overrides: &OverrideRegistry,
+) -> Vec<String> {
+    columns_for(entries, overrides, &seeded_columns(seed, lanes))
 }
 
 /// The seeded flags' keys when any lane is of the kind the seed applies to,

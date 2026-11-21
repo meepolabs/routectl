@@ -7197,6 +7197,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   chain position, a nested alias step owns its expansion; remainders
   `off_chain` and `not_dispatched`; a label with no chain (or one nested past
   the depth bound) has `steps: []`
+- `src/handlers/status/models.rs` -- `/status/models` (schema_version 1):
+  one row per learned lane (`provider#upstream`) the live router dispatches
+  to, with nicknames, account, live state from health's eligibility reading,
+  the attention item key that names its problem, learned refusals and
+  capability cells resolved through `lane_cell`, and changed-in-transit
+  counts. Memory reads off one pinned router snapshot; no ledger, no doctor
+  gather.
+- `src/handlers/status/models/fixture.rs` -- `cfg(test)` `populated_models()`:
+  the shared fixture targets as lanes, cells resolved over the shared config
+  and a transit tally past its path cap
 - `src/handlers/status/query/fixture.rs` -- `cfg(test)` `populated_query()`
   (grouped) and `populated_query_series()` (bucketed): a seeded ledger read
   through the route's `build_panel` and the facade's pricer

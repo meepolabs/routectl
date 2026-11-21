@@ -1056,6 +1056,7 @@ pub(super) const AUTH_GATED_ROUTES: &[&str] = &[
     "/status/doctor",
     "/status/accounts",
     "/status/attention",
+    "/status/models",
     "/status/query",
 ];
 
@@ -1097,6 +1098,7 @@ pub(super) const NON_MITM_INFERENCE_ROUTES: &[&str] = &[
     "/status/doctor",
     "/status/accounts",
     "/status/attention",
+    "/status/models",
     "/status/query",
 ];
 
@@ -1152,6 +1154,7 @@ pub(super) const NON_OBSERVING_ROUTES: &[&str] = &[
     "/status/doctor",
     "/status/accounts",
     "/status/attention",
+    "/status/models",
     "/status/query",
 ];
 
