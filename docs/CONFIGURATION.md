@@ -6364,8 +6364,10 @@ paste the block by hand instead.
 The `oauth://codex` ref resolves at request time against the credentials
 store; rotation is picked up live without restarting routectl. When the
 upstream marks the refresh token expired, reused, or invalidated,
-routectl surfaces a "re-run `routectl login codex`" error -- re-run the
-login and traffic resumes.
+routectl surfaces a "refresh token for `codex` expired or revoked" error
+naming the seat (`codex#<label>` for a labeled one) -- run
+`routectl login codex`, with `--label <label>` for a labeled seat, and
+traffic resumes.
 
 ### Static bearer
 
@@ -6498,7 +6500,9 @@ The `oauth://xai` ref resolves at request time against the credentials store;
 rotation is picked up live without restarting routectl. An upstream 401 makes
 routectl refresh the login and retry the request once. When the upstream marks
 the refresh token dead (`invalid_grant` on 400/401), routectl surfaces a
-"re-run `routectl login xai`" error -- re-run the login and traffic resumes.
+"refresh token for `xai` expired or revoked" error naming the seat
+(`xai#<label>` for a labeled one) -- run `routectl login xai`, with
+`--label <label>` for a labeled seat, and traffic resumes.
 
 **Lazy refresh rotation.** xAI's token endpoint commonly omits `refresh_token`
 on a successful refresh (it re-validates the prior token rather than issuing a

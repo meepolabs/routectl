@@ -592,7 +592,7 @@ async fn refresh_codex_without_record_reports_not_logged_in() {
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
 
-    let err = commands::refresh::run("codex", None)
+    let err = commands::refresh::run("codex", None, None)
         .await
         .expect_err("refresh codex with no record must error");
     match err {
@@ -1463,7 +1463,7 @@ async fn refresh_leaves_a_neighbouring_config_byte_identical() {
 
     // Act: no credential record, so the refresh fails -- the point is what
     // it did NOT touch on the way.
-    let outcome = commands::refresh::run("anthropic", None).await;
+    let outcome = commands::refresh::run("anthropic", None, None).await;
 
     // Assert
     assert!(outcome.is_err(), "refresh without a record must error");

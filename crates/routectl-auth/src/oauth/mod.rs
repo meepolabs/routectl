@@ -141,7 +141,10 @@ pub enum OAuthError {
     TokenEndpoint(String),
 
     /// The refresh token is expired or revoked; re-login is required.
-    #[error("refresh token expired or revoked; re-run `routectl login {0}`")]
+    /// Holds the provider id where a token endpoint raises it and the seat
+    /// key once the store reports it. Names no rerun: only the caller knows
+    /// the command that logs that seat in again.
+    #[error("refresh token for `{0}` expired or revoked")]
     RefreshExpired(String),
 
     /// A network error occurred during the flow.
@@ -261,6 +264,28 @@ mod tests {
     /// registry, not a stale hardcoded literal. Pins that the newly
     /// registered `antigravity` provider appears in the "known: ..." list
     /// so an operator correcting a typo sees every valid choice.
+    /// The errors that end in a fresh login name the seat and the cause,
+    /// never a command: only the caller knows the flags that would log the
+    /// same seat in again.
+    #[test]
+    fn a_must_relogin_error_names_its_seat_and_no_command() {
+        let rows = [
+            (
+                "refresh expired",
+                OAuthError::RefreshExpired("anthropic#work".into()),
+                "refresh token for `anthropic#work` expired or revoked",
+            ),
+            (
+                "login timeout",
+                OAuthError::LoginTimeout("anthropic".into()),
+                "oauth flow for `anthropic` timed out",
+            ),
+        ];
+        for (row, err, expected) in rows {
+            assert_eq!(err.to_string(), expected, "row `{row}`");
+        }
+    }
+
     #[test]
     fn unknown_provider_message_lists_all_known_ids() {
         let msg = OAuthError::UnknownProvider("made-up".into()).to_string();

@@ -191,41 +191,57 @@ async fn on_auth_failure_forces_refresh_even_when_token_not_near_expiry() {
     assert_eq!(tok, "tok-after-401");
 }
 
+/// A refused refresh names the seat it failed for and the cause, and no
+/// `routectl login` command: the store cannot know the invocation that
+/// would log that seat in again, and a command without the seat's label
+/// would log in a different one. The 401-driven path is the one the server
+/// takes.
 #[tokio::test]
-async fn refresh_failure_surfaces_actionable_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("creds.json");
-    let seed = OAuthStore::open(&path).await.unwrap();
-    seed.write_record("anthropic", rec_at(unix_now() + 10))
-        .await
-        .unwrap();
-    drop(seed);
+async fn a_refused_refresh_names_the_seat_and_no_login_command() {
+    let rows = [
+        ("default seat", None, "`anthropic`"),
+        ("labeled seat", Some("work"), "`anthropic#work`"),
+        (
+            "control in label",
+            Some("wo\u{1b}[2Jrk"),
+            "`anthropic#work`",
+        ),
+    ];
+    for (row, label, shown) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record(&seat_key("anthropic", label), rec_at(unix_now() + 10))
+            .await
+            .unwrap();
+        drop(seed);
+        let flow = Arc::new(CountingFlow::new(ScriptedRefresh::RefreshExpired));
+        let store = open_with_flow(&path, flow.clone()).await;
 
-    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::RefreshExpired));
-    let store = open_with_flow(&path, flow).await;
+        // Act
+        let err = store
+            .on_auth_failure(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: label.map(str::to_string),
+            })
+            .await
+            .unwrap_err();
 
-    let err = store
-        .get(&SecretRef::OAuth {
-            provider: "anthropic".into(),
-            label: None,
-        })
-        .await
-        .unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("oauth refresh failed for anthropic"),
-        "expected wrapping prefix, got: {msg}"
-    );
-    assert!(
-        msg.contains("routectl login anthropic"),
-        "expected actionable login hint, got: {msg}"
-    );
-    // The wrapped root cause must include the Anthropic provider's
-    // RefreshExpired Display string (its `invalid_grant` bucketing).
-    assert!(
-        msg.contains("refresh token expired or revoked"),
-        "expected RefreshExpired display, got: {msg}"
-    );
+        // Assert
+        let msg = err.to_string();
+        assert_eq!(
+            flow.call_count(),
+            1,
+            "row `{row}`: the refresh was attempted"
+        );
+        assert_eq!(
+            msg,
+            format!("auth: oauth refresh failed: refresh token for {shown} expired or revoked"),
+            "row `{row}`"
+        );
+        assert!(!msg.contains("routectl"), "row `{row}`: {msg}");
+    }
 }
 
 #[tokio::test]
@@ -1404,10 +1420,11 @@ async fn only_a_terminal_refresh_failure_carries_a_credential_reason() {
         // Assert
         assert_eq!(flow.call_count(), 1, "{name}: the refresh was attempted");
         assert_eq!(err.upstream_reason(), expected, "{name}: {err:?}");
+        let msg = err.to_string();
         assert!(
-            err.to_string()
-                .contains("re-run `routectl login anthropic`"),
-            "{name}: the operator detail keeps its login hint: {err}"
+            msg.contains("`anthropic`"),
+            "{name}: the operator detail names the seat: {msg}"
         );
+        assert!(!msg.contains("routectl"), "{name}: names no command: {msg}");
     }
 }

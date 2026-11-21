@@ -640,7 +640,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Refresh { provider, label } => {
-            if let Err(e) = commands::refresh::run(&provider, label.as_deref()).await {
+            if let Err(e) =
+                commands::refresh::run(&provider, label.as_deref(), cli.config.as_deref()).await
+            {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }

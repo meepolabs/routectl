@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use routectl_core::{Error, Result};
+use routectl_core::{Error, Result, render_operator_text};
 
 use crate::oauth::file_io;
 use crate::oauth::providers;
@@ -351,7 +351,7 @@ impl OAuthStore {
     ) -> Result<TokenRecord> {
         self.refresh_seat(provider, seat, current, force, bypass_cooldown)
             .await
-            .map_err(|failure| failure.into_error(provider))
+            .map_err(|failure| failure.into_error(provider, seat))
     }
 
     /// `refresh_under_lock` with the failure kept typed, so a caller can
@@ -581,10 +581,10 @@ enum RefreshFailure {
 
 impl RefreshFailure {
     /// The `Error` request-time callers see.
-    fn into_error(self, provider: &str) -> Error {
+    fn into_error(self, provider: &str, seat: &str) -> Error {
         match self {
             Self::Store(err) => Error::from(err),
-            Self::Flow(err) => refresh_failure_error(provider, &err),
+            Self::Flow(err) => refresh_failure_error(seat, err),
             Self::Cooldown { remaining } => Error::Auth(format!(
                 "oauth refresh temporarily unavailable for {provider}; \
                  retry after ~{remaining}s"
@@ -649,22 +649,24 @@ fn is_transient_refresh_error(err: &OAuthError) -> bool {
     }
 }
 
-/// The error a failed refresh surfaces. Only `RefreshExpired` (the identity
-/// provider refused the grant itself) is exact evidence the credential is
-/// dead, so only it carries a reason; every other failure stays a plain
-/// `Error::Auth`, which never parks the seat.
-fn refresh_failure_error(provider: &str, err: &OAuthError) -> Error {
-    let detail = format!(
-        "oauth refresh failed for {provider}: {err}; \
-         re-run `routectl login {provider}`"
-    );
+/// The error a failed refresh of `seat` surfaces. Only `RefreshExpired` (the
+/// identity provider refused the grant itself) is exact evidence the
+/// credential is dead, so only it carries a reason; every other failure
+/// stays a plain `Error::Auth`, which never parks the seat. The text names
+/// the seat key and no rerun: the store cannot know the command that would
+/// log that seat in again.
+fn refresh_failure_error(seat: &str, err: OAuthError) -> Error {
+    let seat = render_operator_text(seat);
     match err {
         OAuthError::RefreshExpired(_) => Error::Credential {
-            detail,
+            detail: format!(
+                "oauth refresh failed: {}",
+                OAuthError::RefreshExpired(seat.into_owned())
+            ),
             reason: routectl_core::UpstreamReason::CredentialInvalid,
             parked_until_ms: None,
         },
-        _ => Error::Auth(detail),
+        err => Error::Auth(format!("oauth refresh failed for `{seat}`: {err}")),
     }
 }
 

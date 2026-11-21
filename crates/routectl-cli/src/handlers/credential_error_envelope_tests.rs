@@ -8,8 +8,8 @@ use super::*;
 use axum::body::to_bytes;
 use routectl_core::{Error, UpstreamReason};
 
-const OPERATOR_DETAIL: &str = "oauth refresh failed for p-internal: refresh token expired or \
-                               revoked; re-run `routectl login p-internal`";
+const OPERATOR_DETAIL: &str =
+    "oauth refresh failed: refresh token for `p-internal#work` expired or revoked";
 
 fn credential(reason: UpstreamReason, parked_until_ms: Option<u64>) -> Error {
     Error::Credential {
@@ -33,7 +33,7 @@ async fn rendered(shape: ErrorEnvelopeShape, err: Error) -> (StatusCode, HeaderM
 }
 
 fn assert_no_operator_detail(name: &str, message: &str) {
-    for leak in ["p-internal", "oauth refresh failed", "routectl login"] {
+    for leak in ["p-internal", "oauth refresh failed", "expired or revoked"] {
         assert!(!message.contains(leak), "{name}: leaks {leak:?}: {message}");
     }
 }

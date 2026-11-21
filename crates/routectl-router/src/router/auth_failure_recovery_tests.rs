@@ -155,9 +155,7 @@ async fn router_refresh_failure_propagates_without_fallback() {
         complete_calls: AtomicUsize::new(0),
         on_auth_failure_calls: AtomicUsize::new(0),
         refresh_failure: Some(
-            "oauth refresh failed for anthropic: invalid_grant; \
-                 re-run `routectl login anthropic`"
-                .into(),
+            "oauth refresh failed: refresh token for `anthropic` expired or revoked".into(),
         ),
     });
     let router = build_router_with_provider(provider.clone() as Arc<dyn Provider>);
@@ -173,8 +171,8 @@ async fn router_refresh_failure_propagates_without_fallback() {
                 "auth error must carry the refresh-failure message: {msg}",
             );
             assert!(
-                msg.contains("re-run"),
-                "auth error must carry the actionable hint: {msg}",
+                msg.contains("`anthropic`"),
+                "auth error must name the seat that failed: {msg}",
             );
         }
         other => panic!("expected Error::Auth, got: {other:?}"),
