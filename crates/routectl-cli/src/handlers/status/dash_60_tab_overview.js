@@ -27,6 +27,10 @@
   // unpriced rows: there is no subtotal to show.
   var PARTIAL_UNPRICED_TITLE = 'mixed cost kinds with no priced row: no dollar cost to show';
 
+  // Why an "At API prices" figure is a subtotal, and why there is none.
+  var EQUIVALENT_PARTIAL_TITLE = 'does not include requests with an unpriced dimension';
+  var EQUIVALENT_UNPRICED_TITLE = 'no subscription request had every dimension priced';
+
   // Whether the overflow list under the provider row is open. View state only:
   // it survives the per-poll rebuild and reaches no fetch.
   var providerOverflowOpen = false;
@@ -893,16 +897,18 @@
       wrappedNote(costNote(t)),
       sparkArea(bucketSamples(series, function (m) { return m.cost_usd; }), gap));
     var spark = tile.lastChild;
-    var alt = apiPriceBlock(t.equivalent_cost_usd);
+    var alt = apiPriceBlock(t);
     if (alt) { tile.insertBefore(alt, tile.querySelector('.kpi-sub')); }
     if (isPricedSubtotal(t)) { tile.insertBefore(costSparkCaption(), spark); }
     return tile;
   }
 
-  // Absent, not zero, when no subscription row could be priced at API rates:
-  // the server sends null then, and there is nothing to approximate.
-  function apiPriceBlock(equivalent) {
-    if (equivalent === null || equivalent === undefined) { return null; }
+  // Absent when the window holds no subscription traffic to approximate; the
+  // word `unpriced` when it does and none of it could be priced; a subtotal
+  // carries its mark.
+  function apiPriceBlock(t) {
+    var coverage = equivalentCoverage(t);
+    if (coverage === 'none') { return null; }
     var block = document.createElement('div');
     block.className = 'kpi-alt';
     var head = document.createElement('div');
@@ -910,7 +916,10 @@
     var label = document.createElement('span');
     label.className = 'kpi-alt-label';
     label.textContent = 'At API prices';
-    var value = figure(money(equivalent), null, '~$');
+    var value = coverage === 'unpriced'
+      ? unpricedEquivalentFigure()
+      : figure(money(t.equivalent_cost_usd), null, '~$');
+    if (coverage === 'partial') { value.appendChild(costMark(EQUIVALENT_PARTIAL_TITLE)); }
     value.classList.add('kpi-alt-value');
     head.appendChild(label);
     head.appendChild(value);
@@ -956,6 +965,43 @@
   // A partial set whose figure is the subtotal of its priced rows.
   function isPricedSubtotal(m) {
     return m.cost_status === 'partial' && pricedCost(m) !== null;
+  }
+
+  // How much of a set's subscription traffic its API-price equivalent covers.
+  // The server adds a subscription row's equivalent only when every dimension
+  // it used had a rate, and lists the ones that did not, so a set with an
+  // equivalent and a listed gap is a subtotal. The list also carries the gaps
+  // of unpriced rows and does not say whose a gap is, so a set mixing kinds
+  // reads as a subtotal whenever any gap is listed. With no equivalent, the
+  // set is known to hold subscription traffic when it is all subscription,
+  // or when it mixes kinds with no priced row (the only other kinds are
+  // subscription and unpriced). `none` is a set with no equivalent that may
+  // hold no subscription traffic at all.
+  function equivalentCoverage(m) {
+    if (isFiniteNumber(m.equivalent_cost_usd)) {
+      var gap = Array.isArray(m.missing_prices) && m.missing_prices.length > 0;
+      return gap ? 'partial' : 'full';
+    }
+    var holdsSubscription = m.cost_status === 'subscription' ||
+      (m.cost_status === 'partial' && pricedCost(m) === null);
+    return holdsSubscription && num0(m.requests) > 0 ? 'unpriced' : 'none';
+  }
+
+  // The visible word beside a figure that is a subtotal, with why in its title.
+  function costMark(title) {
+    var mark = document.createElement('span');
+    mark.className = 'cost-mark';
+    mark.textContent = labelFor('cost', 'partial').label;
+    mark.title = title;
+    return mark;
+  }
+
+  // An equivalent no subscription row could be priced into: the word, faint,
+  // never a dollar zero or a bare dash.
+  function unpricedEquivalentFigure() {
+    var fig = faintFigure(labelFor('cost', 'unpriced').label);
+    fig.title = EQUIVALENT_UNPRICED_TITLE;
+    return fig;
   }
 
   function costNote(t) {

@@ -266,6 +266,8 @@
       req: textIn(line, '.acct-traffic-req'),
       cost: textIn(line, '.acct-traffic-cost'),
       alt: textIn(line, '.acct-traffic-alt'),
+      alt_mark: textIn(line, '.acct-traffic-alt .cost-mark'),
+      alt_faint: !!line.querySelector('.acct-traffic-alt .mag-zero'),
       note: textIn(line, '.acct-traffic-note')
     };
   }
@@ -326,6 +328,36 @@
         compat: trafficSeen(COMPAT_ROW + '-traffic'),
         cloud: trafficSeen(CLOUD_ROW + '-traffic'),
         range_head: byId('accounts-traffic-range').textContent
+      };
+    });
+  });
+
+  // The labeled seat's equivalent leaves out rows with an unpriced
+  // dimension; the API-key entry's group is subscription traffic none of
+  // which could be priced; the compat entry's equivalent covers every row.
+  d.scenario('accounts-traffic-equivalent', function () {
+    var gap = [{ model: 'opus', dimension: 'cache write (unknown lifetime)', config_key: null }];
+    rewriteSeatAnswers(function (data) {
+      setMetrics(data, 'anthropic#a', {
+        cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 1.234,
+        missing_prices: gap, missing_price_dimensions: [gap[0].dimension]
+      });
+      setMetrics(data, '#anthropic', {
+        cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: null,
+        missing_prices: gap, missing_price_dimensions: [gap[0].dimension]
+      });
+      setMetrics(data, '#compat', {
+        cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 2,
+        missing_prices: [], missing_price_dimensions: []
+      });
+    });
+    return trafficSettled(SEAT_TRAFFIC).then(function () {
+      var answer = lastSeatAnswer();
+      return {
+        api_key_requests: requestsOf(answer, '#anthropic'),
+        seat: trafficSeen(SEAT_TRAFFIC),
+        api_key: trafficSeen(API_KEY_ROW + '-traffic'),
+        compat: trafficSeen(COMPAT_ROW + '-traffic')
       };
     });
   });

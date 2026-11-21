@@ -143,7 +143,7 @@
       msFigure(m.ttft_p50_ms),
       msFigure(m.latency_p50_ms),
       trafficCostFigure(m),
-      equivalentFigure(m.equivalent_cost_usd),
+      equivalentFigure(m),
       cacheHitFigure(m.cache_hit_pct)
     ], trafficTimingPairs(m));
     appendDetailBlocks(tbl, [aliasChainBlock(g), missingPriceBlock(m.missing_prices)]);
@@ -197,21 +197,21 @@
   // reads as the group's whole cost.
   function trafficCostFigure(m) {
     var fig = costFigure(m);
-    if (isPricedSubtotal(m)) {
-      var mark = document.createElement('span');
-      mark.className = 'cost-mark';
-      mark.textContent = labelFor('cost', 'partial').label;
-      mark.title = PARTIAL_COST_NOTE;
-      fig.appendChild(mark);
-    }
+    if (isPricedSubtotal(m)) { fig.appendChild(costMark(PARTIAL_COST_NOTE)); }
     return fig;
   }
 
   // An equivalent is what subscription traffic would have cost at API
-  // prices, never a bill: the tilde says so.
-  function equivalentFigure(v) {
-    if (v === null || v === undefined) { return figure('-', null, null); }
-    return figure(money(v), null, '~$');
+  // prices, never a bill: the tilde says so. One that leaves some of that
+  // traffic out carries the mark a priced subtotal does, and subscription
+  // traffic none of whose requests could be priced says so in a word.
+  function equivalentFigure(m) {
+    var coverage = equivalentCoverage(m);
+    if (coverage === 'unpriced') { return unpricedEquivalentFigure(); }
+    if (coverage === 'none') { return figure('-', null, null); }
+    var fig = figure(money(m.equivalent_cost_usd), null, '~$');
+    if (coverage === 'partial') { fig.appendChild(costMark(EQUIVALENT_PARTIAL_TITLE)); }
+    return fig;
   }
 
   function cacheHitFigure(pct) {

@@ -126,6 +126,11 @@
     return found ? found.textContent : null;
   }
 
+  function titleOr(node, selector) {
+    var found = node.querySelector(selector);
+    return found ? found.title : null;
+  }
+
   // The totals and groups of the last series answer handed to the page, as
   // rewritten.
   var lastTotals = {};
@@ -190,6 +195,10 @@
       alt_label: textOr(tile, '.kpi-alt-label'),
       alt_value: textOr(tile, '.kpi-alt-value'),
       alt_note: textOr(tile, '.kpi-alt-note'),
+      alt_mark: textOr(tile, '.kpi-alt-value .cost-mark'),
+      alt_mark_title: titleOr(tile, '.kpi-alt-value .cost-mark'),
+      alt_faint: !!tile.querySelector('.kpi-alt-value.mag-zero'),
+      requests: lastTotals.requests,
       sub: textOr(tile, '.kpi-sub'),
       caption: textOr(tile, '.kpi-caption'),
       caption_before_spark: captionPrecedesSpark(tile),
@@ -216,12 +225,15 @@
     });
   }
 
+  // Each equivalent covers every subscription row: no price is missing.
   d.scenario('tiles-cost-equivalent', function () {
     var group = { cost_status: 'priced', cost_usd: 1.25, equivalent_cost_usd: null };
     return costAcrossRounds([
-      { totals: { cost_status: 'priced', cost_usd: 12.5, equivalent_cost_usd: 40.25 },
+      { totals: { cost_status: 'priced', cost_usd: 12.5, equivalent_cost_usd: 40.25,
+        missing_prices: [], missing_price_dimensions: [] },
         groups: [group] },
-      { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 40.25 },
+      { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 40.25,
+        missing_prices: [], missing_price_dimensions: [] },
         groups: [group] },
       { totals: { cost_status: 'priced', cost_usd: 12.5, equivalent_cost_usd: null },
         groups: [group] }
@@ -241,6 +253,25 @@
         totals: { cost_status: 'priced', cost_usd: 30.85, equivalent_cost_usd: null },
         groups: [{ cost_status: 'priced', cost_usd: 10.0 }]
       }
+    ]);
+  });
+
+  // The subscription window's API-price equivalent: covering only the rows
+  // whose every dimension was priced (the server lists the rest), covering
+  // every row, and with no row priced at all.
+  d.scenario('tiles-equivalent-coverage', function () {
+    var group = { cost_status: 'priced', cost_usd: 1.25, equivalent_cost_usd: null };
+    var gap = [{ model: 'opus', dimension: 'cache write (unknown lifetime)', config_key: null }];
+    return costAcrossRounds([
+      { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 617.54,
+        missing_prices: gap, missing_price_dimensions: [gap[0].dimension] },
+        groups: [group] },
+      { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 40.25,
+        missing_prices: [], missing_price_dimensions: [] },
+        groups: [group] },
+      { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: null,
+        missing_prices: gap, missing_price_dimensions: [gap[0].dimension] },
+        groups: [group] }
     ]);
   });
 

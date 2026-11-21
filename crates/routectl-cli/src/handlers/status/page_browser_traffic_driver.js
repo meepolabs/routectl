@@ -77,6 +77,11 @@
     return found ? found.textContent : null;
   }
 
+  function titleIn(node, selector) {
+    var found = node.querySelector(selector);
+    return found ? found.title : null;
+  }
+
   function keysIn(node) {
     return Array.prototype.map.call(node.querySelectorAll('.traffic-key'), function (k) {
       return k.textContent;
@@ -266,7 +271,11 @@
       }) : [],
       rate_color: rate ? getComputedStyle(rate).color : null,
       cost: cost.textContent,
-      cost_mark: textIn(cost, '.cost-mark')
+      cost_mark: textIn(cost, '.cost-mark'),
+      equivalent: cells[5].textContent,
+      equivalent_mark: textIn(cells[5], '.cost-mark'),
+      equivalent_mark_title: titleIn(cells[5], '.cost-mark'),
+      equivalent_faint: !!cells[5].querySelector('.mag-zero')
     };
   }
 

@@ -766,6 +766,84 @@ fn page_browser_traffic_an_unknown_cost_never_reads_as_zero() {
     }
 }
 
+const UNKNOWN_LIFETIME: &str = "cache write (unknown lifetime)";
+
+/// The "At API prices" cell never reads as the value of all of a group's
+/// subscription traffic when it is not: an equivalent beside a listed
+/// unpriced dimension carries the `partial` mark, whose title says what it
+/// leaves out; one that covers every row carries no mark; subscription
+/// traffic with no equivalent reads the faint word `unpriced`, as does a
+/// mix with no priced row (only subscription and unpriced rows remain); a
+/// group that may hold no subscription traffic keeps its `-`.
+///
+/// Mutation checks: the mark appended by equivalentFigure removed -> red;
+/// equivalentCoverage ignoring `missing_prices` -> red (model-01 unmarked);
+/// the `unpriced` branch dropped -> red (model-03 reads `-`); the partial
+/// clause of holdsSubscription dropped -> red (model-05 reads `-`).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
+    let gap = json!([{"model": "opus", "dimension": UNKNOWN_LIFETIME, "config_key": null}]);
+    let sub = |equivalent: Value, missing: &Value| {
+        let dims: Vec<Value> = missing
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|p| p["dimension"].clone())
+            .collect();
+        json!({
+            "cost_status": "subscription",
+            "cost_usd": null,
+            "equivalent_cost_usd": equivalent,
+            "missing_prices": missing,
+            "missing_price_dimensions": dims,
+        })
+    };
+    let answer = dense_with(&[
+        ("model-01", sub(json!(268.29), &gap)),
+        ("model-02", sub(json!(40.25), &json!([]))),
+        ("model-03", sub(Value::Null, &gap)),
+        (
+            "model-04",
+            json!({"cost_status": "priced", "cost_usd": 1.5, "equivalent_cost_usd": null}),
+        ),
+        (
+            "model-05",
+            json!({"cost_status": "partial", "cost_usd": null, "equivalent_cost_usd": null}),
+        ),
+        (
+            "model-06",
+            json!({"cost_status": "partial", "cost_usd": 0.25, "equivalent_cost_usd": null}),
+        ),
+    ]);
+
+    let out = observe("traffic", answer, &[]);
+
+    let partial = row(&out, "model-01");
+    assert_eq!(partial["equivalent"], "~$268.29partial", "{partial:#}");
+    assert_eq!(partial["equivalent_mark"], "partial", "{partial:#}");
+    assert_eq!(
+        partial["equivalent_mark_title"], "does not include requests with an unpriced dimension",
+        "{partial:#}"
+    );
+    let full = row(&out, "model-02");
+    assert_eq!(full["equivalent"], "~$40.25", "positive control: {full:#}");
+    assert_eq!(full["equivalent_mark"], Value::Null, "{full:#}");
+    let unpriced = row(&out, "model-03");
+    assert_eq!(unpriced["equivalent"], "unpriced", "{unpriced:#}");
+    assert_eq!(unpriced["equivalent_faint"], true, "{unpriced:#}");
+    let priced = row(&out, "model-04");
+    assert_eq!(priced["equivalent"], "-", "{priced:#}");
+    assert_eq!(priced["equivalent_mark"], Value::Null, "{priced:#}");
+    let mixed_unpriced = row(&out, "model-05");
+    assert_eq!(
+        mixed_unpriced["equivalent"], "unpriced",
+        "{mixed_unpriced:#}"
+    );
+    let mixed_priced = row(&out, "model-06");
+    assert_eq!(mixed_priced["equivalent"], "-", "{mixed_priced:#}");
+}
+
 /// An error rate is plain text below 5% of a group's requests, the degraded
 /// color from 5%, the broken color from 50%, and a zero is faint; each
 /// boundary is a row, one request either side of it.

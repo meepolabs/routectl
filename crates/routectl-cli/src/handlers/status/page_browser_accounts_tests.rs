@@ -555,6 +555,32 @@ fn page_browser_accounts_traffic_cost_names_an_equivalent_as_one() {
     );
 }
 
+/// An account's "At API prices" figure says when it leaves some of its
+/// subscription traffic out (the `partial` mark), carries no mark when it
+/// covers every row, and reads the faint word `unpriced` for subscription
+/// traffic none of which could be priced, never a bare status word.
+///
+/// Mutation checks: the mark appended in acctCostNodes removed -> red (seat);
+/// the `unpriced` figure dropped from acctCostNodes -> red (api_key reads
+/// `subscription`).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_an_equivalent_that_leaves_rows_out_says_so() {
+    let out = accounts_scenario("accounts-traffic-equivalent");
+
+    assert_eq!(out["seat"]["alt"], "~$1.23partialAt API prices", "{out:#}");
+    assert_eq!(out["seat"]["alt_mark"], "partial", "{out:#}");
+    assert_eq!(out["compat"]["alt"], "~$2.00At API prices", "{out:#}");
+    assert_eq!(out["compat"]["alt_mark"], Value::Null, "{out:#}");
+    assert!(
+        out["api_key_requests"].as_u64() > Some(0),
+        "the unpriced account carries requests: {out:#}"
+    );
+    assert_eq!(out["api_key"]["alt"], "unpricedAt API prices", "{out:#}");
+    assert_eq!(out["api_key"]["alt_faint"], true, "{out:#}");
+    assert_eq!(out["api_key"]["cost"], Value::Null, "{out:#}");
+}
+
 /// A provider scope carried in from another view narrows the seat QUERY;
 /// Accounts names it in the heading and the no-traffic words and offers the
 /// control that lifts it, while every row still lists.

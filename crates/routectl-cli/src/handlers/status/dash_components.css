@@ -282,8 +282,9 @@ td.num .unit, th.num .unit {
   margin-left: 0.08em;
 }
 .mag-zero { color: var(--faint); }
-/* A cost that is a subtotal of the priced rows says so beside its figure,
-   in words, not only in a hover title. */
+/* A figure that is a subtotal (a cost over the priced rows, an API-price
+   equivalent over the fully priced subscription rows) says so beside it, in
+   words, not only in a hover title. */
 .cost-mark {
   margin-left: var(--sp-1);
   font-family: var(--font-ui);
@@ -564,6 +565,7 @@ td.num .unit, th.num .unit {
   color: var(--muted);
   white-space: nowrap;
 }
+.kpi-alt-value.mag-zero { color: var(--faint); }
 .kpi-alt-value .unit {
   font-size: 0.75em;
   color: var(--faint);

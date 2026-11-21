@@ -588,10 +588,14 @@
       }
       nodes.push(spend);
     }
-    if (acctHasNumber(m.equivalent_cost_usd)) {
+    var coverage = equivalentCoverage(m);
+    if (coverage !== 'none') {
       var alt = document.createElement('span');
       alt.className = 'acct-traffic-alt';
-      alt.appendChild(figure(money(m.equivalent_cost_usd), null, '~$'));
+      alt.appendChild(coverage === 'unpriced'
+        ? unpricedEquivalentFigure()
+        : figure(money(m.equivalent_cost_usd), null, '~$'));
+      if (coverage === 'partial') { alt.appendChild(costMark(EQUIVALENT_PARTIAL_TITLE)); }
       alt.appendChild(acctText('span', 'acct-traffic-qual', 'At API prices'));
       alt.title = API_PRICE_NOTE;
       nodes.push(alt);

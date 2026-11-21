@@ -174,6 +174,53 @@ fn page_browser_tiles_cost_tile_keeps_spend_and_api_price_apart() {
     assert!(no_equiv["alt_value"].is_null(), "{no_equiv:#}");
 }
 
+/// The tile's "At API prices" figure says when it leaves some subscription
+/// traffic out: an equivalent beside a listed unpriced dimension carries the
+/// `partial` mark and its title, one covering every row carries none, and a
+/// subscription window with requests but no equivalent reads the faint word
+/// `unpriced` rather than drawing nothing.
+///
+/// Mutation checks: the mark appended in apiPriceBlock removed -> red (round
+/// 0); apiPriceBlock returning null with no equivalent -> red (round 2).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
+    let rounds = run("tiles-equivalent-coverage");
+    let (partial, full, unpriced) = (&rounds[0], &rounds[1], &rounds[2]);
+
+    assert_eq!(
+        text(partial, "alt_value"),
+        Some("~$617.54partial"),
+        "{partial:#}"
+    );
+    assert_eq!(text(partial, "alt_mark"), Some("partial"), "{partial:#}");
+    assert_eq!(
+        text(partial, "alt_mark_title"),
+        Some("does not include requests with an unpriced dimension"),
+        "{partial:#}"
+    );
+
+    assert_eq!(text(full, "alt_value"), Some("~$40.25"), "{full:#}");
+    assert!(full["alt_mark"].is_null(), "{full:#}");
+
+    assert!(
+        unpriced["requests"].as_u64() > Some(0),
+        "the window carries requests: {unpriced:#}"
+    );
+    assert_eq!(
+        text(unpriced, "alt_label"),
+        Some("At API prices"),
+        "{unpriced:#}"
+    );
+    assert_eq!(
+        text(unpriced, "alt_value"),
+        Some("unpriced"),
+        "{unpriced:#}"
+    );
+    assert_eq!(unpriced["alt_faint"], true, "{unpriced:#}");
+    assert!(unpriced["alt_mark"].is_null(), "{unpriced:#}");
+}
+
 /// A partial window qualifies its cost on the tile and on every provider card
 /// whose own cost is partial (the all-providers card included, since it reads
 /// the partial totals), and on no other card; the cost sparkline is
