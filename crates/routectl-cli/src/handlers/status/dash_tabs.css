@@ -348,10 +348,6 @@
   .pane { padding: var(--sp-4) var(--sp-4) var(--sp-6); gap: var(--sp-5); }
   .card { padding: var(--sp-3) var(--sp-4) var(--sp-4); }
   .tablewrap { margin: 0 calc(-1 * var(--sp-4)); padding: 0 var(--sp-4); }
-  .ucard-figs { gap: var(--sp-4); }
-  .ucard-head { gap: var(--sp-3); }
-  .chain-step { width: var(--w-step-narrow); }
-  .attr-step { grid-template-columns: 4.2rem minmax(0, 1fr) 4.4rem 3rem; }
   .doccounts { gap: var(--sp-4); }
   .docpass-name { flex: 0 0 7rem; }
 }

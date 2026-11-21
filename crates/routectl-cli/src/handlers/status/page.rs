@@ -794,6 +794,23 @@ mod tests {
         assert_eq!(page, server);
     }
 
+    /// The page's unattributed label is the server's, so the scope sets
+    /// leave out exactly the group the query names that way.
+    ///
+    /// Mutation check: spell UNATTRIBUTED_LABEL `'unattributed'` -> red.
+    #[test]
+    fn the_unattributed_label_is_the_server_label() {
+        let script = script();
+        let needle = "var UNATTRIBUTED_LABEL = '";
+        let start = script
+            .find(needle)
+            .expect("dashboard JS declares UNATTRIBUTED_LABEL")
+            + needle.len();
+        let end = start + script[start..].find('\'').expect("the literal closes");
+
+        assert_eq!(&script[start..end], routectl_usage::UNATTRIBUTED);
+    }
+
     /// The string entries of a `var <name> = [ ... ]` array literal in the
     /// dashboard script.
     fn string_array(name: &str) -> Vec<String> {
@@ -1787,6 +1804,10 @@ mod tests {
         (
             "page_browser_cases_tests.rs",
             include_str!("page_browser_cases_tests.rs"),
+        ),
+        (
+            "page_browser_models_tests.rs",
+            include_str!("page_browser_models_tests.rs"),
         ),
     ];
 

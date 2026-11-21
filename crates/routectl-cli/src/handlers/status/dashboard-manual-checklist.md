@@ -39,6 +39,11 @@ has not verified the failure that matters most.
   `page_browser_accounts_tests.rs` (grouping and names, the login cause and
   focusable fix, windows named from their length with level, reset, age and
   stale mark, the poll line, the drivers, and a row kept across a refresh).
+- **The Models lanes** (`dash_63_view_models.js`):
+  `page_browser_models_tests.rs` (problems first, one cause line per
+  attention item, the seven-day fold and its survival of a failed refresh,
+  a row kept across a refresh, transit wording, and the nickname link to
+  scoped Traffic).
 - **The address and the views** (`dash_90_chrome.js`):
   `page_browser_url_tests.rs` and `page_browser_views_tests.rs`.
 - **Figures read in full at each text size** (`dash_*.css`):
@@ -188,36 +193,61 @@ banner, no retry signal -- silently mislabeled data.
   zero on a healthy daemon. The Doctor tab shows no capability matrix: what
   each lane has learned is on the Models tab.
 
-## 6. Models tab learned negatives
+## 6. Models tab: one row per lane
 
 - Serve a config with two nicknames on ONE upstream of one provider entry and
-  a third nickname on a different upstream, against a ledger holding a
+  a third nickname on a different upstream, against a learned store holding a
   `broken` row for the shared `<provider>#<upstream>` lane and nothing for the
-  other. On the Models tab, the learned-negatives chip for that capability
-  must appear on the card of EVERY nickname that maps to the shared lane, and
-  the third nickname's card must read `none`. A card reading `none` for a
-  nickname on a lane the ledger holds a negative for means the client joined
-  learned rows on the runtime `state_key` instead of the target's
-  `learned_lane`.
+  other. The Models table shows ONE row for the shared lane, naming both
+  nicknames, and one row for the third. The shared row's Refuses cell carries
+  the capability chip; the other row reads `none`. Two rows for the shared
+  lane, or a `none` on it, means the rows are no longer keyed by the learned
+  lane.
 - Seed a learned output ceiling (`ceiling:<n>`) on a lane. Hover its chip:
   the tooltip ends in `value ceiling:<n>`; a chip for a capability whose
   verdict writes no value ends in `value -`. The chip text stays the bare
-  capability key, the one to copy into `force_supported`.
-- A `verified` row on the same lane must not render as a chip. Seed it with a
-  recognized `evidence_class` (for example `schema_parse`): replay skips a
-  `verified` row whose class is missing or unrecognized, so a row seeded
-  without one never reaches the registry and the check passes vacuously.
+  capability key, the one to copy into `force_supported`. Expanding the row
+  lists every resolved capability with its verdict, the refused ones marked.
+- A `verified` row on the same lane must not render as a refusal chip. Seed
+  it with a recognized `evidence_class` (for example `schema_parse`): replay
+  skips a `verified` row whose class is missing or unrecognized, so a row
+  seeded without one never reaches the registry and the check passes
+  vacuously.
+- Problems come first. Open the breaker on two or more lanes of one provider
+  entry with the same last outcome: their rows sit together under ONE cause
+  line carrying the needs-attention item's own words (`Circuit open on <n>
+  routes, last outcome ...`) and, when the item has one, its fix command,
+  with the lane count beside it. While the attention panel answers unavailable, every row keeps its
+  raw state and the cause line reads `cause not available - <key>`, never an
+  error card.
+- When the breaker closes, the row's state reads `ok` followed by `recovered
+  <n> min ago`; a lane that never had a problem shows no recovered text.
+- Lanes none of whose nicknames carried a request in the last seven days fold
+  into one `<n> lanes with no request in the last 7 days` line under the
+  table; opening it lists their rows. A lane with a problem, or one that
+  recovered recently, never folds. Before the seven-day read first answers,
+  nothing folds. Open the fold and expand a row in it, then block
+  `/status/query` in devtools for two polls: the fold stays open, the row
+  stays expanded, and nothing moves back into the main table.
+- Changed in transit reads `<changed> of <checked> responses changed` for a
+  lane the wire check sampled and `unmeasured` (faint) for one it never did;
+  the expanded row adds `since <start>` and the most-changed field paths.
+  No wording on the tab says error, loss or rate for transit.
+- Each nickname in the Model column is a link. Following it opens Traffic
+  with the address `#traffic?scope=<provider entry>&model=<nickname>`, the
+  strip reads `Scoped to model <nickname> on provider <provider entry>`, and
+  the figures are that nickname's alone; the strip's reset clears both. For
+  a pooled nickname each seat lane's link scopes to that seat's member entry.
 
-## 7. Models and Accounts tabs: eligibility, accounts by pool and the seat drivers
+## 7. Models and Accounts tabs: lane state, accounts by pool and the seat drivers
 
 - Serve a config with a pool of two `oauth://anthropic#<label>` members,
   one logged in and one never logged in, against a throwaway credentials
-  file. Before any request, the never-logged-in seat's card must sit under
-  "Needs attention", never "Not observed yet": its reason line reads `1 of 2
-  seats not eligible`, and its eligibility cell names the seat,
-  `credential_unusable (not_logged_in)`, how long ago it was marked, and the
-  exact `routectl login anthropic --label <label>` command, selectable as one
-  unit. A logged-in seat's eligibility cell reads `eligible`.
+  file. Before any request, the never-logged-in seat's lane is a problem row
+  at the top of the Models table, in its State cell `credential unusable`
+  with how long it has held, under a cause line reading `Not logged in, for
+  <age>` with the exact `routectl login anthropic --label <label>` command,
+  selectable as one unit. The logged-in seat's lane reads `ok`.
 - On Accounts the pool is listed with `1 of 2 usable` beside its name, and
   each member is a row named `<provider entry> (<label>)`. The never-logged-in
   seat reads `unusable` with the daemon's sentence (`Not logged in, for
@@ -278,20 +308,19 @@ banner, no retry signal -- silently mislabeled data.
   verdict. It never returns to `Checking routing state`. Start the daemon
   again: within a poll the current sentence replaces it, the dimming clears
   and the icon takes that verdict's color again.
-- The Models tab badge counts every target with an eligibility reason or a
-  non-closed breaker once: two logged-out seats badge `2`, and a seat that is
-  both logged out and breaker-open still counts once.
-- The Traffic "Live target state" row for the same target shows a red dot,
-  a non-green pill (`no seat` when every seat is out, otherwise the reason),
-  and `<n> of <m> not eligible`; never `unknown - nothing dispatched to it
-  yet`. The Models card's state pill shows the same label, never a green `ok`.
+- The Models tab badge counts the lanes whose state is not `ok`: two
+  logged-out seats on one model badge `2`, and a lane that is both logged
+  out and breaker-open counts once. On Traffic, scoped to that seat's
+  provider entry, the figures are the ledger's for that entry only; Traffic
+  carries no live lane state, which is the Models tab's subject.
 - Select a fix command with the mouse and wait through three polls with
   nothing changing: the selection stays, and Ctrl+C copies the full command.
   The `since <age> ago` text beside it keeps advancing (ages update every
   poll; only the nodes that changed are replaced).
-- At 800 px wide, the eligibility cell spans the whole card row and each fix
-  command sits on one line; a command wider than the card scrolls inside its
-  own box instead of wrapping at a hyphen.
+- At 800 px wide the Models table scrolls sideways inside its own box,
+  which Tab reaches and its caption names; the page itself does not scroll
+  sideways. A cause line's fix command wraps inside its box instead of
+  running out of the row, and a click still selects the whole command.
 - The Now glance and Accounts follow the current config. Serve a config
   whose provider entry name differs from its login's vendor (for example
   entry `work` with `credential = "oauth://anthropic#a"` in pool `main`)

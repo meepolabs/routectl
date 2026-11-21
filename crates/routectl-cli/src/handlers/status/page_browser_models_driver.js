@@ -120,10 +120,19 @@
   }
 
   // The page's own fetch marks when an answer to the per-model QUERY has
-  // been handed over, so a scenario reads the view after it applied.
+  // been handed over, so a scenario reads the view after it applied. Once a
+  // scenario sets `failLanes`, every per-model QUERY answers 503 instead.
   var pageFetch = window.fetch;
+  var failLanes = false;
+  var lanesFailed = 0;
   window.fetch = function (input, init) {
     var lanes = isLanesQuery(init);
+    if (lanes && failLanes) {
+      return Promise.resolve(new Response('', { status: 503 })).then(function (resp) {
+        setTimeout(function () { lanesFailed += 1; }, 0);
+        return resp;
+      });
+    }
     return pageFetch(input, init).then(function (resp) {
       if (lanes) { setTimeout(function () { window.routectlModelsAnswered = true; }, 0); }
       return resp;
@@ -167,6 +176,49 @@
           figure: live ? live.children[7].textContent : null
         };
       });
+    });
+  });
+
+  // An unused lane expanded inside its open collapsed line, then every
+  // later per-model QUERY failing: the collapsed line and the row are read
+  // once the first failure applied and again after the next round.
+  d.scenario('models-stale-fold', function () {
+    var fold = null;
+    var node = null;
+    function observe() {
+      var live = node && document.getElementById(node.id);
+      var detail = node && document.getElementById(node.id + '-detail');
+      var nowFold = document.getElementById('models-unused');
+      return {
+        failed: lanesFailed,
+        unused: nowFold ? textIn(nowFold, 'summary') : null,
+        same_fold: !!fold && nowFold === fold,
+        fold_open: !!nowFold && nowFold.open,
+        same_node: !!node && live === node,
+        connected: !!node && node.isConnected,
+        in_fold: !!node && !!fold && fold.contains(node),
+        open: !!detail && !detail.hidden
+      };
+    }
+    return d.waitUntil('the lane table', lanesDrawn).then(lanesQueryAnswered).then(function () {
+      return d.waitUntil('the collapsed lanes', function () {
+        return document.querySelector('#models-unused-lanes tr.exp-row');
+      });
+    }).then(function (row) {
+      fold = document.getElementById('models-unused');
+      fold.open = true;
+      node = row;
+      document.getElementById(node.id + '-toggle').click();
+      var before = observe();
+      failLanes = true;
+      return d.waitUntil('a failed per-model QUERY', function () { return lanesFailed > 0; })
+        .then(function () { return d.sleep(300); })
+        .then(function () {
+          var failedOnce = observe();
+          return d.waitFor('/status', 1).then(function () {
+            return { before: before, failed_once: failedOnce, next_round: observe() };
+          });
+        });
     });
   });
 

@@ -200,6 +200,7 @@ fn page_browser_a_markup_scope_from_the_ledger_renders_as_text_and_reaches_the_q
 /// canonical address it is rewritten to.
 struct ParamCase {
     name: &'static str,
+    view: &'static str,
     raw: String,
     scope: Option<&'static str>,
     model: Option<&'static str>,
@@ -213,9 +214,23 @@ fn param_case(
     model: Option<&'static str>,
     hash: &str,
 ) -> ParamCase {
+    param_case_on("traffic", name, query, scope, model, hash)
+}
+
+/// A row followed on `view`. Now reads the providers unscoped, so a scope no
+/// config entry names is decided there against the ledger's labels.
+fn param_case_on(
+    view: &'static str,
+    name: &'static str,
+    query: &str,
+    scope: Option<&'static str>,
+    model: Option<&'static str>,
+    hash: &str,
+) -> ParamCase {
     ParamCase {
         name,
-        raw: format!("#traffic?{query}"),
+        view,
+        raw: format!("#{view}?{query}"),
         scope,
         model,
         hash: hash.to_owned(),
@@ -225,7 +240,8 @@ fn param_case(
 /// The value classes URLSearchParams can produce for `scope` and `model`.
 /// Positive rows are the configured names spelled as the page writes them;
 /// every other value is dropped, including one that decodes to a configured
-/// name through another spelling.
+/// name through another spelling, and the label the ledger gives requests
+/// that reached no provider.
 fn param_cases() -> Vec<ParamCase> {
     vec![
         param_case(
@@ -337,6 +353,22 @@ fn param_cases() -> Vec<ParamCase> {
             None,
             "#traffic",
         ),
+        param_case_on(
+            "now",
+            "provider entry as a scope on Now",
+            "scope=anthropic",
+            Some("anthropic"),
+            None,
+            "#now?scope=anthropic",
+        ),
+        param_case_on(
+            "now",
+            "the unattributed ledger label as a scope",
+            "scope=%28unattributed%29",
+            None,
+            None,
+            "#now",
+        ),
         param_case(
             "a dropped model keeps a kept scope",
             "scope=compat&model=n%D0%BEsuch",
@@ -356,7 +388,8 @@ fn param_cases() -> Vec<ParamCase> {
 /// Mutation checks: read the value with `params.get` in canonicalParam ->
 /// red (the percent-encoded and duplicate rows); return keep for every model
 /// in addressVerdict -> red (the unknown, look-alike and plus rows); leave
-/// `model` out of bodyFromShape -> red (the positive rows).
+/// `model` out of bodyFromShape -> red (the positive rows); drop the
+/// isScopeLabel filter in noteLedgerProviders -> red (the unattributed row).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_scope_and_model_from_the_address_are_kept_only_in_their_live_sets() {
@@ -369,7 +402,7 @@ fn page_browser_scope_and_model_from_the_address_are_kept_only_in_their_live_set
     assert_eq!(seen.len(), cases.len());
     for (case, report) in cases.iter().zip(seen) {
         let name = case.name;
-        assert_eq!(report["view"], "traffic", "{name}");
+        assert_eq!(report["view"], case.view, "{name}");
         assert_eq!(report["hash"], case.hash.as_str(), "{name}: {report:#}");
         let bodies = queries(report);
         assert!(!bodies.is_empty(), "{name}: no QUERY for the address");
@@ -380,6 +413,39 @@ fn page_browser_scope_and_model_from_the_address_are_kept_only_in_their_live_set
             assert_eq!(model, case.model, "{name}: {body}");
         }
     }
+}
+
+/// The provider card of the group the ledger leaves unattributed carries no
+/// scope action: clicking it leaves the address and every QUERY unscoped.
+/// Positive control: the anthropic card, clicked next, scopes both.
+///
+/// Mutation check: set the scope action on every card in provCardShell ->
+/// red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_the_unattributed_provider_card_sets_no_scope() {
+    let run = browser::run_scenario(&url_vars_scenario(
+        "url-card-scope",
+        "now",
+        &[("routectlUrlCardLabel", Value::from("(unattributed)"))],
+    ));
+    let out = &run.result;
+
+    let placeholder = &out["placeholder"];
+    assert_eq!(placeholder["action"], Value::Null, "{out:#}");
+    assert_eq!(placeholder["disabled"], true, "{out:#}");
+    assert_eq!(placeholder["hash"], "#now", "{out:#}");
+    for body in queries(placeholder) {
+        assert!(body.get("provider").is_none(), "{body}");
+    }
+    let provider = &out["provider"];
+    assert_eq!(provider["hash"], "#now?scope=anthropic", "{out:#}");
+    assert!(
+        queries(provider)
+            .iter()
+            .any(|b| b["provider"] == FIXTURE_PROVIDER),
+        "the control scoped the QUERY: {out:#}"
+    );
 }
 
 /// While the config panel is not live, the set a `scope` or `model` value
@@ -956,6 +1022,116 @@ fn the_address_value_scan_reports_each_read_with_its_function_and_line() {
             ),
         ]
     );
+}
+
+/// Every line of parseViewHash that names `params` or `query`, compacted,
+/// with how many times it names each. A new read of the parsed address,
+/// whatever its spelling (`params.has`, `params.entries()`, an alias, a
+/// second parse of `query`), adds a line or changes one.
+const PARSE_ADDRESS_LINES: &[(&str, usize, usize)] = &[
+    ("varquery=mark>=0?raw.slice(mark+1):'';", 0, 1),
+    ("varparams=newurlsearchparams(query);", 1, 1),
+    ("range:firstwindow([params.get('range'),path[1]]),", 1, 0),
+    ("scope:canonicalparam(query,params,'scope'),", 1, 1),
+    ("model:canonicalparam(query,params,'model'),", 1, 1),
+    ("group:groupparam(params.get('group')),", 1, 0),
+    ("sort:sortparam(params.get('sort'))", 1, 0),
+];
+
+/// Byte offsets of `word` in `code` as a whole identifier.
+fn word_offsets(code: &str, word: &str) -> Vec<usize> {
+    code.match_indices(word)
+        .map(|(at, _)| at)
+        .filter(|&at| {
+            let before = code[..at].chars().next_back();
+            let after = code[at + word.len()..].chars().next();
+            !before.is_some_and(is_ident_char) && !after.is_some_and(is_ident_char)
+        })
+        .collect()
+}
+
+/// The lines of `body` naming `params` or `query`, each compacted with its
+/// count of each word.
+fn address_token_lines(body: &str) -> Vec<(String, usize, usize)> {
+    body.lines()
+        .filter_map(|line| {
+            let params = word_offsets(line, "params").len();
+            let query = word_offsets(line, "query").len();
+            (params + query > 0).then(|| (compact(line), params, query))
+        })
+        .collect()
+}
+
+/// The names of the functions whose parameter list names `params`, with an
+/// empty name for an anonymous one.
+fn functions_taking_params(code: &str) -> Vec<String> {
+    code.match_indices("function")
+        .filter_map(|(at, _)| {
+            let rest = &code[at + "function".len()..];
+            let open = rest.find('(')?;
+            let close = open + rest[open..].find(')')?;
+            let name = rest[..open].trim();
+            let named = name.chars().all(is_ident_char);
+            let takes = !word_offsets(&rest[open + 1..close], "params").is_empty();
+            (named && takes).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// parseViewHash reads the parsed address only through the listed lines:
+/// every `params` and `query` token in it is one of them, whatever method
+/// or name a new read would use. canonicalParam is the only function that
+/// takes the parsed address, and it reads it only with `getAll`.
+///
+/// Mutation checks: add `params.has('x')` inside parseViewHash -> red; add
+/// `var alias = params;` inside parseViewHash -> red.
+#[test]
+fn parse_view_hash_reads_the_parsed_address_only_at_its_listed_sites() {
+    let code = strip_js_comments(&script());
+
+    let parse = address_token_lines(&function_span_text(&code, "parseViewHash"));
+    let canonical = address_token_lines(&function_span_text(&code, "canonicalParam"));
+
+    let expected: Vec<(String, usize, usize)> = PARSE_ADDRESS_LINES
+        .iter()
+        .map(|(line, params, query)| ((*line).to_owned(), *params, *query))
+        .collect();
+    assert_eq!(parse, expected, "parseViewHash reads the address elsewhere");
+    let params_reads: Vec<&str> = canonical
+        .iter()
+        .filter(|(_, params, _)| *params > 0)
+        .map(|(line, _, _)| line.as_str())
+        .collect();
+    assert_eq!(
+        params_reads,
+        [
+            "functioncanonicalparam(query,params,key){",
+            "varvalues=params.getall(key);",
+        ],
+        "canonicalParam reads the parsed address another way"
+    );
+    assert_eq!(functions_taking_params(&code), ["canonicalParam"]);
+}
+
+/// The token scan counts a read in any spelling, skips a longer identifier
+/// that contains the word, and finds an anonymous function taking `params`.
+#[test]
+fn the_address_token_scan_counts_every_spelling() {
+    let body = "var params = x;\n  if (params.has('a')) {}\n  var canonicalParams = 1;\n\
+                for (var k of params) {}\n  var queryText = query;\n";
+    let code = "function a(params) {}\nvar f = function (params) {};\n\
+                function b(paramsList) {}\n";
+
+    assert_eq!(
+        address_token_lines(body),
+        vec![
+            ("varparams=x;".to_owned(), 1, 0),
+            ("if(params.has('a')){}".to_owned(), 1, 0),
+            ("for(varkofparams){}".to_owned(), 1, 0),
+            ("varquerytext=query;".to_owned(), 0, 1),
+        ]
+    );
+    assert_eq!(functions_taking_params(code), ["a", ""]);
 }
 
 fn function_span_text(code: &str, name: &str) -> String {

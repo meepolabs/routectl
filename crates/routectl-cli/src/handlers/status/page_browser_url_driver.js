@@ -316,6 +316,42 @@
     });
   });
 
+  // On Now, the provider card named `routectlUrlCardLabel` (opening the
+  // overflow when it sits there) is clicked, then the anthropic card: the
+  // address and the QUERY bodies after each click.
+  d.scenario('url-card-scope', function () {
+    var label = window.routectlUrlCardLabel;
+    var out = {};
+    function card(name) {
+      return Array.prototype.filter.call(document.querySelectorAll('#body-now .provcard-scope'),
+        function (btn) { return btn.querySelector('.provcard-name').textContent === name; })[0];
+    }
+    function press(name, key) {
+      var from = sent.length;
+      var btn = card(name);
+      if (!btn) { throw new Error('no provider card ' + name); }
+      btn.click();
+      return d.sleep(1000).then(waitSettled).then(function () {
+        out[key] = {
+          hash: location.hash,
+          action: btn.getAttribute('data-action'),
+          disabled: btn.disabled,
+          queries: sent.slice(from)
+        };
+      });
+    }
+    return d.waitUntil('the provider cards', function () {
+      return settled() && document.getElementById('overview-provider-more');
+    }).then(function () {
+      if (!card(label)) { click('overview-provider-more'); }
+      return d.waitUntil('the ' + label + ' card', function () { return card(label); });
+    }).then(function () {
+      return press(label, 'placeholder');
+    }).then(function () {
+      return press('anthropic', 'provider');
+    }).then(function () { return out; });
+  });
+
   // Each row's address is followed as a link would be: from Config, which
   // asks no QUERY, so every QUERY sent after the arrival is the one the
   // address led to. The row is read once the view settled on its answer.

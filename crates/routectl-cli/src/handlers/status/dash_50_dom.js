@@ -808,8 +808,9 @@
   // =====================================================================
   // Per-tab section builders.
   //
-  // One contiguous marker-delimited block per tab, composed into the views
-  // in dash_80_views.js through viewSection, which draws the loading /
+  // One contiguous marker-delimited block per tab. Each view's build
+  // function (in dash_80_views.js, or in the view's own part for Traffic and
+  // Models) composes its sections through viewSection, which draws the loading /
   // unavailable / incompatible / dead card for a section's source and calls
   // the builder only for a renderable record. Every builder:
   //   1. receives the record of the source it reads, as the host passed it;

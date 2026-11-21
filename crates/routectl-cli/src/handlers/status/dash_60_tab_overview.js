@@ -476,7 +476,7 @@
       if (hasQueryScope()) { commitViewState({ scope: null, model: null }); }
       return;
     }
-    if (selectedProvider === label) { return; }
+    if (selectedProvider === label || !isScopeLabel(label)) { return; }
     commitViewState({ scope: label });
   }
 
@@ -620,7 +620,12 @@
     btn.appendChild(facts);
 
     btn.appendChild(shareBar(share));
-    setAction(btn, 'provider-scope', label);
+    if (label === null || isScopeLabel(label)) {
+      setAction(btn, 'provider-scope', label);
+    } else {
+      btn.disabled = true;
+      btn.title = 'requests that never reached a provider - not a scope';
+    }
     cardEl.appendChild(btn);
     return cardEl;
   }

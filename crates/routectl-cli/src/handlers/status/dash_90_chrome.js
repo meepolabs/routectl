@@ -264,14 +264,19 @@
   }
 
   // Record the provider labels of a live answer to `body` when it is an
-  // unscoped provider read, then settle a scope waiting on them.
+  // unscoped provider read, then settle a scope waiting on them. The
+  // unattributed group names no provider, so it never joins the set.
   function noteLedgerProviders(source, body) {
     if (body.group_by !== 'provider' || body.provider || body.model) { return; }
     if (SOURCES[source].state !== 'live') { return; }
     var view = queryViewOf(source);
     if (!view) { return; }
-    ledgerProviders = view.groups.map(function (g) { return g.label; });
+    ledgerProviders = view.groups.map(function (g) { return g.label; }).filter(isScopeLabel);
     settleHeldAddress();
+  }
+
+  function isScopeLabel(label) {
+    return label !== UNATTRIBUTED_LABEL;
   }
 
   function isGroupBy(token) {

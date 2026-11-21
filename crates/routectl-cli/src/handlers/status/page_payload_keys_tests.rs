@@ -21,6 +21,10 @@ const PANEL_FIELD_LISTS: &[(&str, &str)] = &[
     ("models", "MODELS_FIELDS"),
 ];
 
+/// The `/status` aggregate's own top-level keys the page reads, apart from
+/// any one panel's.
+const AGGREGATE_FIELD_LIST: &str = "AGGREGATE_FIELDS";
+
 /// The query vocabulary lists, each pinned to the server's serialization by
 /// its own drift test (`dashboard_metric_tokens_are_in_the_query_vocabulary`,
 /// `missing_price_entry_fields_are_the_dto_fields` and the alias step weld).
@@ -186,6 +190,7 @@ fn accounted_names(scan: &MemberScan) -> std::collections::BTreeSet<String> {
         .iter()
         .map(|(_, list)| *list)
         .chain(QUERY_FIELD_LISTS.iter().copied())
+        .chain(std::iter::once(AGGREGATE_FIELD_LIST))
         .flat_map(string_array);
     let named = BUILT_IN_MEMBERS
         .iter()
@@ -292,6 +297,24 @@ fn the_nullable_query_metrics_are_the_dto_options() {
         "positive control: some listed metric is an Option"
     );
     assert_eq!(page_nullable, server_nullable);
+}
+
+/// Each declared aggregate field is a top-level key of the real aggregate.
+///
+/// Mutation check: declare `'panelz'` in AGGREGATE_FIELDS -> red.
+#[test]
+fn each_declared_aggregate_field_is_a_top_level_aggregate_key() {
+    let aggregate = crate::handlers::status::panel_fixtures::aggregate_json();
+    let keys: std::collections::BTreeSet<String> = aggregate
+        .as_object()
+        .expect("the aggregate is an object")
+        .keys()
+        .cloned()
+        .collect();
+    let fields = string_array(AGGREGATE_FIELD_LIST);
+
+    assert!(!fields.is_empty(), "positive control: the list is read");
+    assert_eq!(fields_missing_from(&fields, &keys), Vec::<String>::new());
 }
 
 #[test]

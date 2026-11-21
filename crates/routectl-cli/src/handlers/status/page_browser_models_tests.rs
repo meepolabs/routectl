@@ -1,11 +1,11 @@
 // The Models view in a real headless Chrome: lanes in the panel's order
 // with one cause line over the lanes one attention item names, lanes no
-// request reached in seven days collapsed to one line (and nothing collapsed
-// while that read is not live), a lane row kept across refreshes, raw state
-// with the attention list down, transit wording, and a nickname link that
-// lands on Traffic scoped to it. `include!`d into a child module of
-// `page::tests` beside `browser`; the scenarios live in
-// page_browser_models_driver.js.
+// request reached in seven days collapsed to one line (nothing collapsed
+// before that read answers, and the collapse kept when a refresh of it
+// fails), a lane row kept across refreshes, raw state with the attention
+// list down, transit wording, and a nickname link that lands on Traffic
+// scoped to it. `include!`d into a child module of `page::tests` beside
+// `browser`; the scenarios live in page_browser_models_driver.js.
 
 use serde_json::Value;
 
@@ -33,9 +33,13 @@ fn populated(name: &'static str, snippets: &'static [&'static str]) -> Value {
 }
 
 fn hop_case(snippets: &'static [&'static str]) -> Value {
+    hop_case_named("models-rows", snippets)
+}
+
+fn hop_case_named(name: &'static str, snippets: &'static [&'static str]) -> Value {
     browser::run_case_scenario(
         &browser::Scenario {
-            name: "models-rows",
+            name,
             hash: "models",
             snippets,
             budget_ms: MODELS_BUDGET_MS,
@@ -159,6 +163,50 @@ fn page_browser_models_nothing_collapses_before_the_lanes_query_answers() {
         .count();
     assert_eq!(lanes, 6, "{result:#}");
     assert_eq!(result["unused"], Value::Null, "{result:#}");
+}
+
+/// A failed refresh of the seven-day per-model read keeps the fold: the
+/// collapsed line stays the same open node, and an unused lane expanded
+/// inside it stays the same open row, after the first failure and after the
+/// next round.
+///
+/// Mutation check: return null from modelsUsedNicknames unless the read is
+/// live -> red (the failure unfolds every lane and replaces the row).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_a_failed_lanes_refresh_keeps_the_collapsed_lanes() {
+    let result = hop_case_named("models-stale-fold", &[MODELS_DRIVER]);
+
+    let before = &result["before"];
+    assert_eq!(
+        before["unused"], "2 lanes with no request in the last 7 days",
+        "{result:#}"
+    );
+    for (at, obs) in [
+        ("before", before),
+        ("failed_once", &result["failed_once"]),
+        ("next_round", &result["next_round"]),
+    ] {
+        for flag in [
+            "same_fold",
+            "fold_open",
+            "same_node",
+            "connected",
+            "in_fold",
+            "open",
+        ] {
+            assert_eq!(obs[flag], true, "`{flag}` broke at {at}: {result:#}");
+        }
+    }
+    assert_eq!(before["failed"], 0, "{result:#}");
+    assert!(
+        result["failed_once"]["failed"].as_u64() >= Some(1),
+        "the lanes QUERY failed: {result:#}"
+    );
+    assert_eq!(
+        result["next_round"]["unused"], before["unused"],
+        "{result:#}"
+    );
 }
 
 /// An expanded lane row is the same node, still open, across two refreshes

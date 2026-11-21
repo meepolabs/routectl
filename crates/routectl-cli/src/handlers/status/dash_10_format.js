@@ -20,6 +20,8 @@
 
   function num0(x) { var n = Number(x); return isFinite(n) ? n : 0; }
 
+  function phrase(n, one, many) { return n === 1 ? one : many; }
+
   // A percentage that ARRIVED as a percentage (the ledger's own weighted
   // cache-hit share), to whole precision. A non-positive share renders "0%"
   // faintly at its call site rather than as an absence: zero warm reads is a

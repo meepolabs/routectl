@@ -4,9 +4,9 @@
   // panel's order (problems first). Rows the needs-attention list names under
   // one cause sit under one cause line carrying that item's words; a row
   // whose problem has cleared shows how long ago, from the list's recovered
-  // item that named it. With the seven-day per-model read live, lanes none of
-  // whose nicknames carried a request collapse to one line. Every string is
-  // set as text.
+  // item that named it. Once the seven-day per-model read has answered
+  // (live, or kept as stale), lanes none of whose nicknames carried a request
+  // collapse to one line. Every string is set as text.
   //
   // The attention list and the seven-day read are each guarded the way
   // acctPoolCounts guards health: either one missing costs its own facts
@@ -63,8 +63,6 @@
     }
   }
 
-  function phrase(n, one, many) { return n === 1 ? one : many; }
-
   function modelsIsProblem(row) {
     return row.state !== 'ok' || typeof row.cause_key === 'string';
   }
@@ -85,9 +83,10 @@
   }
 
   // The nicknames the seven-day per-model read saw a request for, or null
-  // while that read is not live: only a current answer may hide a lane.
+  // while that read holds no answer. The answer a failed refresh kept still
+  // decides the fold: dropping it would unfold every collapsed lane, replace
+  // their rows and lose what the operator had open.
   function modelsUsedNicknames(rec) {
-    if (rec.state !== 'live') { return null; }
     var view = queryViewOf(rec.name);
     if (!view) { return null; }
     var used = Object.create(null);
@@ -98,7 +97,7 @@
     return used;
   }
 
-  // A lane collapses when the seven-day read is live and none of its
+  // A lane collapses when the seven-day read holds an answer and none of its
   // nicknames carried a request in it. A pooled nickname's seat lanes share
   // the nickname, so they collapse or stay together. A problem, or a problem
   // that cleared recently, always stays a row of its own.

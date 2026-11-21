@@ -122,6 +122,11 @@
 
   var ALIAS_STEP_KIND = 'alias';
 
+  // The label the server gives a group whose rows carry no value for the
+  // grouping (a request that never reached a provider). It names no
+  // provider, so it is never a scope; a page.rs test pins it to the server's.
+  var UNATTRIBUTED_LABEL = '(unattributed)';
+
   // The dimensions a query can group by, as [token, picker label], in picker
   // order. The URL codec, the transport and the Traffic picker all read this
   // one list; a page.rs test pins the tokens to the server's groupings.
@@ -139,6 +144,12 @@
   // read anywhere in the script must be declared here, be a key of an object
   // literal the script builds, or be a JS/DOM built-in. A field the page starts
   // reading goes into its panel's list here.
+  // The `/status` aggregate's own envelope: the member every panel above
+  // arrives under.
+  var AGGREGATE_FIELDS = [
+    'panels'
+  ];
+
   var HEALTH_FIELDS = [
     'schema_version', 'unavailable', 'as_of', 'data',
     'targets', 'pools',
@@ -166,14 +177,7 @@
     'schema_version', 'unavailable', 'as_of', 'data',
     'report', 'reachability', 'capability_writes',
     'findings', 'status', 'section', 'name', 'detail', 'remediation',
-    'capability_events_dropped_full', 'write_errors', 'capability_writer_unavailable',
-    'panels', 'capability_matrix', 'availability', 'state', 'code', 'source', 'columns', 'lanes',
-    'warm', 'outcome', 'class', 'summary', 'replay',
-    'loaded_rows', 'replayed', 'skipped_vocab', 'skipped_owner', 'skipped_revision',
-    'skipped_lane', 'skipped_unknown',
-    'lane', 'routed', 'provider_kind', 'nicknames', 'cells',
-    'action', 'verdict', 'layer', 'stale', 'nickname_actions', 'nickname',
-    'first_seen_ms', 'last_seen_ms', 'expires_at_ms', 'value'
+    'capability_events_dropped_full', 'write_errors', 'capability_writer_unavailable'
   ];
 
   var ATTENTION_FIELDS = [
