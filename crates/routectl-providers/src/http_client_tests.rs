@@ -585,3 +585,31 @@ fn local_build_error_names_the_serialize_step_for_a_serde_failure() {
         "{message}"
     );
 }
+
+#[test]
+fn user_agent_validity_matches_whether_the_client_builds() {
+    let rows = [
+        ("claude cli", "claude-cli/2.1.3 (external, cli)", true),
+        (
+            "codex cli",
+            "codex_cli_rs/0.5.0 (Linux; x86_64) xterm",
+            true,
+        ),
+        ("tab", "routectl/0.9.0\t(test)", true),
+        ("non-ascii obs-text", "routectl/0.9.0 (Jos\u{e9})", true),
+        ("empty", "", true),
+        ("CR", "routectl\r", false),
+        ("LF", "routectl\n", false),
+        ("NUL", "routectl\0", false),
+        ("DEL", "routectl\u{7f}", false),
+        ("SOH", "routectl\u{1}", false),
+    ];
+    for (label, user_agent, expected) in rows {
+        let builds = super::common_builder(Some(user_agent), "https://api.example.test")
+            .build()
+            .is_ok();
+
+        assert_eq!(builds, expected, "{label}: client build");
+        assert_eq!(super::is_valid_user_agent(user_agent), builds, "{label}");
+    }
+}

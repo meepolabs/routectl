@@ -912,7 +912,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `format`, `base_url` or `cloud`, `credential`, `auth` | `[providers.X]` | provider-only; required (see [Provider entries](#provider-entries-providersx)) |
 | `account_id_ref`, `cloud_project_id` | `[providers.X]` | provider-only companions; one format each (see [Provider entries](#provider-entries-providersx)) |
 | `anthropic_version`            | `[providers.X]`     | provider-only, `anthropic-messages` only; default `2023-06-01`         |
-| `user_agent`                   | `[providers.X]`     | provider-only                                                          |
+| `user_agent`                   | `[providers.X]`     | provider-only; a value that is not a valid HTTP header value is refused at load |
 | `runtime` (RPM, breaker, timeouts) | `[providers.X]`, `[pools.X]` | provider > pool; the two timeouts then fall back to `[retry]`          |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
@@ -1790,7 +1790,10 @@ The keys, in order:
   `client_fingerprint_stripped`; an operator-set `metadata` value is
   still sent. A library caller that builds its own `ChatRequest` without
   an ingress keeps forwarding its explicit `provider_extras`.
-- `user_agent` (optional) -- override the outbound `User-Agent`.
+- `user_agent` (optional) -- override the outbound `User-Agent`. A value
+  that is not a valid HTTP header value (CR, LF, NUL, DEL or another
+  control character other than tab) is refused at load, naming the entry
+  and the key but not the value.
 
 ### Cloud Code (`gemini-cloud-code`)
 

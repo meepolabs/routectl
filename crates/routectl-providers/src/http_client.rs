@@ -379,6 +379,14 @@ fn is_loopback_host(host: &str) -> bool {
         .map_or(host == "localhost", |ip| ip.is_loopback())
 }
 
+/// True when `user_agent` is a value this module's client builders can
+/// install: the builder parses it as a header value, and a value that
+/// fails that parse leaves the builder in an error state that every client
+/// build here turns into a panic.
+pub fn is_valid_user_agent(user_agent: &str) -> bool {
+    reqwest::header::HeaderValue::from_str(user_agent).is_ok()
+}
+
 /// Shared builder body: TLS-1.2 floor, timeouts, optional UA, and the
 /// host-keyed proxy policy for `base_url`. Centralized so
 /// `build_no_redirect` and `build_with_cookie_provider` cannot drift on

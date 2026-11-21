@@ -631,6 +631,23 @@ pub(super) fn validate_codex_version_syntax(provider_name: &str, version: &str) 
     Ok(())
 }
 
+/// Refuse an entry `user_agent` the HTTP client builder cannot install.
+/// The rule is the builder's own header-value parse, so the accept set
+/// matches what reaches the wire. The message names the entry and the key
+/// only: the value may carry control bytes and is never echoed.
+pub(super) fn validate_user_agent_syntax(provider_name: &str, entry: &ProviderEntry) -> Result<()> {
+    match entry.user_agent.as_deref() {
+        Some(user_agent) if !routectl_providers::is_valid_user_agent(user_agent) => {
+            Err(routectl_core::Error::Config(format!(
+                "provider `{provider_name}`: user_agent is not a valid HTTP header value \
+                 (control characters such as CR, LF, NUL and DEL are not allowed); fix the value \
+                 or delete the key"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The maximum number of members one pool may declare. Bounds pool
 /// construction cost, the per-request dispatch chain a pool expands into,
 /// and the per-member WARN volume a degraded pool emits. Well above any
@@ -959,6 +976,9 @@ fn provider_entry_errors(name: &str, entry: &ProviderEntry) -> Vec<String> {
             errors.push(message);
         }
     }
+    if let Err(e) = validate_user_agent_syntax(&name, entry) {
+        errors.push(bare_validation_message(e));
+    }
     errors
 }
 
@@ -1063,3 +1083,7 @@ mod managed_oauth_tests;
 #[cfg(all(test, feature = "openai-responses"))]
 #[path = "validate_account_id_tests.rs"]
 mod account_id_tests;
+
+#[cfg(test)]
+#[path = "validate_user_agent_tests.rs"]
+mod user_agent_tests;

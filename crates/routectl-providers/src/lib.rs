@@ -98,6 +98,14 @@ pub(crate) mod sampling_drop_guard;
     feature = "bedrock"
 ))]
 pub(crate) mod http_client;
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini",
+    feature = "bedrock"
+))]
+pub use http_client::is_valid_user_agent;
 
 // Shared single-shot reachability probe for the HTTP-based egresses
 // (`Provider::probe`). Gated on the three OpenAI/Anthropic-shape

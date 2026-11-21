@@ -57,7 +57,8 @@ const FORWARDED_HOST_VENDOR: &str = "anthropic";
 /// `anthropic-messages` to the Anthropic API host with `bearer`;
 /// `gemini-cloud-code` only with a managed `oauth://antigravity` login;
 /// managed-login containment over every reference slot; then the entry's
-/// shape (`base_url` a plain http(s) URL, no key its format does not take).
+/// shape (`base_url` a plain http(s) URL, no key its format does not take);
+/// then `user_agent`, when set, is a value the HTTP client can install.
 /// Then it computes the client-identity verdict.
 ///
 /// Every build path calls this first and passes the plan down: no
@@ -70,6 +71,7 @@ pub fn plan_provider(name: &str, entry: &ProviderEntry) -> Result<ProviderPlan> 
     if let Some(refusal) = shape_refusals(name, entry).into_iter().next() {
         return Err(Error::Config(refusal));
     }
+    super::validate::validate_user_agent_syntax(name, entry)?;
     Ok(plan)
 }
 

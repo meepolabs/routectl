@@ -635,6 +635,43 @@ async fn unknown_field_reload_rejected_old_router_stays_live() {
     prove_watch_delivering(&base_url, &config_path, "field-stable", "field-post").await;
 }
 
+/// The alias config with a provider `user_agent` carrying CR/LF: TOML
+/// accepts it, but no HTTP client can install it as a header value.
+fn config_text_with_crlf_user_agent(alias: &str) -> String {
+    config_text_with_alias(alias).replace(
+        "auth = \"bearer\"\n",
+        "auth = \"bearer\"\nuser_agent = \"probe/1.0\\r\\nX-Injected: 1\"\n",
+    )
+}
+
+/// A reload whose candidate sets a header-illegal `user_agent` is refused
+/// and the running daemon keeps its router and its watch: the old alias
+/// stays live, the candidate's never surfaces, and a later valid write
+/// still reloads.
+#[tokio::test]
+async fn header_illegal_user_agent_reload_rejected_old_router_stays_live() {
+    let (base_url, config_path, _dir) = spawn_watched_server("ua-stable").await;
+    let candidate = config_text_with_crlf_user_agent("ua-rejected");
+    assert!(
+        candidate.contains("user_agent = \"probe/1.0\\r\\n"),
+        "fixture must carry the CR/LF user_agent: {candidate}"
+    );
+
+    prove_watch_delivering(&base_url, &config_path, "ua-stable", "ua-armed").await;
+
+    hold_rejected_candidate(
+        &base_url,
+        &config_path,
+        candidate.as_bytes(),
+        Some("ua-rejected"),
+        Some("ua-stable"),
+        REJECT_HOLD_WINDOW,
+    )
+    .await;
+
+    prove_watch_delivering(&base_url, &config_path, "ua-stable", "ua-post").await;
+}
+
 /// Five sequential rewrites of the config (each with a unique
 /// alias) all complete without dead-locking. The final alias is
 /// what `/v1/models` returns. Pins the no-filter design's
