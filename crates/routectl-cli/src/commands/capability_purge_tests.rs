@@ -230,6 +230,30 @@ async fn an_unrecognized_success_body_exits_non_zero() {
     assert_eq!(code, 1);
 }
 
+/// A success status whose body is over the read cap is an unrecognized
+/// response, not a purge. The oversized body is a VALID purge-success envelope
+/// padded past 2 MiB, so an uncapped read would parse it and exit zero: the
+/// only way this exits non-zero is the cap refusing the read.
+#[tokio::test]
+async fn an_oversized_success_body_is_an_unrecognized_response() {
+    // Arrange
+    let mut body = purge_response(true);
+    body["padding"] = json!("x".repeat(2 * daemon_client::MAX_BODY_BYTES));
+    let daemon = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(PURGE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
+        .mount(&daemon)
+        .await;
+
+    // Act
+    let code = run(&config_pointing_at(&daemon.uri()), LANE, "web_search").await;
+
+    // Assert
+    assert_eq!(code, 1, "an over-cap body must not be read as a purge");
+}
+
 #[tokio::test]
 async fn an_unreachable_daemon_exits_non_zero_and_writes_no_local_state() {
     // Arrange: a port bound WITHOUT listening, so every dial is refused and no
@@ -375,7 +399,7 @@ async fn no_credential_header_is_sent_when_the_daemon_is_token_less() {
     );
 }
 
-// --- Fix round: destination derivation, proxy bypass, redirect refusal ---
+// --- Fix round: destination derivation, redirect refusal ---
 
 /// The whole command refuses before transmitting when no loopback destination
 /// can be derived. Proven on a config an operator can really write: a hostname
@@ -483,173 +507,6 @@ async fn every_3xx_status_is_reported_as_a_failure() {
             code, 1,
             "status {status} must be reported as a failure, never as a purge, \
              even when its body would parse as one"
-        );
-    }
-}
-
-/// Single-source pin for the two client settings whose absence is otherwise
-/// only observable through a process-global environment variable.
-///
-/// The behavioral proof of the proxy bypass lives in its own test BINARY
-/// (`tests/capability_purge_no_proxy.rs`) because the environment is
-/// per-process; this guard is the cheap in-suite companion, and it fails on
-/// exactly one line so removing either setting names itself.
-#[test]
-fn the_control_client_pins_no_proxy_and_no_redirects() {
-    // Arrange: this module's production text. The tests are a sidecar, so the
-    // whole file is the production region and nothing can truncate the scan.
-    let source = include_str!("capability_purge.rs");
-
-    // Assert
-    assert!(
-        source.contains(".no_proxy()"),
-        "the control client must bypass any configured proxy: reqwest reads \
-         HTTP_PROXY / ALL_PROXY from the environment by default, and a loopback \
-         control call must not hand its listener token to an outbound hop"
-    );
-    assert!(
-        source.contains("redirect::Policy::none()"),
-        "the control client must not follow redirects: `x-api-key` is not on \
-         reqwest's cross-host strip list, so a followed 3xx would carry the \
-         credential and the body to whatever host Location names"
-    );
-}
-
-// --- Second fix round: the destination is loopback or it is nothing ---
-
-/// A LITERAL loopback bind is preserved exactly as written, and an IPv6 literal
-/// is bracketed. Preserved rather than normalized because the daemon bound that
-/// specific address: rewriting `127.0.0.5` to `127.0.0.1` would dial an address
-/// nothing is listening on.
-#[test]
-fn a_literal_loopback_bind_is_preserved_verbatim() {
-    for (bind, expected) in [
-        (
-            "127.0.0.1",
-            "http://127.0.0.1:8791/control/capability/purge",
-        ),
-        (
-            "127.0.0.5",
-            "http://127.0.0.5:8791/control/capability/purge",
-        ),
-        (
-            "127.255.255.254",
-            "http://127.255.255.254:8791/control/capability/purge",
-        ),
-        ("::1", "http://[::1]:8791/control/capability/purge"),
-        ("[::1]", "http://[::1]:8791/control/capability/purge"),
-    ] {
-        // Act
-        let url = control_url(bind, 8791);
-
-        // Assert
-        assert_eq!(
-            url.as_deref(),
-            Some(expected),
-            "literal loopback bind `{bind}` must be addressed exactly as bound"
-        );
-    }
-}
-
-/// A WILDCARD bind derives the loopback address of the matching family. A
-/// wildcard is reachable on every interface INCLUDING loopback, so this is a
-/// derivation the operator's own configuration justifies -- `0.0.0.0` itself is
-/// not an address to dial.
-#[test]
-fn a_wildcard_bind_derives_the_matching_family_loopback() {
-    for (bind, expected) in [
-        ("0.0.0.0", "http://127.0.0.1:8791/control/capability/purge"),
-        ("::", "http://[::1]:8791/control/capability/purge"),
-        ("[::]", "http://[::1]:8791/control/capability/purge"),
-    ] {
-        // Act
-        let url = control_url(bind, 8791);
-
-        // Assert
-        assert_eq!(
-            url.as_deref(),
-            Some(expected),
-            "wildcard bind `{bind}` must derive its family's loopback address"
-        );
-    }
-}
-
-/// A SPECIFIC non-loopback bind is REFUSED, not rewritten.
-///
-/// Rewriting it to `127.0.0.1` was wrong in both directions. It is a guess: a
-/// daemon bound only to `10.20.30.40` is NOT listening on loopback, so the
-/// rewrite dials a port that may belong to an entirely different process on
-/// this machine -- and the credentialed request goes to whatever answers. And it
-/// silently contradicts the operator's own configuration instead of saying the
-/// control surface is unreachable as configured. A refusal is the honest answer.
-#[test]
-fn a_specific_non_loopback_bind_is_refused_rather_than_rewritten() {
-    for bind in [
-        "10.20.30.40",
-        "192.168.1.5",
-        "203.0.113.7",
-        "2001:db8::1",
-        "[2001:db8::1]",
-        "::ffff:203.0.113.7",
-        "169.254.1.1",
-    ] {
-        // Act
-        let url = control_url(bind, 8791);
-
-        // Assert
-        assert!(
-            url.is_none(),
-            "specific non-loopback bind `{bind}` must be refused, not rewritten \
-             to loopback: the daemon is not listening there, so the rewrite \
-             would send a credential to whatever else holds that port"
-        );
-    }
-}
-
-/// An IPv4-MAPPED loopback bind is a loopback bind. The shared predicate
-/// unwraps the mapping, so `::ffff:127.0.0.1` is preserved rather than refused.
-#[test]
-fn an_ipv4_mapped_loopback_bind_is_preserved() {
-    // Act
-    let url = control_url("::ffff:127.0.0.1", 8791);
-
-    // Assert
-    assert_eq!(
-        url.as_deref(),
-        Some("http://[::ffff:127.0.0.1]:8791/control/capability/purge"),
-        "an IPv4-mapped loopback literal names loopback and must be preserved"
-    );
-}
-
-/// Everything unclassifiable is refused. A hostname cannot be shown to name
-/// loopback without asking a resolver, and a resolver answer is exactly what
-/// this command must not depend on.
-#[test]
-fn every_unclassifiable_bind_is_refused() {
-    for bind in [
-        "",
-        "   ",
-        "not a host",
-        "example.com",
-        "daemon.internal",
-        "http://127.0.0.1",
-        "127.0.0.1:8791",
-        // A NAME, and treated as one: see the dedicated test below.
-        "localhost",
-        "LOCALHOST",
-        "LocalHost",
-        "[::1",
-        "::1]",
-        "localhost.evil.example",
-    ] {
-        // Act
-        let url = control_url(bind, 8791);
-
-        // Assert
-        assert!(
-            url.is_none(),
-            "bind `{bind}` cannot be shown to name loopback, so it must be \
-             refused rather than guessed"
         );
     }
 }
@@ -769,62 +626,6 @@ async fn a_daemon_sending_a_hostile_code_still_exits_non_zero() {
 }
 
 // --- Final correction: `localhost` is a NAME, so it is underivable ---
-
-/// `localhost` is refused like any other hostname.
-///
-/// It reads as obviously loopback, which is exactly why it was tempting to
-/// special-case -- and why the special case was wrong. Accepting it forced this
-/// command to pick an address FAMILY on the operator's behalf: `localhost`
-/// resolves to `127.0.0.1`, `::1`, or both depending on the resolver and the
-/// hosts file, and the daemon bound whichever one it was given. Choosing `::1`
-/// when the daemon bound `127.0.0.1` sends a credentialed request to a port that
-/// may belong to a different process; choosing `127.0.0.1` when it bound `::1`
-/// does the same. There is no correct guess available here, so the honest answer
-/// is to require the operator to say which one -- the literal they already had
-/// to give the daemon.
-#[test]
-fn the_localhost_name_is_underivable_like_any_other_hostname() {
-    for bind in ["localhost", "LOCALHOST", "LocalHost", "localhost."] {
-        // Act
-        let url = control_url(bind, 8791);
-
-        // Assert
-        assert!(
-            url.is_none(),
-            "`{bind}` is a NAME: deriving from it would mean picking an address \
-             family the operator never chose, and resolving it would let a \
-             resolver decide where a credential goes"
-        );
-    }
-}
-
-/// The paired positive: the EXPLICIT loopback literals of both families still
-/// work. Without this, the refusal above would be equally satisfied by a command
-/// that refused every bind, which would make the control surface unusable.
-#[test]
-fn both_explicit_loopback_literal_families_still_derive() {
-    // Act + Assert: IPv4.
-    assert_eq!(
-        control_url("127.0.0.1", 8791).as_deref(),
-        Some("http://127.0.0.1:8791/control/capability/purge"),
-        "an explicit IPv4 loopback literal must still work"
-    );
-    // Act + Assert: IPv6, bracketed.
-    assert_eq!(
-        control_url("::1", 8791).as_deref(),
-        Some("http://[::1]:8791/control/capability/purge"),
-        "an explicit IPv6 loopback literal must still work, bracketed"
-    );
-    // And the wildcard derivations are untouched by this change.
-    assert_eq!(
-        control_url("0.0.0.0", 8791).as_deref(),
-        Some("http://127.0.0.1:8791/control/capability/purge"),
-    );
-    assert_eq!(
-        control_url("::", 8791).as_deref(),
-        Some("http://[::1]:8791/control/capability/purge"),
-    );
-}
 
 /// A `localhost` bind refuses locally: nothing is transmitted.
 ///

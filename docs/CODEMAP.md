@@ -9235,6 +9235,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   columns (the lane printed exactly as `capability purge` accepts it),
   compact `verdict[source]->action` cells with a `(stale)` marker
   and an `(unrouted)` lane tag
+- `src/commands/daemon_client.rs` -- the CLI's client for the local daemon
+  (crate-private module). `control_url(bind, port, path)` derives the URL from
+  `[server] host`: a loopback literal verbatim, a wildcard bind translated to
+  the matching family's loopback address, anything else `None` -- a SPECIFIC
+  non-loopback bind (rewriting it would dial whatever other process holds that
+  port) and EVERY hostname, `localhost` included (a name picks no address
+  family, and resolving it would let a resolver choose the destination); the
+  authority is rendered through `SocketAddr` so an IPv6 literal is bracketed.
+  `build_client(timeout)` pins `.no_proxy()` (reqwest reads `HTTP_PROXY` /
+  `ALL_PROXY` from the env by default, and a loopback call must not hand its
+  token to an outbound hop) and `redirect::Policy::none()` (`x-api-key` is not
+  on reqwest's cross-host strip list), matching the
+  `routectl-providers::http_client` posture; `REQUEST_TIMEOUT` is the 5 s
+  default. `first_listener_token` resolves the first `[server.auth]` token
+  (silently `None` when unresolvable). `read_capped_body` reads at most
+  `MAX_BODY_BYTES` (1 MiB) and returns `BodyError::TooLarge` past it
 - `src/commands/capability_purge.rs` -- `routectl capability purge <lane>
   <capability>`: parses `<lane>` through `StateKey::parse` (refusing an
   unparseable lane locally, non-zero), POSTs the two keys to the daemon's
