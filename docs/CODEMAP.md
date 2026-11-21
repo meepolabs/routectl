@@ -584,7 +584,8 @@ license.
   `model_profile`, `skipped_format`, `stream_completion`, `upstream_error`,
   `aws_error`; re-exports
   `system_filter::is_billing_attribution_block` for the ingress system lift,
-  `aws_error::is_client_safe_token` for the cli error-envelope sinks, and
+  `aws_error::is_client_safe_token` for the cli error-envelope sinks,
+  `http_client::is_valid_user_agent` for config validation, and
   `retry_after::parse_retry_after` for callers that read a vendor's rate-limit
   reply themselves
 - `src/alloc_probe.rs` -- test-only thread-local allocation counter for
@@ -623,7 +624,9 @@ license.
   call it
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin,
   User-Agent override, and the host-keyed proxy policy (every builder takes
-  the client's base URL; a loopback host gets `no_proxy()`); tests in
+  the client's base URL; a loopback host gets `no_proxy()`); public
+  `is_valid_user_agent` (the builder's own header-value parse, re-exported at
+  the crate root for config validation); tests in
   `src/http_client_tests.rs`; also owns the response-body cap cluster shared by
   all five provider egresses: `read_body_capped` (two-guard buffered read --
   fast-reject on an honest over-cap `Content-Length` plus a mid-transfer
@@ -2081,8 +2084,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `client_identity`): the one decision about an entry taken before any
   credential read (credential parse, carrier, descriptor route, sigv4
   pairing, forwarded pin, Cloud Code login, managed-login containment, entry
-  shape), run by every build path and, via `plan_coherent_entry`, by config
-  validation
+  shape, `user_agent` header-value syntax), run by every build path and, via
+  `plan_coherent_entry`, by config validation
 - `src/factory/validate_region.rs` -- (cfg `bedrock`) `validate_aws_regions`:
   config-load rejection of a non-canonical `cloud.region`
 - `src/factory/validate_state_keys.rs` -- `validate_state_key_names`:
@@ -2100,10 +2103,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `validate_managed_anthropic_credential` (the descriptor's anthropic vendor
   containment); `validate_codex_version` (syntax, and one agreed value across
   entries) with `resolved_codex_version` / `configured_codex_version`;
+  `validate_user_agent_syntax` (an entry `user_agent` the HTTP client cannot
+  install, via `routectl_providers::is_valid_user_agent`; units in
+  `validate_user_agent_tests.rs`);
   cfg(`bedrock`) `validate_bedrock_invoke_model_family` (a non-Anthropic
   `upstream` on a `bedrock-invoke` provider); `validate_pools` (one collecting
-  pass: unknown member, members differing on any `PoolKey` field, double
-  claim, non-OAuth member, name collisions, empty, over `MAX_POOL_MEMBERS`);
+  pass: unknown member, a member repeated inside one pool, members differing
+  on any `PoolKey` field, double claim, non-OAuth member, name collisions,
+  empty, over `MAX_POOL_MEMBERS`);
   plus the private capability-essential, float-field, cloud Responses
   `store` and account-id checks; the `[mitm]` validator stays on the router
   build path
@@ -2417,7 +2424,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   newest-wins per key on the monotonic clock; a partial never erases; a
   complete report drops older omitted windows and sets a floor late windows
   cannot cross; a same-reset reading lower by at most `CONTRADICTION_SLACK`
-  is kept at the higher value. A lower reading against a window still in
+  is kept at the higher value. A running reading whose reset is earlier than
+  the stored (or kept) window's by more than `RESET_TOLERANCE` is also lower.
+  A lower reading against a window still in
   effect is refused `Contradictory` until `CORRECTION_CONFIRMATIONS`
   consecutive agreeing lower readings for the key (a per-key streak) confirm
   it, then taken as reported. A running window a complete report drops is
@@ -5512,7 +5521,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `env_ref`); feature-gated re-exports of `LocalProbe`, `LoginOptions`,
   `OAuthError`, `OAuthStore`, `OAuthStoreProjectCache`, `OpenOutcome` under
   `oauth` (incl. the `RefreshOutcome` / `DefinitiveCause` refresh-check
-  vocabulary and the `PeekedAccessToken` / `PeekedCredential` peek outcomes),
+  vocabulary, the `ForcedRefreshError` that `force_refresh` returns, and the
+  `PeekedAccessToken` / `PeekedCredential` peek outcomes),
   and the unconditional `CredentialProbeFailure`. Carries
   `#![warn(missing_docs)]`
 - `src/store.rs` -- `SecretStore` async trait (get/set/delete) for credential
@@ -5563,8 +5573,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug),
   `SCHEMA_VERSION`, `unix_now`; `seat_key(provider, label)` composes the
   credentials-map key (bare provider for the default seat, `provider#label`
-  otherwise) and `CredentialsFile::seats_for_provider` enumerates a provider's
-  seats (default first, then sorted labels)
+  otherwise), `seat_description(seat)` names a seat key in operator messages
+  (the key when it prints exactly, else a provider-only phrase), and
+  `CredentialsFile::seats_for_provider` enumerates a provider's seats
+  (default first, then sorted labels)
 - `src/oauth/file_io.rs` -- atomic load/save of `credentials.json` under the
   shared `routectl_core::config_dir` folder (`default_path` errors when no
   folder resolves); load is TOCTOU-safe (fstat + `0o600`
@@ -5605,7 +5617,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `doctor` and the server reload read)
 - `src/oauth/store/refresh.rs` -- per-seat single-flight refresh:
   `force_refresh(provider, label)` targets one seat (drives `routectl refresh
-  --label`), `refresh_if_due(provider, label)` -> `RefreshOutcome` {NotDue,
+  --label`) and fails with `ForcedRefreshError` {`error` naming the seat and no
+  command, `relogin: Option<DefinitiveCause>`},
+  `refresh_if_due(provider, label)` -> `RefreshOutcome` {NotDue,
   Refreshed, Transient, Definitive(`DefinitiveCause` NotLoggedIn / Revoked)}
   for the background seat driver, `refresh_under_lock` (near-expiry 300s lead + 401-recovery +
   reload-generation guard), `reload_from_disk` (returns the seat keys whose
@@ -5626,7 +5640,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   preserves an existing `session_id` across token rotation (the codex provider
   flow mints the fresh `session_id` on first OAuth exchange);
   `seat_ref_from_key` inverse of `seat_key`; `probe_credential` tells a missing
-  login apart from an unreadable one
+  login apart from an unreadable one; `resolve_error` adds the `routectl login`
+  hint to a missing default seat only (a labeled seat gets no command)
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry +
   `known_provider_ids` (anthropic, codex, xai, antigravity); `AuthParams`,
   `token_parse_error`, and `token_status_error`/`safe_token_error_code`
@@ -6487,16 +6502,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (a `SeatJob` that peeks each due seat's token, fetches its usage endpoint and
   lands an accepted body through `Router::observe_polled_usage`, plus its
   history rows; switched off by `[usage] poll = false`, read from the live
-  router before each sweep, each seat and each landing, and sending an
-  Anthropic seat's configured `user_agent`), `UsagePollState` / `PollStateSnapshot` (the
+  router before each sweep, each seat and each landing, and sending each
+  seat's configured `user_agent`), `UsagePollState` / `PollStateSnapshot` (the
   schedule and its read-only view for `/status/accounts`, where a switched-off
   seat reads `off`) and `spawn_usage_poll_driver`
 - `src/server/usage_poll/client.rs` -- the usage poll's HTTP client: the two
   compile-time vendor usage URLs, a no-redirect https-only client with 5 s
   connect / 10 s total timeouts, the body cut at `MAX_USAGE_BODY_BYTES`, the
-  lane's first-party identity headers (`anthropic_user_agent`: the configured
-  Claude `user_agent` when it is a valid header value, else the compiled
-  default), and the closed `FetchResult`; its
+  lane's first-party identity headers (`usage_user_agent` -> `UsageUserAgent`:
+  the seat's configured `user_agent` when it is a valid header value, else
+  none so the vendor's compiled Claude or Codex default is sent), and the
+  closed `FetchResult`; its
   `network_fence` makes a test build resolve no host; tests in
   `client_tests.rs`
 - `src/server/usage_poll/history.rs` -- maps an accepted poll reading to
@@ -8715,8 +8731,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   an error
 - `src/commands/refresh.rs` -- `routectl refresh <provider> [--label <name>]`
   -- forces a refresh of one seat through the per-seat single-flight gate,
-  regardless of expiry. Takes no config path, so it is write-free by
-  construction (unlike `login`, which offers a config change)
+  regardless of expiry. `run` takes the chosen config path only to name it in
+  the rerun; it never reads or writes config. `refresh_with` runs against an
+  already-open store; a failure only a fresh login cures appends the exact
+  `routectl login` rerun for the same seat (built with `commands::rerun`)
 - `src/commands/whoami.rs` -- `routectl whoami` -- prints OAuth seat state
   grouped by provider (default seat as `<provider> (default)`, labeled seats
   as `<provider>#<label>`), each with its own expiry; exits 0 when at least
@@ -8727,7 +8745,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   whole command when a value has no exact printable form (control
   character, non-UTF-8 path); `chosen_config_path` leaves the default file
   unnamed; `instruction` falls back to "re-run the same `...` command".
-  Used by `login`, `provider add --login` and `init`
+  Used by `login`, `refresh`, `provider add --login` and `init`
 - `src/commands/seat.rs` -- shared `--label` handling for the seat-aware
   OAuth commands: `validate_label` (rejects empty/whitespace labels,
   mirroring the `oauth://` ref parser) and `shell_word` (one POSIX shell
