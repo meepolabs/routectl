@@ -6023,7 +6023,7 @@ upstream = "claude-sonnet-4-6"
 
 | Key | Meaning |
 |---|---|
-| `members` | `[providers]` table keys, required and non-empty, at most 32. Every member must exist, all must share format, destination, auth, OAuth vendor and cloak settings (see "What pool members share" below), and a provider entry belongs to at most one pool. This release's members are OAuth accounts. |
+| `members` | `[providers]` table keys, required and non-empty, at most 32. Every member must exist, all must share format, destination, auth, OAuth vendor and cloak settings (see "What pool members share" below), a provider entry belongs to at most one pool, and a pool lists each member once (a repeated member is refused, naming the pool and the member). This release's members are OAuth accounts. |
 | `seat_selection` | How dispatch picks among the members for one request. Documented per strategy below. Set on the POOL, because the strategy is a property of the SET, not of one transport. |
 | `accepts_new_logins` | Whether a future `routectl login` for this family may propose joining the new account to this pool. `false` (the default) pins the membership list, so only an explicit config edit grows it. There is no wildcard member token. |
 | `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`, `stream_first_byte_timeout_ms` | Tuning every member inherits. See "Pool tuning keys" below. |

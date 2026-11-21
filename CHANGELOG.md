@@ -986,6 +986,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A pool listing the same member twice is refused at load.** `[pools.<name>] members` naming one provider entry more than once passed `config check`, serve and reload, and the pool was built with that account as two seats, so placement ranked it twice. Validation now refuses it with one error per repeated member, naming the pool and the member, however many times the member repeats. A member in two pools is refused as before. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 - **A provider `user_agent` that is not a valid HTTP header value is refused at load.** A value carrying CR, LF, NUL, DEL or another control character other than tab passed `config check` and stopped the daemon when it built its HTTP client, at start or on a hot reload. `config check`, `serve`, the hot-reload gate and the build of a single provider (`provider probe`, `doctor`) now refuse it with an error naming the entry and the key, never the value; a refused reload keeps the running router. The rule is the HTTP client's own header-value parse, so tab and non-ASCII bytes stay accepted. Library callers: `routectl_providers::is_valid_user_agent`.
 
 - **A wide status-page table can be scrolled from the keyboard.** Each table that scrolls inside its card (the Config, Traffic and Models tables) is now a focusable region named after its table, so Tab stops on it, the arrow keys scroll it, and a screen reader announces which table it is.

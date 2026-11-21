@@ -126,7 +126,12 @@ fn only_pool_message(label: &str, toml_text: &str) -> String {
 
 #[test]
 fn hostile_pool_and_member_names_reach_every_pool_message_without_a_control_byte() {
-    let too_many = vec![MEMBER; crate::factory::MAX_POOL_MEMBERS + 1];
+    let too_many: Vec<String> = (0..=crate::factory::MAX_POOL_MEMBERS)
+        .map(|i| format!("s{i:03}"))
+        .collect();
+    let too_many_seats: String = too_many.iter().map(|m| oauth_seat(m, m)).collect();
+    let too_many: Vec<String> = too_many.iter().map(|m| format!("\"{m}\"")).collect();
+    let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
     let rows: Vec<(&str, String, String)> = vec![
         (
             "pool named like a provider entry",
@@ -149,7 +154,7 @@ fn hostile_pool_and_member_names_reach_every_pool_message_without_a_control_byte
         ),
         (
             "too many members",
-            format!("{}{}", oauth_seat(MEMBER, "a"), pool(POOL, &too_many)),
+            format!("{too_many_seats}{}", pool(POOL, &too_many)),
             format!("pool `{POOL_SHOWN}`: 33 members exceeds"),
         ),
         (
@@ -164,6 +169,15 @@ fn hostile_pool_and_member_names_reach_every_pool_message_without_a_control_byte
                 "provider `{MEMBER_SHOWN}` is a member of both pool `{POOL_SHOWN}` and pool \
                  `plain`"
             ),
+        ),
+        (
+            "member listed twice in one pool",
+            format!(
+                "{}{}",
+                oauth_seat(MEMBER, "a"),
+                pool(POOL, &[MEMBER, MEMBER])
+            ),
+            format!("pool `{POOL_SHOWN}`: member `{MEMBER_SHOWN}` is listed more than once"),
         ),
         (
             "unknown member",
@@ -208,4 +222,79 @@ fn a_hostile_pool_name_in_a_mismatch_line_carries_no_control_byte() {
 
     assert!(!message.chars().any(char::is_control), "{message:?}");
     assert!(message.contains("differs from member"), "{message}");
+}
+
+/// How `validate_pools` must answer one membership layout: `None` accepts,
+/// `Some(lines)` refuses with exactly those lines.
+struct MembershipRow {
+    label: &'static str,
+    pools: &'static [(&'static str, &'static [&'static str])],
+    refusal: Option<&'static [&'static str]>,
+}
+
+const REPEAT_LINE: &str = "pool `east`: member `seat-a` is listed more than once; a repeated \
+                           member would be placed as two seats of one account -- list each \
+                           provider entry once";
+
+const MEMBERSHIP_ROWS: &[MembershipRow] = &[
+    MembershipRow {
+        label: "member repeated twice in one pool",
+        pools: &[("east", &["seat-a", "seat-b", "seat-a"])],
+        refusal: Some(&[REPEAT_LINE]),
+    },
+    MembershipRow {
+        label: "member repeated three times in one pool",
+        pools: &[("east", &["seat-a", "seat-a", "seat-b", "seat-a"])],
+        refusal: Some(&[REPEAT_LINE]),
+    },
+    MembershipRow {
+        label: "two members each repeated in one pool",
+        pools: &[("east", &["seat-a", "seat-b", "seat-a", "seat-b"])],
+        refusal: Some(&[
+            REPEAT_LINE,
+            "pool `east`: member `seat-b` is listed more than once; a repeated member would be \
+             placed as two seats of one account -- list each provider entry once",
+        ]),
+    },
+    MembershipRow {
+        label: "member in two pools",
+        pools: &[("east", &["seat-a"]), ("west", &["seat-a", "seat-b"])],
+        refusal: Some(&[
+            "provider `seat-a` is a member of both pool `east` and pool `west`; a provider \
+             entry belongs to at most one pool",
+        ]),
+    },
+    MembershipRow {
+        label: "distinct members",
+        pools: &[("east", &["seat-a", "seat-b"])],
+        refusal: None,
+    },
+];
+
+fn membership_config(pools: &[(&str, &[&str])]) -> Config {
+    let mut text = format!("{}{}", oauth_seat("seat-a", "a"), oauth_seat("seat-b", "b"));
+    for (name, members) in pools {
+        let quoted: Vec<String> = members.iter().map(|m| format!("\"{m}\"")).collect();
+        let quoted: Vec<&str> = quoted.iter().map(String::as_str).collect();
+        text.push_str(&pool(name, &quoted));
+    }
+    parse(&text)
+}
+
+#[test]
+fn pool_membership_is_refused_once_per_repeated_or_shared_member() {
+    for row in MEMBERSHIP_ROWS {
+        let config = membership_config(row.pools);
+
+        let outcome = validate_pools(&config).map_err(|e| e.to_string());
+
+        match row.refusal {
+            None => assert!(outcome.is_ok(), "{}: {outcome:?}", row.label),
+            Some(lines) => {
+                let message = outcome.expect_err(row.label);
+                let expected = format!("config: {}", lines.join("\n"));
+                assert_eq!(message, expected, "{}", row.label);
+            }
+        }
+    }
 }

@@ -9,7 +9,7 @@ use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
 use routectl_core::{Result, render_operator_name};
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Reject cleartext `http://` base_urls unless the parsed host is loopback:
 /// an IPv4 literal in `127.0.0.0/8`, native `::1`, IPv4-mapped loopback, or
@@ -670,6 +670,8 @@ pub const MAX_POOL_MEMBERS: usize = 32;
 ///     becoming two overlapping fallback mechanisms),
 ///   - a member claimed by two pools (a provider entry belongs to at most
 ///     one pool),
+///   - a member listed more than once in one pool, reported once per
+///     repeated member,
 ///   - a member authenticating with an API key rather than an OAuth seat,
 ///   - a pool name colliding with a provider entry name or with a model
 ///     nickname (a `[models.X] provider` value resolves against providers
@@ -720,8 +722,20 @@ pub fn validate_pools(config: &Config) -> Result<()> {
         }
 
         let mut pool_key: Option<(&str, PoolKey)> = None;
+        let mut listed: BTreeSet<&str> = BTreeSet::new();
+        let mut repeated: BTreeSet<&str> = BTreeSet::new();
         for member_key in &pool.members {
             let member = render_operator_name(member_key);
+            if !listed.insert(member_key.as_str()) {
+                if repeated.insert(member_key.as_str()) {
+                    errors.push(format!(
+                        "pool `{pool_name}`: member `{member}` is listed more than once; a \
+                         repeated member would be placed as two seats of one account -- list \
+                         each provider entry once"
+                    ));
+                }
+                continue;
+            }
             if let Some(previous) = claimed_by.insert(member_key.as_str(), pool_key_name.as_str())
                 && previous != pool_key_name.as_str()
             {
