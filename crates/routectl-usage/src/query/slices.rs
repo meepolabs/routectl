@@ -299,7 +299,14 @@ impl SliceJob<'_> {
         let lifetimes = read_lifetimes(&tx, &window, width, limit)?;
         let classes = read_error_classes(&tx, &window, width, limit)?;
         let fine = read_fine_rows(&tx, &window, width, limit)?;
-        let timings = read_timings(&tx, &window, self.spec.group_by, width, limit)?;
+        let timings = read_timings(
+            &tx,
+            &window,
+            self.spec.group_by,
+            &self.spec.entry_accounts,
+            width,
+            limit,
+        )?;
         // A read-only transaction has nothing to commit; finishing releases
         // the snapshot.
         tx.finish()?;

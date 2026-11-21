@@ -21,15 +21,18 @@ use super::aggregate::ReadWindow;
 use super::deadline::ReadLimit;
 use super::grouped::{GroupDim, UNATTRIBUTED};
 
-/// The one statement shape: the display label first, then the bucket index,
-/// the TTFT of an eligible row (NULL otherwise) and the latency, for every
-/// inference row of the window. Every column it reads is in the covering
-/// aggregate index.
+/// The one statement shape: the display label first, then the served
+/// provider entry when the label falls back to that entry's account (NULL
+/// otherwise), the bucket index, the TTFT of an eligible row (NULL otherwise)
+/// and the latency, for every inference row of the window. Every column it
+/// reads is in the covering aggregate index.
 macro_rules! timings_sql {
-    ($label:literal, $bucket:literal) => {
+    ($label:literal, $fallback:literal, $bucket:literal) => {
         concat!(
             "SELECT ",
             $label,
+            ", ",
+            $fallback,
             ", ",
             $bucket,
             ",
@@ -46,23 +49,47 @@ WHERE ",
 /// The bucket expression of the series read: the same global grid index the
 /// series aggregate groups on (`?7` the width, `?8` the anchor).
 macro_rules! timings_sql_pair {
-    ($label:literal) => {
+    ($label:literal, $fallback:literal) => {
         (
-            timings_sql!($label, "0"),
-            timings_sql!($label, "(ts_start - ?8) / ?7"),
+            timings_sql!($label, $fallback, "0"),
+            timings_sql!($label, $fallback, "(ts_start - ?8) / ?7"),
         )
     };
 }
 
-/// The `(unbucketed, bucketed)` statements of `group_by`. The label column is
-/// the column [`GroupDim::label`] reads from the fine key.
+/// The `(unbucketed, bucketed)` statements of `group_by`. The label columns
+/// are the columns [`QuerySpec::group_label`] reads from the fine key.
+///
+/// [`QuerySpec::group_label`]: super::grouped::QuerySpec::group_label
 pub(super) const fn statements(group_by: GroupDim) -> (&'static str, &'static str) {
     match group_by {
-        GroupDim::Model => timings_sql_pair!("COALESCE(model, requested_model)"),
-        GroupDim::Alias => timings_sql_pair!("alias"),
-        GroupDim::Provider => timings_sql_pair!("provider"),
-        GroupDim::Seat => timings_sql_pair!("seat"),
+        GroupDim::Model => timings_sql_pair!("COALESCE(model, requested_model)", "NULL"),
+        GroupDim::Alias => timings_sql_pair!("alias", "NULL"),
+        GroupDim::Provider => timings_sql_pair!("provider", "NULL"),
+        GroupDim::Seat => timings_sql_pair!("seat", "provider"),
     }
+}
+
+/// The display label of one timing row, by the rule
+/// [`QuerySpec::group_label`] applies to a fine row: the label column when it
+/// is set, else the account `entry_accounts` maps the fallback entry to, else
+/// `(unattributed)`.
+///
+/// [`QuerySpec::group_label`]: super::grouped::QuerySpec::group_label
+fn row_label<'r>(
+    label: ValueRef<'r>,
+    fallback: ValueRef<'r>,
+    entry_accounts: &'r BTreeMap<String, String>,
+) -> Result<&'r str, rusqlite::Error> {
+    if let ValueRef::Text(text) = label {
+        return Ok(std::str::from_utf8(text)?);
+    }
+    if let ValueRef::Text(entry) = fallback
+        && let Some(account) = entry_accounts.get(std::str::from_utf8(entry)?)
+    {
+        return Ok(account);
+    }
+    Ok(UNATTRIBUTED)
 }
 
 /// The raw values of one metric set: every eligible TTFT and every latency.
@@ -202,11 +229,16 @@ fn nearest_ranks(values: &mut [i64]) -> [Option<i64>; 3] {
 }
 
 /// Read the timing values of `window` for `group_by`, each split further by
-/// bucket index when `bucket_width_ms` is set.
+/// bucket index when `bucket_width_ms` is set. `entry_accounts` labels a
+/// seat-grouped row with no persisted seat, as [`QuerySpec::entry_accounts`]
+/// does for the aggregate.
+///
+/// [`QuerySpec::entry_accounts`]: super::grouped::QuerySpec::entry_accounts
 pub(super) fn read_timings(
     tx: &Transaction<'_>,
     window: &ReadWindow<'_>,
     group_by: GroupDim,
+    entry_accounts: &BTreeMap<String, String>,
     bucket_width_ms: Option<i64>,
     limit: &ReadLimit,
 ) -> Result<TimingSamples, QueryError> {
@@ -226,19 +258,16 @@ pub(super) fn read_timings(
     let series = bucket_width_ms.is_some();
     while let Some(row) = rows.next()? {
         limit.check()?;
-        let label = match row.get_ref(0)? {
-            ValueRef::Text(text) => std::str::from_utf8(text).map_err(rusqlite::Error::from)?,
-            _ => UNATTRIBUTED,
-        };
-        let ttft: Option<i64> = row.get(2)?;
-        let latency: i64 = row.get(3)?;
+        let label = row_label(row.get_ref(0)?, row.get_ref(1)?, entry_accounts)?;
+        let ttft: Option<i64> = row.get(3)?;
+        let latency: i64 = row.get(4)?;
         let samples = match out.by_label.get_mut(label) {
             Some(samples) => samples,
             None => out.by_label.entry(label.to_string()).or_default(),
         };
         samples.push(ttft, latency);
         if series {
-            let bucket: i64 = row.get(1)?;
+            let bucket: i64 = row.get(2)?;
             out.by_bucket.entry(bucket).or_default().push(ttft, latency);
         }
     }

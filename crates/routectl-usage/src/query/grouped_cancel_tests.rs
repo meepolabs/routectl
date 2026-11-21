@@ -201,14 +201,22 @@ fn a_stopped_limit_interrupts_each_read_row_loop() {
             read_lifetimes(tx, &whole_window(), Some(1000), limit).map(|l| l.len())
         }),
         ("timings, unbucketed", |tx, limit| {
-            crate::query::timings::read_timings(tx, &whole_window(), GroupDim::Model, None, limit)
-                .map(|t| t.by_label.len())
+            crate::query::timings::read_timings(
+                tx,
+                &whole_window(),
+                GroupDim::Model,
+                &Default::default(),
+                None,
+                limit,
+            )
+            .map(|t| t.by_label.len())
         }),
         ("timings, bucketed", |tx, limit| {
             crate::query::timings::read_timings(
                 tx,
                 &whole_window(),
                 GroupDim::Model,
+                &Default::default(),
                 Some(1000),
                 limit,
             )
@@ -255,6 +263,7 @@ fn populated_slice(db: &UsageDb) -> SliceRows {
             &tx,
             &whole_window(),
             GroupDim::Model,
+            &Default::default(),
             width,
             &unbounded,
         )

@@ -2,6 +2,7 @@
 //! display labels, the buckets, the empty sets, the order property, and
 //! independence from how the window is cut.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -71,6 +72,7 @@ fn open_db() -> (TempDir, UsageDb) {
 struct Row {
     ts: i64,
     provider: Option<&'static str>,
+    seat: Option<&'static str>,
     model: Option<&'static str>,
     stream: i64,
     outcome: &'static str,
@@ -82,6 +84,7 @@ struct Row {
 const BASE: Row = Row {
     ts: 0,
     provider: Some("pa"),
+    seat: None,
     model: Some("m1"),
     stream: 1,
     outcome: "ok",
@@ -96,9 +99,9 @@ fn insert(db: &UsageDb, id: usize, row: &Row) {
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
              requested_model, alias, model, provider, upstream, stream, outcome, \
              latency_ms, ttfb_ms, tool_count, msg_count, attempt_count, fallback_count, \
-             operation) \
+             operation, seat) \
              VALUES (?1, ?1, ?2, 'openai', 'req-model', 'al', ?3, ?4, 'u', ?5, ?6, ?7, ?8, \
-             0, 0, 1, 0, ?9)",
+             0, 0, 1, 0, ?9, ?10)",
             rusqlite::params![
                 row.ts,
                 format!("r{id}"),
@@ -109,6 +112,7 @@ fn insert(db: &UsageDb, id: usize, row: &Row) {
                 row.latency,
                 row.ttfb,
                 row.operation,
+                row.seat,
             ],
         )
         .expect("insert");
@@ -223,9 +227,17 @@ fn ttft_counts_only_streaming_successes_and_latency_every_inference_row() {
     assert_eq!(ranks(&result.groups[0].metrics), ranks(t));
 }
 
+/// Entry -> account for the own-credential entry `pa`, as the caller derives
+/// it from config.
+fn entry_accounts() -> BTreeMap<String, String> {
+    BTreeMap::from([("pa".to_string(), "#pa-key".to_string())])
+}
+
 #[test]
 fn groups_are_labelled_as_the_aggregate_labels_them() {
-    // Arrange: a NULL provider and a NULL served model.
+    // Arrange: a NULL-seat row on the mapped entry `pa`, a NULL provider and
+    // served model, and a persisted seat on `pa`; every grouping reads with
+    // the entry map set, which only the seat grouping may consult.
     let (_dir, mut db) = open_db();
     insert(&db, 0, &BASE);
     insert(
@@ -238,19 +250,39 @@ fn groups_are_labelled_as_the_aggregate_labels_them() {
             ..BASE
         },
     );
+    insert(
+        &db,
+        2,
+        &Row {
+            seat: Some("persisted"),
+            latency: 3_000,
+            ..BASE
+        },
+    );
 
     for (group_by, labels) in [
         (
             GroupDim::Provider,
-            vec![(UNATTRIBUTED, 7_000), ("pa", 1_000)],
+            vec![(UNATTRIBUTED, 7_000), ("pa", 3_000)],
         ),
-        (GroupDim::Model, vec![("m1", 1_000), ("req-model", 7_000)]),
+        (GroupDim::Model, vec![("m1", 3_000), ("req-model", 7_000)]),
         (GroupDim::Alias, vec![("al", 7_000)]),
-        (GroupDim::Seat, vec![(UNATTRIBUTED, 7_000)]),
+        (
+            GroupDim::Seat,
+            vec![
+                ("#pa-key", 1_000),
+                (UNATTRIBUTED, 7_000),
+                ("persisted", 3_000),
+            ],
+        ),
     ] {
         // Act
-        let result = timed(&mut db, &spec(group_by, None), 1);
-        let mut read_labels = statement_labels(&db, group_by);
+        let spec = QuerySpec {
+            entry_accounts: entry_accounts(),
+            ..spec(group_by, None)
+        };
+        let result = timed(&mut db, &spec, 1);
+        let mut read_labels = statement_labels(&db, group_by, &spec.entry_accounts);
         read_labels.sort();
 
         // Assert: the timing statement reads the aggregate's labels, and each
@@ -271,7 +303,11 @@ fn groups_are_labelled_as_the_aggregate_labels_them() {
 }
 
 /// The labels the timing statement of `group_by` reads, deduplicated.
-fn statement_labels(db: &UsageDb, group_by: GroupDim) -> Vec<String> {
+fn statement_labels(
+    db: &UsageDb,
+    group_by: GroupDim,
+    entry_accounts: &BTreeMap<String, String>,
+) -> Vec<String> {
     let tx = db.conn().unchecked_transaction().expect("begin read");
     let window = ReadWindow {
         from_ms: 0,
@@ -282,7 +318,8 @@ fn statement_labels(db: &UsageDb, group_by: GroupDim) -> Vec<String> {
         watermark: i64::MAX,
         anchor_ms: 0,
     };
-    let samples = read_timings(&tx, &window, group_by, None, &no_deadline()).expect("read");
+    let samples =
+        read_timings(&tx, &window, group_by, entry_accounts, None, &no_deadline()).expect("read");
     samples.by_label.into_keys().collect()
 }
 

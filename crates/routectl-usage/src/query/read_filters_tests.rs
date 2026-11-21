@@ -423,7 +423,8 @@ fn cache_lifetimes_seen(tx: &Transaction<'_>, window: &ReadWindow<'_>, width: Op
 /// The window's latency p99 under the model grouping.
 fn timings_seen(tx: &Transaction<'_>, window: &ReadWindow<'_>, width: Option<i64>) -> Seen {
     let limit = ReadLimit::unbounded();
-    let samples = read_timings(tx, window, GroupDim::Model, width, &limit).expect("timings");
+    let samples = read_timings(tx, window, GroupDim::Model, &BTreeMap::new(), width, &limit)
+        .expect("timings");
     let labels = samples.by_label.keys().cloned().collect();
     let ranks = samples
         .finish(width.map(|_| 2), &limit)
