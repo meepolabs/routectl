@@ -12,11 +12,42 @@
   // as the severities above.
   var REACHABILITY_TOKENS = ['reachable', 'degraded', 'unknown'];
 
-  // Doctor is the second tab that FAILS CLOSED as a whole: an unrecognized
-  // severity would have to be guessed at to be placed, and a diagnostic that
-  // guesses is worse than one that says it cannot read the report. Single-
-  // source, so the tab-wide `safeSection` IS that posture -- the whole payload
-  // is validated below before any section is built.
+  // The needs-attention part of the view, from the attention source: one
+  // headline number, the daemon's own active tally, over the shared list. It
+  // is the number the tab badge shows, so the view never shows a second
+  // problem count beside it.
+  function doctorAttentionSection(rec) {
+    var wrap = document.createElement('div');
+    wrap.className = 'tabstack';
+    wrap.appendChild(doctorHeadline(attentionTally(rec.data.counts)));
+    wrap.appendChild(attentionSection(rec, 'doctor'));
+    return wrap;
+  }
+
+  function doctorHeadline(counts) {
+    var active = counts.broken + counts.degraded;
+    var card = markRefreshUnit(document.createElement('div'), 'headline');
+    card.className = 'card docverdict';
+    var lead = document.createElement('div');
+    lead.className = 'docverdict-lead';
+    var dot = document.createElement('span');
+    dot.className = 'docdot docdot--' + (counts.broken ? 'bad' : (counts.degraded ? 'warn' : 'ok'));
+    dot.setAttribute('aria-hidden', 'true');
+    var head = document.createElement('span');
+    head.className = 'docverdict-head';
+    head.appendChild(docText('dochead-count', String(active)));
+    head.appendChild(document.createTextNode(active === 1 ? ' item needs attention' : ' items need attention'));
+    lead.appendChild(dot);
+    lead.appendChild(head);
+    card.appendChild(lead);
+    return card;
+  }
+
+  // The doctor section FAILS CLOSED as a whole: an unrecognized severity
+  // would have to be guessed at to be placed, and a diagnostic that guesses
+  // is worse than one that says it cannot read the report. The section reads
+  // one source, so its `safeSection` IS that posture -- the whole payload is
+  // validated below before any part is built.
   //
   // The report also carries structured panels, none of which renders here:
   // the steady-state trim panel is not a check with a verdict, and what each
@@ -33,9 +64,8 @@
     var warns = findingsWith(report.findings, 'Warn');
     var passes = findingsWith(report.findings, 'Pass');
     var attention = fails.concat(warns);
-    var counts = { fail: fails.length, warn: warns.length, pass: passes.length };
     var stack = tabStack();
-    stack.appendChild(doctorVerdict(counts, rec.data.reachability));
+    stack.appendChild(doctorReach(rec.data.reachability));
     if (attention.length) { stack.appendChild(doctorFindings(attention)); }
     else if (passes.length) { stack.appendChild(doctorAllClear(passes.length)); }
     else { stack.appendChild(doctorNoChecks()); }
@@ -73,54 +103,18 @@
     return findings.filter(function (f) { return f.status === status; });
   }
 
-  // ---- doctor: the verdict card ----------------------------------------
-
-  function doctorVerdict(counts, reachability) {
-    var wrap = markRefreshUnit(document.createElement('div'), 'verdict');
-    wrap.className = 'card docverdict';
-    wrap.appendChild(doctorVerdictLead(counts, reachability));
-    wrap.appendChild(doctorCounts(counts));
-    return wrap;
-  }
-
-  function doctorVerdictLead(counts, reachability) {
-    var lead = document.createElement('div');
-    lead.className = 'docverdict-lead';
-    var dot = document.createElement('span');
-    dot.className = 'docdot docdot--' + verdictTone(counts);
-    dot.setAttribute('aria-hidden', 'true');
-    var text = document.createElement('div');
-    text.className = 'docverdict-text';
-    text.appendChild(docText('docverdict-head', verdictHeadline(counts)));
-    text.appendChild(docText('docverdict-sub',
-      'no-network checks - ' + reachSummary(reachability)));
-    lead.appendChild(dot);
-    lead.appendChild(text);
-    return lead;
-  }
-
-  // A report nobody could produce a check for is UNKNOWN, never clear: zero
-  // findings is an absence of evidence, not a clean bill of health.
-  function verdictTone(counts) {
-    if (counts.fail) { return 'bad'; }
-    if (counts.warn) { return 'warn'; }
-    return counts.pass ? 'ok' : 'unknown';
-  }
-
-  function verdictHeadline(counts) {
-    if (counts.fail) {
-      return countText(counts.fail, ' check failed', ' checks failed') +
-        ' - routing stays degraded until they are fixed';
-    }
-    if (counts.warn) {
-      return countText(counts.warn, ' warning', ' warnings') + ' - nothing is broken yet';
-    }
-    return counts.pass ? 'Everything checks out' : 'No checks reported';
-  }
+  // ---- doctor: reachability ------------------------------------------
 
   // The reachability rollup, which is the ONLY reachability reading on the
   // page: the per-target last outcome it folds is the Models view's subject, so
   // repeating those rows here would show the same fact twice.
+  function doctorReach(reachability) {
+    var line = markRefreshUnit(document.createElement('p'), 'reach');
+    line.className = 'docverdict-sub docreach';
+    line.textContent = 'no-network checks - ' + reachSummary(reachability);
+    return line;
+  }
+
   function reachSummary(reachability) {
     if (!reachability.length) { return 'no dispatch target resolved yet'; }
     var parts = [];
@@ -129,17 +123,6 @@
       if (n) { parts.push(n + ' ' + token); }
     });
     return 'last settled outcome: ' + parts.join(', ');
-  }
-
-  function doctorCounts(counts) {
-    var row = document.createElement('div');
-    row.className = 'doccounts';
-    [
-      ['failed', counts.fail, 'bad'],
-      ['warnings', counts.warn, 'warn'],
-      ['passed', counts.pass, null]
-    ].forEach(function (c) { row.appendChild(doctorCount(c[0], c[1], c[2])); });
-    return row;
   }
 
   // A zero count reads faint: no failures is the good state, so it must not
@@ -160,8 +143,7 @@
   function doctorFindings(findings) {
     var wrap = markRefreshUnit(document.createElement('div'), 'findings');
     wrap.className = 'ovsection';
-    wrap.appendChild(sectionHead('Findings',
-      countText(findings.length, ' check needs attention', ' checks need attention')));
+    wrap.appendChild(sectionHead('Findings', 'failed and warning checks, failures first'));
     var list = document.createElement('div');
     list.className = 'doclist';
     var seen = Object.create(null);
@@ -211,8 +193,30 @@
     var wrap = document.createElement('div');
     wrap.className = 'docfix';
     wrap.appendChild(docText('docfix-label', 'remediation'));
-    wrap.appendChild(docText('docfix-text', remediation));
+    wrap.appendChild(remediationText(remediation));
     return wrap;
+  }
+
+  // A remediation is prose that quotes commands in backticks. Each quoted
+  // span is drawn as a copyable code element without its backticks, so a copy
+  // carries the bare command; the payload text itself is left as sent. A
+  // stray or empty backtick pair is not a quote this can trust, so such a
+  // remediation is drawn as the plain text it is.
+  function remediationText(remediation) {
+    var span = document.createElement('span');
+    span.className = 'docfix-text';
+    var parts = String(remediation).split('`');
+    var quoted = parts.length % 2 === 1 &&
+      parts.every(function (part, i) { return i % 2 === 0 || part !== ''; });
+    if (!quoted) {
+      span.textContent = String(remediation);
+      return span;
+    }
+    parts.forEach(function (part, i) {
+      if (i % 2) { span.appendChild(copyableCode('docfix-code', part)); }
+      else if (part) { span.appendChild(document.createTextNode(part)); }
+    });
+    return span;
   }
 
   // The passing checks stay reachable (data floor) behind a default-closed
@@ -245,10 +249,11 @@
     return row;
   }
 
-  // Nothing to act on. Welcoming, and explicit that the passing checks below
-  // are what the verdict rests on.
+  // No check to act on. Explicit that the passing checks below are what this
+  // rests on, and titled for the checks alone: the needs-attention list
+  // above can still carry items the checks do not cover.
   function doctorAllClear(passCount) {
-    return emptyCard('Nothing needs attention',
+    return emptyCard('Every check passed',
       countText(passCount, ' check ran', ' checks ran') + ' and none of them reported a ' +
       'problem. A warning or a failure appears here the moment one does.',
       ['current state', 'no upstream was dialed']);

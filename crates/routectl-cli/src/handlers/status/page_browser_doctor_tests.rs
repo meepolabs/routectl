@@ -1,0 +1,205 @@
+// The Doctor view in a real headless Chrome: the daemon's needs-attention
+// list drawn as Now draws it under its own id prefix, one headline number
+// that is the tab badge's, and finding remediations whose backtick-quoted
+// commands are copyable code with the backticks left out. `include!`d into a
+// child module of `page::tests` beside `browser`; the scenarios live in
+// page_browser_doctor_driver.js.
+
+use serde_json::{Value, json};
+
+use crate::commands::doctor::SeatFix;
+use crate::handlers::status::panel_fixtures::fixture_config;
+
+const DOCTOR_DRIVER: &str = include_str!("page_browser_doctor_driver.js");
+
+const DOCTOR_BUDGET_MS: u64 = 40_000;
+
+fn doctor_scenario(name: &'static str, hash: &'static str, row: Option<Value>) -> Value {
+    let snippets: &'static [&'static str] = match row {
+        Some(row) => {
+            let set = format!("window.routectlDoctorRow = {row};");
+            Box::leak(vec![&*Box::leak(set.into_boxed_str()), DOCTOR_DRIVER].into_boxed_slice())
+        }
+        None => Box::leak(vec![DOCTOR_DRIVER].into_boxed_slice()),
+    };
+    browser::run_scenario(&browser::Scenario {
+        name,
+        hash,
+        snippets,
+        budget_ms: DOCTOR_BUDGET_MS,
+    })
+    .result
+}
+
+fn keys_of(drawn: &Value, prefix: &str) -> Vec<String> {
+    drawn
+        .as_array()
+        .expect("items drawn")
+        .iter()
+        .map(|item| {
+            assert_eq!(item["prefix"], prefix, "{item:#}");
+            item["key"].as_str().expect("a key").to_string()
+        })
+        .collect()
+}
+
+/// The page's `idKey` of `raw`.
+fn id_key(raw: &str) -> String {
+    raw.chars().fold(String::from("k"), |mut out, ch| {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("_{:x}_", u32::from(ch)));
+        }
+        out
+    })
+}
+
+/// From one attention payload, Now and Doctor draw the same items in the
+/// same order, each under its own id prefix, so no id appears twice on the
+/// page. Doctor's one headline number is its tab badge and the daemon's
+/// active tally (broken + degraded); the Fail/Warn/Pass headline is gone
+/// while the report's findings still render (positive control).
+///
+/// Mutation checks: pass 'now' as the Doctor prefix -> red (duplicate ids);
+/// add `counts.recovered` to the headline -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_doctor_lists_now_items_under_its_own_ids_and_headlines_the_badge() {
+    let out = doctor_scenario("doctor-same-list", "now", None);
+
+    let now = keys_of(&out["now"], "now");
+    let doctor = keys_of(&out["doctor"], "doctor");
+    let served: Vec<String> = out["served_keys"]
+        .as_array()
+        .expect("served keys")
+        .iter()
+        .map(|k| id_key(k.as_str().expect("a key")))
+        .collect();
+    assert!(served.len() > 1, "positive control: several items: {out:#}");
+    assert_eq!(doctor, now, "{out:#}");
+    assert_eq!(doctor, served, "{out:#}");
+    assert_eq!(out["duplicate_ids"], json!([]), "{out:#}");
+    let counts = &out["served_counts"];
+    let active =
+        counts["broken"].as_u64().expect("broken") + counts["degraded"].as_u64().expect("degraded");
+    assert!(active > 0, "positive control: active items: {out:#}");
+    assert!(
+        counts["recovered"].as_u64().expect("recovered") > 0,
+        "positive control: a recovered item the count leaves out: {out:#}"
+    );
+    assert_eq!(out["headline"], active.to_string(), "{out:#}");
+    assert_eq!(out["badge"], out["headline"], "{out:#}");
+    assert_eq!(out["old_headline_gone"], true, "{out:#}");
+    assert!(
+        out["doctor_findings"].as_u64().expect("findings") > 0,
+        "positive control: the report's findings still render: {out:#}"
+    );
+}
+
+fn warn(detail: &str, remediation: &str) -> Value {
+    json!({
+        "section": "config",
+        "name": detail,
+        "status": "Warn",
+        "detail": detail,
+        "remediation": remediation,
+    })
+}
+
+/// The remediation rows, each taken from the doctor's own sentence
+/// builders where one quotes a command: one quoted command, two quoted
+/// tokens, a single unbalanced backtick, and none.
+fn remediation_rows() -> Vec<Value> {
+    let login = SeatFix::of(&fixture_config(), "claude-seat").remediation();
+    let unknown = SeatFix::for_oauth_ref("claude-seat", "nosuch".to_string(), None).remediation();
+    vec![
+        warn("one quoted command", &login),
+        warn("two quoted tokens", &unknown),
+        warn(
+            "unbalanced",
+            "run `routectl doctor after editing the config",
+        ),
+        warn("plain", "remove the old folder"),
+    ]
+}
+
+fn card<'a>(out: &'a Value, detail: &str) -> &'a Value {
+    out["cards"]
+        .as_array()
+        .expect("cards")
+        .iter()
+        .find(|c| c["detail"] == detail)
+        .unwrap_or_else(|| panic!("no card `{detail}`: {out:#}"))
+}
+
+fn served_remediation(out: &Value, detail: &str) -> String {
+    out["served"]
+        .as_array()
+        .expect("served findings")
+        .iter()
+        .find(|f| f["detail"] == detail)
+        .and_then(|f| f["remediation"].as_str())
+        .unwrap_or_else(|| panic!("no served `{detail}`: {out:#}"))
+        .to_string()
+}
+
+/// A quoted command in a remediation is a focusable code element whose text
+/// carries no backtick, while the payload's remediation keeps its backticks
+/// and the card reads as the sentence with them dropped. A remediation with
+/// one unbalanced backtick, or none, is plain text with no code element. Every
+/// attention fix on the view is a focusable code element with no backtick.
+///
+/// Mutation check: draw every remediation as plain text in
+/// remediationText -> red (the quoted rows carry no code element).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_doctor_remediations_show_quoted_commands_bare() {
+    let rows = remediation_rows();
+    let out = doctor_scenario(
+        "doctor-remediations",
+        "doctor",
+        Some(json!({ "findings": rows })),
+    );
+
+    for (detail, spans) in [("one quoted command", 1), ("two quoted tokens", 2)] {
+        let served = served_remediation(&out, detail);
+        let shown = card(&out, detail);
+        assert!(
+            served.contains('`'),
+            "the payload keeps its backticks: {served}"
+        );
+        assert_eq!(shown["text"], served.replace('`', ""), "{shown:#}");
+        let quoted: Vec<&str> = served.split('`').skip(1).step_by(2).collect();
+        let codes = shown["codes"].as_array().expect("codes");
+        assert_eq!(codes.len(), spans, "{shown:#}");
+        for (code, want) in codes.iter().zip(&quoted) {
+            assert_eq!(code["text"], *want, "{shown:#}");
+            assert_eq!(code["tab_index"], 0, "{shown:#}");
+        }
+    }
+    assert!(
+        card(&out, "one quoted command")["codes"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("routectl login ")),
+        "{out:#}"
+    );
+    for detail in ["unbalanced", "plain"] {
+        let shown = card(&out, detail);
+        assert_eq!(shown["text"], served_remediation(&out, detail), "{shown:#}");
+        assert_eq!(shown["codes"], json!([]), "{shown:#}");
+    }
+    let fixes = out["fixes"].as_array().expect("fixes");
+    assert!(
+        !fixes.is_empty(),
+        "positive control: attention fixes drawn: {out:#}"
+    );
+    for fix in fixes {
+        assert_eq!(fix["tag"], "code", "{fix:#}");
+        assert_eq!(fix["tab_index"], 0, "{fix:#}");
+        assert!(
+            !fix["text"].as_str().expect("fix text").contains('`'),
+            "{fix:#}"
+        );
+    }
+}

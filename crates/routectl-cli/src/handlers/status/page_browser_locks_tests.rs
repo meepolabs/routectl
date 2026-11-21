@@ -226,7 +226,7 @@ fn section_wrappers_mark_themselves_as_refresh_units() {
         compact(&function_body("modelsSection"))
             .contains("markrefreshunit(document.createelement('div'),'models-lanes')")
     );
-    for name in ["doctorVerdict", "doctorFindings", "doctorPasses"] {
+    for name in ["doctorHeadline", "doctorFindings", "doctorPasses"] {
         assert!(
             function_body(name).contains("markRefreshUnit(document.createElement('div'), '"),
             "{name} marks its wrapper"

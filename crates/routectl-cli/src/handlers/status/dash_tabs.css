@@ -207,9 +207,9 @@
   overflow-wrap: anywhere;
 }
 
-/* ---- doctor: verdict card, findings, collapsed passes ----
+/* ---- doctor: headline card, findings, collapsed passes ----
 
-   The verdict is ONE reading, so it is one card with no internal hairline;
+   The headline is ONE reading, so it is one card with no internal hairline;
    each finding is a separate object an operator acts on, so each gets its
    own card. State color rides the dot, the severity pill, and (for a
    failure only) the card border -- a card never floods with it. */
@@ -238,12 +238,6 @@
 .docdot--warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
 .docdot--bad { background: var(--neg); box-shadow: 0 0 0 3px var(--neg-soft); }
 .docdot--unknown { background: var(--border-strong); }
-.docverdict-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
 .docverdict-head {
   font-size: var(--fs-lg);
   color: var(--fg);
@@ -254,6 +248,11 @@
   font-size: var(--fs-xs);
   color: var(--faint);
   overflow-wrap: anywhere;
+}
+.docreach { margin: 0; }
+.dochead-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 .doccounts {
   display: flex;
@@ -355,6 +354,15 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* A command quoted in a remediation: the part to run, selected whole by a
+   click and reachable by Tab, drawn without the backticks it was quoted in. */
+.docfix-code {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--fg);
+  user-select: all;
+}
+.docfix-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .docpassgrid {
   display: grid;

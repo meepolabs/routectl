@@ -64,7 +64,7 @@
     {
       id: 'doctor',
       label: 'Doctor',
-      sources: ['doctor'],
+      sources: ['attention', 'doctor'],
       badge: 'attention',
       span: 'current state',
       build: buildDoctorView
@@ -122,8 +122,13 @@
     return viewSection('config', buildConfig);
   }
 
+  // What needs attention, from the daemon's list (the same items Now shows),
+  // then the doctor report's own checks and counters.
   function buildDoctorView() {
-    return viewSection('doctor', buildDoctor);
+    var stack = tabStack();
+    stack.appendChild(viewSection('attention', doctorAttentionSection, 'Needs attention'));
+    stack.appendChild(viewSection('doctor', buildDoctor));
+    return stack;
   }
 
   // The registered view with this id, or null.

@@ -2378,6 +2378,11 @@ mod tests {
         include!("page_browser_cases_tests.rs");
     }
 
+    mod browser_doctor {
+        use super::*;
+        include!("page_browser_doctor_tests.rs");
+    }
+
     mod payload_keys {
         use super::*;
         include!("page_payload_keys_tests.rs");

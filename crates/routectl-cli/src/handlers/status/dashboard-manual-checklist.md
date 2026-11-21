@@ -44,6 +44,10 @@ has not verified the failure that matters most.
   attention item, the seven-day fold and its survival of a failed refresh,
   a row kept across a refresh, transit wording, and the nickname link to
   scoped Traffic).
+- **The Doctor view** (`dash_73_tab_doctor.js`):
+  `page_browser_doctor_tests.rs` (the same attention items as Now under
+  their own ids, one headline number equal to the tab badge, and quoted
+  remediation commands drawn as bare focusable code).
 - **The address and the views** (`dash_90_chrome.js`):
   `page_browser_url_tests.rs` and `page_browser_views_tests.rs`.
 - **Figures read in full at each text size** (`dash_*.css`):

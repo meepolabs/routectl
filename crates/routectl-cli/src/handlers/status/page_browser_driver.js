@@ -255,7 +255,7 @@
 
   d.scenario('doctor-selection', function () {
     return d.waitUntil('a doctor fix command', function () {
-      return document.querySelector('#body-doctor .docfix-text');
+      return document.querySelector('#body-doctor .attn-fix-code');
     }).then(function (fix) {
       var node = fix.firstChild;
       var range = document.createRange();

@@ -833,7 +833,8 @@ fn the_glance_link_keeps_four_and_a_half_to_one() {
 }
 
 /// A click selects a whole value only on a command the operator runs as
-/// is: the Now and Accounts fixes and the Models cause fix. A raw
+/// is: the Now and Accounts fixes, the Models cause fix and a command a
+/// Doctor remediation quotes. A raw
 /// token or an inline value stays selectable in part (Ctrl+A on it when
 /// focused still takes all of it). Positive control: the fix commands are
 /// found, so the scan sees `user-select` declarations.
@@ -855,6 +856,11 @@ fn only_fix_commands_select_whole_on_click() {
 
     assert_eq!(
         whole,
-        vec![".acct-fix-code", ".attn-fix-code", ".models-cause-fix"]
+        vec![
+            ".acct-fix-code",
+            ".attn-fix-code",
+            ".docfix-code",
+            ".models-cause-fix"
+        ]
     );
 }
