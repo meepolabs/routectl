@@ -387,7 +387,7 @@ async fn an_invalid_configured_user_agent_sends_the_default_and_logs_no_value() 
             "{row}"
         );
         assert_eq!(refused.field("account"), Some(vendor.account), "{row}");
-        let leaked: Vec<String> = events
+        let flattened: Vec<String> = events
             .iter()
             .flat_map(|event| {
                 std::iter::once(event.message.clone()).chain(
@@ -397,9 +397,23 @@ async fn an_invalid_configured_user_agent_sends_the_default_and_logs_no_value() 
                         .map(|(name, value)| format!("{name}={value}")),
                 )
             })
+            .collect();
+        let account_field = format!("account={}", vendor.account);
+        assert!(
+            flattened.contains(&account_field),
+            "{row}: premise: the refusal's operator-text field is in the scan: {flattened:?}"
+        );
+        assert!(
+            flattened
+                .iter()
+                .any(|text| text.contains("configured user_agent")),
+            "{row}: premise: the refusal's message is in the scan: {flattened:?}"
+        );
+        let leaked: Vec<&String> = flattened
+            .iter()
             .filter(|text| text.contains("synthetic-ua-marker") || text.contains("agent/1.0"))
             .collect();
-        assert_eq!(leaked, Vec::<String>::new(), "{row}");
+        assert_eq!(leaked, Vec::<&String>::new(), "{row}");
     }
 }
 
@@ -413,15 +427,31 @@ fn a_seat_and_its_user_agent_never_print_the_value_in_debug() {
         user_agent: configured(ANTHROPIC.credential, CONFIGURED_UA),
     };
 
-    let rendered = format!(
-        "{seat:?} {:?} {:?}",
-        usage_user_agent(Some(CONFIGURED_UA)),
-        usage_user_agent(Some(INVALID_UA)),
-    );
-
-    assert!(rendered.contains(SEAT), "premise: the seat rendered");
-    assert!(!rendered.contains("9.9.1"), "{rendered}");
-    assert!(!rendered.contains("synthetic-ua-marker"), "{rendered}");
+    // (row, Debug output, a field each output must render)
+    let rows = [
+        ("seat account", format!("{seat:?}"), SEAT.to_string()),
+        (
+            "seat user_agent",
+            format!("{seat:?}"),
+            "user_agent: Some(".to_string(),
+        ),
+        (
+            "valid user agent",
+            format!("{:?}", usage_user_agent(Some(CONFIGURED_UA))),
+            "configured_invalid: false".to_string(),
+        ),
+        (
+            "invalid user agent",
+            format!("{:?}", usage_user_agent(Some(INVALID_UA))),
+            "configured_invalid: true".to_string(),
+        ),
+    ];
+    for (row, rendered, control) in rows {
+        assert!(rendered.contains(&control), "{row}: premise: {rendered}");
+        for marker in ["9.9.1", "synthetic-ua-marker", "agent/1.0"] {
+            assert!(!rendered.contains(marker), "{row}: {marker}: {rendered}");
+        }
+    }
 }
 
 fn configured(
