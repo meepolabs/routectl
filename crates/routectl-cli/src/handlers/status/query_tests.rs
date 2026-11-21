@@ -12,7 +12,9 @@ use axum::http::Request as HttpRequest;
 use routectl_router::{
     AccountIdentities, Config, ModelEntry, PricingConfig, ProviderEntry, Router,
 };
-use routectl_usage::{CostStatus, QueryGroup, QueryMetrics, QuerySeries, SeriesBucket, open};
+use routectl_usage::{
+    CostStatus, EquivalentStatus, QueryGroup, QueryMetrics, QuerySeries, SeriesBucket, open,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;

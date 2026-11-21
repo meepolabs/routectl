@@ -1,5 +1,7 @@
 // A row priced only in part: its covered cost reaches `cost_usd` and the
-// metric set reads `partial`, with the row's missing dimensions listed.
+// metric set reads `partial`, with the row's missing dimensions listed; and
+// how completely a metric set's API-equivalent value covers its subscription
+// rows (`equivalent_status`).
 // `include!`d into `grouped_tests.rs`, so the fixtures there stay in scope.
 // All imports come from the host -- do not add `use` lines here.
 
@@ -76,5 +78,150 @@ fn totals_over_a_priced_part_row_read_partial_with_the_priced_subtotal() {
         assert_eq!(m.cost_status, CostStatus::Partial, "{name}");
         assert_eq!(m.cost_usd, Some(3.75), "{name}");
         assert_eq!(m.missing_price_dimensions, vec![PART_LABEL], "{name}");
+    }
+}
+
+/// Seed one row per `(upstream, model, cost)` entry and price each row with
+/// the cost its upstream names.
+fn query_equivalent_rows(
+    rows: &[(&'static str, &'static str, RowCost)],
+    group_by: GroupDim,
+) -> QueryResult {
+    let (_dir, mut db) = open_db();
+    let ids = ["a", "b", "c", "d"];
+    for ((upstream, model, _), id) in rows.iter().zip(ids) {
+        insert(
+            &db,
+            &Fixture {
+                request_id: id,
+                model: Some(model),
+                upstream: Some(upstream),
+                ..Fixture::default()
+            },
+        );
+    }
+    let pricer = |row: &AggRow| {
+        rows.iter()
+            .find(|(upstream, _, _)| row.key.upstream.as_deref() == Some(*upstream))
+            .map(|(_, _, cost)| cost.clone())
+            .expect("every seeded upstream has a cost")
+    };
+    query(&mut db, &spec(group_by), pricer, no_deadline()).expect("query")
+}
+
+fn sub(equivalent: Option<f64>, missing: &[&str]) -> RowCost {
+    RowCost::Subscription(
+        equivalent,
+        missing.iter().map(ToString::to_string).collect(),
+    )
+}
+
+#[test]
+fn equivalent_status_reads_whether_every_subscription_row_was_valued_in_full() {
+    let cases = [
+        (
+            "no subscription rows",
+            vec![
+                ("u-a", "m1", RowCost::Priced(1.0)),
+                ("u-b", "m1", RowCost::Unpriced(vec!["input".to_string()])),
+            ],
+            EquivalentStatus::NoSubscription,
+            None,
+        ),
+        (
+            "all subscription rows fully priced",
+            vec![
+                ("u-a", "m1", sub(Some(2.0), &[])),
+                ("u-b", "m1", sub(Some(3.0), &[])),
+            ],
+            EquivalentStatus::Complete,
+            Some(5.0),
+        ),
+        (
+            "None beside priced",
+            vec![
+                ("u-a", "m1", sub(None, &["input"])),
+                ("u-b", "m1", sub(Some(2.0), &[])),
+            ],
+            EquivalentStatus::Partial,
+            Some(2.0),
+        ),
+        (
+            "one covered-part row",
+            vec![("u-a", "m1", sub(Some(2.5), &[PART_LABEL]))],
+            EquivalentStatus::Partial,
+            Some(2.5),
+        ),
+    ];
+    for (name, rows, expected, equivalent) in cases {
+        // Act: every row lands in one model group.
+        let result = query_equivalent_rows(&rows, GroupDim::Model);
+
+        // Assert
+        let m = &group(&result, "m1").metrics;
+        assert_eq!(m.equivalent_status, expected, "{name}");
+        assert_eq!(m.equivalent_cost_usd, equivalent, "{name}");
+    }
+}
+
+#[test]
+fn totals_equivalent_status_folds_from_the_group_accumulators() {
+    let cases = [
+        (
+            "one partial group",
+            vec![
+                ("u-a", "m1", sub(None, &["input"])),
+                ("u-b", "m2", sub(Some(2.0), &[])),
+            ],
+            [EquivalentStatus::Partial, EquivalentStatus::Complete],
+            EquivalentStatus::Partial,
+        ),
+        (
+            "complete beside no subscription",
+            vec![
+                ("u-a", "m1", RowCost::Priced(1.0)),
+                ("u-b", "m2", sub(Some(2.0), &[])),
+            ],
+            [EquivalentStatus::NoSubscription, EquivalentStatus::Complete],
+            EquivalentStatus::Complete,
+        ),
+        (
+            "no subscription anywhere",
+            vec![
+                ("u-a", "m1", RowCost::Priced(1.0)),
+                ("u-b", "m2", RowCost::Priced(2.0)),
+            ],
+            [
+                EquivalentStatus::NoSubscription,
+                EquivalentStatus::NoSubscription,
+            ],
+            EquivalentStatus::NoSubscription,
+        ),
+    ];
+    for (name, rows, groups, expected) in cases {
+        // Act: one row per model group.
+        let result = query_equivalent_rows(&rows, GroupDim::Model);
+
+        // Assert: each group as built, then the totals over them.
+        for (label, status) in ["m1", "m2"].into_iter().zip(groups) {
+            assert_eq!(
+                group(&result, label).metrics.equivalent_status,
+                status,
+                "{name} {label}"
+            );
+        }
+        assert_eq!(result.totals.equivalent_status, expected, "{name} totals");
+    }
+}
+
+#[test]
+fn the_equivalent_status_tokens_are_the_wire_tokens() {
+    for (status, token) in [
+        (EquivalentStatus::NoSubscription, "none"),
+        (EquivalentStatus::Complete, "complete"),
+        (EquivalentStatus::Partial, "partial"),
+    ] {
+        assert_eq!(serde_json::to_value(status).expect("serializes"), token);
+        assert_eq!(status.as_str(), token);
     }
 }

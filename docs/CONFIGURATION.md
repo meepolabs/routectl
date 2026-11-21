@@ -5034,9 +5034,20 @@ not share this limit and keep answering while a query reads.
 Every metric set (groups, totals, and each series bucket) carries both cost
 channels side by side: `cost_usd` is real spend under `cost_status`, and
 `equivalent_cost_usd` is the API-equivalent value of the set's subscription
-rows under the same complete-or-absent rule the CLI cell applies. Both are
-`null` rather than `0` when nothing contributed, and neither is ever folded
-into the other.
+rows under `equivalent_status`. Both are `null` rather than `0` when nothing
+contributed, and neither is ever folded into the other.
+
+`equivalent_status` is one of three tokens. `none` means the set holds no
+subscription requests. `complete` means every subscription request was
+valued at a price for every dimension it used, so `equivalent_cost_usd` is
+the whole value. `partial` means at least one subscription request used a
+dimension with no price (it is named in `missing_price_dimensions`), so
+`equivalent_cost_usd` is the value of the requests and dimensions that had
+one, and is `null` when none did. A present `equivalent_cost_usd` is
+therefore not by itself complete: read `equivalent_status`. A request whose
+only unpriced usage is cache writes with no recorded lifetime adds the value
+of the rest of its usage and makes the set `partial`. Totals are `partial`
+when any group is.
 
 The groups and `totals` are priced over the whole window, and are the same
 whether or not a `bucket` series was requested. Each series bucket is priced

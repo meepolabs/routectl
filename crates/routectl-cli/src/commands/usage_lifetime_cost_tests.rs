@@ -55,6 +55,13 @@ const TOTAL_ONLY: WriteCase = WriteCase {
     split: None,
 };
 
+/// 500 written whose split names one lifetime with zero tokens: nothing is
+/// written at a known lifetime, so the whole total has no reported lifetime.
+const ZERO_ONLY_SPLIT: WriteCase = WriteCase {
+    total: Some(500),
+    split: Some(r#"{"3600":0}"#),
+};
+
 /// A split summing above its own total.
 const SPLIT_ABOVE_TOTAL: WriteCase = WriteCase {
     total: Some(100),
@@ -177,6 +184,13 @@ fn writes_with_no_reported_lifetime_price_only_the_rest_of_the_row() {
             LIFETIME_PARTIAL_5M_USD,
         ),
         ("total with no split", TOTAL_ONLY, LIFETIME_BASE_USD),
+        // The 1-hour lifetime has no rate here, so pricing its zero entry as
+        // used would leave the row unpriced rather than partial.
+        (
+            "split whose only entry is zero",
+            ZERO_ONLY_SPLIT,
+            LIFETIME_BASE_USD,
+        ),
     ];
     for (name, writes, expected) in cases {
         // Act
@@ -411,4 +425,103 @@ fn a_row_whose_only_use_is_unknown_lifetime_writes_stays_unpriced() {
         verdict,
         RowCost::Unpriced(labels(&[UNKNOWN_LIFETIME_LABEL]))
     );
+}
+
+#[test]
+fn a_split_whose_only_entry_is_zero_prices_no_writes_and_counts_the_whole_total_unknown() {
+    // Arrange: the 1-hour rate exists, so a zero entry priced as used would
+    // still add nothing; the unknown count is what tells the cases apart.
+    let config = lifetime_config("env://LT_KEY", covered_rates(true));
+
+    // Act
+    let (verdict, metrics) = covered_outcome(&config, r#"{"3600":0}"#, 500);
+
+    // Assert: 3.00 + 15.00 + 0.30, no write priced, all 500 unknown.
+    let base = 18.30;
+    assert_priced_part(verdict, base, "zero-only split verdict");
+    assert_usd(metrics.cost_usd, base, "group cost");
+    assert_eq!(metrics.cost_status, CostStatus::Partial);
+    assert_eq!(metrics.cache_write_unknown_tokens, 500);
+}
+
+// --- the same covered-split row through a bucketed query -----------------
+
+/// The covered-split row (at ts 1000) queried over two 5 s buckets, so it
+/// lands in the first and the second sees no traffic.
+fn covered_bucketed(config: &Config, split: &str, total: i64) -> routectl_usage::QueryResult {
+    let (_dir, _path, mut db) = temp_db();
+    insert_covered_row(&db, split, total);
+    let bucket = BucketSpec {
+        width_ms: 5_000,
+        count: 2,
+    };
+    priced_query(&mut db, config, GroupDim::Model, Some(bucket))
+}
+
+/// The cost channel a case reads: the real cost for an API-key row, the
+/// equivalent for a subscription row.
+fn case_amount(metrics: &routectl_usage::QueryMetrics, subscription: bool) -> Option<f64> {
+    if subscription {
+        metrics.equivalent_cost_usd
+    } else {
+        metrics.cost_usd
+    }
+}
+
+#[test]
+fn a_bucketed_query_reads_a_covered_split_partial_on_the_group_the_totals_and_its_bucket() {
+    let cases = [
+        (
+            "api key, covered split",
+            "env://LT_KEY",
+            COVERED_TOTAL,
+            CostStatus::Partial,
+            EquivalentStatus::NoSubscription,
+            COVERED_TOTAL - 7445,
+        ),
+        (
+            "subscription, covered split",
+            "oauth://anthropic",
+            COVERED_TOTAL,
+            CostStatus::Subscription,
+            EquivalentStatus::Partial,
+            COVERED_TOTAL - 7445,
+        ),
+        (
+            "subscription, fully split control",
+            "oauth://anthropic",
+            7445,
+            CostStatus::Subscription,
+            EquivalentStatus::Complete,
+            0,
+        ),
+    ];
+    for (name, key_ref, total, cost_status, equivalent_status, unknown) in cases {
+        // Arrange
+        let config = lifetime_config(key_ref, covered_rates(true));
+        let subscription = key_ref.starts_with("oauth://");
+
+        // Act
+        let result = covered_bucketed(&config, COVERED_SPLIT, total);
+
+        // Assert: the group, the totals and the row's bucket agree; the
+        // bucket that saw no traffic stays empty.
+        let buckets = &result.series.as_ref().expect("series").buckets;
+        assert_eq!(result.groups.len(), 1, "{name}: one model group");
+        for (set, m) in [
+            ("group", &result.groups[0].metrics),
+            ("totals", &result.totals),
+            ("bucket", &buckets[0].metrics),
+        ] {
+            assert_eq!(m.cost_status, cost_status, "{name} {set}");
+            assert_eq!(m.equivalent_status, equivalent_status, "{name} {set}");
+            assert_usd(
+                case_amount(m, subscription),
+                COVERED_USD,
+                &format!("{name} {set}"),
+            );
+            assert_eq!(m.cache_write_unknown_tokens, unknown, "{name} {set}");
+        }
+        assert_eq!(buckets[1].metrics.requests, 0, "{name}: empty bucket");
+    }
 }

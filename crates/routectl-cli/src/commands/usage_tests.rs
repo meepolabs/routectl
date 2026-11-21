@@ -6,7 +6,7 @@
 use super::*;
 use routectl_router::prices::PriceTable;
 use routectl_router::{Config, ModelEntry, PricingConfig, ProviderEntry};
-use routectl_usage::{CostStatus, UsageDb, open};
+use routectl_usage::{CostStatus, EquivalentStatus, UsageDb, open};
 use tempfile::TempDir;
 
 /// No refreshed and no shipped price table, so a figure a test asserts can

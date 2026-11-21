@@ -191,10 +191,13 @@ impl GroupDim {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RowCost {
     /// A managed-subscription row: real usage, no per-token dollar cost, plus
-    /// the API-equivalent value of that usage when the caller could resolve
-    /// EVERY dimension the row used, and the used dimensions it could not. The
-    /// value feeds [`QueryMetrics::equivalent_cost_usd`] only -- never
-    /// `cost_usd`, which stays real spend.
+    /// the API-equivalent value of that usage, and the used dimensions with no
+    /// rate. The value is either the whole row's or, when the labels are not
+    /// empty, a covered subtotal of the dimensions that had a rate; a row with
+    /// labels marks its set's [`QueryMetrics::equivalent_status`] partial,
+    /// so a reader never needs to infer completeness from the value being
+    /// present. The value feeds [`QueryMetrics::equivalent_cost_usd`] only --
+    /// never `cost_usd`, which stays real spend.
     Subscription(Option<f64>, Vec<String>),
     /// A priced row and its dollar cost.
     Priced(f64),
@@ -239,6 +242,41 @@ impl CostStatus {
             Self::Priced => "priced",
             Self::Unpriced => "unpriced",
             Self::Subscription => "subscription",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+/// How completely a metric set's API-equivalent value covers its subscription
+/// rows.
+///
+/// The serialized form is the lowercase token [`EquivalentStatus::as_str`]
+/// returns; those three tokens are a wire contract, so the renames and
+/// `as_str` must stay in lockstep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum EquivalentStatus {
+    /// The set holds no subscription row, so there is nothing to value.
+    #[default]
+    #[serde(rename = "none")]
+    NoSubscription,
+    /// No subscription row named a dimension with no rate;
+    /// `equivalent_cost_usd` is the whole value (absent only when no row used
+    /// a dimension, or the sum overflowed).
+    #[serde(rename = "complete")]
+    Complete,
+    /// Some subscription row named a dimension with no rate:
+    /// `equivalent_cost_usd` is a subtotal of the rows and dimensions that had
+    /// one, and absent when none did.
+    #[serde(rename = "partial")]
+    Partial,
+}
+
+impl EquivalentStatus {
+    /// The wire token for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSubscription => "none",
+            Self::Complete => "complete",
             Self::Partial => "partial",
         }
     }
@@ -348,10 +386,15 @@ pub struct QueryMetrics {
     /// contributed.
     pub cost_usd: Option<f64>,
     /// API-equivalent USD value of this metric set's SUBSCRIPTION rows, at the
-    /// rates a priced row would have used. Absent when no subscription row
-    /// resolved a complete rate set -- never `0`, and never summed with
+    /// rates a priced row would have used. A present value may be a subtotal:
+    /// read [`Self::equivalent_status`] for whether it covers every
+    /// subscription row, never the value's presence. Absent when no
+    /// subscription row was valued -- never `0`, and never summed with
     /// `cost_usd`: this is notional replacement value, not spend.
     pub equivalent_cost_usd: Option<f64>,
+    /// How completely `equivalent_cost_usd` covers the set's subscription
+    /// rows.
+    pub equivalent_status: EquivalentStatus,
     /// How completely the cost could be resolved.
     pub cost_status: CostStatus,
     /// The dimensions this metric set's rows used that had no rate, sorted
@@ -731,6 +774,9 @@ struct GroupAcc {
     /// reach the real-spend channel.
     equivalent_usd: f64,
     any_equivalent: bool,
+    /// A subscription row named a dimension with no rate, so the summed
+    /// equivalent leaves part of the set's usage out.
+    any_equivalent_gap: bool,
     any_subscription: bool,
     any_unpriced: bool,
     /// (fine model, dimension) pairs that had no rate.
@@ -807,6 +853,7 @@ impl GroupAcc {
         match cost {
             RowCost::Subscription(equivalent, missing) => {
                 self.any_subscription = true;
+                self.any_equivalent_gap |= !missing.is_empty();
                 self.add_missing(&agg.key, missing);
                 if let Some(usd) = *equivalent {
                     // No finiteness assertion here: the equivalent channel
@@ -892,6 +939,7 @@ impl GroupAcc {
         self.any_priced |= other.any_priced;
         self.equivalent_usd += other.equivalent_usd;
         self.any_equivalent |= other.any_equivalent;
+        self.any_equivalent_gap |= other.any_equivalent_gap;
         self.any_subscription |= other.any_subscription;
         self.any_unpriced |= other.any_unpriced;
         self.missing_prices
@@ -908,6 +956,7 @@ impl GroupAcc {
     fn finish(self, ranks: Percentiles) -> QueryMetrics {
         let (cost_usd, cost_status) = self.cost();
         let equivalent_cost_usd = self.equivalent_cost();
+        let equivalent_status = self.equivalent_status();
         let (missing_price_dimensions, missing_prices) = missing_price_fields(self.missing_prices);
         QueryMetrics {
             requests: self.requests,
@@ -946,6 +995,7 @@ impl GroupAcc {
             cache_hit_pct: ratio(self.cache_hit_num as f64 * 100.0, self.cache_hit_den),
             cost_usd,
             equivalent_cost_usd,
+            equivalent_status,
             cost_status,
             missing_price_dimensions,
             missing_prices,
@@ -964,6 +1014,17 @@ impl GroupAcc {
         self.any_equivalent
             .then_some(self.equivalent_usd)
             .filter(|usd| usd.is_finite())
+    }
+
+    /// How completely the group's equivalent covers its subscription rows.
+    const fn equivalent_status(&self) -> EquivalentStatus {
+        if !self.any_subscription {
+            return EquivalentStatus::NoSubscription;
+        }
+        if self.any_equivalent_gap {
+            return EquivalentStatus::Partial;
+        }
+        EquivalentStatus::Complete
     }
 
     /// The group's cost and its status. A group with no cost signal at all

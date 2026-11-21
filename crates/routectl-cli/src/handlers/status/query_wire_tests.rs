@@ -15,6 +15,7 @@ fn wire_shape_pins_every_metric_token() {
         status: CostStatus,
         cost: Option<f64>,
         equivalent: Option<f64>,
+        equivalent_status: EquivalentStatus,
     ) -> QueryMetrics {
         QueryMetrics {
             requests: 100 + offset,
@@ -56,6 +57,7 @@ fn wire_shape_pins_every_metric_token() {
             cache_hit_pct: Some(63.25),
             cost_usd: cost,
             equivalent_cost_usd: equivalent,
+            equivalent_status,
             cost_status: status,
             missing_price_dimensions: if status == CostStatus::Partial {
                 vec!["cache write 30m".to_string()]
@@ -78,10 +80,22 @@ fn wire_shape_pins_every_metric_token() {
     let result = QueryResult {
         groups: vec![QueryGroup {
             label: "sonnet".to_string(),
-            metrics: metrics(0, CostStatus::Priced, Some(1.25), None),
+            metrics: metrics(
+                0,
+                CostStatus::Priced,
+                Some(1.25),
+                None,
+                EquivalentStatus::NoSubscription,
+            ),
             requests_by_model: None,
         }],
-        totals: metrics(1, CostStatus::Partial, Some(1.25), Some(3.5)),
+        totals: metrics(
+            1,
+            CostStatus::Partial,
+            Some(1.25),
+            Some(3.5),
+            EquivalentStatus::Partial,
+        ),
         series: None,
     };
     let panel = Panel::available(
@@ -137,6 +151,7 @@ fn wire_shape_pins_every_metric_token() {
         "cache_hit_pct": 63.25,
         "cost_usd": 1.25,
         "equivalent_cost_usd": null,
+        "equivalent_status": "none",
         "cost_status": "priced",
         "missing_price_dimensions": [],
         "missing_prices": [],
@@ -186,6 +201,7 @@ fn wire_shape_pins_every_metric_token() {
         "cache_hit_pct": 63.25,
         "cost_usd": 1.25,
         "equivalent_cost_usd": 3.5,
+        "equivalent_status": "partial",
         "cost_status": "partial",
         "missing_price_dimensions": ["cache write 30m"],
         "missing_prices": missing_30m,
@@ -222,6 +238,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         status: CostStatus,
         cost: Option<f64>,
         equivalent: Option<f64>,
+        equivalent_status: EquivalentStatus,
     ) -> QueryMetrics {
         QueryMetrics {
             requests: 40 + offset,
@@ -263,6 +280,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
             cache_hit_pct: Some(17.75),
             cost_usd: cost,
             equivalent_cost_usd: equivalent,
+            equivalent_status,
             cost_status: status,
             missing_price_dimensions: if status == CostStatus::Partial {
                 vec!["cache write 30m".to_string()]
@@ -285,16 +303,34 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
     let result = QueryResult {
         groups: vec![QueryGroup {
             label: "sonnet".to_string(),
-            metrics: metrics(0, CostStatus::Priced, Some(2.5), None),
+            metrics: metrics(
+                0,
+                CostStatus::Priced,
+                Some(2.5),
+                None,
+                EquivalentStatus::NoSubscription,
+            ),
             requests_by_model: None,
         }],
-        totals: metrics(1, CostStatus::Partial, Some(2.5), Some(4.25)),
+        totals: metrics(
+            1,
+            CostStatus::Partial,
+            Some(2.5),
+            Some(4.25),
+            EquivalentStatus::Complete,
+        ),
         series: Some(QuerySeries {
             bucket_ms: 3_600_000,
             buckets: vec![
                 SeriesBucket {
                     start_ms: 1_000_000,
-                    metrics: metrics(2, CostStatus::Priced, Some(0.75), None),
+                    metrics: metrics(
+                        2,
+                        CostStatus::Priced,
+                        Some(0.75),
+                        None,
+                        EquivalentStatus::NoSubscription,
+                    ),
                 },
                 SeriesBucket {
                     start_ms: 4_600_000,
@@ -354,6 +390,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "cache_hit_pct": 17.75,
         "cost_usd": 0.75,
         "equivalent_cost_usd": null,
+        "equivalent_status": "none",
         "cost_status": "priced",
         "missing_price_dimensions": [],
         "missing_prices": [],
@@ -400,6 +437,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "cache_hit_pct": null,
         "cost_usd": null,
         "equivalent_cost_usd": null,
+        "equivalent_status": "none",
         "cost_status": "unpriced",
         "missing_price_dimensions": [],
         "missing_prices": [],
@@ -447,6 +485,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "cache_hit_pct": 17.75,
         "cost_usd": 2.5,
         "equivalent_cost_usd": null,
+        "equivalent_status": "none",
         "cost_status": "priced",
         "missing_price_dimensions": [],
         "missing_prices": [],
@@ -496,6 +535,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "cache_hit_pct": 17.75,
         "cost_usd": 2.5,
         "equivalent_cost_usd": 4.25,
+        "equivalent_status": "complete",
         "cost_status": "partial",
         "missing_price_dimensions": ["cache write 30m"],
         "missing_prices": missing_30m,
@@ -536,6 +576,7 @@ fn absent_metrics_serialize_as_null_and_the_cost_tokens_are_stable() {
         };
         let json = serde_json::to_value(&metrics).unwrap();
         assert_eq!(json["cost_status"], token);
+        assert_eq!(json["equivalent_status"], "none");
         for name in [
             "ttft_avg_ms",
             "ttft_max_ms",
