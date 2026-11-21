@@ -525,11 +525,30 @@ async fn an_unseated_row_on_an_api_key_entry_groups_under_its_account() {
     assert_eq!(keyed["metrics"]["requests"], 2, "{json}");
 }
 
-/// Groups of every other grouping keep exactly their label and metrics: no
-/// identity key appears, on the route, even over a config naming seats.
+/// Each grouping's groups carry exactly their own keys on the route, over a
+/// config naming seats: model and provider groups their label and metrics, a
+/// seat group adds only its identity and an alias group only its step shares.
 #[tokio::test]
-async fn non_seat_groups_carry_no_identity_keys() {
-    for group_by in ["model", "alias", "provider"] {
+async fn each_grouping_carries_exactly_its_group_keys() {
+    let rows: [(&str, &[&str]); 4] = [
+        ("model", &["label", "metrics"]),
+        (
+            "alias",
+            &["label", "metrics", "not_dispatched", "off_chain", "steps"],
+        ),
+        ("provider", &["label", "metrics"]),
+        (
+            "seat",
+            &[
+                "account",
+                "label",
+                "login_label",
+                "metrics",
+                "provider_entry",
+            ],
+        ),
+    ];
+    for (group_by, expected) in rows {
         // Arrange
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
@@ -551,16 +570,20 @@ async fn non_seat_groups_carry_no_identity_keys() {
                 .map(String::as_str)
                 .collect();
             keys.sort_unstable();
-            assert_eq!(keys, ["label", "metrics"], "{group_by}: {group}");
+            assert_eq!(keys, expected, "{group_by}: {group}");
         }
     }
 }
 
-/// A non-seat grouping's wire payload is the grouped result exactly as it
-/// serialized before seat groups were named, plus the ledger's earliest row.
+/// A model or provider grouping's wire payload is the grouped result exactly as
+/// it serialized before seat groups were named and alias groups were split,
+/// plus the ledger's earliest row.
 #[test]
-fn non_seat_payloads_serialize_as_the_grouped_result() {
-    for group_by in [GroupDim::Model, GroupDim::Alias, GroupDim::Provider] {
+fn model_and_provider_payloads_serialize_as_the_grouped_result() {
+    let pricer = state_over_router(PathBuf::new(), work_and_codex_router())
+        .pricer()
+        .pin();
+    for group_by in [GroupDim::Model, GroupDim::Provider] {
         // Arrange
         let result = QueryResult {
             groups: vec![QueryGroup {
@@ -585,7 +608,7 @@ fn non_seat_payloads_serialize_as_the_grouped_result() {
         };
 
         // Act
-        let payload = name_groups(read, group_by, &identities);
+        let payload = name_groups(read, group_by, &identities, &pricer);
 
         // Assert
         let mut expected = serde_json::to_value(&result).unwrap();
@@ -668,3 +691,4 @@ include!("query_series_tests.rs");
 include!("query_price_pickup_tests.rs");
 include!("query_model_filter_tests.rs");
 include!("query_gate_tests.rs");
+include!("query_alias_steps_tests.rs");

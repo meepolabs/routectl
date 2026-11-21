@@ -58,6 +58,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use crate::commands::usage::{BucketUnit, WindowFlag, resolve_bucket, window_bounds};
 use crate::server::status_gate::QUERY_BUDGET_MS;
 
+use self::alias_steps::{AliasShares, alias_shares};
 use super::router_view::QueryPricer;
 use super::usage::{open_error_code, query_error_code};
 use super::vocabulary::codes;
@@ -97,7 +98,9 @@ use super::{Panel, StatusState, now_utc_rfc3339, run_blocking_panel};
 /// `missing_prices` (each model and dimension behind
 /// `missing_price_dimensions`, with the `config_key` that would price it, null
 /// where no key can) and `cache_write_unknown_tokens`, the `model` request
-/// filter, and the top-level `earliest_ms`.
+/// filter, and the top-level `earliest_ms`. Added within 6: on every `alias`
+/// group `steps`, `off_chain` and `not_dispatched`, its requests split over
+/// the chain its label resolves to.
 pub const SCHEMA_VERSION: u32 = 6;
 
 /// The one method this route answers. Not expressible as an axum
@@ -302,13 +305,16 @@ pub(super) struct QueryRead {
     earliest_ms: Option<i64>,
 }
 
-/// One group. A seat group also carries its account identity; a group of
-/// any other grouping carries only its label and metrics.
+/// One group. A seat group also carries its account identity and an alias
+/// group its chain step shares; a group of any other grouping carries only its
+/// label and metrics.
 #[derive(Debug, Clone, Serialize)]
 struct GroupRow {
     label: String,
     #[serde(flatten)]
     seat: Option<SeatIdentity>,
+    #[serde(flatten)]
+    alias: Option<AliasShares>,
     metrics: QueryMetrics,
 }
 
@@ -328,11 +334,13 @@ struct SeatIdentity {
 }
 
 /// `read` as the wire payload, each group of a `seat` grouping named from
-/// `identities`.
+/// `identities`, and each group of an `alias` grouping split over the chain
+/// `pricer`'s config resolves its label to.
 fn name_groups(
     read: QueryRead,
     group_by: GroupDim,
     identities: &AccountIdentities,
+    pricer: &QueryPricer,
 ) -> QueryPayload {
     let QueryRead {
         result,
@@ -343,6 +351,10 @@ fn name_groups(
         .into_iter()
         .map(|group| GroupRow {
             seat: (group_by == GroupDim::Seat).then(|| seat_identity(&group.label, identities)),
+            alias: (group_by == GroupDim::Alias).then(|| {
+                let by_model = group.requests_by_model.unwrap_or_default();
+                alias_shares(&group.label, group.metrics.requests, &by_model, pricer)
+            }),
             label: group.label,
             metrics: group.metrics,
         })
@@ -356,8 +368,8 @@ fn name_groups(
 }
 
 /// `panel` with its result, if any, as the wire payload: each missing price
-/// keyed by `pricer`, the snapshot that priced the rows, then named by
-/// [`name_groups`].
+/// keyed by `pricer`, the snapshot that priced the rows, then named and split
+/// by [`name_groups`] against that same snapshot.
 fn name_panel_groups(
     panel: Panel<QueryRead>,
     group_by: GroupDim,
@@ -372,7 +384,7 @@ fn name_panel_groups(
                 result: with_price_keys(read.result, pricer),
                 earliest_ms: read.earliest_ms,
             };
-            name_groups(keyed, group_by, identities)
+            name_groups(keyed, group_by, identities, pricer)
         }),
         unavailable: panel.unavailable,
     }
@@ -735,6 +747,7 @@ fn with_price_keys(mut result: QueryResult, pricer: &QueryPricer) -> QueryResult
     result
 }
 
+mod alias_steps;
 #[cfg(test)]
 pub(super) mod fixture;
 #[cfg(test)]

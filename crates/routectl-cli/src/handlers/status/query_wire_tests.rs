@@ -94,6 +94,7 @@ fn wire_shape_pins_every_metric_token() {
             },
             GroupDim::Model,
             &AccountIdentities::default(),
+            &state_with_ledger(PathBuf::new()).pricer().pin(),
         ),
     );
 
@@ -312,6 +313,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
             },
             GroupDim::Model,
             &AccountIdentities::default(),
+            &state_with_ledger(PathBuf::new()).pricer().pin(),
         ),
     );
 

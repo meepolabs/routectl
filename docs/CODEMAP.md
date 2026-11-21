@@ -7189,6 +7189,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `populated_attention()` and its doctor-unavailable twin: two reads through
   the panel's own `AttentionState`, so the list carries a broken, degraded and
   recovered item, and both doctor coverage states
+- `src/handlers/status/query/alias_steps.rs` -- `alias_shares`: an `alias`
+  group's requests split over the top-level steps of the chain its wire-name
+  label resolves to (`QueryPricer::alias_chain_steps`, the router's
+  `resolve_alias_value` + `alias_steps` over the request's pinned config),
+  from the group's `requests_by_model`; each served model counts at its first
+  chain position, a nested alias step owns its expansion; remainders
+  `off_chain` and `not_dispatched`; a label with no chain (or one nested past
+  the depth bound) has `steps: []`
 - `src/handlers/status/query/fixture.rs` -- `cfg(test)` `populated_query()`
   (grouped) and `populated_query_series()` (bucketed): a seeded ledger read
   through the route's `build_panel` and the facade's pricer

@@ -23,9 +23,10 @@ use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
-    AccountIdentities, AccountReadings, EffectiveView, FidelitySnapshot, FieldRepairCounters,
-    LaneBudgetExhaustions, LaneLossyRepairs, ObservationStamp, PlacementStatus, PoolEligibility,
-    Router, derive_effective_view, shipped_beta_seed_scope,
+    AccountIdentities, AccountReadings, AliasStep, EffectiveView, FidelitySnapshot,
+    FieldRepairCounters, LaneBudgetExhaustions, LaneLossyRepairs, ObservationStamp,
+    PlacementStatus, PoolEligibility, Router, alias_steps, derive_effective_view,
+    resolve_alias_value, shipped_beta_seed_scope,
 };
 use routectl_usage::{AggRow, RowCost};
 
@@ -139,6 +140,20 @@ impl QueryPricer {
             return None;
         }
         crate::commands::pricing::price_config_key(model, dimension)
+    }
+
+    /// The top-level steps of the chain the wire model name `wire` resolves
+    /// to under the pinned config, by the router's own precedence and
+    /// expansion; empty when the name resolves to no chain.
+    ///
+    /// # Errors
+    /// The chain nests past the router's alias depth bound.
+    pub fn alias_chain_steps(&self, wire: &str) -> routectl_core::Result<Vec<AliasStep>> {
+        let config = &self.router.config;
+        match resolve_alias_value(config, wire) {
+            Some(value) => alias_steps(config, &value),
+            None => Ok(Vec::new()),
+        }
     }
 }
 

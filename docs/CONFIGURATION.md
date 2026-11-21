@@ -4930,6 +4930,21 @@ null for all three. Read these fields; never split the label. Groups of the
 other groupings carry no identity fields. Do not build a durable
 integration on the response shape before 1.0.
 
+An `alias` group also carries how its requests spread over the chain its
+label resolves to. The label is the model name the client sent, so the chain
+is the one the router would pick for that name today (an exact `[aliases]`
+key, the longest matching glob, a model nickname, then `default`), read from
+the config the request was priced against. `steps` lists each top-level entry
+of that chain in order as `{step, kind, requests}`: `kind` is `model` for a
+model nickname and `alias` for an entry naming another alias, whose
+`requests` count every model that alias expands to. A model the chain names
+twice counts at its first position. `off_chain` counts requests served by a
+model the chain does not name (the config changed since, for example), and
+`not_dispatched` the requests no model served, so `steps`, `off_chain` and
+`not_dispatched` always sum to the group's `requests`. A label that resolves
+to no chain carries `steps: []`. All three count the requested `window` only.
+Groups of the other groupings carry none of these fields.
+
 Beside `groups`, `totals` and `series`, the payload carries `earliest_ms`:
 the start time (epoch ms) of the oldest request in the whole ledger,
 whatever the requested `window` and filters, or null when the ledger holds
