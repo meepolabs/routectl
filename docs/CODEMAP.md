@@ -3408,7 +3408,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   under a credential generation -> `AcceptedReading` or `PolledUsageRejection`),
   `account_readings`, `forget_account_readings`, and the `AccountIdentities`
   resolver (`from_config`: each configured credential account's
-  `AccountIdentity` provider entry + login label; targets carry `login_label`).
+  `AccountIdentity` provider entry + login label; targets carry `login_label`;
+  `account_of_entry(config, entry)` applies the same rule to one entry,
+  built or not; `entry_accounts()` maps each API-key or cloud entry to its
+  own `#<entry>` account).
   Also `Router::placement_status` -> `PlacementStatus` (`PlacementBirths`,
   `PlacementMoves`, cap-forced moves, and per pool and upstream model a
   `PoolPlacement` of `SeatPlacement` rank / tier / score / reason), ranked by
@@ -5831,8 +5834,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `QueryTotals`, `CostStatus`, and the time-series types `BucketSpec` /
   `QuerySeries` / `SeriesBucket`. `GroupDim` is THE one grouping list every
   usage reader offers (`model`, `alias`, `provider`, `seat`; `ALL`, `as_str`,
-  `parse`, `label`, NULL reading as `(unattributed)`), shared by `routectl
-  usage --by` and `/status/query`. The read (`slices.rs`) returns raw fine
+  `parse`, NULL reading as `(unattributed)`), shared by `routectl
+  usage --by` and `/status/query`. `QuerySpec::group_label` is the one rule
+  every reader labels a fine row by: under `seat` a persisted seat wins, a
+  seatless row takes the account its served provider entry maps to in
+  `QuerySpec::entry_accounts` (API-key and cloud entries, from
+  `AccountIdentities::entry_accounts`), else `(unattributed)`. The read (`slices.rs`) returns raw fine
   rows at the `(model, provider, upstream, alias, provider_kind, seat)` grain
   with alias/provider filters as BIND params; the fold prices each fine row
   through the caller's closure BEFORE upstream is dropped (on the calling
@@ -6418,8 +6425,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   apply; `is_switched_off`, checked before each seat's credential generation
   is acquired, lets a job turned off mid-sweep leave waiting seats untouched), acquiring each seat's credential generation before `run` and
   applying under it; keeps the memory-only `SeatDriverHealth` that
-  `DaemonMeta` holds. Spawned by `spawn_reload_pipeline` when a credential
-  store exists; tests in `seat_driver_tests.rs`
+  `DaemonMeta` holds. `RefreshJob` also records each managed account's current
+  run of failed refreshes into the memory-only `RefreshFailures` (account ->
+  `RefreshFailure`: first failure ms and the latest token `transient` /
+  `transient_access_expired` / `revoked` / `not_logged_in`), cleared by a quiet
+  result, a credential replacement or the config dropping the seat; the
+  needs-attention list reads its `snapshot()`. Spawned by
+  `spawn_reload_pipeline` when a credential store exists; tests in
+  `seat_driver_tests.rs`
 - `src/server/usage_poll/mod.rs` -- the background usage poll: `UsagePollJob`
   (a `SeatJob` that peeks each due seat's token, fetches its usage endpoint and
   lands an accepted body through `Router::observe_polled_usage`, plus its
@@ -6610,7 +6623,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   for one whole `/status/usage` collection (an overrun of either sheds as the
   `query_timeout` unavailable panel), and `AGGREGATE_RESERVE_MS = 1000`, the
   room the `/status` aggregate leaves after the usage budget for its other
-  panels and the response write (bounds nothing at runtime). The MODULE doc
+  panels and the response write (bounds nothing at runtime; the attention
+  panel fits it only by reading the doctor panel's report instead of gathering
+  its own). The MODULE doc
   block carries the coupled timing numbers once -- these three, `STATUS_MAX_INFLIGHT`,
   the ledger-read gate, `handlers/status/query.rs`'s `BODY_READ_TIMEOUT`, and
   the dashboard's two aborts and `BASE_MS` cadence -- plus the two sum identities
@@ -7022,7 +7037,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `status_query_series`) so a healthy aggregate poll cannot mask a consistently
   failing series poll.
   `status_router() -> Router<Arc<StatusState>>` registers GET-only panel routes
-  (`/status`, `/status/{usage,health,config,doctor,accounts}`; non-GET gets 405) plus the
+  (`/status`, `/status/{usage,health,config,doctor,accounts,attention}`; non-GET gets 405) plus the
   ONE method carve-out `/status/query`, registered with `any()` because axum's
   `MethodFilter` cannot express `QUERY` -- the carve-out is route-scoped, so
   `QUERY` against any sibling path is still a 405.
@@ -7038,14 +7053,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the permit of its own one-permit `LedgerReadGate` (a `StatusState` field
   apart from `BuilderCapacity`), so a query read never holds a GET builder
   permit. The `/status` aggregate
-  composes the five REAL panel builders SEQUENTIALLY (five awaits, no
+  composes the six REAL panel builders SEQUENTIALLY (six awaits, no
   `tokio::join!`), so an admitted request holds at most ONE blocking builder at a
   time and `STATUS_MAX_INFLIGHT` names a single unit -- admitted requests AND
   concurrent blocking builders -- cancellation included: waiting on the builder
   permit cannot deadlock (no hold-and-wait edge), and a request arriving behind a
   detached builder is DELAYED, never shed. Latency is
-  the SUM of the five builders rather than the max, deliberately accepted.
-  Composed into `{panels:{usage,health,config,doctor,accounts}}` -- each an INDEPENDENT
+  the SUM of the six builders rather than the max, deliberately accepted.
+  The attention builder runs last and reads the Fail findings of the report the
+  doctor builder just made (`DoctorPanel::fail_findings`), so the aggregate runs
+  one no-network doctor gather, not two.
+  Composed into `{panels:{usage,health,config,doctor,accounts,attention}}` -- each an INDEPENDENT
   per-panel envelope with its OWN `schema_version` (each panel module's own
   `SCHEMA_VERSION` const -- `DOCTOR_SCHEMA_VERSION` for
   doctor)/`as_of`/availability, with NO outer envelope version
@@ -7061,10 +7079,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/accounts.rs` -- `/status/accounts` (schema_version 1):
   each configured credential account with its account, provider entry and
   login label, its account-meter windows under the stale rule (kept windows
-  flagged), and its usage poll state (`off` when the poll is switched off);
-  plus vendor pauses, refusal totals, `corrections_confirmed`, history
-  counters, the poll driver's health and the top-level `placement` object
-  (`accounts/placement.rs`). Memory-only, wire types owned here.
+  flagged), its usage poll state (`off` when the poll is switched off), its
+  sorted `pools`, its `subscription` billing flag and its `credential` row
+  (`usable` / `unusable` / `parked` / `not_built`, the cause worded by the
+  needs-attention builder's `credential_cause`, since / until, and a bare
+  `fix` command or a `remediation` sentence); plus vendor pauses, refusal
+  totals, `corrections_confirmed`, history counters, the poll and refresh
+  drivers' health (`poll_driver` / `refresh_driver`) and the top-level
+  `placement` object (`accounts/placement.rs`). Memory-only, wire types owned
+  here.
 - `src/handlers/status/attention.rs` -- `/status/attention` (schema_version 1):
   the needs-attention list with its verdict, counts and doctor coverage.
   Gathers plain snapshots from one pinned router snapshot, both seat drivers'
@@ -7111,7 +7134,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   aggregate's health-failure fallback be exercised over a real request.
   `stall_query_read` parks every `/status/query` read on its blocking worker,
   holding the ledger-read gate, until its cancel flag or deadline fires, so a
-  test observes a dropped request reaching the read.
+  test observes a dropped request reaching the read. `doctor_gathers` counts
+  the no-network doctor gathers the daemon ran, so a test sees the aggregate
+  share one gather between the doctor and attention panels.
   Per-daemon rather than process-global -- a test binary runs its cases
   concurrently, so a global slot is claimed by whichever daemon boots first
   (measured on the sibling router-swap seam: the global shape failed every case at
@@ -7167,7 +7192,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   provenance tokens `override`/`learned`, signal-tier
   tokens) plus the `unavailable` reason codes
   (`no_data`/`schema_mismatch`/`db_busy`/`db_unavailable`/`config_unavailable`/`doctor_unavailable`/`no_config_path`/`query_timeout`)
-- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 4),
+- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 5,
+  where a seatless row served by an API-key or cloud entry groups under that
+  entry's `#<entry>` account rather than `(unattributed)`),
   the grouped windowed aggregate. Three EXCLUSIVE regimes: 405 (method is not
   `QUERY`, guarded by the handler's first extractor), 400 (body outside the
   closed vocabulary -- `deny_unknown_fields` + closed `window`
@@ -7177,7 +7204,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   alias/provider filters -- or over `MAX_BODY_BYTES` (8 KiB), or still arriving
   at the `BODY_READ_TIMEOUT` (1s) read deadline that stops a stalled send from
   parking a concurrency permit; all refused with the FIXED envelope
-  `{"schema_version":4,"error":{"code":"invalid_query",...}}` that never echoes
+  `{"schema_version":5,"error":{"code":"invalid_query",...}}` that never echoes
   serde text or body bytes and never opens the ledger), and 200 for everything
   else including every data-source failure. Runs `routectl_usage::query` under
   `run_blocking_panel` (blocking worker + `catch_unwind`, per-request
@@ -7220,7 +7247,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `learned_capabilities(now)` (each resident entry with its cell resolved
   through `lane_cell::resolve_entries` -> `ResolvedEntry`),
   `account_identities()` / `account_readings(now)` (the configured accounts
-  and their account-meter readings), `placement_status(now)` (the pace rule's
+  and their account-meter readings), `account_pools()` (each account's sorted
+  pool keys), `account_credentials(now)` -> `AccountCredential` (each built
+  account's `CredentialState` with its cause, since / until and readmitting
+  `fix` or `remediation`), `managed_accounts()` (the seats both background
+  drivers work on), `account_subscriptions()` (the subscription billing flag
+  per account), `placement_status(now)` (the pace rule's
   counters and seat ranking), `usage_poll_snapshot(state)`,
   `field_repair_counters()` (the live Stage-1
   rebuild/repair/acting counters, read for the field-verdict snapshot log --
@@ -7248,7 +7280,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `AggRow` through `commands::usage::cost_for_row` (so `/status/query` and the
   CLI usage report price a row through one function, and a hot-swap or a new
   table mid-query cannot make two rows of one result price against different
-  rate tables). `StatusState::pricer()` pairs it with the shared book. Rust module
+  rate tables); `QueryPricer::entry_accounts()` hands the seat grouping its
+  entry -> account map from the same snapshot. `StatusState::pricer()` pairs
+  it with the shared book. Rust module
   privacy makes the raw `Router` unreachable
   from the sibling panel modules -- a panel cannot obtain a `&Router`, call
   `.complete`/`.stream`/dispatch, or read `.config`; the `mod.rs`
@@ -7267,22 +7301,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   stamp; `stamp_config_loaded` clears it, so `DaemonMetaHandle::reload_failure`
   reports it only until a later load supersedes it. `DaemonMeta` also holds the
   refresh and usage poll drivers' `SeatDriverHealth` (`seat_driver_health()` /
-  `usage_poll_driver_health()` hand the writer to each driver) and the
+  `usage_poll_driver_health()` hand the writer to each driver), the refresh
+  job's `RefreshFailures` (`refresh_failures()` hands it to the job) and the
   once-installed `UsagePollState`; the handle reads them only as
-  `seat_driver()` / `usage_poll_driver()` -> `SeatDriverHealthSnapshot` and
+  `seat_driver()` / `usage_poll_driver()` -> `SeatDriverHealthSnapshot`,
+  `refresh_failures()` -> account -> `RefreshFailure`, and
   `usage_poll_state()`
 - `src/handlers/status/usage.rs` --
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
   `guard_panel`'s blocking worker, runs
-  `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`window_observation` over the
+  `aggregate`/`errors_by_class`/`window_observation` over the
   `window_bounds` window, and maps to the aggregates-only `UsagePanel` DTO
-  (schema_version 7, which dropped the `would_trim` block: per-`(alias,provider,model,upstream)` rollups, each with
+  (schema_version 8: 7 dropped the `would_trim` block, 8 the per-seat `quota`
+  list, which `/status/accounts` now covers; per-`(alias,provider,model,upstream)` rollups, each with
   the both-era `cache_write_tokens` / `cache_write_present`, + windowed
-  totals + one quota snapshot per CONFIGURED seat (`seat` + `provider_entry` +
-  `login_label` from `AccountIdentities`, + `provider_kind`, per-row
-  `ts_start_ms` freshness; seatless and retired seats are dropped) + the
-  window's `observation`
+  totals + the window's `observation`
   block with its walk counts; per-group and totals
   `errors_by_class` failure-class breakdown, `client_disconnect_total` +
   `cancelled_total` +
@@ -7300,7 +7334,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `query_error_code` also owns the `query_timeout` arm
   (`QueryError::Interrupted`). `build_panel` anchors ONE `USAGE_BUDGET_MS`
   deadline inside the blocking closure and `collect` installs a single
-  `DeadlineGuard` on the per-request connection, so all four reads share one
+  `DeadlineGuard` on the per-request connection, so all three reads share one
   budget and an overrun sheds `query_timeout` instead of starving a worker
 - `src/handlers/status/health.rs` -- `/status/health` (schema_version 9).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
@@ -7478,8 +7512,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   config and replays no ledger; `legacy_dirs` are the old
   folders `StatusState` carries) +
   `build_report_no_network(&ctx)` (never
-  `gather_probe_results`/`section_probe`); the async gather runs
+  `gather_probe_results`/`section_probe`); the inputs are pinned on the async
+  side into `PinnedGather` and the gather runs
   under `guard_panel`'s `spawn_blocking` via `Handle::current().block_on`.
+  `DoctorPanel::fail_findings` / `fail_findings(report)` hand the report's Fail
+  findings to the aggregate's attention builder, and `report_fail_findings`
+  builds them alone (no panel, no fidelity line) for `/status/attention`.
   The synchronous fold from the gathered report plus the pinned router
   snapshot into `DoctorPanel` -- including the shared
   `field_verdict_log::log_field_verdict_snapshot` call -- is split into
@@ -7531,7 +7569,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   asserting the set of `method:` values the script sets is a subset of
   `{"query"}` (fails closed on a verb nobody deny-listed); (2) the
   `EXPECTED` schema-version map pinned to the panel `SCHEMA_VERSION` consts
-  (`pub` on usage/health/config/accounts, `DOCTOR_SCHEMA_VERSION` on doctor,
+  (`pub` on usage/health/config/accounts/attention, `DOCTOR_SCHEMA_VERSION` on doctor,
   `query::SCHEMA_VERSION`) so client render-target and server wire versions
   cannot drift; (3) `QUERY_METRICS` + `QUERY_TOKENS` field names asserted to be
   fields of a serde-serialized `QueryMetrics` (derived, not a second hardcoded
@@ -7549,9 +7587,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   declaration form (`function`, `async`, generator, and `var`/`let`/`const` with
   any number of declarators) and PANICS on one it cannot classify, with (6) a
   per-form recognition test that feeds each form in twice and asserts the
-  collision is reported; (7) the two `/status/query` read shapes own SEPARATE
+  collision is reported; (7) the three `/status/query` read shapes own SEPARATE
   source records, each `SOURCE_PANEL`-mapped to the query wire version, with
-  Now and Traffic naming different primaries in `VIEWS` and the
+  Now and Traffic naming different query sources in `VIEWS` and the
   transport wiring (`querySourceFor` arms, `queryRound` resolution,
   `applyQueryOutcome` writing only its `source` parameter) asserted from the
   extracted function bodies; (8) every `queryRound()` nudge in `runRound` sits
@@ -7560,15 +7598,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `applyQueryOutcome`, on a bounded `SUPERSEDED_BUSY_RETRY_MS` schedule that
   ends before the first backoff step and never names the backoff ladder
 - `src/handlers/status/dashboard.html` -- dashboard MARKUP only: the verdict
-  strip (state dot + one plain-language sentence + req/span + window picker +
-  poll indicator, which reports the as_of AGE of the active tab's data; carries
-  no cost figure by design), the six-tab bar
-  (Now default, then Accounts / Traffic / Models / Config / Doctor, in VIEWS
-  order), the banner, one identical pane shell per view (`status-<view>` +
-  `body-<view>`, the status line reporting only a NOT-current source), and the
-  `modal-host` overlay host outside `<main>` (a pane's entry animation would
-  otherwise become the containing block for a fixed-position modal). Never
-  served alone; carries no `<link>`/`<script src>`
+  strip (state dot + one plain-language sentence + a not-current note with its
+  time and reason + a link to the view showing its cause + req/span + window
+  picker with its covered-span hint + poll indicator, which reports the as_of
+  AGE of the active tab's data; carries no cost figure by design), the six-tab
+  bar (Now default, then Accounts / Traffic / Models / Config / Doctor, in
+  VIEWS order), the banner, and one identical pane shell per view
+  (`status-<view>` + `body-<view>`, the status line reporting only a
+  NOT-current source). Never served alone; carries no `<link>`/`<script src>`
 - `src/handlers/status/dash_base.css` -- dashboard STYLE part 1 of 3: the
   design system and page chrome. One token set (dark primary, light re-valued
   under `prefers-color-scheme`), 8px grid, hairline borders, system sans for UI
@@ -7576,25 +7613,29 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   green/amber/red reserved for good/degraded/broken. Layout dimensions (column
   min-widths, flex bases, the step-card width) are named
   `--col-*`/`--fb-*`/`--w-*` tokens on the 8px grid; hairlines and control
-  details stay at their intentional off-grid values. Also the verdict strip,
-  the window picker including its windowless dimming, and the tab bar
+  details stay at their intentional off-grid values. Also the verdict strip
+  (its not-current note and view link), the window picker including its
+  windowless dimming, and the tab bar
 - `src/handlers/status/dash_components.css` -- dashboard STYLE part 2 of 3: the
   shared component vocabulary. Tables that scroll inside their card
   (`.tablewrap`) so the page never scrolls sideways from 720px up,
   cards, badges, the `.tok` value-domain token families (mirrored by the label
   maps in `dash_10_format.js` -- a new token is a paired edit in both),
-  figures, notes, and the modal host
+  figures, notes, and the Now view's needs-attention list and accounts-at-a-
+  glance grid
 - `src/handlers/status/dash_tabs.css` -- dashboard STYLE part 3 of 3: the
-  per-tab layouts. Cascade order is load-bearing and is the `STYLE_PARTS`
+  per-tab layouts, the Accounts view's pool groups, rows, meters and driver
+  cards last. Cascade order is load-bearing and is the `STYLE_PARTS`
   declaration order, so these rules land last and may lean on the component
   vocabulary above
-- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 15: the
-  client's shared state. `EXPECTED` (per-source wire versions; `accounts` is
-  pinned though the Accounts view does not read that panel yet), the seven DATA
-  SOURCES -- `usage`/`health`/`config`/`doctor` off the GET `/status`
-  aggregate, plus `query` (Traffic's series-less read), `query_series` (Now's
-  bucketed read) and `usage_all` (the all-history usage GET the routing
-  figures need) -- each with an independent state record
+- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 16: the
+  client's shared state. `EXPECTED` (per-source wire versions), the nine DATA
+  SOURCES -- `usage`/`health`/`config`/`doctor`/`attention`/`accounts` off the
+  GET `/status` aggregate (`GET_SOURCES`), plus the three `QUERY_SOURCES`
+  (`query`, Traffic's series-less read; `query_series`, Now's bucketed read;
+  `query_seats`, the Accounts view's per-seat read) and `usage_all` (the
+  all-history usage GET the routing figures need) -- each with an independent
+  state record
   (`loading|live|empty|unavailable|incompatible|invalid_payload|stale|dead`)
   carrying its own `liveAt`, `SOURCE_PANEL`/`expectedVersion`, the cadence and
   budget constants (`BASE_MS`, the shared `BACKOFF_STEPS_MS` ladder,
@@ -7602,33 +7643,35 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `server::status_gate` for the coupled-timing derivation), the selection
   state (window / group-by / provider scope / sort / active view), `SOURCES`,
   `RENDER_FAULTS`, `setSource`, and `effectiveState`
-- `src/handlers/status/dash_05_idiomorph.js` -- dashboard SCRIPT part 2 of 15:
+- `src/handlers/status/dash_05_idiomorph.js` -- dashboard SCRIPT part 2 of 16:
   the vendored idiomorph v0.8.0 `dist/idiomorph.js` (0BSD), byte-for-byte
   upstream, sha256
   `4cda2ad0d39c630100957eeb5ec3115f84d57351c6c313579d2441cf48e9880d` (pinned
   by `page::tests::morph`). Declares one name, `Idiomorph`; page code reaches
   it only through `morphPanel` in `dash_40_render.js`, which takes a DOM node
-  and never markup, and updates every pane body and the modal host in place
-- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 3 of 15:
+  and never markup, and updates every pane body in place
+- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 3 of 16:
   number and time humanizers matched to the CLI's usage formatters
   (`humanCount` mirrors `human_count`, percent / timestamp / relative-age /
-  duration text) plus `WINDOW_SPAN` and the `LABELS` token vocabulary with
+  duration text) plus `WINDOW_SPAN`, `WINDOW_COVERS` (what each range
+  covers, shown beside the picker) and the `LABELS` token vocabulary with
   `labelFor`/`labelCell`, so a wire token renders as plain-language text in
   exactly one place
 - `src/handlers/status/dash_20_query_vocab.js` -- dashboard SCRIPT part 4 of
-  15: the payload field vocabulary. `QUERY_METRICS` / `QUERY_NULLABLE_METRICS`
+  16: the payload field vocabulary. `QUERY_METRICS` / `QUERY_NULLABLE_METRICS`
   / `QUERY_TOKENS` name every `/status/query` metric (the nullable list equals
   the DTO's `Option` members), and `USAGE_FIELDS` / `HEALTH_FIELDS` /
-  `CONFIG_FIELDS` / `DOCTOR_FIELDS` declare every key the page reads from each
-  GET panel; `page::tests::payload_keys` pins each list to the keys the real
+  `CONFIG_FIELDS` / `DOCTOR_FIELDS` / `ATTENTION_FIELDS` / `ACCOUNTS_FIELDS`
+  declare every key the page reads from each GET panel;
+  `page::tests::payload_keys` pins each list to the keys the real
   DTOs serialize and every member read in the script to the declared union.
   `isQueryShape` validates a query payload in full (groups, totals, series
   buckets; a missing or non-numeric required metric is `invalid_payload`, never
   a zero) before `QueryAdapter`/`queryViewOf` adapt it without coercion.
   `QUERY_SHAPES` is the COMPLETE request vocabulary -- every selectable window
-  x every group_by x each series mode -- as strict JSON the Rust guard feeds to
-  the server's own parser
-- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 5 of 15:
+  x every group_by (seat included) x each series mode -- as strict JSON the
+  Rust guard feeds to the server's own parser
+- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 5 of 16:
   every fetch on the page. `safeRequest` is the SOLE fetch call site and the
   shared outcome classifier (`ok`/`overloaded`/`forbidden`/`rejected`/
   `timeout`/`network`). Every independently fetched source (the aggregate GET,
@@ -7643,10 +7686,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   short `SUPERSEDED_BUSY_RETRY_MS` schedule). `queryKeysBySource` /
   `resetMovedQuerySources` reset only the query sources whose request key a
   selection change moved, whichever view is active, and
-  `markQuerySourcesTransport` marks them stale when the aggregate round fails.
+  `markQuerySourcesTransport` marks stale, when the aggregate round fails, the
+  query sources holding a rendered payload or issued by the active view (one
+  no view has asked for yet stays loading). The per-seat source always asks
+  for the series-less seat shape.
   Also the aggregate round (`runRound`/`tick`/`scheduleNext`), the
   visibility-aware refresh, and the independent `usage_all` round
-- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 6 of 15: the
+- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 6 of 16: the
   render host. `renderPanel` validates `schema_version` and the envelope
   invariant per source (`renderPanelGuarded` isolates each); a transport
   failure keeps a rendered source's data marked `stale` and marks a
@@ -7660,11 +7706,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   loading / unavailable / invalid / stale / pending states, contains a builder
   throw in that section's titled error card (`guardedContent`, `safeSection`),
   and records faults in `RENDER_FAULTS` for the badges and status line. Also
-  the state cards, the banner, the verdict strip (`verdictState` reads routing
-  targets, pool eligibility and account usability only, "Checking routing
-  state" until a current, well-formed health payload), the poll indicator,
-  and the tab badges
-- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 7 of 15: the
+  the state cards, the banner, the verdict strip (`renderVerdict`: the
+  severity, sentence and view target of a current `attention` payload's
+  `verdict` via `currentVerdict`; else, through `shownVerdict`, the last one
+  shown with its time and why it is not current; "Checking routing state"
+  only before any verdict; the view link via `syncVerdictLink`), the poll
+  indicator, and the tab badges (`sourceBadge`; the attention badge counts
+  broken plus degraded from `attentionTally`, which throws on a missing or
+  non-count tally so the payload lands as `invalid_payload`)
+- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 7 of 16: the
   DOM construction vocabulary, `textContent` only and never `innerHTML`. Stable
   ids (`idKey`, the id scheme comment) and delegated actions (`setAction`
   writes `data-action`/`data-arg`; no builder attaches a listener), the shared
@@ -7672,13 +7722,26 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `sortBy` columns, keyed rows that throw on a duplicate key, nulls last and
   ties by key), `markRefreshUnit`, the changed-value marks (`markValue`,
   `markChangedValue`, `clearChangedValue`), the state-dot and token pills, the
-  card / section / figure / share-bar primitives, `emptyCard`, and the SVG
+  card / section / figure / share-bar primitives, `emptyCard`, `viewLink`
+  (a same-page link to a view through the `open-view` action), the shared login
+  color rule (`loginKind`, `poolsWithUsableLogin`), `copyableCode` (a focusable
+  `<code>` whose Ctrl+A selects its text alone), and the SVG
   sparkline family (`sparkSvg` + `drawSegments`, which draws a sparse series as
   breaks). Data-age figures use the as_of of their own record (`panelNowMs`)
 - `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 8 of
-  15: the Overview sections, the whole of the Now view, MULTI-SOURCE (`query_series` primary -- the bucketed
-  read whose series feeds the sparklines -- plus `usage` for the
-  seat surface). The provider row leads with an all-providers AGGREGATE card
+  16: the Now view's sections. `attentionSection` (source `attention`) draws
+  the daemon's needs-attention list as sent: its broken / degraded counts, a
+  clear line when nothing is active, then each item (severity, subject, cause,
+  a link to its target view, the fix as a focusable `copyableCode` or a
+  remediation in words, the raw token) as its own refresh unit, recovered
+  items grey with their minutes since recovery. `accountsGlanceSection`
+  (source `accounts`) lists every subscription account under each pool it
+  dispatches in (a pool-less account as a pool of one) with its login dot
+  (`loginKind`), each window's meter (accent, amber past
+  `GLANCE_NEAR_FULL` = 0.9, red at its limit, each with a word; stale dimmed)
+  and age, and a link to the Accounts view. Then the provider and KPI block,
+  single-source (`query_series`, the bucketed read whose series feeds the
+  sparklines). The provider row leads with an all-providers AGGREGATE card
   built from the query `totals` (the scope reset), then the busiest
   `PROVIDER_CARD_CAP` provider cards from `groups`, then -- only when more
   remain -- one overflow card whose expansion lists the rest. Every card stays
@@ -7688,39 +7751,37 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the row, since a scoped response narrows `groups` to one provider. The scope
   is labeled directly above the KPI grid, and a scope strip renders outside the
   section boundary ONLY when the scoped query is unrenderable (so the scope
-  stays reversible with no cards on screen). A card's seat affordance is
-  per-seat DOTS plus the seat count, opening a page-level centered MODAL
-  (backdrop click, close control, or Escape) of one quota tile per seat over
-  the usage `quota[]` rows whose `provider_entry` names that provider -- the same tiles
-  Health renders, so a provider with no quota row gets no affordance, no
-  synthesized tile, and no cross-seat rollup. Eight KPI tiles come from
-  `totals`, each carrying a sparkline over `series.buckets[].metrics`; the seat
-  read is guarded on the usage record alone, so a usage fault costs the seat
-  surface and leaves the KPI and provider blocks live. The provider row builder
-  is `providerRowSection`, named for the row rather than its subject because the
-  script parts share one function scope with Config's provider TABLE builder
-- `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 9 of 15:
+  stays reversible with no cards on screen). Eight KPI tiles come from
+  `totals`, each carrying a sparkline over `series.buckets[].metrics`; an empty
+  ledger names the client base URL from the config panel. The provider row
+  builder is `providerRowSection`, named for the row rather than its subject
+  because the script parts share one function scope with Config's provider
+  TABLE builder
+- `src/handlers/status/dash_61_tab_usage.js` -- dashboard SCRIPT part 9 of 16:
   the Usage sections, the head of the Traffic view, single-source (`query`). Renders the group-by picker
   (model/alias/provider, re-issuing the non-series query through
   `queryInputChanged`) outside the section boundary, then one two-line card per
   query group ranked by requests, with zero-traffic groups omitted and their
   count reported in the header
-- `src/handlers/status/dash_62_view_accounts.js` -- dashboard SCRIPT part: the
-  Accounts view sections, MULTI-SOURCE (`accounts`, plus `health` for each
-  pool header's usable count, guarded in `acctPoolCounts` so a dark health
-  source costs the counts alone). `accountsPoolSection` lists every
+- `src/handlers/status/dash_62_view_accounts.js` -- dashboard SCRIPT part 10
+  of 16: the Accounts view sections, MULTI-SOURCE (`accounts`, plus `health`
+  for each pool header's usable count, guarded in `acctPoolCounts` so a dark
+  health source costs the counts alone, and `query_seats` for each row's
+  traffic over the selected range, guarded the same way in
+  `acctSeatTraffic`). `accountsPoolSection` lists every
   configured credential from `/status/accounts` under each pool naming it
   (sorted; an account in several pools under each, then "Not in a pool"),
   named "provider_entry (login_label)", with the daemon's credential cause
   and its fix in a focusable `<code>`, every window labelled from
   `length_secs` with used and room, a meter calm / amber past 0.9 / red at
   1 beside its word, "resets in", the reading's age and source and a stale
-  mark (dimmed), and the usage-poll line (every applicability token
+  or kept mark (stale dimmed), each seat's placement rank and reason, the
+  range's traffic line, and the usage-poll line (every applicability token
   neutral). API-key and cloud rows say "this provider reports no usage
   windows". `accountsDriverSection` shows the refresh and poll drivers,
   stopped reading amber
-- `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 10 of
-  15: the Routing sections, built under the Usage sections in the Traffic
+- `src/handlers/status/dash_70_tab_routing.js` -- dashboard SCRIPT part 11 of
+  16: the Routing sections, built under the Usage sections in the Traffic
   view, MULTI-SOURCE (built around `config`, plus `usage_all` and `health`);
   its figures span ALL HISTORY whatever the picker says, and its header and
   note say so. The
@@ -7734,25 +7795,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   can resolve to several health targets (one per seat), collapsed by the
   worst-circuit rule Health shares. Each of the three sources is wrapped in its
   own `safeSection`, so health going dark costs the state list alone
-- `src/handlers/status/dash_71_tab_health.js` -- dashboard SCRIPT part 11 of
-  15: the Health sections, with no view entry point of its own: the target
-  section (`healthTargetSection`) is the Models view, and the pool, seat-driver
-  and quota sections are the Accounts view. MULTI-SOURCE (`health`, plus
-  `usage` for the quota tiles). Per-target
+- `src/handlers/status/dash_71_tab_health.js` -- dashboard SCRIPT part 12 of
+  16: the Models view's dispatch target section (`healthTargetSection`),
+  single-source (`health`), with no view entry point of its own. Per-target
   cards collapse a pooled model's seats by nickname through the same
   worst-circuit rule Routing uses and split into needs-attention / healthy /
   not-observed sections (a target with no settled outcome is `unknown`, never
   `Healthy`; an unusable or parked seat puts its card in needs-attention, and
-  a card's `eligibility` cell names its blocked seats), followed by a pools
-  section (`healthPoolSection`: eligible / configured seats and the by-reason
-  counts) and a seat-driver section (`healthDriverSection`), while the per-seat quota tiles read the usage panel's `quota[]`
-  discriminated by `provider_kind`, rendering one line per POPULATED
-  utilization field (no synthesized second line, no cross-seat rollup) and
-  distinguishing a missing snapshot, a null utilization, and a measured `0`.
-  Each source has its own `safeSection`, so a dark ledger costs the quota tiles
-  alone and a dark health source leaves the quota tiles live
-- `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 12 of
-  15: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
+  a card's `eligibility` cell names its blocked seats)
+- `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 13 of
+  16: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
   tab -- the payload is validated in one place before any section is built, so
   a version mismatch or a malformed panel never partially renders config
   vocabulary. Renders a source strip (config path, load age, resolved
@@ -7769,8 +7821,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the capability overrides (default-closed disclosure),
   and the retry-class policy whose columns are exactly retry cap / fallback /
   breaker debit (the wire's `debits_breaker`) / source
-- `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 13 of
-  15: the Doctor tab, the second single-source FAIL-CLOSED tab (`doctor`) --
+- `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 14 of
+  16: the Doctor tab, the second single-source FAIL-CLOSED tab (`doctor`) --
   `validatedReport` checks every finding severity against the fixed
   `Pass|Warn|Fail` triad and every reachability verdict against
   `reachable|degraded|unknown` before a section is built, so an unknown token
@@ -7786,27 +7838,35 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lane-by-capability table (lane, kind, nicknames, then `verdict (layer)`
   cells whose tooltip carries the source, action, learned timestamps and
   learned value)
-- `src/handlers/status/dash_80_views.js` -- dashboard SCRIPT part 14 of 15:
-  `VIEWS`, the one view registry (`{id, label, sources, span, build}`, array
-  order = tab order): Now (the Overview sections), Accounts (pools, seat
-  driver, seat quota), Traffic (Usage then Routing), Models (the health target
-  section), Config and Doctor. Each composition wraps every section in
-  `viewSection` bound to that section's source, and keeps view controls (the
-  scope reset, the group-by strip) outside the section boundary. Accounts,
-  Models, Config and Doctor carry the `current state` span; Now and Traffic
-  are windowed. `LEGACY_VIEW_IDS` / `canonicalViewId` map the old tab tokens
-  (overview -> now, usage and routing -> traffic, health -> accounts).
-  `sources[0]` is a view's primary source (freshness line, tab badge, and the
-  QUERY a query-backed view issues, via `viewQuerySource`). `page::tests::views`
-  pins the markup ids to the VIEWS ids in order
-- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 15 of 15:
+- `src/handlers/status/dash_80_views.js` -- dashboard SCRIPT part 15 of 16:
+  `VIEWS`, the one view registry (`{id, label, sources, badge?, span, build}`,
+  array order = tab order): Now (needs attention, accounts at a glance, then
+  the Overview provider and KPI sections), Accounts (accounts by pool and the
+  background seat drivers, with a scope strip when an inherited provider scope
+  narrows its seat QUERY), Traffic (Usage then Routing), Models (the health
+  target section), Config and Doctor (badged from `attention`). Each
+  composition wraps every section in `viewSection` bound to that section's
+  source, and keeps view controls (the scope reset, the group-by strip)
+  outside the section boundary. Models, Config and Doctor carry the
+  `current state` span; Now, Accounts and Traffic are windowed.
+  `LEGACY_VIEW_IDS` / `canonicalViewId` map the old tab tokens (overview ->
+  now, usage and routing -> traffic, health -> accounts). `sources[0]` is a
+  view's primary source (freshness line, state card, and the tab badge unless
+  `badge` names another), and the first QUERY source a view lists is the one
+  it issues (`viewQuerySource`). `page::tests::views` pins the markup ids to
+  the VIEWS ids in order
+- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 16 of 16:
   the page chrome and the load-time wiring. The view-state codec, the only
   code that reads or writes the address: `#<view>?range=&scope=&group=&sort=`
   (`parseViewHash`/`formatViewHash`/`writeViewHash`, closed vocabularies, a
   bounded scope with hidden characters refused, `SORT_TABLES`; a user change
   pushes one history entry through `commitViewState`, cleanup replaces it).
-  The `ACTIONS` map and one delegated click listener per pane root and the
-  modal host, the favicons (`FAVICON_BY_VERDICT` follows the verdict), the
+  The `ACTIONS` map (`open-view` among them) with one delegated click
+  listener per pane root and on the verdict strip, and one keydown listener
+  per pane root (`selectFocusedCode`: Ctrl+A on a focused copyable code
+  selects its text alone), the favicons (`faviconState` follows the shown
+  verdict: red for a stopped page or a current broken verdict, amber for a
+  current degraded one, grey for a verdict not current or aged data), the
   age ticker, the refresh control, the window picker and its dimming, tab
   selection with keyboard navigation, the `animationend` listener that clears
   a changed mark, and the single load-time statement that starts the loops
@@ -7818,6 +7878,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   scripted /status answers, system Chrome, nothing in the release build). Pinned
   by `page.rs`'s `dashboard_script_points_at_the_manual_checklist`, which also
   requires the checklist to name every browser suite
+- `src/handlers/status/page_browser_tests.rs` -- `cfg(test)` headless-Chrome
+  harness `include!`d into `page::tests::browser`: `run_scenario` serves the
+  assembled `PAGE` from a loopback test server with the test-only
+  `page_browser_driver.js` injected (never part of the released page) and
+  answers `/status`, `/status/usage` and `QUERY /status/query` from the
+  populated panel fixtures, `run_case_scenario` from one `ui_case_fixtures`
+  review case, and `serve_review_case` serves a case for a reviewer to browse.
+  Each topic is a `page_browser_<topic>_tests.rs` + `page_browser_<topic>_driver.js`
+  pair attached as `page::tests::browser_<topic>` (`views`, `url`, `sort`,
+  `epoch`, `locks`, `states`, `verdict`, `motion`, `host`, `layout`, `tiles`,
+  `sources`, `now`, `accounts`, `cases`); among them `now` covers needs
+  attention and accounts at a glance, `accounts` the Accounts view, `tiles`
+  the KPI tiles' gaps, cost split and empty ledger, `sources` the attention and
+  accounts records applied and refused one at a time, and `cases` each review
+  case's signature read back from the drawn page
 - `src/ingress/mod.rs` -- `IngressAdapter` trait (incl. `early_frame`:
   warm-hold first-body-byte SSE events, default no-op; Anthropic emits the
   synthesized `message_start`, OpenAI / Responses emit nothing; and
@@ -8593,7 +8668,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   shared grouping list, model when absent; every report ends with a `total`
   row kept apart from the groups) under a far-off read limit, and renders
   the query's `QueryMetrics` per `DisplayRow` (plus the `+sub` flag and the
-  `--detail` nearest-rank TTFT p50/p95 from `ttfbs`), so the CLI and the
+  `--detail` nearest-rank TTFT p50/p95 from `ttfbs`, labelled through the same
+  `QuerySpec::group_label`), so the CLI and the
   endpoint cannot disagree on a figure. Cost bifurcates per fine row through
   `cost_for_row(config, &PriceSnapshot, row)`, the pricing closure shared
   with `/status/query`: a provider whose `[providers.X] credential` starts
@@ -8823,7 +8899,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   renders through `parked_seat_finding` as one `parked seat <state_key>` Warn
   each naming the reason and the RFC3339 deadline; `with_unusable_seats`
   likewise attaches `UnusableSeat`s (state key, cause, since, fix line from
-  `SeatFix` / `unusable_seat_fix`), rendered by `unusable_seat_finding` as one
+  `SeatFix` / `unusable_seat_fix`; `SeatFix::bare_command` is the copyable
+  login command and `SeatFix::correction` the sentence for a fix no command
+  makes), rendered by `unusable_seat_finding` as one
   `unusable seat <state_key>` Warn each. `ServedInputs` also carries the
   daemon's boot-time `usage_db_path` (the cache section reads that ledger,
   never a reloaded config's path) and the cache read budget
