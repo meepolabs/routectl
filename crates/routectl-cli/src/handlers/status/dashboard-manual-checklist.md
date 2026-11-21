@@ -44,8 +44,9 @@ has not verified the failure that matters most.
 - **Figures read in full at each text size** (`dash_*.css`):
   `page_browser_layout_tests.rs` loads Now, Traffic and Doctor at 720 px,
   at 1440 px and at 1440 px with a 32 px default font, and fails on any text
-  a box cuts off, a scroller the keyboard cannot reach, or stat labels drawn
-  over each other.
+  a box cuts off, a scroller the keyboard cannot reach, stat labels drawn
+  over each other, or a table scroller that is not a focusable region named
+  by its table's caption.
 
 ## What is NOT covered by any test
 

@@ -4,7 +4,8 @@
 // screen has settled, `layout-check` walks every rendered element and
 // reports what hides text: a box that cuts its text off (hidden overflow, or
 // an ellipsis) and a scroller nobody can reach by keyboard. A truncated name
-// is allowed when its full text is in its `title`. It also reports any two
+// is allowed when its full text is in its `title`. It lists every table
+// scroller with the name it announces. It also reports any two
 // text runs in one Traffic stat row that draw over each other, and how each
 // Doctor fix command fits its box. The checks also run over planted
 // controls, so a clean report is not a check that cannot fire.
@@ -102,10 +103,41 @@
       ' "' + ownText(el).slice(0, 80) + '"';
   }
 
+  // The name assistive technology announces for `el`, from aria-labelledby
+  // or aria-label: the two sources a scroller region can carry.
+  function accessibleName(el) {
+    var ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    if (ids.length) {
+      return ids.map(function (id) {
+        var ref = document.getElementById(id);
+        return ref ? ownText(ref) : '';
+      }).join(' ').trim();
+    }
+    return (el.getAttribute('aria-label') || '').trim();
+  }
+
+  // One table scroller as a keyboard and screen reader user meet it.
+  function tableScroller(el) {
+    var cap = el.querySelector('table > caption');
+    return {
+      id: el.id,
+      self_focusable: el.tabIndex >= 0,
+      role: el.getAttribute('role'),
+      name: accessibleName(el),
+      caption: cap ? ownText(cap) : null
+    };
+  }
+
+  function scrollsSideways(el) {
+    return /auto|scroll/.test(getComputedStyle(el).overflowX) &&
+      el.scrollWidth > el.clientWidth + SLACK_PX;
+  }
+
   // How `el` treats text it cannot fit: null when nothing is hidden, else
-  // { kind, ... }. A scroller the keyboard can reach and a name whose full
-  // text is its title are allowed; a wide table scrolling inside its card is
-  // filed on its own; anything else hides text. An inline box
+  // { kind, ... }. A scroller the keyboard can reach (axe
+  // scrollable-region-focusable: the scroller or something inside it takes
+  // focus) and a name whose full text is its title are allowed; anything
+  // else hides text. An inline box
   // reports no client width, so only boxes that clip are judged here; text
   // that spills out of a box shows up as a collision instead.
   function hiding(el) {
@@ -118,9 +150,7 @@
     var scrolls = (overX && /auto|scroll/.test(cs.overflowX)) ||
       (overY && /auto|scroll/.test(cs.overflowY));
     if (scrolls) {
-      if (focusable(el)) { return null; }
-      var table = el.classList.contains('tablewrap');
-      return { kind: table ? 'table-scroller' : 'unreachable-scroller', el: describe(el) };
+      return focusable(el) ? null : { kind: 'unreachable-scroller', el: describe(el) };
     }
     if (cs.textOverflow === 'ellipsis' && overX && el.getAttribute('title') === el.textContent) {
       return { kind: 'titled-name', el: describe(el) };
@@ -187,18 +217,23 @@
     };
   }
 
-  // The checks over every rendered element under `root`.
+  // The checks over every rendered element under `root`. `tables` lists
+  // every table scroller, drawn or not (a closed disclosure holds one);
+  // `table_scrollers` the drawn ones too wide for their card.
   function audit(root) {
-    var out = { inspected: 0, digit_elements: 0, hidden: [], titled_names: [], table_scrollers: [],
-      stat_rows: 0, stat_runs: 0, collisions: [], fixes: [] };
+    var out = { inspected: 0, digit_elements: 0, hidden: [], titled_names: [], tables: [],
+      table_scrollers: [], stat_rows: 0, stat_runs: 0, collisions: [], fixes: [] };
     Array.prototype.forEach.call(root.querySelectorAll('*'), function (el) {
       if (!rendered(el)) { return; }
       out.inspected += 1;
       if (DIGIT.test(el.textContent)) { out.digit_elements += 1; }
       var h = hiding(el) || offscreen(el);
       if (!h) { return; }
-      var bucket = { 'titled-name': out.titled_names, 'table-scroller': out.table_scrollers };
-      (bucket[h.kind] || out.hidden).push(h);
+      (h.kind === 'titled-name' ? out.titled_names : out.hidden).push(h);
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('.tablewrap'), function (el) {
+      out.tables.push(tableScroller(el));
+      if (rendered(el) && scrollsSideways(el)) { out.table_scrollers.push(tableScroller(el)); }
     });
     Array.prototype.forEach.call(root.querySelectorAll('.ucard-stats'), function (row) {
       if (!rendered(row)) { return; }
@@ -233,6 +268,10 @@
         'left:100vw">555555555555</div>' +
       '<div class="ctl" id="ctl-scroller-focus" tabindex="0" style="width:3rem;' +
         'overflow-x:auto;white-space:pre">routectl login anthropic --label a</div>' +
+      '<div class="tablewrap" id="ctl-table-wrap" style="width:3rem">' +
+        '<table><caption>Planted table</caption><tbody><tr>' +
+        '<td style="white-space:nowrap">routectl-planted-table-cell</td>' +
+        '</tr></tbody></table></div>' +
       '<div class="ucard-stats" style="display:grid;grid-template-columns:' +
         'repeat(2, 2rem);gap:0">' +
         '<div class="ustat"><span class="ustat-label" style="white-space:nowrap">' +

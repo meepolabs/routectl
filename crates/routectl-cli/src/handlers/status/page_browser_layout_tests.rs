@@ -129,10 +129,41 @@ fn assert_readable(setup: &Setup, view: &str, out: &Value) {
     }
 }
 
-fn assert_views_readable(setup: &Setup) {
+/// Every table scroller in the view is a region the keyboard can stop on,
+/// announced by its table's caption, and so is every one too wide for its
+/// card. Returns how many of each the view held.
+fn assert_tables_named(setup: &Setup, view: &str, out: &Value) -> (usize, usize) {
+    let at = format!("{view} at {}", setup.name);
+    let body = &out["body"];
+    let named = |t: &Value| {
+        let name = t["name"].as_str().unwrap_or("");
+        assert!(
+            !name.is_empty(),
+            "{at}: a table scroller has no name: {t:#}"
+        );
+        assert_eq!(t["caption"].as_str(), Some(name), "{at}: {t:#}");
+        assert_eq!(t["role"], "region", "{at}: {t:#}");
+        assert_eq!(t["self_focusable"], true, "{at}: {t:#}");
+    };
+    list(body, "tables").iter().for_each(named);
+    list(body, "table_scrollers").iter().for_each(named);
+    (
+        list(body, "tables").len(),
+        list(body, "table_scrollers").len(),
+    )
+}
+
+/// Checks every view and returns how many table scrollers they held in all,
+/// and how many of those were too wide for their card.
+fn assert_views_readable(setup: &Setup) -> (usize, usize) {
+    let mut totals = (0, 0);
     for (view, hash) in VIEWS {
-        assert_readable(setup, view, &run_layout(setup, hash));
+        let out = run_layout(setup, hash);
+        assert_readable(setup, view, &out);
+        let (tables, scrolling) = assert_tables_named(setup, view, &out);
+        totals = (totals.0 + tables, totals.1 + scrolling);
     }
+    totals
 }
 
 /// At 1440 px with the text doubled, every view (Traffic over a week, grouped
@@ -158,19 +189,29 @@ fn page_browser_figures_read_in_full_at_default_text_size() {
 }
 
 /// At the 720 px floor the same views still show everything and the page
-/// does not scroll sideways.
+/// does not scroll sideways. A table too wide for its card scrolls inside
+/// it, and that scroller takes keyboard focus itself (axe
+/// scrollable-region-focusable) as a region named by its table's caption,
+/// as does every other table scroller on every view. Positive control: the
+/// views held table scrollers, and at least one scrolled at this width.
+///
+/// Mutation check: drop the `tabIndex` line from `tableScroll` -> red (the
+/// too-wide tables become unreachable scrollers).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_figures_read_in_full_at_the_narrow_floor() {
-    assert_views_readable(&FLOOR);
+    let (tables, scrolling) = assert_views_readable(&FLOOR);
+    assert!(tables > 0, "no view held a table scroller");
+    assert!(scrolling > 0, "no table scrolled inside its card at 720 px");
 }
 
 /// The audit is not blind: over planted boxes beside the view it flags a
 /// numeral cut by an ellipsis, one clipped without, one pushed past the
-/// window's edge, a scroller the
-/// keyboard cannot reach, and two labels drawn over each other; it lets
-/// through the same scroller made focusable, and files a titled name apart
-/// from the text it hides.
+/// window's edge, a scroller the keyboard cannot reach (once as a bare box,
+/// once as a table scroller with no focus of its own), and two labels drawn
+/// over each other; it lets through the same scroller made focusable, files a
+/// titled name apart from the text it hides, and reads the planted table
+/// scroller as unnamed and unfocusable.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_layout_audit_flags_planted_cut_offs_and_collisions() {
@@ -194,15 +235,24 @@ fn page_browser_layout_audit_flags_planted_cut_offs_and_collisions() {
     assert!(flagged("ellipsis", "123456789012345"), "{ctl:#}");
     assert!(flagged("clipped", "987654321098765"), "{ctl:#}");
     assert!(flagged("offscreen", "555555555555"), "{ctl:#}");
+    assert!(
+        flagged("unreachable-scroller", "routectl-planted-table-cell"),
+        "{ctl:#}"
+    );
     assert_eq!(
         hidden
             .iter()
             .filter(|(k, _)| *k == "unreachable-scroller")
             .count(),
-        1,
-        "only the unfocusable scroller is flagged: {ctl:#}"
+        2,
+        "only the unfocusable scrollers are flagged: {ctl:#}"
     );
-    assert_eq!(hidden.len(), 4, "{ctl:#}");
+    assert_eq!(hidden.len(), 5, "{ctl:#}");
+    let planted = list(ctl, "table_scrollers");
+    assert_eq!(planted.len(), 1, "{ctl:#}");
+    assert_eq!(planted[0]["name"], "", "{ctl:#}");
+    assert_eq!(planted[0]["self_focusable"], false, "{ctl:#}");
+    assert_eq!(planted[0]["caption"], "Planted table", "{ctl:#}");
     assert_eq!(list(ctl, "titled_names").len(), 1, "{ctl:#}");
     assert_eq!(list(ctl, "collisions").len(), 1, "{ctl:#}");
 }

@@ -132,7 +132,8 @@
     t.appendChild(thead);
     var tb = document.createElement('tbody');
     t.appendChild(tb);
-    return { t: t, tb: tb, cols: cols, id: id, expandable: expandable, rowKey: rowKey, sort: sort };
+    return { t: t, tb: tb, cols: cols, id: id, caption: caption, expandable: expandable,
+      rowKey: rowKey, sort: sort };
   }
 
   // One column header. A sortable one holds a button carrying the
@@ -218,11 +219,16 @@
   }
 
   // A table wrapped so it scrolls INSIDE its card: the page itself never
-  // scrolls sideways, down to 720 px.
+  // scrolls sideways, down to 720 px. A table whose cells hold no control
+  // would leave its hidden columns out of keyboard reach, so the scroller
+  // itself takes focus, as a region named after its table.
   function tableScroll(tbl) {
     var wrap = document.createElement('div');
     wrap.className = 'tablewrap';
     wrap.id = tbl.id + '-wrap';
+    wrap.tabIndex = 0;
+    wrap.setAttribute('role', 'region');
+    wrap.setAttribute('aria-label', tbl.caption);
     wrap.appendChild(tbl.t);
     return wrap;
   }
