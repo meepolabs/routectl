@@ -183,7 +183,8 @@ impl GroupDim {
 /// pricing closure. The three states are exclusive and drive [`CostStatus`].
 ///
 /// The label lists name the dimensions the row used that had no rate, in the
-/// caller's vocabulary; they feed [`QueryMetrics::missing_price_dimensions`].
+/// caller's vocabulary; they feed [`QueryMetrics::missing_prices`] and
+/// [`QueryMetrics::missing_price_dimensions`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum RowCost {
     /// A managed-subscription row: real usage, no per-token dollar cost, plus
@@ -346,8 +347,30 @@ pub struct QueryMetrics {
     pub cost_status: CostStatus,
     /// The dimensions this metric set's rows used that had no rate, sorted
     /// and deduplicated: the reason a cost or an API-equivalent value is
-    /// absent or partial. Empty when every used dimension was priced.
+    /// absent or partial. Empty when every used dimension was priced. Always
+    /// the distinct `dimension` values of [`Self::missing_prices`].
     pub missing_price_dimensions: Vec<String>,
+    /// The distinct (fine model, dimension) pairs behind
+    /// [`Self::missing_price_dimensions`], sorted by model then dimension.
+    pub missing_prices: Vec<MissingPrice>,
+    /// Summed cache-write tokens with no reported lifetime (see
+    /// [`super::CacheWriteLifetimes::unknown_tokens`]). A ledger row whose
+    /// lifetime split sums above its total adds nothing.
+    pub cache_write_unknown_tokens: i64,
+}
+
+/// One dimension a model's rows used that had no rate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct MissingPrice {
+    /// The fine model label the row was served under (the label the model
+    /// grouping reads), whatever the metric set is grouped by.
+    pub model: String,
+    /// The missing dimension, in the pricer's vocabulary.
+    pub dimension: String,
+    /// The configuration key that would price the dimension. This crate does
+    /// not own configuration and always leaves it `None`; a caller that does
+    /// fills it in.
+    pub config_key: Option<String>,
 }
 
 /// One coarse group: its label under the requested [`GroupDim`], plus its
@@ -701,7 +724,9 @@ struct GroupAcc {
     any_equivalent: bool,
     any_subscription: bool,
     any_unpriced: bool,
-    missing_price_dimensions: BTreeSet<String>,
+    /// (fine model, dimension) pairs that had no rate.
+    missing_prices: BTreeSet<(String, String)>,
+    cache_write_unknown_tokens: i64,
     /// Requests per served fine model; `Some` only on a coarse group under
     /// the alias grouping, so bucket and totals accumulators never carry it.
     requests_by_model: Option<BTreeMap<String, i64>>,
@@ -743,6 +768,11 @@ impl GroupAcc {
         self.client_disconnect_pre_dispatch += agg.client_disconnect_pre_dispatch;
         self.cancelled_total += agg.cancelled_total;
         self.fallback_served += fine.fallback_served;
+        if let Some(lifetimes) = &agg.cache_write_lifetimes {
+            self.cache_write_unknown_tokens = self
+                .cache_write_unknown_tokens
+                .saturating_add(lifetimes.unknown_tokens);
+        }
         if let Some(by_model) = &mut self.requests_by_model
             && agg.key.provider.is_some()
         {
@@ -768,8 +798,7 @@ impl GroupAcc {
         match cost {
             RowCost::Subscription(equivalent, missing) => {
                 self.any_subscription = true;
-                self.missing_price_dimensions
-                    .extend(missing.iter().cloned());
+                self.add_missing(&agg.key, missing);
                 if let Some(usd) = *equivalent {
                     // No finiteness assertion here: the equivalent channel
                     // degrades a non-finite sum to absent in
@@ -790,10 +819,22 @@ impl GroupAcc {
             }
             RowCost::Unpriced(missing) => {
                 self.any_unpriced = true;
-                self.missing_price_dimensions
-                    .extend(missing.iter().cloned());
+                self.add_missing(&agg.key, missing);
             }
         }
+    }
+
+    /// Record the dimensions a fine row under `key` used with no rate.
+    fn add_missing(&mut self, key: &GroupKey, missing: &[String]) {
+        if missing.is_empty() {
+            return;
+        }
+        let model = GroupDim::Model.label(key);
+        self.missing_prices.extend(
+            missing
+                .iter()
+                .map(|dimension| (model.clone(), dimension.clone())),
+        );
     }
 
     /// Fold a finished group's accumulator into the window totals. Operates on
@@ -837,8 +878,11 @@ impl GroupAcc {
         self.any_equivalent |= other.any_equivalent;
         self.any_subscription |= other.any_subscription;
         self.any_unpriced |= other.any_unpriced;
-        self.missing_price_dimensions
-            .extend(other.missing_price_dimensions.iter().cloned());
+        self.missing_prices
+            .extend(other.missing_prices.iter().cloned());
+        self.cache_write_unknown_tokens = self
+            .cache_write_unknown_tokens
+            .saturating_add(other.cache_write_unknown_tokens);
     }
 
     /// Resolve the derived metrics and the cost tri-state, with the set's
@@ -848,6 +892,7 @@ impl GroupAcc {
     fn finish(self, ranks: Percentiles) -> QueryMetrics {
         let (cost_usd, cost_status) = self.cost();
         let equivalent_cost_usd = self.equivalent_cost();
+        let (missing_price_dimensions, missing_prices) = missing_price_fields(self.missing_prices);
         QueryMetrics {
             requests: self.requests,
             ok: self.ok,
@@ -886,7 +931,9 @@ impl GroupAcc {
             cost_usd,
             equivalent_cost_usd,
             cost_status,
-            missing_price_dimensions: self.missing_price_dimensions.into_iter().collect(),
+            missing_price_dimensions,
+            missing_prices,
+            cache_write_unknown_tokens: self.cache_write_unknown_tokens,
         }
     }
 
@@ -931,6 +978,21 @@ impl GroupAcc {
         }
         (None, CostStatus::Unpriced)
     }
+}
+
+/// The sorted distinct dimensions of `pairs`, and the pairs themselves as
+/// [`MissingPrice`] entries in (model, dimension) order.
+fn missing_price_fields(pairs: BTreeSet<(String, String)>) -> (Vec<String>, Vec<MissingPrice>) {
+    let dimensions: BTreeSet<String> = pairs.iter().map(|(_, dim)| dim.clone()).collect();
+    let prices = pairs
+        .into_iter()
+        .map(|(model, dimension)| MissingPrice {
+            model,
+            dimension,
+            config_key: None,
+        })
+        .collect();
+    (dimensions.into_iter().collect(), prices)
 }
 
 /// Add each class count of `from` into `into`.

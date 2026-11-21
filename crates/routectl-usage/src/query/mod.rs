@@ -135,8 +135,8 @@ pub use capability::{
 };
 pub use deadline::{CancelFlag, DeadlineGuard, ReadLimit};
 pub use grouped::{
-    BucketSpec, CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
-    QuerySpec, QueryTotals, RowCost, SeriesBucket, UNATTRIBUTED, query,
+    BucketSpec, CostStatus, GroupDim, MissingPrice, QueryGroup, QueryMetrics, QueryResult,
+    QuerySeries, QuerySpec, QueryTotals, RowCost, SeriesBucket, UNATTRIBUTED, query,
 };
 pub use observation::{ObservationTotals, observation_totals};
 pub use reduction::{ReductionSummary, reduction_summary};

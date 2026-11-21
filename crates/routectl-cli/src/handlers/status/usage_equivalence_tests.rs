@@ -112,7 +112,7 @@ const SHARED: [&str; 17] = [
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 21] = [
+const QUERY_ONLY: [&str; 23] = [
     "fallback_served",
     "server_tool_present",
     "client_disconnect_pre_dispatch",
@@ -134,6 +134,8 @@ const QUERY_ONLY: [&str; 21] = [
     "equivalent_cost_usd",
     "cost_status",
     "missing_price_dimensions",
+    "missing_prices",
+    "cache_write_unknown_tokens",
 ];
 
 /// Panel metric-surface fields with NO `/status/query` counterpart: the group

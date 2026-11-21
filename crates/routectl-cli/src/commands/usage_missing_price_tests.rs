@@ -99,6 +99,33 @@ fn the_same_row_on_an_api_key_is_unpriced_naming_the_30m_write() {
     );
 }
 
+#[test]
+fn an_unpriced_30m_write_names_its_model_on_the_group_and_the_totals() {
+    // Arrange: grouped by alias, so the pair's model is not the group label.
+    let (_dir, _path, mut db) = temp_db();
+    insert_lifetime_row(&db, &SPLIT_30M);
+    let config = lifetime_config("env://LT_KEY", lifetime_rates(false));
+
+    // Act
+    let result = priced_query(&mut db, &config, GroupDim::Alias, None);
+
+    // Assert
+    let expected = serde_json::json!([
+        {"model": LIFETIME_MODEL, "dimension": "cache write 30m", "config_key": null}
+    ]);
+    assert_eq!(result.groups.len(), 1);
+    let group = &result.groups[0].metrics;
+    assert_ne!(result.groups[0].label, LIFETIME_MODEL);
+    assert_eq!(
+        serde_json::to_value(&group.missing_prices).unwrap(),
+        expected
+    );
+    assert_eq!(
+        serde_json::to_value(&result.totals.missing_prices).unwrap(),
+        expected
+    );
+}
+
 /// Two models on one API-key provider: `lifetime-model` writes at 30m (no
 /// rate) in the first bucket, `other-model` is fully priced in the second.
 fn seed_priced_and_unpriced_models(db: &UsageDb) {

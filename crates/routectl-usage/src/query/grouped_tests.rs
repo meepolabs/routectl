@@ -707,3 +707,4 @@ include!("grouped_error_class_tests.rs");
 include!("grouped_cancel_tests.rs");
 include!("grouped_slice_tests.rs");
 include!("grouped_models_tests.rs");
+include!("grouped_unpriced_tests.rs");

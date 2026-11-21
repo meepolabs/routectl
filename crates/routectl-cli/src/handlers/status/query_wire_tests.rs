@@ -62,6 +62,16 @@ fn wire_shape_pins_every_metric_token() {
             } else {
                 Vec::new()
             },
+            missing_prices: if status == CostStatus::Partial {
+                vec![routectl_usage::MissingPrice {
+                    model: "sonnet".to_string(),
+                    dimension: "cache write 30m".to_string(),
+                    config_key: None,
+                }]
+            } else {
+                Vec::new()
+            },
+            cache_write_unknown_tokens: 25 + offset,
         }
     }
 
@@ -121,7 +131,12 @@ fn wire_shape_pins_every_metric_token() {
         "equivalent_cost_usd": null,
         "cost_status": "priced",
         "missing_price_dimensions": [],
+        "missing_prices": [],
+        "cache_write_unknown_tokens": 25,
     });
+    let missing_30m = serde_json::json!([
+        {"model": "sonnet", "dimension": "cache write 30m", "config_key": null}
+    ]);
     let totals = serde_json::json!({
         "requests": 101,
         "ok": 91,
@@ -161,6 +176,8 @@ fn wire_shape_pins_every_metric_token() {
         "equivalent_cost_usd": 3.5,
         "cost_status": "partial",
         "missing_price_dimensions": ["cache write 30m"],
+        "missing_prices": missing_30m,
+        "cache_write_unknown_tokens": 26,
     });
     let expected = serde_json::json!({
         "schema_version": 5,
@@ -239,6 +256,16 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
             } else {
                 Vec::new()
             },
+            missing_prices: if status == CostStatus::Partial {
+                vec![routectl_usage::MissingPrice {
+                    model: "sonnet".to_string(),
+                    dimension: "cache write 30m".to_string(),
+                    config_key: None,
+                }]
+            } else {
+                Vec::new()
+            },
+            cache_write_unknown_tokens: 25 + offset,
         }
     }
 
@@ -269,91 +296,97 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         name_groups(result, GroupDim::Model, &AccountIdentities::default()),
     );
 
+    let first_bucket_metrics = serde_json::json!({
+        "requests": 42,
+        "ok": 33,
+        "errors": 10,
+        "input_tokens": 5002,
+        "output_tokens": 6002,
+        "reasoning_tokens": 702,
+        "cache_read_billed": 8002,
+        "cache_write_5m": 92,
+        "cache_write_1h": 112,
+        "cache_write_tokens": 1112,
+        "cache_write_present": 13,
+        "cache_read_present": 22,
+        "server_tool_calls": 15,
+        "server_tool_present": 32,
+        "stream_count": 23,
+        "client_disconnect_total": 4,
+        "client_disconnect_pre_dispatch": 2,
+        "cancelled_total": 6,
+        "fallback_served": 5,
+        "errors_by_class": {"timeout": 8, "unclassified": 2},
+        "ttft_avg_ms": 212,
+        "ttft_max_ms": 642,
+        "ttft_p50_ms": 182,
+        "ttft_p90_ms": 502,
+        "ttft_p99_ms": 632,
+        "latency_avg_ms": 1502,
+        "latency_max_ms": 4702,
+        "latency_p50_ms": 1202,
+        "latency_p90_ms": 4002,
+        "latency_p99_ms": 4602,
+        "throughput_tok_s": 31.5,
+        "ctx_avg": 2402,
+        "ctx_peak": 9602,
+        "cache_hit_pct": 17.75,
+        "cost_usd": 0.75,
+        "equivalent_cost_usd": null,
+        "cost_status": "priced",
+        "missing_price_dimensions": [],
+        "missing_prices": [],
+        "cache_write_unknown_tokens": 27,
+    });
     let first_bucket = serde_json::json!({
         "start_ms": 1000000,
-        "metrics": {
-            "requests": 42,
-            "ok": 33,
-            "errors": 10,
-            "input_tokens": 5002,
-            "output_tokens": 6002,
-            "reasoning_tokens": 702,
-            "cache_read_billed": 8002,
-            "cache_write_5m": 92,
-            "cache_write_1h": 112,
-            "cache_write_tokens": 1112,
-            "cache_write_present": 13,
-            "cache_read_present": 22,
-            "server_tool_calls": 15,
-            "server_tool_present": 32,
-            "stream_count": 23,
-            "client_disconnect_total": 4,
-            "client_disconnect_pre_dispatch": 2,
-            "cancelled_total": 6,
-            "fallback_served": 5,
-            "errors_by_class": {"timeout": 8, "unclassified": 2},
-            "ttft_avg_ms": 212,
-            "ttft_max_ms": 642,
-            "ttft_p50_ms": 182,
-            "ttft_p90_ms": 502,
-            "ttft_p99_ms": 632,
-            "latency_avg_ms": 1502,
-            "latency_max_ms": 4702,
-            "latency_p50_ms": 1202,
-            "latency_p90_ms": 4002,
-            "latency_p99_ms": 4602,
-            "throughput_tok_s": 31.5,
-            "ctx_avg": 2402,
-            "ctx_peak": 9602,
-            "cache_hit_pct": 17.75,
-            "cost_usd": 0.75,
-            "equivalent_cost_usd": null,
-            "cost_status": "priced",
-            "missing_price_dimensions": [],
-        }
+        "metrics": first_bucket_metrics,
+    });
+    let empty_bucket_metrics = serde_json::json!({
+        "requests": 0,
+        "ok": 0,
+        "errors": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_billed": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "cache_write_tokens": 0,
+        "cache_write_present": 0,
+        "cache_read_present": 0,
+        "server_tool_calls": 0,
+        "server_tool_present": 0,
+        "stream_count": 0,
+        "client_disconnect_total": 0,
+        "client_disconnect_pre_dispatch": 0,
+        "cancelled_total": 0,
+        "fallback_served": 0,
+        "errors_by_class": {},
+        "ttft_avg_ms": null,
+        "ttft_max_ms": null,
+        "ttft_p50_ms": null,
+        "ttft_p90_ms": null,
+        "ttft_p99_ms": null,
+        "latency_avg_ms": null,
+        "latency_max_ms": null,
+        "latency_p50_ms": null,
+        "latency_p90_ms": null,
+        "latency_p99_ms": null,
+        "throughput_tok_s": null,
+        "ctx_avg": null,
+        "ctx_peak": null,
+        "cache_hit_pct": null,
+        "cost_usd": null,
+        "equivalent_cost_usd": null,
+        "cost_status": "unpriced",
+        "missing_price_dimensions": [],
+        "missing_prices": [],
+        "cache_write_unknown_tokens": 0,
     });
     let empty_bucket = serde_json::json!({
         "start_ms": 4600000,
-        "metrics": {
-            "requests": 0,
-            "ok": 0,
-            "errors": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "reasoning_tokens": 0,
-            "cache_read_billed": 0,
-            "cache_write_5m": 0,
-            "cache_write_1h": 0,
-            "cache_write_tokens": 0,
-            "cache_write_present": 0,
-            "cache_read_present": 0,
-            "server_tool_calls": 0,
-            "server_tool_present": 0,
-            "stream_count": 0,
-            "client_disconnect_total": 0,
-            "client_disconnect_pre_dispatch": 0,
-            "cancelled_total": 0,
-            "fallback_served": 0,
-            "errors_by_class": {},
-            "ttft_avg_ms": null,
-            "ttft_max_ms": null,
-            "ttft_p50_ms": null,
-            "ttft_p90_ms": null,
-            "ttft_p99_ms": null,
-            "latency_avg_ms": null,
-            "latency_max_ms": null,
-            "latency_p50_ms": null,
-            "latency_p90_ms": null,
-            "latency_p99_ms": null,
-            "throughput_tok_s": null,
-            "ctx_avg": null,
-            "ctx_peak": null,
-            "cache_hit_pct": null,
-            "cost_usd": null,
-            "equivalent_cost_usd": null,
-            "cost_status": "unpriced",
-            "missing_price_dimensions": [],
-        }
+        "metrics": empty_bucket_metrics,
     });
 
     let group_metrics = serde_json::json!({
@@ -395,7 +428,12 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "equivalent_cost_usd": null,
         "cost_status": "priced",
         "missing_price_dimensions": [],
+        "missing_prices": [],
+        "cache_write_unknown_tokens": 25,
     });
+    let missing_30m = serde_json::json!([
+        {"model": "sonnet", "dimension": "cache write 30m", "config_key": null}
+    ]);
     let totals = serde_json::json!({
         "requests": 41,
         "ok": 32,
@@ -435,6 +473,8 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "equivalent_cost_usd": 4.25,
         "cost_status": "partial",
         "missing_price_dimensions": ["cache write 30m"],
+        "missing_prices": missing_30m,
+        "cache_write_unknown_tokens": 26,
     });
     let expected = serde_json::json!({
         "schema_version": 5,
