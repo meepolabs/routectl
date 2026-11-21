@@ -402,3 +402,7 @@ mod park_tests;
 #[cfg(test)]
 #[path = "doctor_unusable_tests.rs"]
 mod unusable_tests;
+
+#[cfg(test)]
+#[path = "attention_cli_weld_tests.rs"]
+mod attention_cli_weld_tests;

@@ -14,6 +14,7 @@
 
 pub mod attention;
 mod cache_section;
+pub mod daemon_attention;
 mod gather;
 mod matrix;
 mod render;

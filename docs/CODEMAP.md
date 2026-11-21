@@ -9006,6 +9006,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   panel). `Attention::from_items` folds any item list
   (active or recovered) into `{verdict, counts}`; `credential_cause` is the
   shared plain-words credential wording. No I/O, clock or state
+- `src/commands/doctor/daemon_attention.rs` -- the running daemon's
+  needs-attention list read over the wire: `fetch(&Config)` sends one
+  `GET /status/attention` through `daemon_client` (body capped) and returns
+  `DaemonAttention` (address, as_of, raw `data`, the lenient `AttentionList`
+  with tokens as strings) or `Unavailable` with a `Reason` from the closed
+  set (`not_running`, `timeout`, `no_loopback_address`, `config_unreadable`,
+  `auth_refused`, `busy`, `not_served`, `unrecognized`); `parse` refuses any
+  `schema_version` but 1, more than `MAX_ITEMS` (512) items and an
+  `unavailable` envelope. `render` / `render_unavailable` build the
+  `[Needs attention]` lines, every wire string through
+  `sanitize_for_log_with_cap` at a module cap; never imports the builder's
+  enums
 - `src/commands/doctor/matrix.rs` -- capability matrix panel builder:
   `build_capability_matrix_panel(&DoctorContext) -> CapabilityMatrixPanel`;
   `capability_columns(seed, lanes, entries, overrides)` is the column rule it
