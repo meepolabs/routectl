@@ -594,7 +594,7 @@ mod tests {
             .as_object()
             .expect("QueryMetrics serializes to an object");
 
-        for name in ["QUERY_METRICS", "QUERY_TOKENS"] {
+        for name in ["QUERY_METRICS", "QUERY_TOKENS", "QUERY_MISSING_PRICE_LISTS"] {
             let tokens = string_array(name);
             assert!(
                 !tokens.is_empty(),
@@ -667,6 +667,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The fields the page checks on each `missing_prices` entry are exactly
+    /// the keys a serialized `MissingPrice` carries, split by whether the
+    /// value may be null: derived from serde, so a renamed or added entry
+    /// field fails here instead of failing every live payload's shape check.
+    #[test]
+    fn missing_price_entry_fields_are_the_dto_fields() {
+        let entry = serde_json::to_value(routectl_usage::MissingPrice {
+            model: "m".to_string(),
+            dimension: "d".to_string(),
+            config_key: None,
+        })
+        .expect("MissingPrice serializes");
+        let entry = entry.as_object().expect("MissingPrice is an object");
+        let server_nullable: std::collections::BTreeSet<String> = entry
+            .iter()
+            .filter(|(_, value)| value.is_null())
+            .map(|(key, _)| key.clone())
+            .collect();
+        let server_text: std::collections::BTreeSet<String> = entry
+            .iter()
+            .filter(|(_, value)| value.is_string())
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        let page_text: std::collections::BTreeSet<String> =
+            string_array("MISSING_PRICE_TEXT").into_iter().collect();
+        let page_nullable: std::collections::BTreeSet<String> =
+            string_array("MISSING_PRICE_NULLABLE_TEXT")
+                .into_iter()
+                .collect();
+
+        assert_eq!(server_text.len() + server_nullable.len(), entry.len());
+        assert_eq!(page_text, server_text);
+        assert_eq!(page_nullable, server_nullable);
+    }
+
+    /// The `[token, label]` pairs of the page's `GROUP_BYS`, tokens only, in
+    /// declaration order. One pair per line, as the page writes it.
+    fn group_by_tokens() -> Vec<String> {
+        let script = script();
+        let needle = "var GROUP_BYS = [";
+        let start = script
+            .find(needle)
+            .expect("dashboard JS declares `var GROUP_BYS = [`")
+            + needle.len();
+        let end = script[start..]
+            .find("\n  ];")
+            .expect("GROUP_BYS literal is closed")
+            + start;
+        script[start..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let pair = line
+                    .trim_end_matches(',')
+                    .strip_prefix('[')
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .unwrap_or_else(|| panic!("GROUP_BYS line `{line}` is not one pair"));
+                let token = pair.split(',').next().unwrap_or_default();
+                token.trim().trim_matches('\'').to_string()
+            })
+            .collect()
+    }
+
+    /// The page's groupings are the server's: the same tokens in the same
+    /// order as `GroupDim::ALL`, so the picker, the URL codec and the
+    /// transport offer every grouping the query route answers and nothing
+    /// else.
+    ///
+    /// Mutation check: drop the `seat` pair from GROUP_BYS -> red.
+    #[test]
+    fn group_bys_are_the_server_groupings_in_order() {
+        let server: Vec<String> = routectl_usage::GroupDim::ALL
+            .iter()
+            .map(|dim| dim.as_str().to_string())
+            .collect();
+
+        let page = group_by_tokens();
+
+        assert_eq!(page, server);
     }
 
     /// The string entries of a `var <name> = [ ... ]` array literal in the

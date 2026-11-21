@@ -328,8 +328,9 @@ fn page_browser_a_selection_changed_on_another_view_resets_its_query() {
     assert_eq!(now_returned["busy"], Value::Null, "{now_returned:#}");
 }
 
-/// A query payload missing a required metric, or with a malformed series
-/// bucket, puts an error card in the section that reads it; the populated
+/// A query payload missing a required metric, with a malformed series
+/// bucket, without `earliest_ms`, or with a missing-price entry that names no
+/// model, puts an error card in the section that reads it; the populated
 /// payload before it rendered figures and no error card.
 ///
 /// Mutation check: make isMetricsShape return true for any object -> red
@@ -341,6 +342,8 @@ fn page_browser_a_malformed_query_payload_is_an_error_never_a_zero() {
         ("states-query-missing-totals-errors", "traffic"),
         ("states-query-group-missing-a-metric", "traffic"),
         ("states-query-malformed-series-bucket", "now"),
+        ("states-query-missing-earliest-ms", "traffic"),
+        ("states-query-missing-price-without-model", "traffic"),
     ];
     for (name, hash) in rows {
         let result = states_scenario(name, hash, 40_000);

@@ -1,16 +1,10 @@
   // ---- tab:usage -------------------------------------------------------
 
-  // The dimensions the ledger can group by, in picker order.
-  var GROUP_BYS = [
-    ['model', 'Model'],
-    ['alias', 'Alias'],
-    ['provider', 'Provider']
-  ];
-
   var GROUP_BY_TITLES = {
     model: 'By model',
     alias: 'By alias',
-    provider: 'By provider'
+    provider: 'By provider',
+    seat: 'By seat'
   };
 
   // The group-by picker and the provider-scope strip, composed by the view

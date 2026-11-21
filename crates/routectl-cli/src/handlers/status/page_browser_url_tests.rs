@@ -106,6 +106,7 @@ fn page_browser_an_address_is_rewritten_canonical() {
             "#now?range=month&group=alias",
         ),
         ("now?group=Alias", "#now"),
+        ("now?group=seat", "#now?group=seat"),
         ("now?sort=models.cost.desc", "#now"),
         ("now?range=%77eek", "#now?range=week"),
         ("now?range=week%", "#now"),

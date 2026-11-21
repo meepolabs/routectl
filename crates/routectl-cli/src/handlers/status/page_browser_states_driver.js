@@ -474,7 +474,11 @@
   var QUERY_FAULTS = {
     'missing-totals-errors': function (data) { delete data.totals.errors; },
     'group-missing-a-metric': function (data) { delete data.groups[0].metrics.input_tokens; },
-    'malformed-series-bucket': function (data) { data.series.buckets[0].metrics = null; }
+    'malformed-series-bucket': function (data) { data.series.buckets[0].metrics = null; },
+    'missing-earliest-ms': function (data) { delete data.earliest_ms; },
+    'missing-price-without-model': function (data) {
+      data.totals.missing_prices = [{ dimension: 'output', config_key: null }];
+    }
   };
 
   function viewReading(view) {
@@ -512,6 +516,8 @@
   queryFaultScenario('missing-totals-errors', 'traffic');
   queryFaultScenario('group-missing-a-metric', 'traffic');
   queryFaultScenario('malformed-series-bucket', 'now');
+  queryFaultScenario('missing-earliest-ms', 'traffic');
+  queryFaultScenario('missing-price-without-model', 'traffic');
 
   // ---- a stale section reports its own source's last success -------------
 

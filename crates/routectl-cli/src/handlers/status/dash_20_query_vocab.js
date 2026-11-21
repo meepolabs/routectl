@@ -25,10 +25,17 @@
     'client_disconnect_total',
     'client_disconnect_pre_dispatch',
     'fallback_served',
+    'cache_write_unknown_tokens',
     'ttft_avg_ms',
     'ttft_max_ms',
+    'ttft_p50_ms',
+    'ttft_p90_ms',
+    'ttft_p99_ms',
     'latency_avg_ms',
     'latency_max_ms',
+    'latency_p50_ms',
+    'latency_p90_ms',
+    'latency_p99_ms',
     'throughput_tok_s',
     'ctx_avg',
     'ctx_peak',
@@ -45,8 +52,14 @@
   var QUERY_NULLABLE_METRICS = [
     'ttft_avg_ms',
     'ttft_max_ms',
+    'ttft_p50_ms',
+    'ttft_p90_ms',
+    'ttft_p99_ms',
     'latency_avg_ms',
     'latency_max_ms',
+    'latency_p50_ms',
+    'latency_p90_ms',
+    'latency_p99_ms',
     'throughput_tok_s',
     'ctx_avg',
     'ctx_peak',
@@ -59,6 +72,33 @@
   // never coerced (a num0 pass would turn `unpriced` into a zero cost).
   var QUERY_TOKENS = [
     'cost_status'
+  ];
+
+  // Fields whose value is a LIST of missing prices, always present (empty
+  // when every used dimension was priced). Each entry names a model and a
+  // dimension as text, plus the config key that would price it, null where
+  // no key can; the two field lists below are that entry's whole shape.
+  var QUERY_MISSING_PRICE_LISTS = [
+    'missing_prices'
+  ];
+
+  var MISSING_PRICE_TEXT = [
+    'model',
+    'dimension'
+  ];
+
+  var MISSING_PRICE_NULLABLE_TEXT = [
+    'config_key'
+  ];
+
+  // The dimensions a query can group by, as [token, picker label], in picker
+  // order. The URL codec, the transport and the Traffic picker all read this
+  // one list; a page.rs test pins the tokens to the server's groupings.
+  var GROUP_BYS = [
+    ['model', 'Model'],
+    ['alias', 'Alias'],
+    ['provider', 'Provider'],
+    ['seat', 'Seat']
   ];
 
   // The fields this page reads from each GET panel, at any depth, envelope
@@ -116,7 +156,7 @@
   var ATTENTION_FIELDS = [
     'schema_version', 'unavailable', 'as_of', 'data',
     'verdict', 'counts', 'coverage', 'items',
-    'severity', 'text', 'target',
+    'severity', 'text', 'target', 'targets',
     'broken', 'degraded', 'recovered', 'doctor_fail',
     'doctor',
     'key', 'kind', 'state', 'subject', 'account', 'cause', 'raw_token',
@@ -186,11 +226,12 @@
     var out = {};
     QUERY_METRICS.forEach(function (key) { out[key] = raw[key]; });
     QUERY_TOKENS.forEach(function (key) { out[key] = raw[key]; });
+    QUERY_MISSING_PRICE_LISTS.forEach(function (key) { out[key] = raw[key]; });
     return out;
   }
 
   // The thin flat-extraction layer over a live QUERY payload that passed
-  // isQueryShape: it walks `{groups, totals, series}` ONCE and hands back the
+  // isQueryShape: it walks `{groups, totals, series, earliest_ms}` ONCE and hands back the
   // same shape. Deliberately NOT a render model -- it renames nothing and
   // computes nothing, so if it ever grows either, inline it back into the
   // callers.
@@ -208,7 +249,8 @@
         return { label: g.label, metrics: adaptMetrics(g.metrics) };
       }),
       totals: adaptMetrics(raw.totals),
-      series: series
+      series: series,
+      earliest_ms: raw.earliest_ms
     };
   }
 
@@ -216,7 +258,8 @@
   // a `groups` array of labelled metrics, a `totals` metrics object, and a
   // `series` member present as an explicit null (the server always emits it,
   // never skips it) or as a bucket width beside an array of time-stamped
-  // metrics buckets. Checked on the raw payload, so a missing or wrongly typed
+  // metrics buckets, and an `earliest_ms` present as a number or an explicit
+  // null (an empty ledger). Checked on the raw payload, so a missing or wrongly typed
   // member fails the source as invalid_payload rather than reaching the page
   // as a zero or an empty ledger.
   //
@@ -226,8 +269,14 @@
     if (!isPlainObject(raw)) { return false; }
     if (!Array.isArray(raw.groups) || !raw.groups.every(isGroupShape)) { return false; }
     if (!isMetricsShape(raw.totals)) { return false; }
+    if (!isNullableNumberMember(raw, 'earliest_ms')) { return false; }
     if (!Object.prototype.hasOwnProperty.call(raw, 'series')) { return false; }
     return raw.series === null || isSeriesShape(raw.series);
+  }
+
+  function isNullableNumberMember(obj, key) {
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) { return false; }
+    return obj[key] === null || isFiniteNumber(obj[key]);
   }
 
   function isGroupShape(g) {
@@ -249,7 +298,18 @@
       if (m[key] === null) { return QUERY_NULLABLE_METRICS.indexOf(key) >= 0; }
       return isFiniteNumber(m[key]);
     });
-    return metricsOk && QUERY_TOKENS.every(function (key) { return typeof m[key] === 'string'; });
+    var tokensOk = QUERY_TOKENS.every(function (key) { return typeof m[key] === 'string'; });
+    return metricsOk && tokensOk && QUERY_MISSING_PRICE_LISTS.every(function (key) {
+      return Array.isArray(m[key]) && m[key].every(isMissingPriceShape);
+    });
+  }
+
+  function isMissingPriceShape(p) {
+    if (!isPlainObject(p)) { return false; }
+    var textOk = MISSING_PRICE_TEXT.every(function (key) { return typeof p[key] === 'string'; });
+    return textOk && MISSING_PRICE_NULLABLE_TEXT.every(function (key) {
+      return p[key] === null || typeof p[key] === 'string';
+    });
   }
 
   function isPlainObject(v) {
