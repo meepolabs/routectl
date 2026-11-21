@@ -1,11 +1,14 @@
 //! Doctor command entry + report assembly.
 //!
-//! `routectl doctor` -- a read-only health report. A doctor run mutates
-//! NOTHING: config, credentials, and usage DB are all byte-identical
+//! `routectl doctor` -- a read-only health report. A doctor run changes
+//! nothing on disk: config, credentials, and usage DB are all byte-identical
 //! afterward. It loads config through the unvalidated,
 //! never-migrating loader, reads the raw config bytes for a schema-version
 //! preflight that never stamps the file, and probes the OAuth store with
-//! read-only calls only.
+//! read-only calls only. Alongside the gather it sends one
+//! `GET /status/attention` to the running daemon (see [`daemon_attention`]);
+//! that read reconciles the daemon's in-memory recovered notes, and the list
+//! it returns never feeds the exit code.
 //!
 //! The aggregator is a FIXED SEQUENCE of section-producer functions, not a
 //! check registry. Each producer maps read-only inputs to `Finding`s; the
@@ -18,6 +21,7 @@ pub mod daemon_attention;
 mod gather;
 mod matrix;
 mod render;
+mod report_json;
 mod sections;
 mod served;
 
@@ -65,8 +69,12 @@ mod leftover_catalog_files_tests;
 #[path = "name_render_tests.rs"]
 mod name_render_tests;
 
+#[cfg(test)]
+#[path = "doctor_attention_run_tests.rs"]
+mod doctor_attention_run_tests;
+
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use routectl_auth::LocalProbe;
 
@@ -84,8 +92,11 @@ use routectl_router::{
 };
 
 use self::cache_section::section_cache;
+use self::daemon_attention::{DaemonAttention, Reason, Unavailable};
 use self::gather::{SecretCheck, gather_context};
+#[cfg(test)]
 use self::render::render_human;
+use self::render::render_human_with_attention;
 use self::sections::{
     section_auth, section_capability, section_config, section_inventory, section_knobs,
     section_pricing, section_probe, section_seat_orphans, section_seat_pools,
@@ -99,11 +110,12 @@ pub(crate) use self::served::{
     unusable_seat_fix,
 };
 
-/// UNSTABLE report schema version. Bumped on ANY structural or semantic
-/// change a consumer would care about -- including an ADDITIVE one, since the
-/// report JSON is explicitly human-facing and non-contractual. Bump when a
-/// section's finding shape, a panel field, or the meaning of an existing
-/// field changes.
+/// UNSTABLE report schema version. An added field, section or token does not
+/// bump it; a removed or renamed field, or a changed meaning of an existing
+/// one, does. The `attention` member `doctor --json` writes beside the report
+/// is not part of [`DoctorReport`] and never moves this number.
+///
+/// The history below predates that rule, so some additive entries bumped.
 ///
 /// v1 -> v2: the reserved `capability` section became a real producer
 /// (override rows, catalog priors, the runtime-only learned line, and the
@@ -618,29 +630,67 @@ enum CapabilityMatrixSource {
     Unavailable(&'static str),
 }
 
+/// The daemon's needs-attention list, or why none could be read.
+type AttentionRead = Result<DaemonAttention, Unavailable>;
+
+/// What one doctor run writes to stdout and the exit code it returns.
+struct RunOutput {
+    stdout: String,
+    exit: i32,
+}
+
 /// Run the doctor aggregator against `config_path` and render the report.
 /// Read-only and infallible in posture: a load or probe failure degrades to
 /// a finding, never a hard error. Returns the process exit code.
 pub async fn run(config_path: &Path, legacy_dirs: &[LegacyConfigDir], json: bool) -> i32 {
-    let zone = crate::local_time::LocalZone::load();
-    let ctx = gather_context(config_path, legacy_dirs, &zone).await;
-    let report = build_report(&ctx);
-
-    if json {
-        match serde_json::to_string_pretty(&report) {
-            Ok(text) => println!("{text}"),
-            Err(e) => {
-                eprintln!("error: failed to serialize doctor report: {e}");
-                return 1;
-            }
+    let timeout = crate::commands::daemon_client::REQUEST_TIMEOUT;
+    match run_within(config_path, legacy_dirs, json, timeout).await {
+        Ok(output) => {
+            print!("{}", output.stdout);
+            output.exit
         }
-    } else {
-        for line in render_human(&report) {
-            println!("{line}");
+        Err(e) => {
+            eprintln!("error: failed to serialize doctor report: {e}");
+            1
         }
     }
+}
 
-    overall_exit(&report.findings)
+/// [`run`] with `timeout` bounding the daemon read, returning the text
+/// instead of printing it. The exit code is the findings' alone.
+async fn run_within(
+    config_path: &Path,
+    legacy_dirs: &[LegacyConfigDir],
+    json: bool,
+    timeout: Duration,
+) -> serde_json::Result<RunOutput> {
+    let zone = crate::local_time::LocalZone::load();
+    let (ctx, attention) = tokio::join!(
+        gather_context(config_path, legacy_dirs, &zone),
+        read_daemon_attention(config_path, timeout),
+    );
+    let report = build_report(&ctx);
+
+    let mut stdout = if json {
+        report_json::to_ascii_json(&report, &attention)?
+    } else {
+        render_human_with_attention(&report, &attention).join("\n")
+    };
+    stdout.push('\n');
+    Ok(RunOutput {
+        stdout,
+        exit: overall_exit(&report.findings),
+    })
+}
+
+/// Read the running daemon's list at the address `config_path` names. A
+/// config that does not load names no address, so it reads
+/// `config_unreadable`; its own Fail finding comes from the gather.
+async fn read_daemon_attention(config_path: &Path, timeout: Duration) -> AttentionRead {
+    match crate::server::parse_config_only(config_path) {
+        Ok(config) => daemon_attention::fetch_within(&config, timeout).await,
+        Err(_) => Err(Unavailable::new(Reason::ConfigUnreadable, None)),
+    }
 }
 
 fn build_report(ctx: &DoctorContext) -> DoctorReport {

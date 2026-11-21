@@ -9213,8 +9213,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `unavailable: <class>`, one Pass per not-evaluated reason
   (`unobservable providers`, `converse providers`); never Fails. Tests in the
   `#[path]`-included `cache_section_tests.rs`
+- `src/commands/doctor/report_json.rs` -- the `doctor --json` document:
+  the `DoctorReport` flattened beside a top-level `attention` member
+  (`source`, `reason`, `address`, `schema_version`, `as_of`, the daemon's raw
+  `data`), written by `to_ascii_json` through a pretty formatter that escapes
+  every non-ASCII character and DEL as `\uXXXX`, so stdout is pure ASCII
 - `src/commands/doctor/render.rs` -- human-text rendering of the
-  `DoctorReport`: `render_human` walks `SECTIONS` in render order (per-section
+  `DoctorReport`: `render_human_with_attention` prints the daemon's
+  `[Needs attention]` block (or its one reason line) above the checks, then
+  walks `SECTIONS` in render order (per-section
   battery via `render_section`/`section_title`/`status_label`, then the
   capability matrix panel block and the would-trim panel block, then a
   `summary: PASS n WARN n FAIL n` line via `render_summary`)

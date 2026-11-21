@@ -4,11 +4,36 @@ use routectl_router::{DoctorReport, Finding, Status};
 
 use crate::commands::doctor_panels::{render_capability_matrix_panel, render_would_trim_panel};
 
-use super::SECTIONS;
+use super::daemon_attention;
 use super::sections::POOLS_SECTION;
+use super::{AttentionRead, SECTIONS};
 
+/// The report alone, with no attention block.
+#[cfg(test)]
 pub(super) fn render_human(report: &DoctorReport) -> Vec<String> {
+    render_with_block(report, Vec::new())
+}
+
+/// The report with the daemon's needs-attention block above the checks: the
+/// served list, or the one line naming why none could be read. The
+/// `summary:` line stays last.
+pub(super) fn render_human_with_attention(
+    report: &DoctorReport,
+    attention: &AttentionRead,
+) -> Vec<String> {
+    let block = match attention {
+        Ok(served) => daemon_attention::render(served),
+        Err(failure) => vec![daemon_attention::render_unavailable(failure)],
+    };
+    render_with_block(report, block)
+}
+
+fn render_with_block(report: &DoctorReport, block: Vec<String>) -> Vec<String> {
     let mut out = vec!["routectl doctor".to_string(), String::new()];
+    if !block.is_empty() {
+        out.extend(block);
+        out.push(String::new());
+    }
     for (key, _) in SECTIONS {
         let section_findings: Vec<&Finding> = report
             .findings

@@ -71,6 +71,9 @@ pub(crate) use field_verdict_log::FidelityEvent;
 
 pub use daemon_meta::DaemonMeta;
 
+#[cfg(test)]
+pub(crate) use attention::fixture::populated_attention;
+
 pub use page::page_router;
 
 use crate::server::AppState;

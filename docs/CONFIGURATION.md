@@ -4819,8 +4819,8 @@ before the upgrade, so snapshot the database first if they matter.
 ## Diagnostics (`routectl doctor` and `routectl provider probe`)
 
 `routectl doctor` and `routectl provider probe` are the two read-only
-health surfaces. Both mutate NOTHING -- config, credentials, and the usage
-DB are byte-identical after a run -- and both share
+health surfaces. Both change nothing on disk -- config, credentials, and the
+usage DB are byte-identical after a run -- and both share
 one exit-code contract and one probe-classification seam, so the two
 never disagree about a provider.
 
@@ -4848,10 +4848,10 @@ off their own constants -- `SCHEMA_VERSION` in
 in `crates/routectl-cli/src/commands/probe/mod.rs` for `provider probe` --
 so read the number off the payload you actually receive rather than
 hardcoding one. The JSON shape is UNSTABLE before 1.0: fields may be added,
-renamed, or restructured, and `schema_version` bumps when they do,
-INCLUDING on a purely additive change (the report is explicitly
-human-facing and non-contractual). Only the exit-code contract above is
-pinned -- do not build a durable integration on the exact JSON shape.
+renamed, or restructured. An added field does not bump `schema_version`; a
+removed or renamed field, or a changed meaning, does. Only the exit-code
+contract above is pinned -- do not build a durable integration on the exact
+JSON shape.
 
 `provider probe --json`:
 
@@ -4865,7 +4865,8 @@ pinned -- do not build a durable integration on the exact JSON shape.
 }
 ```
 
-`doctor --json` carries the flat findings list plus the structured panels
+`doctor --json` carries the flat findings list plus the structured panels,
+and beside them the running daemon's needs-attention list as `attention`
 (`schema_version` elided here -- read it off the payload):
 
 ```json
@@ -4879,7 +4880,15 @@ pinned -- do not build a durable integration on the exact JSON shape.
       "remediation": "run `routectl login <provider>` to authenticate"
     }
   ],
-  "panels": { "would_trim": null, "capability_matrix": null }
+  "panels": { "would_trim": null, "capability_matrix": null },
+  "attention": {
+    "source": "unavailable",
+    "reason": "not_served",
+    "address": "http://127.0.0.1:8787/status/attention",
+    "schema_version": null,
+    "as_of": null,
+    "data": null
+  }
 }
 ```
 
@@ -4890,6 +4899,54 @@ data to summarize (its fields are documented under
 [Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)),
 `capability_matrix` when the config layer it draws lanes from could not be
 loaded.
+
+#### The needs-attention block and the `attention` member
+
+Alongside its own checks, `routectl doctor` sends one
+`GET /status/attention` to the daemon at the config's `[server]` host and
+port (a loopback literal or wildcard bind only; never through a proxy,
+never following a redirect, 5 s timeout, the first listener token as
+`x-api-key`). The human output prints a `[Needs attention]` block above the
+check sections, and the `summary:` line stays last: a source line (address,
+`as_of`, doctor coverage), the daemon's verdict and counts, then each item
+with its subject, cause, raw token, and its fix or remediation on a line of
+its own. See
+[Needs-attention list on `/status/attention`](#needs-attention-list-on-statusattention)
+for what the list contains.
+
+When no list can be read, the block is one line naming the reason and
+saying the current-conditions list needs the running daemon. No reduced
+list and no verdict are printed. The reasons are a closed set:
+`not_running`, `timeout`, `no_loopback_address`, `config_unreadable` (the
+config did not load, so no address is known), `auth_refused`, `busy`,
+`not_served` and `unrecognized`. A daemon built before the list existed
+answers 404 on that route, which reads `not_served`; restart the daemon on
+the current build to see the list.
+
+The list never changes the exit code: it stays the findings' alone, per the
+exit-code contract above, so a `broken` daemon verdict with no FAIL finding
+still exits 0.
+
+In `--json`, `attention` is a top-level member beside `findings` and
+`panels`; the report under them is unchanged and `schema_version` is the
+report's. `source` is `daemon` or `unavailable`. With `daemon`, `reason` is
+null and `address`, `schema_version` (the route's own, 1), `as_of` and
+`data` are set, `data` being the daemon's `/status/attention` `data` as
+received. With `unavailable`, `reason` is set, `address` is the URL dialed
+(null when none was derived) and the rest are null.
+
+The reader follows one rule for this out-of-process contract: it refuses
+any `schema_version` but 1, tolerates kinds, tokens and fields it does not
+know (an unknown kind still prints with its subject, cause and raw token),
+and sanitizes every string it prints. An answer over 1 MiB or with more
+than 512 items is refused whole as `unrecognized`, never truncated.
+
+`attention.data` strings are untrusted text from whatever answers on the
+configured port. The JSON on stdout is pure ASCII (every non-ASCII
+character and DEL is written as a `\uXXXX` escape), but a decoded value is
+not terminal-safe: `jq -r` or any other decoder can turn it back into
+control characters or bidirectional overrides, so sanitize before printing
+it to a terminal.
 
 ### `/status/query` is UNSTABLE pre-1.0
 
