@@ -183,7 +183,7 @@ impl GroupDim {
 }
 
 /// The cost verdict for one fine-grained [`AggRow`], as decided by the caller's
-/// pricing closure. The three states are exclusive and drive [`CostStatus`].
+/// pricing closure. The four states are exclusive and drive [`CostStatus`].
 ///
 /// The label lists name the dimensions the row used that had no rate, in the
 /// caller's vocabulary; they feed [`QueryMetrics::missing_prices`] and
@@ -198,6 +198,11 @@ pub enum RowCost {
     Subscription(Option<f64>, Vec<String>),
     /// A priced row and its dollar cost.
     Priced(f64),
+    /// A row priced only in part: the dollar cost of the dimensions that had
+    /// a rate, and the used dimensions that did not. The covered cost feeds
+    /// `cost_usd` like a priced row; the row also counts as unpriced, so its
+    /// metric set reads [`CostStatus::Partial`].
+    PricedPart(f64, Vec<String>),
     /// A row with no usable price, and the used dimensions that had no rate:
     /// counts toward usage, contributes no cost.
     Unpriced(Vec<String>),
@@ -221,8 +226,9 @@ pub enum CostStatus {
     Unpriced,
     /// Every row was a subscription row; `cost_usd` is absent.
     Subscription,
-    /// The group mixes cost kinds; `cost_usd` is the PRICED SUBTOTAL only, and
-    /// is absent when the mix carries no priced row at all.
+    /// The group mixes cost kinds, or holds a row priced only in part;
+    /// `cost_usd` is the PRICED SUBTOTAL only (a part-priced row adds its
+    /// covered cost), and is absent when nothing in the group was priced.
     Partial,
 }
 
@@ -819,6 +825,13 @@ impl GroupAcc {
                 debug_assert!(usd.is_finite(), "a resolved row price must be finite");
                 self.priced_usd += *usd;
                 self.any_priced = true;
+            }
+            RowCost::PricedPart(usd, missing) => {
+                debug_assert!(usd.is_finite(), "a resolved row price must be finite");
+                self.priced_usd += *usd;
+                self.any_priced = true;
+                self.any_unpriced = true;
+                self.add_missing(&agg.key, missing);
             }
             RowCost::Unpriced(missing) => {
                 self.any_unpriced = true;

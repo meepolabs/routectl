@@ -4573,7 +4573,8 @@ The equivalent is **complete or absent**: if any dimension with a nonzero
 count on the row (input, output, separately-billed reasoning, billed cache
 reads, either cache-write bucket) has no price, the cell falls back to the
 plain `n/a (subscription)` / `+sub` string instead of showing a partial
-figure. A known `$0` price counts as a price: that dimension adds nothing
+figure. The one exception is cache writes with no lifetime (below): they
+are never valued, and the rest of the row is. A known `$0` price counts as a price: that dimension adds nothing
 and the figure stays complete. A model no source prices shows no
 equivalent, never `~$0.00`. A group
 whose subscription rows recorded no tokens at all resolves a measured
@@ -4581,15 +4582,19 @@ whose subscription rows recorded no tokens at all resolves a measured
 
 **Cache writes with no lifetime.** Cache writes are priced per lifetime,
 so written tokens the upstream reported with no lifetime cannot be
-priced, and routectl never guesses one. Cost is resolved per group of
-rows sharing a model, provider, upstream, alias and provider kind in
-the window, so one such row leaves that whole group without a price or
-an API-equivalent value. A `routectl usage` line made only of such
-groups reads `n/a` (API key) or plain `n/a (subscription)` (no `~$`);
-a line that also covers priced groups shows only their figure. On the
-dashboard such an API-key group reads `unpriced`, and a view that mixes
-it with priced groups reads `partial`. The tokens still count in
-`cache_wr` and the dashboard's cache-write figure. A streamed Anthropic turn in which a server tool
+priced, and routectl never guesses one: no rate of any lifetime is ever
+applied to them. Cost is resolved per group of rows sharing a model,
+provider, upstream, alias and provider kind in the window. When those
+tokens are such a group's only gap, everything else it used is priced
+(input, output, cache reads and the writes whose lifetime was
+reported) and the group still names `cache write (unknown lifetime)`:
+the figure is a priced subtotal, not the group's whole cost. On the
+dashboard an API-key view holding such a group reads `partial`, and a
+subscription group's `~$` value covers the same priced part. When any
+other dimension it used has no price, or its lifetime split sums above
+its total, the group has no price or API-equivalent value at all. The
+tokens still count in `cache_wr` and the dashboard's cache-write
+figure. A streamed Anthropic turn in which a server tool
 such as web search adds content partway through the turn produces such
 a row: the closing event reports the turn's whole cache-write total
 with no per-lifetime split, and the split on the opening event covers
@@ -5037,9 +5042,10 @@ The groups and `totals` are priced over the whole window, and are the same
 whether or not a `bucket` series was requested. Each series bucket is priced
 and derived over its own requests alone. The counts of the buckets (requests,
 tokens, errors) sum to `totals`, but their costs and cache-hit shares need
-not. A cache write with no recorded lifetime leaves the window's cost of its
-requests unpriced, while a bucket that holds none of that write prices the
-same requests' share in it; and a set of requests sharing the keys listed
+not. A cache write with no recorded lifetime is never priced, so the window
+holds only the priced part of its requests' cost and reads `partial`, while
+a bucket that holds none of that write prices the same requests' share in
+full; and a set of requests sharing the keys listed
 under `cache_hit_pct` below counts toward a bucket's hit share only when it
 reported cache reads in that bucket.
 

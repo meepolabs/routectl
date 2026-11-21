@@ -606,6 +606,7 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 
 /// The missing-price label for cache-write tokens no lifetime can be matched
 /// to: tokens with no reported lifetime, or a split summing above its total.
+/// No rate is ever applied to them, at any lifetime.
 pub(super) const UNKNOWN_LIFETIME_LABEL: &str = "cache write (unknown lifetime)";
 
 /// The missing-price label for reasoning tokens on a row whose persisted kind
@@ -622,7 +623,8 @@ pub(super) const UNKNOWN_REASONING_LABEL: &str = "reasoning";
 /// row goes through, so the two can never disagree on reasoning structure,
 /// cache-read basis, or persisted-kind keying. That equivalent is
 /// complete-or-absent (see [`uncovered_used_dimensions`]), and so is a priced
-/// row.
+/// row, with one exception: a row whose ONLY gap is cache writes of no
+/// reported lifetime (see [`RowPrice::Covered`]).
 ///
 /// Rates resolve through `routectl_router::prices::effective_pricing` against
 /// `prices`, field by field: `[models.X.pricing]` on the served model, then
@@ -632,9 +634,12 @@ pub(super) const UNKNOWN_REASONING_LABEL: &str = "reasoning";
 /// when that entry no longer exists. No price for any field leaves the row
 /// `Unpriced` (or, on the subscription arm, with no equivalent), never `$0`.
 ///
-/// Cache writes price per lifetime. Written tokens with no reported lifetime,
-/// or a lifetime split summing above its total, leave the row `Unpriced` (or
-/// with no equivalent) whatever priced it: no rate can be matched to them.
+/// Cache writes price per lifetime, and no rate is ever matched to written
+/// tokens with no reported lifetime. When those tokens are the row's only gap,
+/// everything else it used is priced and the row is `PricedPart` (or a
+/// subscription row carries that covered value as its equivalent), still
+/// naming [`UNKNOWN_LIFETIME_LABEL`]. A lifetime split summing above its total
+/// leaves the row `Unpriced` (or with no equivalent) whatever priced it.
 ///
 /// Reasoning is priced from the row's PERSISTED `provider_kind`, so a provider
 /// whose kind an operator later changed keeps each era priced by what it was.
@@ -663,22 +668,45 @@ pub(crate) fn cost_for_row(config: &Config, prices: &PriceSnapshot, row: &AggRow
         // the equivalent channel's sum, where it would poison every other
         // row's value.
         return match priced {
-            Ok(usd) => RowCost::Subscription(usd.filter(|usd| usd.is_finite()), Vec::new()),
-            Err(missing) => RowCost::Subscription(None, missing),
+            RowPrice::Complete(usd) => {
+                RowCost::Subscription(usd.filter(|usd| usd.is_finite()), Vec::new())
+            }
+            RowPrice::Covered(usd, missing) => {
+                RowCost::Subscription(Some(usd).filter(|usd| usd.is_finite()), missing)
+            }
+            RowPrice::Absent(missing) => RowCost::Subscription(None, missing),
         };
     }
     match priced {
-        Ok(Some(usd)) => RowCost::Priced(usd),
-        Ok(None) => RowCost::Unpriced(Vec::new()),
-        Err(missing) => RowCost::Unpriced(missing),
+        RowPrice::Complete(Some(usd)) => RowCost::Priced(usd),
+        RowPrice::Complete(None) => RowCost::Unpriced(Vec::new()),
+        RowPrice::Covered(usd, missing) => RowCost::PricedPart(usd, missing),
+        RowPrice::Absent(missing) => RowCost::Unpriced(missing),
     }
+}
+
+/// What [`complete_price`] could resolve for one row.
+#[derive(Debug, Clone, PartialEq)]
+enum RowPrice {
+    /// Every used dimension had a rate: the row's value, `None` only when no
+    /// rate resolved at all.
+    Complete(Option<f64>),
+    /// The row's only gap is written tokens of no reported lifetime: the
+    /// value of everything else it used, and the labels of that gap. The
+    /// remainder is never priced, so this is a subtotal, never the row's
+    /// value.
+    Covered(f64, Vec<String>),
+    /// No value: the labels of everything that kept the row from one.
+    Absent(Vec<String>),
 }
 
 /// The dollar value of one row's usage at its resolved rates, or the labels
 /// of everything that kept it from being complete.
 ///
 /// A row is complete-or-absent: a dimension it used with no rate leaves the
-/// row with no value. A table gap or a partial `[models.X.pricing]` block is
+/// row with no value. The one exception is a row whose ONLY gap is written
+/// tokens of no reported lifetime and which used some other dimension: it
+/// yields the covered value of the rest (see [`RowPrice::Covered`]). A table gap or a partial `[models.X.pricing]` block is
 /// not a statement that the dimension is free. The rule applies to the
 /// subscription equivalent as much as to a real price: a subscription
 /// operator's workload runs at a high cache-hit rate, so a figure that
@@ -688,17 +716,18 @@ pub(crate) fn cost_for_row(config: &Config, prices: &PriceSnapshot, row: &AggRow
 ///
 /// Every reason is collected, not only the first: writes no lifetime can be
 /// matched to, reasoning of an unknown structure, and either every used
-/// dimension (no pricing resolves) or the used dimensions with no rate. `Err`
-/// is empty only for a row that resolves no pricing and used no dimension.
+/// dimension (no pricing resolves) or the used dimensions with no rate.
+/// `Absent` is empty only for a row that resolves no pricing and used no
+/// dimension.
 fn complete_price(
     config: &Config,
     prices: &PriceSnapshot,
     row: &AggRow,
     provider: &str,
-) -> Result<Option<f64>, Vec<String>> {
+) -> RowPrice {
     let mut missing = BTreeSet::new();
-    let (cache_writes, lifetimes_known) = lifetime_split_writes(row);
-    if !lifetimes_known {
+    let (cache_writes, coverage) = lifetime_split_writes(row);
+    if coverage != LifetimeCoverage::Complete {
         missing.insert(UNKNOWN_LIFETIME_LABEL.to_string());
     }
     let structure = reasoning_structure(row.key.provider_kind.as_deref());
@@ -712,7 +741,7 @@ fn complete_price(
                 .into_iter()
                 .map(dimension_label),
         );
-        return Err(missing.into_iter().collect());
+        return RowPrice::Absent(missing.into_iter().collect());
     };
     let resolved = RowRates {
         rates: row_rates(&pricing, reasoning_billed),
@@ -721,10 +750,27 @@ fn complete_price(
     };
     missing.extend(uncovered_used_dimensions(&resolved, row));
     if missing.is_empty() {
-        Ok(price_row(&resolved, row))
-    } else {
-        Err(missing.into_iter().collect())
+        return RowPrice::Complete(price_row(&resolved, row));
     }
+    let only_remainder = coverage == LifetimeCoverage::Remainder && missing.len() == 1;
+    let covered = only_remainder
+        .then(|| covered_value(&resolved, row))
+        .flatten();
+    match covered {
+        Some(usd) => RowPrice::Covered(usd, missing.into_iter().collect()),
+        None => RowPrice::Absent(missing.into_iter().collect()),
+    }
+}
+
+/// The value of the dimensions a row used that are not its unknown-lifetime
+/// writes, or `None` when it used none: a subtotal over nothing would read
+/// as a measured `$0`.
+fn covered_value(resolved: &RowRates, row: &AggRow) -> Option<f64> {
+    let used = used_dimensions(row, &resolved.cache_writes, resolved.reasoning_billed);
+    if used.is_empty() {
+        return None;
+    }
+    price_row(resolved, row)
 }
 
 /// A row's resolved rate table plus whether its reasoning tokens bill as their
@@ -767,16 +813,38 @@ fn row_pricing(
     effective_pricing(config, &subject, prices.refreshed(), prices.shipped()).map(|(p, _)| p)
 }
 
-/// A row's cache-write tokens per reported lifetime, and whether every
-/// written token has one. A row with tokens of no reported lifetime, a split
-/// summing above its total, or written tokens read without their lifetimes
-/// cannot be priced by lifetime.
-fn lifetime_split_writes(row: &AggRow) -> (BTreeMap<u32, i64>, bool) {
+/// How far a row's reported lifetimes account for its written tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifetimeCoverage {
+    /// Every written token has a reported lifetime.
+    Complete,
+    /// The reported lifetimes are valid, and some written tokens have none.
+    Remainder,
+    /// The split sums above its total, or written tokens were read without
+    /// their lifetimes: no reported lifetime can be trusted.
+    Unmatched,
+}
+
+/// A row's cache-write tokens per reported lifetime, and how far they
+/// account for its written tokens. Tokens with no reported lifetime are never
+/// placed in any lifetime.
+fn lifetime_split_writes(row: &AggRow) -> (BTreeMap<u32, i64>, LifetimeCoverage) {
     let Some(lifetimes) = &row.cache_write_lifetimes else {
-        return (BTreeMap::new(), row.cache_write_tokens == 0);
+        let coverage = if row.cache_write_tokens == 0 {
+            LifetimeCoverage::Complete
+        } else {
+            LifetimeCoverage::Unmatched
+        };
+        return (BTreeMap::new(), coverage);
     };
-    let known = !lifetimes.invalid_split && lifetimes.unknown_tokens == 0;
-    (lifetimes.tokens_by_lifetime.clone(), known)
+    let coverage = if lifetimes.invalid_split {
+        LifetimeCoverage::Unmatched
+    } else if lifetimes.unknown_tokens > 0 {
+        LifetimeCoverage::Remainder
+    } else {
+        LifetimeCoverage::Complete
+    };
+    (lifetimes.tokens_by_lifetime.clone(), coverage)
 }
 
 /// The token math shared by the real price and the API-equivalent value.

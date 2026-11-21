@@ -154,8 +154,8 @@ async fn a_group_with_an_unknown_lifetime_write_row_reports_partial_cost() {
     // (name, second row's split, expected status, expected cost)
     // Each row prices its tokens at $0.12. The second also writes 10 tokens:
     // fully split at 5m they add 10*1000/1e6 = $0.01 (group $0.25); with 4 of
-    // the 10 unsplit that row is unpriced and the group reports the first
-    // row's $0.12 alone.
+    // the 10 unsplit that row prices only its 6 split tokens, $0.006, and the
+    // group reports the priced subtotal $0.246, never the 4 unsplit tokens.
     let cases = [
         (
             "every write has a lifetime",
@@ -167,7 +167,7 @@ async fn a_group_with_an_unknown_lifetime_write_row_reports_partial_cost() {
             "part of the write has no lifetime",
             r#"{"300":6}"#,
             "partial",
-            TABLE_A_USD,
+            0.246,
         ),
     ];
     for (name, split, status, cost) in cases {
