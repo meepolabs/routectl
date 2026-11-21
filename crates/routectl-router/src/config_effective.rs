@@ -27,13 +27,13 @@ use routectl_core::failure_class::FailureClass;
 
 use crate::class_policy::ConfigFailureClass;
 use crate::config::{
-    Config, ModelEntry, PricingConfig, ProviderEntry, ResolvedTuning, resolve_tuning,
+    Config, ModelEntry, PricingConfig, ProviderEntry, ResolvedTuning, SeatSelection, resolve_tuning,
 };
 use crate::override_registry::{OverrideRegistry, OverrideRow};
 use crate::prices::{
     PriceSource, PriceSources, PriceSubject, PriceTable, TableDate, effective_pricing,
 };
-use crate::router::LearnedFills;
+use crate::router::{AccountIdentities, LearnedFills};
 use crate::seat_pool::seat_state_key;
 
 /// The effective facts a single `[models.X]` entry resolves to, tagged with
@@ -542,6 +542,63 @@ fn model_tuning_rows(config: &Config) -> Vec<TuningRow> {
     rows
 }
 
+/// One `[pools.<name>]` block: its seat-selection strategy and every
+/// configured member, whether or not the member's provider built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolCell {
+    /// The `[pools]` table key.
+    pub pool: String,
+    /// The strategy dispatch picks among the members with.
+    pub seat_selection: SeatSelection,
+    /// One entry per configured member, in the order the block lists them.
+    pub members: Vec<PoolMemberCell>,
+}
+
+/// One configured pool member and the credential account it reads, named
+/// by the [`AccountIdentities`] rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolMemberCell {
+    /// The member's `[providers]` table key.
+    pub entry: String,
+    /// The member's credential account key; `None` for an unknown or
+    /// forwarded entry, which names no account.
+    pub account: Option<String>,
+    /// The `<label>` of the account's `oauth://<provider>#<label>` login;
+    /// `None` for an unlabeled login, any other credential, and an account
+    /// no model dispatches on.
+    pub login_label: Option<String>,
+}
+
+/// Every `[pools]` block in key order, walked from config so a member whose
+/// provider failed to build is still listed.
+fn pool_cells(config: &Config) -> Vec<PoolCell> {
+    let identities = AccountIdentities::from_config(config);
+    config
+        .pools
+        .iter()
+        .map(|(pool, entry)| PoolCell {
+            pool: pool.clone(),
+            seat_selection: entry.seat_selection,
+            members: entry
+                .members
+                .iter()
+                .map(|member| {
+                    let account = AccountIdentities::account_of_entry(config, member);
+                    let login_label = account
+                        .as_deref()
+                        .and_then(|account| identities.get(account))
+                        .and_then(|identity| identity.login_label.clone());
+                    PoolMemberCell {
+                        entry: member.clone(),
+                        account,
+                        login_label,
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// The provenance-annotated effective view: the layered surfaces only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveView {
@@ -559,6 +616,8 @@ pub struct EffectiveView {
     pub aliases: Vec<AliasChain>,
     /// One secret-safe cell per `[providers.X]` entry, in provider-key order.
     pub providers: Vec<ProviderCell>,
+    /// One entry per `[pools.X]` block, in pool-key order.
+    pub pools: Vec<PoolCell>,
     /// The resolved tuning table: one row per `[providers.X]` entry, then the
     /// rows of each `[models.X]` first-content override, one per seat for a
     /// pooled model (see [`TuningRow`]).
@@ -672,6 +731,7 @@ pub fn derive_effective_view(
         capabilities,
         aliases,
         providers,
+        pools: pool_cells(config),
         tuning,
         price_tables: PriceTableDates {
             refreshed: refreshed.map(PriceTable::generated_at),

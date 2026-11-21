@@ -1510,3 +1510,201 @@ fn price_dimension_config_key_names_the_key_that_prices_it() {
         assert_eq!(dimension.config_key(), expected, "{name}");
     }
 }
+
+/// Pool `beta` is written before pool `alpha`, and `beta` lists its members
+/// out of key order.
+fn two_pool_config() -> Config {
+    toml::from_str(
+        r#"
+version = 2
+
+[providers.seat-a]
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://A"
+auth = "x-api-key"
+
+[providers.seat-b]
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://B"
+auth = "x-api-key"
+
+[providers.seat-c]
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://C"
+auth = "x-api-key"
+
+[pools.beta]
+members = ["seat-c", "seat-a"]
+seat_selection = "fill-first"
+
+[pools.alpha]
+members = ["seat-b"]
+
+[models.opus]
+provider = "beta"
+upstream = "claude-opus-4-8"
+"#,
+    )
+    .expect("valid config")
+}
+
+fn pool_members(cell: &PoolCell) -> Vec<&str> {
+    cell.members.iter().map(|m| m.entry.as_str()).collect()
+}
+
+#[test]
+fn pools_come_out_in_key_order_with_members_in_configured_order() {
+    let view = derive_effective_view(&two_pool_config(), None, None);
+
+    let listed: Vec<(&str, SeatSelection, Vec<&str>)> = view
+        .pools
+        .iter()
+        .map(|cell| (cell.pool.as_str(), cell.seat_selection, pool_members(cell)))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("alpha", SeatSelection::StickyLeastLoaded, vec!["seat-b"]),
+            ("beta", SeatSelection::FillFirst, vec!["seat-c", "seat-a"]),
+        ]
+    );
+}
+
+#[test]
+fn a_config_with_no_pools_yields_no_pool_cells() {
+    let view = derive_effective_view(&config_with_opus_model(), None, None);
+
+    assert!(view.pools.is_empty(), "{:?}", view.pools);
+}
+
+/// A labeled OAuth login pooled in `logins` and an `env://` key pooled in
+/// `keys`, both dispatched on by a model.
+fn identity_config() -> Config {
+    toml::from_str(
+        r#"
+version = 2
+
+[providers.work-login]
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "oauth://anthropic#work"
+auth = "bearer"
+
+[providers.keyed]
+format = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+credential = "env://ROUTECTL_POOL_CELL_TEST_KEY"
+auth = "x-api-key"
+
+[pools.logins]
+members = ["work-login"]
+
+[pools.keys]
+members = ["keyed"]
+
+[models.via-login]
+provider = "logins"
+upstream = "claude-opus-4-8"
+
+[models.via-key]
+provider = "keys"
+upstream = "claude-opus-4-8"
+"#,
+    )
+    .expect("valid config")
+}
+
+#[test]
+fn each_member_carries_the_account_and_login_label_account_identities_names() {
+    let config = identity_config();
+    let identities = AccountIdentities::from_config(&config);
+    let view = derive_effective_view(&config, None, None);
+
+    let rows: [(&str, &str, Option<&str>); 2] = [
+        ("keyed", "keyed", None),
+        ("work-login", "anthropic#work", Some("work")),
+    ];
+    for (entry, account_suffix, label) in rows {
+        let member = view
+            .pools
+            .iter()
+            .flat_map(|cell| &cell.members)
+            .find(|member| member.entry == entry)
+            .unwrap_or_else(|| panic!("member {entry} listed"));
+        let expected_account = AccountIdentities::account_of_entry(&config, entry);
+        assert_eq!(member.account, expected_account, "{entry} account");
+        let account = member.account.as_deref().expect("member has an account");
+        assert!(account.ends_with(account_suffix), "{entry}: {account}");
+        let expected_label = identities
+            .get(account)
+            .unwrap_or_else(|| panic!("{entry} account listed"))
+            .login_label
+            .clone();
+        assert_eq!(member.login_label, expected_label, "{entry} label");
+        assert_eq!(member.login_label.as_deref(), label, "{entry} label value");
+    }
+}
+
+#[cfg(feature = "openai-responses")]
+mod failed_build {
+    use std::sync::Arc;
+
+    use routectl_auth::{OAuthStore, SecretStore};
+
+    use super::*;
+    use crate::factory::{BuildOptions, build_resolved_models_reported};
+
+    const CODEX_TOML: &str = r#"
+version = 2
+
+[providers.codex-seat]
+format = "openai-responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+credential = "oauth://codex"
+auth = "bearer"
+
+[pools.codex]
+members = ["codex-seat"]
+
+[models.gpt]
+provider = "codex"
+upstream = "gpt-5-codex"
+"#;
+
+    /// An OAuth store over an empty credentials file: every login is absent.
+    async fn logged_out_store() -> (tempfile::TempDir, Arc<dyn SecretStore>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = OAuthStore::open(dir.path().join("credentials.json"))
+            .await
+            .expect("open an empty store");
+        (dir, Arc::new(store))
+    }
+
+    #[tokio::test]
+    async fn a_member_whose_provider_did_not_build_is_still_listed() {
+        let config: Config = toml::from_str(CODEX_TOML).expect("valid config");
+        let (_dir, store) = logged_out_store().await;
+        let built = build_resolved_models_reported(&config, store, BuildOptions::default())
+            .await
+            .expect("a logged-out pool member keeps the build going");
+        let report = &built.pool_reports[0];
+        assert_eq!(report.usable_members, 0, "the member did not build");
+        assert_eq!(report.placeholders[0].member, "codex-seat");
+
+        let view = derive_effective_view(&config, None, None);
+
+        let cell = &view.pools[0];
+        assert_eq!(cell.pool, "codex");
+        assert_eq!(
+            cell.members,
+            [PoolMemberCell {
+                entry: "codex-seat".to_string(),
+                account: Some("codex".to_string()),
+                login_label: None,
+            }]
+        );
+    }
+}

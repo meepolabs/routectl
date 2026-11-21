@@ -121,6 +121,7 @@ fn build_panel_maps_every_effective_surface_with_provenance() {
         }],
         aliases: Vec::new(),
         providers: Vec::new(),
+        pools: Vec::new(),
         tuning: Vec::new(),
         price_tables: PriceTableDates::default(),
     };
