@@ -564,6 +564,7 @@ fn non_seat_payloads_serialize_as_the_grouped_result() {
             groups: vec![QueryGroup {
                 label: "anthropic#work".to_string(),
                 metrics: QueryMetrics::default(),
+                requests_by_model: None,
             }],
             totals: QueryMetrics::default(),
             series: Some(QuerySeries {

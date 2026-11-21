@@ -69,6 +69,7 @@ fn wire_shape_pins_every_metric_token() {
         groups: vec![QueryGroup {
             label: "sonnet".to_string(),
             metrics: metrics(0, CostStatus::Priced, Some(1.25), None),
+            requests_by_model: None,
         }],
         totals: metrics(1, CostStatus::Partial, Some(1.25), Some(3.5)),
         series: None,
@@ -245,6 +246,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         groups: vec![QueryGroup {
             label: "sonnet".to_string(),
             metrics: metrics(0, CostStatus::Priced, Some(2.5), None),
+            requests_by_model: None,
         }],
         totals: metrics(1, CostStatus::Partial, Some(2.5), Some(4.25)),
         series: Some(QuerySeries {

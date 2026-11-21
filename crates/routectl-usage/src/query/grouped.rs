@@ -358,6 +358,13 @@ pub struct QueryGroup {
     pub label: String,
     /// The group's display figures.
     pub metrics: QueryMetrics,
+    /// Requests per served fine model (the model label the model grouping
+    /// reads), over the rows that recorded a served provider. `Some` only
+    /// under the alias grouping, where `requests` minus the map's sum is the
+    /// group's requests that were never dispatched. Not part of the wire
+    /// shape.
+    #[serde(skip)]
+    pub requests_by_model: Option<BTreeMap<String, i64>>,
 }
 
 /// Window-wide totals. Identical in shape to a group's metrics by
@@ -489,11 +496,13 @@ fn read_and_fold(
         .map(|bucket| densify(bucket, spec.from_ms, buckets, &bucket_ranks));
     let groups = groups
         .into_iter()
-        .map(|(label, acc)| {
+        .map(|(label, mut acc)| {
             let ranks = group_ranks.get(&label).copied().unwrap_or_default();
+            let requests_by_model = acc.requests_by_model.take();
             QueryGroup {
                 label,
                 metrics: acc.finish(ranks),
+                requests_by_model,
             }
         })
         .collect();
@@ -561,7 +570,7 @@ fn fold(
         let cost = price(&fine.agg);
         groups
             .entry(spec.group_label(&fine.agg.key))
-            .or_default()
+            .or_insert_with(|| GroupAcc::for_group(spec.group_by))
             .add(&fine, &cost, &row_classes);
     }
     Ok((groups, buckets))
@@ -693,9 +702,20 @@ struct GroupAcc {
     any_subscription: bool,
     any_unpriced: bool,
     missing_price_dimensions: BTreeSet<String>,
+    /// Requests per served fine model; `Some` only on a coarse group under
+    /// the alias grouping, so bucket and totals accumulators never carry it.
+    requests_by_model: Option<BTreeMap<String, i64>>,
 }
 
 impl GroupAcc {
+    /// The accumulator of one coarse group under `group_by`.
+    fn for_group(group_by: GroupDim) -> Self {
+        Self {
+            requests_by_model: (group_by == GroupDim::Alias).then(BTreeMap::new),
+            ..Self::default()
+        }
+    }
+
     /// Fold one priced fine row and its error-class counts in.
     fn add(
         &mut self,
@@ -723,6 +743,11 @@ impl GroupAcc {
         self.client_disconnect_pre_dispatch += agg.client_disconnect_pre_dispatch;
         self.cancelled_total += agg.cancelled_total;
         self.fallback_served += fine.fallback_served;
+        if let Some(by_model) = &mut self.requests_by_model
+            && agg.key.provider.is_some()
+        {
+            *by_model.entry(GroupDim::Model.label(&agg.key)).or_default() += agg.requests;
+        }
         add_classes(&mut self.errors_by_class, classes);
         self.ttft_sum += fine.ttft_sum;
         self.ttft_count += fine.ttft_count;
