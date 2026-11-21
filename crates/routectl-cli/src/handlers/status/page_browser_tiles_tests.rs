@@ -275,3 +275,40 @@ fn page_browser_tiles_an_empty_window_over_a_used_ledger_is_not_first_run() {
     );
     assert!(obs["base_url"].is_null(), "{obs:#}");
 }
+
+/// The cache-hit row table the CLI's `cache_hit_text` is pinned by.
+const CACHE_HIT_ROWS: &str = include_str!("../../../tests/fixtures/cache_hit_rows.json");
+
+/// Virtual time for one series answer per table row at the 5 s cadence.
+const CACHE_HIT_BUDGET_MS: u64 = 180_000;
+
+/// Every row of the shared table, served as the window's cache-hit share,
+/// reads on the Now tile as the row's text: the tile and the CLI print one
+/// rule.
+///
+/// Mutation checks: cacheHitTile back on `hit.toFixed(1)` -> red (99.96 reads
+/// "100.0%"); cacheHitText rounding above 99 instead of flooring -> red;
+/// cacheHitText keeping a decimal at exactly 100 -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_cache_hit_tile_shows_each_row_of_the_shared_table() {
+    let rows: Vec<Value> = serde_json::from_str(CACHE_HIT_ROWS).expect("cache hit rows parse");
+    let set_rows = format!("window.routectlCacheHitRows = {CACHE_HIT_ROWS};");
+    let snippets: &'static [&'static str] =
+        Box::leak(vec![&*Box::leak(set_rows.into_boxed_str()), TILES_DRIVER].into_boxed_slice());
+
+    let shown = browser::run_scenario(&browser::Scenario {
+        name: "tiles-cache-hit-rows",
+        hash: "now",
+        snippets,
+        budget_ms: CACHE_HIT_BUDGET_MS,
+    })
+    .result;
+    let shown = shown.as_array().expect("one reading per row");
+
+    assert_eq!(shown.len(), rows.len(), "{shown:#?}");
+    for (i, (row, reading)) in rows.iter().zip(shown).enumerate() {
+        assert_eq!(reading["row"], i, "served in table order: {reading:#}");
+        assert_eq!(reading["text"], row["text"], "cache_hit_pct {}", row["pct"]);
+    }
+}

@@ -811,8 +811,9 @@
 
   function cacheHitTile(t, series, gap) {
     var hit = num0(t.cache_hit_pct);
-    var shown = t.cache_hit_pct === null ? figure('-', null, null)
-      : figure(hit > 0 ? hit.toFixed(1) : '0', '%', null);
+    var text = cacheHitText(t.cache_hit_pct);
+    var shown = text === '-' ? figure('-', null, null)
+      : figure(text.slice(0, text.length - 1), '%', null);
     return kpiTile('Cache hit',
       shown,
       wrappedNote(hit > 0

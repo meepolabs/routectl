@@ -29,6 +29,21 @@
     return (isFinite(x) ? Math.round(x) : 0) + '%';
   }
 
+  // A cache-hit percentage, the same rule as the CLI's `cache_hit_text`:
+  // exactly 100 reads "100%"; above 99 keeps one decimal rounded DOWN, so a
+  // rate short of 100 never reads as 100 ("99.96" -> "99.9%"); anything else
+  // is a whole percent; null or non-finite is "-".
+  function cacheHitText(pct) {
+    if (pct === null || pct === undefined) { return '-'; }
+    var x = Number(pct);
+    if (!isFinite(x)) { return '-'; }
+    if (x > 99 && x < 100) {
+      var tenths = Math.floor(x * 10);
+      return Math.floor(tenths / 10) + '.' + (tenths % 10) + '%';
+    }
+    return Math.round(x) + '%';
+  }
+
   // Compact absolute local timestamp for an epoch-ms instant.
   function fmtTs(ms) {
     if (ms === null || ms === undefined) { return '-'; }

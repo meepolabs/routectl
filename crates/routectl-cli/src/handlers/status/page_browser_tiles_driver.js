@@ -292,3 +292,51 @@
     return emptyAfterLedgerRead();
   });
 })(window.routectlDriver);
+
+// ---- scenario: the cache-hit tile's text for each row of the shared table -
+//
+// The table arrives as `window.routectlCacheHitRows` ([{pct, text}], the
+// test sets it from the fixture). Row i is served as the totals'
+// `cache_hit_pct` of the series answers delivered after it is chosen, and the
+// tile is read once such an answer has landed.
+(function (d) {
+  'use strict';
+
+  var CACHE_HIT_TILE = 'Cache hit';
+
+  function cacheHitValue() {
+    var tiles = document.querySelectorAll('#body-now .kpi');
+    for (var i = 0; i < tiles.length; i++) {
+      var label = tiles[i].querySelector('.kpi-label');
+      if (label && label.textContent === CACHE_HIT_TILE) {
+        var value = tiles[i].querySelector('.kpi-value');
+        return value ? value.textContent : null;
+      }
+    }
+    return null;
+  }
+
+  d.scenario('tiles-cache-hit-rows', function () {
+    var rows = window.routectlCacheHitRows;
+    if (!rows || !rows.length) { throw new Error('no cache hit rows were set'); }
+    var current = 0;
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status/query') { return text; }
+      var panel = JSON.parse(text);
+      if (!panel.data || !panel.data.series) { return text; }
+      panel.data.totals.cache_hit_pct = rows[current].pct;
+      return JSON.stringify(panel);
+    });
+    var out = [];
+    var step = d.waitUntil('the ' + CACHE_HIT_TILE + ' tile', cacheHitValue);
+    rows.forEach(function (_, i) {
+      step = step.then(function () {
+        current = i;
+        return d.waitFor('/status/query', 1);
+      }).then(function () {
+        out.push({ row: i, text: cacheHitValue() });
+      });
+    });
+    return step.then(function () { return out; });
+  });
+})(window.routectlDriver);
