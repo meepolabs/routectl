@@ -281,12 +281,12 @@ impl ServedInputs {
         }
     }
 
-    /// How long the gather's cache-ignore ledger read may run.
+    /// How long each of the gather's ledger reads may run.
     pub(super) const fn cache_read_budget(&self) -> Duration {
         self.cache_read_budget
     }
 
-    /// Replace the cache-ignore read budget.
+    /// Replace the per-read ledger budget.
     #[cfg(test)]
     #[must_use]
     pub fn with_cache_read_budget(self, cache_read_budget: Duration) -> Self {

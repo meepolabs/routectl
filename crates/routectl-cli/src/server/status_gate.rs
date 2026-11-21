@@ -117,14 +117,15 @@
 //! that line to [`AGGREGATE_BUDGET_MS`], so a term added to the const and not
 //! to this line, or the reverse, fails it.
 //!
-//! Inside the reserve, two panels hold named shares: the doctor panel's
-//! cache-ignore read (`SERVED_CACHE_READ_BUDGET`, held to at most a quarter of
-//! the reserve by the const assertion beside it) and the models panel
+//! Inside the reserve, two panels hold named shares: the doctor panel's two
+//! ledger reads (the cache-ignore report and the would-trim panel, each under
+//! `SERVED_CACHE_READ_BUDGET`, together held to at most half of the reserve by
+//! the const assertion beside it) and the models panel
 //! ([`MODELS_PANEL_ALLOWANCE_MS`]). The rest is the room the panels with no
 //! share and the response write draw on, so the two shares must leave some:
 //!
 //! ```text
-//! AGGREGATE_RESERVE_MS / 4 + MODELS_PANEL_ALLOWANCE_MS = 250 + 100 = 350 < 1000 (AGGREGATE_RESERVE_MS)
+//! AGGREGATE_RESERVE_MS / 2 + MODELS_PANEL_ALLOWANCE_MS = 500 + 100 = 600 < 1000 (AGGREGATE_RESERVE_MS)
 //! ```
 //!
 //! This module's `the_models_share_leaves_room_inside_the_aggregate_reserve`
@@ -220,10 +221,13 @@ pub const QUERY_BUDGET_MS: u64 = 10_000;
 pub const USAGE_BUDGET_MS: u64 = 2500;
 
 /// Room the `/status` aggregate holds, milliseconds, for the health, config,
-/// doctor, accounts, attention and models panels and the response write. None of them carries a deadline of its own except
-/// the doctor panel's cache-ignore read, which takes a fixed share; the
-/// attention panel reads the doctor panel's report rather than gathering one. It bounds nothing at
-/// runtime: it is the one term of [`AGGREGATE_BUDGET_MS`].
+/// doctor, accounts, attention and models panels and the response write. None
+/// of them carries a deadline of its own except the doctor panel's two ledger
+/// reads, the cache-ignore report and the whole-ledger would-trim panel, each
+/// bounded by `SERVED_CACHE_READ_BUDGET` and together asserted to take at most
+/// half of this reserve; the attention panel reads the doctor panel's report
+/// rather than gathering one. It bounds nothing at runtime: it is the one term
+/// of [`AGGREGATE_BUDGET_MS`].
 pub const AGGREGATE_RESERVE_MS: u64 = 1000;
 
 /// The `/status` aggregate's whole budgeted stretch, milliseconds: the sum of
@@ -637,12 +641,12 @@ mod tests {
     use tower::ServiceExt;
 
     /// The reserve identity in this module's docs: the doctor panel's
-    /// cache-ignore cap and the models panel's share, both drawn from
-    /// `AGGREGATE_RESERVE_MS`, leave room for the panels with no share and the
-    /// response write.
+    /// ledger-read cap (two reads, at most half the reserve) and the models
+    /// panel's share, both drawn from `AGGREGATE_RESERVE_MS`, leave room for
+    /// the panels with no share and the response write.
     #[test]
     fn the_models_share_leaves_room_inside_the_aggregate_reserve() {
-        let doctor_cache_cap_ms = AGGREGATE_RESERVE_MS / 4;
+        let doctor_cache_cap_ms = AGGREGATE_RESERVE_MS / 2;
 
         let named_shares_ms = doctor_cache_cap_ms + MODELS_PANEL_ALLOWANCE_MS;
 

@@ -22,26 +22,32 @@ use super::served::GatherSources;
 
 const SECTION: &str = "cache";
 
-/// The read budget of the CLI `routectl doctor`: a one-shot diagnostic the
+/// The budget of each ledger read in the CLI `routectl doctor` (the
+/// cache-ignore report and the would-trim panel): a one-shot diagnostic the
 /// operator waits on, so it may take longer than a dashboard poll.
 pub(super) const DISK_CACHE_READ_BUDGET: Duration = Duration::from_secs(2);
 
-/// The read budget of the served `/status/doctor` panel: this read's own
-/// share of the `/status` aggregate's `AGGREGATE_RESERVE_MS` (1000 ms, see
-/// `server::status_gate`), which the health and config panels and the
-/// response write also draw on, so it takes at most a quarter of it. It
-/// bounds the cache-ignore open and query only. The bench
+/// The budget of each ledger read in the served `/status/doctor` panel. The
+/// panel runs [`SERVED_LEDGER_READS`] of them in sequence, the cache-ignore
+/// report and the whole-ledger would-trim panel, each bounding its own open
+/// and query. Together they draw on the `/status` aggregate's
+/// `AGGREGATE_RESERVE_MS` (1000 ms, see `server::status_gate`), which the
+/// health and config panels and the response write also need, so the two
+/// take at most half of it. The bench
 /// `query::cache_ignore::tests::a_million_row_ledger_answers_inside_the_served_budget`
-/// in routectl-usage times the query alone (1M rows, 60k in the window,
-/// warm OS cache) against this number.
+/// in routectl-usage times the cache-ignore query alone (1M rows, 60k in the
+/// window, warm OS cache) against this number.
 pub(super) const SERVED_CACHE_READ_BUDGET: Duration = Duration::from_millis(250);
 
+/// The budgeted ledger reads one served doctor gather runs.
+const SERVED_LEDGER_READS: u128 = 2;
+
 const _: () = assert!(
-    SERVED_CACHE_READ_BUDGET.as_millis() * 4
+    SERVED_CACHE_READ_BUDGET.as_millis() * SERVED_LEDGER_READS * 2
         <= crate::server::status_gate::AGGREGATE_RESERVE_MS as u128
 );
 
-/// The read budget for a gather from `sources`.
+/// The per-read ledger budget for a gather from `sources`.
 pub(super) fn read_budget(sources: &GatherSources) -> Duration {
     match sources {
         GatherSources::Disk => DISK_CACHE_READ_BUDGET,

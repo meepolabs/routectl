@@ -82,7 +82,7 @@ pub async fn gather_context_no_network(
     zone: &LocalZone,
 ) -> DoctorContext {
     let raw_config = std::fs::read_to_string(config_path).ok();
-    let cache_read_budget = read_budget(&sources);
+    let ledger_read_budget = read_budget(&sources);
     let layers = match sources {
         GatherSources::Disk => disk_layers(config_path),
         GatherSources::Served(inputs) => served_layers(inputs),
@@ -114,11 +114,11 @@ pub async fn gather_context_no_network(
     let orphan_secrets = gather_orphan_secrets(&config);
     let orphan_seats = gather_orphan_seats(&config, &seats);
     let now = time::OffsetDateTime::now_utc();
-    let would_trim = compute_would_trim_panel(&config, zone, now);
+    let would_trim = compute_would_trim_panel(&config, zone, now, ledger_read_budget);
     let cache_ignore = gather_cache_ignore(
         &usage_db_path,
         &config,
-        cache_read_budget,
+        ledger_read_budget,
         crate::local_time::unix_ms(now),
     );
     let legacy_folders = legacy_dirs

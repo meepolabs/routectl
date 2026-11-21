@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use routectl_core::cache_decision::CALLER_SUPPLIED;
-use routectl_router::{Config, Finding, Status, overall_exit};
+use routectl_router::{Config, DoctorReport, Finding, Status, overall_exit};
 use routectl_testkit::ScopedEnv;
 
 use crate::cache_ignore::UNAVAILABLE_QUERY_TIMEOUT;
@@ -17,6 +17,7 @@ use super::super::served::{ResidentLearned, ServedInputs, ServedPrices};
 use super::super::{
     GatherSources, build_report, build_report_no_network, gather_context_no_network,
 };
+use super::{DISK_CACHE_READ_BUDGET, SERVED_CACHE_READ_BUDGET, read_budget};
 
 /// Seed `turns` consecutive caller-marked turns on `(provider, model)`, an
 /// hour before now, each reading and writing no cache. The first turn has no
@@ -422,6 +423,99 @@ async fn a_served_read_past_its_deadline_reports_query_timeout() {
         "the other sections still render: {:#?}",
         report.findings
     );
+}
+
+/// Seed `count` would-trim candidates an hour before now, in one
+/// transaction.
+fn seed_would_trim_candidates(db_path: &Path, count: i64) {
+    let db = routectl_usage::open(db_path).expect("open ledger");
+    let base = crate::local_time::unix_ms(time::OffsetDateTime::now_utc()) - 3_600_000;
+    db.conn().execute_batch("BEGIN").expect("begin");
+    for i in 0..count {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, would_trim_tokens) \
+                 VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0, 10)",
+                rusqlite::params![base + i, format!("trim-{i}")],
+            )
+            .expect("insert candidate");
+    }
+    db.conn().execute_batch("COMMIT").expect("commit");
+}
+
+const WOULD_TRIM_CANDIDATES: i64 = 5_000;
+
+async fn served_report_with_budget(fx: &Fixture, budget: Option<Duration>) -> DoctorReport {
+    let inputs = served_inputs(&fx.config_path, &fx.db_path);
+    let inputs = match budget {
+        Some(budget) => inputs.with_cache_read_budget(budget),
+        None => inputs,
+    };
+    let ctx = gather_context_no_network(
+        &fx.config_path,
+        GatherSources::Served(Box::new(inputs)),
+        &[],
+        &crate::local_time::LocalZone::utc(),
+    )
+    .await;
+    build_report_no_network(&ctx)
+}
+
+/// A served would-trim read past its deadline omits the panel, and the rest
+/// of the report still builds.
+///
+/// Mutation check: run the would-trim query on the bare connection instead
+/// of under its `DeadlineGuard` -> red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_served_would_trim_read_past_its_deadline_omits_the_panel() {
+    // Arrange: enough candidates that the query runs past one progress
+    // callback.
+    let fx = fixture();
+    seed_would_trim_candidates(&fx.db_path, WOULD_TRIM_CANDIDATES);
+
+    // Act
+    let report = served_report_with_budget(&fx, Some(Duration::ZERO)).await;
+
+    // Assert
+    assert_eq!(report.panels.would_trim, None);
+    assert!(
+        report.findings.iter().any(|f| f.section == "tuning"),
+        "the other sections still render: {:#?}",
+        report.findings
+    );
+}
+
+/// The default served budget reads the same ledger's would-trim panel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_served_would_trim_read_inside_the_default_budget_fills_the_panel() {
+    // Arrange
+    let fx = fixture();
+    seed_would_trim_candidates(&fx.db_path, WOULD_TRIM_CANDIDATES);
+
+    // Act
+    let report = served_report_with_budget(&fx, None).await;
+
+    // Assert
+    let panel = report.panels.would_trim.expect("would-trim panel");
+    assert_eq!(panel.candidate_requests, WOULD_TRIM_CANDIDATES);
+}
+
+/// The CLI gather reads under the unchanged disk budget, and a served gather
+/// defaults to the served one.
+#[test]
+#[serial_test::serial]
+fn each_gather_source_reads_under_its_own_budget() {
+    let fx = fixture();
+    let served = GatherSources::Served(Box::new(served_inputs(&fx.config_path, &fx.db_path)));
+
+    assert_eq!(DISK_CACHE_READ_BUDGET, Duration::from_secs(2));
+    assert_eq!(read_budget(&GatherSources::Disk), DISK_CACHE_READ_BUDGET);
+    assert_eq!(SERVED_CACHE_READ_BUDGET, Duration::from_millis(250));
+    assert_eq!(read_budget(&served), SERVED_CACHE_READ_BUDGET);
 }
 
 /// The human render titles the section rather than filing it under "Other".

@@ -7,6 +7,8 @@
 //! its human battery. Kept apart from the doctor orchestration so the
 //! compute/map/render seam is unit-testable against a temp DB.
 
+use std::time::{Duration, Instant};
+
 use time::OffsetDateTime;
 
 use crate::local_time::LocalZone;
@@ -15,7 +17,9 @@ use routectl_router::{
     ACTION_MIXED, ACTION_NONE, CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell,
     MatrixReplaySummary, MatrixSource, MatrixWarm, VERDICT_MIXED, WouldTrimPanel,
 };
-use routectl_usage::{OpenError, WouldTrimSummary, open_readonly_fastfail, would_trim_summary};
+use routectl_usage::{
+    DeadlineGuard, OpenError, WouldTrimSummary, open_readonly_fastfail, would_trim_summary,
+};
 
 use super::text_table::render_table;
 use super::usage::{WindowFlag, human_count, window_bounds};
@@ -38,14 +42,20 @@ const DEFAULT_WINDOW: WindowFlag = WindowFlag::All;
 /// and never fails the surrounding diagnostic. A present DB with zero candidates returns a `Some`
 /// all-zero panel, which is distinct from "no data".
 ///
+/// `budget` bounds the open and the query together: the deadline is anchored
+/// before the open, and a query still running past it is interrupted and
+/// reads as no panel, like any other read failure.
+///
 /// `now` is passed in (never read from the clock here) so the window is
 /// deterministic under test.
 pub(crate) fn compute_would_trim_panel(
     config: &Config,
     zone: &LocalZone,
     now: OffsetDateTime,
+    budget: Duration,
 ) -> Option<WouldTrimPanel> {
-    let db = match open_readonly_fastfail(&config.usage.db_path) {
+    let deadline = Instant::now() + budget;
+    let mut db = match open_readonly_fastfail(&config.usage.db_path) {
         Ok(db) => db,
         Err(OpenError::NoData { .. } | OpenError::VersionTooOld { .. }) => return None,
         Err(e) => {
@@ -60,7 +70,9 @@ pub(crate) fn compute_would_trim_panel(
         }
     };
     let bounds = window_bounds(zone, DEFAULT_WINDOW, now);
-    match would_trim_summary(&db, bounds.from_ms, bounds.to_ms) {
+    let summary = DeadlineGuard::install(&mut db, deadline)
+        .and_then(|guard| would_trim_summary(&guard, bounds.from_ms, bounds.to_ms));
+    match summary {
         Ok(summary) => Some(panel_from_summary(summary)),
         Err(e) => {
             tracing::debug!(error = %e, "would-trim panel: summary query failed, omitting");
@@ -306,8 +318,10 @@ mod tests {
     use rusqlite::OpenFlags;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
-    use std::time::Duration;
     use tempfile::TempDir;
+
+    /// A budget no read over these small fixtures comes near.
+    const AMPLE_BUDGET: Duration = Duration::from_secs(30);
 
     fn fixed_now() -> OffsetDateTime {
         // 2026-06-11 (Thursday) 14:30, read in UTC.
@@ -412,7 +426,10 @@ mod tests {
         let config = config_for(&path);
 
         // Act + Assert: NoData collapses to no panel, never an error.
-        assert!(compute_would_trim_panel(&config, &LocalZone::utc(), fixed_now()).is_none());
+        assert!(
+            compute_would_trim_panel(&config, &LocalZone::utc(), fixed_now(), AMPLE_BUDGET)
+                .is_none()
+        );
     }
 
     #[test]
@@ -428,7 +445,13 @@ mod tests {
 
         // Act + Assert: VersionTooOld collapses to no panel, never an error.
         assert!(
-            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), fixed_now()).is_none()
+            compute_would_trim_panel(
+                &config_for(&path),
+                &LocalZone::utc(),
+                fixed_now(),
+                AMPLE_BUDGET
+            )
+            .is_none()
         );
     }
 
@@ -447,11 +470,47 @@ mod tests {
 
         // Act
         let panel =
-            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now).expect("panel");
+            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now, AMPLE_BUDGET)
+                .expect("panel");
 
         // Assert: the future candidate is excluded by the window's upper bound.
         assert_eq!(panel.candidate_requests, 2);
         assert_eq!(panel.would_trim_tokens, 60_000);
+    }
+
+    /// Seed `count` in-window candidates in one transaction: enough rows that
+    /// the summary query runs past one progress callback of the deadline
+    /// guard.
+    fn seed_candidates(db: &UsageDb, now: OffsetDateTime, count: i64) {
+        let now_ms = crate::local_time::unix_ms(now);
+        db.conn().execute_batch("BEGIN").expect("begin");
+        for i in 0..count {
+            insert_would_trim_row(db, &format!("w{i}"), now_ms - 1_000 - i, Some(10));
+        }
+        db.conn().execute_batch("COMMIT").expect("commit");
+    }
+
+    /// The budget bounds the summary query: an exhausted budget omits the
+    /// panel, and an ample one over the same ledger reads it.
+    ///
+    /// Mutation check: run the query on the bare connection instead of under
+    /// the `DeadlineGuard` -> red on the zero-budget row.
+    #[test]
+    fn compute_omits_the_panel_when_the_read_budget_runs_out() {
+        // Arrange
+        let (_dir, path, db) = temp_db();
+        let now = fixed_now();
+        seed_candidates(&db, now, 5_000);
+        drop(db);
+        let config = config_for(&path);
+
+        // Act
+        let exhausted = compute_would_trim_panel(&config, &LocalZone::utc(), now, Duration::ZERO);
+        let ample = compute_would_trim_panel(&config, &LocalZone::utc(), now, AMPLE_BUDGET);
+
+        // Assert
+        assert_eq!(exhausted, None, "a read past its deadline omits the panel");
+        assert_eq!(ample.map(|p| p.candidate_requests), Some(5_000));
     }
 
     #[test]
@@ -470,7 +529,8 @@ mod tests {
 
         // Act: the read-only compute must not touch the file.
         let panel =
-            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now).expect("panel");
+            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now, AMPLE_BUDGET)
+                .expect("panel");
 
         // Assert: candidate seen, and the DB file is byte-for-byte unchanged.
         assert_eq!(panel.candidate_requests, 1);
@@ -513,7 +573,10 @@ mod tests {
 
         // Act: capture the omission log emitted while computing the panel.
         let events = capture_events(|| {
-            assert!(compute_would_trim_panel(&config, &LocalZone::utc(), fixed_now()).is_none());
+            assert!(
+                compute_would_trim_panel(&config, &LocalZone::utc(), fixed_now(), AMPLE_BUDGET)
+                    .is_none()
+            );
         });
 
         // Assert: the panel is omitted, exactly the path-free class is logged,
@@ -610,7 +673,12 @@ mod tests {
         let config = config_for(&path);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(compute_would_trim_panel(&config, &LocalZone::utc(), now));
+            let _ = tx.send(compute_would_trim_panel(
+                &config,
+                &LocalZone::utc(),
+                now,
+                AMPLE_BUDGET,
+            ));
         });
         let result = rx.recv_timeout(bound);
 
@@ -619,8 +687,9 @@ mod tests {
         let panel = result.unwrap_or_else(|_| panic!("panel did not shed within {bound:?}"));
         assert!(panel.is_none(), "a locked DB must omit the panel");
         drop(holder);
-        let after = compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now)
-            .expect("panel after unlock");
+        let after =
+            compute_would_trim_panel(&config_for(&path), &LocalZone::utc(), now, AMPLE_BUDGET)
+                .expect("panel after unlock");
         assert_eq!(after.candidate_requests, 1);
     }
 
@@ -653,7 +722,9 @@ mod tests {
 
         // Act
         let events = capture_events(|| {
-            assert!(compute_would_trim_panel(&config, &LocalZone::utc(), now).is_none());
+            assert!(
+                compute_would_trim_panel(&config, &LocalZone::utc(), now, AMPLE_BUDGET).is_none()
+            );
         });
 
         // Assert: exactly the path-free class is logged, and nothing carries
