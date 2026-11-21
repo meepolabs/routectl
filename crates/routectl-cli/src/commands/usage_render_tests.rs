@@ -506,7 +506,7 @@ fn render_footer_shows_cache_hit_rate() {
     // Arrange: one cache-reporting stream row (cache_read=100, input=0) and a
     // fresh-input stream row (cache_read=0, input via reasoning unused). With the
     // token-weighted formula, a row reporting cache_read=100 and no fresh input /
-    // cache-write has hit rate 100/100 = 100.0%.
+    // cache-write has hit rate 100/100 = 100%.
     let (_dir, _path, mut db) = temp_db();
     insert_stream_row(&db, "r1", 1000, "m", 100, 600, Some(10), None, Some(100));
     paid_model_row(&db, "r2", "m", "upstream_error", 0, 0);
@@ -516,7 +516,7 @@ fn render_footer_shows_cache_hit_rate() {
     let out = render_report(&report, &zone());
 
     // Assert: errors moved to a column; the footer is the cache-hit line only.
-    assert!(out.contains("cache hit 100.0%"));
+    assert!(out.contains("cache hit 100%"));
     assert!(!out.contains("errors:"));
 }
 
@@ -544,7 +544,7 @@ fn render_footer_cache_hit_rate_is_token_weighted_over_reporting_rows() {
     // was wrong (it mixed a per-turn SNAPSHOT with summed input and dropped
     // cache-write). Group A: cache_read 900, input 100. Group B: cache_read 0,
     // input 100. num = 900 + 0 = 900; den = (100+900) + (100+0) = 1100;
-    // 900/1100 = 0.81818 -> "81.8%".
+    // 900/1100 = 0.81818 -> "82%".
     let (_dir, _path, mut db) = temp_db();
     // Group A "ga": a stream row carries the cache_read billed volume (900); a
     // paid row carries the fresh input (100). Both share (model, provider,
@@ -559,9 +559,9 @@ fn render_footer_cache_hit_rate_is_token_weighted_over_reporting_rows() {
     // Act
     let out = render_report(&report, &zone());
 
-    // Assert: token-weighted 900/1100 = 81.8%.
+    // Assert: token-weighted 900/1100 = 82%.
     assert!(
-        out.contains("cache hit 81.8%"),
+        out.contains("cache hit 82%"),
         "footer should be the token-weighted rate: {out:?}"
     );
 }
@@ -573,8 +573,8 @@ fn render_footer_excludes_non_cache_reporting_rows() {
     // rate must exclude the non-reporting group's input from BOTH numerator and
     // denominator. Reporting group "rep": cache_read 600, input 0. Non-reporting
     // "norep": input 1000, NULL cache_read. Footer over reporting rows only =
-    // 600/600 = 100.0%; if the non-reporting input leaked in it would be
-    // 600/1600 = 37.5%.
+    // 600/600 = 100%; if the non-reporting input leaked in it would be
+    // 600/1600 = 38%.
     let (_dir, _path, mut db) = temp_db();
     insert_stream_row(
         &db,
@@ -597,14 +597,14 @@ fn render_footer_excludes_non_cache_reporting_rows() {
         .find(|l| l.starts_with("cache hit"))
         .expect("footer line present");
 
-    // Assert: the footer counts only the cache-reporting row -> 100.0%, never the
-    // 37.5% it would show if the non-reporting input padded the denominator.
+    // Assert: the footer counts only the cache-reporting row -> 100%, never the
+    // 38% it would show if the non-reporting input padded the denominator.
     assert!(
-        footer_line.contains("cache hit 100.0%"),
+        footer_line.contains("cache hit 100%"),
         "non-reporting row must be excluded from footer num and den: {footer_line:?}"
     );
     assert!(
-        !footer_line.contains("37.5%"),
+        !footer_line.contains("38%"),
         "non-reporting input must not pad the footer denominator: {footer_line:?}"
     );
 }
@@ -657,7 +657,7 @@ fn per_group_cache_hit_matches_footer_in_mixed_provider_group() {
 fn non_reporting_only_group_renders_no_data_marker() {
     // Arrange: a group whose only rows never report cache reads (present==0).
     // The shared denominator stays 0, so the rate is None and the hit% cell is
-    // the "-" no-data marker -- never "0.0%".
+    // the "-" no-data marker -- never "0%".
     let (_dir, _path, mut db) = temp_db();
     paid_model_row(&db, "nr1", "norep", "ok", 500, 0);
     let report = report_all(&mut db, &cost_config(), Some(GroupDim::Model), false);
@@ -670,15 +670,15 @@ fn non_reporting_only_group_renders_no_data_marker() {
         .find(|l| l.trim_start().starts_with("norep"))
         .expect("norep row present");
 
-    // Assert: no rate on the struct; the row renders the "-" marker, not 0.0%.
+    // Assert: no rate on the struct; the row renders the "-" marker, not 0%.
     assert_eq!(group.metrics.cache_hit_pct, None);
     assert!(
         row_line.contains(" - "),
         "hit% cell should be '-' for a non-reporting-only group: {row_line:?}"
     );
     assert!(
-        !row_line.contains("0.0%"),
-        "non-reporting-only group must not render 0.0%: {row_line:?}"
+        !row_line.contains("0%"),
+        "non-reporting-only group must not render 0%: {row_line:?}"
     );
 }
 
@@ -687,9 +687,9 @@ fn render_footer_not_equal_to_old_peak_based_value() {
     // Arrange: a regression guard for the footer-formula rewrite. The OLD footer
     // was a per-group mean of peak/(peak+input). For ONE group with two stream
     // rows (cache_read snapshots 100 then 900) plus input 100, the old value used
-    // the PEAK (900): 900/(900+100) = 0.90 -> "90.0%". The NEW token-weighted
+    // the PEAK (900): 900/(900+100) = 0.90 -> "90%". The NEW token-weighted
     // value sums the billed cache-read flow (100+900=1000): 1000/(100+1000) =
-    // 0.90909 -> "90.9%". These differ, proving the footer no longer uses peak.
+    // 0.90909 -> "91%". These differ, proving the footer no longer uses peak.
     let (_dir, _path, mut db) = temp_db();
     insert_stream_row(&db, "pk1", 1000, "pk", 100, 600, Some(5), None, Some(100));
     insert_stream_row(&db, "pk2", 1100, "pk", 100, 600, Some(5), None, Some(900));
@@ -699,13 +699,13 @@ fn render_footer_not_equal_to_old_peak_based_value() {
     // Act
     let out = render_report(&report, &zone());
 
-    // Assert: the token-weighted billed figure (90.9%), NOT the old peak (90.0%).
+    // Assert: the token-weighted billed figure (91%), NOT the old peak (90%).
     assert!(
-        out.contains("cache hit 90.9%"),
+        out.contains("cache hit 91%"),
         "footer should use summed billed cache-read, not peak: {out:?}"
     );
     assert!(
-        !out.contains("90.0%"),
+        !out.contains("cache hit 90%"),
         "footer must not equal the old peak-based value: {out:?}"
     );
 }
@@ -827,8 +827,8 @@ fn render_hit_pct_column_is_token_weighted_over_billed_not_peak() {
     // snapshot (100 then 900) plus a paid row with fresh input 100. The hit%
     // column is token-weighted over the BILLED (summed) cache-read volume:
     //   billed = 100 + 900 = 1000; input = 100; cache_write = 0
-    //   hit% = 1000 / (100 + 1000) = 0.90909 -> "90.9%"
-    // If it ever used the PEAK (900) the cell would read "90.0%"
+    //   hit% = 1000 / (100 + 1000) = 0.90909 -> "91%"
+    // If it ever used the PEAK (900) the cell would read "90%"
     // (900 / (100 + 900)). The group's own per-row cell must show the billed
     // figure, proving SUM not peak.
     let (_dir, _path, mut db) = temp_db();
@@ -844,13 +844,13 @@ fn render_hit_pct_column_is_token_weighted_over_billed_not_peak() {
         .find(|l| l.trim_start().starts_with("hp"))
         .expect("hp row present");
 
-    // Assert: the cell is the token-weighted billed figure (90.9%), not peak.
+    // Assert: the cell is the token-weighted billed figure (91%), not peak.
     assert!(
-        row_line.contains("90.9%"),
+        row_line.contains("91%"),
         "hit% cell should use summed billed cache-read: {row_line:?}"
     );
     assert!(
-        !row_line.contains("90.0%"),
+        !row_line.contains("90%"),
         "hit% cell must not use the peak figure: {row_line:?}"
     );
 }
@@ -858,7 +858,7 @@ fn render_hit_pct_column_is_token_weighted_over_billed_not_peak() {
 #[test]
 fn render_hit_pct_column_dash_when_provider_does_not_report_cache() {
     // Arrange: a paid row with input but NULL cache_read => cache_read_present
-    // == 0. The hit% cell must render "-" (not "0.0%"): the provider does not
+    // == 0. The hit% cell must render "-" (not "0%"): the provider does not
     // report cache reads, so the rate is "not reported", not "zero hits".
     let (_dir, _path, mut db) = temp_db();
     paid_model_row(&db, "nc1", "nocache", "ok", 500, 200);
@@ -871,14 +871,14 @@ fn render_hit_pct_column_dash_when_provider_does_not_report_cache() {
         .find(|l| l.trim_start().starts_with("nocache"))
         .expect("nocache row present");
 
-    // Assert: dash, never a 0.0% rate, for a non-cache-reporting provider.
+    // Assert: dash, never a 0% rate, for a non-cache-reporting provider.
     assert!(
         row_line.contains(" - "),
         "hit% cell should be '-' when cache is not reported: {row_line:?}"
     );
     assert!(
-        !row_line.contains("0.0%"),
-        "hit% must not render 0.0% for a non-reporting provider: {row_line:?}"
+        !row_line.contains("0%"),
+        "hit% must not render 0% for a non-reporting provider: {row_line:?}"
     );
 }
 
@@ -890,10 +890,10 @@ fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
     // the non-reporting group's input.
     //   Reporting "rep": cache_read billed 900, input 100.
     //   Non-reporting "norep": input 1000, NULL cache_read (present == 0).
-    // Footer / total = 900 / (100 + 900) = 90.0%.
+    // Footer / total = 900 / (100 + 900) = 90%.
     // The OLD total recomputed from its OWN summed fields, which fold in the
-    // non-reporting input: 900 / (100 + 900 + 1000) = 900/2000 = 45.0%. The
-    // total must read 90.0%, never 45.0%.
+    // non-reporting input: 900 / (100 + 900 + 1000) = 900/2000 = 45%. The
+    // total must read 90%, never 45%.
     let (_dir, _path, mut db) = temp_db();
     insert_stream_row(
         &db,
@@ -924,15 +924,15 @@ fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
     // Assert: the total row's hit% equals the footer's reporting-only rate, and
     // is not the diluted all-input value.
     assert!(
-        total_line.contains("90.0%"),
+        total_line.contains("90%"),
         "total hit% should mirror the footer rate: {total_line:?}"
     );
     assert!(
-        !total_line.contains("45.0%"),
+        !total_line.contains("45%"),
         "total hit% must not be diluted by non-reporting input: {total_line:?}"
     );
     assert!(
-        footer_line.contains("cache hit 90.0%"),
+        footer_line.contains("cache hit 90%"),
         "footer should be the reporting-only token-weighted rate: {footer_line:?}"
     );
 }
@@ -1373,8 +1373,8 @@ fn displayed_input_unchanged_for_write_less_provider() {
 fn current_era_write_total_feeds_displayed_input_and_hit_rate() {
     // Arrange: a row carrying the write total (no per-lifetime columns): fresh
     // input 100, cache_read 300, writes 100. Displayed input = 100 + 100 = 200;
-    // hit% = 300 / (100 + 300 + 100) = 60.0%. A reader of only the older-era
-    // columns would show input 100 and 75.0%.
+    // hit% = 300 / (100 + 300 + 100) = 60%. A reader of only the older-era
+    // columns would show input 100 and 75%.
     let (_dir, _path, mut db) = temp_db();
     db.conn()
         .execute(
@@ -1399,8 +1399,8 @@ fn current_era_write_total_feeds_displayed_input_and_hit_rate() {
     // Assert: key|reqs|err|input|output|cache_read|hit%.
     let cells: Vec<&str> = row_line.split_whitespace().collect();
     assert_eq!(cells.get(3).copied(), Some("200"), "input: {row_line:?}");
-    assert_eq!(cells.get(6).copied(), Some("60.0%"), "hit%: {row_line:?}");
-    assert!(out.contains("cache hit 60.0%"), "footer: {out}");
+    assert_eq!(cells.get(6).copied(), Some("60%"), "hit%: {row_line:?}");
+    assert!(out.contains("cache hit 60%"), "footer: {out}");
 }
 
 /// Insert a would-trim candidate row with the verdict-related advisory

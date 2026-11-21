@@ -1137,12 +1137,27 @@ const DETAIL_HEADERS: [&str; 8] = [
     "srv_tools",
 ];
 
+/// The one display rule for a cache-hit percentage: exactly 100 reads
+/// `100%`; above 99 keeps one decimal rounded DOWN, so a rate short of 100
+/// never prints as 100 (`99.96` -> `99.9%`); anything else is a whole
+/// percent (`98.6` -> `99%`); `None` is `-`. The row table in
+/// `tests/fixtures/cache_hit_rows.json` pins this rule for every reader.
+fn cache_hit_text(cache_hit_pct: Option<f64>) -> String {
+    match cache_hit_pct {
+        None => "-".to_string(),
+        Some(pct) if pct > 99.0 && pct < 100.0 => {
+            let tenths = (pct * 10.0).floor() as i64;
+            format!("{}.{}%", tenths / 10, tenths % 10)
+        }
+        Some(pct) => format!("{:.0}%", pct.round()),
+    }
+}
+
 /// Render a token-weighted cache-hit percentage under the not-reported rule:
 /// `-` when the provider reports no cache reads or the denominator is
-/// degenerate, else the one-decimal percentage (e.g. `45.0%`), matching the
-/// footer's formatting so column and footer read identically.
+/// degenerate, else [`cache_hit_text`], the same text the footer shows.
 fn hit_pct_cell(cache_hit_pct: Option<f64>) -> String {
-    cache_hit_pct.map_or_else(|| "-".to_string(), |pct| format!("{pct:.1}%"))
+    cache_hit_text(cache_hit_pct)
 }
 
 /// Displayed `input`: all prompt tokens NOT served from cache, i.e. fresh
@@ -1509,7 +1524,7 @@ fn format_reset(zone: &LocalZone, epoch_s: i64) -> String {
 fn render_footer(report: &WindowReport) -> String {
     let totals = &report.total.metrics;
     let hit = match totals.cache_hit_pct {
-        Some(pct) => format!("cache hit {pct:.1}%"),
+        Some(pct) => format!("cache hit {}", cache_hit_text(Some(pct))),
         None => "cache hit n/a".to_string(),
     };
     format!(

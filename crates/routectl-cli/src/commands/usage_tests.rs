@@ -1462,6 +1462,55 @@ fn build_output_normal_returns_window_blocks_not_calibration_report() {
 // The render-layer, quota-line, --since-title, and --by-model tests live in
 // a sibling file to keep each file under the size ceiling. They compile into
 // THIS module via include!, so the helpers above stay in scope.
+
+/// The cache-hit row table the CLI and the status page both read.
+const CACHE_HIT_ROWS: &str = include_str!("../../tests/fixtures/cache_hit_rows.json");
+
+/// `(pct, text)` per row of [`CACHE_HIT_ROWS`]; `pct` null is `None`.
+fn cache_hit_rows() -> Vec<(Option<f64>, String)> {
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(CACHE_HIT_ROWS).expect("cache hit rows parse");
+    rows.iter()
+        .map(|row| {
+            let pct = &row["pct"];
+            let pct = if pct.is_null() {
+                None
+            } else {
+                Some(pct.as_f64().expect("pct is a number or null"))
+            };
+            let text = row["text"].as_str().expect("text is a string");
+            (pct, text.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn cache_hit_text_renders_every_row_of_the_shared_table() {
+    // Arrange: the table must carry the boundary rows the rule is defined by,
+    // so a pruned table cannot pass by asserting less.
+    let rows = cache_hit_rows();
+    let required: [(Option<f64>, &str); 7] = [
+        (Some(99.96), "99.9%"),
+        (Some(99.04), "99.0%"),
+        (Some(99.0), "99%"),
+        (Some(98.6), "99%"),
+        (Some(100.0), "100%"),
+        (Some(0.0), "0%"),
+        (None, "-"),
+    ];
+    for (pct, text) in required {
+        assert!(
+            rows.iter().any(|(p, t)| *p == pct && t == text),
+            "row table lacks {pct:?} -> {text:?}"
+        );
+    }
+
+    // Act + Assert: every row, named by its input on failure.
+    for (pct, text) in &rows {
+        assert_eq!(&cache_hit_text(*pct), text, "cache_hit_text({pct:?})");
+    }
+}
+
 include!("usage_render_tests.rs");
 include!("usage_reduction_render_tests.rs");
 include!("usage_suppressed_render_tests.rs");
