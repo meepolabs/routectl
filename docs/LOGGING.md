@@ -1930,13 +1930,13 @@ headers, or a vendor account id. A rejected reading also counts in the
 `quota_observation_rejected` WARN totals. The driver stopping before shutdown
 is an ERROR with `job=usage_poll` (see the catalog).
 
-When an Anthropic seat's entry sets a `user_agent` that is not a valid HTTP
-header value, each poll of that seat logs one WARN, target
+When an Anthropic or Codex seat's entry sets a `user_agent` that is not a
+valid HTTP header value, each poll of that seat logs one WARN, target
 `routectl_cli::server::usage_poll`, `event=usage_poll_user_agent_refused`,
 message `configured user_agent is not a valid header value; the usage poll
 sends the default`, with fields `account` (the seat key) and `reason`
-(`invalid_header_value`). The poll then sends the built-in Claude Code
-`User-Agent`. The line never carries the configured value; fix the entry's
+(`invalid_header_value`). The poll then sends the vendor's built-in
+`User-Agent` (Claude Code or Codex CLI). The line never carries the configured value; fix the entry's
 `user_agent` (no control characters such as a line break).
 
 ## Capability intelligence events

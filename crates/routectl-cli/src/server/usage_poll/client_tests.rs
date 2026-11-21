@@ -12,7 +12,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use super::{
     ANTHROPIC_USAGE_URL, CODEX_USAGE_URL, FetchResult, MAX_USAGE_RETRY_AFTER, SeatCredential,
-    UsagePollClient, anthropic_user_agent,
+    UsagePollClient,
 };
 
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
@@ -67,6 +67,7 @@ impl Stubs {
             .fetch(SeatCredential::Codex {
                 token: &token,
                 account_id: Some(ACCOUNT_SENTINEL),
+                user_agent: None,
             })
             .await
     }
@@ -76,7 +77,7 @@ impl Stubs {
 fn default_anthropic(token: &SecretToken) -> SeatCredential<'_> {
     SeatCredential::Anthropic {
         token,
-        user_agent: anthropic_user_agent(None).value,
+        user_agent: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn the_production_client_targets_only_the_usage_constants() {
             SeatCredential::Codex {
                 token: &token,
                 account_id: None,
+                user_agent: None,
             },
         ),
     ];
@@ -149,6 +151,7 @@ fn the_bearer_and_account_id_are_sensitive_and_absent_from_request_debug() {
             SeatCredential::Codex {
                 token: &token,
                 account_id: Some(ACCOUNT_SENTINEL),
+                user_agent: None,
             },
         ),
     ];

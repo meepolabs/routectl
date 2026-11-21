@@ -1,7 +1,8 @@
-//! The `User-Agent` the Anthropic usage call presents: the `user_agent` of
-//! the provider entry the seat is reported under, else the compiled default,
-//! read from the live config on every poll. Every request goes to a wiremock
-//! stub behind a TLS front for the vendor host; the router is built from the
+//! The `User-Agent` the Anthropic and Codex usage calls present: the
+//! `user_agent` of the provider entry the seat is reported under, else the
+//! vendor's compiled default, read from the live config on every poll. Every
+//! request goes to one wiremock stub behind a TLS front for each vendor
+//! host; the router is built from the
 //! config text by the daemon's own factory, and reloads go through the
 //! daemon's reload handler.
 
@@ -15,8 +16,11 @@ use routectl_testkit::tls_front::TlsFront;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::client::{UsagePollClient, anthropic_user_agent};
-use super::rig::{ANTHROPIC_HOST, ManualClock, TOKEN_MARKER, now_ms, unix_now, write_credentials};
+use super::client::{UsagePollClient, usage_user_agent};
+use super::rig::{
+    ACCOUNT_ID_MARKER, ANTHROPIC_HOST, CODEX_HOST, ManualClock, TOKEN_MARKER, now_ms, unix_now,
+    write_credentials,
+};
 use super::schedule::RandomJitter;
 use super::{UsagePollJob, UsagePollState, WallClock};
 use crate::server::reload::handle_config_reload;
@@ -25,14 +29,35 @@ use crate::server::seat_driver::{ManagedSeat, SeatJob, managed_seats, sweep};
 use crate::server::test_support::never_shutdown;
 
 const SEAT: &str = "anthropic#a";
+const CODEX_SEAT: &str = "codex#c";
 const SHARED_SEAT: &str = "anthropic#shared";
 /// Past the boot spread and every failure backoff the stub's 500 earns.
 const PAST_EVERY_DEADLINE_MS: i64 = 20 * 60_000;
 const CONFIGURED_UA: &str = "claude-cli/9.9.1 (external, cli)";
+const CODEX_CONFIGURED_UA: &str = "codex_cli_rs/9.9.3 (Linux 6.1; x86_64) synthetic-term";
 const RELOADED_UA: &str = "claude-cli/9.9.2 (external, cli)";
 
 /// One `[providers]` entry: name, credential and optional `user_agent`.
+/// An `oauth://codex#` credential makes it a Codex entry, any other an
+/// Anthropic one.
 type Entry<'a> = (&'a str, &'a str, Option<&'a str>);
+
+/// The format, base URL and upstream model of an entry on `credential`.
+fn entry_shape(credential: &str) -> (&'static str, &'static str, &'static str) {
+    if credential.starts_with("oauth://codex#") {
+        (
+            "openai-responses",
+            "https://chatgpt.com/backend-api/codex",
+            "gpt-5",
+        )
+    } else {
+        (
+            "anthropic-messages",
+            "https://api.anthropic.com",
+            "claude-sonnet-4-6",
+        )
+    }
+}
 
 /// `entries` plus one model per entry, named so that model `m_<entry>`
 /// sorts in the order the entries are given.
@@ -42,14 +67,15 @@ fn config_text(entries: &[Entry<'_>], usage_db: &Path) -> String {
         usage_db.display()
     );
     for (index, (name, credential, user_agent)) in entries.iter().enumerate() {
+        let (format, base_url, upstream) = entry_shape(credential);
         text.push_str(&format!(
-            "[providers.{name}]\nformat = \"anthropic-messages\"\nbase_url = \"https://api.anthropic.com\"\ncredential = \"{credential}\"\nauth = \"bearer\"\n"
+            "[providers.{name}]\nformat = \"{format}\"\nbase_url = \"{base_url}\"\ncredential = \"{credential}\"\nauth = \"bearer\"\n"
         ));
         if let Some(user_agent) = user_agent {
             text.push_str(&format!("user_agent = \"{user_agent}\"\n"));
         }
         text.push_str(&format!(
-            "\n[models.m{index}_{name}]\nprovider = \"{name}\"\nupstream = \"claude-sonnet-4-6\"\n\n"
+            "\n[models.m{index}_{name}]\nprovider = \"{name}\"\nupstream = \"{upstream}\"\n\n"
         ));
     }
     text
@@ -64,18 +90,23 @@ struct UaRig {
     clock: Arc<ManualClock>,
     stub: MockServer,
     job: UsagePollJob,
-    _front: TlsFront,
+    _fronts: [TlsFront; 2],
     _dir: tempfile::TempDir,
 }
 
 impl UaRig {
     /// A daemon-built router over `entries`, `account` logged in with a
-    /// token far from expiry, and the Anthropic usage host answering 500
-    /// (any answer will do: only the request is under test).
+    /// token far from expiry (and, for Codex, an account id), and both
+    /// usage hosts fronting one stub answering 500 (any answer will do:
+    /// only the request is under test).
     async fn new(entries: &[Entry<'_>], account: &str) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let creds = dir.path().join("credentials.json");
-        write_credentials(&creds, &[(account, TOKEN_MARKER, unix_now() + 3600, None)]);
+        let account_id = account.starts_with("codex#").then_some(ACCOUNT_ID_MARKER);
+        write_credentials(
+            &creds,
+            &[(account, TOKEN_MARKER, unix_now() + 3600, account_id)],
+        );
         let store = Arc::new(OAuthStore::open(&creds).await.expect("open the store"));
         let usage_db = dir.path().join("usage.db");
         let config_path = dir.path().join("config.toml");
@@ -91,8 +122,14 @@ impl UaRig {
             .respond_with(ResponseTemplate::new(500))
             .mount(&stub)
             .await;
-        let front = TlsFront::start(ANTHROPIC_HOST, *stub.address()).await;
-        let client = UsagePollClient::with_fronts_for_tests(&[(ANTHROPIC_HOST, &front)]);
+        let fronts = [
+            TlsFront::start(ANTHROPIC_HOST, *stub.address()).await,
+            TlsFront::start(CODEX_HOST, *stub.address()).await,
+        ];
+        let client = UsagePollClient::with_fronts_for_tests(&[
+            (ANTHROPIC_HOST, &fronts[0]),
+            (CODEX_HOST, &fronts[1]),
+        ]);
         let clock = Arc::new(ManualClock::starting_at(now_ms()));
         let wall: Arc<dyn WallClock> = clock.clone();
         let swap = Arc::new(ArcSwap::from_pointee(router));
@@ -112,7 +149,7 @@ impl UaRig {
             clock,
             stub,
             job,
-            _front: front,
+            _fronts: fronts,
             _dir: dir,
         }
     }
@@ -138,6 +175,17 @@ impl UaRig {
         .await
         .expect("the reload applies")
         .expect("a successful reload returns its config");
+    }
+
+    /// The path of every request the stub saw.
+    async fn paths(&self) -> Vec<String> {
+        self.stub
+            .received_requests()
+            .await
+            .expect("recording")
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect()
     }
 
     /// Every `user-agent` header value of every request the stub saw, as
@@ -168,31 +216,81 @@ fn default_ua() -> &'static str {
     routectl_core::identity::anthropic::default_claude_code_user_agent()
 }
 
+fn codex_default_ua() -> &'static str {
+    routectl_core::identity::codex::codex_user_agent()
+}
+
+const ANTHROPIC_PATH: &str = "/api/oauth/usage";
+const CODEX_PATH: &str = "/backend-api/wham/usage";
+
+/// One vendor's seat: its entry credential, account key and usage path.
+struct Vendor {
+    credential: &'static str,
+    account: &'static str,
+    path: &'static str,
+}
+
+const ANTHROPIC: Vendor = Vendor {
+    credential: "oauth://anthropic#a",
+    account: SEAT,
+    path: ANTHROPIC_PATH,
+};
+
+const CODEX: Vendor = Vendor {
+    credential: "oauth://codex#c",
+    account: CODEX_SEAT,
+    path: CODEX_PATH,
+};
+
 #[tokio::test]
 async fn the_usage_call_sends_the_seat_entrys_user_agent_or_the_default() {
-    // (row, the entry's user_agent, the exact header bytes sent)
+    // (row, vendor, the entry's user_agent, the exact header bytes sent)
     let rows = [
-        ("configured", Some(CONFIGURED_UA), CONFIGURED_UA),
-        ("non-ASCII", Some("agent/caf\u{e9}"), "agent/caf\u{e9}"),
-        ("unset", None, default_ua()),
+        (
+            "anthropic configured",
+            ANTHROPIC,
+            Some(CONFIGURED_UA),
+            CONFIGURED_UA,
+        ),
+        (
+            "anthropic non-ASCII",
+            ANTHROPIC,
+            Some("agent/caf\u{e9}"),
+            "agent/caf\u{e9}",
+        ),
+        ("anthropic unset", ANTHROPIC, None, default_ua()),
+        (
+            "codex configured",
+            CODEX,
+            Some(CODEX_CONFIGURED_UA),
+            CODEX_CONFIGURED_UA,
+        ),
+        (
+            "codex non-ASCII",
+            CODEX,
+            Some("agent/caf\u{e9}"),
+            "agent/caf\u{e9}",
+        ),
+        ("codex unset", CODEX, None, codex_default_ua()),
     ];
-    for (row, configured, expected) in rows {
+    for (row, vendor, configured, expected) in rows {
         // Arrange
-        let rig = UaRig::new(&[("seat_a", "oauth://anthropic#a", configured)], SEAT).await;
+        let rig = UaRig::new(&[("seat_a", vendor.credential, configured)], vendor.account).await;
 
         // Act
         rig.poll().await;
 
         // Assert
+        assert_eq!(rig.paths().await, vec![vendor.path.to_string()], "{row}");
         assert_eq!(rig.user_agents().await, vec![one_header(expected)], "{row}");
     }
 }
 
 #[test]
-fn with_no_configured_value_the_header_is_the_compiled_default_byte_for_byte() {
-    let resolved = anthropic_user_agent(None);
+fn with_no_configured_value_no_override_is_sent() {
+    let resolved = usage_user_agent(None);
 
-    assert_eq!(resolved.value.as_bytes(), default_ua().as_bytes());
+    assert_eq!(resolved.configured, None);
     assert!(!resolved.configured_invalid);
 }
 
@@ -254,43 +352,55 @@ const INVALID_UA: &str = "agent/1.0\r\nx-injected: synthetic-ua-marker-3b7d";
 
 #[tokio::test]
 async fn an_invalid_configured_user_agent_sends_the_default_and_logs_no_value() {
-    // Arrange: the seat as the config would carry it, run directly so the
-    // router factory never sees the value.
-    let rig = UaRig::new(&[("seat_a", "oauth://anthropic#a", None)], SEAT).await;
-    let mut seat = managed_seats(&rig.swap.load().config)
-        .into_iter()
-        .find(|seat| seat.account == SEAT)
-        .expect("the managed seat");
-    seat.user_agent = configured(INVALID_UA);
+    // (row, vendor, the vendor's compiled default)
+    let rows = [
+        ("anthropic", ANTHROPIC, default_ua()),
+        ("codex", CODEX, codex_default_ua()),
+    ];
+    for (row, vendor, expected) in rows {
+        // Arrange: the seat as the config would carry it, run directly so
+        // the router factory never sees the value.
+        let rig = UaRig::new(&[("seat_a", vendor.credential, None)], vendor.account).await;
+        let mut seat = managed_seats(&rig.swap.load().config)
+            .into_iter()
+            .find(|seat| seat.account == vendor.account)
+            .expect("the managed seat");
+        seat.user_agent = configured(vendor.credential, INVALID_UA);
 
-    // Act
-    let (_, events) = routectl_testkit::with_capture(async { rig.job.run(&seat).await }).await;
+        // Act
+        let (_, events) = routectl_testkit::with_capture(async { rig.job.run(&seat).await }).await;
 
-    // Assert: the default went out, alone, and nothing logged the value.
-    assert_eq!(rig.user_agents().await, vec![one_header(default_ua())]);
-    let refused: Vec<_> = events
-        .iter()
-        .filter(|event| event.field("event") == Some("usage_poll_user_agent_refused"))
-        .collect();
-    let [refused] = refused.as_slice() else {
-        panic!("one refusal line, saw {}", refused.len());
-    };
-    assert_eq!(refused.level, tracing::Level::WARN);
-    assert_eq!(refused.field("reason"), Some("invalid_header_value"));
-    assert_eq!(refused.field("account"), Some(SEAT));
-    let leaked: Vec<String> = events
-        .iter()
-        .flat_map(|event| {
-            std::iter::once(event.message.clone()).chain(
-                event
-                    .fields
-                    .iter()
-                    .map(|(name, value)| format!("{name}={value}")),
-            )
-        })
-        .filter(|text| text.contains("synthetic-ua-marker") || text.contains("agent/1.0"))
-        .collect();
-    assert_eq!(leaked, Vec::<String>::new());
+        // Assert: the default went out, alone, and nothing logged the value.
+        assert_eq!(rig.paths().await, vec![vendor.path.to_string()], "{row}");
+        assert_eq!(rig.user_agents().await, vec![one_header(expected)], "{row}");
+        let refused: Vec<_> = events
+            .iter()
+            .filter(|event| event.field("event") == Some("usage_poll_user_agent_refused"))
+            .collect();
+        let [refused] = refused.as_slice() else {
+            panic!("{row}: one refusal line, saw {}", refused.len());
+        };
+        assert_eq!(refused.level, tracing::Level::WARN, "{row}");
+        assert_eq!(
+            refused.field("reason"),
+            Some("invalid_header_value"),
+            "{row}"
+        );
+        assert_eq!(refused.field("account"), Some(vendor.account), "{row}");
+        let leaked: Vec<String> = events
+            .iter()
+            .flat_map(|event| {
+                std::iter::once(event.message.clone()).chain(
+                    event
+                        .fields
+                        .iter()
+                        .map(|(name, value)| format!("{name}={value}")),
+                )
+            })
+            .filter(|text| text.contains("synthetic-ua-marker") || text.contains("agent/1.0"))
+            .collect();
+        assert_eq!(leaked, Vec::<String>::new(), "{row}");
+    }
 }
 
 #[test]
@@ -300,13 +410,13 @@ fn a_seat_and_its_user_agent_never_print_the_value_in_debug() {
         provider: "anthropic".into(),
         label: Some("a".into()),
         account: SEAT.into(),
-        user_agent: configured(CONFIGURED_UA),
+        user_agent: configured(ANTHROPIC.credential, CONFIGURED_UA),
     };
 
     let rendered = format!(
         "{seat:?} {:?} {:?}",
-        anthropic_user_agent(Some(CONFIGURED_UA)),
-        anthropic_user_agent(Some(INVALID_UA)),
+        usage_user_agent(Some(CONFIGURED_UA)),
+        usage_user_agent(Some(INVALID_UA)),
     );
 
     assert!(rendered.contains(SEAT), "premise: the seat rendered");
@@ -314,11 +424,14 @@ fn a_seat_and_its_user_agent_never_print_the_value_in_debug() {
     assert!(!rendered.contains("synthetic-ua-marker"), "{rendered}");
 }
 
-fn configured(value: &str) -> Option<crate::server::seat_driver::ConfiguredUserAgent> {
+fn configured(
+    credential: &str,
+    value: &str,
+) -> Option<crate::server::seat_driver::ConfiguredUserAgent> {
     let config = routectl_router::parse_config(&config_text(
         &[(
             "seat_a",
-            "oauth://anthropic#a",
+            credential,
             Some(&value.escape_default().to_string()),
         )],
         Path::new("/nonexistent/usage.db"),

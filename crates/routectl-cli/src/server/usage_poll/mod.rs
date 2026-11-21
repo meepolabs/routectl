@@ -47,7 +47,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use self::client::{FetchResult, SeatCredential, UsagePollClient, anthropic_user_agent};
+use self::client::{FetchResult, SeatCredential, UsagePollClient, usage_user_agent};
 use self::schedule::{PollOutcome, PollSchedule, RandomJitter, SeatCandidate};
 use crate::handlers::status::DaemonMeta;
 use crate::server::seat_driver::{
@@ -366,7 +366,7 @@ impl SeatJob for UsagePollJob {
             let Some(vendor) = vendor else {
                 return PollAttempt::NotPolled;
             };
-            let user_agent = (vendor == UsageVendor::Anthropic).then(|| seat_user_agent(&seat));
+            let user_agent = seat_user_agent(&seat);
             let credential = store.peek_credential(&seat.account).await;
             let reload_generation = credential.reload_generation;
             let result = fetch_usage(&client, credential, vendor, user_agent).await;
@@ -466,11 +466,12 @@ pub(super) fn spawn_usage_poll_driver(
     )))
 }
 
-/// The `User-Agent` `seat`'s Anthropic usage call presents. A configured
-/// value that is not a valid header value is replaced by the compiled
-/// default, with one WARN that names the seat and never the value.
-fn seat_user_agent(seat: &ManagedSeat) -> HeaderValue {
-    let resolved = anthropic_user_agent(seat.user_agent.as_ref().map(ConfiguredUserAgent::as_str));
+/// The configured `User-Agent` `seat`'s usage call presents, or `None` for
+/// the vendor's compiled default. A configured value that is not a valid
+/// header value is replaced by the default, with one WARN that names the
+/// seat and never the value.
+fn seat_user_agent(seat: &ManagedSeat) -> Option<HeaderValue> {
+    let resolved = usage_user_agent(seat.user_agent.as_ref().map(ConfiguredUserAgent::as_str));
     if resolved.configured_invalid {
         tracing::warn!(
             event = "usage_poll_user_agent_refused",
@@ -479,7 +480,7 @@ fn seat_user_agent(seat: &ManagedSeat) -> HeaderValue {
             "configured user_agent is not a valid header value; the usage poll sends the default",
         );
     }
-    resolved.value
+    resolved.configured
 }
 
 async fn fetch_usage(
@@ -494,12 +495,13 @@ async fn fetch_usage(
     let seat_credential = match vendor {
         UsageVendor::Anthropic => SeatCredential::Anthropic {
             token: &token,
-            user_agent: user_agent.unwrap_or_else(|| anthropic_user_agent(None).value),
+            user_agent,
         },
         UsageVendor::Codex => match credential.account_id.as_deref() {
             Some(account_id) => SeatCredential::Codex {
                 token: &token,
                 account_id: Some(account_id),
+                user_agent,
             },
             None => return AttemptResult::NoAccountId,
         },
