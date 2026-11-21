@@ -64,7 +64,7 @@
     {
       id: 'doctor',
       label: 'Doctor',
-      sources: ['attention', 'doctor'],
+      sources: ['attention', 'doctor', 'models'],
       badge: 'attention',
       span: 'current state',
       build: buildDoctorView
@@ -123,10 +123,12 @@
   }
 
   // What needs attention, from the daemon's list (the same items Now shows),
-  // then the doctor report's own checks and counters.
+  // how many model problems the Models view lists, then the doctor report's
+  // own checks and counters.
   function buildDoctorView() {
     var stack = tabStack();
     stack.appendChild(viewSection('attention', doctorAttentionSection, 'Needs attention'));
+    stack.appendChild(viewSection('models', doctorModelProblemsSection, 'Model problems'));
     stack.appendChild(viewSection('doctor', buildDoctor));
     return stack;
   }

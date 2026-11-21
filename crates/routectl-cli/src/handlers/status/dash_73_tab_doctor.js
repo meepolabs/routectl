@@ -138,6 +138,27 @@
     return cell;
   }
 
+  // ---- doctor: model problems ------------------------------------------
+
+  // How many model problems the Models view lists: one per cause line it
+  // draws over its lanes, grouped by the same rule, so the two views read one
+  // number from one models payload. Problem lanes never collapse into the
+  // unused table, so every cause line sits in the main one.
+  function doctorModelProblemsSection(rec) {
+    var rows = rec.data.rows;
+    if (!Array.isArray(rows)) { throw new Error('models payload carries no rows'); }
+    var count = modelsCauseGroups(rows.filter(isPlainObject)).filter(function (group) {
+      return group.key !== null;
+    }).length;
+    var line = markRefreshUnit(document.createElement('div'), 'model-problems');
+    line.className = 'docverdict-sub docmodels';
+    line.appendChild(docText('docmodels-count', String(count)));
+    line.appendChild(document.createTextNode(
+      phrase(count, ' model problem', ' model problems') + ' on the Models view - '));
+    line.appendChild(viewLink(viewFor('models')));
+    return line;
+  }
+
   // ---- doctor: findings + passes ---------------------------------------
 
   function doctorFindings(findings) {

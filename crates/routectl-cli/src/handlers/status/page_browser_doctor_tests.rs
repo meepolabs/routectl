@@ -1,14 +1,16 @@
 // The Doctor view in a real headless Chrome: the daemon's needs-attention
 // list drawn as Now draws it under its own id prefix, one headline number
-// that is the tab badge's, and finding remediations whose backtick-quoted
-// commands are copyable code with the backticks left out. `include!`d into a
+// that is the tab badge's, finding remediations whose backtick-quoted
+// commands are copyable code with the backticks left out, and a
+// model-problem number equal to the Models view's cause lines. `include!`d into a
 // child module of `page::tests` beside `browser`; the scenarios live in
 // page_browser_doctor_driver.js.
 
 use serde_json::{Value, json};
 
 use crate::commands::doctor::SeatFix;
-use crate::handlers::status::panel_fixtures::fixture_config;
+use crate::handlers::status::panel_fixtures::{FIXTURE_NOW_MS, fixture_config};
+use crate::handlers::status::ui_case_fixtures::{CaseSource, UiCase};
 
 const DOCTOR_DRIVER: &str = include_str!("page_browser_doctor_driver.js");
 
@@ -202,4 +204,48 @@ fn page_browser_doctor_remediations_show_quoted_commands_bare() {
             "{fix:#}"
         );
     }
+}
+
+/// On one aggregate fixture the Doctor tab's model-problem number is the
+/// number of cause lines the Models view draws. The passthrough hop case
+/// carries three lanes under one cause, so a count of problem lanes would
+/// read 3 where Models draws one line (premise asserted on the served rows).
+///
+/// Mutation check: count rows with a cause_key instead of distinct cause
+/// groups in doctorModelProblemsSection -> red (3 against 1).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_doctor_model_problems_equal_the_models_cause_lines() {
+    let out = browser::run_case_scenario(
+        &browser::Scenario {
+            name: "doctor-model-problems",
+            hash: "models",
+            snippets: &[DOCTOR_DRIVER],
+            budget_ms: DOCTOR_BUDGET_MS,
+        },
+        browser::CaseServed {
+            source: CaseSource::open(UiCase::PassthroughHop, FIXTURE_NOW_MS, "127.0.0.1:8787"),
+            now_ms: Some(FIXTURE_NOW_MS),
+        },
+    )
+    .result;
+
+    let rows = out["served_rows"].as_array().expect("served models rows");
+    let with_cause: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row["cause_key"].as_str())
+        .collect();
+    let distinct: std::collections::BTreeSet<&str> = with_cause.iter().copied().collect();
+    assert!(
+        with_cause.len() > distinct.len(),
+        "premise: more problem lanes than causes: {out:#}"
+    );
+    let lines = out["cause_lines"].as_u64().expect("cause lines");
+    assert!(
+        lines > 0,
+        "positive control: Models draws a cause line: {out:#}"
+    );
+    assert_eq!(lines, distinct.len() as u64, "{out:#}");
+    assert_eq!(out["doctor_count"], lines.to_string(), "{out:#}");
+    assert_eq!(out["link_action"], "models", "{out:#}");
 }

@@ -118,4 +118,32 @@
       return { cards: cards, served: served.findings, fixes: fixes };
     });
   });
+  // The Models view is drawn first, then the Doctor tab; both stay in the
+  // document. Every models payload served is kept, so the test can check
+  // the premise that its lanes outnumber its causes.
+  d.scenario('doctor-model-problems', function () {
+    var served = { rows: null };
+    d.rewrite(function (url, text) {
+      if (url.pathname === '/status') { served.rows = JSON.parse(text).panels.models.data.rows; }
+      return text;
+    });
+    return d.waitUntil('models lanes drawn', function () {
+      var body = document.getElementById('body-models');
+      return !!document.getElementById('models-lanes') && !body.querySelector('.skeleton');
+    }).then(function () {
+      document.getElementById('tab-doctor').click();
+      return d.waitUntil('the doctor model-problem count', function () {
+        return document.querySelector('#body-doctor .docmodels-count');
+      });
+    }).then(function () {
+      var link = document.querySelector('#body-doctor .docmodels a');
+      return {
+        cause_lines: document.querySelectorAll('#body-models .models-cause-row').length,
+        doctor_count: document.querySelector('#body-doctor .docmodels-count').textContent,
+        doctor_line: document.querySelector('#body-doctor .docmodels').textContent,
+        link_action: link ? link.getAttribute('data-arg') : null,
+        served_rows: served.rows
+      };
+    });
+  });
 })(window.routectlDriver);

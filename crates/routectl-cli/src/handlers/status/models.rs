@@ -424,3 +424,7 @@ pub(super) mod fixture;
 #[cfg(test)]
 #[path = "models_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "doctor_models_count_tests.rs"]
+mod doctor_count_tests;
