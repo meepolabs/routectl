@@ -81,6 +81,14 @@ fn ids_in<'a>(result: &'a Value, table: &str) -> Vec<&'a str> {
         .collect()
 }
 
+fn lane_row<'a>(result: &'a Value, table: &str, lane: &str) -> &'a Value {
+    let id = lane_id(table, lane);
+    drawn(result)
+        .iter()
+        .find(|r| r["id"] == id.as_str())
+        .unwrap_or_else(|| panic!("no `{lane}` row in {table}: {result:#}"))
+}
+
 fn hop_item_key() -> String {
     let agg = CaseSource::open(UiCase::PassthroughHop, FIXTURE_NOW_MS, "127.0.0.1:8787")
         .aggregate(FIXTURE_NOW_MS);
@@ -129,6 +137,10 @@ fn page_browser_models_one_cause_line_over_the_hop_and_unused_lanes_collapse() {
     expected.insert(0, cause["id"].as_str().expect("id").to_owned());
     expected.push(lane_id("models-lanes", "busy#claude-sonnet-4-5"));
     assert_eq!(ids_in(&result, "models-lanes"), expected, "{result:#}");
+    for lane in HOP_LANES {
+        let row = lane_row(&result, "models-lanes", lane);
+        assert_eq!(row["toggle_name"], format!("Details for {lane}"), "{row:#}");
+    }
     assert_eq!(
         result["unused"], "2 lanes with no request in the last 7 days",
         "{result:#}"
@@ -274,7 +286,7 @@ fn page_browser_models_rows_keep_their_raw_state_without_the_attention_list() {
         state_of("claude-seat").starts_with("credential unusable"),
         "{result:#}"
     );
-    assert!(state_of("compat").starts_with("breaker open"), "{result:#}");
+    assert!(state_of("compat").starts_with("circuit open"), "{result:#}");
     assert_eq!(state_of("anthropic"), "ok");
     let causes: Vec<&Value> = drawn(&result)
         .iter()
@@ -324,6 +336,8 @@ fn page_browser_models_a_cleared_problem_shows_its_age() {
 
 /// Transit reads exact counts beside the responses checked, "unmeasured"
 /// for a lane nothing was checked on, and never says error, loss or rate.
+/// The expansion repeats transit only where it has counts: the two measured
+/// lanes add a line, the unmeasured one does not.
 ///
 /// Mutation check: drop the `checked <= 0` arm of modelsTransitText -> red.
 /// Positive control: the transit text nodes exist, one per lane, and a
@@ -346,7 +360,7 @@ fn page_browser_models_transit_reads_counts_or_unmeasured_and_never_a_failure_wo
         .map(|t| t.as_str().expect("text"))
         .collect();
     assert_eq!(shown.len(), 3, "{result:#}");
-    assert_eq!(details.len(), 3, "{result:#}");
+    assert_eq!(details.len(), 2, "{result:#}");
     assert!(shown.contains(&"2 of 5 responses changed"), "{shown:?}");
     assert!(shown.contains(&"0 of 1 responses changed"), "{shown:?}");
     assert!(shown.contains(&"unmeasured"), "{shown:?}");
@@ -366,12 +380,16 @@ fn page_browser_models_transit_reads_counts_or_unmeasured_and_never_a_failure_wo
     assert!(failure("an error rate"), "control: the matcher fires");
 }
 
-/// A nickname's link lands on Traffic with the scope and model applied: the
-/// address carries both, the strip names both, and the QUERY Traffic sends
-/// carries both.
+/// A nickname's link, followed from the keyboard on the default (Today)
+/// range, lands on Traffic for the last seven days with the scope and model
+/// applied: the address carries all three, the strip names both, the QUERY
+/// Traffic sends carries them, and focus sits on the strip's heading, where
+/// the next refresh leaves it.
 ///
-/// Mutation check: drop `state.model = String(nickname);` from
-/// modelsNicknameLinks -> red (the body carries no model).
+/// Mutation checks: drop `state.model = String(nickname);` from
+/// modelsNicknameLinks -> red (the body carries no model); drop the
+/// `landFollowedLink(next);` call in syncFromLocation -> red (focus is not on
+/// the heading).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_models_a_nickname_link_lands_on_traffic_scoped_to_it() {
@@ -383,8 +401,9 @@ fn page_browser_models_a_nickname_link_lands_on_traffic_scoped_to_it() {
     });
     let result = &report.result;
 
-    assert_eq!(result["href"], "#traffic?scope=anthropic&model=sonnet");
-    assert_eq!(result["hash"], "#traffic?scope=anthropic&model=sonnet");
+    let address = "#traffic?range=last7d&scope=anthropic&model=sonnet";
+    assert_eq!(result["href"], address);
+    assert_eq!(result["hash"], address);
     assert_eq!(
         result["strip"], "Scoped to model sonnet on provider anthropic",
         "{result:#}"
@@ -395,9 +414,10 @@ fn page_browser_models_a_nickname_link_lands_on_traffic_scoped_to_it() {
             .and_then(|b| serde_json::from_str::<Value>(b).ok())
             .is_some_and(|b| {
                 b["group_by"] == "model"
-                    && b["window"] == "today"
+                    && b["window"] == "last7d"
                     && b["provider"] == "anthropic"
                     && b["model"] == "sonnet"
+                    && b.get("bucket").is_none_or(Value::is_null)
             })
     });
     assert!(
@@ -405,6 +425,138 @@ fn page_browser_models_a_nickname_link_lands_on_traffic_scoped_to_it() {
         "Traffic sent the scoped body: {:#?}",
         report.requests
     );
+    assert!(
+        result["focused_before"]
+            .as_str()
+            .is_some_and(|id| id != "usage-scope-title"),
+        "positive control: focus starts on the link, not the heading: {result:#}"
+    );
+    assert_eq!(result["focused"], "usage-scope-title", "{result:#}");
+    assert_eq!(
+        result["focused_text"], "Scoped to model sonnet on provider anthropic",
+        "{result:#}"
+    );
+    assert_eq!(
+        result["focused_after_refresh"], "usage-scope-title",
+        "{result:#}"
+    );
+    assert_eq!(result["same_heading"], true, "{result:#}");
+}
+
+/// The range a nickname link carries: Today, which Models cannot show and
+/// which is empty on most mornings, becomes the seven days the fold reads;
+/// any other range the operator picked is kept as it is.
+///
+/// Mutation check: drop the `today` check in modelsNicknameLinks so every
+/// range becomes last7d -> red (the Week and All rows).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_a_nickname_link_keeps_the_range_except_today() {
+    for (hash, range) in [
+        ("models", "last7d"),
+        ("models?range=week", "week"),
+        ("models?range=last24h", "last24h"),
+        ("models?range=all", "all"),
+    ] {
+        let result = browser::run_scenario(&browser::Scenario {
+            name: "models-link-hrefs",
+            hash,
+            snippets: &[MODELS_DRIVER],
+            budget_ms: MODELS_BUDGET_MS,
+        })
+        .result;
+
+        let hrefs: Vec<&str> = result["hrefs"]
+            .as_array()
+            .expect("hrefs")
+            .iter()
+            .map(|h| h.as_str().expect("an href"))
+            .collect();
+        assert!(!hrefs.is_empty(), "`{hash}`: {result:#}");
+        for href in hrefs {
+            assert!(
+                href.starts_with(&format!("#traffic?range={range}&scope=")),
+                "`{hash}`: {href}"
+            );
+        }
+    }
+}
+
+/// A lane's own duration and the cause line over it read one instant the
+/// same way: with the attention list up, the hop lanes under the cause line
+/// carry no duration of their own (the line says it); with the list down
+/// they carry one, and it is the exact words the attention item uses for the
+/// same `since_ms` (the daemon's own formatter, read from its payload).
+///
+/// Mutation checks: format the lane duration with humanDuration -> red
+/// (`5m` against `5 min`); drop the cause-item check in modelsSinceText ->
+/// red (the lanes under the line repeat the duration).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_a_lane_and_its_cause_line_say_one_duration() {
+    let live = hop_case(&[MODELS_DRIVER]);
+    let down = hop_case(&[
+        "window.routectlModels = { attentionDown: true };",
+        MODELS_DRIVER,
+    ]);
+
+    let cause = drawn(&live)
+        .iter()
+        .find(|r| r["kind"] == "cause")
+        .and_then(|r| r["text"].as_str())
+        .expect("the hop cause line");
+    let (_, span) = cause
+        .rsplit_once(", for ")
+        .unwrap_or_else(|| panic!("the cause says how long: {cause}"));
+    for lane in HOP_LANES {
+        let state = lane_row(&live, "models-lanes", lane)["state"]
+            .as_str()
+            .expect("state text");
+        assert_eq!(state, "circuit open", "{lane} under the cause line");
+        let state = lane_row(&down, "models-lanes", lane)["state"]
+            .as_str()
+            .expect("state text");
+        assert_eq!(state, format!("circuit openfor {span}"), "{lane}");
+    }
+}
+
+/// The lane duration across its arms, each rounded down: seconds read as
+/// under a minute, then whole minutes, whole hours, one day, whole days.
+///
+/// Mutation check: round minutes up (Math.ceil) in spanText -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_a_lane_duration_reads_each_span_in_whole_units() {
+    let spans: [(u64, &str); 6] = [
+        (30_000, "under 1 min"),
+        (60_000, "1 min"),
+        (419_000, "6 min"),
+        (7_259_000, "2 h"),
+        (129_600_000, "1 day"),
+        (262_800_000, "3 days"),
+    ];
+    let list: Vec<String> = spans.iter().map(|(ms, _)| ms.to_string()).collect();
+    let set = format!(
+        "window.routectlModels = {{ attentionDown: true, spanLanes: [{}] }};",
+        list.join(", ")
+    );
+    let snippets: &'static [&'static str] =
+        Box::leak(vec![&*Box::leak(set.into_boxed_str()), MODELS_DRIVER].into_boxed_slice());
+
+    let result = populated("models-rows", snippets);
+
+    for (i, (_, words)) in spans.iter().enumerate() {
+        let provider = format!("span-{i}");
+        let state = drawn(&result)
+            .iter()
+            .find(|r| r["provider"] == provider.as_str())
+            .and_then(|r| r["state"].as_str())
+            .unwrap_or_else(|| panic!("a `{provider}` lane: {result:#}"));
+        assert!(
+            state.ends_with(&format!("for {words}")),
+            "{provider}: `{state}` should end in `for {words}`"
+        );
+    }
 }
 
 /// The seven-day per-model read describes every lane, so it never carries

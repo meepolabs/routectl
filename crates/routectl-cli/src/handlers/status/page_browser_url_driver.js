@@ -469,7 +469,13 @@
     });
   });
 
-  // The strip names the model and provider scope; its reset lifts both.
+  function focusedId() {
+    var node = document.activeElement;
+    return node === document.body ? 'body' : (node.id || node.tagName.toLowerCase());
+  }
+
+  // The strip names the model and provider scope; its reset, focused and
+  // activated as a keyboard Enter activates it, lifts both.
   d.scenario('url-scope-strip-reset', function () {
     var out = {};
     return d.waitUntil('the scope strip', function () {
@@ -479,14 +485,21 @@
       out.reset_text = reset.textContent;
       var issued = queryBodies().length;
       var before = history.length;
+      reset.focus();
+      out.focused_before = focusedId();
       reset.click();
       out.added = history.length - before;
+      out.focused_at_once = focusedId();
       return d.waitUntil('the unscoped answer', function () {
         return settled() && answers.length > 0 && queryBodies().length > issued;
       }).then(function () {
         out.after = stateReport();
         out.after.queries = queryBodies().slice(issued);
         out.after.reset_present = !!document.getElementById('usage-scope-reset');
+        out.after.focused = focusedId();
+        return d.waitFor('/status/query', 1);
+      }).then(function () {
+        out.focused_after_refresh = focusedId();
       });
     }).then(function () { return out; });
   });

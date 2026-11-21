@@ -222,6 +222,9 @@
   // One link per nickname, each to Traffic narrowed to that nickname on this
   // lane's provider entry. The address goes through the page's own codec
   // and, once followed, through its closed-set check like any other link.
+  // Models has no range of its own: from Today, which is empty on most
+  // mornings, the link opens the seven days the fold reads; any other range
+  // the operator picked is kept.
   function modelsNicknameLinks(row) {
     var wrap = document.createElement('span');
     wrap.className = 'models-names';
@@ -230,14 +233,21 @@
       state.view = 'traffic';
       state.scope = row.provider;
       state.model = String(nickname);
+      if (state.range === 'today') { state.range = modelsFoldRange(); }
       var a = document.createElement('a');
       a.className = 'models-link';
       a.textContent = String(nickname);
       a.setAttribute('href', formatViewHash(state));
       a.title = 'Traffic for ' + nickname + ' on ' + row.provider;
+      setAction(a, 'traffic-link', null);
       wrap.appendChild(a);
     });
     return wrap;
+  }
+
+  // The range the seven-day per-model read asks for.
+  function modelsFoldRange() {
+    return shapeAt(QUERY_MODELS_SOURCE, {}).window;
   }
 
   function modelsAccountText(row) {
@@ -246,7 +256,9 @@
   }
 
   // The lane's raw state with how long it has held, and, on a lane whose
-  // problem has cleared, how long ago it did.
+  // problem has cleared, how long ago it did. A lane under a cause line that
+  // carries the attention item's words leaves the duration to that line,
+  // which already says it.
   function modelsStateCell(row, ctx) {
     var wrap = document.createElement('span');
     wrap.className = 'models-state';
@@ -254,8 +266,8 @@
       wrap.appendChild(attentionText('span', 'models-ok', 'ok'));
     } else {
       wrap.appendChild(tokLabeled('elig', 'elig', row.state));
-      var since = ageSince(row.since_ms, ctx.nowMs);
-      if (since !== '-') { wrap.appendChild(attentionText('span', 'models-since', 'for ' + since)); }
+      var since = modelsSinceText(row, ctx);
+      if (since) { wrap.appendChild(attentionText('span', 'models-since', since)); }
     }
     var recovered = modelsIsProblem(row) ? null : modelsRecovered(row, ctx.items);
     if (recovered) {
@@ -263,6 +275,17 @@
         recoveredText(recovered.recovered_at_ms, ctx.nowMs)));
     }
     return wrap;
+  }
+
+  // `for <span>` since the lane's problem began, or null when its cause
+  // line says it or the start is not known.
+  function modelsSinceText(row, ctx) {
+    if (typeof row.cause_key === 'string' && modelsCauseItem(row.cause_key, ctx.items)) { return null; }
+    var at = Number(row.since_ms);
+    if (row.since_ms === null || row.since_ms === undefined || !isFinite(at) || !isFinite(ctx.nowMs)) {
+      return null;
+    }
+    return 'for ' + spanText(Math.max(0, ctx.nowMs - at));
   }
 
   function modelsRefusals(row) {
@@ -300,14 +323,18 @@
     return span;
   }
 
+  // The row's Changed in transit cell already reads `unmeasured`, so the
+  // expansion adds transit lines only when it has counts or paths to show.
   function modelsDetail(row, ctx) {
-    var transit = modelsTransitText(row.transit);
-    return [
-      ['lane', row.lane],
-      ['changed in transit', transit === 'unmeasured' ? transit : transit + ' since ' + ctx.startText],
-      ['most-changed fields', modelsPaths(row.transit.top_paths)],
-      ['capabilities', modelsCapabilities(row.capabilities)]
-    ];
+    var pairs = [['lane', row.lane]];
+    if (num0(row.transit.checked) > 0) {
+      pairs.push(['changed in transit', modelsTransitText(row.transit) + ' since ' + ctx.startText]);
+    }
+    if (row.transit.top_paths.length) {
+      pairs.push(['most-changed fields', modelsPaths(row.transit.top_paths)]);
+    }
+    pairs.push(['capabilities', modelsCapabilities(row.capabilities)]);
+    return pairs;
   }
 
   function modelsPaths(paths) {
@@ -322,7 +349,6 @@
       line.appendChild(attentionText('span', 'models-path-count', String(num0(p.count))));
       wrap.appendChild(line);
     });
-    if (!wrap.childNodes.length) { wrap.appendChild(faintFigure('none')); }
     return wrap;
   }
 

@@ -7,6 +7,9 @@
 //   attentionDown     answer the attention panel as unavailable
 //   recoveredLane     `{subject, minutes}`: add a recovered route item for
 //                     that route, cleared that many minutes before as_of
+//   spanLanes         `[ms, ...]`: add one problem lane per entry, named
+//                     `span-<i>`, whose problem began that long before as_of
+//                     and which no cause line covers
 (function (d) {
   'use strict';
 
@@ -23,9 +26,28 @@
     return (opts.holdLanesQuery && url.pathname === '/status/query' && isLanesQuery(init)) ? HOLD_MS : 0;
   });
 
+  // A copy of the first problem lane per `spanLanes` entry, each its own
+  // lane and provider so it draws as its own row.
+  function addSpanLanes(models) {
+    var rows = models.data.rows;
+    var model = rows.filter(function (row) { return row.state !== 'ok'; })[0];
+    var asOf = Date.parse(models.as_of);
+    opts.spanLanes.forEach(function (ms, i) {
+      var row = JSON.parse(JSON.stringify(model));
+      row.lane = 'span-' + i + '#up';
+      row.provider = 'span-' + i;
+      row.cause_key = null;
+      row.since_ms = asOf - ms;
+      rows.push(row);
+    });
+  }
+
   d.rewrite(function (url, text) {
-    if (url.pathname !== '/status' || !(opts.attentionDown || opts.recoveredLane)) { return text; }
+    if (url.pathname !== '/status' || !(opts.attentionDown || opts.recoveredLane || opts.spanLanes)) {
+      return text;
+    }
     var agg = JSON.parse(text);
+    if (opts.spanLanes) { addSpanLanes(agg.panels.models); }
     var attention = agg.panels.attention;
     if (opts.attentionDown) {
       agg.panels.attention = {
@@ -76,6 +98,7 @@
       }
       if (!tr.classList.contains('exp-row')) { return; }
       var cells = tr.children;
+      var detail = document.getElementById(tr.id + '-detail');
       out.push({
         kind: 'lane',
         table: table,
@@ -86,7 +109,11 @@
         provider: cells[2].textContent,
         state: cells[5].textContent,
         refuses: cells[6].textContent,
-        transit: cells[7].textContent
+        transit: cells[7].textContent,
+        toggle_name: document.getElementById(tr.id + '-toggle').getAttribute('aria-label'),
+        detail_labels: Array.prototype.map.call(detail.querySelectorAll('dt'), function (dt) {
+          return dt.textContent;
+        })
       });
     });
     return out;
@@ -222,15 +249,25 @@
     });
   });
 
-  // Follow a nickname's link and read Traffic once its QUERY answered.
+  function focusedId() {
+    var node = document.activeElement;
+    return node === document.body ? 'body' : (node.id || node.tagName.toLowerCase());
+  }
+
+  // Follow a nickname's link from the keyboard (focused, then activated:
+  // the click a keyboard Enter on a link dispatches) and read Traffic once
+  // its QUERY answered, then again after the next refresh.
   d.scenario('models-link', function () {
     var href = null;
+    var out = {};
     return d.waitUntil('the lane table', lanesDrawn).then(function () {
       var link = Array.prototype.filter.call(document.querySelectorAll('#models-lanes .models-link'), function (a) {
         return a.textContent === 'sonnet';
       })[0];
       if (!link) { throw new Error('no sonnet link'); }
       href = link.getAttribute('href');
+      link.focus();
+      out.focused_before = focusedId();
       link.click();
       return d.waitUntil('the Traffic table', function () {
         var tab = document.querySelector('#tabbar [aria-selected="true"]');
@@ -241,7 +278,28 @@
       return d.sleep(500);
     }).then(function () {
       var strip = document.querySelector('#body-traffic .card-title');
-      return { href: href, hash: location.hash, strip: strip ? strip.textContent : null };
+      out.href = href;
+      out.hash = location.hash;
+      out.strip = strip ? strip.textContent : null;
+      out.focused = focusedId();
+      out.focused_text = document.activeElement.textContent;
+      var heading = document.activeElement;
+      return d.waitFor('/status/query', 1).then(function () {
+        out.focused_after_refresh = focusedId();
+        out.same_heading = document.activeElement === heading && heading.isConnected;
+        return out;
+      });
+    });
+  });
+
+  // Every nickname link's address as drawn, read once the lanes drew.
+  d.scenario('models-link-hrefs', function () {
+    return d.waitUntil('the lane table', lanesDrawn).then(function () {
+      return {
+        hrefs: Array.prototype.map.call(document.querySelectorAll('#body-models .models-link'), function (a) {
+          return a.getAttribute('href');
+        })
+      };
     });
   });
 

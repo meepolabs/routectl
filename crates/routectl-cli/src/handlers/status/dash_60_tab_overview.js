@@ -478,13 +478,28 @@
   // through the standard input-changed path (which aborts the in-flight
   // request and bumps the generation, so a late response for the previous
   // scope cannot repaint this one) and records it in the address.
-  function onProviderScope(label) {
+  function onProviderScope(label, node) {
     if (label === null) {
-      if (hasQueryScope()) { commitViewState({ scope: null, model: null }); }
+      if (hasQueryScope()) {
+        commitViewState({ scope: null, model: null });
+        landScopeResetFocus(node);
+      }
       return;
     }
     if (selectedProvider === label || !isScopeLabel(label)) { return; }
     commitViewState({ scope: label });
+  }
+
+  // A reset from the scope strip removes the strip, and the button with it,
+  // so focus would fall to the page body: it lands on the pressed Group by
+  // button where the view has one, else on the view's own pane. A reset
+  // whose control is still on the page (the aggregate provider card) keeps
+  // its focus, and focus already elsewhere is never moved.
+  function landScopeResetFocus(node) {
+    if (!node || node.isConnected || document.activeElement !== document.body) { return; }
+    var pane = el('pane-' + activeTab);
+    if (!pane) { return; }
+    (pane.querySelector('.gbbtn[aria-pressed="true"]') || pane).focus();
   }
 
   // Whether the selection narrows the QUERY to one provider or one model.
@@ -523,6 +538,9 @@
     var wrap = document.createElement('div');
     wrap.className = 'ovsection';
     var head = sectionHead(scopeTitle(), hint);
+    var title = head.querySelector('.card-title');
+    title.id = scopeTitleId(view);
+    title.tabIndex = -1;
     var reset = document.createElement('button');
     reset.type = 'button';
     reset.id = view + '-scope-reset';
@@ -532,6 +550,12 @@
     head.appendChild(reset);
     wrap.appendChild(head);
     return wrap;
+  }
+
+  // The id of view `view`'s scope strip heading, the place a followed link
+  // that sets the scope leaves focus.
+  function scopeTitleId(view) {
+    return view + '-scope-title';
   }
 
   // The provider row: the all-providers aggregate card, then the busiest

@@ -218,9 +218,11 @@ banner, no retry signal -- silently mislabeled data.
   entry with the same last outcome: their rows sit together under ONE cause
   line carrying the needs-attention item's own words (`Circuit open on <n>
   routes, last outcome ...`) and, when the item has one, its fix command,
-  with the lane count beside it. While the attention panel answers unavailable, every row keeps its
-  raw state and the cause line reads `cause not available - <key>`, never an
-  error card.
+  with the lane count beside it. A lane under that line reads `circuit open`
+  with no duration of its own: the line already says how long. While the
+  attention panel answers unavailable, every row keeps its raw state followed
+  by `for <n> min` in the same words the cause line would use, and the cause
+  line reads `cause not available - <key>`, never an error card.
 - When the breaker closes, the row's state reads `ok` followed by `recovered
   <n> min ago`; a lane that never had a problem shows no recovered text.
 - Lanes none of whose nicknames carried a request in the last seven days fold
@@ -232,23 +234,35 @@ banner, no retry signal -- silently mislabeled data.
   stays expanded, and nothing moves back into the main table.
 - Changed in transit reads `<changed> of <checked> responses changed` for a
   lane the wire check sampled and `unmeasured` (faint) for one it never did;
-  the expanded row adds `since <start>` and the most-changed field paths.
-  No wording on the tab says error, loss or rate for transit.
-- Each nickname in the Model column is a link. Following it opens Traffic
-  with the address `#traffic?scope=<provider entry>&model=<nickname>`, the
-  strip reads `Scoped to model <nickname> on provider <provider entry>`, and
-  the figures are that nickname's alone; the strip's reset clears both. For
-  a pooled nickname each seat lane's link scopes to that seat's member entry.
+  the expanded row of a sampled lane adds `since <start>` and the
+  most-changed field paths, and that of an unmeasured lane adds no transit
+  line at all. No wording on the tab says error, loss or rate for transit.
+- With a screen reader's button list open on Models or Traffic, each row's
+  expand button is named `Details for <row>` (the lane, or the group), never
+  one shared name.
+- Each nickname in the Model column is a link. With the range on Today,
+  following it opens Traffic with the address
+  `#traffic?range=last7d&scope=<provider entry>&model=<nickname>`; with any
+  other range picked first (Week, say) the link keeps that range. The strip
+  reads `Scoped to model <nickname> on provider <provider entry>`, and the
+  figures are that nickname's alone. For a pooled nickname each seat lane's
+  link scopes to that seat's member entry.
+- Keyboard only: Tab to a nickname link and press Enter. Focus lands on the
+  strip's heading on Traffic (a screen reader reads the scope), not on the
+  Models tab, and stays there through the next refreshes. Tab to the strip's
+  `all models and providers` and press Enter: both scopes clear and focus
+  lands on the pressed Group by button, never on the page body.
 
 ## 7. Models and Accounts tabs: lane state, accounts by pool and the seat drivers
 
 - Serve a config with a pool of two `oauth://anthropic#<label>` members,
   one logged in and one never logged in, against a throwaway credentials
   file. Before any request, the never-logged-in seat's lane is a problem row
-  at the top of the Models table, in its State cell `credential unusable`
-  with how long it has held, under a cause line reading `Not logged in, for
-  <age>` with the exact `routectl login anthropic --label <label>` command,
-  selectable as one unit. The logged-in seat's lane reads `ok`.
+  at the top of the Models table, in its State cell `credential unusable`,
+  under a cause line reading `Not logged in, for <age>` with the exact
+  `routectl login anthropic --label <label>` command, selectable as one unit.
+  The lane does not repeat the age the cause line gives. The logged-in seat's
+  lane reads `ok`.
 - On Accounts the pool is listed with `1 of 2 usable` beside its name, and
   each member is a row named `<provider entry> (<label>)`. The never-logged-in
   seat reads `unusable` with the daemon's sentence (`Not logged in, for
@@ -335,7 +349,11 @@ banner, no retry signal -- silently mislabeled data.
 - Zero counts render faint: `0` in `eligible 0 of 2` and the seat driver's
   zero failure counts, never full brightness and never red.
 - In the light theme, faint text (hints, labels, zeros) stays readable on
-  both the page background and a card; the faint token clears 4.5:1 on each.
+  both the page background and a card; the faint token clears 4.5:1 on each,
+  and on the tinted selected provider card on Now.
+- The pressed range button reads in the accent color with an underline;
+  hovering another range only shades it, so exactly one range reads as
+  selected, in both themes.
 
 ## UI review cases
 

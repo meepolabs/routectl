@@ -288,7 +288,7 @@
     btn.id = rid + '-toggle';
     btn.className = 'exp-btn';
     btn.setAttribute('aria-controls', detailRow.id);
-    btn.setAttribute('aria-label', 'Toggle row details');
+    btn.setAttribute('aria-label', 'Details for ' + rowKey);
     setAction(btn, 'row-toggle', rid);
     paintRowToggle(btn, open);
     extd.appendChild(btn);

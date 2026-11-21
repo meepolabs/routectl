@@ -536,6 +536,72 @@ fn the_active_group_by_button_text_keeps_four_and_a_half_to_one() {
     }
 }
 
+/// The pressed range button is marked by more than its fill: accent text
+/// and an underline, as the pressed Group by button is, so a hovered button
+/// (a fill alone) never reads as a second selection. The text keeps 4.5:1 on
+/// its fill in both themes.
+///
+/// Mutation check: set the pressed rule back to `background:
+/// var(--surface-2); color: var(--fg);` -> red.
+#[test]
+fn the_pressed_range_button_is_marked_by_text_and_underline() {
+    let css = style();
+    let decls = css_decls(&css);
+    let pressed = block(&decls, "", ".windowsel button[aria-pressed=\"true\"]");
+    let hover = block(&decls, "", ".windowsel button:hover");
+    let value = |rules: &[(&str, &str)], prop: &str| {
+        rules
+            .iter()
+            .rfind(|(p, _)| *p == prop)
+            .map(|(_, v)| (*v).to_owned())
+    };
+    assert_eq!(
+        value(&pressed, "color").as_deref(),
+        Some("var(--accent-ink)")
+    );
+    assert!(
+        value(&pressed, "box-shadow").is_some_and(|v| v.contains("var(--accent)")),
+        "{pressed:?}"
+    );
+    assert_ne!(value(&pressed, "color"), value(&hover, "color"));
+    assert!(value(&hover, "box-shadow").is_none(), "{hover:?}");
+    for light in [false, true] {
+        let tokens = theme_tokens(&css, light);
+        let base = srgba(resolve(&tokens, "--surface"));
+        let fill = over(srgba(resolve(&tokens, "--accent-soft")), base);
+        let ratio = contrast(srgba(resolve(&tokens, "--accent-ink")), fill);
+        assert!(ratio >= 4.5, "{ratio:.2}:1 (light: {light})");
+    }
+}
+
+/// Faint text on a selected provider card (the accent tint over the page,
+/// a card or the raised surface) keeps 4.5:1 in both themes.
+///
+/// Mutation check: set the light `--faint` back to `#646e79` -> red (4.33:1
+/// on the tint over --bg).
+#[test]
+fn faint_text_on_a_selected_card_keeps_four_and_a_half_to_one() {
+    let css = style();
+    let decls = css_decls(&css);
+    assert!(
+        block(&decls, "", ".provcard--on").contains(&("background", "var(--accent-soft)")),
+        "the selected card is tinted with --accent-soft"
+    );
+    for light in [false, true] {
+        let tokens = theme_tokens(&css, light);
+        let faint = srgba(resolve(&tokens, "--faint"));
+        let tint = srgba(resolve(&tokens, "--accent-soft"));
+        for bg in TEXT_BACKGROUNDS {
+            let fill = over(tint, srgba(resolve(&tokens, bg)));
+            let ratio = contrast(faint, fill);
+            assert!(
+                ratio >= 4.5,
+                "on the tint over {bg}: {ratio:.2}:1 (light: {light})"
+            );
+        }
+    }
+}
+
 #[test]
 fn the_contrast_formula_matches_the_wcag_reference_points() {
     let black = srgba("#000000");
@@ -681,7 +747,7 @@ fn the_stale_text_scan_reports_opacity_and_a_low_contrast_color() {
     let faint_fill = format!("{css}\n.glance-meter--stale .glance-bar-fill {{ opacity: 0.5; }}\n");
     let low = format!("{css}\n.acct-traffic--stale .x {{ color: var(--border-strong); }}\n");
     let low_badge =
-        format!("{css}\n.tab-badge--dimmed.tab-badge--warn {{ color: var(--faint); }}\n");
+        format!("{css}\n.tab-badge--dimmed.tab-badge--warn {{ color: var(--border-strong); }}\n");
 
     assert_eq!(
         stale_text_faults(&dimmed),
@@ -706,9 +772,9 @@ fn the_stale_text_scan_reports_opacity_and_a_low_contrast_color() {
     assert_eq!(
         stale_text_faults(&low_badge),
         vec![
-            ".tab-badge--dimmed.tab-badge--warn on --pill-warn-bg over --surface is 4.18:1 \
+            ".tab-badge--dimmed.tab-badge--warn on --pill-warn-bg over --surface is 1.16:1 \
              (light: false)",
-            ".tab-badge--dimmed.tab-badge--warn on --pill-warn-bg over --surface is 4.47:1 \
+            ".tab-badge--dimmed.tab-badge--warn on --pill-warn-bg over --surface is 1.35:1 \
              (light: true)"
         ]
     );

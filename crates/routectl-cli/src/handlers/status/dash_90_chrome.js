@@ -135,6 +135,9 @@
     ]
   };
   var selectedSort = null;         // `<table>.<column>.<dir>`, null = unsorted
+  // The address of the scoped Traffic link just activated, until the
+  // hashchange it causes has been applied.
+  var followedLink = null;
   var selectedModel = null;        // nickname scope, null = every model
   // scope and model values read from the address whose set is not known
   // yet: held here, never in the selection, until admitHeld settles them.
@@ -424,6 +427,18 @@
     var next = admitHeld(parsed);
     applyViewState(next, refetch);
     writeViewHash(next, false);
+    landFollowedLink(next);
+  }
+
+  // Focus the scope strip heading a followed link opened, once, and only
+  // when the address applied is the one the link carried: a later Back or
+  // an edited address leaves focus alone.
+  function landFollowedLink(state) {
+    var target = followedLink;
+    followedLink = null;
+    if (target === null || formatViewHash(addressState(state)) !== target) { return; }
+    var heading = el(scopeTitleId('usage'));
+    if (heading) { heading.focus(); }
   }
 
   // ---- chrome: window picker -------------------------------------------
@@ -496,7 +511,7 @@
   // names has an entry here and that every entry is named by a builder.
   var ACTIONS = {
     'row-toggle': function (arg) { if (arg) { onRowToggle(arg); } },
-    'provider-scope': function (arg) { onProviderScope(arg); },
+    'provider-scope': function (arg, node) { onProviderScope(arg, node); },
     'provider-overflow': function () { onProviderOverflow(); },
     'group-by': function (arg) { if (arg) { onGroupBy(arg); } },
     'sort-column': function (arg) { if (arg) { onSortColumn(arg); } },
@@ -506,6 +521,13 @@
       if (!viewFor(arg) || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
       e.preventDefault();
       selectTab(arg);
+    },
+    // A link to Traffic scoped to a model: the browser follows the address
+    // as it is, and once it has been applied focus lands on the scope strip
+    // heading it opened.
+    'traffic-link': function (arg, node, e) {
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
+      followedLink = node.getAttribute('href');
     }
   };
 

@@ -501,10 +501,14 @@ fn page_browser_no_query_carries_an_address_scope_or_model_before_config_is_live
     );
 }
 
-/// The strip reads "model X on provider Y"; its one reset lifts both scopes
-/// in one history entry, and the next QUERY carries neither.
+/// The strip reads "model X on provider Y"; its one reset, activated from
+/// the keyboard, lifts both scopes in one history entry, the next QUERY
+/// carries neither, and focus lands on the pressed Group by button rather
+/// than the page body, where the next refresh leaves it.
 ///
-/// Mutation check: lift only the provider in onProviderScope's reset -> red.
+/// Mutation checks: lift only the provider in onProviderScope's reset ->
+/// red; drop the `landScopeResetFocus(node);` call in onProviderScope -> red
+/// (focus falls to the body).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_the_scope_strip_names_model_and_provider_and_its_reset_clears_both() {
@@ -523,6 +527,13 @@ fn page_browser_the_scope_strip_names_model_and_provider_and_its_reset_clears_bo
     let after = &out["after"];
     assert_eq!(after["hash"], "#traffic", "{out:#}");
     assert_eq!(after["reset_present"], false, "{out:#}");
+    assert_eq!(out["focused_before"], "usage-scope-reset", "{out:#}");
+    assert_eq!(out["focused_at_once"], "usage-groupby-kmodel", "{out:#}");
+    assert_eq!(after["focused"], "usage-groupby-kmodel", "{out:#}");
+    assert_eq!(
+        out["focused_after_refresh"], "usage-groupby-kmodel",
+        "{out:#}"
+    );
     let bodies = queries(after);
     assert!(!bodies.is_empty(), "no QUERY after the reset");
     for body in bodies {

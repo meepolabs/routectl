@@ -87,6 +87,23 @@
     return Math.floor(sec / 3600) + 'h';
   }
 
+  // How long a state has held, in the words the daemon's attention items
+  // use for the same span (`for 6 min`), so a lane and the cause line over
+  // it never read one instant two ways: under a minute, whole minutes, whole
+  // hours, then days, each rounded down. Negative spans are clamped by the
+  // caller.
+  var SPAN_MINUTE_MS = 60000;
+  var SPAN_HOUR_MS = 60 * SPAN_MINUTE_MS;
+  var SPAN_DAY_MS = 24 * SPAN_HOUR_MS;
+
+  function spanText(ms) {
+    if (ms < SPAN_MINUTE_MS) { return 'under 1 min'; }
+    if (ms < SPAN_HOUR_MS) { return Math.floor(ms / SPAN_MINUTE_MS) + ' min'; }
+    if (ms < SPAN_DAY_MS) { return Math.floor(ms / SPAN_HOUR_MS) + ' h'; }
+    if (ms < 2 * SPAN_DAY_MS) { return '1 day'; }
+    return Math.floor(ms / SPAN_DAY_MS) + ' days';
+  }
+
   // The window's plain-language span, for the verdict strip's req/span pair.
   var WINDOW_SPAN = {
     today: 'today',
@@ -133,7 +150,7 @@
     elig: {
       credential_unusable: { label: 'credential unusable', title: 'credential_unusable - the seat cannot authenticate until it is fixed' },
       account_parked: { label: 'account parked', title: 'account_parked - the account is resting after an upstream rejection' },
-      breaker_open: { label: 'breaker open', title: 'breaker_open - the breaker is failing fast' },
+      breaker_open: { label: 'circuit open', title: 'breaker_open - the circuit is open and failing fast' },
       rate_limited: { label: 'rate limited', title: 'rate_limited - the local request-rate limit has no capacity left' }
     },
     reach: {
