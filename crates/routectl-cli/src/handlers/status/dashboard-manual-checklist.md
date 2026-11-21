@@ -182,36 +182,11 @@ banner, no retry signal -- silently mislabeled data.
   FIRST TOKEN and CACHE HIT notes wrap instead of truncating, and hovering
   each shows the full sentence.
 
-## 5. Doctor tab capability surface
+## 5. Doctor tab capability writes
 
-- Serve a config with two nicknames on ONE upstream of one provider entry,
-  plus a model on a pool of two member entries, against a ledger holding
-  learned rows for those lanes. The Doctor tab's capability matrix must list
-  one row per `<provider>#<upstream>` lane -- the shared lane naming BOTH
-  nicknames, the pooled model on one row per member -- and each row's lane
-  text must be exactly what `routectl capability purge` accepts.
-- Hover a learned cell: the tooltip names its source, its routing action,
-  its first-seen / last-seen / expiry times, and its value (`value
-  ceiling:<n>` / `value shape:<v>`, or `value -` for a verdict that writes
-  none, such as a dropped field). An unknown cell reads `-`, and a cell no
-  learned entry backs names no value.
-- The replay line names rows read, replayed, and every skip reason. Seed a
-  row whose provider entry the config no longer has and confirm the owner
-  skip count moves.
-- Point the daemon at a ledger whose post-boundary slice cannot be read. The
-  matrix state line must say UNAVAILABLE with its code, never "empty".
-- The matrix header carries a source badge: `ledger replay` when the panel
-  was built from a read-only ledger replay, `resident` when it reflects the
-  daemon's in-memory registry. Hover it: the tooltip names that origin.
-- A `resident` panel shows a "warm at boot" line with the boot outcome (an
-  `unreadable` warm adds its failure class in parentheses) and, when the warm
-  replay ran, its tally, and no replay line. Its state line reads "learned
-  registry resident" when entries are present, never "replayed"; an
-  unavailable resident state line ends its code with "(boot warm)". A `ledger replay`
-  panel shows the replay line and no warm line. A skip count of 0 reads `0`,
-  never `-`.
 - The capability-writes card shows three separate counters, all faint at
-  zero on a healthy daemon.
+  zero on a healthy daemon. The Doctor tab shows no capability matrix: what
+  each lane has learned is on the Models tab.
 
 ## 6. Models tab learned negatives
 

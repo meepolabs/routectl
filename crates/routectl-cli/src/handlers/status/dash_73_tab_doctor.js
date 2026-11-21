@@ -18,12 +18,11 @@
   // source, so the tab-wide `safeSection` IS that posture -- the whole payload
   // is validated below before any section is built.
   //
-  // The report also carries structured panels. The steady-state trim panel is
-  // not a check with a verdict and has no home here. The capability matrix
-  // does: it is the one place an operator reads what each learned lane has
-  // learned, so it renders below the checks, together with the daemon's live
-  // capability-write failure counters, which say whether what it learns can
-  // survive a restart.
+  // The report also carries structured panels, none of which renders here:
+  // the steady-state trim panel is not a check with a verdict, and what each
+  // lane has learned is the Models view's subject. Below the checks sit the
+  // daemon's live capability-write failure counters, which say whether what
+  // it learns can survive a restart.
   function buildDoctor(rec) {
     return safeSection(rec, buildDoctorLive);
   }
@@ -42,8 +41,6 @@
     else { stack.appendChild(doctorNoChecks()); }
     if (passes.length) { stack.appendChild(doctorPasses(passes)); }
     stack.appendChild(doctorCapWrites(rec.data.capability_writes));
-    var matrix = (report.panels || {}).capability_matrix;
-    if (matrix) { stack.appendChild(doctorMatrix(matrix, panelNowMs(rec))); }
     return stack;
   }
 
@@ -289,143 +286,6 @@
     return card('Capability writes',
       'since this daemon started - nonzero means a learned verdict may not survive a restart',
       row);
-  }
-
-  // ---- doctor: capability matrix ---------------------------------------
-
-  // One row per learned lane, keyed exactly as `routectl capability purge`
-  // accepts it, with the nicknames that map to it. A cell is the winning
-  // verdict and its layer; the routing action, the learned timestamps and the
-  // age sit in its tooltip so the grid stays readable.
-  function doctorMatrix(panel, nowMs) {
-    var wrap = markRefreshUnit(document.createElement('div'), 'matrix');
-    wrap.className = 'ovsection';
-    var lanes = Array.isArray(panel.lanes) ? panel.lanes : [];
-    var columns = Array.isArray(panel.columns) ? panel.columns : [];
-    var head = sectionHead('Capability matrix', matrixStateText(panel.availability, panel.source));
-    head.appendChild(matrixSourceBadge(panel.source));
-    wrap.appendChild(head);
-    if (panel.warm) { wrap.appendChild(docText('docmatrix-warm', warmText(panel.warm))); }
-    if (panel.replay) { wrap.appendChild(docText('docmatrix-replay', replayText(panel.replay))); }
-    if (!lanes.length) {
-      wrap.appendChild(docText('docmatrix-empty', 'no capability lanes observed'));
-      return wrap;
-    }
-    var cols = [R('lane'), C('kind'), C('nicknames')].concat(columns.map(function (c) {
-      return C(c);
-    }));
-    var tbl = mkTable('doctor-matrix', 'Capability matrix', cols);
-    lanes.forEach(function (lane) {
-      var cells = Array.isArray(lane.cells) ? lane.cells : [];
-      trow(tbl, [
-        lane.routed ? lane.lane : lane.lane + ' (unrouted)',
-        lane.provider_kind || '-',
-        (lane.nicknames || []).join(', ') || '-'
-      ].concat(cells.map(function (cell) { return matrixCell(cell, nowMs); })));
-    });
-    wrap.appendChild(buildExpander('doctor-matrix-lanes',
-      countText(lanes.length, ' lane', ' lanes') + ' by ' +
-        countText(columns.length, ' capability', ' capabilities'),
-      tableScroll(tbl)));
-    return wrap;
-  }
-
-  // Worded for the source: a resident registry is held live, a ledger replay
-  // was run for this report. A resident registry is unavailable only through
-  // its boot warm, which holds for the daemon's lifetime.
-  function matrixStateText(availability, source) {
-    var a = availability || {};
-    var resident = source === 'resident';
-    if (a.state === 'available') {
-      return resident ? 'learned registry resident' : 'learned registry replayed';
-    }
-    if (a.state === 'empty') { return 'learned registry empty - nothing learned yet'; }
-    if (a.state === 'unavailable') {
-      return 'learned registry unavailable (' + (a.code || 'unknown') + ')' +
-        (resident ? ' (boot warm)' : '') + ' - seed and override cells only';
-    }
-    return 'learned registry state unknown';
-  }
-
-  // `resident` is the daemon's in-memory registry; `ledger_replay` is a
-  // read-only replay run for this report. An unrecognized token is shown
-  // verbatim rather than guessed at.
-  function matrixSourceBadge(source) {
-    var chip = document.createElement('span');
-    chip.className = 'hchip';
-    if (source === 'resident') {
-      chip.textContent = 'resident';
-      chip.title = 'the daemon in-memory learned registry, warmed at boot and updated live';
-    } else if (source === 'ledger_replay') {
-      chip.textContent = 'ledger replay';
-      chip.title = 'a read-only replay of the usage ledger run for this report';
-    } else {
-      chip.textContent = source ? String(source) : 'source unknown';
-    }
-    return chip;
-  }
-
-  // The boot warm describes how the resident registry was seeded when the
-  // daemon started, never its current state.
-  function warmText(w) {
-    var text = 'warm at boot: ' + (w.outcome || 'unknown') +
-      (w.class ? ' (' + w.class + ')' : '');
-    return w.summary ? text + ' - ' + tallyText(w.summary) : text;
-  }
-
-  function replayText(r) {
-    return 'replay: ' + tallyText(r);
-  }
-
-  // A tally count of 0 is a real reading; an absent one renders '-'.
-  function tallyCount(v) {
-    return (v === null || v === undefined) ? '-' : String(v);
-  }
-
-  function tallyText(r) {
-    return tallyCount(r.loaded_rows) + ' rows read, ' + tallyCount(r.replayed) +
-      ' replayed - skipped vocab ' + tallyCount(r.skipped_vocab) + ', owner ' +
-      tallyCount(r.skipped_owner) + ', revision ' + tallyCount(r.skipped_revision) +
-      ', lane ' + tallyCount(r.skipped_lane) + ', unknown ' + tallyCount(r.skipped_unknown);
-  }
-
-  // A `mixed` cell is one whose nicknames resolve to different verdicts or
-  // routing actions; it names no single verdict, and its tooltip lists each
-  // nickname's verdict, layer and action.
-  function matrixCell(cell, nowMs) {
-    if (!cell) { return '-'; }
-    var mixed = cell.action === 'mixed' || cell.verdict === 'mixed';
-    if (!mixed && !cell.source) { return '-'; }
-    var span = document.createElement('span');
-    span.textContent = mixed ? 'mixed'
-      : cell.verdict + ' (' + cell.layer + ')' + (cell.stale ? ' stale' : '');
-    span.title = matrixCellTitle(cell, nowMs);
-    return span;
-  }
-
-  function matrixCellTitle(cell, nowMs) {
-    var parts = [];
-    if (cell.source) { parts.push('source ' + cell.source); }
-    if (cell.action === 'mixed' || cell.verdict === 'mixed') {
-      parts.push('mixed: ' + (cell.nickname_actions || []).map(function (n) {
-        return n.nickname + ' ' + n.verdict + ' (' + (n.layer || 'none') + ') ' + n.action;
-      }).join(', '));
-    } else {
-      parts.push('action ' + cell.action);
-    }
-    if (cell.first_seen_ms !== null && cell.first_seen_ms !== undefined) {
-      parts.push('first seen ' + fmtTs(cell.first_seen_ms));
-    }
-    if (cell.last_seen_ms !== null && cell.last_seen_ms !== undefined) {
-      parts.push('last seen ' + ageSince(cell.last_seen_ms, nowMs) + ' ago');
-    }
-    if (cell.expires_at_ms !== null && cell.expires_at_ms !== undefined) {
-      parts.push('expires ' + fmtTs(cell.expires_at_ms));
-    }
-    if (cell.first_seen_ms !== null && cell.first_seen_ms !== undefined) {
-      parts.push('value ' + (cell.value || '-'));
-    }
-    return parts.join(' - ');
   }
 
   function docText(cls, value) {

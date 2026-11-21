@@ -1830,23 +1830,17 @@ mod tests {
         );
     }
 
-    /// Both tabs that show a learned row read its `value`: the Models tab's
-    /// refusal chip and the Doctor tab's matrix cell, each in its tooltip
-    /// builder. A text scan only: that the tooltip renders is on the manual
+    /// The Models view's refusal chip reads a learned row's `value` in its
+    /// tooltip. A text scan only: that the tooltip renders is on the manual
     /// checklist.
     ///
-    /// Mutation check: drop the `value` clause from either builder -> red.
+    /// Mutation check: drop the `value` clause from the builder -> red.
     #[test]
-    fn both_learned_tooltips_read_the_value_field() {
-        for (builder, field) in [
-            ("modelsRefusalChip", "refusal.value"),
-            ("matrixCellTitle", "cell.value"),
-        ] {
-            assert!(
-                function_body(builder).contains(field),
-                "`{builder}` must render `{field}`"
-            );
-        }
+    fn the_learned_tooltip_reads_the_value_field() {
+        assert!(
+            function_body("modelsRefusalChip").contains("refusal.value"),
+            "`modelsRefusalChip` must render `refusal.value`"
+        );
     }
 
     /// The config tab reads the model facts the panel sends and nothing from

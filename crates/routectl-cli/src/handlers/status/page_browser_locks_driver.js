@@ -8,6 +8,8 @@
   'use strict';
 
   var DOCTOR_FINDINGS = '#body-doctor .ovsection[data-unit="findings"]';
+  // The first capability-write counter, which moves every round.
+  var DOCTOR_FIGURE = '#body-doctor [data-unit="Capability writes"] .doccount-value';
 
   function finding(name, status, detail, remediation) {
     return { section: 'config', name: name, status: status, detail: detail,
@@ -78,7 +80,7 @@
       same_anchor: sel.anchorNode === picked.node,
       connected: picked.node.isConnected,
       details: shownDetails(),
-      figure: document.querySelector('#body-doctor .docmatrix-replay').textContent
+      figure: document.querySelector(DOCTOR_FIGURE).textContent
     };
   }
 

@@ -193,6 +193,9 @@
     return node;
   }
 
+  // The first capability-write counter, which moves every round.
+  var DOCTOR_FIGURE = '#body-doctor [data-unit="Capability writes"] .doccount-value';
+
   function textOf(selector) {
     var node = document.querySelector(selector);
     if (!node) { throw new Error('no element matches ' + selector); }
@@ -270,7 +273,7 @@
           same_text: picked !== '' && now.toString() === picked,
           same_anchor: now.anchorNode === node,
           connected: node.isConnected,
-          figure: textOf('#body-doctor .docmatrix-replay')
+          figure: textOf(DOCTOR_FIGURE)
         };
       });
     });

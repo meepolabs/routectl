@@ -141,8 +141,9 @@ struct Harness {
 }
 
 /// `payload` as round `round` of a changing reading: request counts, the
-/// config's load age, the replay tally and each quota utilization move by
-/// the round number, so every view has figures that differ between rounds.
+/// config's load age, the dropped capability writes and each quota
+/// utilization move by the round number, so every view has figures that
+/// differ between rounds.
 fn at_round(payload: &Value, round: u64) -> Value {
     let mut out = payload.clone();
     shift_figures(&mut out, round);
@@ -154,7 +155,9 @@ fn shift_figures(value: &mut Value, round: u64) {
         Value::Object(map) => {
             for (key, child) in map.iter_mut() {
                 match (key.as_str(), child.as_u64(), child.as_f64()) {
-                    ("requests" | "replayed", Some(n), _) => *child = Value::from(n + round),
+                    ("requests" | "capability_events_dropped_full", Some(n), _) => {
+                        *child = Value::from(n + round)
+                    }
                     ("loaded_age_ms", Some(n), _) => *child = Value::from(n + round * 60_000),
                     ("utilization", _, Some(u)) => {
                         *child = Value::from((u + round as f64 / 100.0).min(1.0));
@@ -627,6 +630,7 @@ fn round_figures_change_and_untouched_keys_stay() {
     let payload = serde_json::json!({
         "data": {
             "groups": [{"label": "a", "requests": 3, "errors": 1}],
+            "capability_writes": {"capability_events_dropped_full": 2, "write_errors": 1},
             "source": {"loaded_age_ms": 42_000, "listen_addr": "x"},
             "quota": [{"utilization": 0.5}]
         }
@@ -636,6 +640,11 @@ fn round_figures_change_and_untouched_keys_stay() {
 
     assert_eq!(next["data"]["groups"][0]["requests"], 5);
     assert_eq!(next["data"]["groups"][0]["errors"], 1);
+    assert_eq!(
+        next["data"]["capability_writes"]["capability_events_dropped_full"],
+        4
+    );
+    assert_eq!(next["data"]["capability_writes"]["write_errors"], 1);
     assert_eq!(next["data"]["source"]["loaded_age_ms"], 162_000);
     assert_eq!(next["data"]["quota"][0]["utilization"], 0.52);
     assert_eq!(at_round(&payload, 0), payload);

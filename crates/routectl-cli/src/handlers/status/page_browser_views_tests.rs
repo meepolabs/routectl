@@ -77,8 +77,8 @@ const VIEW_CASES: &[ViewCase] = &[
     },
     ViewCase {
         id: "doctor",
-        shows: &["Findings", "Capability matrix"],
-        omits: &["Accounts by pool", "Model lanes"],
+        shows: &["Findings", "Capability writes"],
+        omits: &["Accounts by pool", "Model lanes", "Capability matrix"],
         windowed: false,
     },
 ];
