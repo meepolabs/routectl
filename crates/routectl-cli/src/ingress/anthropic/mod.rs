@@ -159,8 +159,8 @@ impl IngressStreamState for AnthropicStreamState {
 /// - `stop_sequences` -> `stop` (canonical name).
 /// - `model` is overridden by the `x-routectl-alias` request header
 ///   when present; otherwise passes through verbatim. v0.6.0 moved
-///   alias resolution from per-ingress maps to the router (see
-///   `routectl_router::Router::resolve_v6_alias`).
+///   alias resolution from per-ingress maps to the router (see its
+///   one resolver, `router/alias_match.rs` in `routectl-router`).
 ///
 /// Any top-level field the canonical doesn't model -- for example
 /// Anthropic-only knobs `top_k`, `service_tier`, `output_config`,

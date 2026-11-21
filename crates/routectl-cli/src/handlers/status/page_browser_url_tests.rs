@@ -1024,19 +1024,22 @@ fn the_address_value_scan_reports_each_read_with_its_function_and_line() {
     );
 }
 
-/// Every line of parseViewHash that names `params` or `query`, compacted,
-/// with how many times it names each. A new read of the parsed address,
-/// whatever its spelling (`params.has`, `params.entries()`, an alias, a
-/// second parse of `query`), adds a line or changes one.
-const PARSE_ADDRESS_LINES: &[(&str, usize, usize)] = &[
-    ("varquery=mark>=0?raw.slice(mark+1):'';", 0, 1),
-    ("varparams=newurlsearchparams(query);", 1, 1),
-    ("range:firstwindow([params.get('range'),path[1]]),", 1, 0),
-    ("scope:canonicalparam(query,params,'scope'),", 1, 1),
-    ("model:canonicalparam(query,params,'model'),", 1, 1),
-    ("group:groupparam(params.get('group')),", 1, 0),
-    ("sort:sortparam(params.get('sort'))", 1, 0),
-];
+/// parseViewHash, comments stripped and compacted. Any edit to it, a new
+/// read of the address under any name or through a second parse included,
+/// changes this string and has to be reviewed against the closed sets
+/// before the pin moves.
+const PARSE_VIEW_HASH_BODY: &str = "functionparseviewhash(hash){\
+    varraw=(hash.charat(0)==='#')?hash.slice(1):hash;\
+    varmark=raw.indexof(query_mark);\
+    varpath=(mark>=0?raw.slice(0,mark):raw).split(hash_sep);\
+    varquery=mark>=0?raw.slice(mark+1):'';\
+    varparams=newurlsearchparams(query);\
+    return{view:canonicalviewid(path[0]),\
+    range:firstwindow([params.get('range'),path[1]]),\
+    scope:canonicalparam(query,params,'scope'),\
+    model:canonicalparam(query,params,'model'),\
+    group:groupparam(params.get('group')),\
+    sort:sortparam(params.get('sort'))};}";
 
 /// Byte offsets of `word` in `code` as a whole identifier.
 fn word_offsets(code: &str, word: &str) -> Vec<usize> {
@@ -1062,41 +1065,74 @@ fn address_token_lines(body: &str) -> Vec<(String, usize, usize)> {
         .collect()
 }
 
-/// The names of the functions whose parameter list names `params`, with an
-/// empty name for an anonymous one.
+/// The names of the functions whose parameter list names `params`, in source
+/// order: an empty name for an anonymous `function`, `=>` for an arrow.
 fn functions_taking_params(code: &str) -> Vec<String> {
-    code.match_indices("function")
-        .filter_map(|(at, _)| {
-            let rest = &code[at + "function".len()..];
-            let open = rest.find('(')?;
-            let close = open + rest[open..].find(')')?;
-            let name = rest[..open].trim();
-            let named = name.chars().all(is_ident_char);
-            let takes = !word_offsets(&rest[open + 1..close], "params").is_empty();
-            (named && takes).then(|| name.to_owned())
-        })
-        .collect()
+    let declared = code.match_indices("function").filter_map(|(at, _)| {
+        let rest = &code[at + "function".len()..];
+        let open = rest.find('(')?;
+        let close = open + rest[open..].find(')')?;
+        let name = rest[..open].trim();
+        let named = name.chars().all(is_ident_char);
+        let takes = !word_offsets(&rest[open + 1..close], "params").is_empty();
+        (named && takes).then(|| (at, name.to_owned()))
+    });
+    let arrows = code.match_indices("=>").filter_map(|(at, _)| {
+        let takes = !word_offsets(arrow_parameters(&code[..at]), "params").is_empty();
+        takes.then(|| (at, "=>".to_owned()))
+    });
+    let mut found: Vec<(usize, String)> = declared.chain(arrows).collect();
+    found.sort();
+    found.into_iter().map(|(_, name)| name).collect()
 }
 
-/// parseViewHash reads the parsed address only through the listed lines:
-/// every `params` and `query` token in it is one of them, whatever method
-/// or name a new read would use. canonicalParam is the only function that
-/// takes the parsed address, and it reads it only with `getAll`.
+/// The parameter text of the arrow whose `=>` follows `before`: the
+/// parenthesized list, or the single bare parameter.
+fn arrow_parameters(before: &str) -> &str {
+    let head = before.trim_end();
+    if !head.ends_with(')') {
+        let start = head
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !is_ident_char(*c))
+            .map_or(0, |(at, c)| at + c.len_utf8());
+        return &head[start..];
+    }
+    let mut depth = 0i32;
+    for (at, c) in head.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &head[at + 1..head.len() - 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    head
+}
+
+/// parseViewHash is pinned whole, so any read of the parsed address it
+/// gains, whatever its spelling, fails here. canonicalParam is the only
+/// function that takes the parsed address, and it reads it only with
+/// `getAll`.
 ///
-/// Mutation checks: add `params.has('x')` inside parseViewHash -> red; add
-/// `var alias = params;` inside parseViewHash -> red.
+/// Mutation checks: add `alias: new URLSearchParams(raw.slice(mark + 1))
+/// .get('alias'),` inside parseViewHash -> red; add `params.has('x')` inside
+/// parseViewHash -> red; pass `params` to an arrow function -> red.
 #[test]
 fn parse_view_hash_reads_the_parsed_address_only_at_its_listed_sites() {
     let code = strip_js_comments(&script());
 
-    let parse = address_token_lines(&function_span_text(&code, "parseViewHash"));
+    let parse = compact(&function_span_text(&code, "parseViewHash"));
     let canonical = address_token_lines(&function_span_text(&code, "canonicalParam"));
 
-    let expected: Vec<(String, usize, usize)> = PARSE_ADDRESS_LINES
-        .iter()
-        .map(|(line, params, query)| ((*line).to_owned(), *params, *query))
-        .collect();
-    assert_eq!(parse, expected, "parseViewHash reads the address elsewhere");
+    assert_eq!(
+        parse, PARSE_VIEW_HASH_BODY,
+        "parseViewHash changed: review its reads against the closed sets"
+    );
     let params_reads: Vec<&str> = canonical
         .iter()
         .filter(|(_, params, _)| *params > 0)
@@ -1114,13 +1150,16 @@ fn parse_view_hash_reads_the_parsed_address_only_at_its_listed_sites() {
 }
 
 /// The token scan counts a read in any spelling, skips a longer identifier
-/// that contains the word, and finds an anonymous function taking `params`.
+/// that contains the word, and finds an anonymous or arrow function taking
+/// `params`.
 #[test]
 fn the_address_token_scan_counts_every_spelling() {
     let body = "var params = x;\n  if (params.has('a')) {}\n  var canonicalParams = 1;\n\
                 for (var k of params) {}\n  var queryText = query;\n";
     let code = "function a(params) {}\nvar f = function (params) {};\n\
-                function b(paramsList) {}\n";
+                function b(paramsList) {}\nvar g = params => 1;\n\
+                var h = (key, params) => 2;\nvar k = (paramsList) => 3;\n\
+                var m = (x = (1), params) => 4;\n";
 
     assert_eq!(
         address_token_lines(body),
@@ -1131,7 +1170,102 @@ fn the_address_token_scan_counts_every_spelling() {
             ("varquerytext=query;".to_owned(), 0, 1),
         ]
     );
-    assert_eq!(functions_taking_params(code), ["a", ""]);
+    assert_eq!(functions_taking_params(code), ["a", "", "=>", "=>", "=>"]);
+}
+
+/// Every `URLSearchParams` in the page: the function it sits in and its
+/// line, compacted. The parse in parseViewHash, the one-pair re-serialization
+/// in canonicalParam, and the writer in formatViewHash.
+const URL_SEARCH_PARAMS_SITES: &[(&str, &str)] = &[
+    (
+        "canonicalParam",
+        "varspelled=newurlsearchparams([[key,values[0]]]).tostring();",
+    ),
+    ("parseViewHash", "varparams=newurlsearchparams(query);"),
+    ("formatViewHash", "varparams=newurlsearchparams();"),
+];
+
+/// Every `location.hash` in the page, the same way: the one parse in
+/// syncFromLocation and the equality check in writeViewHash.
+const LOCATION_HASH_SITES: &[(&str, &str)] = &[
+    ("writeViewHash", "if(location.hash===hash){return;}"),
+    (
+        "syncFromLocation",
+        "varparsed=parseviewhash(location.hash);",
+    ),
+];
+
+/// Each occurrence of `needle` in `code`, in source order, as the innermost
+/// function holding it and its line compacted.
+fn needle_sites(code: &str, needle: &str) -> Vec<(String, String)> {
+    code.match_indices(needle)
+        .map(|(at, _)| {
+            let line_start = code[..at].rfind('\n').map_or(0, |i| i + 1);
+            let line_end = code[at..].find('\n').map_or(code.len(), |i| at + i);
+            (
+                enclosing_function(code, at),
+                compact(&code[line_start..line_end]),
+            )
+        })
+        .collect()
+}
+
+fn owned_sites(sites: &[(&str, &str)]) -> Vec<(String, String)> {
+    sites
+        .iter()
+        .map(|(function, line)| ((*function).to_owned(), (*line).to_owned()))
+        .collect()
+}
+
+/// The address is parsed in one place and read from `location.hash` in two:
+/// a second `URLSearchParams` over any text, or another read of
+/// `location.hash`, in the codec or anywhere else, fails here. Positive
+/// control: the scans find exactly the codec's own sites, so a clean result
+/// is not an empty search.
+///
+/// Mutation checks: add `var p = new URLSearchParams(location.hash.slice(1));`
+/// inside syncFromLocation -> red; add a second `new URLSearchParams(raw)`
+/// inside parseViewHash -> red.
+#[test]
+fn the_address_is_parsed_once_and_read_from_location_only_at_its_listed_sites() {
+    let code = strip_js_comments(&script());
+
+    let parses = needle_sites(&code, "URLSearchParams");
+    let hash_reads = needle_sites(&code, "location.hash");
+
+    assert_eq!(
+        parses,
+        owned_sites(URL_SEARCH_PARAMS_SITES),
+        "URLSearchParams sites changed"
+    );
+    assert_eq!(
+        hash_reads,
+        owned_sites(LOCATION_HASH_SITES),
+        "location.hash reads changed"
+    );
+}
+
+/// The site scan reports each occurrence in its function, including one
+/// nested in an expression on a line that already holds another site.
+#[test]
+fn the_needle_scan_reports_each_occurrence_with_its_function_and_line() {
+    let src = "function a() {\n  var p = new URLSearchParams(location.hash);\n}\n\
+               function b() { return location.hash === h; }\n";
+
+    assert_eq!(
+        needle_sites(src, "location.hash"),
+        vec![
+            (
+                "a".to_owned(),
+                "varp=newurlsearchparams(location.hash);".to_owned()
+            ),
+            (
+                "b".to_owned(),
+                "functionb(){returnlocation.hash===h;}".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(needle_sites(src, "URLSearchParams").len(), 1);
 }
 
 fn function_span_text(code: &str, name: &str) -> String {

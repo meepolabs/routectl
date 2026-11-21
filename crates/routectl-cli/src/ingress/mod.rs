@@ -413,7 +413,8 @@ fn carries_billing_attribution(existing: Option<&SystemContent>, lifted: &[Syste
 /// the top-level `[aliases]` table. The ingress is now alias-agnostic:
 /// it reads the wire `model` value (or the override header) and
 /// forwards it verbatim to the router, which does all the alias
-/// resolution. See `routectl_router::Router::resolve_v6_alias`.
+/// resolution (one resolver for dispatch and config readers: the
+/// router's alias precedence and expansion in `router/alias_match.rs`).
 pub fn read_alias_header(headers: &HeaderMap) -> Option<String> {
     headers
         .get(ALIAS_HEADER)
