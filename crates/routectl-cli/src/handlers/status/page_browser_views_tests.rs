@@ -53,13 +53,14 @@ const VIEW_CASES: &[ViewCase] = &[
     },
     ViewCase {
         id: "traffic",
-        shows: &[
-            "By model",
+        shows: &["By model"],
+        omits: &[
+            "Accounts by pool",
+            "Dispatch targets",
             "Fallback chains",
             "Live target state",
             "Estimated step attribution",
         ],
-        omits: &["Accounts by pool", "Dispatch targets"],
         windowed: true,
     },
     ViewCase {
@@ -160,17 +161,16 @@ fn page_browser_each_view_renders_its_sections_from_the_fixtures() {
     }
 }
 
-/// The positive control for the error-card count above: a broken all-history
-/// read shows its card inside Traffic while the rest of the view renders.
+/// The positive control for the error-card count above: a broken QUERY
+/// answer shows its card inside Now while the GET-backed sections render.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_broken_source_shows_its_error_card_inside_the_view() {
-    let report =
-        browser::run_scenario(&views_scenario("view-content-usage-all-broken", "traffic")).result;
+    let report = browser::run_scenario(&views_scenario("view-content-query-broken", "now")).result;
 
-    assert_eq!(report["view"], "traffic");
+    assert_eq!(report["view"], "now");
     assert_eq!(report["error_cards"], 1, "{report:#}");
-    assert!(titles(&report).contains(&"Fallback chains"));
+    assert!(titles(&report).contains(&"Needs attention"), "{report:#}");
 }
 
 /// An old tab token opens the view that took over its content and the hash

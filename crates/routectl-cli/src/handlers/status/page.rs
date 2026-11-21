@@ -57,7 +57,6 @@ const SCRIPT_PARTS: &[&str] = &[
     include_str!("dash_61_view_traffic.js"),
     include_str!("dash_62_view_accounts.js"),
     include_str!("dash_63_view_models.js"),
-    include_str!("dash_70_tab_routing.js"),
     include_str!("dash_72_tab_config.js"),
     include_str!("dash_73_tab_doctor.js"),
     include_str!("dash_80_views.js"),
@@ -600,7 +599,12 @@ mod tests {
             .as_object()
             .expect("QueryMetrics serializes to an object");
 
-        for name in ["QUERY_METRICS", "QUERY_TOKENS", "QUERY_MISSING_PRICE_LISTS"] {
+        for name in [
+            "QUERY_METRICS",
+            "QUERY_TOKENS",
+            "QUERY_MISSING_PRICE_LISTS",
+            "QUERY_COUNT_MAPS",
+        ] {
             let tokens = string_array(name);
             assert!(
                 !tokens.is_empty(),
@@ -2366,6 +2370,11 @@ mod tests {
     mod browser_accounts {
         use super::*;
         include!("page_browser_accounts_tests.rs");
+    }
+
+    mod browser_traffic {
+        use super::*;
+        include!("page_browser_traffic_tests.rs");
     }
 
     mod browser_cases {

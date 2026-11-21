@@ -22,9 +22,21 @@ const PANEL_FIELD_LISTS: &[(&str, &str)] = &[
     ("models", "MODELS_FIELDS"),
 ];
 
-/// The query vocabulary lists, already pinned to `QueryMetrics` by
-/// `dashboard_metric_tokens_are_in_the_query_vocabulary`.
-const QUERY_FIELD_LISTS: &[&str] = &["QUERY_METRICS", "QUERY_TOKENS"];
+/// The query vocabulary lists, each pinned to the server's serialization by
+/// its own drift test (`dashboard_metric_tokens_are_in_the_query_vocabulary`,
+/// `missing_price_entry_fields_are_the_dto_fields` and the alias step weld).
+const QUERY_FIELD_LISTS: &[&str] = &[
+    "QUERY_METRICS",
+    "QUERY_TOKENS",
+    "QUERY_MISSING_PRICE_LISTS",
+    "QUERY_COUNT_MAPS",
+    "MISSING_PRICE_TEXT",
+    "MISSING_PRICE_NULLABLE_TEXT",
+    "ALIAS_GROUP_LISTS",
+    "ALIAS_GROUP_COUNTS",
+    "ALIAS_STEP_TEXT",
+    "ALIAS_STEP_COUNTS",
+];
 
 /// Lowercase members of the JS language and the DOM the page calls or reads.
 /// Only built-ins belong here: a name the server sends goes in a panel list.

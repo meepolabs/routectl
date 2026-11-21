@@ -7,32 +7,27 @@
     seat: 'By seat'
   };
 
-  // What was served in the window, then how the configured chains carried
-  // it: the chains from config, their live state from health and the
-  // estimate from the all-history ledger.
+  // The height the group section last drew at, held while the section waits
+  // for the answer to a new selection, so a loading section never collapses
+  // and drops what sits under it. Zero until a table has been drawn.
+  var trafficSectionPx = 0;
+
+  // What was served in the selected range: the scope strip and the grouping
+  // picker, then one sortable table with a row per group.
   function buildTraffic() {
     var stack = tabStack();
-    stack.appendChild(usageControls());
-    stack.appendChild(viewSection(QUERY_SOURCE, buildUsage));
-    stack.appendChild(viewSection('config', routingChainsSection, 'Fallback chains'));
-    var chains = liveChains(SOURCES.config);
-    if (!chains.length) { return stack; }
-    stack.appendChild(viewSection('health', function (rec) {
-      return targetStateSection(rec, chains);
-    }, 'Live target state'));
-    stack.appendChild(viewSection(USAGE_ALL_SOURCE, function (rec) {
-      return attributionSection(rec, chains);
-    }, 'Estimated step attribution'));
+    stack.appendChild(trafficControls());
+    var section = viewSection(QUERY_SOURCE, buildTrafficGroups, GROUP_BY_TITLES[selectedGroupBy]);
+    reserveTrafficHeight(section);
+    stack.appendChild(section);
     return stack;
   }
 
-  // The group-by picker and the provider-scope strip, composed by the view
-  // OUTSIDE the section boundary: a selection whose query comes back
-  // unavailable or refused must stay reversible, and the state card that
-  // replaces the content carries no affordance. Usage carries no provider
-  // cards of its own, so the strip is the only place its inherited scope can
-  // be read or lifted.
-  function usageControls() {
+  // The picker and the scope strip sit OUTSIDE the section boundary: a
+  // selection whose query comes back unavailable or refused must stay
+  // reversible, and the state card that replaces the content carries no
+  // affordance.
+  function trafficControls() {
     var controls = document.createDocumentFragment();
     if (hasQueryScope()) {
       controls.appendChild(scopeStrip('usage', 'every figure below is this provider only'));
@@ -41,40 +36,70 @@
     return controls;
   }
 
-  function buildUsage(rec) {
-    return safeSection(rec, buildUsageLive);
+  // Measured on the section the page shows now, before the rebuild replaces
+  // it; only a drawn table on a shown pane counts, so a reserve never feeds
+  // on itself.
+  function reserveTrafficHeight(section) {
+    var shown = el('body-traffic');
+    var current = shown && shown.querySelector('[data-source="' + QUERY_SOURCE + '"]');
+    if (current && current.querySelector('#traffic-groups') && current.offsetHeight > 0) {
+      trafficSectionPx = current.offsetHeight;
+    }
+    if (SOURCES[QUERY_SOURCE].state === 'loading' && trafficSectionPx > 0) {
+      section.style.minHeight = trafficSectionPx + 'px';
+    }
   }
 
-  // One card per group, never a table: a group is a separate object an operator
-  // reads on its own, and the per-group stats do not line up as columns of one
-  // reading. Zero-traffic groups are omitted rather than listed as rows of
-  // zeroes; the header says how many were left out.
-  function buildUsageLive() {
+  function buildTrafficGroups(rec) {
+    return safeSection(rec, buildTrafficLive);
+  }
+
+  // Groups with no request in the range are left out rather than listed as
+  // rows of zeroes; the hint says how many. The builder order is busiest
+  // first, which is the order an unsorted table keeps.
+  function buildTrafficLive() {
     var view = queryView();
     if (!view) { throw new Error('usage query payload is not live'); }
     var live = view.groups.filter(function (g) { return num0(g.metrics.requests) > 0; });
-    if (num0(view.totals.requests) <= 0 || live.length === 0) { return usageEmpty(); }
-    var omitted = view.groups.length - live.length;
+    if (num0(view.totals.requests) <= 0 || live.length === 0) { return trafficEmpty(); }
     var ranked = live.slice().sort(function (a, b) {
       return num0(b.metrics.requests) - num0(a.metrics.requests);
     });
-    var wrap = document.createElement('div');
-    wrap.className = 'ovsection';
-    wrap.appendChild(sectionHead(GROUP_BY_TITLES[selectedGroupBy], usageHint(ranked.length, omitted)));
-    var list = document.createElement('div');
-    list.className = 'ugroups';
-    var totalReq = num0(view.totals.requests);
-    var seen = Object.create(null);
-    ranked.forEach(function (g) {
-      var card = usageCard(g, totalReq);
-      card.id = uniqueItemId('usage-group-' + idKey(g.label), seen);
-      list.appendChild(card);
-    });
-    wrap.appendChild(list);
-    return wrap;
+    return card(GROUP_BY_TITLES[selectedGroupBy],
+      trafficHint(ranked.length, view.groups.length - live.length),
+      tableScroll(trafficTable(ranked)));
   }
 
-  function usageHint(shown, omitted) {
+  function trafficTable(groups) {
+    var tbl = mkTable('traffic-groups', 'Traffic ' + GROUP_BY_TITLES[selectedGroupBy].toLowerCase(), [
+      sortBy(R('group'), 'group', function (g) { return g.label; }),
+      sortBy(N('requests'), 'requests', function (g) { return num0(g.metrics.requests); }),
+      sortBy(N('error rate'), 'errors', function (g) { return errorRate(g.metrics); }),
+      sortBy(N('TTFT p50'), 'ttft', function (g) { return g.metrics.ttft_p50_ms; }),
+      sortBy(N('latency p50'), 'latency', function (g) { return g.metrics.latency_p50_ms; }),
+      sortBy(N('cost'), 'cost', function (g) { return pricedCost(g.metrics); }),
+      sortBy(N('At API prices'), 'equivalent', function (g) { return g.metrics.equivalent_cost_usd; }),
+      sortBy(N('cache hit'), 'cache', function (g) { return g.metrics.cache_hit_pct; })
+    ], { expandable: true, sortable: true, rowKey: function (g) { return g.label; } });
+    fillRows(tbl, groups, function (g, key) { trafficRow(tbl, g, key); });
+    return tbl;
+  }
+
+  function trafficRow(tbl, g, key) {
+    var m = g.metrics;
+    xrow(tbl, key, [
+      g.label,
+      magSpan(m.requests),
+      errorRateFigure(m),
+      msFigure(m.ttft_p50_ms),
+      msFigure(m.latency_p50_ms),
+      costFigure(m),
+      equivalentFigure(m.equivalent_cost_usd),
+      cacheHitFigure(m.cache_hit_pct)
+    ], trafficDetail(g));
+  }
+
+  function trafficHint(shown, omitted) {
     var hint = shown + (shown === 1 ? ' group - ' : ' groups - ') + WINDOW_SPAN[selectedWindow];
     if (omitted > 0) {
       hint += ' - ' + omitted + (omitted === 1 ? ' group' : ' groups') + ' with no requests not listed';
@@ -82,12 +107,161 @@
     return hint;
   }
 
-  function usageEmpty() {
+  function trafficEmpty() {
     return emptyCard('No requests in this window',
       'Nothing was routed ' + WINDOW_SPAN[selectedWindow] +
       '. Pick a wider window, or send a request through the proxy.',
       ['grouped by ' + selectedGroupBy, WINDOW_SPAN[selectedWindow]]);
   }
+
+  // ---- traffic: row figures --------------------------------------------
+
+  function errorRate(m) {
+    var req = num0(m.requests);
+    return req > 0 ? num0(m.errors) / req * 100 : null;
+  }
+
+  // One decimal, so a rate under one percent still reads as a rate; a rate
+  // above zero that rounds to nothing says so rather than reading as zero.
+  function errorRateFigure(m) {
+    var rate = errorRate(m);
+    if (rate === null) { return figure('-', null, null); }
+    var text = rate > 0 && rate < 0.05 ? '<0.1' : rate.toFixed(1);
+    var fig = figure(rate === 0 ? '0' : text, '%', null);
+    if (rate > 0) { fig.classList.add('neg'); }
+    return fig;
+  }
+
+  function msFigure(ms) {
+    var p = msParts(ms);
+    return figure(p.v, p.u || null, null);
+  }
+
+  // The dollar figure a cost column sorts by: present only where rows were
+  // priced, so an unpriced or subscription group sorts with the absent.
+  function pricedCost(m) {
+    var priced = m.cost_status === 'priced' || m.cost_status === 'partial';
+    return priced ? m.cost_usd : null;
+  }
+
+  // An equivalent is what subscription traffic would have cost at API
+  // prices, never a bill: the tilde says so.
+  function equivalentFigure(v) {
+    if (v === null || v === undefined) { return figure('-', null, null); }
+    return figure(money(v), null, '~$');
+  }
+
+  function cacheHitFigure(pct) {
+    var text = cacheHitText(pct);
+    return text === '-' ? figure('-', null, null) : figure(text.slice(0, text.length - 1), '%', null);
+  }
+
+  // ---- traffic: the expanded row ---------------------------------------
+
+  // The tail percentiles, then what went wrong, what the cache-write figure
+  // covers, what could not be priced and, for an alias, how its chain
+  // carried the group.
+  function trafficDetail(g) {
+    var m = g.metrics;
+    return [
+      ['TTFT p90, p99', msText(m.ttft_p90_ms) + ', ' + msText(m.ttft_p99_ms)],
+      ['latency p90, p99', msText(m.latency_p90_ms) + ', ' + msText(m.latency_p99_ms)],
+      ['error classes', errorClassText(m)],
+      ['cache write', cacheWriteStatement(m)]
+    ].concat(missingPricePairs(m.missing_prices), aliasStepPairs(g));
+  }
+
+  // Most frequent class first, ties by token, each in its humanized words.
+  function errorClassText(m) {
+    var classes = m.errors_by_class;
+    var tokens = Object.keys(classes).filter(function (k) { return num0(classes[k]) > 0; });
+    if (!tokens.length) { return 'none'; }
+    tokens.sort(function (a, b) {
+      return (num0(classes[b]) - num0(classes[a])) || (a < b ? -1 : (a > b ? 1 : 0));
+    });
+    return tokens.map(function (k) {
+      return labelFor('class', k).label + ' ' + humanCount(classes[k]);
+    }).join(', ');
+  }
+
+  // What the write figure covers, in the CLI legend's terms, and how much of
+  // it had no reported lifetime.
+  function cacheWriteStatement(m) {
+    var written = cacheWritten(m);
+    if (written === null) { return 'no cache write reported'; }
+    var unknown = num0(m.cache_write_unknown_tokens);
+    var covers = humanCount(written) + ' tokens, every lifetime and both ledger eras, already in input';
+    if (unknown <= 0) { return covers + '; none of unknown lifetime'; }
+    var share = written > 0 ? ' (' + Math.round(unknown / written * 100) + '%)' : '';
+    return covers + '; ' + humanCount(unknown) + share + ' of unknown lifetime';
+  }
+
+  // One pair per (model, dimension) with no rate. The configuration key is
+  // the server's text, shown as it arrived.
+  function missingPricePairs(prices) {
+    return prices.map(function (p) {
+      var value = document.createElement('span');
+      value.appendChild(document.createTextNode(p.model + ' ' + p.dimension + ' - '));
+      if (p.config_key === null) {
+        value.appendChild(document.createTextNode('no configuration key prices it'));
+      } else {
+        value.appendChild(document.createTextNode('set '));
+        var key = document.createElement('code');
+        key.className = 'traffic-key';
+        key.textContent = p.config_key;
+        value.appendChild(key);
+      }
+      return ['no price', value];
+    });
+  }
+
+  // Each top-level chain step's share of the group, then the requests served
+  // off the chain and the ones never dispatched: together they are the
+  // group's requests. A step that names another alias reads as that alias.
+  function aliasStepPairs(g) {
+    if (!g.steps) { return []; }
+    var total = num0(g.metrics.requests);
+    if (!g.steps.length) {
+      return [['chain', 'this name resolves to no configured chain']].concat(remainderPairs(g, total));
+    }
+    return g.steps.map(function (s, i) {
+      return ['step ' + (i + 1), stepShare(s, total)];
+    }).concat(remainderPairs(g, total));
+  }
+
+  function remainderPairs(g, total) {
+    return [
+      ['off chain', countShare(g.off_chain, total)],
+      ['not dispatched', countShare(g.not_dispatched, total)]
+    ];
+  }
+
+  function stepShare(s, total) {
+    var span = document.createElement('span');
+    span.className = 'traffic-step';
+    var name = document.createElement('span');
+    name.className = 'traffic-stepname';
+    name.textContent = s.kind === ALIAS_STEP_KIND ? 'via alias ' + s.step : s.step;
+    span.appendChild(name);
+    span.appendChild(countShare(s.requests, total));
+    return span;
+  }
+
+  // An exact count, so the step lines add up to the group on screen, and its
+  // whole-percent share of the group.
+  function countShare(n, total) {
+    var span = document.createElement('span');
+    span.className = 'traffic-count';
+    var count = figure(String(num0(n)), ' req', null);
+    count.classList.add('traffic-req');
+    span.appendChild(count);
+    if (total > 0) {
+      span.appendChild(figure(String(Math.round(num0(n) / total * 100)), '%', null));
+    }
+    return span;
+  }
+
+  // ---- traffic: the grouping picker ------------------------------------
 
   // Switch the grouping dimension. A view-state change: commitViewState
   // re-issues the query through the standard input-changed path (which aborts
@@ -124,142 +298,106 @@
     setAction(btn, 'group-by', dim);
     return btn;
   }
-
-  // The two-line group card: a headline line carrying identity, share, and the
-  // three figures an operator scans for, over a hairline-separated detail line.
-  function usageCard(group, totalReq) {
-    var cardEl = document.createElement('div');
-    cardEl.className = 'ucard';
-    cardEl.appendChild(usageHeadLine(group, totalReq));
-    cardEl.appendChild(usageStatLine(group.metrics));
-    return cardEl;
-  }
-
-  function usageHeadLine(group, totalReq) {
-    var m = group.metrics;
-    var head = document.createElement('div');
-    head.className = 'ucard-head';
-
-    var id = document.createElement('div');
-    id.className = 'ucard-id';
-    var name = document.createElement('span');
-    name.className = 'ucard-name';
-    name.textContent = group.label;
-    name.title = group.label;
-    id.appendChild(name);
-    var share = totalReq > 0 ? num0(m.requests) / totalReq * 100 : 0;
-    var shareRow = document.createElement('span');
-    shareRow.className = 'ucard-share';
-    shareRow.appendChild(shareBar(share));
-    var pct = document.createElement('span');
-    pct.className = 'ucard-sharepct';
-    pct.textContent = Math.round(share) + '% of requests';
-    shareRow.appendChild(pct);
-    id.appendChild(shareRow);
-    head.appendChild(id);
-
-    var figs = document.createElement('div');
-    figs.className = 'ucard-figs';
-    figs.appendChild(ufig('requests', magSpan(m.requests), null));
-    figs.appendChild(ufig('errors', negCell(m.errors), null));
-    figs.appendChild(ufig('est. cost', costFigure(m),
-      m.cost_status === 'partial' ? 'priced subtotal only' : null));
-    head.appendChild(figs);
-    return head;
-  }
-
-  // The ONE column set this tab ships (the Essentials/Everything toggle is not
-  // built): token volumes in and out, the weighted cache-hit share, the billed
-  // cache read and write volumes, time to first token as a mean and its
-  // observed maximum, generation throughput, context size at its peak and
-  // mean, and how many of the group's requests were streamed. Every figure is a metric the
-  // ledger measured for THIS group -- nothing is derived from another column
-  // and nothing is filler.
-  function usageStatLine(m) {
-    var line = document.createElement('div');
-    line.className = 'ucard-stats';
-    var ttft = msParts(m.ttft_avg_ms), max = msParts(m.ttft_max_ms);
-    [
-      ustat('tokens in / out', pairValue(magSpan(m.input_tokens), magSpan(m.output_tokens))),
-      ustat('cache hit', pctFigure(m.cache_hit_pct)),
-      ustat('cache read / write',
-        pairValue(magSpan(m.cache_read_billed), magSpan(cacheWritten(m)))),
-      ustat('ttft avg / max',
-        pairValue(figure(ttft.v, ttft.u, null), figure(max.v, max.u, null))),
-      ustat('throughput', throughputFigure(m.throughput_tok_s)),
-      ustat('ctx peak / avg', pairValue(magSpan(m.ctx_peak), magSpan(m.ctx_avg))),
-      ustat('streamed', magSpan(m.stream_count))
-    ].forEach(function (stat) { line.appendChild(stat); });
-    return line;
-  }
-
-  // A share that ARRIVED as a percentage, rounded by pctText and re-split so
-  // the sign rides the faint unit slot instead of the numeral. A null share
-  // (no prompt tokens to weigh) is absent, not zero.
-  function pctFigure(v) {
-    if (v === null) { return figure('-', null, null); }
-    var text = pctText(v);
-    return figure(text.slice(0, text.length - 1), '%', null);
-  }
-
-  // A null or non-positive throughput means no generation was measured for
-  // this group, so it reads as absent rather than as a stalled stream.
-  function throughputFigure(v) {
-    var x = num0(v);
-    return x > 0 ? figure(String(Math.round(x)), 'tok/s', null) : figure('-', null, null);
-  }
-
-  // Two readings of one measurement, the second de-emphasized so the pair reads
-  // as primary-then-secondary rather than as two competing figures. The
-  // separator is drawn by CSS: this script carries no slash-leading string
-  // literal (see the mutation-channel scan in page.rs).
-  function pairValue(first, second) {
-    var span = document.createElement('span');
-    span.className = 'upair';
-    span.appendChild(first);
-    var sep = document.createElement('span');
-    sep.className = 'upair-sep';
-    sep.setAttribute('aria-hidden', 'true');
-    span.appendChild(sep);
-    second.classList.add('upair-b');
-    span.appendChild(second);
-    return span;
-  }
-
-  // A headline figure: an uppercase label over the numeral, with an optional
-  // faint qualifier under it.
-  function ufig(label, valueNode, note) {
-    var wrap = document.createElement('div');
-    wrap.className = 'ufig';
-    var l = document.createElement('span');
-    l.className = 'ufig-label';
-    l.textContent = label;
-    var v = document.createElement('span');
-    v.className = 'ufig-value';
-    v.appendChild(valueNode);
-    wrap.appendChild(l);
-    wrap.appendChild(v);
-    if (note) {
-      var n = document.createElement('span');
-      n.className = 'ufig-note';
-      n.textContent = note;
-      wrap.appendChild(n);
-    }
-    return wrap;
-  }
-
-  function ustat(label, valueNode) {
-    var wrap = document.createElement('div');
-    wrap.className = 'ustat';
-    var l = document.createElement('span');
-    l.className = 'ustat-label';
-    l.textContent = label;
-    var v = document.createElement('span');
-    v.className = 'ustat-value';
-    v.appendChild(valueNode);
-    wrap.appendChild(l);
-    wrap.appendChild(v);
-    return wrap;
-  }
   // ---- end view:traffic ------------------------------------------------
 
+  // ---- health target phase -------------------------------------------
+
+  // The target-phase rule over the health panel's targets and the titled
+  // section wrapper the Models view composes them in.
+
+  // Circuit phases ranked worst-first. One chain member can resolve to several
+  // health targets (one per seat), and the member's live state is the worst of
+  // them: an open breaker on one seat is the fact an operator needs, not the
+  // closed one beside it.
+  var CIRCUIT_RANK = { open: 3, half_open_ready: 2, closed: 1 };
+
+  // A titled section whose BODY is filled by the caller. The head sits outside
+  // the section boundary so a source that is down still says which reading is
+  // missing instead of showing a bare error box.
+  function routingSection(title, hint) {
+    var wrap = markRefreshUnit(document.createElement('div'), title);
+    wrap.className = 'ovsection';
+    wrap.appendChild(sectionHead(title, hint));
+    return wrap;
+  }
+
+  // Seats collapsed per nickname: the worst circuit across them, how many they
+  // are, and the seats themselves. The members are carried because the phase
+  // rule reads every seat's settled outcome, not just the worst one's.
+  function targetsByNickname(targets) {
+    var map = Object.create(null);
+    (targets || []).forEach(function (t) {
+      if (!t || !t.nickname) { return; }
+      var found = map[t.nickname];
+      if (!found) {
+        map[t.nickname] = { worst: t, count: 1, members: [t] };
+        return;
+      }
+      found.count += 1;
+      found.members.push(t);
+      if (circuitRank(t.circuit) > circuitRank(found.worst.circuit)) { found.worst = t; }
+    });
+    return map;
+  }
+
+  function circuitRank(circuit) {
+    return CIRCUIT_RANK[circuit] || 0;
+  }
+
+  // The eligibility reasons that make a seat need attention before anything
+  // was dispatched to it: a dead login or a parked account is never "not
+  // observed yet".
+  var UNUSABLE_SEAT_REASONS = ['credential_unusable', 'account_parked'];
+
+  // The seats of a group a request cannot dispatch to right now.
+  function blockedSeats(group) {
+    return group.members.filter(function (t) {
+      return !!(t && t.eligibility && t.eligibility.reason);
+    });
+  }
+
+  function hasUnusableSeat(group) {
+    return blockedSeats(group).some(function (t) {
+      return UNUSABLE_SEAT_REASONS.indexOf(t.eligibility.reason) >= 0;
+    });
+  }
+
+  // The ONE target-state rule, shared by the Routing state list and the Health
+  // target cards so the two tabs can never disagree about the same target. A
+  // seat whose credential is unusable or whose account is parked needs
+  // attention first, whatever its breaker or outcome says. Otherwise a target
+  // with no settled outcome anywhere is `unknown`, NEVER healthy: no
+  // observation is not evidence of health. Healthy means a closed breaker AND
+  // an ok last outcome on every seat that has reported one.
+  function targetPhase(group) {
+    if (hasUnusableSeat(group)) { return 'attention'; }
+    if (group.worst.circuit !== 'closed') { return 'attention'; }
+    var settled = group.members.filter(function (t) { return !!t.last_outcome; });
+    if (!settled.length) { return 'unknown'; }
+    var failing = settled.some(function (t) { return t.last_outcome !== 'ok'; });
+    return failing ? 'attention' : 'healthy';
+  }
+
+  // The circuit pill both tabs render: the neutral unknown token when nothing
+  // has been observed, the worst seat's circuit otherwise. A closed breaker on
+  // a target that needs attention because of its seats names the seats
+  // instead: a green "ok" there would contradict the card it sits on.
+  function circuitPill(group, phase) {
+    if (phase === 'unknown') { return tok('circuit', 'unknown'); }
+    var blocked = blockedSeats(group);
+    if (phase === 'attention' && group.worst.circuit === 'closed' && blocked.length) {
+      return seatPill(group, blocked);
+    }
+    return tokLabeled('circuit', 'circuit', group.worst.circuit);
+  }
+
+  // "no seat" when every seat is out, otherwise the first blocked seat's
+  // reason, humanized.
+  function seatPill(group, blocked) {
+    var reason = blocked[0].eligibility.reason;
+    var pill = tokLabeled('elig', 'elig', reason);
+    if (blocked.length === group.count) { pill.textContent = 'no seat'; }
+    pill.title = blocked.length + ' of ' + group.count +
+      phrase(group.count, ' seat', ' seats') + ' not eligible - ' + reason;
+    return pill;
+  }

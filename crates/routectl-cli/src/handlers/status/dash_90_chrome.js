@@ -129,7 +129,10 @@
   // ids its mkTable call declares; a page test keeps the two equal). A sort
   // key naming a table or column not registered here is dropped.
   var SORT_TABLES = {
-    'config-models': ['model', 'provider', 'upstream']
+    'config-models': ['model', 'provider', 'upstream'],
+    'traffic-groups': [
+      'group', 'requests', 'errors', 'ttft', 'latency', 'cost', 'equivalent', 'cache'
+    ]
   };
   var selectedSort = null;         // `<table>.<column>.<dir>`, null = unsorted
   var selectedModel = null;        // nickname scope, null = every model

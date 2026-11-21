@@ -150,7 +150,7 @@
     var probe = document.getElementById('seat-probe');
     return {
       stats: document.getElementById('verdict-stats').textContent,
-      cards: textOfAll('.ucard'),
+      cards: textOfAll('#traffic-groups tr.exp-row'),
       probe: probe ? probe.textContent : null
     };
   }

@@ -6,7 +6,7 @@
 // an ellipsis) and a scroller nobody can reach by keyboard. A truncated name
 // is allowed when its full text is in its `title`. It lists every table
 // scroller with the name it announces. It also reports any two
-// text runs in one Traffic stat row that draw over each other, and how each
+// text runs in one stat row that draw over each other, and how each
 // Doctor fix command fits its box. The checks also run over planted
 // controls, so a clean report is not a check that cannot fire.
 //
@@ -23,7 +23,7 @@
   var SETTLED_MARKER = {
     now: ['.kpigrid', '.glance-meter'],
     accounts: ['.acct-row'],
-    traffic: ['.ucard-stats'],
+    traffic: ['#traffic-groups'],
     models: ['.hgrid'],
     config: ['.cfgstrip'],
     doctor: ['.docfix-text']
@@ -302,7 +302,8 @@
         strip: audit(document.getElementById('verdict')),
         body: audit(body),
         controls: controls(body),
-        glance_meters: body.querySelectorAll('.glance-meter').length
+        glance_meters: body.querySelectorAll('.glance-meter').length,
+        traffic_rows: body.querySelectorAll('#traffic-groups tr.exp-row').length
       };
       return out;
     });

@@ -43,7 +43,7 @@
     {
       id: 'traffic',
       label: 'Traffic',
-      sources: [QUERY_SOURCE, 'config', USAGE_ALL_SOURCE, 'health'],
+      sources: [QUERY_SOURCE, 'config'],
       span: null,
       build: buildTraffic
     },

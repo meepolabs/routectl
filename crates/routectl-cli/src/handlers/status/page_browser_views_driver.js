@@ -59,15 +59,15 @@
 
   d.scenario('view-content', settledReport);
 
-  // The positive control for the error-card count: the all-history usage
-  // read answers an envelope with no schema version, so the one section that
-  // reads it must show its incompatible card.
-  d.scenario('view-content-usage-all-broken', function () {
+  // The positive control for the error-card count: every QUERY answers an
+  // envelope with no schema version, so the one section that reads it must
+  // show its card.
+  d.scenario('view-content-query-broken', function () {
     var inner = window.fetch;
     window.fetch = function (input, init) {
       var url = new URL(String(input), location.href);
       return inner(input, init).then(function (resp) {
-        if (url.pathname !== '/status/usage') { return resp; }
+        if (url.pathname !== '/status/query') { return resp; }
         return new Response('{}', {
           status: 200,
           headers: { 'Content-Type': 'application/json' }

@@ -296,7 +296,7 @@
 
   // ---- a range change is pending until its answer applies ---------------
 
-  var TRAFFIC_FIGURES = '#body-traffic .ucard-figs';
+  var TRAFFIC_FIGURES = '#traffic-groups tbody';
 
   function trafficObservation() {
     var pane = document.getElementById('pane-traffic');
@@ -305,7 +305,7 @@
       pending_class: pane.classList.contains('pane--pending'),
       week_pressed: windowButton('week').getAttribute('aria-pressed'),
       figures: textOf(TRAFFIC_FIGURES),
-      cards: document.querySelectorAll('#body-traffic .ucard').length,
+      cards: document.querySelectorAll('#traffic-groups tr.exp-row').length,
       error_cards: errorCards(document.getElementById('body-traffic'))
     };
   }
@@ -373,7 +373,7 @@
   }
 
   function trafficCards() {
-    var names = document.querySelectorAll('#body-traffic .ucard-name');
+    var names = document.querySelectorAll('#traffic-groups tr.exp-row > th');
     return Array.prototype.map.call(names, function (n) { return n.textContent; });
   }
 
@@ -490,7 +490,7 @@
     return {
       error_card: textOf('#body-' + view + ' [data-source] .unavailable-msg'),
       error_cards: errorCards(body),
-      figures: body.querySelectorAll('.ucard, .kpi').length
+      figures: body.querySelectorAll('tr.exp-row, .kpi').length
     };
   }
 

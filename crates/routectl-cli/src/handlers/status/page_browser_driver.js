@@ -223,7 +223,7 @@
       btn.click();
       return d.waitFor('/status/query', 1).then(function () {
         return d.acrossRounds('/status/query', 2, function () {
-          var obs = focusObservation(btn, '#body-traffic .ucard-figs');
+          var obs = focusObservation(btn, '#traffic-groups tbody');
           obs.pressed = byId('usage-groupby-kalias').getAttribute('aria-pressed') === 'true';
           return obs;
         });

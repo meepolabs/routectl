@@ -68,7 +68,7 @@ fn list<'a>(audit: &'a Value, key: &str) -> &'a Vec<Value> {
 /// out of keyboard reach, no two text runs
 /// in a stat row draw over each other, and every fix command fits its box.
 /// Positive controls: the page really ran at the setup's text size and width,
-/// the audit read elements carrying digits, the stat rows had text runs, and
+/// the audit read elements carrying digits, Traffic drew its group rows, and
 /// the view carried a fix command where one is expected, and Now drew its
 /// account meters.
 fn assert_readable(setup: &Setup, view: &str, out: &Value) {
@@ -114,9 +114,8 @@ fn assert_readable(setup: &Setup, view: &str, out: &Value) {
     let body = &out["body"];
     if view == "traffic" {
         assert!(
-            body["stat_rows"].as_u64().unwrap_or(0) > 0
-                && body["stat_runs"].as_u64().unwrap_or(0) > 0,
-            "{at}: no stat row was measured: {body:#}"
+            out["traffic_rows"].as_u64().unwrap_or(0) > 0,
+            "{at}: Traffic drew no group row: {out:#}"
         );
     }
     if view == "doctor" {
@@ -169,11 +168,6 @@ fn assert_views_readable(setup: &Setup) -> (usize, usize) {
 /// At 1440 px with the text doubled, every view (Traffic over a week, grouped
 /// by alias) shows every figure, label and fix command in full, the figures
 /// widened to the magnitudes a real ledger produces.
-///
-/// Mutation checks: put `.ucard-stats` back on its px column minimum AND
-/// `.ustat-label` and `.ustat-value` back on no-wrap with an ellipsis -> red
-/// (figures are cut off); the column minimum alone stays green, because the
-/// wrapping labels still fit.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_figures_read_in_full_at_double_text_size() {

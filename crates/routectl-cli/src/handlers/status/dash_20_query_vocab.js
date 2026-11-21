@@ -91,6 +91,37 @@
     'config_key'
   ];
 
+  // Fields whose value is a map of a class token to a count, always present
+  // (empty when nothing counted): the error count split by failure class.
+  var QUERY_COUNT_MAPS = [
+    'errors_by_class'
+  ];
+
+  // What an alias group carries beside its label and metrics: its chain steps
+  // and the two remainders, which together count every request of the group.
+  // A group of any other grouping carries none of them; a group carries all
+  // or none. Each step is a name and a kind as text and a request count. A
+  // step of kind ALIAS_STEP_KIND names another alias, not a model.
+  var ALIAS_GROUP_LISTS = [
+    'steps'
+  ];
+
+  var ALIAS_GROUP_COUNTS = [
+    'off_chain',
+    'not_dispatched'
+  ];
+
+  var ALIAS_STEP_TEXT = [
+    'step',
+    'kind'
+  ];
+
+  var ALIAS_STEP_COUNTS = [
+    'requests'
+  ];
+
+  var ALIAS_STEP_KIND = 'alias';
+
   // The dimensions a query can group by, as [token, picker label], in picker
   // order. The URL codec, the transport and the Traffic picker all read this
   // one list; a page.rs test pins the tokens to the server's groupings.
@@ -236,6 +267,17 @@
     QUERY_METRICS.forEach(function (key) { out[key] = raw[key]; });
     QUERY_TOKENS.forEach(function (key) { out[key] = raw[key]; });
     QUERY_MISSING_PRICE_LISTS.forEach(function (key) { out[key] = raw[key]; });
+    QUERY_COUNT_MAPS.forEach(function (key) { out[key] = raw[key]; });
+    return out;
+  }
+
+  // One validated group: its label and metrics, and an alias group's steps
+  // and remainders carried through as they arrived; null steps elsewhere.
+  function adaptGroup(raw) {
+    var out = { label: raw.label, metrics: adaptMetrics(raw.metrics), steps: null };
+    if (!isAliasGroup(raw)) { return out; }
+    ALIAS_GROUP_LISTS.forEach(function (key) { out[key] = raw[key]; });
+    ALIAS_GROUP_COUNTS.forEach(function (key) { out[key] = raw[key]; });
     return out;
   }
 
@@ -254,9 +296,7 @@
       }
       : null;
     return {
-      groups: raw.groups.map(function (g) {
-        return { label: g.label, metrics: adaptMetrics(g.metrics) };
-      }),
+      groups: raw.groups.map(adaptGroup),
       totals: adaptMetrics(raw.totals),
       series: series,
       earliest_ms: raw.earliest_ms
@@ -289,7 +329,34 @@
   }
 
   function isGroupShape(g) {
-    return isPlainObject(g) && typeof g.label === 'string' && isMetricsShape(g.metrics);
+    if (!isPlainObject(g) || typeof g.label !== 'string' || !isMetricsShape(g.metrics)) {
+      return false;
+    }
+    var aliasKeys = ALIAS_GROUP_LISTS.concat(ALIAS_GROUP_COUNTS);
+    var present = aliasKeys.filter(function (key) {
+      return Object.prototype.hasOwnProperty.call(g, key);
+    });
+    if (!present.length) { return true; }
+    return present.length === aliasKeys.length && isAliasGroupShape(g);
+  }
+
+  function isAliasGroup(g) {
+    return ALIAS_GROUP_LISTS.every(function (key) {
+      return Object.prototype.hasOwnProperty.call(g, key);
+    });
+  }
+
+  function isAliasGroupShape(g) {
+    var countsOk = ALIAS_GROUP_COUNTS.every(function (key) { return isFiniteNumber(g[key]); });
+    return countsOk && ALIAS_GROUP_LISTS.every(function (key) {
+      return Array.isArray(g[key]) && g[key].every(isAliasStepShape);
+    });
+  }
+
+  function isAliasStepShape(s) {
+    if (!isPlainObject(s)) { return false; }
+    var textOk = ALIAS_STEP_TEXT.every(function (key) { return typeof s[key] === 'string'; });
+    return textOk && ALIAS_STEP_COUNTS.every(function (key) { return isFiniteNumber(s[key]); });
   }
 
   function isSeriesShape(series) {
@@ -308,9 +375,14 @@
       return isFiniteNumber(m[key]);
     });
     var tokensOk = QUERY_TOKENS.every(function (key) { return typeof m[key] === 'string'; });
-    return metricsOk && tokensOk && QUERY_MISSING_PRICE_LISTS.every(function (key) {
+    var mapsOk = QUERY_COUNT_MAPS.every(function (key) { return isCountMap(m[key]); });
+    return metricsOk && tokensOk && mapsOk && QUERY_MISSING_PRICE_LISTS.every(function (key) {
       return Array.isArray(m[key]) && m[key].every(isMissingPriceShape);
     });
+  }
+
+  function isCountMap(v) {
+    return isPlainObject(v) && Object.keys(v).every(function (k) { return isFiniteNumber(v[k]); });
   }
 
   function isMissingPriceShape(p) {
