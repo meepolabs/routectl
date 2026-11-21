@@ -28,7 +28,7 @@
   var PARTIAL_UNPRICED_TITLE = 'mixed cost kinds with no priced row: no dollar cost to show';
 
   // Why an "At API prices" figure is a subtotal, and why there is none.
-  var EQUIVALENT_PARTIAL_TITLE = 'does not include requests with an unpriced dimension';
+  var EQUIVALENT_PARTIAL_TITLE = PARTIAL_COST_NOTE + ': leaves out usage that has no price';
   var EQUIVALENT_UNPRICED_TITLE = 'no subscription request had every dimension priced';
 
   // Whether the overflow list under the provider row is open. View state only:
@@ -824,19 +824,16 @@
   }
 
   // How much of a set's subscription traffic its API-price equivalent covers.
-  // The server adds a subscription row's equivalent only when every dimension
-  // it used had a rate, and lists the ones that did not, so a set with an
-  // equivalent and a listed gap is a subtotal. The list also carries the gaps
-  // of unpriced rows and does not say whose a gap is, so a set mixing kinds
-  // reads as a subtotal whenever any gap is listed. With no equivalent, the
+  // Whether a present equivalent is a subtotal is the server's
+  // `equivalent_status`, never the missing-price list: that list also carries
+  // the gaps of non-subscription rows. With no equivalent, the
   // set is known to hold subscription traffic when it is all subscription,
   // or when it mixes kinds with no priced row (the only other kinds are
   // subscription and unpriced). `none` is a set with no equivalent that may
   // hold no subscription traffic at all.
   function equivalentCoverage(m) {
     if (isFiniteNumber(m.equivalent_cost_usd)) {
-      var gap = Array.isArray(m.missing_prices) && m.missing_prices.length > 0;
-      return gap ? 'partial' : 'full';
+      return m.equivalent_status === 'partial' ? 'partial' : 'full';
     }
     var holdsSubscription = m.cost_status === 'subscription' ||
       (m.cost_status === 'partial' && pricedCost(m) === null);

@@ -114,14 +114,16 @@
     };
   }
 
-  // One row's opened detail: the dt -> dd pairs in order, then the alias
-  // chain and the missing prices, each a block of lines.
+  // One row's opened detail: the dt -> dd pairs in order, the unpriced
+  // remainder sentence (null when none is drawn), then the alias chain and
+  // the missing prices, each a block of lines.
   function detailOf(rowId) {
     var detail = byId(rowId + '-detail');
     return {
       pairs: Array.prototype.map.call(detail.querySelectorAll('.def'), function (def) {
         return { term: def.querySelector('dt').textContent, text: def.querySelector('dd').textContent };
       }),
+      remainder: textIn(detail, '.traffic-remainder'),
       chain: blockLines(detail, '.traffic-chain'),
       prices: blockLines(detail, '.traffic-prices')
     };

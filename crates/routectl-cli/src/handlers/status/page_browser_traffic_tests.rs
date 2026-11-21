@@ -769,22 +769,25 @@ fn page_browser_traffic_an_unknown_cost_never_reads_as_zero() {
 const UNKNOWN_LIFETIME: &str = "cache write (unknown lifetime)";
 
 /// The "At API prices" cell never reads as the value of all of a group's
-/// subscription traffic when it is not: an equivalent beside a listed
-/// unpriced dimension carries the `partial` mark, whose title says what it
-/// leaves out; one that covers every row carries no mark; subscription
-/// traffic with no equivalent reads the faint word `unpriced`, as does a
-/// mix with no priced row (only subscription and unpriced rows remain); a
-/// group that may hold no subscription traffic keeps its `-`.
+/// subscription traffic when it is not: an equivalent the server calls
+/// `partial` carries the `partial` mark, whose title says what it leaves
+/// out; a `complete` one carries no mark, even beside a listed missing price
+/// (that gap belongs to another kind of row); subscription traffic with no
+/// equivalent reads the faint word `unpriced`, as does a mix with no priced
+/// row (only subscription and unpriced rows remain); a group that may hold
+/// no subscription traffic keeps its `-`.
 ///
 /// Mutation checks: the mark appended by equivalentFigure removed -> red;
-/// equivalentCoverage ignoring `missing_prices` -> red (model-01 unmarked);
-/// the `unpriced` branch dropped -> red (model-03 reads `-`); the partial
-/// clause of holdsSubscription dropped -> red (model-05 reads `-`).
+/// equivalentCoverage ignoring `equivalent_status` (reading every present
+/// equivalent as full) -> red (model-01 unmarked); equivalentCoverage reading
+/// a listed missing price as partial -> red (model-07 marked); the
+/// `unpriced` branch dropped -> red (model-03 reads `-`); the partial clause
+/// of holdsSubscription dropped -> red (model-05 reads `-`).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
     let gap = json!([{"model": "opus", "dimension": UNKNOWN_LIFETIME, "config_key": null}]);
-    let sub = |equivalent: Value, missing: &Value| {
+    let sub = |equivalent: Value, status: &str, missing: &Value| {
         let dims: Vec<Value> = missing
             .as_array()
             .expect("a list")
@@ -795,14 +798,17 @@ fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
             "cost_status": "subscription",
             "cost_usd": null,
             "equivalent_cost_usd": equivalent,
+            "equivalent_status": status,
             "missing_prices": missing,
             "missing_price_dimensions": dims,
         })
     };
+    let mut beside_unpriced_row = sub(json!(12.5), "complete", &gap);
+    beside_unpriced_row["cost_status"] = json!("partial");
     let answer = dense_with(&[
-        ("model-01", sub(json!(268.29), &gap)),
-        ("model-02", sub(json!(40.25), &json!([]))),
-        ("model-03", sub(Value::Null, &gap)),
+        ("model-01", sub(json!(268.29), "partial", &gap)),
+        ("model-02", sub(json!(40.25), "complete", &json!([]))),
+        ("model-03", sub(Value::Null, "partial", &gap)),
         (
             "model-04",
             json!({"cost_status": "priced", "cost_usd": 1.5, "equivalent_cost_usd": null}),
@@ -815,6 +821,7 @@ fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
             "model-06",
             json!({"cost_status": "partial", "cost_usd": 0.25, "equivalent_cost_usd": null}),
         ),
+        ("model-07", beside_unpriced_row),
     ]);
 
     let out = observe("traffic", answer, &[]);
@@ -823,12 +830,22 @@ fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
     assert_eq!(partial["equivalent"], "~$268.29partial", "{partial:#}");
     assert_eq!(partial["equivalent_mark"], "partial", "{partial:#}");
     assert_eq!(
-        partial["equivalent_mark_title"], "does not include requests with an unpriced dimension",
+        partial["equivalent_mark_title"], EQUIVALENT_PARTIAL_TITLE,
         "{partial:#}"
     );
     let full = row(&out, "model-02");
     assert_eq!(full["equivalent"], "~$40.25", "positive control: {full:#}");
     assert_eq!(full["equivalent_mark"], Value::Null, "{full:#}");
+    let complete_beside_gap = row(&out, "model-07");
+    assert_eq!(
+        complete_beside_gap["equivalent"], "~$12.50",
+        "{complete_beside_gap:#}"
+    );
+    assert_eq!(
+        complete_beside_gap["equivalent_mark"],
+        Value::Null,
+        "{complete_beside_gap:#}"
+    );
     let unpriced = row(&out, "model-03");
     assert_eq!(unpriced["equivalent"], "unpriced", "{unpriced:#}");
     assert_eq!(unpriced["equivalent_faint"], true, "{unpriced:#}");
@@ -842,6 +859,60 @@ fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
     );
     let mixed_priced = row(&out, "model-06");
     assert_eq!(mixed_priced["equivalent"], "-", "{mixed_priced:#}");
+}
+
+/// The title of the `partial` mark on an "At API prices" figure, on every
+/// view that draws one.
+const EQUIVALENT_PARTIAL_TITLE: &str = "priced subtotal only: leaves out usage that has no price";
+
+/// An opened row whose group wrote cache tokens of unknown lifetime says in
+/// one plain sentence that those tokens have no price and that the dollar
+/// figures leave them out, with the group's own count; a group with none
+/// draws no sentence. The count reads the way the cache-write pair beside it
+/// reads it, and one token reads in the singular.
+///
+/// Mutation checks: unpricedRemainderLine dropped from trafficRow -> red
+/// (model-01 has no sentence); its `unknown <= 0` guard removed -> red
+/// (model-02 draws one).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_an_unknown_lifetime_remainder_is_explained_as_unpriced() {
+    let writes = |unknown: i64| {
+        json!({
+            "cache_write_present": 1,
+            "cache_write_tokens": 2_000_000,
+            "cache_write_unknown_tokens": unknown,
+        })
+    };
+    let answer = dense_with(&[
+        ("model-01", writes(1_234_567)),
+        ("model-02", writes(0)),
+        ("model-03", writes(1)),
+    ]);
+
+    let out = observe("traffic", answer, &["model-01", "model-02", "model-03"]);
+
+    let details = &out["details"];
+    let remainder = |label: &str| details[id_key(label)]["remainder"].clone();
+    assert_eq!(
+        remainder("model-01"),
+        "1.2M cache-write tokens of unknown lifetime have no price; the cost and \
+         At API prices figures leave them out.",
+        "{out:#}"
+    );
+    assert_eq!(remainder("model-02"), Value::Null, "{out:#}");
+    assert!(
+        details[id_key("model-02")]["pairs"]
+            .as_array()
+            .is_some_and(|p| !p.is_empty()),
+        "positive control: model-02's detail is open: {out:#}"
+    );
+    assert_eq!(
+        remainder("model-03"),
+        "1 cache-write token of unknown lifetime has no price; the cost and \
+         At API prices figures leave it out.",
+        "{out:#}"
+    );
 }
 
 /// An error rate is plain text below 5% of a group's requests, the degraded

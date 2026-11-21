@@ -146,7 +146,9 @@
       equivalentFigure(m),
       cacheHitFigure(m.cache_hit_pct)
     ], trafficTimingPairs(m));
-    appendDetailBlocks(tbl, [aliasChainBlock(g), missingPriceBlock(m.missing_prices)]);
+    appendDetailBlocks(tbl, [
+      unpricedRemainderLine(m), aliasChainBlock(g), missingPriceBlock(m.missing_prices)
+    ]);
   }
 
   function trafficHint(shown, omitted) {
@@ -273,6 +275,19 @@
     if (unknown <= 0) { return covers + '; none of unknown lifetime'; }
     var share = written > 0 ? ' (' + shareText(unknown, written) + '%)' : '';
     return covers + '; ' + humanCount(unknown) + share + ' of unknown lifetime';
+  }
+
+  // Written tokens of unknown lifetime are never priced at any lifetime's
+  // rate, so every dollar figure of the group leaves them out.
+  function unpricedRemainderLine(m) {
+    var unknown = num0(m.cache_write_unknown_tokens);
+    if (unknown <= 0) { return null; }
+    var line = document.createElement('p');
+    line.className = 'traffic-remainder';
+    line.textContent = humanCount(unknown) +
+      phrase(unknown, ' cache-write token of unknown lifetime has', ' cache-write tokens of unknown lifetime have') +
+      ' no price; the cost and At API prices figures leave ' + phrase(unknown, 'it', 'them') + ' out.';
+    return line;
   }
 
   // A whole-percent share; a part above zero that rounds to nothing reads

@@ -26,6 +26,12 @@
   font-size: var(--fs-xs);
   color: var(--faint);
 }
+.traffic-remainder {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: normal;
+}
 .traffic-block {
   margin-top: var(--sp-3);
   display: flex;
@@ -34,6 +40,7 @@
   white-space: normal;
 }
 /* Capped at the scroller's visible width, as the pairs above are. */
+.tablewrap .traffic-remainder,
 .tablewrap .traffic-block { max-width: calc(100cqi - 2 * var(--sp-4) - 2px); }
 .traffic-blockhead {
   margin: 0;

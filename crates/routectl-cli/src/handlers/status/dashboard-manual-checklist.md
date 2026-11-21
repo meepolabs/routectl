@@ -186,12 +186,15 @@ banner, no retry signal -- silently mislabeled data.
 - An "At API prices" figure never reads as covering traffic it leaves out.
   In a ledger copy, give one subscription model some rows with a cache
   write of unknown lifetime and some fully priced rows, and give another
-  subscription model only rows with an unknown-lifetime write. On Traffic
-  by model, the first reads `~$<n> partial`, the mark's tooltip saying it
-  does not include requests with an unpriced dimension; the second reads a
-  faint `unpriced`, never `-`; a priced API-key model keeps `-`. The Now
-  EST. COST tile's `At API prices` and each Accounts `traffic` line read
-  the same way.
+  subscription model only rows with a reasoning count and no persisted
+  provider kind. On Traffic by model, the first reads `~$<n> partial`, the
+  mark's tooltip saying `priced subtotal only: leaves out usage that has no
+  price`; the second reads a faint `unpriced`, never `-`; a priced API-key
+  model keeps `-`. The Now EST. COST tile's `At API prices` and each
+  Accounts `traffic` line read the same way. Opening the first model's row
+  shows one sentence saying how many cache-write tokens of unknown lifetime
+  have no price and that the cost and At API prices figures leave them out;
+  a model with no such writes shows no sentence.
 - Check the next item at 720, 1024 and 1440 px wide and at 1440 px with
   200% text, in both the dark and the light theme, and once more with the
   OS reduced-motion preference on (no value animates, nothing is lost).

@@ -71,7 +71,8 @@
   // Fields whose value is a TOKEN, not a figure: carried through verbatim,
   // never coerced (a num0 pass would turn `unpriced` into a zero cost).
   var QUERY_TOKENS = [
-    'cost_status'
+    'cost_status',
+    'equivalent_status'
   ];
 
   // Fields whose value is a LIST of missing prices, always present (empty

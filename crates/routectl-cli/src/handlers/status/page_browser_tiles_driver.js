@@ -230,10 +230,10 @@
     var group = { cost_status: 'priced', cost_usd: 1.25, equivalent_cost_usd: null };
     return costAcrossRounds([
       { totals: { cost_status: 'priced', cost_usd: 12.5, equivalent_cost_usd: 40.25,
-        missing_prices: [], missing_price_dimensions: [] },
+        equivalent_status: 'complete', missing_prices: [], missing_price_dimensions: [] },
         groups: [group] },
       { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 40.25,
-        missing_prices: [], missing_price_dimensions: [] },
+        equivalent_status: 'complete', missing_prices: [], missing_price_dimensions: [] },
         groups: [group] },
       { totals: { cost_status: 'priced', cost_usd: 12.5, equivalent_cost_usd: null },
         groups: [group] }
@@ -256,20 +256,28 @@
     ]);
   });
 
-  // The subscription window's API-price equivalent: covering only the rows
-  // whose every dimension was priced (the server lists the rest), covering
-  // every row, and with no row priced at all.
+  // The window's API-price equivalent: a subtotal the server calls partial,
+  // one it calls complete, subscription traffic with no row priced at all,
+  // and a complete equivalent in a window whose listed gap belongs to an
+  // unpriced API-key row.
   d.scenario('tiles-equivalent-coverage', function () {
     var group = { cost_status: 'priced', cost_usd: 1.25, equivalent_cost_usd: null };
     var gap = [{ model: 'opus', dimension: 'cache write (unknown lifetime)', config_key: null }];
     return costAcrossRounds([
       { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 617.54,
+        equivalent_status: 'partial',
         missing_prices: gap, missing_price_dimensions: [gap[0].dimension] },
         groups: [group] },
       { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 40.25,
+        equivalent_status: 'complete',
         missing_prices: [], missing_price_dimensions: [] },
         groups: [group] },
       { totals: { cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: null,
+        equivalent_status: 'partial',
+        missing_prices: gap, missing_price_dimensions: [gap[0].dimension] },
+        groups: [group] },
+      { totals: { cost_status: 'partial', cost_usd: null, equivalent_cost_usd: 40.25,
+        equivalent_status: 'complete',
         missing_prices: gap, missing_price_dimensions: [gap[0].dimension] },
         groups: [group] }
     ]);

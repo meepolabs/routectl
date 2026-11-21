@@ -175,18 +175,23 @@ fn page_browser_tiles_cost_tile_keeps_spend_and_api_price_apart() {
 }
 
 /// The tile's "At API prices" figure says when it leaves some subscription
-/// traffic out: an equivalent beside a listed unpriced dimension carries the
-/// `partial` mark and its title, one covering every row carries none, and a
-/// subscription window with requests but no equivalent reads the faint word
-/// `unpriced` rather than drawing nothing.
+/// traffic out, as the server's `equivalent_status` says: a `partial`
+/// equivalent carries the `partial` mark and its title, a `complete` one
+/// carries none (also when the window lists a missing price, which belongs
+/// to another kind of row), and a subscription window with requests but no
+/// equivalent reads the faint word `unpriced` rather than drawing nothing.
 ///
 /// Mutation checks: the mark appended in apiPriceBlock removed -> red (round
-/// 0); apiPriceBlock returning null with no equivalent -> red (round 2).
+/// 0); equivalentCoverage ignoring `equivalent_status` -> red (round 0
+/// unmarked); equivalentCoverage reading a listed missing price as partial
+/// -> red (round 3 marked); apiPriceBlock returning null with no equivalent
+/// -> red (round 2).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
     let rounds = run("tiles-equivalent-coverage");
-    let (partial, full, unpriced) = (&rounds[0], &rounds[1], &rounds[2]);
+    let (partial, full, unpriced, complete_beside_gap) =
+        (&rounds[0], &rounds[1], &rounds[2], &rounds[3]);
 
     assert_eq!(
         text(partial, "alt_value"),
@@ -196,7 +201,7 @@ fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
     assert_eq!(text(partial, "alt_mark"), Some("partial"), "{partial:#}");
     assert_eq!(
         text(partial, "alt_mark_title"),
-        Some("does not include requests with an unpriced dimension"),
+        Some("priced subtotal only: leaves out usage that has no price"),
         "{partial:#}"
     );
 
@@ -219,6 +224,16 @@ fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
     );
     assert_eq!(unpriced["alt_faint"], true, "{unpriced:#}");
     assert!(unpriced["alt_mark"].is_null(), "{unpriced:#}");
+
+    assert_eq!(
+        text(complete_beside_gap, "alt_value"),
+        Some("~$40.25"),
+        "{complete_beside_gap:#}"
+    );
+    assert!(
+        complete_beside_gap["alt_mark"].is_null(),
+        "{complete_beside_gap:#}"
+    );
 }
 
 /// A partial window qualifies its cost on the tile and on every provider card

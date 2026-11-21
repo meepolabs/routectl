@@ -300,7 +300,8 @@
   d.scenario('accounts-traffic', function () {
     rewriteSeatAnswers(function (data) {
       setMetrics(data, 'anthropic#a', {
-        cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 1.234
+        cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 1.234,
+        equivalent_status: 'complete'
       });
       data.groups.push(seatGroup(data, 'CODEX', { requests: 777 }));
       setMetrics(data, '#anthropic', {
@@ -340,14 +341,17 @@
     rewriteSeatAnswers(function (data) {
       setMetrics(data, 'anthropic#a', {
         cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 1.234,
+        equivalent_status: 'partial',
         missing_prices: gap, missing_price_dimensions: [gap[0].dimension]
       });
       setMetrics(data, '#anthropic', {
         cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: null,
+        equivalent_status: 'partial',
         missing_prices: gap, missing_price_dimensions: [gap[0].dimension]
       });
       setMetrics(data, '#compat', {
         cost_status: 'subscription', cost_usd: null, equivalent_cost_usd: 2,
+        equivalent_status: 'complete',
         missing_prices: [], missing_price_dimensions: []
       });
     });
