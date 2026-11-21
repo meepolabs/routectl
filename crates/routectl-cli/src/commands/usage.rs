@@ -607,7 +607,7 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// The missing-price label for cache-write tokens no lifetime can be matched
 /// to: tokens with no reported lifetime, or a split summing above its total.
 /// No rate is ever applied to them, at any lifetime.
-pub(super) const UNKNOWN_LIFETIME_LABEL: &str = "cache write (unknown lifetime)";
+pub(crate) const UNKNOWN_LIFETIME_LABEL: &str = "cache write (unknown lifetime)";
 
 /// The missing-price label for reasoning tokens on a row whose persisted kind
 /// does not say whether they bill on their own.

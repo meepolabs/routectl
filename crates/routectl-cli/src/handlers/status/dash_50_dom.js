@@ -75,8 +75,11 @@
   // A link to view `view`, labelled from the view's own label. The click is
   // dispatched through the `open-view` action; the href is the view's
   // address, so the link also works as a link (copied, opened in a new tab).
+  // It carries the shared link look; a caller with its own placement swaps
+  // the class.
   function viewLink(view) {
     var a = document.createElement('a');
+    a.className = 'view-link';
     a.textContent = 'see ' + view.label;
     a.setAttribute('href', viewLinkHash(view.id));
     setAction(a, 'open-view', view.id);

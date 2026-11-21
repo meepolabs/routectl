@@ -22,6 +22,13 @@
 
   function phrase(n, one, many) { return n === 1 ? one : many; }
 
+  // A seat is named "provider_entry (login_label)", or by its entry alone
+  // when the login carries no label.
+  function seatName(entry, label) {
+    var name = String(entry);
+    return label ? name + ' (' + String(label) + ')' : name;
+  }
+
   // A percentage that ARRIVED as a percentage (the ledger's own weighted
   // cache-hit share), to whole precision. A non-positive share renders "0%"
   // faintly at its call site rather than as an absence: zero warm reads is a

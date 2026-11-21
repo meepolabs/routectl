@@ -812,6 +812,28 @@ mod tests {
         assert_eq!(&script[start..end], routectl_usage::UNATTRIBUTED);
     }
 
+    /// The dimension the Traffic view folds into its remainder sentence is
+    /// the label the server puts in `missing_prices` for writes of unknown
+    /// lifetime.
+    ///
+    /// Mutation check: spell UNKNOWN_LIFETIME_DIMENSION `'cache write'` ->
+    /// red.
+    #[test]
+    fn the_unknown_lifetime_dimension_is_the_server_label() {
+        let script = script();
+        let needle = "var UNKNOWN_LIFETIME_DIMENSION = '";
+        let start = script
+            .find(needle)
+            .expect("dashboard JS declares UNKNOWN_LIFETIME_DIMENSION")
+            + needle.len();
+        let end = start + script[start..].find('\'').expect("the literal closes");
+
+        assert_eq!(
+            &script[start..end],
+            crate::commands::usage::UNKNOWN_LIFETIME_LABEL
+        );
+    }
+
     /// The string entries of a `var <name> = [ ... ]` array literal in the
     /// dashboard script.
     fn string_array(name: &str) -> Vec<String> {

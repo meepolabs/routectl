@@ -591,13 +591,17 @@ fn page_browser_doctor_fix_command_selection_survives_rounds() {
 }
 
 /// The populated config fixture's pool, read off the Pools card: each
-/// member's provider entry and login label are separate texts, in configured
-/// order, beside the strategy token as the config spells it. Positive control
-/// for the faint state: the unlabeled member says so rather than leaving a
-/// gap.
+/// member is named "entry (label)" as every other view names a seat, in
+/// configured order, beside the strategy token as the config spells it, and
+/// a copy of a labeled member is that name alone. Positive control for the
+/// faint state: the unlabeled member reads its entry alone and says it has
+/// no login label rather than leaving a gap.
+///
+/// Mutation check: draw the entry alone in poolMembers (no seatName) -> red
+/// (`claude-seat` where `claude-seat (a)` is wanted).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_config_pools_card_lists_members_by_entry_and_login_label() {
+fn page_browser_config_pools_card_names_members_as_entry_and_label() {
     use crate::handlers::status::config::fixture::{FIXTURE_POOL, FIXTURE_POOL_MEMBERS};
 
     let report = run_scenario(&scenario("config-pools", "config"));
@@ -608,18 +612,21 @@ fn page_browser_config_pools_card_lists_members_by_entry_and_login_label() {
     assert_eq!(pool["pool"], FIXTURE_POOL);
     assert_eq!(pool["seat_selection"], "fill-first");
     let members = pool["members"].as_array().expect("members");
-    let entries: Vec<&str> = members
+    let names: Vec<&str> = members
         .iter()
-        .map(|m| m["entry"].as_str().expect("an entry"))
+        .map(|m| m["name"].as_str().expect("a name"))
         .collect();
-    assert_eq!(entries, FIXTURE_POOL_MEMBERS);
+    assert_eq!(
+        names,
+        [
+            FIXTURE_POOL_MEMBERS[0].to_string(),
+            format!("{} (a)", FIXTURE_POOL_MEMBERS[1])
+        ]
+    );
     assert_eq!(members[0]["login"], "no login label");
     assert_eq!(members[0]["login_faint"], true);
-    assert_eq!(members[1]["login"], "a");
-    assert_eq!(members[1]["login_faint"], false);
-    for m in members {
-        assert_eq!(m["text_nodes"], 2, "entry and label are two texts: {m:#}");
-    }
+    assert_eq!(members[1]["login"], Value::Null, "{:#}", members[1]);
+    assert_eq!(members[1]["copied"], names[1], "{:#}", members[1]);
 }
 
 /// The priced fixture model's detail row at `width`: the pairs as drawn.

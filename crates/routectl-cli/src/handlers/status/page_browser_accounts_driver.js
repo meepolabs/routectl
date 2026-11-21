@@ -262,11 +262,12 @@
   function trafficSeen(id) {
     var line = byId(id);
     return {
-      text: line.textContent,
+      text: d.shownText(line),
       req: textIn(line, '.acct-traffic-req'),
       cost: textIn(line, '.acct-traffic-cost'),
-      alt: textIn(line, '.acct-traffic-alt'),
-      alt_mark: textIn(line, '.acct-traffic-alt .cost-mark'),
+      alt: d.shownText(line.querySelector('.acct-traffic-alt')),
+      alt_mark: d.shownText(line.querySelector('.acct-traffic-alt .cost-mark')),
+      alt_mark_spoken: d.spokenMark(line.querySelector('.acct-traffic-alt .cost-mark')),
       alt_faint: !!line.querySelector('.acct-traffic-alt .mag-zero'),
       note: textIn(line, '.acct-traffic-note')
     };

@@ -232,8 +232,8 @@
 }
 
 /* ---- config: seat pools ----
-   Members read in configured order, one per line: the provider entry in
-   monospace, its login label beside it as its own quieter text. */
+   Members read in configured order, one per line, each named "entry
+   (label)" in monospace; an unlabeled entry carries a quieter note. */
 .cfgpool-members {
   list-style: none;
   margin: 0;
@@ -393,27 +393,31 @@
   letter-spacing: 0.07em;
   color: var(--faint);
 }
-/* A remediation is something to run verbatim, so it keeps its own spacing,
-   and it wraps inside its own box so all of it is readable without
-   scrolling: a long token breaks rather than running out of the box. */
+/* A remediation is prose in the UI face; only the commands it quotes are
+   set as code. It wraps within the card: a long token breaks rather than
+   running out of it. */
 .docfix-text {
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--fs-sm);
   color: var(--fg);
-  background: var(--surface-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-sm);
-  padding: var(--sp-2) var(--sp-3);
   max-width: 100%;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-/* A command quoted in a remediation: the part to run, selected whole by a
-   click and reachable by Tab, drawn without the backticks it was quoted in. */
+/* A command quoted in a remediation: the part to run, in the attention fix's
+   chip, selected whole by a click and reachable by Tab, drawn without the
+   backticks it was quoted in. A chip broken across lines keeps its box on
+   each piece. */
 .docfix-code {
   font-family: var(--font-mono);
   font-weight: 600;
   color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 0 var(--sp-1);
+  white-space: pre-wrap;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
   user-select: all;
 }
 .docfix-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

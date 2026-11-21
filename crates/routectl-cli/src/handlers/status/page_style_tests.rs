@@ -806,30 +806,40 @@ fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
     }
 }
 
-/// The Now "see Accounts" link keeps 4.5:1 on the page and on a card in
-/// both themes.
+/// The Now "see Accounts" link and the shared "see <view>" link (Doctor's
+/// "see Models") keep 4.5:1 on the page and on a card in both themes, and
+/// the shared link draws the accent focus ring.
 ///
-/// Mutation check: color `.glance-link` with `var(--accent)` -> red (light
-/// on --bg is 4.43:1).
+/// Mutation checks: color `.glance-link` with `var(--accent)` -> red (light
+/// on --bg is 4.43:1); drop the `.view-link` color -> red (no color).
 #[test]
-fn the_glance_link_keeps_four_and_a_half_to_one() {
+fn the_see_view_links_keep_four_and_a_half_to_one() {
     let css = style();
     let decls = css_decls(&css);
-    let (_, value) = block(&decls, "", ".glance-link")
-        .into_iter()
-        .rfind(|(prop, _)| *prop == "color")
-        .expect(".glance-link declares a color");
-    let token = value
-        .strip_prefix("var(")
-        .and_then(|v| v.strip_suffix(')'))
-        .expect("the link color is a token");
-    for light in [false, true] {
-        let tokens = theme_tokens(&css, light);
-        for bg in TEXT_BACKGROUNDS {
-            let ratio = contrast(srgba(resolve(&tokens, token)), srgba(resolve(&tokens, bg)));
-            assert!(ratio >= 4.5, "on {bg}: {ratio:.2}:1 (light: {light})");
+    for sel in [".glance-link", ".view-link"] {
+        let (_, value) = block(&decls, "", sel)
+            .into_iter()
+            .rfind(|(prop, _)| *prop == "color")
+            .unwrap_or_else(|| panic!("{sel} declares a color"));
+        let token = value
+            .strip_prefix("var(")
+            .and_then(|v| v.strip_suffix(')'))
+            .expect("the link color is a token");
+        for light in [false, true] {
+            let tokens = theme_tokens(&css, light);
+            for bg in TEXT_BACKGROUNDS {
+                let ratio = contrast(srgba(resolve(&tokens, token)), srgba(resolve(&tokens, bg)));
+                assert!(ratio >= 4.5, "{sel} on {bg}: {ratio:.2}:1 (light: {light})");
+            }
         }
     }
+    assert_eq!(
+        block(&decls, "", ".view-link:focus-visible"),
+        vec![
+            ("outline", "2px solid var(--accent)"),
+            ("outline-offset", "2px")
+        ]
+    );
 }
 
 /// A click selects a whole value only on a command the operator runs as
@@ -863,4 +873,45 @@ fn only_fix_commands_select_whole_on_click() {
             ".models-cause-fix"
         ]
     );
+}
+
+/// A Doctor remediation reads as prose in the UI face with no box of its
+/// own; only the commands it quotes are code, each in the chip the
+/// attention fix uses (its surface, border and radius).
+///
+/// Mutation checks: set `.docfix-text` back to `var(--font-mono)` -> red;
+/// drop the `.docfix-code` border -> red.
+#[test]
+fn a_remediation_is_prose_with_only_its_commands_as_code_chips() {
+    let css = style();
+    let decls = css_decls(&css);
+    let value = |sel: &str, prop: &str| {
+        block(&decls, "", sel)
+            .into_iter()
+            .rfind(|(p, _)| *p == prop)
+            .map(|(_, v)| v.to_owned())
+    };
+
+    assert_eq!(
+        value(".docfix-text", "font-family").as_deref(),
+        Some("var(--font-ui)")
+    );
+    for prop in ["background", "border", "padding"] {
+        assert_eq!(value(".docfix-text", prop), None, ".docfix-text {prop}");
+    }
+    assert_eq!(
+        value(".docfix-code", "font-family").as_deref(),
+        Some("var(--font-mono)")
+    );
+    for prop in ["background", "border", "border-radius"] {
+        assert!(
+            value(".attn-fix-code", prop).is_some(),
+            "positive control: the attention chip declares {prop}"
+        );
+        assert_eq!(
+            value(".docfix-code", prop),
+            value(".attn-fix-code", prop),
+            ".docfix-code {prop}"
+        );
+    }
 }

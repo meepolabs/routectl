@@ -143,18 +143,26 @@
   // How many model problems the Models view lists: one per cause line it
   // draws over its lanes, grouped by the same rule, so the two views read one
   // number from one models payload. Problem lanes never collapse into the
-  // unused table, so every cause line sits in the main one.
+  // unused table, so every cause line sits in the main one. One cause can
+  // cover several lanes, and the Models tab badge counts lanes, so the lanes
+  // ride beside the problems in the badge's own count.
   function doctorModelProblemsSection(rec) {
     var rows = rec.data.rows;
     if (!Array.isArray(rows)) { throw new Error('models payload carries no rows'); }
     var count = modelsCauseGroups(rows.filter(isPlainObject)).filter(function (group) {
       return group.key !== null;
     }).length;
+    var lanes = modelProblemLanes(rows);
     var line = markRefreshUnit(document.createElement('div'), 'model-problems');
     line.className = 'docverdict-sub docmodels';
     line.appendChild(docText('docmodels-count', String(count)));
-    line.appendChild(document.createTextNode(
-      phrase(count, ' model problem', ' model problems') + ' on the Models view - '));
+    line.appendChild(document.createTextNode(phrase(count, ' model problem', ' model problems')));
+    if (lanes > 0) {
+      line.appendChild(document.createTextNode(' ('));
+      line.appendChild(docText('docmodels-lanes', String(lanes)));
+      line.appendChild(document.createTextNode(phrase(lanes, ' lane)', ' lanes)')));
+    }
+    line.appendChild(document.createTextNode(' on the Models view - '));
     line.appendChild(viewLink(viewFor('models')));
     return line;
   }

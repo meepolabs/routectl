@@ -148,13 +148,6 @@
     return card;
   }
 
-  // A seat is named "provider_entry (login_label)", or by its entry alone
-  // when the login carries no label.
-  function glanceSeatName(row) {
-    var name = String(row.provider_entry);
-    return row.login_label ? name + ' (' + String(row.login_label) + ')' : name;
-  }
-
   function glanceSeat(row, poolId, poolHasUsable, nowMs) {
     var seat = document.createElement('div');
     seat.id = poolId + '-' + idKey(row.account);
@@ -162,7 +155,7 @@
     seat.setAttribute('data-account', String(row.account));
     var head = document.createElement('div');
     head.className = 'glance-seat-head';
-    head.appendChild(attentionText('span', 'glance-seat-name', glanceSeatName(row)));
+    head.appendChild(attentionText('span', 'glance-seat-name', seatName(row.provider_entry, row.login_label)));
     head.appendChild(glanceLogin(row.credential, poolHasUsable));
     seat.appendChild(head);
     seat.appendChild(glanceReading(row, nowMs));
@@ -840,11 +833,18 @@
     return holdsSubscription && num0(m.requests) > 0 ? 'unpriced' : 'none';
   }
 
-  // The visible word beside a figure that is a subtotal, with why in its title.
+  // The visible word beside a figure that is a subtotal, with why in its
+  // title for a pointer and as visually hidden text for everyone else: the
+  // mark takes no focus, so a title alone never reaches a keyboard or a
+  // screen reader.
   function costMark(title) {
     var mark = document.createElement('span');
     mark.className = 'cost-mark';
-    mark.textContent = labelFor('cost', 'partial').label;
+    mark.appendChild(document.createTextNode(labelFor('cost', 'partial').label));
+    var why = document.createElement('span');
+    why.className = 'sr-only';
+    why.textContent = ' (' + title + ')';
+    mark.appendChild(why);
     mark.title = title;
     return mark;
   }

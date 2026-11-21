@@ -25,6 +25,12 @@
 
   var TRAFFIC_READ_FAILED = "Couldn't read traffic from routectl";
 
+  // The missing-price dimension the server names for cache writes of unknown
+  // lifetime. No configuration key prices it at any rate, and the remainder
+  // sentence already says so, so the No price block never repeats it there;
+  // a page.rs test pins it to the server's label.
+  var UNKNOWN_LIFETIME_DIMENSION = 'cache write (unknown lifetime)';
+
   // What was served in the selected range: the scope strip and the grouping
   // picker, then one sortable table with a row per group.
   function buildTraffic() {
@@ -147,7 +153,7 @@
       cacheHitFigure(m.cache_hit_pct)
     ], trafficTimingPairs(m));
     appendDetailBlocks(tbl, [
-      unpricedRemainderLine(m), aliasChainBlock(g), missingPriceBlock(m.missing_prices)
+      unpricedRemainderLine(m), aliasChainBlock(g), missingPriceBlock(trafficMissingPrices(m))
     ]);
   }
 
@@ -290,6 +296,13 @@
     return line;
   }
 
+  // The missing prices the No price block lists: the unknown-lifetime
+  // dimension is left out wherever the remainder sentence explains it.
+  function trafficMissingPrices(m) {
+    if (num0(m.cache_write_unknown_tokens) <= 0) { return m.missing_prices; }
+    return m.missing_prices.filter(function (p) { return p.dimension !== UNKNOWN_LIFETIME_DIMENSION; });
+  }
+
   // A whole-percent share; a part above zero that rounds to nothing reads
   // "<1", never a zero beside its own count.
   function shareText(part, whole) {
@@ -343,7 +356,9 @@
         line.appendChild(key);
       });
     }
-    var unkeyed = prices.filter(function (p) { return p.config_key === null; });
+    var unkeyed = prices.filter(function (p) {
+      return p.config_key === null && p.dimension !== UNKNOWN_LIFETIME_DIMENSION;
+    });
     if (unkeyed.length) {
       line.appendChild(document.createTextNode(' - no configuration key prices ' +
         unkeyed.map(function (p) { return p.dimension; }).join(', ')));

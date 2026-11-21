@@ -164,6 +164,30 @@
     });
   }
 
+  // The text a sighted reader sees in `node`: its text with every visually
+  // hidden part left out. Null for no node.
+  function shownText(node) {
+    if (!node) { return null; }
+    var copy = node.cloneNode(true);
+    Array.prototype.forEach.call(copy.querySelectorAll('.sr-only'), function (n) {
+      n.parentNode.removeChild(n);
+    });
+    return copy.textContent;
+  }
+
+  // What a `partial` mark says without a pointer: its whole text, the
+  // visually hidden part included, and whether that part is really hidden.
+  function spokenMark(node) {
+    if (!node) { return null; }
+    var hidden = node.querySelector('.sr-only');
+    var box = hidden ? hidden.getBoundingClientRect() : null;
+    return {
+      text: node.textContent,
+      hidden_part_hidden: !!box && box.width <= 1 && box.height <= 1 &&
+        getComputedStyle(hidden).overflow === 'hidden'
+    };
+  }
+
   var api = {
     scenario: function (name, fn) { scenarios[name] = fn; },
     hold: function (rule) { holdRules.push(rule); },
@@ -174,7 +198,9 @@
     waitFor: waitFor,
     waitForElement: waitForElement,
     acrossRounds: acrossRounds,
-    pressSelectAll: pressSelectAll
+    pressSelectAll: pressSelectAll,
+    shownText: shownText,
+    spokenMark: spokenMark
   };
   window.routectlDriver = api;
 })();
@@ -341,10 +367,10 @@
               cells[2].querySelectorAll('.cfgpool-member'), function (li) {
                 var login = li.querySelector('.cfgpool-login');
                 return {
-                  entry: li.querySelector('.cfgpool-entry').textContent,
-                  login: login.textContent,
-                  login_faint: login.classList.contains('mag-zero'),
-                  text_nodes: li.children.length
+                  name: li.querySelector('.cfgpool-entry').textContent,
+                  login: login ? login.textContent : null,
+                  login_faint: !!login && login.classList.contains('mag-zero'),
+                  copied: li.innerText
                 };
               })
           };

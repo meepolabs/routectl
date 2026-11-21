@@ -766,7 +766,7 @@
       return open > 0 ? { label: String(open), kind: 'warn' } : null;
     }
     if (name === 'models') {
-      var lanes = (data.rows || []).filter(function (row) { return row && row.state !== 'ok'; }).length;
+      var lanes = modelProblemLanes(data.rows);
       return lanes > 0 ? { label: String(lanes), kind: 'warn' } : null;
     }
     if (name === 'attention') {
@@ -776,6 +776,12 @@
       return { label: String(active), kind: counts.broken > 0 ? 'error' : 'warn' };
     }
     return null;
+  }
+
+  // The model lanes whose state is not ok: the Models badge, and the lane
+  // figure Doctor shows beside its problem count, so the two never differ.
+  function modelProblemLanes(rows) {
+    return (rows || []).filter(function (row) { return row && row.state !== 'ok'; }).length;
   }
 
   var ATTENTION_COUNT_KEYS = ['broken', 'degraded', 'recovered', 'doctor_fail'];

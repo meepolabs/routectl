@@ -242,8 +242,8 @@
 
   // One row per `[pools.X]` entry: the selection strategy as the config
   // spells it, and the members in configured order (fill-first drains them in
-  // that order). A member is named by its provider entry and its login label
-  // as two separate texts; the account key is never parsed for either.
+  // that order). A member is named as every other view names a seat, "entry
+  // (label)"; the account key is never parsed for either.
   function poolSection(pools) {
     var tbl = mkTable('config-pools', 'Configured seat pools',
       [R('pool'), C('seat selection'), W('members, in order')]);
@@ -260,11 +260,13 @@
     (Array.isArray(members) ? members : []).forEach(function (m) {
       var item = document.createElement('li');
       item.className = 'cfgpool-member';
+      var label = typeof m.login_label === 'string' && m.login_label !== '' ? m.login_label : null;
       var entry = document.createElement('span');
       entry.className = 'cfgpool-entry';
-      entry.textContent = (m.entry === null || m.entry === undefined) ? '-' : String(m.entry);
+      entry.textContent = (m.entry === null || m.entry === undefined)
+        ? '-' : seatName(m.entry, label);
       item.appendChild(entry);
-      item.appendChild(memberLogin(m.login_label));
+      if (label === null) { item.appendChild(memberNoLogin()); }
       list.appendChild(item);
     });
     return list;
@@ -272,15 +274,10 @@
 
   // An entry with no OAuth label (an API-key entry, or a login no model
   // reaches) says so rather than leaving a gap that reads as a missing field.
-  function memberLogin(label) {
+  function memberNoLogin() {
     var span = document.createElement('span');
-    span.className = 'cfgpool-login';
-    if (typeof label === 'string' && label !== '') {
-      span.textContent = label;
-    } else {
-      span.textContent = 'no login label';
-      span.classList.add('mag-zero');
-    }
+    span.className = 'cfgpool-login mag-zero';
+    span.textContent = 'no login label';
     return span;
   }
 

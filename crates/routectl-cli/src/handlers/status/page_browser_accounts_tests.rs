@@ -6,7 +6,7 @@
 // over the selected range, the poll state, and the two background drivers. `include!`d into a child module of
 // `page::tests`; the scenarios live in page_browser_accounts_driver.js.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const ACCOUNTS_DRIVER: &str = include_str!("page_browser_accounts_driver.js");
 
@@ -570,6 +570,14 @@ fn page_browser_accounts_an_equivalent_that_leaves_rows_out_says_so() {
 
     assert_eq!(out["seat"]["alt"], "~$1.23partialAt API prices", "{out:#}");
     assert_eq!(out["seat"]["alt_mark"], "partial", "{out:#}");
+    assert_eq!(
+        out["seat"]["alt_mark_spoken"],
+        json!({
+            "text": "partial (priced subtotal only: leaves out usage that has no price)",
+            "hidden_part_hidden": true
+        }),
+        "the mark's reason reaches a keyboard and a screen reader: {out:#}"
+    );
     assert_eq!(out["compat"]["alt"], "~$2.00At API prices", "{out:#}");
     assert_eq!(out["compat"]["alt_mark"], Value::Null, "{out:#}");
     assert!(

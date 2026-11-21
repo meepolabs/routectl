@@ -124,6 +124,7 @@
         return { term: def.querySelector('dt').textContent, text: def.querySelector('dd').textContent };
       }),
       remainder: textIn(detail, '.traffic-remainder'),
+      remainders: detail.querySelectorAll('.traffic-remainder').length,
       chain: blockLines(detail, '.traffic-chain'),
       prices: blockLines(detail, '.traffic-prices')
     };
@@ -272,10 +273,12 @@
         return c.indexOf('traffic-rate--') === 0;
       }) : [],
       rate_color: rate ? getComputedStyle(rate).color : null,
-      cost: cost.textContent,
-      cost_mark: textIn(cost, '.cost-mark'),
-      equivalent: cells[5].textContent,
-      equivalent_mark: textIn(cells[5], '.cost-mark'),
+      cost: d.shownText(cost),
+      cost_mark: d.shownText(cost.querySelector('.cost-mark')),
+      cost_mark_spoken: d.spokenMark(cost.querySelector('.cost-mark')),
+      equivalent: d.shownText(cells[5]),
+      equivalent_mark: d.shownText(cells[5].querySelector('.cost-mark')),
+      equivalent_mark_spoken: d.spokenMark(cells[5].querySelector('.cost-mark')),
       equivalent_mark_title: titleIn(cells[5], '.cost-mark'),
       equivalent_faint: !!cells[5].querySelector('.mag-zero')
     };

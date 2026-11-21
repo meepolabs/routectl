@@ -757,6 +757,11 @@ fn page_browser_traffic_an_unknown_cost_never_reads_as_zero() {
     let subtotal = row(&out, "model-02");
     assert_eq!(subtotal["cost"], "$0.250partial", "{subtotal:#}");
     assert_eq!(subtotal["cost_mark"], "partial", "{subtotal:#}");
+    assert_eq!(
+        subtotal["cost_mark_spoken"],
+        json!({"text": "partial (priced subtotal only)", "hidden_part_hidden": true}),
+        "the mark's reason reaches a keyboard and a screen reader: {subtotal:#}"
+    );
     let priced = row(&out, "model-03");
     assert_eq!(priced["cost"], "$1.50", "positive control: {priced:#}");
     assert_eq!(priced["cost_mark"], Value::Null, "{priced:#}");
@@ -832,6 +837,14 @@ fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
     assert_eq!(
         partial["equivalent_mark_title"], EQUIVALENT_PARTIAL_TITLE,
         "{partial:#}"
+    );
+    assert_eq!(
+        partial["equivalent_mark_spoken"],
+        json!({
+            "text": format!("partial ({EQUIVALENT_PARTIAL_TITLE})"),
+            "hidden_part_hidden": true
+        }),
+        "the mark's reason reaches a keyboard and a screen reader: {partial:#}"
     );
     let full = row(&out, "model-02");
     assert_eq!(full["equivalent"], "~$40.25", "positive control: {full:#}");
@@ -911,6 +924,103 @@ fn page_browser_traffic_an_unknown_lifetime_remainder_is_explained_as_unpriced()
         remainder("model-03"),
         "1 cache-write token of unknown lifetime has no price; the cost and \
          At API prices figures leave it out.",
+        "{out:#}"
+    );
+}
+
+/// The remainder sentence is the one place an opened row explains writes of
+/// unknown lifetime: where it is drawn, the No price block leaves that
+/// dimension out (and drops the block when it was the only gap) while still
+/// listing any other one, and the cache-write pair keeps its share. With no
+/// sentence the dimension stays listed, with no "no configuration key" tail
+/// naming it again; another unkeyed dimension keeps its tail (control).
+///
+/// Mutation checks: trafficMissingPrices returning `m.missing_prices` ->
+/// red (model-01 draws a No price block); the dimension test dropped from
+/// the unkeyed filter in missingPriceLine -> red (model-04's tail).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_the_remainder_sentence_replaces_its_no_price_line() {
+    let unknown = crate::commands::usage::UNKNOWN_LIFETIME_LABEL;
+    let gap = |dims: &[(&str, Option<&str>)]| -> Value {
+        dims.iter()
+            .map(|(dim, key)| json!({"model": "opus", "dimension": dim, "config_key": key}))
+            .collect()
+    };
+    let writes = |unknown_tokens: i64, missing: Value| {
+        json!({
+            "cache_write_present": 1,
+            "cache_write_tokens": 16_017,
+            "cache_write_unknown_tokens": unknown_tokens,
+            "missing_prices": missing,
+        })
+    };
+    let answer = dense_with(&[
+        ("model-01", writes(8_572, gap(&[(unknown, None)]))),
+        (
+            "model-02",
+            writes(
+                8_572,
+                gap(&[
+                    (unknown, None),
+                    ("output", Some("models.opus.pricing.output")),
+                ]),
+            ),
+        ),
+        ("model-03", writes(0, gap(&[("input", None)]))),
+        ("model-04", writes(0, gap(&[(unknown, None)]))),
+    ]);
+
+    let out = observe(
+        "traffic",
+        answer,
+        &["model-01", "model-02", "model-03", "model-04"],
+    );
+
+    let detail = |label: &str| out["details"][id_key(label)].clone();
+    let price_texts = |label: &str| -> Vec<String> {
+        detail(label)["prices"]["lines"]
+            .as_array()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|l| l["text"].as_str().expect("line text").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for label in ["model-01", "model-02"] {
+        let d = detail(label);
+        assert_eq!(d["remainders"], 1, "{label}: {d:#}");
+        let write = d["pairs"]
+            .as_array()
+            .expect("pairs")
+            .iter()
+            .find(|p| p["term"] == "cache write")
+            .expect("a cache write pair");
+        assert!(
+            write["text"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("(54%) of unknown lifetime")),
+            "{label}: {d:#}"
+        );
+    }
+    assert_eq!(detail("model-01")["prices"], Value::Null, "{out:#}");
+    assert_eq!(
+        price_texts("model-02"),
+        ["opus: output - set models.opus.pricing.output"],
+        "{out:#}"
+    );
+    assert_eq!(detail("model-03")["remainders"], 0, "{out:#}");
+    assert_eq!(
+        price_texts("model-03"),
+        ["opus: input - no configuration key prices input"],
+        "control: another unkeyed dimension keeps its tail: {out:#}"
+    );
+    assert_eq!(detail("model-04")["remainders"], 0, "{out:#}");
+    assert_eq!(
+        price_texts("model-04"),
+        [format!("opus: {unknown}")],
         "{out:#}"
     );
 }

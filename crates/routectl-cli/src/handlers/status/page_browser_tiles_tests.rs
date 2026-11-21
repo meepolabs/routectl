@@ -6,7 +6,7 @@
 // scenarios live in page_browser_tiles_driver.js, which serves a synthetic
 // six-bucket series one bucket width apart.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const TILES_DRIVER: &str = include_str!("page_browser_tiles_driver.js");
 
@@ -203,6 +203,14 @@ fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
         text(partial, "alt_mark_title"),
         Some("priced subtotal only: leaves out usage that has no price"),
         "{partial:#}"
+    );
+    assert_eq!(
+        partial["alt_mark_spoken"],
+        json!({
+            "text": "partial (priced subtotal only: leaves out usage that has no price)",
+            "hidden_part_hidden": true
+        }),
+        "the mark's reason reaches a keyboard and a screen reader: {partial:#}"
     );
 
     assert_eq!(text(full, "alt_value"), Some("~$40.25"), "{full:#}");

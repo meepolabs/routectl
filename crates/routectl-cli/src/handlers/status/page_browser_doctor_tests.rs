@@ -2,7 +2,8 @@
 // list drawn as Now draws it under its own id prefix, one headline number
 // that is the tab badge's, finding remediations whose backtick-quoted
 // commands are copyable code with the backticks left out, and a
-// model-problem number equal to the Models view's cause lines. `include!`d into a
+// model-problem number equal to the Models view's cause lines beside a lane
+// number equal to the Models tab badge. `include!`d into a
 // child module of `page::tests` beside `browser`; the scenarios live in
 // page_browser_doctor_driver.js.
 
@@ -207,15 +208,17 @@ fn page_browser_doctor_remediations_show_quoted_commands_bare() {
 }
 
 /// On one aggregate fixture the Doctor tab's model-problem number is the
-/// number of cause lines the Models view draws. The passthrough hop case
-/// carries three lanes under one cause, so a count of problem lanes would
-/// read 3 where Models draws one line (premise asserted on the served rows).
+/// number of cause lines the Models view draws, and the lane number beside
+/// it is the Models tab badge. The passthrough hop case carries three lanes
+/// under one cause, so the two numbers differ there (premise asserted on the
+/// served rows), and the line names both units, each in its own number.
 ///
-/// Mutation check: count rows with a cause_key instead of distinct cause
-/// groups in doctorModelProblemsSection -> red (3 against 1).
+/// Mutation checks: count rows with a cause_key instead of distinct cause
+/// groups in doctorModelProblemsSection -> red (3 against 1); draw the cause
+/// count as the lane number -> red (1 against the badge's 3).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_doctor_model_problems_equal_the_models_cause_lines() {
+fn page_browser_doctor_model_problems_equal_the_models_cause_lines_and_badge() {
     let out = browser::run_case_scenario(
         &browser::Scenario {
             name: "doctor-model-problems",
@@ -247,5 +250,17 @@ fn page_browser_doctor_model_problems_equal_the_models_cause_lines() {
     );
     assert_eq!(lines, distinct.len() as u64, "{out:#}");
     assert_eq!(out["doctor_count"], lines.to_string(), "{out:#}");
+    let not_ok = rows.iter().filter(|row| row["state"] != "ok").count();
+    assert!(
+        not_ok > distinct.len(),
+        "premise: more lanes not ok than causes: {out:#}"
+    );
+    assert_eq!(out["models_badge"], not_ok.to_string(), "{out:#}");
+    assert_eq!(out["doctor_lanes"], out["models_badge"], "{out:#}");
+    assert_eq!(
+        out["doctor_line"],
+        format!("{lines} model problem ({not_ok} lanes) on the Models view - see Models"),
+        "{out:#}"
+    );
     assert_eq!(out["link_action"], "models", "{out:#}");
 }

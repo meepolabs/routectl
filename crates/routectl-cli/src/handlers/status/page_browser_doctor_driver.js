@@ -137,9 +137,12 @@
       });
     }).then(function () {
       var link = document.querySelector('#body-doctor .docmodels a');
+      var badge = document.getElementById('badge-models');
       return {
         cause_lines: document.querySelectorAll('#body-models .models-cause-row').length,
+        models_badge: badge.hidden ? null : badge.textContent,
         doctor_count: document.querySelector('#body-doctor .docmodels-count').textContent,
+        doctor_lanes: textOrNull('#body-doctor .docmodels-lanes'),
         doctor_line: document.querySelector('#body-doctor .docmodels').textContent,
         link_action: link ? link.getAttribute('data-arg') : null,
         served_rows: served.rows
