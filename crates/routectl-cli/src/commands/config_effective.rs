@@ -577,10 +577,15 @@ upstream = "glm-5"
     }
 
     #[test]
-    fn an_extra_priced_write_lifetime_follows_the_fixed_five_with_its_source() {
+    fn cache_write_prices_render_in_duration_order_with_their_sources() {
         let mut config = priced_config();
         config.models.get_mut("glm").expect("glm").pricing = Some(PricingConfig {
-            cache_write_per_mtok: Some([("30m".to_string(), 4.5)].into()),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_per_mtok: Some(
+                [("1h", 6.0), ("30m", 4.5)]
+                    .map(|(key, rate)| (key.to_string(), rate))
+                    .into(),
+            ),
             ..PricingConfig::default()
         });
         let view = derive_effective_view(&config, None, None);
@@ -598,9 +603,9 @@ upstream = "glm-5"
                 "input_per_mtok=unknown",
                 "output_per_mtok=unknown",
                 "cache_read_per_mtok=unknown",
-                "cache_write_5m_per_mtok=unknown",
-                "cache_write_1h_per_mtok=unknown",
+                "cache_write_5m_per_mtok=3.75(model-config)",
                 "cache_write_per_mtok.30m=4.5(model-config)",
+                "cache_write_1h_per_mtok=6(model-config)",
             ]
         );
     }

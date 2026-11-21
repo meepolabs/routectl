@@ -657,9 +657,9 @@ fn own_pricing_config(rows: &[(&str, PricingConfig)]) -> Config {
 }
 
 /// A model priced for 5m, 1h and 30m writes lists a segment per lifetime
-/// with its source, the 30m one after the fixed five.
+/// with its source, in duration order.
 #[test]
-fn each_extra_priced_write_lifetime_gets_its_own_segment() {
+fn each_priced_write_lifetime_gets_its_own_segment_in_duration_order() {
     let cfg = own_pricing_config(&[(
         "lifetimes",
         PricingConfig {
@@ -672,8 +672,8 @@ fn each_extra_priced_write_lifetime_gets_its_own_segment() {
     let rows = [(
         "lifetimes",
         "input $3.00 (model-config), output unknown (unknown), cache read unknown \
-             (unknown), cache write 5m $3.75 (model-config), cache write 1h $6.00 \
-             (model-config), cache write 30m $4.50 (model-config); ",
+             (unknown), cache write 5m $3.75 (model-config), cache write 30m $4.50 \
+             (model-config), cache write 1h $6.00 (model-config); ",
     )];
 
     let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));

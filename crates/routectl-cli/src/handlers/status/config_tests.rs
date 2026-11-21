@@ -720,8 +720,8 @@ fn model_wire_carries_window_fill_and_each_price_with_its_source() {
 }
 
 /// A priced lifetime beyond 5m and 1h reaches the wire as its own
-/// `cache_write_per_mtok.<duration>` row after the fixed five, with its
-/// source and, for a table source, the table date.
+/// `cache_write_per_mtok.<duration>` row, in duration order among the
+/// cache-write rows, with its source and, for a table source, the table date.
 #[test]
 fn model_wire_carries_a_row_per_extra_priced_write_lifetime() {
     let config: Config = toml::from_str(
@@ -768,12 +768,12 @@ cache_write_per_mtok = { "30m" = 4.5 }
             "output_per_mtok",
             "cache_read_per_mtok",
             "cache_write_5m_per_mtok",
-            "cache_write_1h_per_mtok",
             "cache_write_per_mtok.30m",
+            "cache_write_1h_per_mtok",
         ]
     );
     assert_eq!(
-        prices[5],
+        prices[4],
         serde_json::json!({ "field": "cache_write_per_mtok.30m", "per_mtok": 4.5,
                             "source": "model-config", "table_date": null })
     );

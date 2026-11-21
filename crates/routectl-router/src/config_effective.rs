@@ -70,15 +70,27 @@ pub struct ModelCell {
 }
 
 impl ModelCell {
-    /// Each price field as `(dimension, value, source)`: the five
-    /// `[models.X.pricing]` fields in key order, then one row per other
-    /// priced cache-write lifetime, shortest first.
+    /// Each price field as `(dimension, value, source)`: input, output and
+    /// cache read, then one row per cache-write lifetime ordered by duration.
+    /// The 5m and 1h rows are always present, priced or not; any other
+    /// lifetime appears only when priced.
     pub fn price_fields(&self) -> Vec<(PriceDimension, Option<f64>, PriceSource)> {
         let p = &self.pricing;
         let s = &self.price_sources;
         let five_minutes = PricingConfig::CACHE_WRITE_5M_SECONDS;
         let one_hour = PricingConfig::CACHE_WRITE_1H_SECONDS;
-        let mut fields = vec![
+        let mut writes: Vec<(u32, Option<f64>)> = vec![
+            (five_minutes, p.cache_write_5m_per_mtok),
+            (one_hour, p.cache_write_1h_per_mtok),
+        ];
+        writes.extend(
+            p.cache_write_rates()
+                .into_iter()
+                .filter(|(seconds, _)| *seconds != five_minutes && *seconds != one_hour)
+                .map(|(seconds, rate)| (seconds, Some(rate))),
+        );
+        writes.sort_by_key(|(seconds, _)| *seconds);
+        let fixed = [
             (PriceDimension::Input, p.input_per_mtok, s.input),
             (PriceDimension::Output, p.output_per_mtok, s.output),
             (
@@ -86,30 +98,17 @@ impl ModelCell {
                 p.cache_read_per_mtok,
                 s.cache_read,
             ),
-            (
-                PriceDimension::CacheWrite(five_minutes),
-                p.cache_write_5m_per_mtok,
-                s.cache_write_at(five_minutes),
-            ),
-            (
-                PriceDimension::CacheWrite(one_hour),
-                p.cache_write_1h_per_mtok,
-                s.cache_write_at(one_hour),
-            ),
         ];
-        fields.extend(
-            p.cache_write_rates()
-                .into_iter()
-                .filter(|(seconds, _)| *seconds != five_minutes && *seconds != one_hour)
-                .map(|(seconds, rate)| {
-                    (
-                        PriceDimension::CacheWrite(seconds),
-                        Some(rate),
-                        s.cache_write_at(seconds),
-                    )
-                }),
-        );
-        fields
+        fixed
+            .into_iter()
+            .chain(writes.into_iter().map(|(seconds, rate)| {
+                (
+                    PriceDimension::CacheWrite(seconds),
+                    rate,
+                    s.cache_write_at(seconds),
+                )
+            }))
+            .collect()
     }
 }
 

@@ -1385,23 +1385,24 @@ fn a_model_no_source_prices_reads_unknown_on_every_field() {
     assert_eq!(view.price_tables, PriceTableDates::default());
 }
 
-/// Every lifetime a source prices beyond 5m and 1h follows the five fixed
-/// fields, shortest first, each with its own source; the 300 and 3600
-/// lifetimes stay in their fixed rows whichever spelling priced them.
+/// Cache-write rows follow input, output and cache read in duration order,
+/// each with its own source; the unpriced 5m and 1h rows keep their place in
+/// that order, and the 300 and 3600 lifetimes read the same whichever
+/// spelling priced them.
 #[test]
-fn price_fields_list_each_extra_priced_lifetime_after_the_fixed_five() {
+fn price_fields_order_cache_write_lifetimes_by_duration() {
     let mut config = facts_config();
     config.models.get_mut("opus").expect("opus").pricing = Some(PricingConfig {
         cache_write_5m_per_mtok: Some(3.75),
         cache_write_per_mtok: Some(
-            [("1h", 6.0), ("30m", 4.5), ("24h", 9.0)]
+            [("1h", 6.0), ("30m", 4.5), ("24h", 9.0), ("90s", 0.5)]
                 .map(|(key, rate)| (key.to_string(), rate))
                 .into(),
         ),
         ..PricingConfig::default()
     });
     config.models.get_mut("plain").expect("plain").pricing = Some(PricingConfig {
-        cache_write_per_mtok: Some([("90s".to_string(), 0.5)].into()),
+        cache_write_per_mtok: Some([("30m".to_string(), 4.5)].into()),
         ..PricingConfig::default()
     });
 
@@ -1409,22 +1410,27 @@ fn price_fields_list_each_extra_priced_lifetime_after_the_fixed_five() {
 
     let rows = [
         (
-            "model-config lifetimes",
+            "90s, 5m, 30m, 1h and 24h all priced",
             "opus",
             vec![
+                (
+                    PriceDimension::CacheWrite(90),
+                    Some(0.5),
+                    PriceSource::ModelConfig,
+                ),
                 (
                     PriceDimension::CacheWrite(300),
                     Some(3.75),
                     PriceSource::ModelConfig,
                 ),
                 (
-                    PriceDimension::CacheWrite(3600),
-                    Some(6.0),
+                    PriceDimension::CacheWrite(1800),
+                    Some(4.5),
                     PriceSource::ModelConfig,
                 ),
                 (
-                    PriceDimension::CacheWrite(1800),
-                    Some(4.5),
+                    PriceDimension::CacheWrite(3600),
+                    Some(6.0),
                     PriceSource::ModelConfig,
                 ),
                 (
@@ -1435,16 +1441,16 @@ fn price_fields_list_each_extra_priced_lifetime_after_the_fixed_five() {
             ],
         ),
         (
-            "a model-config lifetime below 5m",
+            "only 30m priced, between the unpriced 5m and 1h",
             "plain",
             vec![
                 (PriceDimension::CacheWrite(300), None, PriceSource::Unknown),
-                (PriceDimension::CacheWrite(3600), None, PriceSource::Unknown),
                 (
-                    PriceDimension::CacheWrite(90),
-                    Some(0.5),
+                    PriceDimension::CacheWrite(1800),
+                    Some(4.5),
                     PriceSource::ModelConfig,
                 ),
+                (PriceDimension::CacheWrite(3600), None, PriceSource::Unknown),
             ],
         ),
     ];
