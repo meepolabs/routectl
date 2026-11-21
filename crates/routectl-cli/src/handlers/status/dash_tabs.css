@@ -215,10 +215,10 @@
 }
 
 /* ---- config: model facts ----
-   A price label names a cache lifetime as the config writes it: upper-cased,
-   "30m" (minutes) reads as 30 million beside $/Mtok. Each label sits over its
-   value, so every pair in a detail row takes the same shape at any width
-   instead of some stacking and some not. */
+   A price label keeps the config's spelling of a cache lifetime (30m):
+   upper-cased, "30M" (minutes) would read as 30 million beside $/Mtok. Each
+   label sits over its value, so every pair in a detail row takes the same
+   shape at any width instead of some stacking and some not. */
 .cfgmodels .deflist dt {
   text-transform: none;
   letter-spacing: normal;

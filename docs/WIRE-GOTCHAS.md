@@ -702,7 +702,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   writes before the tool ran, while the closing delta states the turn's
   whole write total with no `cache_creation`, so the row records the
   opener's lifetimes and the rest of the total as unknown lifetime, never
-  guessed, which leaves the row unpriced.
+  guessed. That remainder is never priced; when it is the row's only gap,
+  cost shows the priced known part as a partial subtotal.
   Lifetimes are parsed from the member names, so
   `ephemeral_30m_input_tokens` reaches the canonical usage and a
   same-format client as 1800 seconds. Pinned by

@@ -156,7 +156,7 @@ fn every_unclassifiable_bind_is_refused() {
         "   ",
         "not a host",
         "example.com",
-        "daemon.internal",
+        "daemon.invalid",
         "http://127.0.0.1",
         "127.0.0.1:8791",
         // A NAME, and treated as one: see the dedicated test below.

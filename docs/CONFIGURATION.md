@@ -4558,7 +4558,11 @@ prices](#model-prices-modelsxpricing) gives: `[models.X.pricing]`, the
 refreshed table, the shipped table. The tables are read once per `routectl usage` run and once per
 dashboard query, so a table `routectl prices refresh` writes while the
 daemon runs prices the next query with no restart; a copy that fails
-validation keeps the previous table. The dollar column has four states:
+validation keeps the previous table. Every money figure in the column
+uses the dashboard's precision: cents at a dollar and above, tenths of a
+cent below it (`$0.243`), and `0.00` for a zero, so the CLI and the
+dashboard print the same figure for the same range. The dollar column has
+four states:
 
 - `$X.XX` -- an API-key provider whose upstream resolved a price for
   every dimension the row used. A dimension with nonzero usage and no

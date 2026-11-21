@@ -1114,19 +1114,60 @@ const PARTIAL_MARK: &str = "partial";
 
 /// A real dollar figure, marked when it is the priced subtotal only.
 fn dollar_text(usd: f64, is_subtotal: bool) -> String {
+    let amount = money_text(usd);
     if is_subtotal {
-        format!("${usd:.2} {PARTIAL_MARK}")
+        format!("${amount} {PARTIAL_MARK}")
     } else {
-        format!("${usd:.2}")
+        format!("${amount}")
     }
 }
 
 /// An API-price figure, marked when it leaves out some subscription usage.
 fn equivalent_text(usd: f64, status: EquivalentStatus) -> String {
+    let amount = money_text(usd);
     match status {
-        EquivalentStatus::Partial => format!("~${usd:.2} {PARTIAL_MARK}"),
-        EquivalentStatus::Complete | EquivalentStatus::NoSubscription => format!("~${usd:.2}"),
+        EquivalentStatus::Partial => format!("~${amount} {PARTIAL_MARK}"),
+        EquivalentStatus::Complete | EquivalentStatus::NoSubscription => format!("~${amount}"),
     }
+}
+
+/// A dollar amount, without its `$`, at the dashboard's precision: zero as
+/// `0.00`, cents at a dollar and above, tenths of a cent below it, and an
+/// amount that is not a finite number as `-`.
+///
+/// The dashboard rounds with `Number.prototype.toFixed`, which breaks an exact
+/// tie away from zero where `format!` breaks it to even (`1.125` is `1.13`
+/// there, `1.12` here), so a tie is nudged past its midpoint first.
+pub(crate) fn money_text(usd: f64) -> String {
+    if !usd.is_finite() {
+        return "-".to_string();
+    }
+    if usd == 0.0 {
+        return "0.00".to_string();
+    }
+    let magnitude = usd.abs();
+    let (width, tie_scale) = if magnitude >= 1.0 {
+        (2, 8.0)
+    } else {
+        (3, 16.0)
+    };
+    let rounded = if is_rounding_tie(magnitude, tie_scale) {
+        magnitude.next_up()
+    } else {
+        magnitude
+    };
+    let sign = if usd < 0.0 { "-" } else { "" };
+    format!("{sign}{rounded:.width$}")
+}
+
+/// Whether `magnitude` is exactly halfway between two neighbours at the
+/// precision `tie_scale` stands for. A midpoint at `d` decimals is an odd
+/// multiple of `1 / (2 * 10^d)`, and a binary float can hold one only when it
+/// is also an odd multiple of `2^-(d + 1)`; `tie_scale` is `2^(d + 1)`, so the
+/// product is exact and the test is integer parity.
+fn is_rounding_tie(magnitude: f64, tie_scale: f64) -> bool {
+    let scaled = magnitude * tie_scale;
+    scaled.fract() == 0.0 && scaled % 2.0 == 1.0
 }
 
 /// The normal (no-`--detail`) column headers, with the key dimension first.

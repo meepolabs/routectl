@@ -614,6 +614,53 @@ fn the_cost_cell_labels_the_equivalent_and_leaves_the_old_strings_untouched() {
             NoSubscription,
             "n/a",
         ),
+        // Below a dollar every figure keeps tenths of a cent, as the
+        // dashboard shows it; a dollar and a zero keep cents.
+        (
+            "sub-dollar priced only",
+            Some(0.243),
+            false,
+            None,
+            Priced,
+            NoSubscription,
+            "$0.243",
+        ),
+        (
+            "sub-dollar subscription equivalent",
+            None,
+            true,
+            Some(0.005),
+            Subscription,
+            Complete,
+            "n/a (sub ~$0.005)",
+        ),
+        (
+            "mixed: sub-dollar subtotals on both channels",
+            Some(0.243),
+            true,
+            Some(0.005),
+            Partial,
+            EquivPartial,
+            "$0.243 partial (+sub ~$0.005 partial)",
+        ),
+        (
+            "one dollar keeps cents",
+            Some(1.0),
+            true,
+            Some(1.0),
+            Priced,
+            Complete,
+            "$1.00 (+sub ~$1.00)",
+        ),
+        (
+            "a zero keeps cents",
+            Some(0.0),
+            true,
+            None,
+            Priced,
+            Complete,
+            "$0.00+sub",
+        ),
     ];
     for (name, priced, any_subscription, equivalent, cost_status, equivalent_status, expected) in
         cases
@@ -626,6 +673,46 @@ fn the_cost_cell_labels_the_equivalent_and_leaves_the_old_strings_untouched() {
             equivalent_status,
         );
         assert_eq!(cost_cell(&row), expected, "{name}");
+    }
+}
+
+/// The dashboard's `money()`, verbatim. If it changes, the precision rule the
+/// table below encodes is stale: re-derive the rows from the new rule.
+const DASHBOARD_MONEY: &str = "  function money(v) {
+    if (!isFiniteNumber(v)) { return '-'; }
+    if (v === 0) { return '0.00'; }
+    return Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(3);
+  }";
+
+#[test]
+fn money_text_follows_the_dashboard_money_rule() {
+    // Arrange: the rule the rows below were derived from is the one the
+    // dashboard ships.
+    let dom = include_str!("../handlers/status/dash_50_dom.js");
+    assert!(
+        dom.contains(DASHBOARD_MONEY),
+        "dash_50_dom.js money() changed; re-derive these rows"
+    );
+    // (amount, what the dashboard's money() shows for it)
+    let rows = [
+        (0.243, "0.243"),
+        (0.005, "0.005"),
+        (1.0, "1.00"),
+        (0.0, "0.00"),
+        (12.34, "12.34"),
+        (0.9996, "1.000"),
+        (-0.243, "-0.243"),
+        // An exact binary tie: toFixed breaks it away from zero.
+        (1.125, "1.13"),
+        (-1.125, "-1.13"),
+        (0.0625, "0.063"),
+        (f64::NAN, "-"),
+        (f64::INFINITY, "-"),
+    ];
+
+    for (amount, dashboard) in rows {
+        // Act + Assert
+        assert_eq!(money_text(amount), dashboard, "{amount}");
     }
 }
 

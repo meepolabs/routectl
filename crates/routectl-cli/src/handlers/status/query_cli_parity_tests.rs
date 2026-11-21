@@ -755,3 +755,73 @@ fn detail_ttft_follows_the_seat_label_of_each_group() {
         "control: a persisted seat keeps its own samples"
     );
 }
+
+/// The dashboard's `money()` rule, restated: zero as `0.00`, cents at a
+/// dollar and above, tenths of a cent below it. No figure in the fixture sits
+/// on a rounding tie, where `toFixed` and `format!` part ways.
+fn dashboard_money(v: f64) -> String {
+    if v == 0.0 {
+        "0.00".to_string()
+    } else if v.abs() >= 1.0 {
+        format!("{v:.2}")
+    } else {
+        format!("{v:.3}")
+    }
+}
+
+#[test]
+fn the_cli_shows_each_money_figure_as_the_dashboard_does() {
+    // Arrange
+    let fx = fixture();
+
+    // Act
+    let endpoint = endpoint_result(&fx, "all", "model");
+    let cli = cli_report_with(&fx, "--all", Some(GroupDim::Model), true);
+    let out = render_report(&cli, &zone());
+    let line_for = |label: &str| {
+        out.lines()
+            .find(|l| l.split_whitespace().next() == Some(label))
+            .unwrap_or_else(|| panic!("rendered `{label}` row in\n{out}"))
+    };
+
+    // Assert: every figure the endpoint hands the dashboard appears in the
+    // CLI row as the dashboard would print it.
+    let mut figures = Vec::new();
+    let groups = endpoint
+        .groups
+        .iter()
+        .map(|g| (g.label.as_str(), &g.metrics))
+        .chain([("total", &endpoint.totals)]);
+    for (label, m) in groups {
+        let line = line_for(label);
+        if let Some(usd) = m.cost_usd {
+            let shown = format!("${} ", dashboard_money(usd));
+            assert!(line.contains(&shown), "{label}: `{shown}` in {line}");
+            figures.push(usd);
+        }
+        if let Some(usd) = m.equivalent_cost_usd {
+            let shown = format!("~${})", dashboard_money(usd));
+            assert!(line.contains(&shown), "{label}: `{shown}` in {line}");
+            figures.push(usd);
+        }
+    }
+    let sonnet = endpoint
+        .groups
+        .iter()
+        .find(|g| g.label == "sonnet")
+        .expect("endpoint sonnet group");
+    let equivalent = sonnet.metrics.equivalent_cost_usd.expect("an equivalent");
+    assert!(
+        equivalent < 1.0 && format!("{equivalent:.2}") != dashboard_money(equivalent),
+        "the control: a sub-dollar figure that two decimals would change"
+    );
+    assert!(
+        line_for("sonnet").contains(&format!("n/a (sub ~${})", dashboard_money(equivalent))),
+        "{}",
+        line_for("sonnet")
+    );
+    assert!(
+        figures.len() >= 4,
+        "priced, partial and equivalent figures all checked: {figures:?}"
+    );
+}
