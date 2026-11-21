@@ -66,7 +66,7 @@ fn wire_shape_pins_every_metric_token() {
                 vec![routectl_usage::MissingPrice {
                     model: "sonnet".to_string(),
                     dimension: "cache write 30m".to_string(),
-                    config_key: None,
+                    config_key: Some("models.sonnet.pricing.cache_write_per_mtok.30m".to_string()),
                 }]
             } else {
                 Vec::new()
@@ -87,7 +87,14 @@ fn wire_shape_pins_every_metric_token() {
     let panel = Panel::available(
         SCHEMA_VERSION,
         "2026-08-02T00:00:00Z".to_string(),
-        name_groups(result, GroupDim::Model, &AccountIdentities::default()),
+        name_groups(
+            QueryRead {
+                result,
+                earliest_ms: Some(900_000),
+            },
+            GroupDim::Model,
+            &AccountIdentities::default(),
+        ),
     );
 
     // Built in parts: one literal for the whole envelope exceeds the
@@ -135,7 +142,11 @@ fn wire_shape_pins_every_metric_token() {
         "cache_write_unknown_tokens": 25,
     });
     let missing_30m = serde_json::json!([
-        {"model": "sonnet", "dimension": "cache write 30m", "config_key": null}
+        {
+            "model": "sonnet",
+            "dimension": "cache write 30m",
+            "config_key": "models.sonnet.pricing.cache_write_per_mtok.30m"
+        }
     ]);
     let totals = serde_json::json!({
         "requests": 101,
@@ -180,7 +191,7 @@ fn wire_shape_pins_every_metric_token() {
         "cache_write_unknown_tokens": 26,
     });
     let expected = serde_json::json!({
-        "schema_version": 5,
+        "schema_version": 6,
         "as_of": "2026-08-02T00:00:00Z",
         "unavailable": null,
         "data": {
@@ -190,6 +201,7 @@ fn wire_shape_pins_every_metric_token() {
             }],
             "totals": totals,
             "series": null,
+            "earliest_ms": 900000,
         }
     });
 
@@ -260,7 +272,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
                 vec![routectl_usage::MissingPrice {
                     model: "sonnet".to_string(),
                     dimension: "cache write 30m".to_string(),
-                    config_key: None,
+                    config_key: Some("models.sonnet.pricing.cache_write_per_mtok.30m".to_string()),
                 }]
             } else {
                 Vec::new()
@@ -293,7 +305,14 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
     let panel = Panel::available(
         SCHEMA_VERSION,
         "2026-08-02T00:00:00Z".to_string(),
-        name_groups(result, GroupDim::Model, &AccountIdentities::default()),
+        name_groups(
+            QueryRead {
+                result,
+                earliest_ms: Some(900_000),
+            },
+            GroupDim::Model,
+            &AccountIdentities::default(),
+        ),
     );
 
     let first_bucket_metrics = serde_json::json!({
@@ -432,7 +451,11 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "cache_write_unknown_tokens": 25,
     });
     let missing_30m = serde_json::json!([
-        {"model": "sonnet", "dimension": "cache write 30m", "config_key": null}
+        {
+            "model": "sonnet",
+            "dimension": "cache write 30m",
+            "config_key": "models.sonnet.pricing.cache_write_per_mtok.30m"
+        }
     ]);
     let totals = serde_json::json!({
         "requests": 41,
@@ -477,7 +500,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
         "cache_write_unknown_tokens": 26,
     });
     let expected = serde_json::json!({
-        "schema_version": 5,
+        "schema_version": 6,
         "as_of": "2026-08-02T00:00:00Z",
         "unavailable": null,
         "data": {
@@ -490,6 +513,7 @@ fn bucketed_wire_shape_pins_the_series_tokens() {
                 "bucket_ms": 3600000,
                 "buckets": [first_bucket, empty_bucket]
             },
+            "earliest_ms": 900000,
         }
     });
 
@@ -561,4 +585,179 @@ async fn the_pricer_resolves_against_one_pinned_snapshot() {
     // honestly unpriced rather than costed at zero.
     assert_eq!(first.totals.cost_status, CostStatus::Unpriced);
     assert!(first.totals.cost_usd.is_none());
+}
+
+/// `earliest_ms` is the ledger's earliest inference row from the epoch on,
+/// whatever the window: a `today` read whose window excludes every row still
+/// names that row, and an empty ledger answers null.
+#[tokio::test]
+async fn earliest_ms_names_the_ledgers_first_row_whatever_the_window() {
+    // Arrange: three days ago is before today's start in every zone; the
+    // later of the two rows is the control that the seek is not "any row".
+    let dir = TempDir::new().unwrap();
+    let populated = dir.path().join("usage.db");
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+    let first = now - 3 * 86_400_000;
+    seed_ledger(&populated, &[first + 60_000, first]);
+    let empty = dir.path().join("empty.db");
+    drop(open(&empty).expect("open empty ledger"));
+    let body = r#"{"window":"today","group_by":"model"}"#;
+
+    // Act
+    let (_, filled) = send(state_with_ledger(populated), QUERY_METHOD, body).await;
+    let (_, blank) = send(state_with_ledger(empty), QUERY_METHOD, body).await;
+
+    // Assert
+    assert!(filled["unavailable"].is_null(), "{filled}");
+    assert_eq!(filled["data"]["totals"]["requests"], 0, "{filled}");
+    assert_eq!(filled["data"]["earliest_ms"], first, "{filled}");
+    assert!(blank["unavailable"].is_null(), "{blank}");
+    let data = blank["data"].as_object().expect("data");
+    assert!(data.contains_key("earliest_ms"), "{blank}");
+    assert_eq!(data["earliest_ms"], Value::Null, "{blank}");
+}
+
+/// The `[providers]` entry and nickname the config-key fixture prices.
+const KEYED_PROVIDER: &str = "lt";
+const KEYED_UPSTREAM: &str = "up-lifetime";
+const KEYED_MODEL: &str = "lifetime-model";
+
+/// A config pricing `lifetime-model` on an API key with every rate but the
+/// 30-minute cache write.
+fn keyed_router() -> Router {
+    let mut config = Config::default();
+    config.providers.insert(
+        KEYED_PROVIDER.to_string(),
+        ProviderEntry::anthropic_api("env://ROUTECTL_QUERY_KEY_TEST"),
+    );
+    let mut entry = ModelEntry::new(KEYED_PROVIDER, KEYED_UPSTREAM);
+    entry.pricing = Some(PricingConfig {
+        input_per_mtok: Some(3.0),
+        output_per_mtok: Some(15.0),
+        cache_write_5m_per_mtok: Some(3.75),
+        ..Default::default()
+    });
+    config.models.insert(KEYED_MODEL.to_string(), entry);
+    Router::new(Arc::new(config))
+}
+
+/// One served row: `(request id, model, provider kind, reasoning tokens,
+/// cache-write total, lifetime split)`.
+type KeyedRow<'a> = (&'a str, &'a str, Option<&'a str>, i64, i64, Option<&'a str>);
+
+/// Seed one served row at `ts` per entry of `rows`.
+fn seed_keyed_ledger(path: &Path, ts: i64, rows: &[KeyedRow<'_>]) {
+    let db = open(path).expect("open ledger");
+    for &(id, model, kind, reasoning, written, split) in rows {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, provider_kind, \
+                 stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
+                 fallback_count, input_tokens, output_tokens, reasoning_tokens, \
+                 cache_write_tokens, cache_write_lifetimes) \
+                 VALUES (?1, ?1, ?2, 'anthropic', ?3, 'al', ?3, ?4, ?5, ?6, 0, 'ok', 10, \
+                 0, 0, 1, 0, 1000, 1000, ?7, ?8, ?9)",
+                rusqlite::params![
+                    ts,
+                    id,
+                    model,
+                    KEYED_PROVIDER,
+                    KEYED_UPSTREAM,
+                    kind,
+                    reasoning,
+                    written,
+                    split
+                ],
+            )
+            .expect("seed keyed row");
+    }
+}
+
+/// `missing_prices` of one metric set as `(model, dimension, config_key)`.
+fn keyed_entries(metrics: &Value) -> Vec<(String, String, Value)> {
+    metrics["missing_prices"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing_prices array: {metrics}"))
+        .iter()
+        .map(|entry| {
+            (
+                entry["model"].as_str().expect("model").to_string(),
+                entry["dimension"].as_str().expect("dimension").to_string(),
+                entry["config_key"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// Each missing price on the route carries the key that would price it, from
+/// the request's pinned config, on the group, the totals and the bucket
+/// alike. The two labels that name no rate, and a model the config does not
+/// name (no source prices it, so each dimension it used is missing), carry
+/// null beside a keyed entry of the same metric set.
+#[tokio::test]
+async fn missing_prices_carry_their_config_key_on_groups_totals_and_buckets() {
+    // Arrange: one ledger row per reason, all in one alias group and bucket.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("usage.db");
+    let now = crate::local_time::unix_ms(time::OffsetDateTime::now_utc());
+    seed_keyed_ledger(
+        &path,
+        now,
+        &[
+            (
+                "w30",
+                KEYED_MODEL,
+                Some("anthropic-api"),
+                0,
+                500,
+                Some(r#"{"1800":500}"#),
+            ),
+            ("wunk", KEYED_MODEL, Some("anthropic-api"), 0, 500, None),
+            ("why", KEYED_MODEL, None, 200, 0, None),
+            (
+                "gone",
+                "gone-model",
+                Some("anthropic-api"),
+                0,
+                500,
+                Some(r#"{"1800":500}"#),
+            ),
+        ],
+    );
+    let state = state_over_router(path, keyed_router());
+    let body = r#"{"window":"all","group_by":"alias","bucket":"day"}"#;
+
+    // Act
+    let (status, json) = send(state, QUERY_METHOD, body).await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["schema_version"], 6, "{json}");
+    let key_30m = Value::from("models.lifetime-model.pricing.cache_write_per_mtok.30m");
+    let entry =
+        |model: &str, dimension: &str, key: Value| (model.to_string(), dimension.to_string(), key);
+    let expected = vec![
+        entry("gone-model", "cache write 30m", Value::Null),
+        entry("gone-model", "input", Value::Null),
+        entry("gone-model", "output", Value::Null),
+        entry(KEYED_MODEL, "cache write (unknown lifetime)", Value::Null),
+        entry(KEYED_MODEL, "cache write 30m", key_30m),
+        entry(KEYED_MODEL, "reasoning", Value::Null),
+    ];
+    let data = &json["data"];
+    let buckets = data["series"]["buckets"].as_array().expect("buckets");
+    let populated: Vec<&Value> = buckets
+        .iter()
+        .filter(|bucket| bucket["metrics"]["requests"] != 0)
+        .collect();
+    assert_eq!(populated.len(), 1, "{json}");
+    let sets = [
+        ("group", &data["groups"][0]["metrics"]),
+        ("totals", &data["totals"]),
+        ("bucket", &populated[0]["metrics"]),
+    ];
+    for (name, metrics) in sets {
+        assert_eq!(keyed_entries(metrics), expected, "{name}: {json}");
+    }
 }

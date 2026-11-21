@@ -128,6 +128,18 @@ impl QueryPricer {
     pub fn entry_accounts(&self) -> BTreeMap<String, String> {
         AccountIdentities::from_config(&self.router.config).entry_accounts()
     }
+
+    /// The `config.toml` key that would price `dimension` (a missing-price
+    /// label) for the fine model `model`, or `None` where no key can: a label
+    /// that names no rate, a nickname a dotted path cannot spell, or a model
+    /// the pinned config does not name under `[models]`, which has no block to
+    /// set a rate in.
+    pub fn price_config_key(&self, model: &str, dimension: &str) -> Option<String> {
+        if !self.router.config.models.contains_key(model) {
+            return None;
+        }
+        crate::commands::pricing::price_config_key(model, dimension)
+    }
 }
 
 /// A read-only view over one pinned router snapshot. The `router` field is

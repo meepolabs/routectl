@@ -136,7 +136,6 @@ pub(super) fn dimension_label(dimension: PriceDimension) -> String {
 /// reasoning of unknown structure, anything [`dimension_label`] does not
 /// produce) and for a nickname that is not a TOML bare key: a dotted path
 /// cannot carry a quoted segment, so no key is offered rather than a wrong one.
-#[cfg_attr(not(test), expect(dead_code, reason = "no production caller yet"))]
 pub(crate) fn price_config_key(model: &str, dimension_label: &str) -> Option<String> {
     if !routectl_router::is_bare_key(model) {
         return None;

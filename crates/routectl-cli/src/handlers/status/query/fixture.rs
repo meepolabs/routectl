@@ -1,5 +1,5 @@
 //! Test-only fully populated `/status/query` panels, grouped and bucketed,
-//! read by this route's own `build_panel` from a seeded ledger and priced by
+//! read by this route's own `read_panel` from a seeded ledger and priced by
 //! the router facade's pricer over the shared fixture config.
 
 use std::path::Path;
@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::super::panel_fixtures::{FIXTURE_NOW_MS, at_epoch_ms, fixture_config};
 use super::super::router_view::StatusRouterHandle;
 use super::super::utc_rfc3339;
-use super::{Panel, QueryPayload, build_panel, name_panel_groups, parse_body};
+use super::{Panel, QueryPayload, name_panel_groups, parse_body, read_panel};
 use crate::commands::usage::{BucketUnit, WindowFlag, window_bounds};
 use crate::local_time::LocalZone;
 
@@ -69,7 +69,7 @@ pub fn query_answer(
 }
 
 /// Today's window (UTC) at `now_ms` over the ledger at `db_path`, read by
-/// the route's own `build_panel` and named by its own `name_panel_groups`,
+/// the route's own `read_panel` and named by its own `name_panel_groups`,
 /// priced and named against `config` with no price table.
 pub fn query_panel_over(
     db_path: &Path,
@@ -109,17 +109,18 @@ fn read_and_name(
     let limit = ReadLimit::from(Instant::now() + Duration::from_secs(30));
     let pricer = router.pricer(book);
     let identities = pricer.account_identities();
-    let panel = build_panel(
+    let pricer = pricer.pin();
+    let panel = read_panel(
         db_path,
         spec,
         bucket,
-        &pricer.pin(),
+        &pricer,
         utc_rfc3339(now_ms),
         &zone,
         at_epoch_ms(now_ms),
         &limit,
     );
-    name_panel_groups(panel, group_by, &identities)
+    name_panel_groups(panel, group_by, &identities, &pricer)
 }
 
 /// One seeded ledger row: `(request id, hours before the fixture instant,

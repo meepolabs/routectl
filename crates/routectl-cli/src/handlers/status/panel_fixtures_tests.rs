@@ -52,24 +52,6 @@ const FULLY_PRICED_BUCKET_PAIRS: DensityException = DensityException {
     reason: "a priced or zero-traffic bucket names no model and dimension",
 };
 
-const GROUP_CONFIG_KEY: DensityException = DensityException {
-    path: "data.groups[].metrics.missing_prices[].config_key",
-    allowance: Allowance::AlwaysNull,
-    reason: "the query fold leaves the price config key unset",
-};
-
-const TOTALS_CONFIG_KEY: DensityException = DensityException {
-    path: "data.totals.missing_prices[].config_key",
-    allowance: Allowance::AlwaysNull,
-    reason: "the query fold leaves the price config key unset",
-};
-
-const BUCKET_CONFIG_KEY: DensityException = DensityException {
-    path: "data.series.buckets[].metrics.missing_prices[].config_key",
-    allowance: Allowance::AlwaysNull,
-    reason: "the query fold leaves the price config key unset",
-};
-
 const NO_WINDOWS: DensityException = DensityException {
     path: "data.accounts[].windows",
     allowance: Allowance::MayBeEmpty,
@@ -133,8 +115,6 @@ const FIXTURES: &[Fixture] = &[
             UNAVAILABLE,
             FULLY_PRICED_GROUPS,
             FULLY_PRICED_GROUP_PAIRS,
-            GROUP_CONFIG_KEY,
-            TOTALS_CONFIG_KEY,
             DensityException {
                 path: "data.series",
                 allowance: Allowance::AlwaysNull,
@@ -152,9 +132,6 @@ const FIXTURES: &[Fixture] = &[
             FULLY_PRICED_BUCKETS,
             FULLY_PRICED_GROUP_PAIRS,
             FULLY_PRICED_BUCKET_PAIRS,
-            GROUP_CONFIG_KEY,
-            TOTALS_CONFIG_KEY,
-            BUCKET_CONFIG_KEY,
         ],
     },
 ];

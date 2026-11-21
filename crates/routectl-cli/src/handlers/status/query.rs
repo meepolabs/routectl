@@ -88,7 +88,17 @@ use super::{Panel, StatusState, now_utc_rfc3339, run_blocking_panel};
 /// was served by an entry whose account is the entry itself (an API key or a
 /// cloud credential) groups under that `#<entry>` account, as the served
 /// config names it, rather than under `(unattributed)`.
-pub const SCHEMA_VERSION: u32 = 5;
+///
+/// At 6 `ttft_p50_ms` and `latency_p50_ms` came back with a new meaning: at 3
+/// they held a mean, and now they are true nearest-rank medians. Every metric
+/// set carries six percentiles, `ttft_p50_ms` / `ttft_p90_ms` / `ttft_p99_ms`
+/// over streamed successes and `latency_p50_ms` / `latency_p90_ms` /
+/// `latency_p99_ms` over every request. Added alongside: per metric set
+/// `missing_prices` (each model and dimension behind
+/// `missing_price_dimensions`, with the `config_key` that would price it, null
+/// where no key can) and `cache_write_unknown_tokens`, the `model` request
+/// filter, and the top-level `earliest_ms`.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The one method this route answers. Not expressible as an axum
 /// `MethodFilter`, hence the manual guard.
@@ -279,6 +289,17 @@ pub(super) struct QueryPayload {
     groups: Vec<GroupRow>,
     totals: QueryTotals,
     series: Option<QuerySeries>,
+    /// `ts_start` of the ledger's earliest inference row from the epoch on,
+    /// whatever the requested window and filters; null for an empty ledger.
+    earliest_ms: Option<i64>,
+}
+
+/// What one ledger read produced: the grouped result, and the ledger's
+/// earliest inference row from the epoch on.
+#[derive(Debug, Clone)]
+pub(super) struct QueryRead {
+    result: QueryResult,
+    earliest_ms: Option<i64>,
 }
 
 /// One group. A seat group also carries its account identity; a group of
@@ -306,13 +327,17 @@ struct SeatIdentity {
     login_label: Option<String>,
 }
 
-/// `result` as the wire payload, each group of a `seat` grouping named from
+/// `read` as the wire payload, each group of a `seat` grouping named from
 /// `identities`.
 fn name_groups(
-    result: QueryResult,
+    read: QueryRead,
     group_by: GroupDim,
     identities: &AccountIdentities,
 ) -> QueryPayload {
+    let QueryRead {
+        result,
+        earliest_ms,
+    } = read;
     let groups = result
         .groups
         .into_iter()
@@ -326,22 +351,29 @@ fn name_groups(
         groups,
         totals: result.totals,
         series: result.series,
+        earliest_ms,
     }
 }
 
-/// `panel` with its result, if any, as the wire payload named by
+/// `panel` with its result, if any, as the wire payload: each missing price
+/// keyed by `pricer`, the snapshot that priced the rows, then named by
 /// [`name_groups`].
 fn name_panel_groups(
-    panel: Panel<QueryResult>,
+    panel: Panel<QueryRead>,
     group_by: GroupDim,
     identities: &AccountIdentities,
+    pricer: &QueryPricer,
 ) -> Panel<QueryPayload> {
     Panel {
         schema_version: panel.schema_version,
         as_of: panel.as_of,
-        data: panel
-            .data
-            .map(|result| name_groups(result, group_by, identities)),
+        data: panel.data.map(|read| {
+            let keyed = QueryRead {
+                result: with_price_keys(read.result, pricer),
+                earliest_ms: read.earliest_ms,
+            };
+            name_groups(keyed, group_by, identities)
+        }),
         unavailable: panel.unavailable,
     }
 }
@@ -554,17 +586,9 @@ async fn read_under_permit(
         let zone = LocalZone::load();
         let (spec, bucket) = parsed.resolve(&zone, now);
         let group_by = spec.group_by;
-        let panel = build_panel(
-            &db_path,
-            spec,
-            bucket,
-            &pricer.pin(),
-            as_of,
-            &zone,
-            now,
-            &limit,
-        );
-        name_panel_groups(panel, group_by, &identities)
+        let pricer = pricer.pin();
+        let panel = read_panel(&db_path, spec, bucket, &pricer, as_of, &zone, now, &limit);
+        name_panel_groups(panel, group_by, &identities, &pricer)
     })
     .await
 }
@@ -580,7 +604,7 @@ fn stall_until_stopped(limit: &ReadLimit) {
 }
 
 /// Open the ledger read-only, run the grouped aggregate under `limit`, and map
-/// the outcome to a panel. Runs on a blocking worker (SQLite is synchronous);
+/// the outcome to a panel, beside the ledger's earliest inference row. Runs on a blocking worker (SQLite is synchronous);
 /// the connection is opened and dropped within this call.
 ///
 /// The seat grouping's entry accounts are taken from `pricer`, so a row's
@@ -590,18 +614,20 @@ fn stall_until_stopped(limit: &ReadLimit) {
 /// this waited for a worker, or the budget ran out in the queue) answers
 /// `query_timeout` before the ledger is opened.
 ///
-/// A requested series resolves its grid here, since an all-time window anchors
-/// on the ledger's earliest row -- an O(log n) index probe, run before the
-/// aggregate and only for that window. The probe carries the window's own lower
-/// bound and the resolved anchor never falls below it, so replacing
-/// `spec.from_ms` with that anchor selects the SAME rows and leaves the groups
-/// and totals identical to the non-series path.
+/// Every read seeks the ledger's earliest inference row from the epoch on, an
+/// O(log n) index probe run before the aggregate, so a reader can tell an
+/// empty ledger from a window with no rows. A requested series resolves its
+/// grid here too, since an all-time window anchors on that same row. The
+/// all-time window's lower bound is the epoch, the bound the probe carries, and
+/// the resolved anchor never falls below it, so replacing `spec.from_ms` with
+/// that anchor selects the SAME rows and leaves the groups and totals identical
+/// to the non-series path.
 #[expect(
     clippy::too_many_arguments,
     reason = "the request's parts are resolved on the async side and the \
               blocking worker; bundling them would only rename the list"
 )]
-pub(super) fn build_panel(
+pub(super) fn read_panel(
     db_path: &Path,
     mut spec: QuerySpec,
     bucket: Option<BucketUnit>,
@@ -610,7 +636,7 @@ pub(super) fn build_panel(
     zone: &LocalZone,
     now: OffsetDateTime,
     limit: &ReadLimit,
-) -> Panel<QueryResult> {
+) -> Panel<QueryRead> {
     if read_stopped(limit) {
         return Panel::unavailable(SCHEMA_VERSION, codes::QUERY_TIMEOUT);
     }
@@ -619,19 +645,14 @@ pub(super) fn build_panel(
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
+    let earliest_ms = match earliest_ts_start(&db, 0) {
+        Ok(earliest) => earliest,
+        Err(err) => return Panel::unavailable(SCHEMA_VERSION, query_error_code(&err)),
+    };
     let empty_series = match bucket {
         None => None,
         Some(unit) => {
-            let first_row_ms = if spec.from_ms == 0 {
-                match earliest_ts_start(&db, spec.from_ms) {
-                    Ok(earliest) => earliest,
-                    Err(err) => {
-                        return Panel::unavailable(SCHEMA_VERSION, query_error_code(&err));
-                    }
-                }
-            } else {
-                None
-            };
+            let first_row_ms = if spec.from_ms == 0 { earliest_ms } else { None };
             match resolve_bucket(zone, unit, spec.from_ms, spec.to_ms, first_row_ms, now) {
                 Some((anchor_ms, resolved)) => {
                     spec.from_ms = anchor_ms;
@@ -655,10 +676,63 @@ pub(super) fn build_panel(
             if let Some(series) = empty_series {
                 result.series = Some(series);
             }
-            Panel::available(SCHEMA_VERSION, as_of, result)
+            Panel::available(
+                SCHEMA_VERSION,
+                as_of,
+                QueryRead {
+                    result,
+                    earliest_ms,
+                },
+            )
         }
         Err(err) => Panel::unavailable(SCHEMA_VERSION, query_error_code(&err)),
     }
+}
+
+/// [`read_panel`]'s grouped result alone, for tests that compare figures.
+#[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same argument list as read_panel, passed through"
+)]
+pub(super) fn build_panel(
+    db_path: &Path,
+    spec: QuerySpec,
+    bucket: Option<BucketUnit>,
+    pricer: &QueryPricer,
+    as_of: String,
+    zone: &LocalZone,
+    now: OffsetDateTime,
+    limit: &ReadLimit,
+) -> Panel<QueryResult> {
+    let panel = read_panel(db_path, spec, bucket, pricer, as_of, zone, now, limit);
+    Panel {
+        schema_version: panel.schema_version,
+        as_of: panel.as_of,
+        data: panel.data.map(|read| read.result),
+        unavailable: panel.unavailable,
+    }
+}
+
+/// `result` with the `config_key` of every missing price on its groups, totals
+/// and series buckets named by `pricer`.
+fn with_price_keys(mut result: QueryResult, pricer: &QueryPricer) -> QueryResult {
+    let buckets = result
+        .series
+        .iter_mut()
+        .flat_map(|series| series.buckets.iter_mut().map(|bucket| &mut bucket.metrics));
+    let metric_sets = result
+        .groups
+        .iter_mut()
+        .map(|group| &mut group.metrics)
+        .chain(std::iter::once(&mut result.totals))
+        .chain(buckets);
+    for metrics in metric_sets {
+        for missing in &mut metrics.missing_prices {
+            missing.config_key = pricer.price_config_key(&missing.model, &missing.dimension);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

@@ -9,7 +9,9 @@ use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::Request as HttpRequest;
-use routectl_router::{AccountIdentities, Config, Router};
+use routectl_router::{
+    AccountIdentities, Config, ModelEntry, PricingConfig, ProviderEntry, Router,
+};
 use routectl_usage::{CostStatus, QueryGroup, QueryMetrics, QuerySeries, SeriesBucket, open};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -437,7 +439,7 @@ async fn seat_groups_carry_the_account_identity_of_the_served_config() {
 
     // Assert
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["schema_version"], 5, "{json}");
+    assert_eq!(json["schema_version"], SCHEMA_VERSION, "{json}");
     let rows: [(&str, Value, Value, Value); 4] = [
         (
             "anthropic#work",
@@ -502,7 +504,7 @@ async fn an_unseated_row_on_an_api_key_entry_groups_under_its_account() {
 
     // Assert
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["schema_version"], 5, "{json}");
+    assert_eq!(json["schema_version"], SCHEMA_VERSION, "{json}");
     let labels: Vec<&str> = json["data"]["groups"]
         .as_array()
         .expect("groups")
@@ -555,7 +557,7 @@ async fn non_seat_groups_carry_no_identity_keys() {
 }
 
 /// A non-seat grouping's wire payload is the grouped result exactly as it
-/// serialized before seat groups were named.
+/// serialized before seat groups were named, plus the ledger's earliest row.
 #[test]
 fn non_seat_payloads_serialize_as_the_grouped_result() {
     for group_by in [GroupDim::Model, GroupDim::Alias, GroupDim::Provider] {
@@ -577,13 +579,20 @@ fn non_seat_payloads_serialize_as_the_grouped_result() {
         };
         let identities = AccountIdentities::from_config(&work_and_codex_router().config);
 
+        let read = QueryRead {
+            result: result.clone(),
+            earliest_ms: Some(1_000),
+        };
+
         // Act
-        let payload = name_groups(result.clone(), group_by, &identities);
+        let payload = name_groups(read, group_by, &identities);
 
         // Assert
+        let mut expected = serde_json::to_value(&result).unwrap();
+        expected["earliest_ms"] = Value::from(1_000);
         assert_eq!(
             serde_json::to_value(&payload).unwrap(),
-            serde_json::to_value(&result).unwrap(),
+            expected,
             "{group_by:?}"
         );
     }

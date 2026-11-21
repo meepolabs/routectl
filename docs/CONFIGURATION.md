@@ -4889,7 +4889,7 @@ loaded.
 
 The running server's `/status/query` endpoint answers a grouped, windowed
 aggregate over the local usage ledger. Like `--json` above, its payload
-carries a `schema_version` (currently `5`) and its shape is UNSTABLE before
+carries a `schema_version` (currently `6`) and its shape is UNSTABLE before
 1.0 -- metric names may be added and the envelope may be restructured. The
 `schema_version` bumps on any semantic change or removal; purely additive
 changes (a new metric, a new grouping or window token) do not bump it.
@@ -4929,6 +4929,13 @@ seat the config no longer names keeps its `account` with null
 null for all three. Read these fields; never split the label. Groups of the
 other groupings carry no identity fields. Do not build a durable
 integration on the response shape before 1.0.
+
+Beside `groups`, `totals` and `series`, the payload carries `earliest_ms`:
+the start time (epoch ms) of the oldest request in the whole ledger,
+whatever the requested `window` and filters, or null when the ledger holds
+no request at all. A window with no requests over a ledger that has some
+therefore answers zero totals with `earliest_ms` set, which tells it apart
+from a ledger that has never recorded anything.
 
 The server runs one query read at a time. A query that arrives while another
 is still reading answers at once with an unavailable panel carrying `db_busy`;
@@ -4980,7 +4987,12 @@ The timing, throughput, context and cache-hit figures of every metric set
 mean what their names say. `ttft_avg_ms` and `ttft_max_ms` are the mean and
 the largest time to first token over streamed successes; `latency_avg_ms` and
 `latency_max_ms` the mean and the largest end-to-end latency over every
-request. None of them is a percentile. `throughput_tok_s` is the output
+request. The percentiles are `ttft_p50_ms`, `ttft_p90_ms` and `ttft_p99_ms`
+over the same streamed successes, and `latency_p50_ms`, `latency_p90_ms` and
+`latency_p99_ms` over every request: nearest-rank, in whole milliseconds,
+null when the set has no such request. At schema 3 `ttft_p50_ms` and
+`latency_p50_ms` held a mean; since schema 6 they are true medians.
+`throughput_tok_s` is the output
 tokens of streamed successes divided by their summed generation time (the
 latency after the first token), so a long slow stream weighs as much as its
 tokens. `ctx_avg` and `ctx_peak` are the mean and the largest per-request
@@ -5010,6 +5022,22 @@ reasoning tokens on a request whose provider kind is unknown read
 `reasoning`. A request with no recorded provider adds nothing. Totals and
 series buckets carry the union of their requests' names. Naming a missing
 dimension never adds any API-equivalent amount to `cost_usd`.
+
+`missing_prices` lists the same reasons per model: one
+`{model, dimension, config_key}` entry for each distinct served model and
+missing dimension, sorted by model then dimension, so its distinct
+`dimension` values are exactly `missing_price_dimensions`. `model` is the
+served model's nickname, whatever the grouping. `config_key` is the
+`config.toml` key that would price the dimension, read from the config that
+priced the request, for example
+`models.sonnet.pricing.cache_write_per_mtok.30m` or
+`models.sonnet.pricing.output_per_mtok`. It is null where no key can: for
+`cache write (unknown lifetime)` and `reasoning`, which no rate fixes, for a
+model the config no longer names under `[models]`, and for a nickname that
+cannot be written as a plain dotted key. `cache_write_unknown_tokens` sums
+the cache-write tokens recorded with no lifetime, the writes behind
+`cache write (unknown lifetime)`; a request whose lifetime split sums above
+its total adds nothing to it.
 
 ### `provider probe [<name>]` -- reachability, free-only
 
