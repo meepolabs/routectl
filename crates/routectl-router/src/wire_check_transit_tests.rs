@@ -1,7 +1,8 @@
 use routectl_core::wire_check::WirePath;
 
 use super::{
-    CheckOutcome, LaneTransitRow, TRANSIT_LANE_CAP, TRANSIT_PATH_CAP, TransitLane, WireCheckState,
+    CheckOutcome, LaneTransitRow, TRANSIT_LANE_CAP, TRANSIT_PATH_CAP, TRANSIT_PATH_SLOTS,
+    TransitLane, WireCheckState,
 };
 use crate::state_key::StateKey;
 
@@ -148,8 +149,12 @@ fn lanes_past_the_cap_count_under_other_and_sums_match_the_totals() {
     assert_eq!(findings, changed);
 }
 
+fn named_plus_other(row: &LaneTransitRow) -> u64 {
+    row.paths.iter().map(|(_, c)| c).sum::<u64>() + row.other_paths
+}
+
 #[test]
-fn paths_past_the_cap_count_in_the_lanes_other_and_sums_match_the_findings() {
+fn a_row_names_the_cap_most_changed_paths_and_sums_the_rest_in_other() {
     let state = WireCheckState::default();
     let key = lane("p0");
     let paths: Vec<WirePath> = (0..=TRANSIT_PATH_CAP + 1)
@@ -166,25 +171,89 @@ fn paths_past_the_cap_count_in_the_lanes_other_and_sums_match_the_findings() {
     let rows = state.transit_snapshot().lanes;
     let row = row_for(&rows, &TransitLane::Lane(key)).expect("lane named");
     assert_eq!(row.paths.len(), TRANSIT_PATH_CAP);
-    assert_eq!(row.paths[0], (paths[0].clone(), 2), "most findings first");
+    assert_eq!(
+        row.paths[..2],
+        [(paths[0].clone(), 2), (paths[TRANSIT_PATH_CAP].clone(), 2)],
+        "most findings first, then by path"
+    );
     assert!(
         row.paths
             .iter()
-            .any(|(p, _)| p == &paths[TRANSIT_PATH_CAP - 1]),
-        "the 16th path is named"
+            .all(|(p, _)| p != &paths[TRANSIT_PATH_CAP - 1] && p != &paths[TRANSIT_PATH_CAP + 1]),
+        "the two last one-off paths by order are not named: {:?}",
+        row.paths
     );
-    assert!(
-        row.paths.iter().all(|(p, _)| p != &paths[TRANSIT_PATH_CAP]),
-        "the 17th path is not named"
-    );
-    assert_eq!(
-        row.other_paths, 3,
-        "the 17th and 18th paths, the 17th twice"
-    );
+    assert_eq!(row.other_paths, 2, "the two unnamed one-off paths");
     assert_eq!((row.checked, row.changed), (2, 2));
-    let named: u64 = row.paths.iter().map(|(_, c)| c).sum();
     let recorded = u64::try_from(paths.len() + 2).expect("small");
-    assert_eq!(named + row.other_paths, recorded);
+    assert_eq!(named_plus_other(row), recorded);
+}
+
+#[test]
+fn a_path_first_seen_after_the_cap_that_changes_most_is_named_first() {
+    let state = WireCheckState::default();
+    let key = lane("p0");
+    let one_offs: Vec<WirePath> = (0..TRANSIT_PATH_CAP)
+        .map(|i| path(&format!("k{i:02}")))
+        .collect();
+    let frequent = path("z_frequent");
+    for one_off in &one_offs {
+        state.record_transit(Some(&key), CheckOutcome::Loss, [one_off]);
+    }
+
+    for _ in 0..5 {
+        state.record_transit(Some(&key), CheckOutcome::Loss, [&frequent]);
+    }
+
+    let rows = state.transit_snapshot().lanes;
+    let row = row_for(&rows, &TransitLane::Lane(key)).expect("lane named");
+    assert_eq!(row.paths.len(), TRANSIT_PATH_CAP);
+    assert_eq!(row.paths[0], (frequent, 5), "{:?}", row.paths);
+    assert_eq!(row.other_paths, 1, "one one-off path is left unnamed");
+    let recorded = u64::try_from(one_offs.len() + 5).expect("small");
+    assert_eq!(row.changed, recorded);
+    assert_eq!(named_plus_other(row), recorded);
+}
+
+#[test]
+fn a_frequent_path_stays_tracked_past_the_slot_bound_with_its_exact_count() {
+    // Arrange: every slot holds a one-off path, then a frequent path arrives
+    // interleaved with twice as many fresh one-off paths, each evicting the
+    // slot with the fewest findings.
+    let state = WireCheckState::default();
+    let key = lane("p0");
+    let mut fresh = (0..).map(|i| path(&format!("n{i:04}")));
+    for _ in 0..TRANSIT_PATH_SLOTS {
+        let one_off = fresh.next().expect("endless");
+        state.record_transit(Some(&key), CheckOutcome::Loss, [&one_off]);
+    }
+    let frequent = path("a_frequent");
+    let rounds: u64 = 40;
+
+    // Act
+    for _ in 0..rounds {
+        let noise = [
+            fresh.next().expect("endless"),
+            fresh.next().expect("endless"),
+        ];
+        state.record_transit(
+            Some(&key),
+            CheckOutcome::Loss,
+            [&frequent, &noise[0], &noise[1]],
+        );
+    }
+
+    // Assert
+    let rows = state.transit_snapshot().lanes;
+    let row = row_for(&rows, &TransitLane::Lane(key)).expect("lane named");
+    let recorded = u64::try_from(TRANSIT_PATH_SLOTS).expect("small") + 3 * rounds;
+    assert_eq!(
+        row.paths[0],
+        (frequent, rounds),
+        "tracked since its first finding, so its count is exact: {:?}",
+        row.paths
+    );
+    assert_eq!(named_plus_other(row), recorded);
 }
 
 #[test]

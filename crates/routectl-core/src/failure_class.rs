@@ -136,6 +136,22 @@ pub enum LastOutcome {
 }
 
 impl LastOutcome {
+    /// The snake_case wire token, byte for byte what `serde` writes. Every
+    /// surface that spells an outcome as a string reads it here; a new
+    /// variant is a compile error until it has a token.
+    #[must_use]
+    pub const fn wire_token(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::RateLimited => "rate_limited",
+            Self::Timeout => "timeout",
+            Self::TransportError => "transport_error",
+            Self::Http4xx => "http_4xx",
+            Self::Http5xx => "http_5xx",
+            Self::CircuitOpen => "circuit_open",
+        }
+    }
+
     /// Derive the outcome of a failed attempt from its [`FailureClass`].
     ///
     /// Collapses the taxonomy into HTTP families: the client-error classes

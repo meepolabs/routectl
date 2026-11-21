@@ -144,7 +144,7 @@ struct TargetHealth {
     /// never a `0`/epoch sentinel.
     open_since_ms: Option<i64>,
     /// Snake_case token of the most recent settled outcome (see
-    /// [`last_outcome_token`]), or `None` before any dispatch has settled
+    /// [`LastOutcome::wire_token`]), or `None` before any dispatch has settled
     /// (fresh state / post-restart). Renders `circuit_open` when the circuit
     /// phase is open -- derived from the phase, never a stored value.
     last_outcome: Option<String>,
@@ -217,22 +217,6 @@ const fn circuit_token(phase: CircuitPhase) -> &'static str {
     }
 }
 
-/// Map a [`LastOutcome`] to its snake_case wire token. Owned by the status
-/// module (not the router enum's `Serialize` derive) so a new outcome variant
-/// is a compile error here rather than a silent wire change. A tripwire test
-/// pins each token to the core enum's `serde` output.
-const fn last_outcome_token(outcome: LastOutcome) -> &'static str {
-    match outcome {
-        LastOutcome::Ok => "ok",
-        LastOutcome::RateLimited => "rate_limited",
-        LastOutcome::Timeout => "timeout",
-        LastOutcome::TransportError => "transport_error",
-        LastOutcome::Http4xx => "http_4xx",
-        LastOutcome::Http5xx => "http_5xx",
-        LastOutcome::CircuitOpen => "circuit_open",
-    }
-}
-
 /// Render the DTO's `last_outcome` token. An open circuit yields the derived
 /// `circuit_open` (the stored value never holds it, per the runtime-state
 /// contract); otherwise the stored outcome's token, or `None` when nothing
@@ -242,7 +226,7 @@ fn last_outcome_wire(circuit: CircuitPhase, stored: Option<LastOutcome>) -> Opti
         CircuitPhase::Open => Some(LastOutcome::CircuitOpen),
         CircuitPhase::Closed | CircuitPhase::HalfOpenReady => stored,
     };
-    outcome.map(|o| last_outcome_token(o).to_string())
+    outcome.map(|o| o.wire_token().to_string())
 }
 
 /// Convert a monotonic elapsed age into an epoch-ms instant relative to

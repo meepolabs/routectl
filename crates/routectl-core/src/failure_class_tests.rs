@@ -728,6 +728,8 @@ fn from_failure_class_is_total_and_never_ok_or_circuit_open() {
     }
 }
 
+/// Tripwire: `wire_token` is the one hand-spelled copy of the outcome
+/// vocabulary, so it must match `serde` byte for byte on every variant.
 #[test]
 fn last_outcome_serializes_snake_case_with_http_family_underscores() {
     let cases = [
@@ -743,8 +745,14 @@ fn last_outcome_serializes_snake_case_with_http_family_underscores() {
         // Act
         let got = serde_json::to_string(&outcome).expect("serialize");
 
-        // Assert: round-trips through the same wire token.
+        // Assert: round-trips through the same wire token, which is the one
+        // `wire_token` spells.
         assert_eq!(got, expected, "outcome {outcome:?}");
+        assert_eq!(
+            format!("\"{}\"", outcome.wire_token()),
+            got,
+            "wire_token drift for {outcome:?}"
+        );
         let back: LastOutcome = serde_json::from_str(&got).expect("deserialize");
         assert_eq!(back, outcome);
     }

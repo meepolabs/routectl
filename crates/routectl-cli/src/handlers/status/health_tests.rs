@@ -87,29 +87,6 @@ fn circuit_token_pins_every_phase_to_snake_case() {
     );
 }
 
-/// Tripwire: the module-owned `last_outcome_token` must match the core
-/// enum's `serde` output for EVERY variant, byte for byte. A rename on
-/// either side drifts the wire away from the taxonomy and trips here.
-#[test]
-fn last_outcome_token_matches_core_enum_serde() {
-    for outcome in [
-        LastOutcome::Ok,
-        LastOutcome::RateLimited,
-        LastOutcome::Timeout,
-        LastOutcome::TransportError,
-        LastOutcome::Http4xx,
-        LastOutcome::Http5xx,
-        LastOutcome::CircuitOpen,
-    ] {
-        let serde_token = serde_json::to_value(outcome).unwrap();
-        assert_eq!(
-            Value::String(last_outcome_token(outcome).to_string()),
-            serde_token,
-            "token drift for {outcome:?}"
-        );
-    }
-}
-
 #[test]
 fn open_circuit_derives_circuit_open_and_open_since() {
     let target = target_with_ages(

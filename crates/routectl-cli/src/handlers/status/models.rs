@@ -33,9 +33,9 @@ use crate::lane_cell::{ResolvedCell, ResolvedLane, encoded_value};
 /// does not.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The `top_paths` entry that sums every path the transit tally counted past
-/// its per-lane path cap. A real path is a JSON pointer, empty or starting
-/// with `/`, so it never reads as this token.
+/// The `top_paths` entry that sums every finding the named paths do not
+/// count. A real path is a JSON pointer, empty or starting with `/`, so it
+/// never reads as this token.
 pub const OTHER_PATHS: &str = "other";
 
 /// One row per learned lane, problems first, then by lane.

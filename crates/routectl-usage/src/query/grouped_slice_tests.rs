@@ -419,9 +419,10 @@ fn four_slices_answer_exactly_as_one_for_every_grouping_filter_and_grid() {
         assert_every_metric_present(&format!("slice {slice}"), &totals);
     }
     let filters = [
-        ("unfiltered", None, None),
-        ("alias al", Some("al"), None),
-        ("provider pa", None, Some("pa")),
+        ("unfiltered", None, None, None),
+        ("alias al", Some("al"), None, None),
+        ("provider pa", None, Some("pa"), None),
+        ("model m1", None, None, Some("m1")),
     ];
     let grids = [
         ("no series", None),
@@ -441,12 +442,13 @@ fn four_slices_answer_exactly_as_one_for_every_grouping_filter_and_grid() {
         ),
     ];
     for group_by in GroupDim::ALL {
-        for (filter, alias_filter, provider_filter) in filters {
+        for (filter, alias_filter, provider_filter, model_filter) in filters {
             for (grid, bucket) in grids {
                 let case = format!("{} / {filter} / {grid}", group_by.as_str());
                 let spec = QuerySpec {
                     alias_filter: alias_filter.map(String::from),
                     provider_filter: provider_filter.map(String::from),
+                    model_filter: model_filter.map(String::from),
                     bucket,
                     ..sliced_spec(group_by)
                 };

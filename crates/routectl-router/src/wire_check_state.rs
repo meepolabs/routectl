@@ -24,9 +24,11 @@
 //!   that finished (`checked`), those with at least one finding (`changed`),
 //!   and the finding count per sanitized path. Learned lanes are operator
 //!   configuration that a reload can rename, so the lanes are bounded by
-//!   [`TRANSIT_LANE_CAP`] and each lane's paths by [`TRANSIT_PATH_CAP`], with
-//!   one overflow bucket each; `started_ms` stamps when the state was built,
-//!   which is the daemon start because the state is carried across reloads.
+//!   [`TRANSIT_LANE_CAP`] with one overflow bucket, and each lane tracks at
+//!   most [`TRANSIT_PATH_SLOTS`] paths (a Space-Saving heavy-hitter summary)
+//!   and names the [`TRANSIT_PATH_CAP`] most changed of them; `started_ms`
+//!   stamps when the state was built, which is the daemon start because the
+//!   state is carried across reloads.
 //!
 //! A loss WARNs once per (lane, path, class) and an unrepaired rejection once
 //! per (lane, path), each kind through its own [`CappedWarnSet`]; the
@@ -36,7 +38,7 @@
 //! WARN. Locks are held only for the map or ring update and never
 //! across a `tracing` call or an await.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -59,9 +61,18 @@ pub const FINDINGS_RING_CAPACITY: usize = 128;
 /// constant, never a config knob.
 pub const TRANSIT_LANE_CAP: usize = 256;
 
-/// Most paths one lane's transit tally names individually. A path first seen
-/// on a lane once this many are named counts in that lane's `other_paths`.
+/// Most paths one lane's transit row names; the findings of every other path
+/// count in that lane's `other_paths`.
 pub const TRANSIT_PATH_CAP: usize = 16;
+
+/// Paths one lane's transit tally tracks, the fixed per-lane memory bound
+/// (each path at most `MAX_WIRE_PATH_LEN` bytes). Once every slot holds a
+/// path, a new path takes the slot with the fewest findings (Space-Saving),
+/// so a path with more than `1/TRANSIT_PATH_SLOTS` of the lane's findings
+/// is always tracked. A tracked path's count is exact since it took its
+/// slot; one admitted into a full tally may miss up to `findings /
+/// TRANSIT_PATH_SLOTS` of its earlier findings, and never over-counts.
+pub const TRANSIT_PATH_SLOTS: usize = 64;
 
 /// Distinct WARN keys each kind's dedup set remembers before it stops
 /// recording. Paths are client-influenced, so the set needs a bound;
@@ -293,9 +304,12 @@ pub struct LaneTransitRow {
     pub checked: u64,
     /// The subset of `checked` with at least one finding.
     pub changed: u64,
-    /// Findings per named path, most findings first, then by path.
+    /// The [`TRANSIT_PATH_CAP`] tracked paths with the most findings, most
+    /// first, then by path. Each count is a lower bound, exact for a path
+    /// tracked since its first finding (see [`TRANSIT_PATH_SLOTS`]).
     pub paths: Vec<(WirePath, u64)>,
-    /// Findings on paths first seen once [`TRANSIT_PATH_CAP`] were named.
+    /// The lane's findings not counted in `paths`, so `paths` and
+    /// `other_paths` sum to every finding recorded.
     pub other_paths: u64,
 }
 
@@ -345,8 +359,25 @@ struct TransitTally {
 struct LaneTransit {
     checked: u64,
     changed: u64,
-    paths: BTreeMap<WirePath, u64>,
-    other_paths: u64,
+    findings: u64,
+    slots: Vec<PathSlot>,
+}
+
+/// One tracked path. `count` is the Space-Saving estimate (an upper bound on
+/// the path's findings, what eviction ranks by); `inherited` is the part of
+/// it the path took over from the slot's previous holder, so `count -
+/// inherited` is exactly the findings since the path took the slot.
+#[derive(Debug)]
+struct PathSlot {
+    path: WirePath,
+    count: u64,
+    inherited: u64,
+}
+
+impl PathSlot {
+    const fn counted(&self) -> u64 {
+        self.count - self.inherited
+    }
 }
 
 impl TransitTally {
@@ -374,28 +405,40 @@ impl TransitTally {
 
 impl LaneTransit {
     fn count_path(&mut self, path: &WirePath) {
-        if let Some(count) = self.paths.get_mut(path) {
-            *count = count.saturating_add(1);
-        } else if self.paths.len() < TRANSIT_PATH_CAP {
-            self.paths.insert(path.clone(), 1);
-        } else {
-            self.other_paths = self.other_paths.saturating_add(1);
+        self.findings = self.findings.saturating_add(1);
+        if let Some(slot) = self.slots.iter_mut().find(|slot| &slot.path == path) {
+            slot.count = slot.count.saturating_add(1);
+        } else if self.slots.len() < TRANSIT_PATH_SLOTS {
+            self.slots.push(PathSlot {
+                path: path.clone(),
+                count: 1,
+                inherited: 0,
+            });
+        } else if let Some(fewest) = self.slots.iter_mut().min_by_key(|slot| slot.count) {
+            let inherited = fewest.count;
+            *fewest = PathSlot {
+                path: path.clone(),
+                count: inherited.saturating_add(1),
+                inherited,
+            };
         }
     }
 
     fn row(&self, lane: TransitLane) -> LaneTransitRow {
         let mut paths: Vec<(WirePath, u64)> = self
-            .paths
+            .slots
             .iter()
-            .map(|(path, &count)| (path.clone(), count))
+            .map(|slot| (slot.path.clone(), slot.counted()))
             .collect();
         paths.sort_by(|(pa, ca), (pb, cb)| cb.cmp(ca).then_with(|| pa.cmp(pb)));
+        paths.truncate(TRANSIT_PATH_CAP);
+        let named: u64 = paths.iter().map(|(_, count)| count).sum();
         LaneTransitRow {
             lane,
             checked: self.checked,
             changed: self.changed,
             paths,
-            other_paths: self.other_paths,
+            other_paths: self.findings.saturating_sub(named),
         }
     }
 }

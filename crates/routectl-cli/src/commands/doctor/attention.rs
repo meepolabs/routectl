@@ -667,7 +667,7 @@ fn provider_folds(inputs: &AttentionInputs) -> ProviderFolds<'_> {
             continue;
         };
         folds
-            .entry((route.provider_entry.as_str(), outcome_token(outcome)))
+            .entry((route.provider_entry.as_str(), outcome.wire_token()))
             .or_default()
             .push(route);
     }
@@ -690,7 +690,7 @@ fn route_cause_key(
     }
     let folded = route
         .last_outcome
-        .map(|outcome| (route.provider_entry.as_str(), outcome_token(outcome)))
+        .map(|outcome| (route.provider_entry.as_str(), outcome.wire_token()))
         .filter(|fold| folds.contains_key(fold));
     match folded {
         Some((entry, token)) => item_key(
@@ -703,20 +703,6 @@ fn route_cause_key(
 
 fn fold_subject_key(entry: &str, token: &str) -> String {
     format!("{entry}/{token}")
-}
-
-/// The wire token of a last outcome, as `/status/health` spells it and the
-/// core enum serializes it.
-const fn outcome_token(outcome: LastOutcome) -> &'static str {
-    match outcome {
-        LastOutcome::Ok => "ok",
-        LastOutcome::RateLimited => "rate_limited",
-        LastOutcome::Timeout => "timeout",
-        LastOutcome::TransportError => "transport_error",
-        LastOutcome::Http4xx => "http_4xx",
-        LastOutcome::Http5xx => "http_5xx",
-        LastOutcome::CircuitOpen => "circuit_open",
-    }
 }
 
 const fn outcome_words(outcome: Option<LastOutcome>) -> &'static str {

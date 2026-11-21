@@ -22,15 +22,25 @@ const READ_FILTERS: &str = read_filters!();
 /// The optional-filter shape every bind-param filter of the predicate takes.
 const OPTIONAL_FILTER: &str = "IS NULL OR";
 
-/// Every request filter and the clause that applies it, one per bind param.
-const FILTER_CLAUSES: [(&str, &str); 3] = [
-    ("alias", "(?3 IS NULL OR alias = ?3)"),
-    ("provider", "(?4 IS NULL OR provider = ?4)"),
-    (
-        "model",
-        "(?6 IS NULL OR COALESCE(model, requested_model) = ?6)",
-    ),
+/// Every request filter: its bind param and the column it compares.
+const FILTERS: [(&str, u8, &str); 3] = [
+    ("alias", 3, "alias"),
+    ("provider", 4, "provider"),
+    ("model", 6, "COALESCE(model, requested_model)"),
 ];
+
+/// Every request filter and the clause that applies it, one per bind param.
+fn filter_clauses() -> Vec<(&'static str, String)> {
+    FILTERS
+        .iter()
+        .map(|&(filter, param, column)| {
+            (
+                filter,
+                format!("(?{param} {OPTIONAL_FILTER} {column} = ?{param})"),
+            )
+        })
+        .collect()
+}
 
 /// Every statement the grouped read prepares: the aggregate and the error
 /// classes and cache-write lifetimes beside it, each unbucketed and bucketed,
@@ -68,7 +78,7 @@ fn every_grouped_read_statement_takes_the_shared_predicate_and_no_other_filter()
     assert_eq!(statements.len(), 14, "statement census");
     assert_eq!(
         filters_in_predicate,
-        FILTER_CLAUSES.len(),
+        FILTERS.len(),
         "one optional clause per request filter"
     );
     assert!(
@@ -86,9 +96,9 @@ fn every_grouped_read_statement_takes_the_shared_predicate_and_no_other_filter()
             filters_in_predicate,
             "{name} filters outside the shared predicate: {sql}"
         );
-        for (filter, clause) in FILTER_CLAUSES {
+        for (filter, clause) in filter_clauses() {
             assert_eq!(
-                sql.matches(clause).count(),
+                sql.matches(clause.as_str()).count(),
                 1,
                 "{name} must apply the {filter} filter exactly once: {sql}"
             );

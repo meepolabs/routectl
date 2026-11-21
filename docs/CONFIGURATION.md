@@ -4946,9 +4946,10 @@ to no chain carries `steps: []`. All three count the requested `window` only.
 Groups of the other groupings carry none of these fields.
 
 Beside `groups`, `totals` and `series`, the payload carries `earliest_ms`:
-the start time (epoch ms) of the oldest request in the whole ledger,
+the start time (epoch ms) of the oldest inference request in the whole
+ledger (token-count requests are excluded, as from every other figure),
 whatever the requested `window` and filters, or null when the ledger holds
-no request at all. A window with no requests over a ledger that has some
+no inference request. A window with no requests over a ledger that has some
 therefore answers zero totals with `earliest_ms` set, which tells it apart
 from a ledger that has never recorded anything.
 
@@ -5949,8 +5950,10 @@ database read and no doctor gather.
     `refusals`.
   - `transit`: `checked` (responses the wire check compared), `changed`
     (those with at least one changed field) and `top_paths` (`path` and
-    `count`, most first, at most 16, then one `other` entry summing the
-    rest). `checked` 0 means unmeasured.
+    `count`: the 16 most changed paths, most first, then one `other` entry
+    summing the rest). Each lane tracks at most 64 paths; a path that took
+    a slot from a rarer one counts only the changes since, which `other`
+    carries the rest of. `checked` 0 means unmeasured.
 
 ### Credential pools (multiple accounts per provider)
 
