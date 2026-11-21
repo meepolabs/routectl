@@ -223,25 +223,15 @@ macro_rules! query_agg_select {
     };
 }
 
-/// The window predicate and the two optional filters, as BIND PARAMS (never
-/// interpolated identifiers). Shared by both query statements so a filter can
-/// never apply to one and not the other.
-///
-/// `?5` is the read's rowid watermark (see `below_watermark!` in the parent
-/// module).
+/// The FROM and WHERE of both query statements: the grouped read's shared
+/// predicate (`read_filters!` in the parent module).
 macro_rules! query_agg_from_where {
     () => {
         concat!(
             "
 FROM requests AS r
-WHERE ts_start >= ?1 AND ts_start < ?2
-  AND ",
-            inference_rows!(),
-            "
-  AND (?3 IS NULL OR alias = ?3)
-  AND (?4 IS NULL OR provider = ?4)
-  AND ",
-            below_watermark!(),
+WHERE ",
+            read_filters!(),
             "\n"
         )
     };
@@ -480,17 +470,11 @@ macro_rules! errors_by_class_sql {
     COALESCE(resolved_class, 'unclassified')            AS class,
     COUNT(*)                                            AS count
 FROM requests
-WHERE ts_start >= ?1 AND ts_start < ?2
+WHERE ",
+            read_filters!(),
+            "
   AND ",
             error_rows!(),
-            "
-  AND ",
-            inference_rows!(),
-            "
-  AND (?3 IS NULL OR alias = ?3)
-  AND (?4 IS NULL OR provider = ?4)
-  AND ",
-            below_watermark!(),
             "
 GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
          provider_kind, seat",

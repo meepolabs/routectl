@@ -37,14 +37,8 @@ macro_rules! timings_sql {
             ttft_eligible!(),
             " THEN ttfb_ms END, latency_ms
 FROM requests
-WHERE ts_start >= ?1 AND ts_start < ?2
-  AND ",
-            inference_rows!(),
-            "
-  AND (?3 IS NULL OR alias = ?3)
-  AND (?4 IS NULL OR provider = ?4)
-  AND ",
-            below_watermark!()
+WHERE ",
+            read_filters!()
         )
     };
 }
@@ -62,7 +56,7 @@ macro_rules! timings_sql_pair {
 
 /// The `(unbucketed, bucketed)` statements of `group_by`. The label column is
 /// the column [`GroupDim::label`] reads from the fine key.
-const fn statements(group_by: GroupDim) -> (&'static str, &'static str) {
+pub(super) const fn statements(group_by: GroupDim) -> (&'static str, &'static str) {
     match group_by {
         GroupDim::Model => timings_sql_pair!("COALESCE(model, requested_model)"),
         GroupDim::Alias => timings_sql_pair!("alias"),

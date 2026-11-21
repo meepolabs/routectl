@@ -259,7 +259,8 @@ const EXEMPT_SITES: &[(&str, &str, &str)] = &[
 
 /// Every `FROM requests` / `JOIN requests` in `src`, as `(item, guarded)`:
 /// the const or macro the statement lives in, and whether the statement up
-/// to its terminating `;` applies the shared predicate. Comment lines are
+/// to its terminating `;` applies the shared predicate, directly or through
+/// the grouped read's `read_filters!()`, which carries it. Comment lines are
 /// skipped; SQL never lives in one.
 fn requests_sites(src: &str) -> Vec<(String, bool)> {
     // A `\n` / `\t` escape inside a literal is whitespace to SQLite but an
@@ -277,7 +278,9 @@ fn requests_sites(src: &str) -> Vec<(String, bool)> {
             continue;
         }
         let end = lower[found..].find(';').map_or(lower.len(), |i| found + i);
-        let guarded = src[found..end].contains("inference_rows!()");
+        let statement = &src[found..end];
+        let guarded =
+            statement.contains("inference_rows!()") || statement.contains("read_filters!()");
         sites.push((enclosing_item(&src[..found]), guarded));
     }
     sites

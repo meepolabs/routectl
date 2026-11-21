@@ -31,6 +31,30 @@ macro_rules! below_watermark {
     };
 }
 
+/// The row predicate every statement of the grouped read shares: the window
+/// (`?1` inclusive, `?2` exclusive), inference rows only, the optional alias
+/// (`?3`) and provider (`?4`) filters as bind params, and the watermark
+/// (`?5`). The aggregate and its side reads (error classes, cache-write
+/// lifetimes, timings) all take it from here, so a filter can never apply to
+/// one statement and not another; a weld test pins every statement to it.
+///
+/// The leading SQL comment marks the expansion, so the weld test tells a
+/// statement that takes this macro from one that spells the same text by hand.
+macro_rules! read_filters {
+    () => {
+        concat!(
+            "/* read_filters */ ts_start >= ?1 AND ts_start < ?2
+  AND ",
+            inference_rows!(),
+            "
+  AND (?3 IS NULL OR alias = ?3)
+  AND (?4 IS NULL OR provider = ?4)
+  AND ",
+            below_watermark!()
+        )
+    };
+}
+
 /// Row-eligibility predicate for every time-to-first-token figure: a streaming
 /// success that recorded a first-byte time. Shared by the mean's numerator /
 /// denominator, the MAX and the percentiles so they can never describe
@@ -337,3 +361,7 @@ mod inference_rows_tests;
 #[cfg(test)]
 #[path = "quota_seat_tests.rs"]
 mod quota_seat_tests;
+
+#[cfg(test)]
+#[path = "read_filters_tests.rs"]
+mod read_filters_tests;

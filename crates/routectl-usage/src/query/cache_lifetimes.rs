@@ -77,14 +77,8 @@ macro_rules! cache_lifetimes_sql {
             $bucket,
             ", cache_write_tokens, cache_write_lifetimes
     FROM requests
-    WHERE ts_start >= ?1 AND ts_start < ?2
-      AND ",
-            inference_rows!(),
-            "
-      AND (?3 IS NULL OR alias = ?3)
-      AND (?4 IS NULL OR provider = ?4)
-      AND ",
-            below_watermark!(),
+    WHERE ",
+            read_filters!(),
             "
       AND ",
             write_total_rows!()
@@ -92,11 +86,11 @@ macro_rules! cache_lifetimes_sql {
     };
 }
 
-const CACHE_LIFETIMES_SQL: &str = cache_lifetimes_sql!("0");
+pub(super) const CACHE_LIFETIMES_SQL: &str = cache_lifetimes_sql!("0");
 
 /// [`CACHE_LIFETIMES_SQL`] split further by the same bucket index the series
 /// aggregate groups on (`?6` is the bucket width, `?7` its anchor).
-const CACHE_LIFETIMES_BUCKETED_SQL: &str = cache_lifetimes_sql!("(ts_start - ?7) / ?6");
+pub(super) const CACHE_LIFETIMES_BUCKETED_SQL: &str = cache_lifetimes_sql!("(ts_start - ?7) / ?6");
 
 /// Per-lifetime cache writes of the rows carrying a write total, keyed by fine
 /// group and bucket index. The unbucketed read puts every row in bucket 0.
