@@ -9,15 +9,43 @@
 
   var answers = [];
   var sent = [];
+  // Hold rules over QUERY answers: the first unused rule whose `match` takes
+  // a request body holds that answer `ms` on the page's timers; a `deaf`
+  // rule also hands it to the page after the page aborted the request.
+  var holds = [];
   var inner = window.fetch;
+
+  function takeHold(body) {
+    for (var i = 0; i < holds.length; i++) {
+      if (!holds[i].used && holds[i].match(body)) {
+        holds[i].used = true;
+        holds[i].issued = true;
+        return holds[i];
+      }
+    }
+    return null;
+  }
+
+  function withoutSignal(init) {
+    var copy = {};
+    Object.keys(init || {}).forEach(function (k) { if (k !== 'signal') { copy[k] = init[k]; } });
+    return copy;
+  }
+
   window.fetch = function (input, init) {
     var url = new URL(String(input), location.href);
-    if (url.pathname === '/status/query') { sent.push(JSON.parse(init.body)); }
-    return inner(input, init).then(function (resp) {
-      if (url.pathname !== '/status/query' || !resp.ok) { return resp; }
+    var body = url.pathname === '/status/query' ? JSON.parse(init.body) : null;
+    if (body) { sent.push(body); }
+    var hold = body ? takeHold(body) : null;
+    var call = (hold && hold.deaf) ? inner(input, withoutSignal(init)) : inner(input, init);
+    return call.then(function (resp) {
+      if (!body || !resp.ok) { return resp; }
       return resp.clone().json().then(function (json) {
-        answers.push({ body: JSON.parse(init.body), json: json });
-        return resp;
+        return d.sleep(hold ? hold.ms : 0).then(function () {
+          answers.push({ body: body, json: json, held: !!hold });
+          if (hold) { hold.delivered = true; }
+          return resp;
+        });
       });
     });
   };
@@ -289,9 +317,9 @@
   });
 
   // Each row's address is followed as a link would be: from Config, which
-  // asks no QUERY, so the one QUERY Now issues for it carries the scope the
-  // page settled on.
-  d.scenario('url-scope-rows', function () {
+  // asks no QUERY, so every QUERY sent after the arrival is the one the
+  // address led to. The row is read once the view settled on its answer.
+  d.scenario('url-param-rows', function () {
     var rows = window.routectlUrlRows || [];
     var out = [];
     var chain = waitSettled();
@@ -306,6 +334,12 @@
         var arrived = nextHashChange();
         location.hash = raw;
         return arrived.then(function () {
+          return d.waitUntil('a QUERY for ' + raw, function () {
+            return queryBodies().length > issued;
+          });
+        }).then(function () {
+          return d.sleep(1000);
+        }).then(waitSettled).then(function () {
           out.push({
             raw: raw,
             hash: location.hash,
@@ -342,10 +376,22 @@
   });
 
   // A scope that looks like markup is drawn as text: the label carries it
-  // verbatim and no element is made from it.
+  // verbatim and no element is made from it. The ledger is made to carry a
+  // provider of that name, the one way such a scope is ever kept.
   d.scenario('url-scope-text', function () {
+    var label = window.routectlUrlLedgerLabel;
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status/query') { return text; }
+      var env = JSON.parse(text);
+      if (!env.data || !Array.isArray(env.data.groups) || !env.data.groups.length) { return text; }
+      var extra = JSON.parse(JSON.stringify(env.data.groups[0]));
+      extra.label = label;
+      env.data.groups.push(extra);
+      return JSON.stringify(env);
+    });
     return d.waitUntil('the scoped Now figures', function () {
-      return settled() && document.querySelector('#body-now .card-title');
+      return settled() && queryBodies().some(function (b) { return b.provider === label; }) &&
+        document.querySelector('#body-now .card-title');
     }).then(function () {
       var titles = Array.prototype.map.call(
         document.querySelectorAll('#body-now .card-title'),
@@ -356,6 +402,111 @@
         b_elements: document.querySelectorAll('b').length,
         queries: queryBodies()
       };
+    });
+  });
+
+  // The config panel answers unavailable for the first `routectlUrlConfigDown`
+  // aggregate rounds, then live. Reports the address and every QUERY body
+  // while it is down, then the same once a QUERY has carried the scope.
+  d.scenario('url-held-before-config', function () {
+    var downRounds = window.routectlUrlConfigDown;
+    d.rewrite(function (url, text, n) {
+      if (url.pathname !== '/status' || n >= downRounds) { return text; }
+      var agg = JSON.parse(text);
+      agg.panels.config = {
+        schema_version: agg.panels.config.schema_version,
+        as_of: null,
+        data: null,
+        unavailable: 'config_unavailable'
+      };
+      return JSON.stringify(agg);
+    });
+    var out = {};
+    return d.waitFor('/status', downRounds).then(function () {
+      out.down = { hash: location.hash, queries: queryBodies(), titles: stateReport().titles };
+      return d.waitUntil('a scoped QUERY answered', function () {
+        return settled() && answers.some(function (a) { return a.body.model; });
+      });
+    }).then(function () {
+      out.live = stateReport();
+      return out;
+    });
+  });
+
+  // The strip names the model and provider scope; its reset lifts both.
+  d.scenario('url-scope-strip-reset', function () {
+    var out = {};
+    return d.waitUntil('the scope strip', function () {
+      return settled() && document.getElementById('usage-scope-reset');
+    }).then(function (reset) {
+      out.before = stateReport();
+      out.reset_text = reset.textContent;
+      var issued = queryBodies().length;
+      var before = history.length;
+      reset.click();
+      out.added = history.length - before;
+      return d.waitUntil('the unscoped answer', function () {
+        return settled() && answers.length > 0 && queryBodies().length > issued;
+      }).then(function () {
+        out.after = stateReport();
+        out.after.queries = queryBodies().slice(issued);
+        out.after.reset_present = !!document.getElementById('usage-scope-reset');
+      });
+    }).then(function () { return out; });
+  });
+
+  function verdictStats() {
+    return document.getElementById('verdict-stats').textContent;
+  }
+
+  function stripTitle() {
+    var head = document.querySelector('#body-traffic .card-title');
+    return head ? head.textContent : null;
+  }
+
+  // Model A is on screen; A's next answer is held past the switch to model
+  // B (and handed over even though the page aborted it), and B's own answer
+  // is held a little so the switch has a window to show something. Every
+  // repaint until both answers landed is sampled.
+  d.scenario('url-model-switch-held', function () {
+    var from = window.routectlUrlModelSwitch[0];
+    var to = window.routectlUrlModelSwitch[1];
+    var holdA = { match: function (b) { return b.model === from; }, ms: 3000, deaf: true };
+    var holdB = { match: function (b) { return b.model === to; }, ms: 800, deaf: false };
+    var samples = [];
+    var sampler = null;
+    var out = {};
+    return d.waitUntil('model A on screen', function () {
+      return settled() && answers.some(function (a) { return a.body.model === from; }) &&
+        / req /.test(verdictStats());
+    }).then(function () {
+      out.a_shown = { stats: verdictStats(), title: stripTitle() };
+      holds.push(holdA);
+      return d.waitUntil('A held in flight', function () { return holdA.issued; }, 15000);
+    }).then(function () {
+      holds.push(holdB);
+      sampler = setInterval(function () {
+        samples.push({ stats: verdictStats(), title: stripTitle(), hash: location.hash });
+      }, 10);
+      var arrived = nextHashChange();
+      location.hash = '#traffic?model=' + encodeURIComponent(to);
+      return arrived;
+    }).then(function () {
+      samples.push({ stats: verdictStats(), title: stripTitle(), hash: location.hash, first: true });
+      return d.waitUntil('both answers handed over', function () {
+        return holdA.delivered && holdB.delivered;
+      });
+    }).then(function () {
+      return d.sleep(300);
+    }).then(function () {
+      clearInterval(sampler);
+      samples.push({ stats: verdictStats(), title: stripTitle(), hash: location.hash });
+      out.samples = samples;
+      out.answers = answers.map(function (a) {
+        return { model: a.body.model || null, held: a.held, requests: a.json.data.totals.requests };
+      });
+      out.queries = queryBodies();
+      return out;
     });
   });
 })(window.routectlDriver);

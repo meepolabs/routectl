@@ -34,7 +34,7 @@
   // be read or lifted.
   function usageControls() {
     var controls = document.createDocumentFragment();
-    if (selectedProvider) {
+    if (hasQueryScope()) {
       controls.appendChild(scopeStrip('usage', 'every figure below is this provider only'));
     }
     controls.appendChild(groupByStrip());

@@ -589,7 +589,9 @@ mod tests {
     /// too -- every selectable window must carry a shape for every
     /// (group_by, series-mode) pair any window declares, and no pair may be
     /// declared twice for one window -- so the client cannot resolve a
-    /// selection to a shape this test never saw.
+    /// selection to a shape this test never saw. A body may also carry the
+    /// selection's `provider` and `model` scopes (bodyFromShape adds them on
+    /// top of the shape), so every shape is validated with both added too.
     #[test]
     fn dashboard_metric_tokens_are_in_the_query_vocabulary() {
         let vocabulary = serde_json::to_value(routectl_usage::QueryMetrics::default())
@@ -622,6 +624,26 @@ mod tests {
             !shapes.is_empty(),
             "QUERY_SHAPES must declare at least one request body"
         );
+        // The keys bodyFromShape writes on top of the copied shape: each one
+        // is added to every shape below, so a key the server does not know
+        // fails its parser here.
+        let body_from_shape = compact(&function_body("bodyFromShape"));
+        assert!(
+            body_from_shape.contains("body[k]=shape[k]"),
+            "bodyFromShape no longer copies the shape; the key scan below sees nothing of it"
+        );
+        let added: std::collections::BTreeSet<&str> = body_from_shape
+            .match_indices("body.")
+            .map(|(at, _)| {
+                let rest = &body_from_shape[at + "body.".len()..];
+                &rest[..rest.find('=').unwrap_or(rest.len())]
+            })
+            .collect();
+        assert_eq!(
+            added,
+            ["model", "provider"].into_iter().collect(),
+            "bodyFromShape adds the provider and model scopes"
+        );
         for shape in &shapes {
             assert!(
                 crate::handlers::status::query::spec_from_body(
@@ -631,6 +653,22 @@ mod tests {
                 )
                 .is_ok(),
                 "dashboard query shape `{shape}` is not in the server's request vocabulary"
+            );
+            let mut scoped: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(shape).expect("a shape is a JSON object");
+            for key in &added {
+                scoped.insert((*key).to_owned(), "x".into());
+            }
+            let scoped = serde_json::to_vec(&scoped).expect("a scoped body serializes");
+            assert!(
+                crate::handlers::status::query::spec_from_body(
+                    &scoped,
+                    &crate::local_time::LocalZone::utc(),
+                    now
+                )
+                .is_ok(),
+                "dashboard query shape `{shape}` with the scopes bodyFromShape adds ({added:?}) \
+                 is not in the server's request vocabulary"
             );
         }
 
@@ -1257,13 +1295,14 @@ mod tests {
             );
         }
         let shape_for = compact(&function_body("shapeFor"));
+        let shape_at = compact(&function_body("shapeAt"));
         assert!(
-            shape_for.contains("query_source_defs[i].name===source")
-                && shape_for.contains(
-                    "returnquery_source_defs[i].shape({window:selectedwindow,groupby:selectedgroupby});"
-                )
-                && shape_for.ends_with("returnnull;"),
-            "shapeFor must resolve a source through its registry entry, and null otherwise"
+            shape_for == "returnshapeat(source,{window:selectedwindow,groupby:selectedgroupby});"
+                && shape_at.contains("query_source_defs[i].name===source")
+                && shape_at.contains("returnquery_source_defs[i].shape(sel);")
+                && shape_at.ends_with("returnnull;"),
+            "shapeFor must resolve a source through its registry entry under the live \
+             selection, and null otherwise"
         );
         assert!(
             !code.contains("query_source,query_series_source"),

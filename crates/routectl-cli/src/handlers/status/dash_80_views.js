@@ -94,7 +94,7 @@
     var stack = tabStack();
     stack.appendChild(viewSection('attention', attentionSection, 'Needs attention'));
     stack.appendChild(viewSection('accounts', accountsGlanceSection, 'Accounts'));
-    if (selectedProvider && stateCard(SOURCES[QUERY_SERIES_SOURCE])) {
+    if (hasQueryScope() && stateCard(SOURCES[QUERY_SERIES_SOURCE])) {
       stack.appendChild(scopeRecovery());
     }
     stack.appendChild(viewSection(QUERY_SERIES_SOURCE, buildOverview));
@@ -110,7 +110,7 @@
   // lifted here.
   function buildAccounts() {
     var stack = tabStack();
-    if (selectedProvider) {
+    if (hasQueryScope()) {
       stack.appendChild(scopeStrip('accounts', 'the traffic lines count this provider only'));
     }
     stack.appendChild(viewSection('accounts', accountsPoolSection, 'Accounts by pool'));

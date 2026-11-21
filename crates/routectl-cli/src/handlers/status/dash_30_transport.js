@@ -135,8 +135,9 @@
   // The shape is looked up whole from QUERY_SHAPES for the live selection and
   // copied field-for-field -- nothing is overwritten afterwards, so every body
   // this page can emit is a declared shape the drift test has validated. Only
-  // the optional provider scope is added on top (the server accepts it against
-  // any shape).
+  // the optional provider and model scopes are added on top (the server
+  // accepts both against any shape); each is set only from the selection,
+  // which an address value reaches only through the codec's closed-set check.
   function queryBodyFor(tab) {
     return bodyFromShape(shapeFor(querySourceFor(tab)));
   }
@@ -150,16 +151,20 @@
     var body = {};
     Object.keys(shape).forEach(function (k) { body[k] = shape[k]; });
     if (selectedProvider) { body.provider = selectedProvider; }
+    if (selectedModel) { body.model = selectedModel; }
     return body;
   }
 
   // The request shape a query source stands for under the live selection, as
   // its QUERY_SOURCE_DEFS entry resolves it; null for any other source.
   function shapeFor(source) {
+    return shapeAt(source, { window: selectedWindow, groupBy: selectedGroupBy });
+  }
+
+  // The same, under the selection `sel` (`{ window, groupBy }`).
+  function shapeAt(source, sel) {
     for (var i = 0; i < QUERY_SOURCE_DEFS.length; i++) {
-      if (QUERY_SOURCE_DEFS[i].name === source) {
-        return QUERY_SOURCE_DEFS[i].shape({ window: selectedWindow, groupBy: selectedGroupBy });
-      }
+      if (QUERY_SOURCE_DEFS[i].name === source) { return QUERY_SOURCE_DEFS[i].shape(sel); }
     }
     return null;
   }
@@ -188,7 +193,9 @@
   // identically, so the rejected-shape guard and the single-flight check can
   // compare selections by string.
   function queryBodyKey(body) {
-    return JSON.stringify([body.window, body.group_by, body.bucket || '', body.provider || '']);
+    return JSON.stringify([
+      body.window, body.group_by, body.bucket || '', body.provider || '', body.model || ''
+    ]);
   }
 
   // Issue one QUERY for `source`. Single-flight: an in-flight request (for
@@ -245,6 +252,7 @@
       queryOwnAbortRevision = -1;
       queryBusyRetryIndex = -1;
       scheduleNextQuery(applyQueryOutcome(source, out, key));
+      noteLedgerProviders(source, body);
     }).catch(function () {
       // A render throw must not wedge the QUERY loop; treat it as a failed
       // round and keep the GET loop untouched.
@@ -500,6 +508,9 @@
       });
       lastSuccess = new Date();
       clearBanner();
+      // The config answer may have made known the set a held address value
+      // waits on; settling it first lets the nudge below ask for the result.
+      settleHeldAddress();
       // Nudge the visible query-backed tab so a healthy page keeps it in
       // step with the 5s poll. Skipped while one is already in flight, while
       // QUERY is backing off on its own clock, or when this selection has

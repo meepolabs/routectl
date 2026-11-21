@@ -135,16 +135,40 @@ fn page_browser_an_address_is_rewritten_canonical() {
     }
 }
 
-/// A scope that looks like markup is drawn as text, no element is made from
-/// it, and the QUERY carries it decoded.
+/// A scenario that first sets each `window.<name>` of `vars` to its value.
+fn url_vars_scenario(
+    name: &'static str,
+    hash: &'static str,
+    vars: &[(&str, Value)],
+) -> browser::Scenario {
+    let set: String = vars
+        .iter()
+        .map(|(var, value)| format!("window.{var} = {value};\n"))
+        .collect();
+    let snippets: &'static [&'static str] =
+        Box::leak(vec![&*Box::leak(set.into_boxed_str()), URL_DRIVER].into_boxed_slice());
+    browser::Scenario {
+        name,
+        hash,
+        snippets,
+        budget_ms: URL_BUDGET_MS,
+    }
+}
+
+/// A scope no config entry names is kept once the ledger's own unscoped
+/// provider read carries it as a label; one that looks like markup is then
+/// drawn as text, no element is made from it, and the QUERY carries it
+/// decoded. No QUERY carries it before the ledger read named it.
 ///
 /// Mutation check: draw sectionHead's title with innerHTML -> red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_a_markup_scope_renders_as_text_and_reaches_the_query_decoded() {
-    let run = browser::run_scenario(&url_scenario(
+fn page_browser_a_markup_scope_from_the_ledger_renders_as_text_and_reaches_the_query_decoded() {
+    let label = "<b>&+%";
+    let run = browser::run_scenario(&url_vars_scenario(
         "url-scope-text",
         "now?scope=%3Cb%3E%26%2B%25",
+        &[("routectlUrlLedgerLabel", Value::from(label))],
     ));
     let report = &run.result;
 
@@ -155,172 +179,376 @@ fn page_browser_a_markup_scope_renders_as_text_and_reaches_the_query_decoded() {
     );
     assert_eq!(report["b_elements"], 0, "the scope made an element");
     let bodies = queries(report);
-    assert!(!bodies.is_empty(), "no QUERY was issued");
-    for body in bodies {
-        assert_eq!(body["provider"], "<b>&+%", "{body}");
+    let first_scoped = bodies
+        .iter()
+        .position(|b| b.get("provider").is_some())
+        .expect("a scoped QUERY");
+    assert!(
+        first_scoped > 0,
+        "the scope was sent before the ledger named it"
+    );
+    for body in &bodies[..first_scoped] {
+        assert_eq!(body["group_by"], "provider", "the label read: {body}");
+    }
+    for body in &bodies[first_scoped..] {
+        assert_eq!(body["provider"], label, "{body}");
     }
 }
 
-/// One row of the scope table: the encoded value in the address, the scope
-/// the page settles on (None = dropped), and the canonical address.
-struct ScopeCase {
+/// One row of the address table: the address followed, what each QUERY sent
+/// for it carries as `provider` and `model` (None = absent), and the
+/// canonical address it is rewritten to.
+struct ParamCase {
     name: &'static str,
     raw: String,
-    scope: Option<String>,
+    scope: Option<&'static str>,
+    model: Option<&'static str>,
     hash: String,
 }
 
-fn scope_case(name: &'static str, raw: &str, scope: Option<&str>, hash: &str) -> ScopeCase {
-    ScopeCase {
+fn param_case(
+    name: &'static str,
+    query: &str,
+    scope: Option<&'static str>,
+    model: Option<&'static str>,
+    hash: &str,
+) -> ParamCase {
+    ParamCase {
         name,
-        raw: format!("#now?scope={raw}"),
-        scope: scope.map(str::to_owned),
+        raw: format!("#traffic?{query}"),
+        scope,
+        model,
         hash: hash.to_owned(),
     }
 }
 
-fn scope_cases() -> Vec<ScopeCase> {
-    let at_limit = "x".repeat(128);
+/// The value classes URLSearchParams can produce for `scope` and `model`.
+/// Positive rows are the configured names spelled as the page writes them;
+/// every other value is dropped, including one that decodes to a configured
+/// name through another spelling.
+fn param_cases() -> Vec<ParamCase> {
     vec![
-        scope_case(
-            "plain",
-            "anthropic",
+        param_case(
+            "model and scope round trip",
+            "scope=anthropic&model=sonnet",
             Some("anthropic"),
-            "#now?scope=anthropic",
+            Some("sonnet"),
+            "#traffic?scope=anthropic&model=sonnet",
         ),
-        scope_case("plus is a space", "a+b", Some("a b"), "#now?scope=a+b"),
-        scope_case(
-            "edges trimmed",
-            "%20anthropic%09",
-            Some("anthropic"),
-            "#now?scope=anthropic",
+        param_case(
+            "keys in another order",
+            "model=seat-sonnet&scope=claude-seat",
+            Some("claude-seat"),
+            Some("seat-sonnet"),
+            "#traffic?scope=claude-seat&model=seat-sonnet",
         ),
-        scope_case("blank dropped", "%20%20", None, "#now"),
-        scope_case("next-line only dropped", "%C2%85", None, "#now"),
-        scope_case("empty dropped", "", None, "#now"),
-        scope_case(
-            "128 chars kept",
-            &at_limit,
-            Some(&at_limit),
-            &format!("#now?scope={at_limit}"),
-        ),
-        scope_case("129 chars dropped", &"x".repeat(129), None, "#now"),
-        scope_case("200 chars dropped", &"y".repeat(200), None, "#now"),
-        scope_case(
-            "non-ASCII",
-            "%E2%82%AC",
-            Some("\u{20ac}"),
-            "#now?scope=%E2%82%AC",
-        ),
-        scope_case("bad UTF-8", "%FF", Some("\u{fffd}"), "#now?scope=%EF%BF%BD"),
-        scope_case("stray percent", "50%", Some("50%"), "#now?scope=50%25"),
-        scope_case(
-            "first duplicate",
-            "first&scope=second",
-            Some("first"),
-            "#now?scope=first",
-        ),
-        scope_case(
-            "padding inside the raw bound trimmed",
-            &format!("{}x", "%20".repeat(511)),
-            Some("x"),
-            "#now?scope=x",
-        ),
-        scope_case(
-            "padding past the raw bound dropped",
-            &format!("{}x", "%20".repeat(512)),
+        param_case(
+            "model alone",
+            "model=glm",
             None,
-            "#now",
+            Some("glm"),
+            "#traffic?model=glm",
         ),
-        scope_case(
-            "zero-width space dropped",
-            "anthro%E2%80%8Bpic",
+        param_case("unknown nickname", "model=nosuch", None, None, "#traffic"),
+        param_case(
+            "provider entry as a model",
+            "model=anthropic",
             None,
-            "#now",
+            None,
+            "#traffic",
         ),
-        scope_case("bidi override dropped", "%E2%80%AEcipohtna", None, "#now"),
-        scope_case("C0 control dropped", "anthro%01pic", None, "#now"),
-        scope_case("inner tab dropped", "anthro%09pic", None, "#now"),
-        scope_case("inner next-line dropped", "anthro%C2%85pic", None, "#now"),
-        scope_case(
-            "combining grapheme joiner dropped",
-            "anthro%CD%8Fpic",
+        param_case(
+            "Cyrillic look-alike model",
+            "model=se%D0%B0t-sonnet",
             None,
-            "#now",
+            None,
+            "#traffic",
         ),
-        scope_case(
-            "variation selector dropped",
-            "anthropic%EF%B8%8F",
+        param_case(
+            "plus-encoded model",
+            "model=+sonnet",
             None,
-            "#now",
+            None,
+            "#traffic",
         ),
-        scope_case("hangul filler dropped", "%E3%85%A4", None, "#now"),
-        scope_case("line separator dropped", "anthro%E2%80%A8pic", None, "#now"),
-        scope_case(
-            "inner no-break space dropped",
-            "anthro%C2%A0pic",
+        param_case(
+            "plus inside a model",
+            "model=seat+sonnet",
             None,
-            "#now",
+            None,
+            "#traffic",
         ),
-        scope_case(
-            "blank braille pattern dropped",
-            "anthro%E2%A0%80pic",
+        param_case(
+            "percent-encoded model",
+            "model=%73onnet",
             None,
-            "#now",
+            None,
+            "#traffic",
+        ),
+        param_case(
+            "duplicate model",
+            "model=sonnet&model=sonnet",
+            None,
+            None,
+            "#traffic",
+        ),
+        param_case("empty model", "model=", None, None, "#traffic"),
+        param_case("bad UTF-8 model", "model=%FF", None, None, "#traffic"),
+        param_case("unknown scope", "scope=nosuch", None, None, "#traffic"),
+        param_case(
+            "nickname as a scope",
+            "scope=sonnet",
+            None,
+            None,
+            "#traffic",
+        ),
+        param_case(
+            "Cyrillic look-alike scope",
+            "scope=%D0%B0nthropic",
+            None,
+            None,
+            "#traffic",
+        ),
+        param_case(
+            "plus-encoded scope",
+            "scope=anthropic+",
+            None,
+            None,
+            "#traffic",
+        ),
+        param_case(
+            "percent-encoded scope",
+            "scope=%61nthropic",
+            None,
+            None,
+            "#traffic",
+        ),
+        param_case(
+            "duplicate scope",
+            "scope=anthropic&scope=compat",
+            None,
+            None,
+            "#traffic",
+        ),
+        param_case(
+            "zero-width space in a scope",
+            "scope=anthro%E2%80%8Bpic",
+            None,
+            None,
+            "#traffic",
+        ),
+        param_case(
+            "a dropped model keeps a kept scope",
+            "scope=compat&model=n%D0%BEsuch",
+            Some("compat"),
+            None,
+            "#traffic?scope=compat",
         ),
     ]
 }
 
-/// The scope value classes the URLSearchParams parser can produce: each is
-/// trimmed, kept at up to 128 chars and dropped when blank or longer, longer
-/// than 512 before the trim, or carrying a character that draws nothing or
-/// draws as a plain space (control, format, default-ignorable, line or
-/// paragraph separator, inner whitespace other than U+0020, the blank
-/// Braille pattern U+2800), and the QUERY
-/// sent for it carries exactly the kept value or no provider at all.
-/// Non-ASCII text that is none of these (the euro sign, U+FFFD) is kept, as
-/// is an inner U+0020 (the plus row).
+/// Each address is followed from Config once the config panel is live: a
+/// `scope` that is a configured provider entry and a `model` that is a
+/// configured nickname, spelled once and as the page writes it, reach every
+/// QUERY sent for the address and stay in it; any other value never reaches
+/// a QUERY and is cut from the address.
 ///
-/// Mutation checks: drop the length bound in scopeParam -> red (129/200
-/// rows); drop the hidden-character test -> red (every dropped-character
-/// row); drop `\p{Default_Ignorable_Code_Point}` from it -> red (the joiner,
-/// variation selector and filler rows); drop `\u2800` from it -> red (the
-/// blank Braille row); drop the raw bound -> red (past-the-raw-bound row).
+/// Mutation checks: read the value with `params.get` in canonicalParam ->
+/// red (the percent-encoded and duplicate rows); return keep for every model
+/// in addressVerdict -> red (the unknown, look-alike and plus rows); leave
+/// `model` out of bodyFromShape -> red (the positive rows).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_a_scope_from_the_address_is_trimmed_bounded_and_sent_as_given() {
-    let cases = scope_cases();
+fn page_browser_scope_and_model_from_the_address_are_kept_only_in_their_live_sets() {
+    let cases = param_cases();
     let rows: Vec<String> = cases.iter().map(|c| c.raw.clone()).collect();
 
-    let run = browser::run_scenario(&url_rows_scenario("url-scope-rows", "config", &rows));
+    let run = browser::run_scenario(&url_rows_scenario("url-param-rows", "config", &rows));
 
     let seen = run.result.as_array().expect("one report per row");
     assert_eq!(seen.len(), cases.len());
     for (case, report) in cases.iter().zip(seen) {
         let name = case.name;
-        assert_eq!(report["view"], "now", "{name}");
+        assert_eq!(report["view"], "traffic", "{name}");
         assert_eq!(report["hash"], case.hash.as_str(), "{name}: {report:#}");
         let bodies = queries(report);
-        assert_eq!(bodies.len(), 1, "{name}: one QUERY per arrival {report:#}");
-        let provider = bodies[0].get("provider").and_then(Value::as_str);
-        assert_eq!(provider, case.scope.as_deref(), "{name}: {report:#}");
+        assert!(!bodies.is_empty(), "{name}: no QUERY for the address");
+        for body in bodies {
+            let provider = body.get("provider").and_then(Value::as_str);
+            let model = body.get("model").and_then(Value::as_str);
+            assert_eq!(provider, case.scope, "{name}: {body}");
+            assert_eq!(model, case.model, "{name}: {body}");
+        }
     }
 }
 
-/// A scope far past the raw bound is dropped without the edge trim ever
-/// running. Each row is one page load on that address, timed across the
-/// page's own load handler, which reads it; the address is then canonical.
+/// While the config panel is not live, the set a `scope` or `model` value
+/// must be in is unknown: the value stays in the address, but no QUERY
+/// carries it and the strip does not name it. Once config answers, both are
+/// checked, kept, and the next QUERY carries them.
+///
+/// Mutation check: keep a model in addressVerdict while the nicknames are
+/// unknown -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_no_query_carries_an_address_scope_or_model_before_config_is_live() {
+    let run = browser::run_scenario(&url_vars_scenario(
+        "url-held-before-config",
+        "traffic?scope=anthropic&model=sonnet",
+        &[("routectlUrlConfigDown", Value::from(2))],
+    ));
+    let out = &run.result;
+
+    let down = &out["down"];
+    assert_eq!(
+        down["hash"], "#traffic?scope=anthropic&model=sonnet",
+        "{out:#}"
+    );
+    let held = down["queries"].as_array().expect("the QUERY bodies");
+    assert!(
+        !held.is_empty(),
+        "positive control: Traffic asked while config was down"
+    );
+    for body in held {
+        assert!(
+            body.get("provider").is_none(),
+            "an unchecked scope was sent: {body}"
+        );
+        assert!(
+            body.get("model").is_none(),
+            "an unchecked model was sent: {body}"
+        );
+    }
+    assert!(
+        !titles(down).iter().any(|t| t.starts_with("Scoped to")),
+        "the strip named an unchecked scope: {out:#}"
+    );
+
+    let live = &out["live"];
+    assert_eq!(live["hash"], "#traffic?scope=anthropic&model=sonnet");
+    let last = queries(live).last().expect("a QUERY");
+    assert_eq!(last["provider"], "anthropic", "{last}");
+    assert_eq!(last["model"], "sonnet", "{last}");
+    assert!(
+        titles(live).contains(&"Scoped to model sonnet on provider anthropic"),
+        "{live:#}"
+    );
+}
+
+/// The strip reads "model X on provider Y"; its one reset lifts both scopes
+/// in one history entry, and the next QUERY carries neither.
+///
+/// Mutation check: lift only the provider in onProviderScope's reset -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_the_scope_strip_names_model_and_provider_and_its_reset_clears_both() {
+    let out = browser::run_scenario(&url_scenario(
+        "url-scope-strip-reset",
+        "traffic?scope=claude-seat&model=seat-sonnet",
+    ))
+    .result;
+
+    assert!(
+        titles(&out["before"]).contains(&"Scoped to model seat-sonnet on provider claude-seat"),
+        "{out:#}"
+    );
+    assert_eq!(out["reset_text"], "all models and providers");
+    assert_eq!(out["added"], 1, "{out:#}");
+    let after = &out["after"];
+    assert_eq!(after["hash"], "#traffic", "{out:#}");
+    assert_eq!(after["reset_present"], false, "{out:#}");
+    let bodies = queries(after);
+    assert!(!bodies.is_empty(), "no QUERY after the reset");
+    for body in bodies {
+        assert!(body.get("provider").is_none(), "{body}");
+        assert!(body.get("model").is_none(), "{body}");
+    }
+}
+
+/// Model A's figures are on screen and A's next answer is held; the address
+/// moves to model B. Until B's own answer lands, nothing under B's label
+/// shows a figure from any A answer, and A's held answer, handed over after
+/// B's, never paints.
+///
+/// Mutation check: drop `model` from queryBodyKey -> red (A's figures stay
+/// under B's label while B's answer is out).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_held_answer_for_model_a_never_paints_under_model_b() {
+    let out = browser::run_scenario(&url_vars_scenario(
+        "url-model-switch-held",
+        "traffic?model=sonnet",
+        &[(
+            "routectlUrlModelSwitch",
+            serde_json::json!(["sonnet", "glm"]),
+        )],
+    ))
+    .result;
+
+    let answers = out["answers"].as_array().expect("the answers");
+    let a_figures: Vec<String> = answers
+        .iter()
+        .filter(|a| a["model"] == "sonnet")
+        .map(|a| format!("{} req ", a["requests"]))
+        .collect();
+    let b_figures: Vec<String> = answers
+        .iter()
+        .filter(|a| a["model"] == "glm")
+        .map(|a| format!("{} req ", a["requests"]))
+        .collect();
+    assert!(
+        answers
+            .iter()
+            .any(|a| a["model"] == "sonnet" && a["held"] == true),
+        "positive control: an A answer was held across the switch: {out:#}"
+    );
+    assert!(!b_figures.is_empty(), "B was answered: {out:#}");
+    assert!(
+        a_figures.iter().all(|a| !b_figures.contains(a)),
+        "positive control: A and B answers carry different figures: {out:#}"
+    );
+    let a_stats = out["a_shown"]["stats"].as_str().expect("A's strip text");
+    assert!(
+        a_figures.iter().any(|f| a_stats.starts_with(f.as_str())),
+        "positive control: an A figure was on screen before the switch: {out:#}"
+    );
+
+    let samples = out["samples"].as_array().expect("the samples");
+    let under_b: Vec<&Value> = samples
+        .iter()
+        .filter(|s| s["title"] == "Scoped to model glm")
+        .collect();
+    assert!(!under_b.is_empty(), "B's label never showed: {out:#}");
+    for sample in &under_b {
+        let stats = sample["stats"].as_str().expect("stats text");
+        assert!(
+            !a_figures.iter().any(|f| stats.starts_with(f.as_str())),
+            "an A figure showed under B: {sample} in {out:#}"
+        );
+    }
+    let last = samples.last().expect("a final sample");
+    let last_stats = last["stats"].as_str().expect("stats text");
+    assert!(
+        b_figures.iter().any(|f| last_stats.starts_with(f.as_str())),
+        "B's own answer is on screen at the end: {last}"
+    );
+}
+
+/// A scope far past any provider name is dropped without the page doing
+/// more than linear work on it. Each row is one page load on that address,
+/// timed across the page's own load handler, which reads it; the address is
+/// then canonical once config answers.
 ///
 /// Rows: 300,000 spaces then one letter (the shape a long link takes), and a
-/// letter, 300,000 spaces and a letter, the input the edge-trim regex
-/// backtracks on (the trim alone takes over a second at 80,000 spaces in
+/// letter, 300,000 spaces and a letter, the input an edge-trim regex
+/// backtracks on (such a trim alone takes over a second at 80,000 spaces in
 /// Chrome). Positive control: the plain-scope row is kept, so the handler
 /// read the address the row wrote.
 ///
 /// The bound sits far above a dropped load under machine load (single-digit
-/// ms) and far below the trim running first (seconds at 300,000 spaces).
-///
-/// Mutation check: run the edge trim before the raw bound -> red.
+/// ms) and far below a backtracking pass (seconds at 300,000 spaces).
+/// Mutation check: run a backtracking edge trim (`/^\s+|\s+$/g`) over the
+/// value at the top of canonicalParam -> red.
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_an_overlong_scope_is_dropped_before_any_regex_runs() {
@@ -594,6 +822,146 @@ fn page_browser_open_rows_focus_and_scroll_stay_out_of_the_address() {
     }
 }
 
+// ---- source scan: every address value reaches a closed set -----------------
+
+/// Each read of an address value (`params.get(` or `params.getAll(`): the
+/// function it sits in and the closed-set check its line hands it to.
+/// Nothing is excluded: every site is checked.
+const ADDRESS_VALUE_SITES: &[(&str, &str, &str)] = &[
+    // WINDOWS
+    ("params.get('range')", "parseViewHash", "firstWindow("),
+    // GROUP_BYS
+    ("params.get('group')", "parseViewHash", "groupParam("),
+    // SORT_TABLES
+    ("params.get('sort')", "parseViewHash", "sortParam("),
+    // scope and model: one canonical spelling here, then the live sets in
+    // addressVerdict (the parseViewHash and syncFromLocation pins below)
+    ("params.getAll(key)", "canonicalParam", "params.getAll(key)"),
+];
+
+/// The address-value reads in `code` (comments stripped): the read, the
+/// innermost function it sits in, and the text of its line.
+fn address_value_reads(code: &str) -> Vec<(String, String, String)> {
+    let mut reads = Vec::new();
+    for needle in ["params.get(", "params.getAll("] {
+        for (at, _) in code.match_indices(needle) {
+            let close = code[at..].find(')').map_or(code.len(), |i| at + i + 1);
+            let line_start = code[..at].rfind('\n').map_or(0, |i| i + 1);
+            let line_end = code[at..].find('\n').map_or(code.len(), |i| at + i);
+            reads.push((
+                code[at..close].to_owned(),
+                enclosing_function(code, at),
+                code[line_start..line_end].to_owned(),
+            ));
+        }
+    }
+    reads.sort();
+    reads
+}
+
+/// The name of the innermost `function <name>(` whose body holds `at`, or
+/// an empty string at the top level.
+fn enclosing_function(code: &str, at: usize) -> String {
+    code[..at]
+        .match_indices("function ")
+        .filter_map(|(start, _)| {
+            let rest = &code[start + "function ".len()..];
+            let name = &rest[..rest.find('(')?];
+            let is_name = !name.is_empty() && name.chars().all(is_ident_char);
+            (is_name && function_span(code, name).contains(&at)).then(|| name.to_owned())
+        })
+        .last()
+        .unwrap_or_default()
+}
+
+/// Every address value the page reads is handed to a closed-set check, and
+/// the list above is every such read: a new `params.get(` site fails here
+/// until it is listed with its check. `scope` and `model` are read only
+/// through canonicalParam, which takes a value only when the key appears
+/// once and is not empty, and never reach the selection before admitHeld
+/// has checked them against their live sets.
+///
+/// Mutation checks: read `scope` with `params.get('scope')` in parseViewHash
+/// -> red (an unlisted site); move the parsed scope straight into the
+/// selection in syncFromLocation -> red.
+#[test]
+fn every_address_value_the_page_reads_reaches_a_closed_set_check() {
+    let code = strip_js_comments(&script());
+
+    let reads = address_value_reads(&code);
+
+    let mut found: Vec<&str> = reads.iter().map(|(site, _, _)| site.as_str()).collect();
+    let mut listed: Vec<&str> = ADDRESS_VALUE_SITES
+        .iter()
+        .map(|(site, _, _)| *site)
+        .collect();
+    found.sort_unstable();
+    listed.sort_unstable();
+    assert_eq!(found, listed, "the address-value reads changed");
+    for (site, function, line) in &reads {
+        let (_, want_fn, check) = ADDRESS_VALUE_SITES
+            .iter()
+            .find(|(listed, _, _)| listed == site)
+            .expect("listed");
+        assert_eq!(function, want_fn, "`{site}` moved");
+        assert!(
+            line.contains(check),
+            "`{site}` is not handed to `{check}`: {line}"
+        );
+    }
+    let canonical = compact(&function_span_text(&code, "canonicalParam"));
+    assert!(
+        canonical.contains("if(values.length!==1||values[0]===''){returnnull;}"),
+        "canonicalParam takes a duplicate or empty value: {canonical}"
+    );
+    let parse = compact(&function_span_text(&code, "parseViewHash"));
+    for key in ["scope", "model"] {
+        assert!(
+            parse.contains(&format!("{key}:canonicalparam(query,params,'{key}')")),
+            "parseViewHash reads `{key}` outside canonicalParam"
+        );
+    }
+    let sync = compact(&function_span_text(&code, "syncFromLocation"));
+    assert!(
+        sync.contains(
+            "heldaddress={scope:parsed.scope,model:parsed.model};parsed.scope=null;\
+             parsed.model=null;varnext=admitheld(parsed);"
+        ),
+        "syncFromLocation applies an address scope or model before admitHeld: {sync}"
+    );
+}
+
+/// The read scan reports a site added anywhere in a script, with its
+/// function and line, and skips one in a comment.
+#[test]
+fn the_address_value_scan_reports_each_read_with_its_function_and_line() {
+    let src = "function a() { return firstWindow([params.get('range')]); }\n\
+               function b() {\n  var x = params.get('scope');\n}\n\
+               // params.get('commented')\n";
+
+    let reads = address_value_reads(&strip_js_comments(src));
+
+    assert_eq!(
+        reads,
+        vec![
+            (
+                "params.get('range')".to_owned(),
+                "a".to_owned(),
+                "function a() { return firstWindow([params.get('range')]); }".to_owned()
+            ),
+            (
+                "params.get('scope')".to_owned(),
+                "b".to_owned(),
+                "  var x = params.get('scope');".to_owned()
+            ),
+        ]
+    );
+}
+
+fn function_span_text(code: &str, name: &str) -> String {
+    code[function_span(code, name)].to_owned()
+}
+
 // ---- source scan: where location and history are touched -------------------
 
 /// The spellings the guard's sites pattern matches, plus the other ways a
@@ -689,6 +1057,7 @@ fn global_references(code: &str, name: &str) -> Vec<usize> {
 /// The codec functions allowed to touch location and history.
 const CODEC_FUNCTIONS: &[&str] = &[
     "parseViewHash",
+    "canonicalParam",
     "formatViewHash",
     "writeViewHash",
     "syncFromLocation",

@@ -401,7 +401,7 @@
     if (!view || !view.series) {
       throw new Error('overview query payload carries no series');
     }
-    if (!selectedProvider) {
+    if (!hasQueryScope()) {
       providerRowView = view;
       providerRowWindow = selectedWindow;
     }
@@ -432,7 +432,7 @@
   // source of this view, so a late answer from it shows here on the view's
   // next render (within one 5 s round).
   function ledgerIsEmpty() {
-    if (selectedProvider) { return false; }
+    if (hasQueryScope()) { return false; }
     if (selectedWindow === 'all') { return true; }
     var rec = SOURCES[USAGE_ALL_SOURCE];
     if (rec.state !== 'live' || !rec.data || !rec.data.totals) { return false; }
@@ -471,13 +471,33 @@
 
   // Scope every figure on this tab to one provider. Picking a DIFFERENT provider
   // while scoped moves the scope rather than lifting it; the aggregate card
-  // (label null) is the reset. A view-state change: commitViewState re-issues
-  // the query through the standard input-changed path (which aborts the
-  // in-flight request and bumps the generation, so a late response for the
-  // previous scope cannot repaint this one) and records it in the address.
+  // and the strip's reset (label null) lift the provider and the model scope
+  // together. A view-state change: commitViewState re-issues the query
+  // through the standard input-changed path (which aborts the in-flight
+  // request and bumps the generation, so a late response for the previous
+  // scope cannot repaint this one) and records it in the address.
   function onProviderScope(label) {
+    if (label === null) {
+      if (hasQueryScope()) { commitViewState({ scope: null, model: null }); }
+      return;
+    }
     if (selectedProvider === label) { return; }
     commitViewState({ scope: label });
+  }
+
+  // Whether the selection narrows the QUERY to one provider or one model.
+  function hasQueryScope() {
+    return !!selectedProvider || !!selectedModel;
+  }
+
+  // The strip's title for the selection's scope: "model X on provider Y",
+  // or whichever of the two is set.
+  function scopeTitle() {
+    if (selectedModel && selectedProvider) {
+      return 'Scoped to model ' + selectedModel + ' on provider ' + selectedProvider;
+    }
+    if (selectedModel) { return 'Scoped to model ' + selectedModel; }
+    return 'Scoped to ' + selectedProvider;
   }
 
   function onProviderOverflow() {
@@ -493,18 +513,19 @@
     return scopeStrip('overview', 'this provider scope has no renderable data');
   }
 
-  // A scoped-to-one-provider header carrying the affordance that lifts the
-  // scope. Overview normally resets through its aggregate provider card, so this
-  // serves Usage (which has no provider cards) and Overview's recovery case.
+  // A scoped header naming the provider and model scope, carrying the
+  // affordance that lifts both. Overview normally resets through its aggregate
+  // provider card, so this serves Usage (which has no provider cards) and
+  // Overview's recovery case.
   function scopeStrip(view, hint) {
     var wrap = document.createElement('div');
     wrap.className = 'ovsection';
-    var head = sectionHead('Scoped to ' + selectedProvider, hint);
+    var head = sectionHead(scopeTitle(), hint);
     var reset = document.createElement('button');
     reset.type = 'button';
     reset.id = view + '-scope-reset';
     reset.className = 'scope-reset';
-    reset.textContent = 'all providers';
+    reset.textContent = selectedModel ? 'all models and providers' : 'all providers';
     setAction(reset, 'provider-scope', null);
     head.appendChild(reset);
     wrap.appendChild(head);
@@ -667,9 +688,10 @@
     var reqSpark = bucketSamples(series, function (m) { return m.requests; });
     var wrap = markRefreshUnit(document.createElement('div'), 'kpis');
     wrap.className = 'ovsection';
-    if (selectedProvider) {
-      wrap.appendChild(sectionHead('Scoped to ' + selectedProvider,
-        'every number below is scoped to this provider'));
+    if (hasQueryScope()) {
+      wrap.appendChild(sectionHead(scopeTitle(),
+        selectedModel ? 'every number below is scoped to this model'
+          : 'every number below is scoped to this provider'));
     }
     var grid = document.createElement('div');
     grid.className = 'kpigrid';

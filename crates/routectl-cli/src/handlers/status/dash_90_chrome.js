@@ -88,18 +88,24 @@
   // ---- chrome: URL view state ------------------------------------------
 
   // The view state lives in the fragment: `#<view>` optionally followed by
-  // `?range=&scope=&group=&sort=`, in that key order, each key omitted at its
-  // default. It serializes the page-global selection (activeTab,
-  // selectedWindow, selectedProvider, selectedGroupBy, selectedSort) and is
-  // never a second store. Open rows, dialogs, focus and scroll stay out of it.
+  // `?range=&scope=&model=&group=&sort=`, in that key order, each key omitted
+  // at its default. It serializes the page-global selection (activeTab,
+  // selectedWindow, selectedProvider, selectedModel, selectedGroupBy,
+  // selectedSort) and is never a second store. Open rows, dialogs, focus and
+  // scroll stay out of it.
   //
   // The fragment is untrusted: anyone can hand the developer a link. Each key
-  // is read with URLSearchParams, whose `get` returns the FIRST of a
-  // duplicate, and checked against a closed vocabulary; a value outside it
-  // falls back to the default and the address is rewritten canonical with
-  // replaceState. scope is the one open value. It reaches the QUERY body and
-  // labels drawn with textContent, so it is only trimmed, bounded and
-  // refused when it carries a hidden character (see scopeParam).
+  // is read with URLSearchParams and checked against a closed set; a value
+  // outside it falls back to the default and the address is rewritten
+  // canonical with replaceState. range, group and sort have fixed
+  // vocabularies, and for them the FIRST of a duplicate counts. scope and
+  // model reach the QUERY body and the scope strip, so each is taken only
+  // when the address spells it once and exactly as the page writes it
+  // (canonicalParam), and then only when it equals a member of a set read
+  // from live payloads (addressVerdict): a configured provider entry or a
+  // provider label of the last live unscoped provider read for scope, a
+  // configured nickname for model. Until its set is known the value is held:
+  // kept in the address, never applied, sent or shown.
   //
   // A link from before the query keys, `#<view>[/<window>]`, still opens: an
   // old tab token goes through canonicalViewId, and the window segment is the
@@ -111,21 +117,13 @@
   // page.rs).
   var HASH_SEP = String.fromCharCode(47);
   var QUERY_MARK = '?';
-  var VIEW_STATE_KEYS = ['range', 'scope', 'group', 'sort'];
-  var SCOPE_MAX_CHARS = 128;
-  // The edge trim below backtracks quadratically on a long run of spaces, so
-  // a raw value longer than this is dropped before it runs.
-  var SCOPE_RAW_MAX_CHARS = SCOPE_MAX_CHARS * 4;
-  // The server refuses a blank provider and counts U+0085 as blank, which
-  // String.prototype.trim does not strip.
-  var SCOPE_EDGE_SPACE = /^[\s\u0085]+|[\s\u0085]+$/g;
-  // Provider names are config identifiers. A character that draws nothing or
-  // draws as a plain space (a control or format character, a default-ignorable
-  // one such as a variation selector or a Hangul filler, a line or paragraph
-  // separator, any inner whitespace but U+0020, the blank Braille pattern)
-  // only makes a label read as a provider it is not.
-  var SCOPE_HIDDEN_CHAR =
-    /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\u2800]|[^\S ]/u;
+  var VIEW_STATE_KEYS = ['range', 'scope', 'model', 'group', 'sort'];
+  // The keys whose value must be in a set read from live payloads. model
+  // comes first: whether a scope waits on the ledger depends on it.
+  var HELD_KEYS = ['model', 'scope'];
+  var ADDRESS_KEEP = 'keep';
+  var ADDRESS_DROP = 'drop';
+  var ADDRESS_HOLD = 'hold';
   var SORT_DIRS = ['asc', 'desc'];
   // Sortable tables by id, each with the column ids it sorts by (the `sortBy`
   // ids its mkTable call declares; a page test keeps the two equal). A sort
@@ -134,9 +132,19 @@
     'config-models': ['model', 'provider', 'upstream']
   };
   var selectedSort = null;         // `<table>.<column>.<dir>`, null = unsorted
+  var selectedModel = null;        // nickname scope, null = every model
+  // scope and model values read from the address whose set is not known
+  // yet: held here, never in the selection, until admitHeld settles them.
+  var heldAddress = { scope: null, model: null };
+  // The provider labels of the last live QUERY answer grouped by provider
+  // and carrying no scope; null until one lands.
+  var ledgerProviders = null;
 
   function defaultViewState() {
-    return { view: VIEWS[0].id, range: WINDOWS[0], scope: null, group: GROUP_BYS[0][0], sort: null };
+    return {
+      view: VIEWS[0].id, range: WINDOWS[0], scope: null, model: null,
+      group: GROUP_BYS[0][0], sort: null
+    };
   }
 
   function currentViewState() {
@@ -144,6 +152,7 @@
       view: activeTab,
       range: selectedWindow,
       scope: selectedProvider,
+      model: selectedModel,
       group: selectedGroupBy,
       sort: selectedSort
     };
@@ -152,7 +161,7 @@
   // The selection a QUERY body is filled from. The view picks the request
   // shape; sort orders rows on the page and never reaches the request.
   function queryInputKey(state) {
-    return JSON.stringify([state.range, state.scope, state.group]);
+    return JSON.stringify([state.range, state.scope, state.model, state.group]);
   }
 
   function firstWindow(candidates) {
@@ -162,11 +171,104 @@
     return WINDOWS[0];
   }
 
-  function scopeParam(raw) {
-    if (raw === null || raw.length > SCOPE_RAW_MAX_CHARS) { return null; }
-    var scope = raw.replace(SCOPE_EDGE_SPACE, '');
-    if (scope === '' || scope.length > SCOPE_MAX_CHARS) { return null; }
-    return SCOPE_HIDDEN_CHAR.test(scope) ? null : scope;
+  // The `key` value of the address query `query` (already parsed into
+  // `params`), or null unless the key appears exactly once and is spelled
+  // exactly as URLSearchParams serializes its decoded value. Any other
+  // spelling of the same value (a percent-encoded letter, a `+` where the
+  // page writes `%2B`) is a second layout of it, and a duplicate is two
+  // claims; both are refused rather than resolved.
+  function canonicalParam(query, params, key) {
+    var values = params.getAll(key);
+    if (values.length !== 1 || values[0] === '') { return null; }
+    var spelled = new URLSearchParams([[key, values[0]]]).toString();
+    var bare = query.charAt(0) === QUERY_MARK ? query.slice(1) : query;
+    return bare.split('&').indexOf(spelled) >= 0 ? values[0] : null;
+  }
+
+  // The `field` of each entry of the live config payload's `list`, or null
+  // while no live config payload is held.
+  function configNames(list, field) {
+    var rec = SOURCES.config;
+    if (rec.state !== 'live' || !rec.data || !Array.isArray(rec.data[list])) { return null; }
+    var names = [];
+    rec.data[list].forEach(function (entry) {
+      if (isPlainObject(entry) && typeof entry[field] === 'string') { names.push(entry[field]); }
+    });
+    return names;
+  }
+
+  // Whether the view of `state` issues an unscoped provider read, the answer
+  // that fills ledgerProviders. A model scope, set or still held, narrows it.
+  function ledgerReadComing(state) {
+    if (state.model !== null || heldAddress.model !== null) { return false; }
+    var source = querySourceFor(state.view);
+    var shape = source ? shapeAt(source, { window: state.range, groupBy: state.group }) : null;
+    return !!shape && shape.group_by === 'provider';
+  }
+
+  // keep, drop or hold an address `value` for `key` against its live set,
+  // for the selection `state`. A scope no configured entry names waits for
+  // the ledger's labels only while the view is about to read them;
+  // otherwise the labels seen so far decide.
+  function addressVerdict(key, value, state) {
+    if (key === 'model') {
+      var nicknames = configNames('models', 'nickname');
+      if (nicknames === null) { return ADDRESS_HOLD; }
+      return nicknames.indexOf(value) >= 0 ? ADDRESS_KEEP : ADDRESS_DROP;
+    }
+    var entries = configNames('providers', 'provider_id');
+    if (entries === null) { return ADDRESS_HOLD; }
+    if (entries.indexOf(value) >= 0) { return ADDRESS_KEEP; }
+    if (ledgerProviders === null && ledgerReadComing(state)) { return ADDRESS_HOLD; }
+    return (ledgerProviders || []).indexOf(value) >= 0 ? ADDRESS_KEEP : ADDRESS_DROP;
+  }
+
+  // `state` with each held value whose set is now known moved into it (kept)
+  // or discarded (dropped); a value still waiting stays held.
+  function admitHeld(state) {
+    var next = copyViewState(state);
+    HELD_KEYS.forEach(function (key) {
+      var value = heldAddress[key];
+      if (value === null) { return; }
+      var verdict = addressVerdict(key, value, next);
+      if (verdict === ADDRESS_HOLD) { return; }
+      heldAddress[key] = null;
+      if (verdict === ADDRESS_KEEP) { next[key] = value; }
+    });
+    return next;
+  }
+
+  function copyViewState(state) {
+    var copy = {};
+    Object.keys(state).forEach(function (key) { copy[key] = state[key]; });
+    return copy;
+  }
+
+  function hasHeldAddress() {
+    return heldAddress.scope !== null || heldAddress.model !== null;
+  }
+
+  // Settle what the address still holds once a set it waits on may have
+  // become known (a GET round, an unscoped provider answer): a kept value
+  // moves the selection and refetches, a dropped one is cut from the address.
+  function settleHeldAddress() {
+    if (!hasHeldAddress() || terminal) { return; }
+    var before = JSON.stringify(heldAddress);
+    var next = admitHeld(currentViewState());
+    if (JSON.stringify(heldAddress) === before) { return; }
+    applyViewState(next, true);
+    writeViewHash(next, false);
+  }
+
+  // Record the provider labels of a live answer to `body` when it is an
+  // unscoped provider read, then settle a scope waiting on them.
+  function noteLedgerProviders(source, body) {
+    if (body.group_by !== 'provider' || body.provider || body.model) { return; }
+    if (SOURCES[source].state !== 'live') { return; }
+    var view = queryViewOf(source);
+    if (!view) { return; }
+    ledgerProviders = view.groups.map(function (g) { return g.label; });
+    settleHeldAddress();
   }
 
   function isGroupBy(token) {
@@ -200,16 +302,24 @@
     var raw = (hash.charAt(0) === '#') ? hash.slice(1) : hash;
     var mark = raw.indexOf(QUERY_MARK);
     var path = (mark >= 0 ? raw.slice(0, mark) : raw).split(HASH_SEP);
-    var params = new URLSearchParams(mark >= 0 ? raw.slice(mark + 1) : '');
-    var group = params.get('group');
-    var sort = params.get('sort');
+    var query = mark >= 0 ? raw.slice(mark + 1) : '';
+    var params = new URLSearchParams(query);
     return {
       view: canonicalViewId(path[0]),
       range: firstWindow([params.get('range'), path[1]]),
-      scope: scopeParam(params.get('scope')),
-      group: isGroupBy(group) ? group : GROUP_BYS[0][0],
-      sort: isSortKey(sort) ? sort : null
+      scope: canonicalParam(query, params, 'scope'),
+      model: canonicalParam(query, params, 'model'),
+      group: groupParam(params.get('group')),
+      sort: sortParam(params.get('sort'))
     };
+  }
+
+  function groupParam(token) {
+    return isGroupBy(token) ? token : GROUP_BYS[0][0];
+  }
+
+  function sortParam(token) {
+    return isSortKey(token) ? token : null;
   }
 
   function formatViewHash(state) {
@@ -222,15 +332,25 @@
     return '#' + state.view + (query ? QUERY_MARK + query : '');
   }
 
+  // `state` as the address carries it: a value still held stands in for its
+  // unset key, so a reload or a copied link keeps it for the next check.
+  function addressState(state) {
+    var out = copyViewState(state);
+    HELD_KEYS.forEach(function (key) {
+      if (out[key] === null && heldAddress[key] !== null) { out[key] = heldAddress[key]; }
+    });
+    return out;
+  }
+
   // The address of view `id` with the rest of the selection as it is now.
   function viewLinkHash(id) {
     var state = currentViewState();
     state.view = id;
-    return formatViewHash(state);
+    return formatViewHash(addressState(state));
   }
 
   function writeViewHash(state, push) {
-    var hash = formatViewHash(state);
+    var hash = formatViewHash(addressState(state));
     if (location.hash === hash) { return; }
     if (push) {
       history.pushState(null, '', hash);
@@ -256,6 +376,7 @@
     activeTab = next.view;
     selectedWindow = next.range;
     selectedProvider = next.scope;
+    selectedModel = next.model;
     selectedGroupBy = next.group;
     selectedSort = next.sort;
     if (refetch) { resetMovedQuerySources(priorKeys); }
@@ -269,20 +390,30 @@
   }
 
   // The one path for a user's change to the view state: apply it and push ONE
-  // history entry, so Back returns to the selection before it.
+  // history entry, so Back returns to the selection before it. A change that
+  // sets scope or model replaces whatever the address still held for it.
   function commitViewState(change) {
     var next = currentViewState();
-    Object.keys(change).forEach(function (key) { next[key] = change[key]; });
+    Object.keys(change).forEach(function (key) {
+      next[key] = change[key];
+      if (HELD_KEYS.indexOf(key) >= 0) { heldAddress[key] = null; }
+    });
     applyViewState(next, true);
     writeViewHash(next, true);
   }
 
   // Read the address into the page, on load and on every hashchange (Back,
   // Forward, an edited or followed link), and rewrite it canonical in place:
-  // a cleanup is not a history step. On load nothing has been asked yet, so
-  // the first round's nudge issues the QUERY.
+  // a cleanup is not a history step. scope and model are held first and
+  // applied only as admitHeld lets them through. On load nothing has been
+  // asked yet, so the first round's nudge issues the QUERY, after that
+  // round's config answer has settled what the address held.
   function syncFromLocation(refetch) {
-    var next = parseViewHash(location.hash);
+    var parsed = parseViewHash(location.hash);
+    heldAddress = { scope: parsed.scope, model: parsed.model };
+    parsed.scope = null;
+    parsed.model = null;
+    var next = admitHeld(parsed);
     applyViewState(next, refetch);
     writeViewHash(next, false);
   }
