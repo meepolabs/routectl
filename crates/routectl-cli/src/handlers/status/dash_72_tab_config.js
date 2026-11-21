@@ -43,6 +43,9 @@
       return safeSection(rec, function () { return modelSection(models); });
     });
     appendIfAny(stack, data.providers, providerSection);
+    // `pools` joined the payload within its schema version, so a payload
+    // without it is still this version and simply names no pool.
+    appendIfAny(stack, Array.isArray(data.pools) ? data.pools : [], poolSection);
     appendIfAny(stack, data.capabilities, capabilitySection);
     appendIfAny(stack, data.activation, activationSection);
     appendIfAny(stack, data.classes, classSection);
@@ -175,6 +178,7 @@
       sortBy(C('provider'), 'provider', function (m) { return textSortValue(m.provider); }),
       sortBy(C('upstream'), 'upstream', function (m) { return textSortValue(m.upstream); })
     ], { expandable: true, sortable: true, rowKey: function (m) { return m.nickname; } });
+    tbl.t.classList.add('cfgmodels');
     fillRows(tbl, models, function (m, key) { modelRow(tbl, m, key); });
     return card('Models', 'what each name dispatches to, and where its facts come from',
       tableScroll(tbl));
@@ -232,6 +236,52 @@
     return pairs.filter(function (p) {
       return p[1] !== null && p[1] !== undefined && p[1] !== '';
     });
+  }
+
+  // ---- config: the seat pools ------------------------------------------
+
+  // One row per `[pools.X]` entry: the selection strategy as the config
+  // spells it, and the members in configured order (fill-first drains them in
+  // that order). A member is named by its provider entry and its login label
+  // as two separate texts; the account key is never parsed for either.
+  function poolSection(pools) {
+    var tbl = mkTable('config-pools', 'Configured seat pools',
+      [R('pool'), C('seat selection'), W('members, in order')]);
+    pools.forEach(function (p) {
+      trow(tbl, [p.pool, p.seat_selection, poolMembers(p.members)]);
+    });
+    return card('Pools', 'which provider entries share a pool, and how a request picks one',
+      tableScroll(tbl));
+  }
+
+  function poolMembers(members) {
+    var list = document.createElement('ol');
+    list.className = 'cfgpool-members';
+    (Array.isArray(members) ? members : []).forEach(function (m) {
+      var item = document.createElement('li');
+      item.className = 'cfgpool-member';
+      var entry = document.createElement('span');
+      entry.className = 'cfgpool-entry';
+      entry.textContent = (m.entry === null || m.entry === undefined) ? '-' : String(m.entry);
+      item.appendChild(entry);
+      item.appendChild(memberLogin(m.login_label));
+      list.appendChild(item);
+    });
+    return list;
+  }
+
+  // An entry with no OAuth label (an API-key entry, or a login no model
+  // reaches) says so rather than leaving a gap that reads as a missing field.
+  function memberLogin(label) {
+    var span = document.createElement('span');
+    span.className = 'cfgpool-login';
+    if (typeof label === 'string' && label !== '') {
+      span.textContent = label;
+    } else {
+      span.textContent = 'no login label';
+      span.classList.add('mag-zero');
+    }
+    return span;
   }
 
   // ---- config: the routing providers -----------------------------------

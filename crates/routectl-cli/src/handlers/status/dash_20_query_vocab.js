@@ -164,6 +164,7 @@
   var CONFIG_FIELDS = [
     'schema_version', 'unavailable', 'as_of', 'data',
     'source', 'aliases', 'models', 'providers', 'capabilities', 'activation', 'classes',
+    'pools', 'pool', 'seat_selection', 'members', 'entry', 'login_label',
     'config_path', 'loaded_age_ms', 'alias_count', 'provider_count', 'listen_addr', 'version',
     'alias', 'chain',
     'nickname', 'provider', 'upstream', 'provider_kind', 'context_window', 'fill', 'tokens',

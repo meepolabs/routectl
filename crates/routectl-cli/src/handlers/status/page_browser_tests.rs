@@ -590,6 +590,120 @@ fn page_browser_doctor_fix_command_selection_survives_rounds() {
     assert_figure_changed_every_round(&obs);
 }
 
+/// The populated config fixture's pool, read off the Pools card: each
+/// member's provider entry and login label are separate texts, in configured
+/// order, beside the strategy token as the config spells it. Positive control
+/// for the faint state: the unlabeled member says so rather than leaving a
+/// gap.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_config_pools_card_lists_members_by_entry_and_login_label() {
+    use crate::handlers::status::config::fixture::{FIXTURE_POOL, FIXTURE_POOL_MEMBERS};
+
+    let report = run_scenario(&scenario("config-pools", "config"));
+
+    let rows = report.result["rows"].as_array().expect("pool rows");
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    let pool = &rows[0];
+    assert_eq!(pool["pool"], FIXTURE_POOL);
+    assert_eq!(pool["seat_selection"], "fill-first");
+    let members = pool["members"].as_array().expect("members");
+    let entries: Vec<&str> = members
+        .iter()
+        .map(|m| m["entry"].as_str().expect("an entry"))
+        .collect();
+    assert_eq!(entries, FIXTURE_POOL_MEMBERS);
+    assert_eq!(members[0]["login"], "no login label");
+    assert_eq!(members[0]["login_faint"], true);
+    assert_eq!(members[1]["login"], "a");
+    assert_eq!(members[1]["login_faint"], false);
+    for m in members {
+        assert_eq!(m["text_nodes"], 2, "entry and label are two texts: {m:#}");
+    }
+}
+
+/// The priced fixture model's detail row at `width`: the pairs as drawn.
+fn config_price_pairs(width: u32) -> Vec<Value> {
+    let window = format!("--window-size={width},900");
+    let report = run_scenario_with(&scenario("config-prices", "config"), &[&window]);
+    assert_eq!(
+        report.result["inner_width"].as_u64(),
+        Some(u64::from(width))
+    );
+    report.result["pairs"]
+        .as_array()
+        .expect("detail pairs")
+        .clone()
+}
+
+/// At 1440 and 1024 the cache-write price labels read as the config writes
+/// the lifetime ("30m", never "30M") in duration order, and every pair in the
+/// detail row stacks its value under its label at the label's left edge,
+/// with the figure on one line.
+///
+/// Mutation checks: restore the `.deflist dt` upper-casing on the price
+/// labels -> red (the `30m` label); drop the column layout of the scoped
+/// pairs -> red (value beside its label).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_config_price_labels_read_as_written_and_stack_evenly() {
+    for width in [1440, 1024] {
+        let pairs = config_price_pairs(width);
+        let writes: Vec<&str> = pairs
+            .iter()
+            .filter_map(|p| p["label"].as_str())
+            .filter(|l| l.to_ascii_lowercase().starts_with("cache write"))
+            .collect();
+        assert_eq!(writes.len(), 3, "at {width}: {pairs:#?}");
+        let misread: Vec<(&str, &str)> = writes
+            .iter()
+            .zip(["5m", "30m", "1h"])
+            .filter(|(label, lifetime)| !label.contains(&format!(" {lifetime} ")))
+            .map(|(label, lifetime)| (*label, lifetime))
+            .collect();
+        assert_eq!(
+            misread,
+            [],
+            "at {width}: labels not reading their lifetime as written, in duration order"
+        );
+        for pair in &pairs {
+            let (label, value) = (
+                pair["label_left"].as_f64().expect("a label edge"),
+                pair["value_left"].as_f64().expect("a value edge"),
+            );
+            assert!(
+                (label - value).abs() <= 1.0,
+                "at {width}: value not under its label: {pair:#}"
+            );
+            assert_eq!(pair["value_below_label"], true, "at {width}: {pair:#}");
+            assert_eq!(
+                pair["figure_lines"], 1,
+                "at {width}: a figure wraps: {pair:#}"
+            );
+        }
+    }
+}
+
+/// The strip shows the version the payload serves, here one no build
+/// carries, so a hardcoded or dropped field cannot pass.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_config_strip_shows_the_served_version() {
+    let report = run_scenario(&scenario("config-version", "config"));
+
+    let served = report.result["served"].as_str().expect("the served value");
+    assert_ne!(
+        served,
+        env!("CARGO_PKG_VERSION"),
+        "premise: a distinct value"
+    );
+    assert_eq!(report.result["facts"]["version"], served);
+    assert_eq!(
+        report.result["facts"]["listening on"], "127.0.0.1:8787",
+        "positive control: the strip read the served source"
+    );
+}
+
 #[test]
 fn the_released_page_carries_no_driver() {
     let served = page_with_driver(&scenario("any", "now"));

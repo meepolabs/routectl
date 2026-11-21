@@ -285,11 +285,22 @@
     return found;
   }
 
+  // The Config view's densest content is a priced model's detail row, which
+  // is closed until opened.
+  var PRICED_MODEL_TOGGLE = 'config-models-kglm-toggle';
+
+  function openPricedModel() {
+    var toggle = document.getElementById(PRICED_MODEL_TOGGLE);
+    if (!toggle) { throw new Error('no element #' + PRICED_MODEL_TOGGLE); }
+    if (toggle.getAttribute('aria-expanded') !== 'true') { toggle.click(); }
+  }
+
   d.scenario('layout-check', function () {
     var view = addressView();
     var marker = SETTLED_MARKER[view];
     if (!marker) { throw new Error('no settle marker for view ' + view); }
     return d.waitUntil('the view to settle', settled(view, marker)).then(function () {
+      if (view === 'config') { openPricedModel(); }
       return d.waitFor('/status', 1);
     }).then(function () {
       var body = document.getElementById('body-' + view);
@@ -303,6 +314,8 @@
         body: audit(body),
         controls: controls(body),
         glance_meters: body.querySelectorAll('.glance-meter').length,
+        config_open_details: body.querySelectorAll('#config-models tr.detail-row:not([hidden])').length,
+        config_pool_members: body.querySelectorAll('#config-pools .cfgpool-member').length,
         traffic_rows: body.querySelectorAll('#traffic-groups tr.exp-row').length
       };
       return out;

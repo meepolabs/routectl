@@ -279,3 +279,111 @@
     });
   });
 })(window.routectlDriver);
+
+// ---- scenarios: what the Config view shows ------------------------------
+//
+// Each reads the rendered DOM as an operator sees it: innerText (so CSS
+// text-transform applies) and box positions at the window the test sets.
+(function (d) {
+  'use strict';
+
+  var SERVED_VERSION = '9.9.9-test';
+  var PRICED_MODEL = 'config-models-kglm';
+  var SLACK_PX = 1;
+
+  function distinctLineTops(range) {
+    var tops = [];
+    Array.prototype.forEach.call(range.getClientRects(), function (r) {
+      if (r.width <= 0 || r.height <= 0) { return; }
+      if (!tops.some(function (t) { return Math.abs(t - r.top) <= SLACK_PX; })) {
+        tops.push(r.top);
+      }
+    });
+    return tops.length;
+  }
+
+  // How many lines the leading figure of a value (its text up to the first
+  // space) is drawn on.
+  function figureLines(dd) {
+    var text = dd.firstChild;
+    if (!text || text.nodeType !== Node.TEXT_NODE) { return 0; }
+    var cut = text.nodeValue.indexOf(' ');
+    var range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, cut < 0 ? text.nodeValue.length : cut);
+    return distinctLineTops(range);
+  }
+
+  function pricePair(def) {
+    var dt = def.querySelector('dt');
+    var dd = def.querySelector('dd');
+    var lr = dt.getBoundingClientRect();
+    var vr = dd.getBoundingClientRect();
+    return {
+      label: dt.innerText,
+      value: dd.innerText,
+      label_left: lr.left,
+      value_left: vr.left,
+      value_below_label: vr.top >= lr.bottom - SLACK_PX,
+      figure_lines: figureLines(dd)
+    };
+  }
+
+  d.scenario('config-pools', function () {
+    return d.waitForElement('config-pools').then(function (tbl) {
+      return {
+        rows: Array.prototype.map.call(tbl.querySelectorAll('tbody > tr'), function (tr) {
+          var cells = tr.children;
+          return {
+            pool: cells[0].innerText,
+            seat_selection: cells[1].innerText,
+            members: Array.prototype.map.call(
+              cells[2].querySelectorAll('.cfgpool-member'), function (li) {
+                var login = li.querySelector('.cfgpool-login');
+                return {
+                  entry: li.querySelector('.cfgpool-entry').textContent,
+                  login: login.textContent,
+                  login_faint: login.classList.contains('mag-zero'),
+                  text_nodes: li.children.length
+                };
+              })
+          };
+        })
+      };
+    });
+  });
+
+  d.scenario('config-prices', function () {
+    return d.waitForElement(PRICED_MODEL + '-toggle').then(function (toggle) {
+      toggle.click();
+      return d.waitUntil('the priced detail to open', function () {
+        var row = document.getElementById(PRICED_MODEL + '-detail');
+        return row && !row.hidden && row;
+      });
+    }).then(function (row) {
+      return {
+        inner_width: window.innerWidth,
+        pairs: Array.prototype.map.call(row.querySelectorAll('.deflist .def'), pricePair)
+      };
+    });
+  });
+
+  d.scenario('config-version', function () {
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status') { return text; }
+      var agg = JSON.parse(text);
+      agg.panels.config.data.source.version = SERVED_VERSION;
+      return JSON.stringify(agg);
+    });
+    return d.waitUntil('the source strip', function () {
+      return document.querySelector('#body-config .cfgstrip');
+    }).then(function (strip) {
+      var facts = {};
+      Array.prototype.forEach.call(strip.querySelectorAll('.cfgfact'), function (f) {
+        facts[f.querySelector('.cfgfact-label').textContent] =
+          f.querySelector('.cfgfact-value').textContent;
+      });
+      return { served: SERVED_VERSION, facts: facts };
+    });
+  });
+})(window.routectlDriver);

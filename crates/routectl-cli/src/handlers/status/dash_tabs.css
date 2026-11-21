@@ -214,6 +214,53 @@
   overflow-wrap: anywhere;
 }
 
+/* ---- config: model facts ----
+   A price label names a cache lifetime as the config writes it: upper-cased,
+   "30m" (minutes) reads as 30 million beside $/Mtok. Each label sits over its
+   value, so every pair in a detail row takes the same shape at any width
+   instead of some stacking and some not. */
+.cfgmodels .deflist dt {
+  text-transform: none;
+  letter-spacing: normal;
+}
+.cfgmodels .deflist .def {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  align-items: flex-start;
+  row-gap: 2px;
+}
+
+/* ---- config: seat pools ----
+   Members read in configured order, one per line: the provider entry in
+   monospace, its login label beside it as its own quieter text. */
+.cfgpool-members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.cfgpool-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--sp-2);
+  min-width: 0;
+}
+.cfgpool-entry {
+  font-family: var(--font-mono);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.cfgpool-login {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 /* ---- doctor: headline card, findings, collapsed passes ----
 
    The headline is ONE reading, so it is one card with no internal hairline;

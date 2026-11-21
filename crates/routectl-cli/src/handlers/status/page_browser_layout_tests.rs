@@ -70,7 +70,8 @@ fn list<'a>(audit: &'a Value, key: &str) -> &'a Vec<Value> {
 /// Positive controls: the page really ran at the setup's text size and width,
 /// the audit read elements carrying digits, Traffic drew its group rows, and
 /// the view carried a fix command where one is expected, and Now drew its
-/// account meters.
+/// account meters, and Config held its priced model's detail open beside
+/// its pool members.
 fn assert_readable(setup: &Setup, view: &str, out: &Value) {
     let at = format!("{view} at {}", setup.name);
     assert_eq!(out["view"], view, "{at}");
@@ -109,6 +110,16 @@ fn assert_readable(setup: &Setup, view: &str, out: &Value) {
         assert!(
             out["glance_meters"].as_u64().unwrap_or(0) > 0,
             "{at}: Now drew no account meter: {out:#}"
+        );
+    }
+    if view == "config" {
+        assert_eq!(
+            out["config_open_details"], 1,
+            "{at}: the priced model's detail was not open: {out:#}"
+        );
+        assert!(
+            out["config_pool_members"].as_u64().unwrap_or(0) > 0,
+            "{at}: Config drew no pool member: {out:#}"
         );
     }
     let body = &out["body"];
