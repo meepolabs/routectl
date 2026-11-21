@@ -592,10 +592,7 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("routectl login anthropic"),
-            "expected OAuthStore guidance, got: {msg}"
-        );
+        assert_eq!(msg, "auth: no credentials for `anthropic`", "{msg}");
     }
 
     use routectl_testkit::ScopedEnv;

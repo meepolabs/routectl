@@ -6295,7 +6295,7 @@ What each family does (one line each):
 | `/v1/messages` (sync + streaming) | works | full forward + headers union |
 | `/v1/messages/count_tokens` | works | proxied to upstream; first-target only (no fallback chain walk) |
 | `/v1/models` (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) | works | glob alias keys and `default` skipped |
-| OAuth refresh on 401 | works | an upstream 401 forces one token refresh and one retry; the background seat driver also refreshes a due login; a refused refresh token needs `routectl login anthropic` |
+| OAuth refresh on 401 | works | an upstream 401 forces one token refresh and one retry; the background seat driver also refreshes a due login; a refused refresh token names the seat in its error and needs a fresh login of that seat (`routectl login anthropic --label <label>`, or `routectl login anthropic` for the default seat) |
 | `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; the router learns the rejection after the first miss per Bedrock lane and skips that lane for later web-search requests. Optionally declare `unsupported = ["web_search"]` under `[capability.overrides.<bedrock-provider>]` to skip even that first miss (see "Per-provider capability filter" above) |
 | Tool use + streaming | works | end-to-end SSE, multi-turn |
 | Subagent / agent-team dispatch | works | every subagent call flows through the same `/v1/messages` route |

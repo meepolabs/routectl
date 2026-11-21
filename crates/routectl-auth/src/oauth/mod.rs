@@ -38,8 +38,8 @@ pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
 pub use store::{
-    DefinitiveCause, LocalProbe, OAuthStore, OpenOutcome, PeekedAccessToken, PeekedCredential,
-    RefreshOutcome,
+    DefinitiveCause, ForcedRefreshError, LocalProbe, OAuthStore, OpenOutcome, PeekedAccessToken,
+    PeekedCredential, RefreshOutcome,
 };
 
 /// Where the credentials store lives by default
@@ -86,8 +86,9 @@ pub enum OAuthError {
     #[error("unknown oauth provider `{0}` (known: {known})", known = crate::oauth::known_provider_ids().join(", "))]
     UnknownProvider(String),
 
-    /// No stored credentials exist for the named provider.
-    #[error("no credentials for `{0}`; run `routectl login {0}` first")]
+    /// No stored credentials exist for the seat key. Names no rerun: only
+    /// the caller knows the command that logs that seat in.
+    #[error("no credentials for {}", crate::oauth::types::seat_description(.0))]
     NotLoggedIn(String),
 
     /// The on-disk credentials store uses a schema version this binary
@@ -144,7 +145,10 @@ pub enum OAuthError {
     /// Holds the provider id where a token endpoint raises it and the seat
     /// key once the store reports it. Names no rerun: only the caller knows
     /// the command that logs that seat in again.
-    #[error("refresh token for `{0}` expired or revoked")]
+    #[error(
+        "refresh token for {} expired or revoked",
+        crate::oauth::types::seat_description(.0)
+    )]
     RefreshExpired(String),
 
     /// A network error occurred during the flow.
@@ -260,10 +264,6 @@ mod tests {
         assert!(msg.contains("data error at line 1 column"), "{msg}");
     }
 
-    /// The `UnknownProvider` operator message must enumerate the live
-    /// registry, not a stale hardcoded literal. Pins that the newly
-    /// registered `antigravity` provider appears in the "known: ..." list
-    /// so an operator correcting a typo sees every valid choice.
     /// The errors that end in a fresh login name the seat and the cause,
     /// never a command: only the caller knows the flags that would log the
     /// same seat in again.
@@ -276,6 +276,28 @@ mod tests {
                 "refresh token for `anthropic#work` expired or revoked",
             ),
             (
+                "refresh expired, unprintable label",
+                OAuthError::RefreshExpired("anthropic#\u{1b}[2Jwork".into()),
+                "refresh token for the seat for `anthropic` whose label holds characters \
+                 that cannot be printed expired or revoked",
+            ),
+            (
+                "not logged in, default seat",
+                OAuthError::NotLoggedIn("anthropic".into()),
+                "no credentials for `anthropic`",
+            ),
+            (
+                "not logged in, labeled seat",
+                OAuthError::NotLoggedIn("anthropic#work".into()),
+                "no credentials for `anthropic#work`",
+            ),
+            (
+                "not logged in, unprintable label",
+                OAuthError::NotLoggedIn("anthropic#\u{1b}[2Jwork".into()),
+                "no credentials for the seat for `anthropic` whose label holds characters \
+                 that cannot be printed",
+            ),
+            (
                 "login timeout",
                 OAuthError::LoginTimeout("anthropic".into()),
                 "oauth flow for `anthropic` timed out",
@@ -286,6 +308,10 @@ mod tests {
         }
     }
 
+    /// The `UnknownProvider` operator message must enumerate the live
+    /// registry, not a stale hardcoded literal. Pins that the newly
+    /// registered `antigravity` provider appears in the "known: ..." list
+    /// so an operator correcting a typo sees every valid choice.
     #[test]
     fn unknown_provider_message_lists_all_known_ids() {
         let msg = OAuthError::UnknownProvider("made-up".into()).to_string();

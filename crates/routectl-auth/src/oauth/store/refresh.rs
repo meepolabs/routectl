@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use routectl_core::{Error, Result, render_operator_text};
+use routectl_core::{Error, Result};
 
 use crate::oauth::file_io;
 use crate::oauth::providers;
-use crate::oauth::types::{CredentialsFile, TokenRecord, seat_key, unix_now};
+use crate::oauth::types::{CredentialsFile, TokenRecord, seat_description, seat_key, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
 use super::{OAuthStore, REFRESH_LEAD_SECS};
@@ -47,6 +47,16 @@ pub enum DefinitiveCause {
     Revoked,
 }
 
+/// Why [`OAuthStore::force_refresh`] did not return a record.
+#[derive(Debug)]
+pub struct ForcedRefreshError {
+    /// The error to report. It names the seat and the cause, never a
+    /// command: only the caller knows the one that logs that seat in.
+    pub error: Error,
+    /// `Some` when only a fresh login of the seat cures the failure.
+    pub relogin: Option<DefinitiveCause>,
+}
+
 impl OAuthStore {
     /// Base cooldown after the first transient refresh failure, in
     /// seconds. Each further consecutive failure doubles the window
@@ -66,14 +76,23 @@ impl OAuthStore {
     /// 401 storm collapses to one token-endpoint POST. Returns the
     /// freshly-persisted `TokenRecord` so the CLI can report the new
     /// expiry.
-    pub async fn force_refresh(&self, provider: &str, label: Option<&str>) -> Result<TokenRecord> {
+    pub async fn force_refresh(
+        &self,
+        provider: &str,
+        label: Option<&str>,
+    ) -> std::result::Result<TokenRecord, ForcedRefreshError> {
         // The explicit CLI `routectl refresh` is the operator escape
         // hatch: it BYPASSES the cooldown check (an operator asking for a
         // refresh during an outage must not be told "temporarily
         // unavailable") but still records the outcome, so a transient
         // failure it hits arms the cooldown for the request-time paths.
-        self.force_refresh_seat(provider, &seat_key(provider, label), true)
+        let seat = seat_key(provider, label);
+        self.force_refresh_typed(provider, &seat, true)
             .await
+            .map_err(|failure| ForcedRefreshError {
+                relogin: failure.relogin_cause(),
+                error: failure.into_error(provider, &seat),
+            })
     }
 
     /// Refresh one seat of `provider` if its access token is inside the
@@ -129,11 +148,26 @@ impl OAuthStore {
         seat: &str,
         bypass_cooldown: bool,
     ) -> Result<TokenRecord> {
+        self.force_refresh_typed(provider, seat, bypass_cooldown)
+            .await
+            .map_err(|failure| failure.into_error(provider, seat))
+    }
+
+    /// `force_refresh_seat` with the failure kept typed.
+    async fn force_refresh_typed(
+        &self,
+        provider: &str,
+        seat: &str,
+        bypass_cooldown: bool,
+    ) -> std::result::Result<TokenRecord, RefreshFailure> {
         // Validate the provider id up front so an unknown id does not
         // surface as `NotLoggedIn` (which is misleading).
-        providers::lookup(provider).map_err(Error::from)?;
-        let current = self.read_record(seat).await.map_err(Error::from)?;
-        self.refresh_under_lock(provider, seat, &current, true, bypass_cooldown)
+        providers::lookup(provider).map_err(RefreshFailure::Store)?;
+        let current = self
+            .read_record(seat)
+            .await
+            .map_err(RefreshFailure::Store)?;
+        self.refresh_seat(provider, seat, &current, true, bypass_cooldown)
             .await
     }
 
@@ -598,6 +632,14 @@ impl RefreshFailure {
             Self::Cooldown { .. } => RefreshOutcome::Transient { access_expired },
         }
     }
+
+    /// The cause when only a fresh login of the seat cures this failure.
+    const fn relogin_cause(&self) -> Option<DefinitiveCause> {
+        match self.outcome(false) {
+            RefreshOutcome::Definitive(cause) => Some(cause),
+            _ => None,
+        }
+    }
 }
 
 /// The background-refresh outcome for a failed refresh. Only exact
@@ -653,20 +695,22 @@ fn is_transient_refresh_error(err: &OAuthError) -> bool {
 /// identity provider refused the grant itself) is exact evidence the
 /// credential is dead, so only it carries a reason; every other failure
 /// stays a plain `Error::Auth`, which never parks the seat. The text names
-/// the seat key and no rerun: the store cannot know the command that would
-/// log that seat in again.
+/// the seat and no rerun: the store cannot know the command that would log
+/// that seat in again.
 fn refresh_failure_error(seat: &str, err: OAuthError) -> Error {
-    let seat = render_operator_text(seat);
     match err {
         OAuthError::RefreshExpired(_) => Error::Credential {
             detail: format!(
                 "oauth refresh failed: {}",
-                OAuthError::RefreshExpired(seat.into_owned())
+                OAuthError::RefreshExpired(seat.to_string())
             ),
             reason: routectl_core::UpstreamReason::CredentialInvalid,
             parked_until_ms: None,
         },
-        err => Error::Auth(format!("oauth refresh failed for `{seat}`: {err}")),
+        err => Error::Auth(format!(
+            "oauth refresh failed for {}: {err}",
+            seat_description(seat)
+        )),
     }
 }
 

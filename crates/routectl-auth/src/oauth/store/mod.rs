@@ -456,7 +456,7 @@ mod refresh;
 pub mod scripted;
 mod seat;
 
-pub use refresh::{DefinitiveCause, RefreshOutcome};
+pub use refresh::{DefinitiveCause, ForcedRefreshError, RefreshOutcome};
 
 #[cfg(test)]
 #[path = "peek_token_tests.rs"]

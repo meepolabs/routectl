@@ -97,27 +97,48 @@ async fn set_is_unsupported() {
     assert!(err.to_string().contains("routectl login"));
 }
 
+/// Resolving a seat with no stored login names the seat. The default seat
+/// keeps the `routectl login <provider>` hint, which logs in exactly that
+/// seat; a labeled seat gets no command, since the bare command would log
+/// in the default seat and the store cannot print the label exactly.
 #[tokio::test]
-async fn on_auth_failure_without_record_returns_provider_specific_error() {
-    // No record on disk -> force_refresh reads the missing record
-    // first and surfaces NotLoggedIn ("...run `routectl login
-    // anthropic` first"). Pinned because `CompositeStore` and
-    // upstream callers rely on the actionable login hint.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("creds.json");
-    let store = OAuthStore::open(&path).await.unwrap();
-    let err = store
-        .on_auth_failure(&SecretRef::OAuth {
-            provider: "anthropic".into(),
-            label: None,
-        })
-        .await
-        .unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("routectl login anthropic"),
-        "expected provider-specific guidance, got: {msg}"
-    );
+async fn get_without_record_names_the_seat_and_only_an_exact_login() {
+    let rows = [
+        (
+            "default seat",
+            None,
+            "auth: no credentials for `anthropic`; run `routectl login anthropic` first",
+        ),
+        (
+            "labeled seat",
+            Some("work"),
+            "auth: no credentials for `anthropic#work`",
+        ),
+        (
+            "CSI before label",
+            Some("\u{1b}[2Jwork"),
+            "auth: no credentials for the seat for `anthropic` whose label holds \
+             characters that cannot be printed",
+        ),
+    ];
+    for (row, label, expected) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+
+        // Act
+        let err = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: label.map(str::to_string),
+            })
+            .await
+            .unwrap_err();
+
+        // Assert
+        assert_eq!(err.to_string(), expected, "row `{row}`");
+    }
 }
 
 // ---- Labeled-seat resolution + per-seat single-flight ----

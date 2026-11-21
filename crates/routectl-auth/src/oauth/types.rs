@@ -6,9 +6,11 @@
 //! mismatches are a fatal error with operator guidance, not a silent
 //! migration -- the file is regenerable via `routectl login`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use routectl_core::render_operator_text;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroize;
 
@@ -200,6 +202,23 @@ pub fn seat_key(provider: &str, label: Option<&str>) -> String {
     match label {
         Some(label) => format!("{provider}#{label}"),
         None => provider.to_string(),
+    }
+}
+
+/// How an operator-facing message names the seat key `seat`: the key in
+/// backticks when it prints exactly as written, else a phrase naming the
+/// provider alone. Printing the key with its unprintable characters
+/// stripped would name a different seat.
+pub(crate) fn seat_description(seat: &str) -> String {
+    match render_operator_text(seat) {
+        Cow::Borrowed(seat) => format!("`{seat}`"),
+        Cow::Owned(_) => {
+            let provider = seat.split_once('#').map_or(seat, |(provider, _)| provider);
+            format!(
+                "the seat for `{}` whose label holds characters that cannot be printed",
+                render_operator_text(provider)
+            )
+        }
     }
 }
 

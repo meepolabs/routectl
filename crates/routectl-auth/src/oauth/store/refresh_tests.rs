@@ -191,31 +191,84 @@ async fn on_auth_failure_forces_refresh_even_when_token_not_near_expiry() {
     assert_eq!(tok, "tok-after-401");
 }
 
-/// A refused refresh names the seat it failed for and the cause, and no
-/// `routectl login` command: the store cannot know the invocation that
-/// would log that seat in again, and a command without the seat's label
-/// would log in a different one. The 401-driven path is the one the server
-/// takes.
+/// A refused refresh, or a refresh of a seat with no stored login, names
+/// the seat and the cause, and no `routectl login` command: the store
+/// cannot know the invocation that would log that seat in again, and a
+/// command without the seat's label would log in a different one. A seat
+/// key that does not print exactly as stored is never printed stripped,
+/// since the stripped key can be another seat's. The 401-driven path is the
+/// one the server takes.
 #[tokio::test]
 async fn a_refused_refresh_names_the_seat_and_no_login_command() {
+    const UNPRINTABLE: &str =
+        "the seat for `anthropic` whose label holds characters that cannot be printed";
+    const REFUSED: &str = "oauth refresh failed: refresh token for";
     let rows = [
-        ("default seat", None, "`anthropic`"),
-        ("labeled seat", Some("work"), "`anthropic#work`"),
         (
-            "control in label",
+            "refused, default seat",
+            true,
+            None,
+            format!("{REFUSED} `anthropic` expired or revoked"),
+        ),
+        (
+            "refused, labeled seat",
+            true,
+            Some("work"),
+            format!("{REFUSED} `anthropic#work` expired or revoked"),
+        ),
+        (
+            "refused, control in label",
+            true,
             Some("wo\u{1b}[2Jrk"),
-            "`anthropic#work`",
+            format!("{REFUSED} {UNPRINTABLE} expired or revoked"),
+        ),
+        (
+            "refused, CSI before label",
+            true,
+            Some("\u{1b}[2Jwork"),
+            format!("{REFUSED} {UNPRINTABLE} expired or revoked"),
+        ),
+        (
+            "refused, non-ASCII label",
+            true,
+            Some("Jos\u{e9}"),
+            format!("{REFUSED} `anthropic#Jos\u{e9}` expired or revoked"),
+        ),
+        (
+            "not logged in, default seat",
+            false,
+            None,
+            "no credentials for `anthropic`".to_string(),
+        ),
+        (
+            "not logged in, labeled seat",
+            false,
+            Some("work"),
+            "no credentials for `anthropic#work`".to_string(),
+        ),
+        (
+            "not logged in, control in label",
+            false,
+            Some("wo\u{1b}[2Jrk"),
+            format!("no credentials for {UNPRINTABLE}"),
+        ),
+        (
+            "not logged in, CSI before label",
+            false,
+            Some("\u{1b}[2Jwork"),
+            format!("no credentials for {UNPRINTABLE}"),
         ),
     ];
-    for (row, label, shown) in rows {
+    for (row, is_stored, label, expected) in rows {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
-        let seed = OAuthStore::open(&path).await.unwrap();
-        seed.write_record(&seat_key("anthropic", label), rec_at(unix_now() + 10))
-            .await
-            .unwrap();
-        drop(seed);
+        if is_stored {
+            let seed = OAuthStore::open(&path).await.unwrap();
+            seed.write_record(&seat_key("anthropic", label), rec_at(unix_now() + 10))
+                .await
+                .unwrap();
+        }
         let flow = Arc::new(CountingFlow::new(ScriptedRefresh::RefreshExpired));
         let store = open_with_flow(&path, flow.clone()).await;
 
@@ -232,15 +285,12 @@ async fn a_refused_refresh_names_the_seat_and_no_login_command() {
         let msg = err.to_string();
         assert_eq!(
             flow.call_count(),
-            1,
-            "row `{row}`: the refresh was attempted"
+            u32::from(is_stored),
+            "row `{row}`: a refresh is attempted only for a stored seat"
         );
-        assert_eq!(
-            msg,
-            format!("auth: oauth refresh failed: refresh token for {shown} expired or revoked"),
-            "row `{row}`"
-        );
+        assert_eq!(msg, format!("auth: {expected}"), "row `{row}`");
         assert!(!msg.contains("routectl"), "row `{row}`: {msg}");
+        assert!(!msg.chars().any(char::is_control), "row `{row}`: {msg}");
     }
 }
 

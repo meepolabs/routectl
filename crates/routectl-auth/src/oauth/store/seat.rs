@@ -31,7 +31,10 @@ impl SecretStore for OAuthStore {
         // (label None) keys as the unlabeled provider record exactly as
         // before; a labeled ref keys this seat's record.
         let seat = seat_key(provider, label.as_deref());
-        let rec = self.read_record(&seat).await.map_err(Error::from)?;
+        let rec = self
+            .read_record(&seat)
+            .await
+            .map_err(|err| resolve_error(err, provider, label.is_none()))?;
 
         if rec.near_expiry(REFRESH_LEAD_SECS, unix_now()) {
             tracing::debug!(
@@ -166,7 +169,7 @@ impl SecretStore for OAuthStore {
         };
         Self::set_cloud_project_id(self, &seat_key(provider, label.as_deref()), project_id)
             .await
-            .map_err(Error::from)
+            .map_err(|err| resolve_error(err, provider, label.is_none()))
     }
 
     async fn clear_cloud_project_id_if_matches(
@@ -236,6 +239,20 @@ fn seat_ref_from_key(provider: &str, seat_key: &str) -> SecretRef {
     SecretRef::OAuth {
         provider: provider.to_string(),
         label,
+    }
+}
+
+/// The error resolving or updating a seat surfaces. A missing default seat
+/// keeps its login hint: the bare `routectl login <provider>` logs in
+/// exactly that seat, and `provider` passed the registry lookup, so it
+/// prints as written. A labeled seat gets no command, since only the
+/// caller can print one that carries the label exactly.
+fn resolve_error(err: OAuthError, provider: &str, is_default_seat: bool) -> Error {
+    match err {
+        OAuthError::NotLoggedIn(_) if is_default_seat => {
+            Error::Auth(format!("{err}; run `routectl login {provider}` first"))
+        }
+        err => Error::from(err),
     }
 }
 
