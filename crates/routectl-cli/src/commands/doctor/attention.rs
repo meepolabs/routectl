@@ -10,8 +10,9 @@
 //! ([`Attention::from_items`]), so a caller that adds recovered items to the
 //! active ones folds the merged list and gets a consistent summary.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use routectl_core::failure_class::LastOutcome;
 use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{Billing, Finding, Status};
@@ -89,8 +90,15 @@ pub struct PoolSnapshot {
 pub struct RouteSnapshot {
     /// The runtime state key (`nickname`, or `nickname#member` for a seat).
     pub state_key: String,
+    /// The `[providers]` entry the target dispatches through (the member
+    /// entry for a pool seat).
+    pub provider_entry: String,
     /// The target's credential account, when it has one.
     pub account: Option<String>,
+    /// The outcome of the target's last settled dispatch, when one has
+    /// settled. Open routes on one provider entry share a cause only when
+    /// this agrees.
+    pub last_outcome: Option<LastOutcome>,
     /// Whether the target's circuit is open (not half-open).
     pub circuit_open: bool,
     /// When the circuit last opened, in epoch ms.
@@ -196,6 +204,9 @@ pub struct RecordLoss {
 pub enum AttentionKind {
     /// A pool with seats configured and none usable.
     PoolEmpty,
+    /// Several routes on one provider entry with open circuits after the
+    /// same last outcome.
+    ProviderFailing,
     /// A route whose circuit is open.
     RouteCircuitOpen,
     /// An account whose credential is unusable.
@@ -221,8 +232,9 @@ pub enum AttentionKind {
 impl AttentionKind {
     /// Every kind, in list order: broken kinds before degraded ones, so
     /// list order is worst first.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::PoolEmpty,
+        Self::ProviderFailing,
         Self::RouteCircuitOpen,
         Self::AccountUnusable,
         Self::AccountParked,
@@ -239,6 +251,7 @@ impl AttentionKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PoolEmpty => "pool_empty",
+            Self::ProviderFailing => "provider_failing",
             Self::RouteCircuitOpen => "route_circuit_open",
             Self::AccountUnusable => "account_unusable",
             Self::AccountParked => "account_parked",
@@ -269,7 +282,7 @@ impl AttentionKind {
     /// The view that shows the item's detail.
     pub const fn target(self) -> ViewTarget {
         match self {
-            Self::RouteCircuitOpen => ViewTarget::Models,
+            Self::ProviderFailing | Self::RouteCircuitOpen => ViewTarget::Models,
             Self::RecordsDropped => ViewTarget::Traffic,
             Self::DoctorFailure => ViewTarget::Doctor,
             Self::PoolEmpty
@@ -425,6 +438,9 @@ pub struct AttentionItem {
     pub remediation: Option<String>,
     /// The view that shows its detail.
     pub target: Option<ViewTarget>,
+    /// The state keys of the routes the item names, sorted, when it names
+    /// several.
+    pub targets: Option<Vec<String>>,
 }
 
 impl AttentionItem {
@@ -562,15 +578,16 @@ pub struct ActiveItems {
     pub items: Vec<AttentionItem>,
     /// The keys of conditions that hold but are named by another item in
     /// `items`: a refresh failing on an account whose credential item is
-    /// listed, an open route whose account is unusable or parked, and a
-    /// pools-section doctor Fail for a pool a listed `pool_empty` names. None
-    /// of them has cleared.
+    /// listed, an open route whose account is unusable or parked, an open
+    /// route a `provider_failing` item names, and a pools-section doctor Fail
+    /// for a pool a listed `pool_empty` names. None of them has cleared.
     pub subsumed: BTreeSet<String>,
 }
 
 /// Every condition that holds at `inputs.now_ms`, one item per cause, in
 /// list order. A route blocked by its account's credential is named by the
-/// account item, not once per route.
+/// account item, and open routes sharing a provider entry and a last outcome
+/// by one `provider_failing` item, not once per route.
 pub fn active_items(inputs: &AttentionInputs) -> Vec<AttentionItem> {
     active_items_with_subsumed(inputs).items
 }
@@ -584,16 +601,7 @@ pub fn active_items_with_subsumed(inputs: &AttentionInputs) -> ActiveItems {
         subsumed: BTreeSet::new(),
     };
     let pool_empty_keys: BTreeSet<String> = out.items.iter().map(|item| item.key.clone()).collect();
-    for route in &inputs.routes {
-        let Some(item) = route_item(route, now) else {
-            continue;
-        };
-        if account_blocked(inputs, route.account.as_deref()) {
-            out.subsumed.insert(item.key);
-        } else {
-            out.items.push(item);
-        }
-    }
+    route_items(inputs, &mut out);
     for account in &inputs.accounts {
         account_items(account, now, &mut out);
     }
@@ -616,11 +624,131 @@ pub fn active_items_with_subsumed(inputs: &AttentionInputs) -> ActiveItems {
 /// `pool_empty_keys`, the `pool_empty` items this read lists, names.
 fn pool_empty_names_it(pool_empty_keys: &BTreeSet<String>, finding: &Finding) -> bool {
     finding.section == POOLS_SECTION
-        && pool_empty_keys.contains(&format!(
-            "{}:{}",
-            AttentionKind::PoolEmpty.as_str(),
-            finding.name
-        ))
+        && pool_empty_keys.contains(&item_key(AttentionKind::PoolEmpty, &finding.name))
+}
+
+/// An item's stable identity: its kind plus its subject's key.
+fn item_key(kind: AttentionKind, subject_key: &str) -> String {
+    format!("{}:{subject_key}", kind.as_str())
+}
+
+/// The key of the item [`active_items`] lists as the cause of route
+/// `state_key`: its account's credential item while that credential is
+/// unusable or parked (listed whether or not the circuit is open), else,
+/// with the circuit open, the `provider_failing` item it folds into or its
+/// own `route_circuit_open` item. `None` for a route with nothing listed
+/// against it or not in `inputs`.
+pub fn cause_key_for_route(inputs: &AttentionInputs, state_key: &str) -> Option<String> {
+    let route = inputs
+        .routes
+        .iter()
+        .find(|route| route.state_key == state_key)?;
+    if !route.circuit_open && blocking_account(inputs, route.account.as_deref()).is_none() {
+        return None;
+    }
+    Some(route_cause_key(inputs, &provider_folds(inputs), route))
+}
+
+/// Open routes on one provider entry with one last outcome, keyed by the
+/// entry and the outcome's token.
+type ProviderFolds<'a> = BTreeMap<(&'a str, &'static str), Vec<&'a RouteSnapshot>>;
+
+/// The open routes that fold into a `provider_failing` item: two or more on
+/// one provider entry, none blocked by its account, with the same last
+/// outcome. A route with no settled outcome shows no shared cause, so it
+/// never folds.
+fn provider_folds(inputs: &AttentionInputs) -> ProviderFolds<'_> {
+    let mut folds = ProviderFolds::new();
+    for route in &inputs.routes {
+        if !route.circuit_open || blocking_account(inputs, route.account.as_deref()).is_some() {
+            continue;
+        }
+        let Some(outcome) = route.last_outcome else {
+            continue;
+        };
+        folds
+            .entry((route.provider_entry.as_str(), outcome_token(outcome)))
+            .or_default()
+            .push(route);
+    }
+    folds.retain(|_, routes| routes.len() >= 2);
+    folds
+}
+
+/// The key of the item that names `route`, given this build's provider
+/// folds. Expects `route` open or blocked by its account.
+fn route_cause_key(
+    inputs: &AttentionInputs,
+    folds: &ProviderFolds<'_>,
+    route: &RouteSnapshot,
+) -> String {
+    let account_key = blocking_account(inputs, route.account.as_deref()).and_then(|account| {
+        credential_kind(&account.credential).map(|kind| item_key(kind, &account.account))
+    });
+    if let Some(key) = account_key {
+        return key;
+    }
+    let folded = route
+        .last_outcome
+        .map(|outcome| (route.provider_entry.as_str(), outcome_token(outcome)))
+        .filter(|fold| folds.contains_key(fold));
+    match folded {
+        Some((entry, token)) => item_key(
+            AttentionKind::ProviderFailing,
+            &fold_subject_key(entry, token),
+        ),
+        None => item_key(AttentionKind::RouteCircuitOpen, &route.state_key),
+    }
+}
+
+fn fold_subject_key(entry: &str, token: &str) -> String {
+    format!("{entry}/{token}")
+}
+
+/// The wire token of a last outcome, as `/status/health` spells it and the
+/// core enum serializes it.
+const fn outcome_token(outcome: LastOutcome) -> &'static str {
+    match outcome {
+        LastOutcome::Ok => "ok",
+        LastOutcome::RateLimited => "rate_limited",
+        LastOutcome::Timeout => "timeout",
+        LastOutcome::TransportError => "transport_error",
+        LastOutcome::Http4xx => "http_4xx",
+        LastOutcome::Http5xx => "http_5xx",
+        LastOutcome::CircuitOpen => "circuit_open",
+    }
+}
+
+const fn outcome_words(outcome: Option<LastOutcome>) -> &'static str {
+    match outcome {
+        None => "unknown",
+        Some(LastOutcome::Ok) => "ok",
+        Some(LastOutcome::RateLimited) => "rate limited",
+        Some(LastOutcome::Timeout) => "timed out",
+        Some(LastOutcome::TransportError) => "connection failed",
+        Some(LastOutcome::Http4xx) => "request refused (4xx)",
+        Some(LastOutcome::Http5xx) => "server error (5xx)",
+        Some(LastOutcome::CircuitOpen) => "circuit open",
+    }
+}
+
+/// One item per provider fold, then each open route listed under its own
+/// item; a route another item names is reported as subsumed.
+fn route_items(inputs: &AttentionInputs, out: &mut ActiveItems) {
+    let folds = provider_folds(inputs);
+    out.items.extend(
+        folds
+            .iter()
+            .map(|((entry, token), routes)| provider_item(entry, token, routes, inputs.now_ms)),
+    );
+    for route in inputs.routes.iter().filter(|route| route.circuit_open) {
+        let item = route_item(route, inputs.now_ms);
+        if route_cause_key(inputs, &folds, route) == item.key {
+            out.items.push(item);
+        } else {
+            out.subsumed.insert(item.key);
+        }
+    }
 }
 
 /// The plain-words cause of a credential state with its age, or `None` for
@@ -672,12 +800,13 @@ struct Draft {
     until_ms: Option<i64>,
     fix: Option<String>,
     remediation: Option<String>,
+    targets: Option<Vec<String>>,
 }
 
 impl Draft {
     fn finish(self) -> AttentionItem {
         AttentionItem {
-            key: format!("{}:{}", self.kind.as_str(), self.subject_key),
+            key: item_key(self.kind, &self.subject_key),
             kind: self.kind,
             severity: self.kind.severity(),
             state: ItemState::Active,
@@ -691,6 +820,7 @@ impl Draft {
             fix: self.fix,
             remediation: self.remediation,
             target: Some(self.kind.target()),
+            targets: self.targets,
         }
     }
 
@@ -713,6 +843,7 @@ impl Draft {
             until_ms: None,
             fix: None,
             remediation: None,
+            targets: None,
         }
     }
 }
@@ -732,31 +863,86 @@ fn pool_item(pool: &PoolSnapshot) -> Option<AttentionItem> {
     })
 }
 
-fn account_blocked(inputs: &AttentionInputs, account: Option<&str>) -> bool {
-    account.is_some_and(|key| {
-        inputs
-            .accounts
-            .iter()
-            .any(|a| a.account == key && a.credential != CredentialState::Usable)
-    })
+/// The account `account` names when its credential is unusable or parked.
+fn blocking_account<'a>(
+    inputs: &'a AttentionInputs,
+    account: Option<&str>,
+) -> Option<&'a AccountSnapshot> {
+    let key = account?;
+    inputs
+        .accounts
+        .iter()
+        .find(|a| a.account == key && credential_kind(&a.credential).is_some())
 }
 
-fn route_item(route: &RouteSnapshot, now: i64) -> Option<AttentionItem> {
-    route.circuit_open.then(|| {
-        let cause = route.open_since_ms.map_or_else(
-            || "Circuit open".to_string(),
-            |since| format!("Circuit open, for {}", span(now - since)),
-        );
-        let kind = AttentionKind::RouteCircuitOpen;
-        Draft {
-            account: route.account.clone(),
-            cause,
-            raw_token: EligibilityReason::BreakerOpen.as_str().to_string(),
-            since_ms: route.open_since_ms,
-            ..Draft::for_subject(kind, &route.state_key, &route.state_key)
-        }
-        .finish()
-    })
+/// The kind of the item a credential state raises, or `None` for a usable
+/// credential.
+const fn credential_kind(state: &CredentialState) -> Option<AttentionKind> {
+    match state {
+        CredentialState::Usable => None,
+        CredentialState::Unusable { .. } => Some(AttentionKind::AccountUnusable),
+        CredentialState::Parked { .. } => Some(AttentionKind::AccountParked),
+    }
+}
+
+/// "Circuit open", with the age since `open_since_ms` when known.
+fn circuit_cause(prefix: &str, open_since_ms: Option<i64>, now: i64) -> String {
+    open_since_ms.map_or_else(
+        || prefix.to_string(),
+        |since| format!("{prefix}, for {}", span(now - since)),
+    )
+}
+
+/// Expects `route` open.
+fn route_item(route: &RouteSnapshot, now: i64) -> AttentionItem {
+    Draft {
+        account: route.account.clone(),
+        cause: circuit_cause("Circuit open", route.open_since_ms, now),
+        raw_token: EligibilityReason::BreakerOpen.as_str().to_string(),
+        since_ms: route.open_since_ms,
+        ..Draft::for_subject(
+            AttentionKind::RouteCircuitOpen,
+            &route.state_key,
+            &route.state_key,
+        )
+    }
+    .finish()
+}
+
+/// One item for the open `routes` of provider entry `entry` whose last
+/// outcome reads `token`. It carries their account only when they all share
+/// it, and dates from the earliest open circuit.
+fn provider_item(entry: &str, token: &str, routes: &[&RouteSnapshot], now: i64) -> AttentionItem {
+    let mut targets: Vec<String> = routes.iter().map(|route| route.state_key.clone()).collect();
+    targets.sort();
+    let account = routes[0].account.clone().filter(|first| {
+        routes
+            .iter()
+            .all(|route| route.account.as_ref() == Some(first))
+    });
+    let since_ms = routes.iter().filter_map(|route| route.open_since_ms).min();
+    let prefix = format!(
+        "Circuit open on {} routes, last outcome {}",
+        routes.len(),
+        outcome_words(routes[0].last_outcome)
+    );
+    Draft {
+        account,
+        cause: circuit_cause(&prefix, since_ms, now),
+        raw_token: format!(
+            "{} (last_outcome={token}, routes={})",
+            EligibilityReason::BreakerOpen.as_str(),
+            routes.len()
+        ),
+        since_ms,
+        targets: Some(targets),
+        ..Draft::for_subject(
+            AttentionKind::ProviderFailing,
+            &fold_subject_key(entry, token),
+            entry,
+        )
+    }
+    .finish()
 }
 
 fn account_items(account: &AccountSnapshot, now: i64, out: &mut ActiveItems) {

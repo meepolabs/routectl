@@ -226,7 +226,9 @@ fn route_snapshot(target: RouteTargetStatus, now_ms: i64) -> RouteSnapshot {
             .filter(|_| circuit_open)
             .map(|elapsed| now_ms.saturating_sub(duration_ms(elapsed))),
         state_key: target.state_key,
+        provider_entry: target.provider_name,
         account: target.account,
+        last_outcome: target.gate.last_outcome,
         circuit_open,
     }
 }

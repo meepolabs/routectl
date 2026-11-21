@@ -5,6 +5,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+use routectl_core::failure_class::LastOutcome;
 use routectl_router::{Finding, Status};
 
 use super::*;
@@ -53,7 +54,9 @@ fn with_open_route(now_ms: i64, open_since_ms: i64) -> AttentionInputs {
     AttentionInputs {
         routes: vec![RouteSnapshot {
             state_key: "claude-a".to_string(),
+            provider_entry: "anthropic-a".to_string(),
             account: None,
+            last_outcome: Some(LastOutcome::Http5xx),
             circuit_open: true,
             open_since_ms: Some(open_since_ms),
         }],
@@ -319,7 +322,9 @@ fn with_seat(now_ms: i64, account: AccountSnapshot, route_open: bool) -> Attenti
         accounts: vec![account],
         routes: vec![RouteSnapshot {
             state_key: "fast".to_string(),
+            provider_entry: "anthropic-seat".to_string(),
             account: Some(ACCOUNT.to_string()),
+            last_outcome: Some(LastOutcome::Http5xx),
             circuit_open: route_open,
             open_since_ms: route_open.then_some(START - MIN),
         }],
@@ -690,4 +695,82 @@ fn the_memory_reads_no_clock_and_touches_no_file() {
         forbidden.iter().any(|t| clocked.contains(*t)),
         "control: the scan finds a clock read in usage.rs"
     );
+}
+
+/// Open routes on the `relay` entry, `keys` after a server error.
+fn with_relay_routes(now_ms: i64, keys: &[&str]) -> AttentionInputs {
+    AttentionInputs {
+        routes: keys
+            .iter()
+            .map(|key| RouteSnapshot {
+                state_key: (*key).to_string(),
+                provider_entry: "relay".to_string(),
+                account: None,
+                last_outcome: Some(LastOutcome::Http5xx),
+                circuit_open: true,
+                open_since_ms: Some(START - MIN),
+            })
+            .collect(),
+        ..at(now_ms)
+    }
+}
+
+fn active_keys(items: &[AttentionItem]) -> Vec<&str> {
+    items
+        .iter()
+        .filter(|item| item.state == ItemState::Active)
+        .map(|item| item.key.as_str())
+        .collect()
+}
+
+/// A fold that drops to one open route: the next read lists that route's
+/// own item active, the fold recovered, and no second active cause; the
+/// routes that closed were named by the fold, so their own items never
+/// show as recovered.
+#[test]
+fn a_fold_dropping_to_one_open_route_recovers_the_fold_and_lists_the_route() {
+    let memory = AttentionMemory::new();
+    let fold_key = "provider_failing:relay/http_5xx";
+    let first = read(
+        &memory,
+        with_relay_routes(START, &["pt-a", "pt-b", "pt-c", "pt-d"]),
+    );
+    let then = START + READ_EVERY;
+
+    let after = read(&memory, with_relay_routes(then, &["pt-a"]));
+
+    assert_eq!(active_keys(&first), [fold_key], "premise: one fold");
+    assert_eq!(active_keys(&after), ["route_circuit_open:pt-a"]);
+    let fold = expect_item(&after, fold_key);
+    assert_eq!(fold.state, ItemState::Recovered);
+    assert_eq!(fold.recovered_at_ms, Some(then));
+    for gone in ["pt-b", "pt-c", "pt-d"] {
+        let key = format!("route_circuit_open:{gone}");
+        assert!(find(&after, &key).is_none(), "{key}: {after:#?}");
+    }
+}
+
+/// A route folded into a provider item is held, not recovered, while the
+/// fold lists it, and its own item returns active with its own start when
+/// the fold breaks up around it.
+#[test]
+fn a_route_listed_alone_then_folded_is_never_stamped_recovered() {
+    let memory = AttentionMemory::new();
+    let route_key = "route_circuit_open:pt-a";
+    let alone = read(&memory, with_relay_routes(START, &["pt-a"]));
+    let folded = read(
+        &memory,
+        with_relay_routes(START + READ_EVERY, &["pt-a", "pt-b"]),
+    );
+
+    let after = read(
+        &memory,
+        with_relay_routes(START + 2 * READ_EVERY, &["pt-a"]),
+    );
+
+    assert_eq!(expect_item(&alone, route_key).state, ItemState::Active);
+    assert!(find(&folded, route_key).is_none(), "{folded:#?}");
+    let item = expect_item(&after, route_key);
+    assert_eq!(item.state, ItemState::Active);
+    assert_eq!(item.since_ms, Some(START - MIN));
 }

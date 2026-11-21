@@ -220,6 +220,7 @@ async fn get_serves_the_v1_shape_and_post_is_refused() {
             "fix",
             "remediation",
             "target",
+            "targets",
         ])
     );
     assert_eq!(post, StatusCode::METHOD_NOT_ALLOWED);

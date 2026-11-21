@@ -5808,13 +5808,18 @@ should read `panels.attention` from it rather than also polling
   age where one is known), `raw_token` (the machine form, for grep and
   copy), `since_ms`, `until_ms`, `recovered_at_ms`, `fix` (the bare command
   that fixes it, copyable as is, or null), `remediation` (what fixes it in
-  plain words when no bare command does, or null) and `target` (`accounts`,
-  `models`, `traffic` or `doctor`). A `doctor_failure` item carries the
+  plain words when no bare command does, or null), `target` (`accounts`,
+  `models`, `traffic` or `doctor`) and `targets` (the sorted state keys of
+  the routes a `provider_failing` item names; null on every other kind).
+  A `doctor_failure` item carries the
   finding's remediation there and a null `fix`. Times are epoch ms; a key a
   kind does not use is null.
 
 The kinds form a closed set: `pool_empty` (a pool with seats configured and
-none usable; the only `broken` kind), `route_circuit_open`,
+none usable; the only `broken` kind), `provider_failing` (two or more
+routes dispatching through one `[providers]` entry with open circuits after
+the same last outcome; its key names the entry and the outcome, e.g.
+`provider_failing:relay/http_5xx`), `route_circuit_open`,
 `account_unusable`, `account_parked`, `account_refresh_failing`,
 `driver_stopped` (the token refresh or usage poll driver not running while
 managed logins exist), `account_near_limit` (a non-stale window more than
@@ -5825,7 +5830,11 @@ included plan within the last 7 minutes; an older claim raises nothing),
 and `doctor_failure` (a doctor Fail finding; a `pools` section Fail about a
 pool listed as `pool_empty` is left to that item). A route
 blocked by its account's credential is named once, by the account item,
-and a failing token refresh on an account whose credential item is listed
+and never joins a `provider_failing` item; open routes a
+`provider_failing` item names get no `route_circuit_open` item of their own,
+and a route with no settled outcome is never folded. When a
+`provider_failing` item drops to one open route, that route is listed as
+`route_circuit_open` and the provider item as `recovered`. A failing token refresh on an account whose credential item is listed
 is named in that item's `raw_token`. Every kind but `pool_empty`
 is `degraded`.
 

@@ -223,6 +223,7 @@ fn the_closed_token_sets_are_welded_to_their_enums() {
         tokens(&AttentionKind::ALL, AttentionKind::as_str),
         pinned(&[
             "pool_empty",
+            "provider_failing",
             "route_circuit_open",
             "account_unusable",
             "account_parked",
@@ -337,4 +338,30 @@ fn the_fixtures_carry_every_item_state_and_both_doctor_coverages() {
             .contains(&"doctor_failure:config/schema".to_string()),
         "{unavailable}"
     );
+}
+
+/// The populated payload carries a `provider_failing` item whose `targets`
+/// lists its routes' state keys sorted, at schema 1; an item naming one
+/// route carries `targets` null (control: the key serializes on every item).
+#[test]
+fn a_provider_fold_serializes_its_kind_and_targets_at_schema_one() {
+    let payload = populated_attention();
+    let items = payload["data"]["items"].as_array().expect("items");
+
+    let fold = items
+        .iter()
+        .find(|item| item["kind"] == "provider_failing")
+        .unwrap_or_else(|| panic!("no provider fold: {payload}"));
+    let route = items
+        .iter()
+        .find(|item| item["kind"] == "route_circuit_open")
+        .unwrap_or_else(|| panic!("no route item: {payload}"));
+
+    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(fold["key"], "provider_failing:compat/http_5xx");
+    assert_eq!(fold["targets"], serde_json::json!(["glm-air", "glm-flash"]));
+    assert_eq!(fold["target"], "models");
+    assert_eq!(route["key"], "route_circuit_open:glm");
+    assert!(route.as_object().expect("an item").contains_key("targets"));
+    assert_eq!(route["targets"], Value::Null);
 }

@@ -1,4 +1,5 @@
 use routectl_core::UpstreamReason;
+use routectl_core::failure_class::LastOutcome;
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{Billing, Finding, Status};
 use serde_json::Value;
@@ -69,9 +70,21 @@ fn window(length_secs: u64, used: f64) -> WindowSnapshot {
 fn route(state_key: &str, account: Option<&str>, open: bool) -> RouteSnapshot {
     RouteSnapshot {
         state_key: state_key.to_string(),
+        provider_entry: format!("entry-of-{state_key}"),
         account: account.map(str::to_string),
+        last_outcome: Some(LastOutcome::Http5xx),
         circuit_open: open,
         open_since_ms: open.then_some(NOW - 2 * MIN),
+    }
+}
+
+/// An open route on provider entry `entry` whose last dispatch settled as
+/// `outcome`, with no account of its own.
+fn on_entry(state_key: &str, entry: &str, outcome: LastOutcome) -> RouteSnapshot {
+    RouteSnapshot {
+        provider_entry: entry.to_string(),
+        last_outcome: Some(outcome),
+        ..route(state_key, None, true)
     }
 }
 
@@ -506,6 +519,32 @@ fn field_rows() -> Vec<(AttentionKind, AttentionInputs, Expected)> {
                 fix: None,
                 remediation: None,
                 target: ViewTarget::Accounts,
+            },
+        ),
+        (
+            AttentionKind::ProviderFailing,
+            AttentionInputs {
+                routes: vec![
+                    on_entry("pt-b", "relay", LastOutcome::Http5xx),
+                    RouteSnapshot {
+                        open_since_ms: Some(NOW - 7 * MIN),
+                        ..on_entry("pt-a", "relay", LastOutcome::Http5xx)
+                    },
+                ],
+                ..inputs()
+            },
+            Expected {
+                key: "provider_failing:relay/http_5xx",
+                severity: Severity::Degraded,
+                subject: "relay",
+                account: None,
+                cause: "Circuit open on 2 routes, last outcome server error (5xx), for 7 min",
+                raw_token: "breaker_open (last_outcome=http_5xx, routes=2)",
+                since_ms: Some(NOW - 7 * MIN),
+                until_ms: None,
+                fix: None,
+                remediation: None,
+                target: ViewTarget::Models,
             },
         ),
         (
@@ -1126,6 +1165,7 @@ fn item(kind: AttentionKind, subject: &str) -> AttentionItem {
         fix: None,
         remediation: None,
         target: Some(kind.target()),
+        targets: None,
     }
 }
 
@@ -1306,6 +1346,7 @@ fn the_built_list_serializes_every_contract_key_with_closed_tokens() {
             "state",
             "subject",
             "target",
+            "targets",
             "until_ms",
         ]
     );
@@ -1466,5 +1507,312 @@ fn a_condition_folded_into_a_worse_item_is_reported_as_subsumed() {
             );
         }
         assert_eq!(built.items, active_items(&row), "{name}");
+    }
+}
+
+fn keys_of(items: &[AttentionItem]) -> Vec<&str> {
+    items.iter().map(|item| item.key.as_str()).collect()
+}
+
+const PT: [&str; 4] = ["pt-d", "pt-a", "pt-c", "pt-b"];
+
+/// Four open routes on one provider entry after the same last outcome are one
+/// `provider_failing` item naming each, sorted; one such route alone is its
+/// own route item.
+#[test]
+fn open_routes_on_one_entry_with_one_outcome_fold_into_one_provider_item() {
+    let four = AttentionInputs {
+        routes: PT
+            .iter()
+            .map(|key| on_entry(key, "relay", LastOutcome::Http5xx))
+            .collect(),
+        ..inputs()
+    };
+    let one = AttentionInputs {
+        routes: vec![on_entry("pt-a", "relay", LastOutcome::Http5xx)],
+        ..inputs()
+    };
+
+    let folded = active_items(&four);
+    let alone = active_items(&one);
+
+    assert_eq!(keys_of(&folded), ["provider_failing:relay/http_5xx"]);
+    assert_eq!(
+        folded[0].targets.as_deref(),
+        Some(&["pt-a", "pt-b", "pt-c", "pt-d"].map(str::to_string)[..])
+    );
+    assert_eq!(folded[0].target, Some(ViewTarget::Models));
+    assert_eq!(keys_of(&alone), ["route_circuit_open:pt-a"]);
+    assert_eq!(alone[0].targets, None);
+}
+
+/// A row name, its routes, its accounts and the item keys it lists.
+type FoldRow = (
+    &'static str,
+    Vec<RouteSnapshot>,
+    Vec<AccountSnapshot>,
+    Vec<&'static str>,
+);
+
+/// The fold needs the same entry, the same last outcome, an open circuit and
+/// a settled outcome; an account-blocked route stays with its account item.
+#[test]
+fn only_open_unblocked_routes_sharing_entry_and_outcome_fold() {
+    let blocked = AccountSnapshot {
+        credential: logged_out(NOW - MIN),
+        ..seat_a()
+    };
+    let unsettled = RouteSnapshot {
+        last_outcome: None,
+        ..on_entry("pt-c", "relay", LastOutcome::Http5xx)
+    };
+    let closed = RouteSnapshot {
+        circuit_open: false,
+        open_since_ms: None,
+        ..on_entry("pt-c", "relay", LastOutcome::Http5xx)
+    };
+    let rows: Vec<FoldRow> = vec![
+        (
+            "different outcomes on one entry stay separate",
+            vec![
+                on_entry("pt-a", "relay", LastOutcome::Http5xx),
+                on_entry("pt-b", "relay", LastOutcome::Timeout),
+            ],
+            Vec::new(),
+            vec!["route_circuit_open:pt-a", "route_circuit_open:pt-b"],
+        ),
+        (
+            "two outcome groups on one entry are two folds",
+            vec![
+                on_entry("pt-a", "relay", LastOutcome::Http5xx),
+                on_entry("pt-b", "relay", LastOutcome::Http5xx),
+                on_entry("pt-c", "relay", LastOutcome::Timeout),
+                on_entry("pt-d", "relay", LastOutcome::Timeout),
+            ],
+            Vec::new(),
+            vec![
+                "provider_failing:relay/http_5xx",
+                "provider_failing:relay/timeout",
+            ],
+        ),
+        (
+            "one outcome on two entries stays separate",
+            vec![
+                on_entry("pt-a", "relay", LastOutcome::Http5xx),
+                on_entry("pt-b", "other", LastOutcome::Http5xx),
+            ],
+            Vec::new(),
+            vec!["route_circuit_open:pt-a", "route_circuit_open:pt-b"],
+        ),
+        (
+            "an account-blocked route folds into its account item",
+            vec![
+                on_entry("pt-a", "relay", LastOutcome::Http5xx),
+                on_entry("pt-b", "relay", LastOutcome::Http5xx),
+                RouteSnapshot {
+                    account: Some(ACCOUNT.to_string()),
+                    ..on_entry("pt-c", "relay", LastOutcome::Http5xx)
+                },
+            ],
+            vec![blocked.clone()],
+            vec![
+                "provider_failing:relay/http_5xx",
+                "account_unusable:anthropic#seat-a",
+            ],
+        ),
+        (
+            "a blocked route leaves too few to fold",
+            vec![
+                on_entry("pt-a", "relay", LastOutcome::Http5xx),
+                RouteSnapshot {
+                    account: Some(ACCOUNT.to_string()),
+                    ..on_entry("pt-b", "relay", LastOutcome::Http5xx)
+                },
+            ],
+            vec![blocked],
+            vec![
+                "route_circuit_open:pt-a",
+                "account_unusable:anthropic#seat-a",
+            ],
+        ),
+        (
+            "a route with no settled outcome never folds",
+            vec![on_entry("pt-a", "relay", LastOutcome::Http5xx), unsettled],
+            Vec::new(),
+            vec!["route_circuit_open:pt-a", "route_circuit_open:pt-c"],
+        ),
+        (
+            "a closed route never folds",
+            vec![on_entry("pt-a", "relay", LastOutcome::Http5xx), closed],
+            Vec::new(),
+            vec!["route_circuit_open:pt-a"],
+        ),
+    ];
+
+    for (name, routes, accounts, expected) in rows {
+        let row = AttentionInputs {
+            routes,
+            accounts,
+            ..inputs()
+        };
+
+        let items = active_items(&row);
+
+        assert_eq!(keys_of(&items), expected, "{name}");
+    }
+}
+
+/// The blocked route is named by the account item and by no fold.
+#[test]
+fn an_account_blocked_route_is_not_among_the_fold_targets() {
+    let row = AttentionInputs {
+        routes: vec![
+            on_entry("pt-a", "relay", LastOutcome::Http5xx),
+            on_entry("pt-b", "relay", LastOutcome::Http5xx),
+            RouteSnapshot {
+                account: Some(ACCOUNT.to_string()),
+                ..on_entry("pt-c", "relay", LastOutcome::Http5xx)
+            },
+        ],
+        ..with_account(AccountSnapshot {
+            credential: logged_out(NOW - MIN),
+            ..seat_a()
+        })
+    };
+
+    let items = active_items(&row);
+
+    let fold = items
+        .iter()
+        .find(|item| item.kind == AttentionKind::ProviderFailing)
+        .expect("a fold");
+    assert_eq!(
+        fold.targets.as_deref(),
+        Some(&["pt-a", "pt-b"].map(str::to_string)[..])
+    );
+}
+
+/// Each folded route is reported subsumed under the fold, so the memory
+/// never reads its own route item as cleared.
+#[test]
+fn routes_named_by_a_provider_fold_are_reported_as_subsumed() {
+    let row = AttentionInputs {
+        routes: vec![
+            on_entry("pt-a", "relay", LastOutcome::Http5xx),
+            on_entry("pt-b", "relay", LastOutcome::Http5xx),
+            on_entry("pt-c", "relay", LastOutcome::Timeout),
+        ],
+        ..inputs()
+    };
+
+    let built = active_items_with_subsumed(&row);
+
+    let subsumed: Vec<&str> = built.subsumed.iter().map(String::as_str).collect();
+    assert_eq!(
+        subsumed,
+        ["route_circuit_open:pt-a", "route_circuit_open:pt-b"]
+    );
+    assert_eq!(
+        keys_of(&built.items),
+        ["provider_failing:relay/http_5xx", "route_circuit_open:pt-c"]
+    );
+}
+
+/// `cause_key_for_route` names, for each route, the key of the item the
+/// build lists for it: its account item, its provider fold or its own route
+/// item; a healthy route has none.
+#[test]
+fn cause_key_for_route_is_the_key_of_the_item_that_lists_the_route() {
+    let row = AttentionInputs {
+        routes: vec![
+            on_entry("pt-a", "relay", LastOutcome::Http5xx),
+            on_entry("pt-b", "relay", LastOutcome::Http5xx),
+            on_entry("solo", "relay", LastOutcome::Timeout),
+            RouteSnapshot {
+                account: Some(ACCOUNT.to_string()),
+                ..on_entry("seat", "relay", LastOutcome::Http5xx)
+            },
+            RouteSnapshot {
+                account: Some(ACCOUNT.to_string()),
+                circuit_open: false,
+                open_since_ms: None,
+                ..on_entry("seat-closed", "relay", LastOutcome::Ok)
+            },
+            route("healthy", None, false),
+        ],
+        ..with_account(AccountSnapshot {
+            credential: logged_out(NOW - MIN),
+            ..seat_a()
+        })
+    };
+    let listed = active_items(&row);
+    let rows = [
+        (
+            "account item",
+            "seat",
+            Some("account_unusable:anthropic#seat-a"),
+        ),
+        (
+            "account item, circuit closed",
+            "seat-closed",
+            Some("account_unusable:anthropic#seat-a"),
+        ),
+        (
+            "provider fold",
+            "pt-a",
+            Some("provider_failing:relay/http_5xx"),
+        ),
+        ("route item", "solo", Some("route_circuit_open:solo")),
+        ("healthy route", "healthy", None),
+        ("unknown route", "absent", None),
+    ];
+
+    for (name, state_key, expected) in rows {
+        let key = cause_key_for_route(&row, state_key);
+
+        assert_eq!(key.as_deref(), expected, "{name}");
+        if let Some(key) = key {
+            assert!(
+                listed.iter().any(|item| item.key == key),
+                "{name}: {key} is listed: {listed:#?}"
+            );
+        }
+    }
+}
+
+/// A fold carries its routes' account only when every route shares it.
+#[test]
+fn a_provider_fold_names_an_account_only_when_its_routes_share_one() {
+    let with = |key: &str, account: Option<&str>| RouteSnapshot {
+        account: account.map(str::to_string),
+        ..on_entry(key, "relay", LastOutcome::Http5xx)
+    };
+    let rows = [
+        (
+            "shared",
+            vec![with("pt-a", Some(ACCOUNT)), with("pt-b", Some(ACCOUNT))],
+            Some(ACCOUNT),
+        ),
+        (
+            "mixed",
+            vec![with("pt-a", Some(ACCOUNT)), with("pt-b", None)],
+            None,
+        ),
+    ];
+
+    for (name, routes, expected) in rows {
+        let row = AttentionInputs {
+            routes,
+            ..with_account(seat_a())
+        };
+
+        let items = active_items(&row);
+
+        assert_eq!(
+            keys_of(&items),
+            ["provider_failing:relay/http_5xx"],
+            "{name}"
+        );
+        assert_eq!(items[0].account.as_deref(), expected, "{name}");
     }
 }

@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use routectl_core::UpstreamReason;
-use routectl_router::runtime_state::UnusableCause;
+use routectl_core::failure_class::LastOutcome;
+use routectl_router::router::RouteTargetStatus;
+use routectl_router::runtime_state::{ProviderGateStatus, UnusableCause};
 use routectl_router::{
     AccountIdentities, AccountReading, AccountReadings, AccountWindow, Billing, Finding,
     LastReading, LengthClass, PoolEligibility, ReadingSource, ReadingWindow, RejectionTotals,
@@ -34,7 +36,8 @@ pub fn populated_attention() -> Value {
 }
 
 /// The list with its doctor report current: an empty pool (broken), an open
-/// route, a logged-out seat, a parked login, a failing token refresh, a
+/// route, two open routes on one provider entry failing alike, a logged-out
+/// seat, a parked login, a failing token refresh, a
 /// window near its limit, a login billing at overage, a failing usage poll,
 /// a stopped poll driver, a recent record loss and a doctor failure (all
 /// degraded), and a second pool that was empty on the earlier read and has
@@ -94,7 +97,7 @@ fn sources(
             pool("backup", 1, backup_eligible),
             pool("api", 1, 1),
         ],
-        targets: fixture_targets(),
+        targets: targets(),
         identities,
         credentials: credentials(),
         fixes,
@@ -134,6 +137,29 @@ fn sources(
         },
         doctor_findings,
     }
+}
+
+/// The shared targets plus two more on the `glm` target's provider entry,
+/// both open after a server error: they fold into one provider item while
+/// `glm`, open after a transport error, keeps its own route item.
+fn targets() -> Vec<RouteTargetStatus> {
+    let mut targets = fixture_targets();
+    let glm = targets
+        .iter()
+        .find(|target| target.nickname == "glm")
+        .expect("the shared targets carry glm")
+        .clone();
+    let failing = |nickname: &str| RouteTargetStatus {
+        state_key: nickname.to_string(),
+        nickname: nickname.to_string(),
+        gate: ProviderGateStatus {
+            last_outcome: Some(LastOutcome::Http5xx),
+            ..glm.gate
+        },
+        ..glm.clone()
+    };
+    targets.extend([failing("glm-air"), failing("glm-flash")]);
+    targets
 }
 
 fn pool(name: &str, configured: usize, eligible: usize) -> PoolEligibility {

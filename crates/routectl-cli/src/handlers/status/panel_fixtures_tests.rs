@@ -296,6 +296,7 @@ fn each_fixture_shows_its_conditional_fields_in_both_states() {
                 "data.items[].recovered_at_ms",
                 "data.items[].fix",
                 "data.items[].remediation",
+                "data.items[].targets",
             ],
         ),
         (
