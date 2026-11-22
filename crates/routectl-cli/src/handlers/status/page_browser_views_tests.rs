@@ -142,6 +142,11 @@ fn assert_picker(case: &ViewCase, report: &Value) {
             picker["label"], "Current state",
             "`{id}` names its span beside the picker"
         );
+        assert_eq!(
+            picker["pressed"],
+            Value::Null,
+            "`{id}` shows a range pressed: {picker:#}"
+        );
     }
 }
 
@@ -159,6 +164,61 @@ fn page_browser_each_view_renders_its_sections_from_the_fixtures() {
         assert_renders_content(case, &report);
         assert_picker(case, &report);
     }
+}
+
+/// The pressed look of one picker button, read from its computed style.
+fn looks_pressed(button: &Value) -> bool {
+    button["shadow"] != "none"
+}
+
+fn pressed_windows(buttons: &Value) -> Vec<&str> {
+    buttons
+        .as_array()
+        .expect("picker buttons")
+        .iter()
+        .filter(|b| b["pressed"] == "true")
+        .map(|b| b["window"].as_str().expect("a window id"))
+        .collect()
+}
+
+fn pressed_looks(buttons: &Value) -> Vec<&str> {
+    buttons
+        .as_array()
+        .expect("picker buttons")
+        .iter()
+        .filter(|b| looks_pressed(b))
+        .map(|b| b["window"].as_str().expect("a window id"))
+        .collect()
+}
+
+/// On a windowless view no range is pressed, by attribute or by look, and
+/// the range picked before it comes back pressed on the next windowed view.
+/// Positive control: on Traffic, before and after, Week is the one button
+/// with the pressed attribute and the pressed look.
+///
+/// Mutation check: drop `!windowless &&` from updateWindowSel -> red (Week
+/// pressed on Models).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_windowless_view_shows_no_range_pressed_and_keeps_it() {
+    let out =
+        browser::run_scenario(&views_scenario("view-range-across-windowless", "traffic")).result;
+
+    for side in ["traffic", "back"] {
+        assert_eq!(pressed_windows(&out[side]), ["week"], "{side}: {out:#}");
+        assert_eq!(pressed_looks(&out[side]), ["week"], "{side}: {out:#}");
+    }
+    assert_eq!(out["models_picker"]["windowless"], "true", "{out:#}");
+    assert!(pressed_windows(&out["models"]).is_empty(), "{out:#}");
+    assert!(pressed_looks(&out["models"]).is_empty(), "{out:#}");
+    let backgrounds: std::collections::BTreeSet<&str> = out["models"]
+        .as_array()
+        .expect("picker buttons")
+        .iter()
+        .map(|b| b["background"].as_str().expect("a color"))
+        .collect();
+    assert_eq!(backgrounds.len(), 1, "one button is filled: {out:#}");
+    assert_eq!(out["back_hash"], "#traffic?range=week", "{out:#}");
 }
 
 /// The positive control for the error-card count above: a broken QUERY

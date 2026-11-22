@@ -198,8 +198,9 @@
   function coversReport() {
     var covers = document.getElementById('window-covers');
     var rect = covers.getBoundingClientRect();
+    var pressedRange = document.querySelector('#windowsel [aria-pressed="true"]');
     return {
-      range: document.querySelector('#windowsel [aria-pressed="true"]').getAttribute('data-window'),
+      range: pressedRange ? pressedRange.getAttribute('data-window') : null,
       text: covers.textContent,
       shown: !covers.hidden && rect.width > 0 && rect.height > 0,
       beside_picker: covers.parentNode === document.getElementById('windowsel').parentNode

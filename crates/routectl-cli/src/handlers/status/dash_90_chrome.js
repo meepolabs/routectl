@@ -446,7 +446,8 @@
   // The picker reflects the live selection and goes DIM + inert on every
   // view that registers a `span` (see VIEWS): such a view reports what it
   // spans instead of a window, so a live picker would promise a filter that
-  // does not reach its figures.
+  // does not reach its figures. There no range reads as pressed; the
+  // selection itself is kept and shows again on the next windowed view.
   function updateWindowSel() {
     var group = el('windowsel');
     var span = viewFor(activeTab).span;
@@ -457,7 +458,7 @@
       : '';
     var buttons = group.querySelectorAll('button');
     Array.prototype.forEach.call(buttons, function (b) {
-      var active = b.getAttribute('data-window') === selectedWindow;
+      var active = !windowless && b.getAttribute('data-window') === selectedWindow;
       b.setAttribute('aria-pressed', active ? 'true' : 'false');
       b.disabled = terminal || windowless;
     });

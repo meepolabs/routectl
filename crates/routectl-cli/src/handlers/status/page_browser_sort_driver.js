@@ -187,15 +187,26 @@
     return { content: after.content, color: after.color, label_color: getComputedStyle(btn).color };
   }
 
-  // An unpressed sortable header shows the neutral mark in the faint color,
-  // a header without a sort button shows none, and a pressed header shows
-  // its direction instead.
+  // The mark an unpressed header draws while it holds keyboard focus.
+  function focusedMarkReport(column) {
+    var btn = headerButton(column);
+    btn.focus();
+    var report = markReport(column);
+    report.focus_visible = btn.matches(':focus-visible');
+    btn.blur();
+    return report;
+  }
+
+  // At rest an unpressed sortable header and a plain header draw no mark;
+  // keyboard focus on an unpressed one shows the faint neutral hint; a
+  // pressed header shows its direction.
   d.scenario('sort-mark', function () {
     return waitForTable().then(function () {
       var plain = document.querySelector('#config-aliases thead th');
       var out = {
         faint: faintColor(),
         unpressed: markReport('provider'),
+        unpressed_focused: focusedMarkReport('provider'),
         plain_header: {
           has_button: !!plain.querySelector('button'),
           after: getComputedStyle(plain, '::after').content
@@ -206,6 +217,7 @@
       out.other_unpressed = markReport('upstream');
       headerButton('provider').click();
       out.descending = markReport('provider');
+      out.pressed_focused = focusedMarkReport('provider');
       return out;
     });
   });

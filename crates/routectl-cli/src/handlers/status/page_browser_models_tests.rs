@@ -137,10 +137,6 @@ fn page_browser_models_one_cause_line_over_the_hop_and_unused_lanes_collapse() {
     expected.insert(0, cause["id"].as_str().expect("id").to_owned());
     expected.push(lane_id("models-lanes", "busy#claude-sonnet-4-5"));
     assert_eq!(ids_in(&result, "models-lanes"), expected, "{result:#}");
-    for lane in HOP_LANES {
-        let row = lane_row(&result, "models-lanes", lane);
-        assert_eq!(row["toggle_name"], format!("Details for {lane}"), "{row:#}");
-    }
     assert_eq!(
         result["unused"], "2 lanes with no request in the last 7 days",
         "{result:#}"
@@ -153,6 +149,38 @@ fn page_browser_models_one_cause_line_over_the_hop_and_unused_lanes_collapse() {
         ]
     );
     assert_eq!(result["error_cards"], 0, "{result:#}");
+}
+
+/// Each lane's row toggle is named by what the row shows, its nickname and
+/// provider cells, never by the `#`-joined lane key its id is built from.
+///
+/// Mutation check: drop the `rowName` argument from modelsRow's xrow call
+/// -> red (the toggle is named by the lane key).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_row_toggles_are_named_by_nickname_and_provider() {
+    let result = hop_case(&[MODELS_DRIVER]);
+
+    for lane in HOP_LANES {
+        let row = lane_row(&result, "models-lanes", lane);
+        let names: Vec<&str> = row["names"]
+            .as_array()
+            .expect("nickname links")
+            .iter()
+            .map(|n| n["text"].as_str().expect("a nickname is text"))
+            .collect();
+        let provider = row["provider"].as_str().expect("provider cell");
+        assert!(!names.is_empty() && !provider.is_empty(), "{row:#}");
+        let toggle = row["toggle_name"].as_str().expect("toggle name");
+
+        assert_eq!(
+            toggle,
+            format!("Details for {} on {provider}", names.join(", ")),
+            "{row:#}"
+        );
+        assert!(!toggle.contains(lane), "`{lane}` named: {row:#}");
+        assert!(!toggle.contains('#'), "{row:#}");
+    }
 }
 
 /// While the seven-day per-model read has not answered, no lane collapses:

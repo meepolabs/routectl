@@ -59,6 +59,52 @@
 
   d.scenario('view-content', settledReport);
 
+  // Each picker button as it reads: its pressed state and the computed
+  // marks the pressed rule paints. The fill is transitioned, so running
+  // transitions are finished first and the look read is the settled one.
+  function pickerLook() {
+    var buttons = document.querySelectorAll('#windowsel button');
+    return Array.prototype.map.call(buttons, function (b) {
+      b.getAnimations().forEach(function (a) { a.finish(); });
+      var style = getComputedStyle(b);
+      return {
+        window: b.getAttribute('data-window'),
+        pressed: b.getAttribute('aria-pressed'),
+        shadow: style.boxShadow,
+        background: style.backgroundColor
+      };
+    });
+  }
+
+  function openView(id) {
+    document.getElementById('tab-' + id).click();
+    return d.waitUntil('the ' + id + ' view to open', function () {
+      return activeView() === id && settled();
+    });
+  }
+
+  // Week picked on Traffic, then Models, then Traffic again.
+  d.scenario('view-range-across-windowless', function () {
+    var out = {};
+    return d.waitUntil('the active view to settle', settled).then(function () {
+      document.querySelector('#windowsel button[data-window="week"]').click();
+      return d.waitUntil('week to be pressed', function () {
+        return pickerState().pressed === 'week' && settled();
+      });
+    }).then(function () {
+      out.traffic = pickerLook();
+      return openView('models');
+    }).then(function () {
+      out.models = pickerLook();
+      out.models_picker = pickerState();
+      return openView('traffic');
+    }).then(function () {
+      out.back = pickerLook();
+      out.back_hash = location.hash;
+      return out;
+    });
+  });
+
   // The positive control for the error-card count: every QUERY answers an
   // envelope with no schema version, so the one section that reads it must
   // show its card.

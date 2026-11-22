@@ -143,8 +143,10 @@ banner, no retry signal -- silently mislabeled data.
 ## 4. Window and visual truthfulness
 
 - Models, Config, and Doctor must **disable** the window picker (dimmed,
-  inert, labeled "Current state"). Now, Accounts and Traffic keep it live;
-  on Accounts it moves the traffic lines only.
+  inert, labeled "Current state") with no range shown pressed, in both
+  themes; back on a windowed view the range picked before reads pressed
+  again. Now, Accounts and Traffic keep it live; on Accounts it moves the
+  traffic lines only.
 - A **sparse series draws gaps as BREAKS, never bridged**: produce traffic
   with an idle stretch in the middle of the window and confirm the sparkline
   and segment charts leave a hole instead of interpolating across it.
@@ -264,8 +266,9 @@ banner, no retry signal -- silently mislabeled data.
   most-changed field paths, and that of an unmeasured lane adds no transit
   line at all. No wording on the tab says error, loss or rate for transit.
 - With a screen reader's button list open on Models or Traffic, each row's
-  expand button is named `Details for <row>` (the lane, or the group), never
-  one shared name.
+  expand button is named `Details for <row>` (on Models `<nickname> on
+  <provider>` as the row shows them, never the `#`-joined lane key; on
+  Traffic the group), never one shared name.
 - The Models table sits in a card titled `Model lanes`, with the collapsed
   lanes line inside it, and State is its first column after the row toggle:
   at 720 px the State cell shows without scrolling the table.
@@ -398,6 +401,9 @@ banner, no retry signal -- silently mislabeled data.
 - The pressed range button reads in the accent color with an underline;
   hovering another range only shades it, so exactly one range reads as
   selected, in both themes.
+- On Traffic and Config, only the sorted column header carries a mark (`^`
+  or `v`); the other sortable headers are bare at rest and show a faint
+  `^v` while hovered or Tab-focused, without the column shifting.
 
 ## UI review cases
 

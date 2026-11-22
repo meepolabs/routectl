@@ -227,7 +227,12 @@
       modelsAccountText(row),
       modelsRefusals(row),
       modelsTransitCell(row)
-    ], modelsDetail(row, ctx), null);
+    ], modelsDetail(row, ctx), null, modelsRowName(row));
+  }
+
+  // The row as its cells read it: the nicknames, then the provider entry.
+  function modelsRowName(row) {
+    return row.nicknames.map(String).join(', ') + ' on ' + row.provider;
   }
 
   // One link per nickname, each to Traffic narrowed to that nickname on this

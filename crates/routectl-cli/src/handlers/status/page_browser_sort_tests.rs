@@ -265,26 +265,28 @@ const THEMES: &[(&str, &str)] = &[
     ("light", "--blink-settings=preferredColorScheme=1"),
 ];
 
-/// Before any header is pressed, a sortable header's button draws a neutral
-/// mark in the faint color; a plain header draws none; pressing a header
-/// swaps its mark for the direction, `^` then `v`, while the other sortable
-/// headers keep the neutral mark. Positive control: the two themes resolve
-/// the faint color differently, so a match in each is not one fixed color.
+/// Only the sorted column carries a mark at rest: an unpressed sortable
+/// header draws none, nor does a plain header, and pressing a header gives
+/// it `^` then `v` while the others stay bare. Keyboard focus on an unpressed
+/// header shows the neutral hint in the faint color, so the header still
+/// reads as sortable; on the pressed header focus keeps its direction.
+/// Positive control: the two themes resolve the faint color differently, so
+/// a match in each is not one fixed color.
 ///
-/// Mutation check: delete the unpressed `.sort-btn::after` rule -> red.
+/// Mutation checks: put back `.sort-btn::after { content: " ^v" / ""; }` ->
+/// red (a mark at rest); drop the `:focus-visible::after` selector -> red
+/// (no hint on focus).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_an_unpressed_sortable_header_shows_a_faint_neutral_mark() {
+fn page_browser_only_the_sorted_header_shows_a_mark_at_rest() {
     let mut faint_by_theme = Vec::new();
     for (theme, switch) in THEMES {
         let scenario = sort_scenario("sort-mark", "config");
         let out = browser::run_scenario_with(&scenario, &[switch]).result;
 
-        let neutral = Value::from("\" ^v\" / \"\"");
-        assert_eq!(out["unpressed"]["content"], neutral, "{theme}: {out:#}");
-        assert_eq!(out["unpressed"]["color"], out["faint"], "{theme}: {out:#}");
+        assert_eq!(out["unpressed"]["content"], "none", "{theme}: {out:#}");
         assert_eq!(
-            out["other_unpressed"]["content"], neutral,
+            out["other_unpressed"]["content"], "none",
             "{theme}: {out:#}"
         );
         assert_eq!(out["plain_header"]["has_button"], false, "{theme}: {out:#}");
@@ -293,6 +295,19 @@ fn page_browser_an_unpressed_sortable_header_shows_a_faint_neutral_mark() {
         assert_eq!(out["descending"]["content"], "\" v\"", "{theme}: {out:#}");
         assert_eq!(
             out["ascending"]["color"], out["ascending"]["label_color"],
+            "{theme}: {out:#}"
+        );
+
+        let focused = &out["unpressed_focused"];
+        assert_eq!(focused["focus_visible"], true, "{theme}: {out:#}");
+        assert_eq!(
+            focused["content"],
+            Value::from("\" ^v\" / \"\""),
+            "{theme}: {out:#}"
+        );
+        assert_eq!(focused["color"], out["faint"], "{theme}: {out:#}");
+        assert_eq!(
+            out["pressed_focused"]["content"], "\" v\"",
             "{theme}: {out:#}"
         );
         faint_by_theme.push(out["faint"].clone());

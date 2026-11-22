@@ -266,8 +266,9 @@
   // click, so a button click toggles once, never twice. Expansion persists
   // across poll rebuilds via the `expanded` map keyed by (table id, encoded
   // row key). An optional `rowClass` de-emphasizes the primary row
-  // (zero-traffic).
-  function xrow(tbl, rowKey, cells, detailPairs, rowClass) {
+  // (zero-traffic). An optional `rowName` names the row in its toggle's label
+  // when the key is not what the row shows; the ids always come from the key.
+  function xrow(tbl, rowKey, cells, detailPairs, rowClass, rowName) {
     var rid = rowDomId(tbl.id, rowKey);
     var open = getExpanded(tbl.id, idKey(rowKey));
     var tr = document.createElement('tr');
@@ -291,7 +292,7 @@
     btn.id = rid + '-toggle';
     btn.className = 'exp-btn';
     btn.setAttribute('aria-controls', detailRow.id);
-    btn.setAttribute('aria-label', 'Details for ' + rowKey);
+    btn.setAttribute('aria-label', 'Details for ' + (rowName || rowKey));
     setAction(btn, 'row-toggle', rid);
     paintRowToggle(btn, open);
     extd.appendChild(btn);
