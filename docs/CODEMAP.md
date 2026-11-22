@@ -999,8 +999,8 @@ license.
   `stream()` in `mod.rs` MERGES the unified-quota head carrier into that first
   chunk rather than replacing it. The closing delta's cache-write split: a delta
   stating its own write total keeps its non-empty split, else the opener's when
-  it sums to that total, else none; a delta stating no total falls back per
-  lifetime to the opener's. `is_terminal_event` (`message_stop` only) is
+  it sums to at most that total (the uncovered rest stays unknown lifetime),
+  else none; a delta stating no total falls back per lifetime to the opener's. `is_terminal_event` (`message_stop` only) is
   the lane's `StreamCompletion` predicate
 - `src/anthropic_api/sse_carriage.rs` -- for an Anthropic client, carries
   unmodeled `message_start` / `message_delta.delta` / known block-start
@@ -1989,15 +1989,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   drift surface
 - `src/config_effective.rs` -- PURE effective-view derivation
   `derive_effective_view(&Config, refreshed, shipped: Option<&PriceTable>) ->
-  EffectiveView{models, classes, capabilities, aliases, providers, tuning,
-  price_tables}` -- no `build_resolved_models`, no secret resolution, no file
+  EffectiveView{models, classes, capabilities, aliases, providers, pools,
+  tuning, price_tables}` -- no `build_resolved_models`, no secret resolution, no file
   read, no network. `ModelCell` carries each `[models.X]` entry's facts: its
   configured context window, its output fill (`fill_ceiling` ->
   `FillCeiling { tokens, source: FillSource }`, `lowered_by` applying a
   learned ceiling; a pool reads its first resolvable member's egress, so a
   mixed Invoke / Converse `bedrock` pool follows member order) and its per-field prices with their sources, keyed by
   `PriceDimension` (input / output / cache read / `CacheWrite(seconds)`, whose
-  `config_key` names the pricing key), via
+  `config_key` names the pricing key; `price_fields` lists the cache-write
+  lifetimes in duration order, 5m and 1h always present), via
   `prices::effective_pricing`; `PriceTableDates` dates the two tables the
   view was derived against; `ClassPolicyCell` tags each
   failure class `ClassPolicySource::{Config, BakedDefault}` via
@@ -2006,7 +2007,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   Chain verbatim -- the order IS the sequence dispatch walks) and
   `providers` lists the `[providers.X]` rows (`ProviderCell`: kind,
   `format`, endpoint origin, `cloud`, credential scheme via
-  `CredentialRef::scheme_label`, `auth`), so a read surface counts
+  `CredentialRef::scheme_label`, `auth`) and `pools` lists the `[pools.X]`
+  blocks walked from config (`PoolCell`: seat selection, and every configured
+  member in order as a `PoolMemberCell` with its account and OAuth login label
+  named by the `AccountIdentities` rule, a member whose provider failed to
+  build included), so a read surface counts
   aliases/providers off the same view it renders; `tuning` holds one
   `TuningRow` (`TuningTargetKind`) per provider plus one per model
   first-content override (per seat for a pooled model), via
@@ -5880,7 +5885,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   exports `query(db, &QuerySpec, price, limit)` (`limit` a `ReadLimit` or a
   bare deadline `Instant`) plus `QuerySpec`,
   `GroupDim`, `RowCost`, `QueryResult`, `QueryGroup`, `QueryMetrics` /
-  `QueryTotals`, `MissingPrice`, `CostStatus`, and the time-series types `BucketSpec` /
+  `QueryTotals`, `MissingPrice`, `CostStatus`, `EquivalentStatus`, and the time-series types `BucketSpec` /
   `QuerySeries` / `SeriesBucket`. `GroupDim` is THE one grouping list every
   usage reader offers (`model`, `alias`, `provider`, `seat`; `ALL`, `as_str`,
   `parse`, NULL reading as `(unattributed)`), shared by `routectl
@@ -5935,18 +5940,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   rate overflowed to non-finite is a VALUE outcome (`cost_usd: None` +
   `unpriced`), never an assert, because the fold is network-reachable and the
   release profile aborts on panic. `RowCost` is `Subscription(Option<f64>,
-  Vec<String>)` / `Priced(f64)` / `Unpriced(Vec<String>)`, the label lists
-  naming used dimensions with no rate; the subscription arm's API-equivalent
-  value is folded into a SEPARATE
+  Vec<String>)` / `Priced(f64)` / `PricedPart(f64, Vec<String>)` /
+  `Unpriced(Vec<String>)`, the label lists naming used dimensions with no
+  rate. `PricedPart` (the covered dimensions' dollar cost) adds to the priced
+  subtotal and also counts as unpriced, so its set reads `CostStatus::Partial`.
+  The subscription arm's API-equivalent value (the whole row's, or a covered
+  subtotal when labels are present) is folded into a SEPARATE
   `equivalent_usd` / `any_equivalent` accumulator pair and surfaced as
   `QueryMetrics::equivalent_cost_usd` -- `priced_usd` never sees a notional
   dollar, so real spend and replacement value cannot conflate, and each channel
   degrades to absent on non-finiteness without touching the other.
-  `QueryResult`/`QueryGroup`/`QueryMetrics`/`CostStatus`/`QuerySeries`/`SeriesBucket`
+  `QueryMetrics::equivalent_status` (`EquivalentStatus`: `none` with no
+  subscription row, `complete`, or `partial` when any subscription row named a
+  dimension with no rate) says whether that value is whole, so no reader infers
+  completeness from presence.
+  `QueryResult`/`QueryGroup`/`QueryMetrics`/`CostStatus`/`EquivalentStatus`/`QuerySeries`/`SeriesBucket`
   derive `Serialize`: the metric field names ARE the `/status/query` wire
   vocabulary, absent `Option`s serialize as explicit `null` (never skipped,
-  `series` included), and `CostStatus` renames to the same lowercase tokens
-  `as_str` returns
+  `series` included), and `CostStatus` / `EquivalentStatus` rename to the
+  same lowercase tokens `as_str` returns
 - `src/query/slices.rs` -- the grouped query's read: takes a `MAX(rowid)`
   watermark bound into every statement, reads a window whose span from its
   earliest row is a week or more in four parallel `ts_start` slices (each on its
@@ -6696,8 +6708,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   AGGREGATE_RESERVE_MS`, the aggregate's whole budgeted stretch (the sum of
   its terms, which a panel with its own deadline would join), and
   `MODELS_PANEL_ALLOWANCE_MS = 100`, the models panel's named share of the
-  reserve beside the doctor cache-ignore read's `SERVED_CACHE_READ_BUDGET`
-  (`the_models_share_leaves_room_inside_the_aggregate_reserve` holds the two
+  reserve beside the doctor panel's two ledger reads (the cache-ignore report
+  and the would-trim panel, each under `SERVED_CACHE_READ_BUDGET`, at most half
+  the reserve together) (`the_models_share_leaves_room_inside_the_aggregate_reserve` holds the two
   shares under the reserve; `the_documented_aggregate_sum_matches_its_terms`
   holds the documented sum line to `AGGREGATE_BUDGET_MS`). The MODULE doc
   block carries the coupled timing numbers once -- these, `STATUS_MAX_INFLIGHT`,
@@ -7279,7 +7292,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (grouped) and `populated_query_series()` (bucketed): a seeded ledger read
   through the route's `build_panel` and the facade's pricer
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
-  `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
+  `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`; one
+  version rule for every panel: an added field or token does not bump it, a
+  removed field or changed meaning does) with
   constructors enforcing available => `unavailable: None` and unavailable =>
   `data`/`as_of` `None`; `now_utc_rfc3339` (RFC3339-UTC `as_of` helper) and
   `utc_rfc3339(epoch_ms)` (same format over a caller-pinned Unix-ms instant,
@@ -7294,7 +7309,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   at 6 every metric set carries the six nearest-rank percentiles
   `ttft_p50/p90/p99_ms` and `latency_p50/p90/p99_ms`, `missing_prices` and
   `cache_write_unknown_tokens`, and each `alias` group `steps` / `off_chain` /
-  `not_dispatched`; carried from 5,
+  `not_dispatched`; every metric set also carries `equivalent_status`
+  (`none`/`complete`/`partial`), added within 6; carried from 5,
   where a seatless row served by an API-key or cloud entry groups under that
   entry's `#<entry>` account rather than `(unattributed)`),
   the grouped windowed aggregate. Three EXCLUSIVE regimes: 405 (method is not
@@ -7610,7 +7626,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   entry)/`cloud` (name plus a canonical region)/`credential_ref_scheme` (the
   closed `CredentialRef` scheme label)/`auth_token`/`rpm_limit`, the last serialized WITHOUT
   `skip_serializing_if` so an explicit `0` (immediately rate-limited) stays
-  distinct from an explicit `null` (not set on this entry) and from an absent field; a
+  distinct from an explicit `null` (not set on this entry) and from an absent field;
+  `pools` carrying one `PoolWire` per `[pools.X]` block in pool-key order --
+  `pool`/`seat_selection` (config spelling)/`members`, each member a
+  `PoolMemberWire` `entry`/`account`/`login_label` in configured order, added
+  within 6; a
   `source` strip with
   `config_path`/`loaded_age_ms`/`alias_count`/`provider_count`/`listen_addr`/`version`,
   counts from the same effective view and daemon facts from the
@@ -7751,7 +7771,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cards last. Cascade order is load-bearing and is the `STYLE_PARTS`
   declaration order, so these rules land last and may lean on the component
   vocabulary above
-- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 15: the
+- `src/handlers/status/dash_00_state.js` -- dashboard SCRIPT part 1 of 16: the
   client's shared state. `EXPECTED` (per-source wire versions), the ten DATA
   SOURCES -- `health`/`config`/`doctor`/`attention`/`accounts`/`models` off the
   GET `/status` aggregate (`GET_SOURCES`), plus the four QUERY reads registered
@@ -7770,25 +7790,27 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   state (window / group-by / provider scope / active view; the model scope and
   sort live in `dash_90_chrome.js`), `SOURCES`,
   `RENDER_FAULTS`, `setSource`, and `effectiveState`
-- `src/handlers/status/dash_05_idiomorph.js` -- dashboard SCRIPT part 2 of 15:
+- `src/handlers/status/dash_05_idiomorph.js` -- dashboard SCRIPT part 2 of 16:
   the vendored idiomorph v0.8.0 `dist/idiomorph.js` (0BSD), byte-for-byte
   upstream, sha256
   `4cda2ad0d39c630100957eeb5ec3115f84d57351c6c313579d2441cf48e9880d` (pinned
   by `page::tests::morph`). Declares one name, `Idiomorph`; page code reaches
   it only through `morphPanel` in `dash_40_render.js`, which takes a DOM node
   and never markup, and updates every pane body in place
-- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 3 of 15:
+- `src/handlers/status/dash_10_format.js` -- dashboard SCRIPT part 3 of 16:
   number and time humanizers matched to the CLI's usage formatters
   (`humanCount` mirrors `human_count`, percent / timestamp / relative-age /
   duration text, `cacheHitText` mirroring `cache_hit_text`) plus
+  `seatName` (a seat as "provider_entry (login_label)"),
   `WINDOW_SPAN`, `WINDOW_COVERS` (what each range
   covers, shown beside the picker) and the `LABELS` token vocabulary with
   `labelFor`/`labelCell`, so a wire token renders as plain-language text in
   exactly one place
 - `src/handlers/status/dash_20_query_vocab.js` -- dashboard SCRIPT part 4 of
-  15: the payload field vocabulary. `QUERY_METRICS` / `QUERY_NULLABLE_METRICS`
+  16: the payload field vocabulary. `QUERY_METRICS` / `QUERY_NULLABLE_METRICS`
   / `QUERY_TOKENS` name every `/status/query` metric (the nullable list equals
-  the DTO's `Option` members), with `QUERY_MISSING_PRICE_LISTS` /
+  the DTO's `Option` members; `QUERY_TOKENS` carries `cost_status` and
+  `equivalent_status` verbatim), with `QUERY_MISSING_PRICE_LISTS` /
   `QUERY_COUNT_MAPS` and the alias-group vocabulary (`ALIAS_GROUP_LISTS` /
   `ALIAS_GROUP_COUNTS` / `ALIAS_STEP_TEXT` / `ALIAS_STEP_COUNTS`);
   `GROUP_BYS` is the one `[token, picker label]` grouping list the URL codec,
@@ -7806,7 +7828,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `QUERY_SHAPES` is the COMPLETE request vocabulary -- every selectable window
   x every group_by (seat included) x each series mode -- as strict JSON the
   Rust guard feeds to the server's own parser
-- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 5 of 15:
+- `src/handlers/status/dash_30_transport.js` -- dashboard SCRIPT part 5 of 16:
   every fetch on the page. `safeRequest` is the SOLE fetch call site and the
   shared outcome classifier (`ok`/`overloaded`/`forbidden`/`rejected`/
   `timeout`/`network`). Every independently fetched source (the aggregate GET
@@ -7830,7 +7852,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `provider` and `model` scope, an unscoped one neither.
   Also the aggregate round (`runRound`/`tick`/`scheduleNext`) and the manual
   refresh (`kickRefresh`)
-- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 6 of 15: the
+- `src/handlers/status/dash_40_render.js` -- dashboard SCRIPT part 6 of 16: the
   render host. `renderPanel` validates `schema_version` and the envelope
   invariant per source (`renderPanelGuarded` isolates each); a transport
   failure keeps a rendered source's data marked `stale` and marks a
@@ -7852,10 +7874,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   shown with its time and why it is not current; "Checking routing state"
   only before any verdict; the view link via `syncVerdictLink`), the poll
   indicator, and the tab badges (`sourceBadge`; the models badge counts rows
-  whose `state` is not `ok`; the attention badge counts
+  whose `state` is not `ok` through `modelProblemLanes`, which Doctor's
+  model-problems line also reads; the attention badge counts
   broken plus degraded from `attentionTally`, which throws on a missing or
   non-count tally so the payload lands as `invalid_payload`)
-- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 7 of 15: the
+- `src/handlers/status/dash_50_dom.js` -- dashboard SCRIPT part 7 of 16: the
   DOM construction vocabulary, `textContent` only and never `innerHTML`. Stable
   ids (`idKey`, the id scheme comment) and delegated actions (`setAction`
   writes `data-action`/`data-arg`; no builder attaches a listener), the shared
@@ -7864,18 +7887,28 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ties by key), `markRefreshUnit`, the changed-value marks (`markValue`,
   `markChangedValue`, `clearChangedValue`), the state-dot and token pills, the
   card / section / figure / share-bar primitives, `emptyCard`, `viewLink`
-  (a same-page link to a view through the `open-view` action), the shared login
+  (a same-page link to a view through the `open-view` action, class
+  `view-link`), the shared login
   color rule (`loginKind`, `poolsWithUsableLogin`), `copyableCode` (a focusable
   `<code>` whose Ctrl+A selects its text alone), and the SVG
   sparkline family (`sparkSvg` + `drawSegments`, which draws a sparse series as
   breaks). Data-age figures use the as_of of their own record (`panelNowMs`)
-- `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 8 of
-  15: the Now view's sections. `attentionSection` (source `attention`) draws
-  the daemon's needs-attention list as sent: its broken / degraded counts, a
-  clear line when nothing is active, then each item (severity, subject, cause,
-  a link to its target view, the fix as a focusable `copyableCode` or a
-  remediation in words, the raw token) as its own refresh unit, recovered
-  items grey with their minutes since recovery. `accountsGlanceSection`
+- `src/handlers/status/dash_55_attention.js` -- dashboard SCRIPT part 8 of
+  16: the shared needs-attention renderer. `attentionSection(rec, idPrefix)`
+  (source `attention`) draws the daemon's list as sent: its broken / degraded
+  counts, a clear line when nothing is active, then each item (severity,
+  subject, cause, a link to its target view, the fix as a focusable
+  `copyableCode` or a remediation in words, the raw token) as its own refresh
+  unit with id `<prefix>-attention-<key>`, recovered items grey with their
+  minutes since recovery. Now and Doctor each pass their own prefix, so two
+  views never share an id
+- `src/handlers/status/dash_60_tab_overview.js` -- dashboard SCRIPT part 9 of
+  16: the Now view's sections. `nowAttentionSection` is the shared
+  `attentionSection` under the `now` prefix. The cost-note constants every
+  view reads live here (`PARTIAL_COST_NOTE` "priced subtotal only",
+  `API_PRICE_NOTE`, `EQUIVALENT_PARTIAL_TITLE`, `EQUIVALENT_UNPRICED_TITLE`,
+  `PARTIAL_UNPRICED_TITLE`), so a partial dollar figure never reads as the
+  total. `accountsGlanceSection`
   (source `accounts`) lists every subscription account under each pool it
   dispatches in (a pool-less account as a pool of one) with its login dot
   (`loginKind`), each window's meter (accent, amber past
@@ -7899,20 +7932,24 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   builder is `providerRowSection`, named for the row rather than its subject
   because the script parts share one function scope with Config's provider
   TABLE builder
-- `src/handlers/status/dash_61_view_traffic.js` -- dashboard SCRIPT part 9 of
-  15: the Traffic view (`buildTraffic`), single-source (`query`; `config`
+- `src/handlers/status/dash_61_view_traffic.js` -- dashboard SCRIPT part 10 of
+  16: the Traffic view (`buildTraffic`), single-source (`query`; `config`
   only repaints the scope strip). Renders the scope strip and the group-by
   picker outside the section boundary, then one sortable expandable table
   (`traffic-groups`) with a row per group with requests in the range:
   requests, error rate, TTFT and latency p50, cost, "At API prices" and cache
-  hit (`cacheHitText`). An opened row shows the p90/p99 tails, errors by class,
-  the cache-write statement with its unknown-lifetime share, each missing
-  price with the server's `config_key`, and an alias group's chain steps
+  hit (`cacheHitText`), a partial cost or API-price figure carrying its
+  subtotal mark. An opened row shows the p90/p99 tails, errors by class,
+  the cache-write statement with its unknown-lifetime share, a remainder line
+  saying unknown-lifetime write tokens have no price (that dimension,
+  `UNKNOWN_LIFETIME_DIMENSION`, pinned to the server's label, is then left out
+  of the missing-price list), each missing price with the server's
+  `config_key`, and an alias group's chain steps
   ("via alias" for a nested one) with the off-chain and not-dispatched
   remainders. A section waiting on a new selection keeps the height it last
   drew at
-- `src/handlers/status/dash_62_view_accounts.js` -- dashboard SCRIPT part 10
-  of 15: the Accounts view sections, MULTI-SOURCE (`accounts`, plus `health`
+- `src/handlers/status/dash_62_view_accounts.js` -- dashboard SCRIPT part 11
+  of 16: the Accounts view sections, MULTI-SOURCE (`accounts`, plus `health`
   for each pool header's usable count, guarded in `acctPoolCounts` so a dark
   health source costs the counts alone, and `query_seats` for each row's
   traffic over the selected range, guarded the same way in
@@ -7928,8 +7965,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   neutral). API-key and cloud rows say "this provider reports no usage
   windows". `accountsDriverSection` shows the refresh and poll drivers,
   stopped reading amber
-- `src/handlers/status/dash_63_view_models.js` -- dashboard SCRIPT part 11 of
-  15: the Models view (`buildModels`), one section on `models` that also
+- `src/handlers/status/dash_63_view_models.js` -- dashboard SCRIPT part 12 of
+  16: the Models view (`buildModels`), one section on `models` that also
   reads `attention` (cause words, recovered ages) and `query_models` (the
   seven-day per-model read, never scoped), each guarded so its loss costs
   only its own facts. One expandable `models-lanes` table in server order
@@ -7938,8 +7975,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `models-unused` disclosure, and nothing folds while that read is not live.
   Transit reads "N of M responses changed" or "unmeasured"; each nickname
   links to Traffic scoped to the lane's entry and that model
-- `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 12 of
-  15: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
+- `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 13 of
+  16: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
   tab -- the payload is validated in one place before any section is built, so
   a version mismatch or a malformed panel never partially renders config
   vocabulary. Renders a source strip (config path, load age, resolved
@@ -7951,34 +7988,44 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ONE formatter for the three non-interchangeable RPM states -- null-checked
   before any coercion so an explicit `0` reads "0 RPM", `null` reads
   "not set here", and an absent field reads "unknown"),
-  credential activation (a footnote naming it the FIXED routectl-owned OAuth
+  the seat pools (`poolSection`, table `config-pools`: each pool's seat
+  selection as written and its members in configured order, named through
+  `seatName`, "no login label" where none; a payload without `pools` names no
+  pool), credential activation (a footnote naming it the FIXED routectl-owned OAuth
   candidate universe rather than a slice of the routing set the strip counts),
   the capability overrides (default-closed disclosure),
   and the retry-class policy whose columns are exactly retry cap / fallback /
   breaker debit (the wire's `debits_breaker`) / source
-- `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 13 of
-  15: the Doctor tab, the second single-source FAIL-CLOSED tab (`doctor`) --
+- `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 14 of
+  16: the Doctor view's sections, on three sources. `doctorAttentionSection`
+  (source `attention`) is one headline card with the daemon's active tally
+  (broken + degraded, the number the tab badge shows) over the shared
+  `attentionSection` under the `doctor` prefix. `doctorModelProblemsSection`
+  (source `models`) counts the Models view's cause groups (`modelsCauseGroups`)
+  with the problem lanes from `modelProblemLanes` beside it and a link to that
+  view. `buildDoctor` (source `doctor`) FAILS CLOSED as a whole --
   `validatedReport` checks every finding severity against the fixed
   `Pass|Warn|Fail` triad and every reachability verdict against
-  `reachable|degraded|unknown` before a section is built, so an unknown token
-  replaces the whole tab instead of being interpreted. Renders a verdict card
-  (state dot + headline + the panel's reachability rollup + failed/warning/
-  passed counts), one card per failing/warning finding (severity pill, name,
-  section, detail, and the remediation only when the finding carries one), and
-  the passing checks behind a default-closed `buildExpander`; a report with
-  findings but none needing attention reads as a welcoming all-clear, and a
-  report with no check at all says so rather than claiming health. Below the
-  checks: a capability-writes card (the three counters, never summed). The
-  report's structured panels (the capability matrix, the steady-state trim
-  panel) ride the payload for the CLI and draw nothing here; what each lane
-  has learned is the Models view's subject
-- `src/handlers/status/dash_80_views.js` -- dashboard SCRIPT part 14 of 15:
+  `reachable|degraded|unknown` before any part is built, so an unknown token
+  replaces the section instead of being interpreted. It renders the
+  reachability rollup line (`doctorReach`), one card per failing/warning
+  finding (severity pill, name, section, detail, and the remediation only when
+  the finding carries one), and the passing checks behind a default-closed
+  `buildExpander`; a report with findings but none needing attention reads as
+  a welcoming all-clear, and a report with no check at all says so rather than
+  claiming health. Below the checks: a capability-writes card (the three
+  counters, never summed). The report's structured panels (the capability
+  matrix, the steady-state trim panel) ride the payload for the CLI and draw
+  nothing here; what each lane has learned is the Models view's subject
+- `src/handlers/status/dash_80_views.js` -- dashboard SCRIPT part 15 of 16:
   `VIEWS`, the one view registry (`{id, label, sources, badge?, span, build}`,
   array order = tab order): Now (needs attention, accounts at a glance, then
   the Overview provider and KPI sections), Accounts (accounts by pool and the
   background seat drivers, with a scope strip when an inherited provider scope
   narrows its seat QUERY), Traffic and Models (their builders live in
-  their own view parts), Config and Doctor (badged from `attention`). Each
+  their own view parts), Config, and Doctor (sources `attention`, `doctor`,
+  `models`: the needs-attention, model-problems and report sections, badged
+  from `attention`). Each
   composition wraps every section in `viewSection` bound to that section's
   source, and keeps view controls (the scope reset, the group-by strip)
   outside the section boundary. Models, Config and Doctor carry the
@@ -7989,7 +8036,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `badge` names another), and the first QUERY source a view lists is the one
   it issues (`viewQuerySource`). `page::tests::views` pins the markup ids to
   the VIEWS ids in order
-- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 15 of 15:
+- `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 16 of 16:
   the page chrome and the load-time wiring. The view-state codec, the only
   code that reads or writes the address:
   `#<view>?range=&scope=&model=&group=&sort=`, each key omitted at its default
@@ -8842,16 +8889,25 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Unpriced` rather than guessing a structure. Both cost arms share ONE body,
   `complete_price` (rate resolution, reasoning structure, `price_row` token
   math), so an API-equivalent figure and a real price can never disagree on
-  basis; it is complete-or-absent for both arms (any used dimension with no
-  rate per `pricing::rate_covers`, writes of no known lifetime, or reasoning
-  of an unknown structure withholds the whole figure; a known `0` is a price)
-  and returns the missing labels (`dimension_label` spellings plus the
-  unknown-lifetime / unknown-reasoning labels) that `RowCost` carries into
+  basis. It returns a `RowPrice`: `Complete` when every used dimension has a
+  rate (a known `0` is a price); `Covered` when the row's ONLY gap is cache
+  writes of no reported lifetime (`LifetimeCoverage::Remainder`) and it used
+  some other dimension, the covered part priced as a subtotal (a `PricedPart`
+  row, or a subscription row's equivalent) still naming
+  `UNKNOWN_LIFETIME_LABEL`, which no rate ever prices; else `Absent` (any
+  other missing rate per `pricing::rate_covers`, a split summing above its
+  total, or reasoning of an unknown structure withholds the whole figure).
+  The missing labels (`dimension_label` spellings plus the unknown-lifetime /
+  unknown-reasoning labels) are what `RowCost` carries into
   `QueryMetrics::missing_price_dimensions`. `cost_cell` renders the real and
   equivalent channels in one cell
-  (`n/a (sub ~$12.34)`, `$5.00 (+sub ~$12.34)`) falling back to the
+  (`n/a (sub ~$12.34)`, `$5.00 (+sub ~$12.34)`), a subtotal figure carrying
+  `partial` by the dashboard's rule (the dollar figure when `cost_status` is
+  partial, the `~$` figure when `equivalent_status` is), falling back to the
   equivalent-free strings when no equivalent resolved -- never summed, no new
-  column. Every operator- or ledger-sourced string printed to the terminal
+  column. Every amount goes through `money_text`, the dashboard's precision
+  (`0.00`, cents at a dollar and above, tenths of a cent below, a non-finite
+  amount as `-`, an exact tie rounded away from zero like `toFixed`). Every operator- or ledger-sourced string printed to the terminal
   (group labels, seat / quota tokens, suppressed-session kind and model,
   reduction decision tokens) passes through `routectl_core::render_operator_text`,
   which strips control characters and escape sequences. Quota lines print only
@@ -8965,8 +9021,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`{schema_version, providers:[{name, outcome}]}`, `SCHEMA_VERSION = 1`,
   UNSTABLE pre-1.0), and returns `overall_exit`
 - `src/commands/doctor/mod.rs` -- `routectl doctor` entry (`run`) + report
-  assembly. Read-only posture: a doctor run mutates nothing
-  (config/credentials/usage DB byte-identical). The aggregator is a
+  assembly. Read-only posture: a doctor run changes nothing on disk
+  (config/credentials/usage DB byte-identical); beside the gather it reads the
+  running daemon's needs-attention list once (`daemon_attention`), which never
+  feeds the exit code. The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
   Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `pools`,
   `seats`, `secrets`, `probe`, `capability`, `pricing`, `knobs`, `tuning`,
@@ -8986,9 +9044,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the producers over a context, flatten, and deterministically sort (section,
   name, status) via `build_report_over` into `DoctorReport { schema_version,
   findings, panels }` (the number and its per-bump history live on the
-  `SCHEMA_VERSION` const's own doc comment; UNSTABLE pre-1.0, so any
-  structural or semantic change, additive included, bumps it); `run` renders
-  human or `--json` and returns `overall_exit`. Data
+  `SCHEMA_VERSION` const's own doc comment; UNSTABLE pre-1.0: a removed or
+  renamed field or a changed meaning bumps it, an added one does not, and the
+  `--json` `attention` member never does); `run` joins the gather with the
+  daemon read (`AttentionRead`), renders human (`render_human_with_attention`)
+  or `--json` (`report_json::to_ascii_json`) and returns `overall_exit` of the
+  findings alone. Data
   collection lives in `gather.rs`, the section producers in `sections.rs`, the
   capability matrix panel builder in `matrix.rs`, human rendering in
   `render.rs`. `run(config_path, legacy_dirs, json)` takes the old config
@@ -9078,8 +9139,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   makes), rendered by `unusable_seat_finding` as one
   `unusable seat <state_key>` Warn each. `ServedInputs` also carries the
   daemon's boot-time `usage_db_path` (the cache section reads that ledger,
-  never a reloaded config's path) and the cache read budget
-  (`with_cache_read_budget`). `served_layers` folds them into the shared gather's layers with
+  never a reloaded config's path) and the per-read ledger budget both of its
+  ledger reads use (`with_cache_read_budget`). `served_layers` folds them into the shared gather's layers with
   `MatrixOrigin::Resident` (panel `source: resident`, `warm` set with an
   `unreadable` warm's class, no replay tally) and the accepted config's
   version, which the version finding reports instead of preflighting the
@@ -9206,8 +9267,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `cache_ignore::read_cache_ignore_report`): the `CacheIgnoreReport` over the
   ledger's last window, read under `DISK_CACHE_READ_BUDGET` (2000 ms) from the
   config's ledger on disk, or on the served path from the daemon's boot ledger
-  under `SERVED_CACHE_READ_BUDGET` (250 ms, at most a quarter of
-  `status_gate::AGGREGATE_RESERVE_MS`, asserted at compile time). One Warn per
+  under `SERVED_CACHE_READ_BUDGET` (250 ms per read; the served panel runs two
+  bounded ledger reads, this one and the would-trim panel, together asserted at
+  compile time to take at most half of `status_gate::AGGREGATE_RESERVE_MS`).
+  `read_budget(&GatherSources)` is the per-read budget the gather hands both. One Warn per
   `ignoring` lane ("markers sent, no cache activity", remediation naming the
   `cache_capability` table), one Pass `cache markers` summary or
   `unavailable: <class>`, one Pass per not-evaluated reason
@@ -9231,10 +9294,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `routectl usage` report
 - `src/commands/doctor_panels.rs` -- doctor's read-only would-trim opportunity
   panel, kept apart from the aggregator so the compute/map/render seam is
-  unit-testable against a temp DB. `compute_would_trim_panel(config, zone, now)
-  -> Option<WouldTrimPanel>` opens the usage DB via `open_readonly_fastfail` and
-  summarizes the all-time window (best-effort: a missing/unmigrated DB or any
-  read failure -> `None`, never fails the surrounding diagnostic; a present DB
+  unit-testable against a temp DB. `compute_would_trim_panel(config, zone, now,
+  budget) -> Option<WouldTrimPanel>` opens the usage DB via
+  `open_readonly_fastfail` and summarizes the all-time window, the open and
+  query together bounded by `budget` through a `DeadlineGuard` (best-effort: a
+  missing/unmigrated DB, a read past the budget, or any read failure -> `None`, never fails the surrounding diagnostic; a present DB
   with zero candidates -> a `Some` all-zero panel); `now` is injected for
   deterministic windowing. `panel_from_summary` maps the usage-crate summary
   field-for-field onto the router-side `WouldTrimPanel`;
@@ -9275,22 +9339,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   unparseable lane locally, non-zero), POSTs the two keys to the daemon's
   loopback purge route and maps the answer to an exit code (0 on a purge or a
   clean no-op, non-zero on an unreachable daemon, a refusal, a 3xx, or an
-  unrecognized body). `control_url`
-  derives the destination from `[server] host`: a loopback bind verbatim, a
-  wildcard or public bind translated to the matching loopback address, anything
-  underivable refused LOCALLY before a credential is resolved or a socket is
-  touched -- which includes a SPECIFIC non-loopback bind (rewriting it would dial
-  whatever other process holds that port) and EVERY hostname, `localhost`
-  included (a name picks no address family, and resolving it would let a resolver
-  choose the destination). The authority is rendered through `SocketAddr` so an
-  IPv6 literal is bracketed. An untrusted
+  unrecognized body). The destination, client, listener token and capped
+  body read all come from `daemon_client` (`control_url`, `build_client`,
+  `first_listener_token`, `read_capped_body`); an underivable `[server] host`
+  is refused LOCALLY before a credential is resolved or a socket is touched.
+  An untrusted
   `error.code` from the daemon is sanitized and capped by `render_refusal_code`
   before it reaches a terminal (a raw newline or ANSI run would forge routectl's
-  own diagnostics). `build_client` pins `.no_proxy()` (reqwest reads
-  `HTTP_PROXY` / `ALL_PROXY` from the env by default, and a loopback control call
-  must not hand its token to an outbound hop) and `redirect::Policy::none()`
-  (`x-api-key` is not on reqwest's cross-host strip list), matching the
-  `routectl-providers::http_client` posture. Sends the first configured
+  own diagnostics). Sends the first configured
   `[server.auth]` token as `x-api-key` when one is set, since the control route
   sits behind the same listener gate as `/v1/*`. Holds NO database or registry
   API by design -- pinned by a source-text guard beside the behavioral ones -- so
