@@ -187,18 +187,19 @@ banner, no retry signal -- silently mislabeled data.
   reported write, the Now WRITE tile reads `-` and its note says no cache
   write was reported.
 - An "At API prices" figure never reads as covering traffic it leaves out.
-  In a ledger copy, give one subscription model some rows with a cache
-  write of unknown lifetime and some fully priced rows, and give another
+  In a ledger copy, give one subscription model some rows with a cache write
+  of unknown lifetime and some fully priced rows, and give another
   subscription model only rows with a reasoning count and no persisted
   provider kind. On Traffic by model, the first reads `~$<n> partial` (the
   `~` as large and bright as the number), a screen reader saying the word
-  apart from the figure, the mark's tooltip saying `priced subtotal only: leaves out usage that has no
-  price`; the second reads a faint `unpriced`, never `-`; a priced API-key
-  model keeps `-`. The Now EST. COST tile's `At API prices` and each
-  Accounts `traffic` line read the same way. Opening the first model's row
-  shows one sentence saying how many cache-write tokens of unknown lifetime
-  have no price and that the cost and At API prices figures leave them out;
-  a model with no such writes shows no sentence.
+  apart from the figure, the mark's tooltip saying `priced subtotal only:
+  leaves out usage that has no price`; the second reads a faint `unpriced`,
+  never `-`; a priced API-key model keeps `-`. The Now EST. COST tile's `At
+  API prices` and each Accounts `traffic` line read the same way. Opening
+  the first model's row shows one sentence saying how many cache-write
+  tokens of unknown lifetime have no price and that the cost and At API
+  prices figures leave them out; a model with no such writes shows no
+  sentence.
 - Check the next item at 720, 1024 and 1440 px wide and at 1440 px with
   200% text, in both the dark and the light theme, and once more with the
   OS reduced-motion preference on (no value animates, nothing is lost).
@@ -324,7 +325,7 @@ banner, no retry signal -- silently mislabeled data.
   endpoint so the next poll fails: the line reads `usage poll: last attempt
   failed (<reason>) <age> ago`, and a `RAW` line under it shows the result
   token in a code box Tab reaches (Ctrl+A on it selects the token alone).
-  In the `five-seat-pool` case the stale seat and the seat never read read
+  In the `five-seat-pool` case the stale seat and the never-read seat show
   `usage poll: last poll answered <age> ago (no new reading)`, never `read
   accepted`, and carry no `RAW` line.
 - Each pool seat shows a `placement` line per pool and upstream model that

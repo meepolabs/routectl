@@ -263,7 +263,8 @@ fn page_browser_accounts_poll_state_reads_neutrally_for_every_token() {
 ///
 /// Mutation checks: print `poll.last_result` as sent in acctPollText -> red
 /// (the seat line reads "last timeout"); drop the raw line from acctRow ->
-/// red (`raw` is null).
+/// red (`raw` is null); set the poll line's title to the result token in
+/// acctPollLine -> red (the line carries no tooltip).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_accounts_failed_poll_reads_in_words_with_a_copyable_raw_line() {
@@ -274,6 +275,10 @@ fn page_browser_accounts_failed_poll_reads_in_words_with_a_copyable_raw_line() {
         seat["text"],
         "usage poll: last attempt failed (timed out) 1 min ago - failing since 2 min ago - next in 4 min",
         "{out:#}"
+    );
+    assert_eq!(
+        seat["title"], "",
+        "the poll line carries no tooltip: {out:#}"
     );
     let raw = &seat["raw"];
     assert_eq!(raw["count"], 1, "{out:#}");
@@ -606,6 +611,7 @@ fn page_browser_accounts_traffic_cost_names_an_equivalent_as_one() {
     assert_eq!(out["seat"]["alt"], "~$1.23At API prices", "{out:#}");
     let approx = &out["seat"]["alt_approx"];
     assert_eq!(approx["text"], "~", "{out:#}");
+    // Regression guard only: the card styles no `.unit`, so this holds for a unit-slot tilde too.
     assert_eq!(
         approx["tilde"], approx["number"],
         "the tilde is drawn like its number: {out:#}"

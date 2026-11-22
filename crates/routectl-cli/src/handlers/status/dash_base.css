@@ -115,8 +115,10 @@
   /* An old reading's meter fill is dimmed by this much and no further: the
      dimmed fill of every meter color keeps 3:1 against its track and the
      card. The bright dark-theme fills need a deeper dim to read as old; the
-     light theme cannot go below 0.85 and keep 3:1. Text of an old reading is
-     never dimmed by opacity; it takes --muted instead. */
+     light theme's 0.85 sits close to its 3:1 floor (at 0.83 the light
+     --meter on --border is 2.97:1 in the style test
+     a_dimmed_stale_meter_fill_keeps_three_to_one; 0.84 passes). Text of an
+     old reading is never dimmed by opacity; it takes --muted instead. */
   --stale-mark-opacity: 0.65;
 
   /* Value-domain pill palette, derived from the state tokens above so a

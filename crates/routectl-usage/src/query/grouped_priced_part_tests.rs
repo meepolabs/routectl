@@ -87,6 +87,13 @@ fn query_equivalent_rows(
     rows: &[(&'static str, &'static str, RowCost)],
     group_by: GroupDim,
 ) -> QueryResult {
+    query_equivalent_spec(rows, &spec(group_by))
+}
+
+fn query_equivalent_spec(
+    rows: &[(&'static str, &'static str, RowCost)],
+    spec: &QuerySpec,
+) -> QueryResult {
     let (_dir, mut db) = open_db();
     let ids = ["a", "b", "c", "d"];
     for ((upstream, model, _), id) in rows.iter().zip(ids) {
@@ -106,7 +113,7 @@ fn query_equivalent_rows(
             .map(|(_, _, cost)| cost.clone())
             .expect("every seeded upstream has a cost")
     };
-    query(&mut db, &spec(group_by), pricer, no_deadline()).expect("query")
+    query(&mut db, spec, pricer, no_deadline()).expect("query")
 }
 
 fn sub(equivalent: Option<f64>, missing: &[&str]) -> RowCost {
@@ -226,47 +233,114 @@ fn the_equivalent_status_tokens_are_the_wire_tokens() {
     }
 }
 
-#[test]
-fn an_unpriced_passthrough_step_leaves_an_alias_equivalent_complete() {
-    let priced_steps = [
+/// Two fully priced subscription steps under one alias, beside a step whose
+/// gap is not a subscription's.
+fn alias_steps_with(
+    other: (&'static str, &'static str, RowCost),
+) -> Vec<(&'static str, &'static str, RowCost)> {
+    vec![
         ("u-a", "m1", sub(Some(2.0), &[])),
         ("u-b", "m1", sub(Some(3.0), &[])),
-        (
-            "u-c",
-            "m2",
-            RowCost::Unpriced(vec!["input".to_string(), "output".to_string()]),
-        ),
-    ];
-    let mut with_sub_gap = priced_steps.to_vec();
-    with_sub_gap.push(("u-d", "m1", sub(Some(1.0), &["input"])));
+        other,
+    ]
+}
+
+fn unpriced_passthrough() -> (&'static str, &'static str, RowCost) {
+    (
+        "u-c",
+        "m2",
+        RowCost::Unpriced(vec!["input".to_string(), "output".to_string()]),
+    )
+}
+
+fn with_subscription_gap() -> Vec<(&'static str, &'static str, RowCost)> {
+    let mut rows = alias_steps_with(unpriced_passthrough());
+    rows.push(("u-d", "m1", sub(Some(1.0), &["input"])));
+    rows
+}
+
+#[test]
+fn only_a_subscription_gap_marks_an_alias_equivalent_partial() {
     let cases = [
         (
-            "passthrough gap only",
-            priced_steps.to_vec(),
+            "unpriced passthrough gap only",
+            alias_steps_with(unpriced_passthrough()),
             EquivalentStatus::Complete,
             Some(5.0),
+            "input",
+        ),
+        (
+            "priced-part passthrough gap only",
+            alias_steps_with((
+                "u-c",
+                "m2",
+                RowCost::PricedPart(1.0, vec![PART_LABEL.to_string()]),
+            )),
+            EquivalentStatus::Complete,
+            Some(5.0),
+            PART_LABEL,
         ),
         (
             "passthrough gap and a subscription gap",
-            with_sub_gap,
+            with_subscription_gap(),
             EquivalentStatus::Partial,
             Some(6.0),
+            "input",
         ),
     ];
-    for (name, rows, expected, equivalent) in cases {
-        // Act: both steps land in the one alias group.
+    for (name, rows, expected, equivalent, passthrough_gap) in cases {
+        // Act: every step lands in the one alias group.
         let result = query_equivalent_rows(&rows, GroupDim::Alias);
 
-        // Assert: the passthrough gap is still listed as a missing price.
+        // Assert: a non-subscription gap leaves the equivalent complete and
+        // is still listed as a missing price; a subscription gap marks it
+        // partial.
         let m = &group(&result, "al").metrics;
         assert_eq!(m.equivalent_status, expected, "{name}");
         assert_eq!(m.equivalent_cost_usd, equivalent, "{name}");
         assert!(
             m.missing_prices
                 .iter()
-                .any(|gap| gap.model == "m2" && gap.dimension == "input"),
+                .any(|gap| gap.model == "m2" && gap.dimension == passthrough_gap),
             "{name}: {:?}",
             m.missing_prices
         );
+    }
+}
+
+#[test]
+fn a_series_bucket_reads_the_equivalent_status_of_its_own_rows() {
+    let cases = [
+        (
+            "passthrough gap only",
+            alias_steps_with(unpriced_passthrough()),
+            EquivalentStatus::Complete,
+        ),
+        (
+            "passthrough gap and a subscription gap",
+            with_subscription_gap(),
+            EquivalentStatus::Partial,
+        ),
+    ];
+    let one_bucket = QuerySpec {
+        bucket: Some(BucketSpec {
+            width_ms: 10_000,
+            count: 1,
+        }),
+        ..spec(GroupDim::Alias)
+    };
+    for (name, rows, expected) in cases {
+        // Act: every row lands in the one bucket.
+        let result = query_equivalent_spec(&rows, &one_bucket);
+
+        // Assert
+        let buckets = &result.series.as_ref().expect("series present").buckets;
+        assert_eq!(buckets.len(), 1, "{name}");
+        assert_eq!(
+            buckets[0].metrics.requests,
+            i64::try_from(rows.len()).expect("a handful of rows"),
+            "{name}"
+        );
+        assert_eq!(buckets[0].metrics.equivalent_status, expected, "{name}");
     }
 }

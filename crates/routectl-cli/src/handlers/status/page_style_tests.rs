@@ -814,7 +814,9 @@ fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
 }
 
 /// The dark theme dims a stale meter fill further than the light theme,
-/// whose 0.85 is the lowest that keeps 3:1 there.
+/// whose 0.85 sits close to its 3:1 floor: with the light value at 0.83,
+/// `a_dimmed_stale_meter_fill_keeps_three_to_one` fails (`--meter` dimmed
+/// on `--border` is 2.97:1); at 0.84 it passes.
 ///
 /// Mutation checks: drop the light block's `--stale-mark-opacity` -> red
 /// (light follows the dark 0.65); set the dark value back to 0.85 -> red.

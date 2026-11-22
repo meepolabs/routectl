@@ -312,40 +312,33 @@
     return wrap;
   }
 
-  // Plain words for the capability and verdict tokens the models panel
-  // sends (routectl-core's well-known capability keys and verdicts, plus the
-  // router's panel-only display verdicts). A token outside the map reads as
-  // itself with its underscores spaced; the raw token stays first in the
-  // chip's tooltip.
-  var MODELS_CAPABILITY_WORDS = {
-    web_search: 'web search',
-    computer_use: 'computer use',
-    structured_output: 'structured output',
-    prompt_caching: 'prompt caching',
-    thinking: 'thinking',
-    reasoning_replay: 'reasoning replay',
-    forced_tool_choice: 'forced tool choice'
-  };
+  // Plain words for the verdict tokens the models panel sends whose words
+  // differ from the token (routectl-core's verdicts plus the router's
+  // panel-only display verdicts). Any other token, and every capability
+  // key, reads as itself with its underscores spaced; the raw tokens stay
+  // first in the chip's tooltip.
   var MODELS_VERDICT_WORDS = {
     verified: 'works',
     broken: 'refused',
     suspect: 'maybe ignored',
-    cleared: 'cleared',
-    unknown: 'unknown',
-    assumed: 'assumed',
     forced_supported: 'supported by config',
     forced_unsupported: 'unsupported by config',
     unrepresentable: 'cannot be sent',
     mixed: 'differs by nickname'
   };
 
-  function modelsWords(words, token) {
-    var raw = String(token);
-    return Object.prototype.hasOwnProperty.call(words, raw) ? words[raw] : raw.replace(/_/g, ' ');
+  function modelsSpacedToken(token) {
+    return String(token).replace(/_/g, ' ');
+  }
+
+  function modelsVerdictWords(verdict) {
+    var raw = String(verdict);
+    return Object.prototype.hasOwnProperty.call(MODELS_VERDICT_WORDS, raw) ?
+      MODELS_VERDICT_WORDS[raw] : modelsSpacedToken(raw);
   }
 
   function modelsChipText(capability, verdict) {
-    return modelsWords(MODELS_CAPABILITY_WORDS, capability) + ': ' + modelsWords(MODELS_VERDICT_WORDS, verdict);
+    return modelsSpacedToken(capability) + ': ' + modelsVerdictWords(verdict);
   }
 
   // The capability and verdict in plain words; the bare key, the one to

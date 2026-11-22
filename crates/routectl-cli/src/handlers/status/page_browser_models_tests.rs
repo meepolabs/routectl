@@ -674,14 +674,16 @@ fn page_browser_models_the_lanes_sit_in_a_card() {
 }
 
 /// A chip reads plain words for the capability and verdict tokens the panel
-/// sends, and a token outside the word map reads as itself with its
-/// underscores spaced. The raw tokens stay at the head of the tooltip, and
-/// a refusal keeps its own mark.
+/// sends: a verdict in the word map reads as its words (`broken` ->
+/// `refused`), and any other token reads as itself with its underscores
+/// spaced. The raw tokens stay at the head of the tooltip, and a refusal
+/// keeps its own mark.
 ///
 /// Mutation checks: render `cell.capability + ' ' + cell.verdict` again in
 /// modelsCapabilities -> red (`forced_tool_choice unknown`); drop the
-/// underscore replacement from modelsWords -> red (the unknown token keeps
-/// its underscores).
+/// underscore replacement from modelsSpacedToken -> red (the unknown token
+/// keeps its underscores); drop `broken` from MODELS_VERDICT_WORDS -> red
+/// (`web search: broken`).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_models_chips_read_plain_words() {
