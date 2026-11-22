@@ -38,7 +38,8 @@ has not verified the failure that matters most.
 - **The Accounts rows** (`dash_62_view_accounts.js`):
   `page_browser_accounts_tests.rs` (grouping and names, the login cause and
   focusable fix, windows named from their length with level, reset, age and
-  stale mark, the poll line, the drivers, and a row kept across a refresh).
+  stale mark, the poll line and its raw token line, the drivers, and a row
+  kept across a refresh).
 - **The Models lanes** (`dash_63_view_models.js`):
   `page_browser_models_tests.rs` (problems first, one cause line per
   attention item, the seven-day fold and its survival of a failed refresh,
@@ -300,6 +301,14 @@ banner, no retry signal -- silently mislabeled data.
   vendor's latest complete report left out while it still binds keeps its
   meter and reads `kept from an earlier report` in the same neutral mark as
   `stale`, never amber or red.
+- A polled seat's poll line reads `usage poll: last read accepted <age> ago`
+  right after a poll that brought its reading. Block the vendor's usage
+  endpoint so the next poll fails: the line reads `usage poll: last attempt
+  failed (<reason>) <age> ago`, and a `RAW` line under it shows the result
+  token in a code box Tab reaches (Ctrl+A on it selects the token alone).
+  In the `five-seat-pool` case the stale seat and the seat never read read
+  `usage poll: last poll answered <age> ago (no new reading)`, never `read
+  accepted`, and carry no `RAW` line.
 - Each pool seat shows a `placement` line per pool and upstream model that
   ranks it: `rank <n> of <m> in <pool> for <model>` and the reason in plain
   words (`ranked on usage pace`), the raw token in the reason's tooltip. Log

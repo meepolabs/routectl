@@ -39,21 +39,21 @@
   };
 
   // The last poll's result, in words: what the attempt did, and for a
-  // failure, why. A token this build does not know is shown as sent; the
-  // token itself rides in the line's title for copying.
+  // failure, why. A token this build does not know is shown as sent; any
+  // result but a plain accepted read also gets its token on a raw line.
   var ACCT_POLL_RESULT_WORDS = {
-    accepted: 'reading accepted',
-    no_windows: 'read, no usage windows reported',
-    token_not_ready: 'skipped, no usable access token',
-    paused: 'deferred, the provider asked to wait',
-    redirect: 'failed (redirected)',
-    auth: 'failed (access refused)',
-    http: 'failed (HTTP error)',
-    timeout: 'failed (timed out)',
-    transport: 'failed (connection error)',
-    too_large: 'failed (answer too large)',
-    malformed: 'failed (answer not understood)',
-    superseded: 'dropped, the login changed meanwhile'
+    accepted: 'read accepted',
+    no_windows: 'attempt read, no usage windows reported',
+    token_not_ready: 'attempt skipped, no usable access token',
+    paused: 'attempt deferred, the provider asked to wait',
+    redirect: 'attempt failed (redirected)',
+    auth: 'attempt failed (access refused)',
+    http: 'attempt failed (HTTP error)',
+    timeout: 'attempt failed (timed out)',
+    transport: 'attempt failed (connection error)',
+    too_large: 'attempt failed (answer too large)',
+    malformed: 'attempt failed (answer not understood)',
+    superseded: 'attempt dropped, the login changed meanwhile'
   };
 
   var ACCT_SOURCE_WORDS = {
@@ -271,7 +271,9 @@
     var places = ctx.places[row.account];
     if (places) { rowEl.appendChild(acctPlacement(places)); }
     rowEl.appendChild(acctTrafficLine(row, ctx.traffic, id + '-traffic'));
-    rowEl.appendChild(acctPollLine(row.poll, ctx.nowMs));
+    rowEl.appendChild(acctPollLine(row, ctx.nowMs));
+    var raw = acctPollRawToken(row.poll);
+    if (raw !== null) { rowEl.appendChild(attentionRaw(raw)); }
     return rowEl;
   }
 
@@ -606,24 +608,57 @@
 
   // ---- usage poll ----------------------------------------------------------
 
-  function acctPollLine(poll, nowMs) {
+  function acctPollLine(row, nowMs) {
     var line = document.createElement('div');
     line.className = 'acct-poll';
-    line.textContent = acctPollText(poll, nowMs);
-    if (poll.applicability === 'polled' && poll.last_result) {
-      line.title = 'last result: ' + String(poll.last_result);
-    }
+    line.textContent = acctPollText(row, nowMs);
     return line;
+  }
+
+  // The last result's token, shown as Now shows a raw token, for any result
+  // but a plain accepted read; null when there is none to show.
+  function acctPollRawToken(poll) {
+    if (poll.applicability !== 'polled' || !poll.last_result) { return null; }
+    var token = String(poll.last_result);
+    return token === 'accepted' ? null : token;
   }
 
   function acctPollResultText(token) {
     if (!token) { return 'attempt'; }
     return Object.prototype.hasOwnProperty.call(ACCT_POLL_RESULT_WORDS, token)
-      ? 'attempt ' + ACCT_POLL_RESULT_WORDS[token]
+      ? ACCT_POLL_RESULT_WORDS[token]
       : String(token);
   }
 
-  function acctPollText(poll, nowMs) {
+  // A poll answered without a new reading when it was accepted (with or
+  // without windows) yet the reading the row shows is older than the
+  // attempt, or the row shows none. The reading shown is the newest window's
+  // observation, or for a row reporting no windows, its last accepted
+  // reading. A reading the poll itself brought is stamped after the attempt
+  // began, so it is never older.
+  function acctPollBroughtNoReading(row) {
+    var result = row.poll.last_result;
+    if (result !== 'accepted' && result !== 'no_windows') { return false; }
+    var shown = acctShownReadingMs(row);
+    return shown === null || shown < Number(row.poll.last_attempt_ms);
+  }
+
+  function acctShownReadingMs(row) {
+    if (row.report === 'no_windows') {
+      var last = row.last_accepted;
+      return isPlainObject(last) && acctHasNumber(last.observed_at_ms) ? Number(last.observed_at_ms) : null;
+    }
+    var newest = null;
+    row.windows.forEach(function (w) {
+      if (acctHasNumber(w.observed_at_ms) && (newest === null || Number(w.observed_at_ms) > newest)) {
+        newest = Number(w.observed_at_ms);
+      }
+    });
+    return newest;
+  }
+
+  function acctPollText(row, nowMs) {
+    var poll = row.poll;
     var token = poll.applicability;
     if (token !== 'polled') {
       return Object.prototype.hasOwnProperty.call(ACCT_POLL_WORDS, token)
@@ -632,9 +667,13 @@
     }
     var parts = [];
     var last = acctAgo(poll.last_attempt_ms, nowMs);
-    parts.push(last === null
-      ? 'usage poll: not attempted yet'
-      : 'usage poll: last ' + acctPollResultText(poll.last_result) + ' ' + last);
+    if (last === null) {
+      parts.push('usage poll: not attempted yet');
+    } else if (acctPollBroughtNoReading(row)) {
+      parts.push('usage poll: last poll answered ' + last + ' (no new reading)');
+    } else {
+      parts.push('usage poll: last ' + acctPollResultText(poll.last_result) + ' ' + last);
+    }
     var failing = acctAgo(poll.failure_since_ms, nowMs);
     if (failing !== null) { parts.push('failing since ' + failing); }
     if (acctHasNumber(poll.next_due_ms) && isFinite(nowMs)) {

@@ -106,6 +106,34 @@
     });
   });
 
+  // The raw token line under a row's poll line, as an operator reaches it:
+  // its label, the token, whether Tab stops on it, and what Ctrl+A on it
+  // selects. Null when the row draws none.
+  function pollRaw(rowEl) {
+    var wraps = rowEl.querySelectorAll('.attn-raw');
+    if (!wraps.length) { return null; }
+    var code = wraps[0].querySelector('.attn-raw-code');
+    return {
+      count: wraps.length,
+      after_poll_line: wraps[0].previousElementSibling === rowEl.querySelector('.acct-poll'),
+      label: textIn(wraps[0], '.attn-label'),
+      label_shown: wraps[0].querySelector('.attn-label').innerText,
+      tag: code.tagName.toLowerCase(),
+      tab_index: code.tabIndex,
+      text: code.textContent,
+      select_all: d.pressSelectAll(code)
+    };
+  }
+
+  function pollSeen(id) {
+    var rowEl = byId(id);
+    return {
+      text: textIn(rowEl, '.acct-poll'),
+      title: rowEl.querySelector('.acct-poll').title,
+      raw: pollRaw(rowEl)
+    };
+  }
+
   // The seat's last poll as served (a timeout), and Codex polled with a
   // result token this build does not know.
   d.scenario('accounts-poll-result', function () {
@@ -116,12 +144,42 @@
       codex.last_attempt_ms = row(data, 'anthropic#a').poll.last_attempt_ms;
     });
     return settled().then(function () {
-      var seat = byId(SEAT_ROW).querySelector('.acct-poll');
-      var codex = byId(CODEX_ROW).querySelector('.acct-poll');
-      return {
-        seat: { text: seat.textContent, title: seat.title },
-        codex: { text: codex.textContent, title: codex.title }
-      };
+      return { seat: pollSeen(SEAT_ROW), codex: pollSeen(CODEX_ROW) };
+    });
+  });
+
+  // The seat's poll accepted 30 s ago and its newest window read by that
+  // same poll: a healthy read.
+  d.scenario('accounts-poll-healthy', function () {
+    rewriteAccounts(function (data) {
+      var seat = row(data, 'anthropic#a');
+      var polledAt = seat.windows[0].observed_at_ms + 30000;
+      seat.windows[0].observed_at_ms = polledAt;
+      seat.poll.last_result = 'accepted';
+      seat.poll.last_attempt_ms = polledAt;
+      seat.poll.failure_since_ms = null;
+    });
+    return settled().then(function () { return { seat: pollSeen(SEAT_ROW) }; });
+  });
+
+  // Polls that answered 30 s ago without changing what the row shows: the
+  // seat accepted while its newest window stays 1 min old, and Codex, which
+  // shows no reading, answered with no windows.
+  d.scenario('accounts-poll-no-new-reading', function () {
+    rewriteAccounts(function (data) {
+      var seat = row(data, 'anthropic#a');
+      var attemptAt = seat.windows[0].observed_at_ms + 30000;
+      seat.poll.last_result = 'accepted';
+      seat.poll.last_attempt_ms = attemptAt;
+      seat.poll.failure_since_ms = null;
+      var codex = row(data, 'codex');
+      codex.poll.applicability = 'polled';
+      codex.poll.last_result = 'no_windows';
+      codex.poll.last_attempt_ms = attemptAt;
+      codex.poll.next_due_ms = null;
+    });
+    return settled().then(function () {
+      return { seat: pollSeen(SEAT_ROW), codex: pollSeen(CODEX_ROW) };
     });
   });
 

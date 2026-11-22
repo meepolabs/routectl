@@ -255,30 +255,87 @@ fn page_browser_accounts_poll_state_reads_neutrally_for_every_token() {
     );
 }
 
-/// The last poll result reads in words with the raw token in the line's
-/// title; a result token this build does not know is shown as sent, also
-/// with its title.
+/// A failed poll reads in words, and its raw token sits on a line of its
+/// own under the poll line, drawn as Now draws a raw token: a `raw` label
+/// and a code element Tab reaches, where Ctrl+A selects the token alone. A
+/// result token this build does not know is shown as sent, with its raw
+/// line too.
 ///
-/// Mutation check: print `poll.last_result` as sent in acctPollText -> red
-/// (the seat line reads "last timeout").
+/// Mutation checks: print `poll.last_result` as sent in acctPollText -> red
+/// (the seat line reads "last timeout"); drop the raw line from acctRow ->
+/// red (`raw` is null).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_accounts_poll_result_reads_in_words_with_the_token_kept() {
+fn page_browser_accounts_failed_poll_reads_in_words_with_a_copyable_raw_line() {
     let out = accounts_scenario("accounts-poll-result");
     let (seat, codex) = (&out["seat"], &out["codex"]);
 
-    assert!(
-        text(&seat["text"], "the seat line")
-            .starts_with("usage poll: last attempt failed (timed out) 1 min ago"),
+    assert_eq!(
+        seat["text"],
+        "usage poll: last attempt failed (timed out) 1 min ago - failing since 2 min ago - next in 4 min",
         "{out:#}"
     );
-    assert_eq!(seat["title"], "last result: timeout", "{out:#}");
+    let raw = &seat["raw"];
+    assert_eq!(raw["count"], 1, "{out:#}");
+    assert_eq!(raw["after_poll_line"], true, "{out:#}");
+    assert_eq!(raw["label"], "raw", "{out:#}");
+    assert_eq!(raw["label_shown"], "RAW", "{out:#}");
+    assert_eq!(raw["tag"], "code", "{out:#}");
+    assert_eq!(raw["tab_index"], 0, "{out:#}");
+    assert_eq!(raw["text"], "timeout", "{out:#}");
+    assert_eq!(raw["select_all"]["focused"], true, "{out:#}");
+    assert_eq!(raw["select_all"]["prevented"], true, "{out:#}");
+    assert_eq!(raw["select_all"]["selection"], "timeout", "{out:#}");
     assert!(
         text(&codex["text"], "the Codex line")
             .starts_with("usage poll: last not_yet_named 1 min ago"),
         "{out:#}"
     );
-    assert_eq!(codex["title"], "last result: not_yet_named", "{out:#}");
+    assert_eq!(codex["raw"]["text"], "not_yet_named", "{out:#}");
+}
+
+/// A poll that brought the reading the row shows reads "last read
+/// accepted", with no raw line: an accepted read has no token to report.
+///
+/// Mutation check: make acctPollBroughtNoReading return true for every
+/// accepted poll -> red (the line reads "last poll answered").
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_healthy_poll_reads_last_read_accepted() {
+    let out = accounts_scenario("accounts-poll-healthy");
+
+    assert_eq!(
+        out["seat"]["text"], "usage poll: last read accepted under 1 min ago - next in 4 min",
+        "{out:#}"
+    );
+    assert_eq!(out["seat"]["raw"], Value::Null, "{out:#}");
+}
+
+/// A poll that answered after the reading the row shows says so instead of
+/// claiming a fresh read: the seat whose newest window predates the
+/// accepted poll, and the Codex row that shows no reading after a poll that
+/// reported no windows. The Codex row keeps its `no_windows` raw line; the
+/// seat, accepted, has none.
+///
+/// Mutation check: make acctPollBroughtNoReading return false -> red (the
+/// seat reads "last read accepted", Codex "last attempt read, no usage
+/// windows reported").
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_accounts_poll_without_a_new_reading_says_so() {
+    let out = accounts_scenario("accounts-poll-no-new-reading");
+
+    assert_eq!(
+        out["seat"]["text"],
+        "usage poll: last poll answered under 1 min ago (no new reading) - next in 4 min",
+        "{out:#}"
+    );
+    assert_eq!(out["seat"]["raw"], Value::Null, "{out:#}");
+    assert_eq!(
+        out["codex"]["text"], "usage poll: last poll answered under 1 min ago (no new reading)",
+        "{out:#}"
+    );
+    assert_eq!(out["codex"]["raw"]["text"], "no_windows", "{out:#}");
 }
 
 /// An Accounts row and its meter are the same DOM nodes across two changed
